@@ -641,8 +641,11 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <StatusPill status={status === 'unknown' ? 'tracking' : status} small />
         {/* When the rain reading is solid and only the schedule is missing,
-            "Limited data this week" blamed the rain — name the actual gap. */}
-        {water.confidence ? <ConfidenceTag confidence={water.confidence} overrideLabel={!irrOnFile && hasRain ? 'Irrigation not on file' : null} /> : null}
+            "Limited data this week" blamed the rain — name the actual gap.
+            rainKnown null-checks BEFORE Number(): hasRain coerces a null
+            rainInches to a finite 0, and a rain-unknown report must keep the
+            low-confidence label warning about the rain (codex P2 r2). */}
+        {water.confidence ? <ConfidenceTag confidence={water.confidence} overrideLabel={!irrOnFile && water.rainInches != null && Number.isFinite(Number(water.rainInches)) ? 'Irrigation not on file' : null} /> : null}
       </div>
       {water.explanation ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>

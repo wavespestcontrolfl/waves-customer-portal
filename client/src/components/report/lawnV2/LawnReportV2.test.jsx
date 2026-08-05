@@ -38,6 +38,14 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     expect(screen.getByText('Verified data')).toBeInTheDocument();
   });
 
+  it('rain-unknown + no schedule keeps the low-confidence label (codex P2 r2)', () => {
+    // Number(null) coerces to a finite 0 — the override must verify the rain
+    // reading actually exists before claiming irrigation is the only gap.
+    render(<WaterIntakeBar water={{ rainInches: null, irrigationInches: 0, totalInches: 0, targetInches: 0.75, status: 'unknown', confidence: 'low', scheduleOnFile: false }} />);
+    expect(screen.getByText('Limited data this week')).toBeInTheDocument();
+    expect(screen.queryByText('Irrigation not on file')).not.toBeInTheDocument();
+  });
+
   it('older payloads without scheduleOnFile keep the numeric row (no false "Not on file")', () => {
     render(<WaterIntakeBar water={{ rainInches: 1.2, irrigationInches: 0, totalInches: 1.2, targetInches: 0.75, status: 'high', confidence: 'low' }} />);
     expect(screen.getByText('0"')).toBeInTheDocument();

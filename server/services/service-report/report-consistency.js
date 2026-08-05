@@ -120,12 +120,28 @@ function reconcileRainFigure(text, canonicalRain) {
     // below half the canonical (the target mention) is skipped, and only the
     // FIRST qualifying figure is rewritten; a skipped figure does not consume
     // the attempt.
-    let replacedOne = false;
-    return sentence.replace(/\b(\d+(?:\.\d+)?)(\s*)(inches?|in\.|")/gi, (match, value, gap, unit) => {
-      if (replacedOne) return match;
+    let done = false;
+    // `inch(?:es)?` — a singular "1 inch" total must match too (codex P2 r2).
+    return sentence.replace(/\b(\d+(?:\.\d+)?)(\s*)(inch(?:es)?|in\.|")/gi, (match, value, gap, unit, offset) => {
+      if (done) return match;
       const v = Number(value);
-      if (!Number.isFinite(v) || Math.abs(v - canonicalRain) <= 0.05 || v < canonicalRain * 0.5) return match;
-      replacedOne = true;
+      if (!Number.isFinite(v)) return match;
+      // A figure inside a target phrase ("below the 0.75 inches target",
+      // "target of 0.75 inch") is never a rain total — skip it WITHOUT
+      // consuming the attempt (codex P2 r2: on a low-rain week the half-
+      // canonical guard alone let the scan rewrite the target itself).
+      // Before-guard: the target word must DIRECTLY precede this number (no
+      // other digits between) — "target of 0.75" is a target, but "0.75 inch
+      // target, rain totaled 2.72" must still let 2.72 qualify.
+      const before = sentence.slice(Math.max(0, offset - 24), offset);
+      const after = sentence.slice(offset + match.length, offset + match.length + 24);
+      if (/\btarget\b[^.\d]{0,12}$/i.test(before) || /^\s*(?:weekly\s+)?target\b/i.test(after)) return match;
+      // The sentence already quotes the canonical figure → it agrees with the
+      // widget; stop scanning so a later, different number (e.g. the target)
+      // is never mistaken for a stale total.
+      if (Math.abs(v - canonicalRain) <= 0.05) { done = true; return match; }
+      if (v < canonicalRain * 0.5) return match;
+      done = true;
       changed = true;
       return `${formatInches(canonicalRain)}${gap}${unit}`;
     });
@@ -141,7 +157,11 @@ function reconcileRainFigure(text, canonicalRain) {
 // sentences only: the sentence must be about the stress signals, negated
 // mentions are left alone, and "drought-tolerant"/"drought tolerance" praise
 // never matches.
-const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|a\s+)?(?:drought(?:\s+stress)?|dry\s+pockets?|dry\s+spells?)\b(?!-)(?!\s+toleran)/gi;
+// The tolerance lookahead covers the bare AND the "stress" form: without
+// `(?:\s+stress)?`, "drought stress tolerance" backtracked to match bare
+// "drought" and produced "uneven sprinkler coverage stress tolerance"
+// (codex P2 r2).
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|a\s+)?(?:drought(?:\s+stress)?|dry\s+pockets?|dry\s+spells?)\b(?!-)(?!(?:\s+stress)?\s+toleran)/gi;
 
 function replaceDroughtHypothesis(text) {
   const t = String(text || '');

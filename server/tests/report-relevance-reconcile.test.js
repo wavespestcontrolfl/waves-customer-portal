@@ -54,6 +54,26 @@ describe('reconcileRainFigure', () => {
     )).toBe('Against the 0.75 inch target, rain totaled 2.96 inches this week.');
   });
 
+  test('a singular "inch" total is rewritten too (codex P2 r2)', () => {
+    expect(reconcileRainFigure('Rain totaled about 1 inch this week.', 1.52))
+      .toBe('Rain totaled about 1.52 inch this week.');
+  });
+
+  test('low-rain week: the target is never rewritten to the rain total (codex P2 r2)', () => {
+    // First figure already canonical → scan stops; target phrase also guarded.
+    expect(reconcileRainFigure(
+      'Rainfall totaled 0.2 inches this week, below the 0.75 inches target.',
+      0.2,
+    )).toBeNull();
+  });
+
+  test('"target of N" phrasing is skipped without consuming the attempt', () => {
+    expect(reconcileRainFigure(
+      'Rain this week fell short of the target of 0.75 inches, totaling 0.2 inches.',
+      0.35,
+    )).toBe('Rain this week fell short of the target of 0.75 inches, totaling 0.35 inches.');
+  });
+
   test('a rain sentence without a weekly-total cue is left alone', () => {
     expect(reconcileRainFigure('About 1.36 inches of rain fell Wednesday.', 2.96)).toBeNull();
   });
@@ -81,6 +101,10 @@ describe('replaceDroughtHypothesis', () => {
   test('never touches drought-tolerance praise or negated mentions', () => {
     expect(replaceDroughtHypothesis('This stress-resistant cultivar has strong drought tolerance.')).toBeNull();
     expect(replaceDroughtHypothesis('No drought stress is visible in the stressed areas.')).toBeNull();
+  });
+
+  test('"drought stress tolerance" never partially rewrites (codex P2 r2)', () => {
+    expect(replaceDroughtHypothesis('Potassium supports drought stress tolerance in stressed turf.')).toBeNull();
   });
 
   test('a sentence not about the stress signals is left alone', () => {
