@@ -80,13 +80,15 @@ function firstSentence(text, max = 170) {
 const REENTRY_REWRITES = {
   lawn: {
     // Label-consistent framing (dried → may re-enter) without a safety
-    // adjective: "are fine" read as a safety assurance the label language
-    // never makes (owner compliance pass 2026-08-04).
-    dried: 'Treated turf has dried, so pets and family can use the lawn again.',
+    // adjective ("are fine" read as a safety assurance the label never
+    // makes — owner compliance pass 2026-08-04), carrying the required
+    // once-dry + technician-confirms-timing idiom (AGENTS.md compliance
+    // language; codex P1 #3197 r16).
+    dried: 'Treated turf has dried per the re-entry timing your technician confirmed — pets and family can use the lawn again.',
     untilDry: 'Keep pets and family off treated turf until it dries.',
   },
   tree_shrub: {
-    dried: 'Treated beds and foliage have dried, so pets and family can be around them again.',
+    dried: 'Treated beds and foliage have dried per the re-entry timing your technician confirmed — pets and family can be around them again.',
     untilDry: 'Keep pets and family off treated beds and foliage until they dry.',
   },
 };
@@ -159,8 +161,11 @@ function reconcileRainFigure(text, canonicalRain) {
       // (codex P2 r4) — and treats a DELTA figure the same way: "2.2 inches
       // above the weekly target" measures distance from the target, not the
       // rain total (codex P2 r5). Both skip without consuming the attempt.
+      // The after-guard also allows an explicit target FIGURE between the
+      // delta preposition and the target word — "1.97 inches above the
+      // 0.75-inch target" is a delta, not the weekly total (codex P2 r16).
       if (new RegExp(`\\b${TARGET_WORD}\\b[^.\\d,;:]{0,12}$`, 'i').test(before)
-        || new RegExp(`^\\s*(?:(?:over|above|below|under|past|beyond|short\\s+of)\\s+)?(?:the\\s+)?(?:(?:per|a|each)\\s+week\\s+|weekly\\s+|/\\s*wk\\s+)?${TARGET_WORD}\\b`, 'i').test(after)) return match;
+        || new RegExp(`^\\s*(?:(?:over|above|below|under|past|beyond|short\\s+of)\\s+)?(?:the\\s+)?(?:\\d+(?:\\.\\d+)?[\\s-]*(?:inch(?:es)?|in\\.?|")\\s*)?(?:(?:per|a|each)\\s+week\\s+|weekly\\s+|/\\s*wk\\s+)?${TARGET_WORD}\\b`, 'i').test(after)) return match;
       // The sentence already quotes the canonical figure → it agrees with the
       // widget; stop scanning so a later, different number (e.g. the target)
       // is never mistaken for a stale total.
@@ -261,9 +266,13 @@ function replaceDroughtHypothesis(text) {
       // before replacing (codex P2 r12); clause punctuation ends the search.
       // Dismissal terms count as negation too — "Drought stress is unlikely"
       // / "was ruled out" already agrees with the water data and must not be
-      // flipped into a coverage claim (codex P2 r14).
+      // flipped into a coverage claim (codex P2 r14). A NEGATED dismissal
+      // ("cannot be ruled out") is an unresolved hypothesis and must still
+      // be reconciled (codex P2 r16).
       const tail = sentence.slice(offset + m.length);
-      if (/^[^.;,:]{0,30}\b(?:not|no|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|never|unlikely|less\s+likely|ruled\s+out|doubtful|improbable)\b/i.test(tail)) return m;
+      const negatedDismissal = /^[^.;,:]{0,30}\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:be\s+)?ruled\s+out\b/i.test(tail);
+      if (!negatedDismissal
+        && /^[^.;,:]{0,30}\b(?:not|no|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|never|unlikely|less\s+likely|ruled\s+out|doubtful|improbable)\b/i.test(tail)) return m;
       // Adjectival forms — hyphenated or space-form "drought stressed"
       // (codex P2 r9/r12), or "drought stress" directly modifying
       // symptoms/signs/related (codex P2 r10) — take the adjectival

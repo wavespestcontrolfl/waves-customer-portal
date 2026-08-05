@@ -141,6 +141,13 @@ describe('reconcileRainFigure', () => {
     )).toBeNull();
   });
 
+  test('a delta against an explicit target figure is preserved too (codex P2 r16)', () => {
+    expect(reconcileRainFigure(
+      'Rain this week was 1.97 inches above the 0.75-inch target.',
+      2.96,
+    )).toBeNull();
+  });
+
   test('goal/recommended phrasing guards like target does', () => {
     expect(reconcileRainFigure(
       'Rain this week totaled 0.2 inches against the recommended 0.75 inches.',
@@ -241,6 +248,11 @@ describe('replaceDroughtHypothesis', () => {
   test('drought dismissals stay verbatim (codex P2 r14)', () => {
     expect(replaceDroughtHypothesis('Drought stress is unlikely given the thin-patch pattern.')).toBeNull();
     expect(replaceDroughtHypothesis('Drought stress was ruled out for the stressed strip.')).toBeNull();
+  });
+
+  test('a negated dismissal is an unresolved hypothesis and still reconciles (codex P2 r16)', () => {
+    expect(replaceDroughtHypothesis('Drought stress cannot be ruled out in the thin patches.'))
+      .toBe('Uneven sprinkler coverage cannot be ruled out in the thin patches.');
   });
 
   test('drought-resistance praise stays verbatim (codex P2 r14)', () => {
