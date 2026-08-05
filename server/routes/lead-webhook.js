@@ -514,6 +514,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           attachedLead = await attachOpenCallLeadByPhone({
             phoneFormatted,
             typedFirstName: firstName,
+            resolvedCustomerFirstName: customer?.first_name,
             fields: buildPrefillAttachFields(),
             webhookStage: { ...webhookStageBase, existing_customer_attach: true },
           });
@@ -871,6 +872,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         attached = await attachOpenCallLeadByPhone({
           phoneFormatted,
           typedFirstName: firstName,
+          resolvedCustomerFirstName: customer?.first_name,
           fields: buildPrefillAttachFields(),
           webhookStage,
         });
@@ -1278,19 +1280,24 @@ async function applyLeadAttachUpdate(leadId, fields, webhookStage, extraWhere) {
 //  - never cross-link: a candidate already linked to a DIFFERENT customer is
 //    someone else's lead (shared line) — skip;
 //  - first-name conflict guard (mirrors lead-from-extraction.nameConflicts):
-//    a typed first name that differs from the lead's captured first name
-//    means a different household member — skip. The webhook's 'Unknown'
-//    placeholder never counts as a typed name.
-// The ownership/name/open-status guards are RE-CHECKED atomically inside the
-// shared UPDATE's WHERE — a concurrent submission or an office edit between
-// the candidate SELECT and the UPDATE makes the UPDATE miss (→ null → the
-// caller inserts a fresh lead) instead of silently overwriting the claim.
+//    a first name that differs from the lead's captured first name means a
+//    different household member — skip. The comparator is the TYPED name
+//    when present, else the RESOLVED customer's name: a nameless form from
+//    an existing customer must not claim a call lead the pipeline left
+//    customer-less precisely because its captured name conflicted with that
+//    customer (Miguel's voicemail on Dana's phone). The webhook's 'Unknown'
+//    placeholder never counts as a name on either side.
+// EVERY candidate predicate (phone, call-channel, open-status, not-deleted,
+// ownership, name) is RE-CHECKED atomically inside the shared UPDATE's
+// WHERE — a concurrent submission or an office edit between the candidate
+// SELECT and the UPDATE makes the UPDATE miss (→ null → the caller inserts
+// a fresh lead) instead of silently overwriting the claim.
 //
 // Unlike the token attach (typed-wins wholesale — the tokenized form was
 // prefilled FROM the lead), this fallback only overwrites with NON-EMPTY
 // typed values: a bare main-site form must not blank out a name/email the
 // call extraction already captured.
-async function attachOpenCallLeadByPhone({ phoneFormatted, typedFirstName, fields, webhookStage }) {
+async function attachOpenCallLeadByPhone({ phoneFormatted, typedFirstName, resolvedCustomerFirstName, fields, webhookStage }) {
   const digits = String(phoneFormatted || '').replace(/\D/g, '').slice(-10);
   if (digits.length !== 10) return null;
   try {
@@ -1329,9 +1336,11 @@ async function attachOpenCallLeadByPhone({ phoneFormatted, typedFirstName, field
 
     const normName = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const typed = typedFirstName === 'Unknown' ? '' : normName(typedFirstName);
+    const resolved = resolvedCustomerFirstName === 'Unknown' ? '' : normName(resolvedCustomerFirstName);
+    const nameComparator = typed || resolved;
     const captured = normName(candidate.first_name);
-    if (typed && captured && typed !== captured) {
-      logger.info(`[lead-webhook] phone-match lead ${candidate.id} first name conflicts with typed name; not attaching`);
+    if (nameComparator && captured && nameComparator !== captured) {
+      logger.info(`[lead-webhook] phone-match lead ${candidate.id} first name conflicts with the ${typed ? 'typed' : "resolved customer's"} name; not attaching`);
       return null;
     }
 
@@ -1343,6 +1352,8 @@ async function attachOpenCallLeadByPhone({ phoneFormatted, typedFirstName, field
     if (typedFirstName === 'Unknown') delete merged.first_name;
 
     const attached = await applyLeadAttachUpdate(candidate.id, merged, webhookStage, (query) => {
+      query.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
+      query.where({ first_contact_channel: 'call' });
       query.whereIn('status', OPEN_LEAD_STATUSES);
       query.whereNull('deleted_at');
       if (fields.customer_id) {
@@ -1350,12 +1361,13 @@ async function attachOpenCallLeadByPhone({ phoneFormatted, typedFirstName, field
           this.whereNull('customer_id').orWhere('customer_id', fields.customer_id);
         });
       }
-      if (typed) {
+      if (nameComparator) {
         // SQL twin of normName: attach only while the captured first name is
-        // still absent or still normalizes to the typed one.
+        // still absent or still normalizes to the comparator (typed name, or
+        // the resolved customer's name on a nameless form).
         query.whereRaw(
           "(COALESCE(first_name, '') = '' OR lower(regexp_replace(first_name, '[^a-zA-Z0-9]', '', 'g')) = ?)",
-          [typed]
+          [nameComparator]
         );
       }
     });

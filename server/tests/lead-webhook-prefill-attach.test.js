@@ -250,17 +250,27 @@ describe('attachOpenCallLeadByPhone — candidate gate', () => {
     expect(state.updates).toHaveLength(0);
   });
 
-  test("webhook 'Unknown' placeholder is not a typed name — attach proceeds", async () => {
+  test("webhook 'Unknown' placeholder is not a typed name — attach proceeds when no other name signal", async () => {
     state.leadCandidates = [{ id: CALL_LEAD_ID, first_name: 'Miguel', customer_id: null }];
     state.returningRows = [{ id: CALL_LEAD_ID }];
     const result = await attachOpenCallLeadByPhone(phoneArgs({
-      top: { typedFirstName: 'Unknown' },
+      top: { typedFirstName: 'Unknown', resolvedCustomerFirstName: 'Miguel' },
       fields: { first_name: 'Unknown', last_name: '' },
     }));
     expect(result).toMatchObject({ id: CALL_LEAD_ID });
     // ...but the placeholder never overwrites the captured name.
     expect(state.updates[0].payload).not.toHaveProperty('first_name');
     expect(state.updates[0].payload).not.toHaveProperty('last_name');
+  });
+
+  test("nameless form: resolved customer's name conflicts with captured name → null (Miguel's voicemail on Dana's phone)", async () => {
+    state.leadCandidates = [{ id: CALL_LEAD_ID, first_name: 'Miguel', customer_id: null }];
+    const result = await attachOpenCallLeadByPhone(phoneArgs({
+      top: { typedFirstName: 'Unknown', resolvedCustomerFirstName: 'Dana' },
+      fields: { first_name: 'Unknown', last_name: '' },
+    }));
+    expect(result).toBeNull();
+    expect(state.updates).toHaveLength(0);
   });
 });
 
@@ -277,9 +287,12 @@ describe('attachOpenCallLeadByPhone — attach semantics', () => {
       first_name: 'Dana', last_name: 'Rivera',
       phone: '+19415550101', customer_id: 'cust-1',
     });
-    // Atomic re-check (codex P2): the candidate guards ride inside the
-    // UPDATE's WHERE so a concurrent claim/edit makes the UPDATE miss.
+    // Atomic re-check (codex P2 ×3): EVERY candidate predicate rides inside
+    // the UPDATE's WHERE so a concurrent claim/edit makes the UPDATE miss.
     expect(builder.wheres).toContainEqual({ id: CALL_LEAD_ID });
+    expect(builder.whereRaws.some(([sql, bindings]) =>
+      sql.includes("RIGHT(regexp_replace(COALESCE(phone") && bindings[0] === '9415550101')).toBe(true);
+    expect(builder.wheres).toContainEqual({ first_contact_channel: 'call' });
     expect(builder.whereIns).toContainEqual(['status', ['new', 'contacted', 'estimate_sent', 'estimate_viewed']]);
     expect(builder.whereNulls).toContain('converted_at');
     // Soft-delete between SELECT and UPDATE must miss too (codex r2).
