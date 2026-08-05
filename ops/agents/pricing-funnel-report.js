@@ -22,7 +22,13 @@
 // server `result.lineItems`). Connects via DATABASE_PUBLIC_URL (see
 // ops/agents/README.md prod access recipe). Prints to stdout only.
 
+const path = require('path');
 const { Client } = require('pg');
+const {
+  INTERNAL_TEST_CUSTOMERS,
+  isInternalTestCustomerId,
+  isInternalTestEmail,
+} = require(path.join(__dirname, '..', '..', 'server', 'services', 'internal-test-customers'));
 
 const args = Object.fromEntries(process.argv.slice(2)
   .filter((a) => a.startsWith('--'))
@@ -132,7 +138,12 @@ function extractPest(row) {
     if (tier && Number(tier.perApp) > 0) {
       perVisit = Math.round(Number(tier.perApp) * discountRatio * 100) / 100;
     } else {
-      const visits = Number(engLine.visitsPerYear) || 4;
+      // Compact mirror lines can carry frequency as a STRING key
+      // ('bimonthly'/'monthly') with visitsPerYear absent — resolve through
+      // the cadence map before dividing (codex #3199 r4).
+      const visits = Number(engLine.visitsPerYear)
+        || FREQ_KEY_TO_APPS[String(engLine.frequency || '').toLowerCase()]
+        || Number(engLine.frequency) || 4;
       perVisit = Number.isFinite(netLineAnnual) && netLineAnnual > 0
         ? Math.round((netLineAnnual / visits) * 100) / 100
         : Number(engLine.perApp);
@@ -181,7 +192,9 @@ function extractLawn(row) {
     if (tier && Number(tier.perApp) > 0) {
       perApp = Math.round(Number(tier.perApp) * discountRatio * 100) / 100;
     } else {
-      const visits = Number(engLine.frequency) || 9;
+      const visits = Number(engLine.frequency)
+        || LAWN_FREQ_KEY_TO_V[String(engLine.frequency || '').toLowerCase()]
+        || 9;
       perApp = Number.isFinite(netLineAnnual) && netLineAnnual > 0
         ? Math.round((netLineAnnual / visits) * 100) / 100
         : Number(engLine.perApp);
@@ -248,7 +261,7 @@ function laneSummary(rows, priceOf, priceLabel) {
   const c = new Client({ connectionString: conn, ssl: { rejectUnauthorized: false } });
   await c.connect();
   const q = await c.query(`
-    SELECT id, customer_id, address, customer_phone, customer_email, status,
+    SELECT id, customer_id, address, customer_name, customer_phone, customer_email, status,
            created_at, accepted_at, accepted_frequency_key, accepted_service_mode,
            expires_at, archived_at, estimate_data
     FROM estimates
@@ -258,8 +271,16 @@ function laneSummary(rows, priceOf, priceLabel) {
 
   const all = [];
   let unpriceable = 0;
+  let internalExcluded = 0;
   for (const row of q.rows) {
     if (SINCE && row.created_at < SINCE) continue;
+    // Repo-standard internal/test exclusion (shared with the IB dashboard
+    // and MRR metrics) so owner test accounts never move the funnel
+    // (codex #3199 r4).
+    const name = String(row.customer_name || '').trim().toLowerCase();
+    if (INTERNAL_TEST_CUSTOMERS.includes(name)
+      || isInternalTestCustomerId(row.customer_id)
+      || isInternalTestEmail(row.customer_email)) { internalExcluded++; continue; }
     const pest = extractPest(row);
     const lawn = extractLawn(row);
     if (!pest && !lawn) { unpriceable++; continue; }
@@ -268,6 +289,7 @@ function laneSummary(rows, priceOf, priceLabel) {
   console.log(`Pricing funnel report — ${new Date().toISOString().slice(0, 10)}${SINCE ? ` (quotes since ${args.since})` : ' (all time)'}`);
   console.log(`quotes analyzed: ${all.length} (sent/viewed/accepted/declined/expired with a priceable pest or lawn line)`);
   if (unpriceable) console.log(`dropped as unpriceable (no pest/lawn line extractable — includes non-pest/lawn service quotes): ${unpriceable}`);
+  if (internalExcluded) console.log(`internal/test customer quotes excluded (shared INTERNAL_TEST_CUSTOMERS list): ${internalExcluded}`);
   console.log('');
 
   if (LANE !== 'lawn') {
