@@ -593,11 +593,15 @@ function InsightLine({ label, value, strong }) {
 export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', aftercare = null }) {
   const mounted = useMounted();
   if (!water) return null;
+  // Missing readings stay missing card-wide: Number(null)/Number('') are a
+  // finite 0, and a rain-unknown payload must not render a false `Rain 0"`
+  // row/bar or divert the confidence tag (codex P2 r6).
+  const known = (v) => v != null && v !== '' && Number.isFinite(Number(v));
   const rain = Number(water.rainInches);
   const irrigation = Number(water.irrigationInches);
   const target = Number(water.targetInches);
-  const hasRain = Number.isFinite(rain);
-  const hasIrr = Number.isFinite(irrigation);
+  const hasRain = known(water.rainInches);
+  const hasIrr = known(water.irrigationInches);
   // No usable schedule on file → the server still sends irrigation as a
   // finite 0, which rendered as `Irrigation 0"` — a claim the customer didn't
   // water, not the truth that we don't know (owner 2026-08-04). Show "Not on
@@ -611,12 +615,13 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   // Nothing measurable → don't draw an empty chart.
   if (!hasRain && !hasIrr) return null;
 
-  const total = Number.isFinite(Number(water.totalInches))
+  const total = known(water.totalInches)
     ? Number(water.totalInches)
     : (hasRain ? rain : 0) + (hasIrr ? irrigation : 0);
+  const hasTarget = known(water.targetInches);
   const status = water.status || 'unknown';
   const meta = statusMeta(status === 'unknown' ? 'tracking' : status);
-  const axisMax = Math.max(total, Number.isFinite(target) ? target : 0) * 1.25 || 2;
+  const axisMax = Math.max(total, hasTarget ? target : 0) * 1.25 || 2;
   const pctOf = (v) => `${clamp((v / axisMax) * 100)}%`;
 
   return (
@@ -627,29 +632,28 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
         {hasIrr && irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(irrigation)}</strong></> : null}
         {hasIrr && !irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><span style={{ textAlign: 'right', color: MUTED, fontStyle: 'italic' }}>Not on file</span></> : null}
         <span style={{ color: MUTED }}>Total</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(total)}</strong>
-        {Number.isFinite(target) ? <><span style={{ color: MUTED }}>Target range</span><strong style={{ textAlign: 'right', color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></> : null}
+        {hasTarget ? <><span style={{ color: MUTED }}>Target range</span><strong style={{ textAlign: 'right', color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></> : null}
       </div>
       {/* Stacked bar with a target marker — segments grow on mount */}
       <div style={{ position: 'relative', height: 26, borderRadius: 8, background: '#F1EEE6', overflow: 'hidden' }}>
         {hasRain ? <div title="Rain" style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: mounted ? pctOf(rain) : '0%', background: COLORS.glassNavy, transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
         {hasIrr && irrOnFile ? <div title="Irrigation" style={{ position: 'absolute', left: hasRain ? (mounted ? pctOf(rain) : '0%') : 0, top: 0, bottom: 0, width: mounted ? pctOf(irrigation) : '0%', background: 'rgba(4, 57, 94, 0.35)', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1) 0.1s, left 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
-        {Number.isFinite(target) ? (
+        {hasTarget ? (
           <div style={{ position: 'absolute', left: pctOf(target), top: -3, bottom: -3, width: 3, background: TEXT, borderRadius: 2, opacity: mounted ? 1 : 0, transition: 'opacity 0.4s ease 0.7s' }} title="Target" />
         ) : null}
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
         {hasRain ? <Legend color={COLORS.glassNavy} label="Rain" /> : null}
         {hasIrr && irrOnFile ? <Legend color='rgba(4, 57, 94, 0.35)' label="Irrigation" /> : null}
-        {Number.isFinite(target) ? <Legend color={TEXT} label="Target" /> : null}
+        {hasTarget ? <Legend color={TEXT} label="Target" /> : null}
       </div>
       <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <StatusPill status={status === 'unknown' ? 'tracking' : status} small />
         {/* When the rain reading is solid and only the schedule is missing,
             "Limited data this week" blamed the rain — name the actual gap.
-            rainKnown null-checks BEFORE Number(): hasRain coerces a null
-            rainInches to a finite 0, and a rain-unknown report must keep the
-            low-confidence label warning about the rain (codex P2 r2). */}
-        {water.confidence ? <ConfidenceTag confidence={water.confidence} overrideLabel={!irrOnFile && water.rainInches != null && Number.isFinite(Number(water.rainInches)) ? 'Irrigation not on file' : null} /> : null}
+            hasRain is a strict known() check, so a rain-unknown report keeps
+            the low-confidence label warning about the rain (codex P2 r2/r6). */}
+        {water.confidence ? <ConfidenceTag confidence={water.confidence} overrideLabel={!irrOnFile && hasRain ? 'Irrigation not on file' : null} /> : null}
       </div>
       {water.explanation ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>

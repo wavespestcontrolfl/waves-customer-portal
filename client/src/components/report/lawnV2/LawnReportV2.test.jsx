@@ -38,6 +38,12 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     expect(screen.getByText('Verified data')).toBeInTheDocument();
   });
 
+  it('rain-unknown payload renders no false Rain 0" row (codex P2 r6)', () => {
+    render(<WaterIntakeBar water={{ rainInches: null, irrigationInches: 0.5, totalInches: 0.5, targetInches: 0.75, status: 'unknown', confidence: 'low', scheduleOnFile: true }} />);
+    expect(screen.queryByText('Rain')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Irrigation').length).toBeGreaterThan(0);
+  });
+
   it('rain-unknown + no schedule keeps the low-confidence label (codex P2 r2)', () => {
     // Number(null) coerces to a finite 0 — the override must verify the rain
     // reading actually exists before claiming irrigation is the only gap.

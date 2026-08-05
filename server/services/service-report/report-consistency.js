@@ -111,8 +111,11 @@ function reconcileRainFigure(text, canonicalRain) {
   if (!t || canonicalRain == null) return null;
   let changed = false;
   const out = t.split(/(?<=[.!?])\s+/).map((sentence) => {
-    if (!/\brain(?:fall)?\b/i.test(sentence)) return sentence;
-    if (!/\bweek\b|\b7[- ]day\b|\bpast seven\b|\btotal(?:ing|ed|s)?\b/i.test(sentence)) return sentence;
+    // Same rain/window vocabulary the narrative layer produces — a stale
+    // total phrased as "Precipitation over the last seven days was 2.72
+    // inches" must qualify too (codex P2 r6).
+    if (!/\brain(?:fall)?\b|\bprecipitation\b/i.test(sentence)) return sentence;
+    if (!/\bweek\b|\b7[- ]days?\b|\b(?:past|last) seven\b|\bseven days\b|\btotal(?:ing|ed|s)?\b/i.test(sentence)) return sentence;
     // A COMBINED rain+irrigation/total-water figure is not the rain total —
     // rewriting "Rain and irrigation totaled 1.95 inches" to rain-only would
     // contradict the widget's Total row (codex P2 r5).
@@ -392,4 +395,47 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
   };
 }
 
-module.exports = { reconcileLawnReport, firstSentence, reconcileRainFigure, replaceDroughtHypothesis };
+/**
+ * Apply reconcileLawnReport's fixes onto an assembled report payload in
+ * place. Shared by the public route AND the queued PDF renderer — the queue
+ * builds its payload directly and renders under the deterministic storage
+ * key, so a queue render without this pass would bake the pre-reconciliation
+ * copy into the cache and the direct route would then serve it as current
+ * (codex P2 #3197 r6). Best-effort: any throw leaves the payload untouched.
+ */
+function applyLawnReportReconciliation(data, dynamicContext = null) {
+  if (!data || !data.reportV2) return data;
+  try {
+    const fix = reconcileLawnReport({
+      data: { ...data, dynamicContext },
+      reportV2: data.reportV2,
+      serviceLine: data.serviceLine,
+    });
+    if (!fix) return data;
+    data.reportV2 = {
+      ...data.reportV2,
+      todaysResult: fix.todaysResult || data.reportV2.todaysResult || null,
+      followUp: fix.followUp || data.reportV2.followUp || null,
+      // Rain-contradicted drought hypotheses reworded in place (null = untouched).
+      insights: fix.insights || data.reportV2.insights,
+      photoSummary: fix.photoSummary || data.reportV2.photoSummary,
+      snapshot: fix.snapshot || data.reportV2.snapshot,
+      consistencyWarnings: fix.warnings || [],
+    };
+    // Stale weekly-rain figure in the AI summary rewritten to the widget's
+    // total so the report never quotes two different rain numbers.
+    if (fix.summary) data.summary = fix.summary;
+    if (fix.reentry && dynamicContext && dynamicContext.reentry) {
+      dynamicContext.reentry = { ...dynamicContext.reentry, petAdvisory: fix.reentry.petAdvisory };
+    }
+  } catch { /* reconciliation is best-effort — never block the report */ }
+  return data;
+}
+
+module.exports = {
+  reconcileLawnReport,
+  applyLawnReportReconciliation,
+  firstSentence,
+  reconcileRainFigure,
+  replaceDroughtHypothesis,
+};

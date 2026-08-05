@@ -40,7 +40,10 @@ export default function LawnReportV2Section({ data, print = false }) {
       {data.water ? <WaterIntakeBar water={data.water} aftercare={data.aftercare} /> : null}
       {data.rain7d?.length ? <RainLast7DaysChart days={data.rain7d} confidence={data.rain7dConfidence} source={data.rain7dSource} /> : null}
       {data.mowing ? <MowingHeightGauge mowing={data.mowing} /> : null}
-      {data.trends ? <LawnTrends trends={data.trends} baselineScore={data.snapshot?.overallScore} hasNextVisit={Boolean(data.snapshot?.nextVisit?.label)} /> : null}
+      {/* Mirrors LawnSnapshotHero's validity check — an 'Invalid Date' label
+          from an older cached payload must not make the baseline card promise
+          a next visit the hero itself suppresses (codex P2 r6). */}
+      {data.trends ? <LawnTrends trends={data.trends} baselineScore={data.snapshot?.overallScore} hasNextVisit={Boolean(data.snapshot?.nextVisit?.label && data.snapshot.nextVisit.label !== 'Invalid Date')} /> : null}
     </div>
     </PrintContext.Provider>
   );

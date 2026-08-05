@@ -5,6 +5,7 @@ const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
 const { nextEtMidnight } = require('./application-conditions');
 const { renderServiceReportV1Pdf } = require('./pdf');
+const { applyLawnReportReconciliation } = require('./report-consistency');
 const {
   getHealthyStoredReportPdf,
   putReportPdf,
@@ -175,6 +176,12 @@ async function renderAndStoreServiceReportPdf(recordId, {
       pestPressureConfig,
       knex,
     });
+    // Same consistency pass the public route runs (rain figure, drought
+    // hypothesis, re-entry, hero) — without it this path would bake the
+    // pre-reconciliation copy into the deterministic PDF cache key and the
+    // direct route would then serve that stale render as current (codex P2
+    // #3197 r6).
+    applyLawnReportReconciliation(data, data.dynamicContext);
     pdf = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,

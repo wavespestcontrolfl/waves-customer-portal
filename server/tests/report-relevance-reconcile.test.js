@@ -82,6 +82,13 @@ describe('reconcileRainFigure', () => {
     expect(reconcileRainFigure('Rain totaled 2.72 inches this week.', null)).toBeNull();
   });
 
+  test('precipitation / last-seven-days phrasing qualifies (codex P2 r6)', () => {
+    expect(reconcileRainFigure('Precipitation over the last seven days was 2.72 inches.', 2.96))
+      .toBe('Precipitation over the last seven days was 2.96 inches.');
+    expect(reconcileRainFigure('Precipitation totaled 2.72 inches this week.', 2.96))
+      .toBe('Precipitation totaled 2.96 inches this week.');
+  });
+
   test('a genuinely stale LOW total is rewritten (codex P2 r3)', () => {
     // Open same-day window: 0.2" at completion, 0.8" by view time — the old
     // below-half-canonical guard wrongly skipped this exact drift.
@@ -262,6 +269,25 @@ describe('reconcileLawnReport — relevance pass integration', () => {
     const input = base();
     input.reportV2.snapshot = { overallScore: 74, mainWatch: 'Mowing a bit tall.' };
     expect(reconcileLawnReport(input).snapshot).toBeNull();
+  });
+
+  test('applyLawnReportReconciliation patches a payload in place (shared with pdf-queue — codex P2 r6)', () => {
+    const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
+    const input = base();
+    const data = { ...input.data, serviceLine: 'lawn', reportV2: input.reportV2 };
+    const out = applyLawnReportReconciliation(data, null);
+    expect(out).toBe(data);
+    expect(data.summary).toMatch(/totaling 2\.96 inches/);
+    expect(data.reportV2.insights[0].whatWeSaw).toMatch(/uneven sprinkler coverage/);
+    expect(data.reportV2.photoSummary).toMatch(/uneven sprinkler coverage/);
+    expect(Array.isArray(data.reportV2.consistencyWarnings)).toBe(true);
+  });
+
+  test('applyLawnReportReconciliation is a no-op without reportV2', () => {
+    const { applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
+    const data = { summary: 'Rain totaled 2.72 inches this week.' };
+    applyLawnReportReconciliation(data, null);
+    expect(data.summary).toBe('Rain totaled 2.72 inches this week.');
   });
 
   test('todaysResult carries no fixed "No urgent homeowner action" clause', () => {
