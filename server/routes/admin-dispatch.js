@@ -6047,14 +6047,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // record the service actually completing. Fail-soft on the
           // re-resolve — the pre-lock profile (today's behavior) stands.
           let frozenCompletionProfile = completionProfile;
+          let primaryFreezeTrusted = true;
           if (lockedSvcRow && (lockedSvcRow.service_id !== svc.service_id
             || lockedSvcRow.service_type !== svc.service_type)) {
             try {
               frozenCompletionProfile = await resolveCompletionProfileForScheduledService(lockedSvcRow, trx);
-            } catch { /* pre-lock profile stands */ }
+            } catch {
+              // Repoint DETECTED but the locked re-resolve failed: the
+              // pre-lock profile is known-stale, so freezing it would pin
+              // the WRONG identity permanently (codex P2 r27). Omit the
+              // freeze — the render's live fallback resolves the current
+              // row, the legacy-record behavior.
+              primaryFreezeTrusted = false;
+            }
           }
-          serviceData.completedServiceKey = frozenCompletionProfile?.serviceKey || null;
-          serviceData.completedServiceName = (lockedSvcRow ? lockedSvcRow.service_type : svc.service_type) || null;
+          if (primaryFreezeTrusted) {
+            serviceData.completedServiceKey = frozenCompletionProfile?.serviceKey || null;
+            serviceData.completedServiceName = (lockedSvcRow ? lockedSvcRow.service_type : svc.service_type) || null;
+          }
           // Typed specialty completion: resolve trend vs the customer's prior
           // visit for the same indicator, then persist the immutable
           // customer-copy snapshot (typedReportSnapshot). The report renders

@@ -682,6 +682,28 @@ describe('classification behavior', () => {
     expect(frozen[1]).not.toHaveProperty('serviceKey');
   });
 
+  test('round 27 — pointer-REQUIRED primary keys fail render closed without their pointer', () => {
+    // termite_liquid's spray verdict is only valid WITH its
+    // termite_treatment pointer — at render a missing pointer must not
+    // yield the unconditional key rule
+    expect(resolveTraceEligibility({ serviceKey: 'termite_liquid', typedValues: null }))
+      .toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    // capture stays permissive (typedValues undefined)
+    expect(resolveTraceEligibility({ serviceKey: 'termite_liquid' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    // with the pointer, the perimeter-method evidence decides
+    expect(resolveTraceEligibility({
+      serviceKey: 'termite_liquid',
+      findingsType: 'termite_treatment',
+      typedValues: { treatment_method: 'Liquid perimeter' },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'termite_trenching',
+      findingsType: 'termite_treatment',
+      typedValues: { treatment_method: 'Spot treatment' },
+    })).toMatchObject({ eligible: false, reason: 'no_perimeter_method_recorded' });
+  });
+
   test('round 19 — callback key overrides its stale snapshot; capture modes must agree', async () => {
     // pre-untype callback: the eligible one_time_pest_treatment snapshot
     // no longer bypasses the exterior-evidence condition

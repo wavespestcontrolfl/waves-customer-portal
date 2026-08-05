@@ -163,8 +163,16 @@ const SERVICE_KEY_RULES = {
   lawn_fertilization: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   lawn_tree_shrub_combo: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   // liquid termite keys (typed — listed for callers that only have the key)
-  termite_liquid: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  termite_trenching: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // pointerRequired (codex P2 r27): these keys' spray verdicts are only
+  // valid WITH their termite_treatment pointer — its perimeter-method
+  // condition is the narrowing. At RENDER (typedValues supplied, even
+  // null) a missing pointer fails closed; capture stays permissive.
+  termite_liquid: {
+    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', pointerRequired: true,
+  },
+  termite_trenching: {
+    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', pointerRequired: true,
+  },
   termite_pretreatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   // Localized foam/drill/wood application by catalog definition — not a
   // perimeter treatment, so a satellite perimeter trace would be a false
@@ -365,6 +373,17 @@ function resolveTraceEligibility({
   // generic pest/lawn key until the registry learns the new type's
   // semantics — the pointer, when present, IS the visit's identity.
   if (findingsType && !findingsRule) {
+    return {
+      eligible: false, variant: null, captionKey: null, reason: 'unclassified_service',
+    };
+  }
+  // A pointer-REQUIRED key with no resolved pointer fails closed at
+  // render (codex P2 r27, the primary-path mirror of the add-ons'
+  // unresolved:pointer rule): termite_liquid without termite_treatment
+  // would skip the perimeter-method evidence check. typedValues
+  // undefined = capture side, which stays permissive.
+  if (keyRule && keyRule.eligible && keyRule.pointerRequired
+    && !findingsRule && typedValues !== undefined) {
     return {
       eligible: false, variant: null, captionKey: null, reason: 'unclassified_service',
     };

@@ -1719,13 +1719,19 @@ async function loadProjectCompletionContextByServiceId(services) {
   const rows = Array.isArray(services) ? services : [];
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const entries = await Promise.all(rows.map(async (service) => {
+    let completionProfileLookupFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(service)
       .catch((e) => {
         logger.warn(`[schedule] completion profile lookup failed for ${service.id}: ${e.message}`);
+        completionProfileLookupFailed = true;
         return null;
       });
     return [service.id, {
       completionProfile,
+      // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
+      // fails open on this flag — the write path catches the same
+      // failure and fails open, so the feed must not hide the mapper.
+      completionProfileLookupFailed,
       // Typed-findings schema embedded alongside the profile so the
       // CompletionPanel (fed by this endpoint on desktop AND mobile) can
       // render the typed form without a registry round-trip. Null for
@@ -1939,6 +1945,12 @@ router.get('/', async (req, res, next) => {
     } = require('../services/service-report/trace-eligibility');
     let serviceKeyByServiceId = new Map();
     let dayPointerByKey = new Map();
+    // Pointer OUTAGE ≠ no pointer rows (codex P2 r27): on failure the
+    // verdict is omitted (fail open, matching the write path's fail-open
+    // catch) instead of unclassifying typed add-ons. A CATALOG failure
+    // still fails closed via the unresolved sentinel — capture's own
+    // catalog rule (r18) rejects those ids the same way.
+    let dayPointerLookupFailed = false;
     if (traceEligibilityGateOn()) {
       // Primary AND add-on catalog ids in one batch — a grouped visit with
       // an ineligible primary but a spray-capable add-on line still traces
@@ -1965,7 +1977,7 @@ router.get('/', async (req, res, next) => {
             .whereIn('service_key', addonOnlyKeys)
             .where({ active: true })
             .select('service_key', 'project_type')
-            .catch(() => []);
+            .catch(() => { dayPointerLookupFailed = true; return []; });
           dayPointerByKey = new Map(profileRows.map((r) => [r.service_key, r.project_type]));
         }
       }
@@ -2125,6 +2137,8 @@ router.get('/', async (req, res, next) => {
       };
 
       const rowTraceVerdict = traceEligibilityGateOn()
+        && !dayPointerLookupFailed
+        && !projectCompletionContext?.completionProfileLookupFailed
         ? combineRowVerdicts(
           rowTraceEligibility({
             serviceKey: serviceKeyByServiceId.get(s.service_id)
@@ -2439,6 +2453,8 @@ router.get('/week', async (req, res, next) => {
       // r12). One batch for keys, one for typed pointers.
       let weekKeyByCatalogId = new Map();
       let weekPointerByKey = new Map();
+      // Same fail-open-on-outage rule as the day feed (codex P2 r27)
+      let weekPointerLookupFailed = false;
       if (weekTraceGateOn()) {
         const addonCatalogIds = [...new Set(
           [...addonsByServiceId.values()].flat().map((a) => a.serviceId).filter(Boolean),
@@ -2455,7 +2471,7 @@ router.get('/week', async (req, res, next) => {
               .whereIn('service_key', addonKeys)
               .where({ active: true })
               .select('service_key', 'project_type')
-              .catch(() => []);
+              .catch(() => { weekPointerLookupFailed = true; return []; });
             weekPointerByKey = new Map(profileRows.map((r) => [r.service_key, r.project_type]));
           }
         }
@@ -2585,6 +2601,8 @@ router.get('/week', async (req, res, next) => {
           serviceCategory: detectServiceCategory(svcType),
           ...(() => {
             const v = weekTraceGateOn()
+              && !weekPointerLookupFailed
+              && !projectCompletionContext?.completionProfileLookupFailed
               ? weekCombineVerdicts(
                 weekTraceEligibility({
                   serviceKey: projectCompletionContext?.completionProfile?.serviceKey || null,
