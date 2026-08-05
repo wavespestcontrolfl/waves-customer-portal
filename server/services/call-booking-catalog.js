@@ -144,11 +144,31 @@ const RE_SERVICE_INTENT_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b`, 'i');
 // "don't want the quarterly but do want a re-service" keeps its affirmative.
 const NEGATED_RE_SERVICE_RE = new RegExp(`\\b(?:no|not|isn['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|wouldn['’]?t|never|without|rather\\s+than|instead\\s+of)\\s+(?:(?!(?:but|however|though|except)\\b)[\\w'’]+\\s+){0,4}?${RE_SERVICE_PHRASE}\\b`, 'gi');
 
+// Historical context is not intent either (codex #3222 r5): "schedule my
+// quarterly; last month's re-service worked great" is a PLAN booking that
+// merely references a past callback — with recurring plan picks now
+// replaceable, an unstripped mention would convert the requested plan visit
+// into a free callback. Both orders, same clause window as the roach/rodent
+// historical strips.
+const RE_SERVICE_HISTORY_CUE = "(?:last\\s+(?:time|visit|week|month|year)|previous(?:ly)?|in\\s+the\\s+past|used\\s+to)";
+const HISTORICAL_RE_SERVICE_RE = new RegExp(`\\b${RE_SERVICE_HISTORY_CUE}\\b[^.!?\\n]{0,40}?${RE_SERVICE_PHRASE}\\b`, 'gi');
+const RE_SERVICE_HISTORICAL_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b[^.!?\\n]{0,40}?\\b(?:${RE_SERVICE_HISTORY_CUE}|ago)\\b`, 'gi');
+
 function hasAffirmativeReServiceIntent(text) {
-  const cleaned = String(text || '').replace(NEGATED_RE_SERVICE_RE, ' ');
+  const cleaned = String(text || '')
+    .replace(NEGATED_RE_SERVICE_RE, ' ')
+    .replace(HISTORICAL_RE_SERVICE_RE, ' ')
+    .replace(RE_SERVICE_HISTORICAL_RE, ' ');
   return RE_SERVICE_INTENT_RE.test(cleaned);
 }
 const RE_SERVICE_LAWN_CONTEXT_RE = /\b(?:lawn|turf|grass|weeds?|fertili[sz]\w*|chinch|sod)\b/i;
+// Lane evidence for the DUAL-eligibility case (codex #3222 r5): with both
+// lanes open, the lane must be evidenced by what the caller talked about —
+// pest wording or lawn wording, not a default. Neither (or both) present →
+// the override declines and the call falls through to the processor's
+// Waves Assessment fallback (assess on-site) instead of guessing which free
+// service to dispatch.
+const RE_SERVICE_PEST_CONTEXT_RE = /\b(?:pests?|bugs?|insects?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|wasps?|hornets?|fleas?|ticks?|silverfish|earwigs?|millipedes?|centipedes?|scorpions?)\b/i;
 const GENERIC_CALL_CATALOG_ROW_RE = /^(?:waves pest control appointment service|waves assessment|waves appointment)$/i;
 // Coarse resolveSchedulableCallService labels a lane's re-service may stand in
 // for. Anything else ("Mosquito Control", "Termite Inspection", …) means the
@@ -333,10 +353,20 @@ function resolveCallBookingCatalogService({
       return !!compat && (coarse === null || compat.has(coarse));
     });
     if (candidates.length > 0) {
-      const lane = candidates.length === 1
-        ? candidates[0]
-        : (RE_SERVICE_LAWN_CONTEXT_RE.test(haystack) ? 'lawn' : 'pest');
-      if (candidates.includes(lane)) {
+      // Single candidate: eligibility + coarse-compat + plan-pin already
+      // narrowed the lane. Dual candidates need lane EVIDENCE from the call
+      // — exactly one of pest/lawn wording — or the override declines
+      // (codex r5: never guess which free service to dispatch; the
+      // processor's Waves Assessment fallback books an assessment instead).
+      let lane = null;
+      if (candidates.length === 1) {
+        lane = candidates[0];
+      } else {
+        const lawnEvidence = RE_SERVICE_LAWN_CONTEXT_RE.test(haystack);
+        const pestEvidence = RE_SERVICE_PEST_CONTEXT_RE.test(haystack);
+        if (lawnEvidence !== pestEvidence) lane = lawnEvidence ? 'lawn' : 'pest';
+      }
+      if (lane && candidates.includes(lane)) {
         const reServiceRow = (Array.isArray(reServices) ? reServices : [])
           .find((s) => s.service_key === RE_SERVICE_KEYS[lane]);
         if (reServiceRow) return reServiceRow;

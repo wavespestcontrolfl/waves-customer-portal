@@ -576,6 +576,42 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     expect(reServiceLaneForPlanRow(GENERIC_ROW)).toBeNull();
   });
 
+  test('a HISTORICAL re-service mention does not convert an explicit plan booking (codex r5)', () => {
+    const plan = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'General Pest Control (Quarterly)', requested_service: "schedule my quarterly visit; last month's re-service worked great" },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(plan?.service_key).toBe('pest_general_quarterly');
+    expect(hasCallReServiceIntent({}, "last month's re-service worked great, book my regular visit")).toBe(false);
+    expect(hasCallReServiceIntent({}, 'we had a re-service two weeks ago')).toBe(false);
+    expect(hasCallReServiceIntent({}, 'you did a revisit in the past and it helped')).toBe(false);
+    // A current ask alongside a historical mention keeps its intent.
+    expect(hasCallReServiceIntent({}, "last month's re-service worked great — can we get another re-service now")).toBe(true);
+  });
+
+  test('dual-lane eligibility with no lane evidence declines — never guesses a free service (codex r5)', () => {
+    const ambiguous = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'please come back out and take care of it' },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest', 'lawn'],
+      coarseServiceLabel: null,
+    });
+    expect(ambiguous).toBeNull();
+    // Both kinds of evidence at once is just as ambiguous.
+    const both = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'come back out — ants inside and the lawn weeds are back' },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest', 'lawn'],
+      coarseServiceLabel: null,
+    });
+    expect(both).toBeNull();
+  });
+
   test('a re-service row never prices — even a transcript-quoted number stays off the visit (codex r2)', () => {
     expect(resolveCallBookingPrice({ quotedPrice: 109, catalogRow: RE_SERVICES[0] }))
       .toEqual({ price: null, source: null });
