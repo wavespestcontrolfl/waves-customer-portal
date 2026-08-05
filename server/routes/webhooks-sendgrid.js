@@ -22,6 +22,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const bounceRecovery = require('../services/email-bounce-recovery');
+const bounceRescue = require('../services/email-bounce-rescue');
 const providerRetry = require('../services/transactional-email-provider-retry');
 
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
@@ -311,6 +312,11 @@ async function handleEvent(ev) {
     if (!bounceRecovery.isHardBounceEvent(ev)) return;
     bounceRecovery.alertBouncedContactAddress(email, ev)
       .catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
+    // Untracked bounces have no email_messages row for domain recovery, but
+    // the transcript rescue only needs the address — same fire-and-forget
+    // contract; the rescue ledger's UNIQUE(bounced_email) absorbs replays.
+    bounceRescue.rescueBouncedAddress(email, { appliedBy: 'webhook' })
+      .catch((err) => logger.error(`[sendgrid-webhook] bounce rescue failed: ${err.message}`));
   };
 
   if (newsletterDelivery) {
@@ -343,7 +349,16 @@ async function handleEvent(ev) {
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
       } else if (bounceRecovery.isHardBounceEvent(ev)) {
         bounceRecovery.attemptRecovery(emailMessage, ev)
-          .catch((err) => logger.error(`[sendgrid-webhook] bounce recovery failed for ${messageId}: ${err.message}`));
+          .then((result) => {
+            // Recovery handles DOMAIN typos; when it re-sent, its own
+            // delivery/bounce feedback decides the address. Everything it
+            // could NOT act on falls through to the transcript rescue —
+            // except streams rescue must never touch either.
+            if (result?.status === 'resent') return null;
+            if (['marketing_stream', 'test_message'].includes(result?.skipped)) return null;
+            return bounceRescue.rescueBouncedAddress(email, { appliedBy: 'webhook' });
+          })
+          .catch((err) => logger.error(`[sendgrid-webhook] bounce recovery/rescue failed for ${messageId}: ${err.message}`));
       } else if (String(ev.event || '').toLowerCase() === 'delivered' && bounceRecovery.isRecoveryMessage(emailMessage)) {
         bounceRecovery.commitRecoveryOnDelivery(emailMessage)
           .catch((err) => logger.error(`[sendgrid-webhook] recovery commit failed for ${messageId}: ${err.message}`));
