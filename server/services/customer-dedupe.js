@@ -1955,6 +1955,9 @@ const TABLE_TIMESTAMP_COLUMNS = {
   estimate_actuals: ['created_at', 'updated_at'],
   google_ads_conversion_uploads: ['created_at', 'updated_at'],
   customer_health_alerts: ['created_at', 'updated_at'],
+  // created_at ONLY — 20260401000020 (the compliance-enhanced migration
+  // adds DACS fields, never updated_at).
+  property_application_history: ['created_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2716,6 +2719,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           // attributes the restored customer's job to the kept customer.
           { table: 'estimate_actuals', label: 'estimate actuals row(s)' },
           { table: 'google_ads_conversion_uploads', label: 'ads conversion upload(s)' },
+          // r42: the legacy post-service compliance hook / backfill inserts
+          // FDACS application-limit ledger rows with the record's current
+          // customer_id — stranding them mis-attributes regulatory history.
+          { table: 'property_application_history', label: 'compliance ledger row(s)' },
         ];
         for (const probe of serviceRecordChildProbes) {
           let childRows = [];

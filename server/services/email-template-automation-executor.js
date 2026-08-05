@@ -580,9 +580,27 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
         // exactly one comms key — a blocking second acquire cannot cycle).
         let ownerNow = leadOwnerCustomerId;
         try {
-          const freshLead = await trx('leads').where({ id: recipient.id }).first('customer_id');
-          ownerNow = (freshLead && freshLead.customer_id) || null;
-          if (ownerNow && ownerNow !== leadOwnerCustomerId) await lockCustomerComms(trx, ownerNow);
+          // r42: LOOP to a fixpoint — each new-owner acquire can itself
+          // wait out ANOTHER undo that repoints the lead again, so a
+          // single re-read can still insert against a stale owner.
+          // Re-read until the owner is one whose key this trx already
+          // holds (advisory keys are held to commit, so a held owner
+          // cannot have an undo mid-flight). Cap guards degenerate
+          // ping-pong; exhausting it queues with the last-read owner and
+          // a loud log (r14 posture: sends are never blocked into
+          // failure — the mailbox check below still gates delivery).
+          const heldOwners = new Set([String(leadOwnerCustomerId)]);
+          for (let hop = 0; ; hop += 1) {
+            const freshLead = await trx('leads').where({ id: recipient.id }).first('customer_id');
+            ownerNow = (freshLead && freshLead.customer_id) || null;
+            if (!ownerNow || heldOwners.has(String(ownerNow))) break;
+            if (hop >= 3) {
+              logger.warn(`[template-executor] lead ${recipient.id} owner still moving after ${hop} comms-fence hops — queuing under last-read owner ${ownerNow}`);
+              break;
+            }
+            await lockCustomerComms(trx, ownerNow);
+            heldOwners.add(String(ownerNow));
+          }
         } catch { ownerNow = leadOwnerCustomerId; }
         // Mailbox revalidation, same rule as resolveRecipientUnderLock: an
         // address that NOW belongs to a live customer other than the run's

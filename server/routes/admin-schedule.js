@@ -6890,11 +6890,24 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
   let spawnedVisit = null;
   const cols = await conn('scheduled_services').columnInfo();
-  const parent = await conn('scheduled_services').where({ id: parentId }).first();
+  let parent = await conn('scheduled_services').where({ id: parentId }).first();
   // Rung-6 re-lock (see runRecurringSeriesMaintenance): the caller locked
   // customer-comms off svc's snapshot — if the in-lock re-read shows the
   // series was repointed to another customer, lock that one too.
-  if (parent && parent.customer_id !== svc.customer_id) await lockCustomerComms(conn, parent.customer_id);
+  if (parent && parent.customer_id !== svc.customer_id) {
+    await lockCustomerComms(conn, parent.customer_id);
+    // r42: that acquire can sit behind the very undo repointing the parent
+    // — re-read after it. A row that moved AGAIN defers to the next
+    // maintenance tick rather than extending from a stale snapshot; an
+    // unchanged owner still adopts the fresh row so the extension copies
+    // post-undo values.
+    const relocked = await conn('scheduled_services').where({ id: parentId }).first();
+    if (!relocked || relocked.customer_id !== parent.customer_id) {
+      logger.warn(`[recurring] parent ${parentId} owner changed under the comms fence (merge-undo) — deferring auto-extend to the next maintenance tick`);
+      return null;
+    }
+    parent = relocked;
+  }
   if (parent && parent.is_recurring && parent.recurring_pattern) {
     // upcomingCount + latest must reflect the BASE recurring series
     // only — see countUpcomingSeriesVisits for the booster and
