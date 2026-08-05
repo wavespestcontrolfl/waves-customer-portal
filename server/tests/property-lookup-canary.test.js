@@ -1,4 +1,5 @@
 const mockLookupByParcel = jest.fn();
+const mockSearchByAddress = jest.fn();
 const mockLookupParcelByPoint = jest.fn();
 const mockTriggerNotification = jest.fn();
 
@@ -10,6 +11,7 @@ const mockDbState = { loadFails: false };
 
 jest.mock('../services/property-lookup/ai-property-lookup', () => ({
   lookupPropertyFromCountyByParcel: (...args) => mockLookupByParcel(...args),
+  searchCountyParcelByAddress: (...args) => mockSearchByAddress(...args),
 }));
 jest.mock('../services/property-lookup/parcel-gis', () => ({
   lookupParcelByPoint: (...args) => mockLookupParcelByPoint(...args),
@@ -82,6 +84,10 @@ beforeEach(() => {
   delete process.env.PROPERTY_LOOKUP_CANARY_DISABLED;
   mockLookupParcelByPoint.mockResolvedValue({ county: 'Manatee', paoParcelId: '579642409' });
   mockLookupByParcel.mockResolvedValue(healthyRecord());
+  // Address-search default: every county resolves its own golden pin.
+  mockSearchByAddress.mockImplementation(async (county) => ({
+    parcelId: GOLDEN_PARCELS.find((g) => g.parcel.county === county)?.parcel.paoParcelId,
+  }));
   // Default: the bell write lands. Tests that exercise failed delivery override.
   mockTriggerNotification.mockResolvedValue({ bellWritten: true, push: null });
   // The timeout path runs a browser-UA diagnostic probe against the county
@@ -204,8 +210,48 @@ describe('runPropertyLookupCanary', () => {
   it('healthy run checks all goldens + FDOR and fires nothing', async () => {
     const result = await runPropertyLookupCanary();
     expect(result.ok).toBe(true);
-    expect(result.checked).toBe(GOLDEN_PARCELS.length + 1);
+    expect(result.checked).toBe(GOLDEN_PARCELS.length * 2 + 1);
     expect(mockLookupByParcel).toHaveBeenCalledTimes(GOLDEN_PARCELS.length);
+    expect(mockSearchByAddress).toHaveBeenCalledTimes(GOLDEN_PARCELS.length);
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
+  it('an address search resolving the WRONG parcel is a regression — pages on night 1', async () => {
+    mockSearchByAddress.mockImplementation(async (county) => (
+      county === 'Manatee'
+        ? { parcelId: '999999999' }
+        : { parcelId: GOLDEN_PARCELS.find((g) => g.parcel.county === county)?.parcel.paoParcelId }
+    ));
+    const result = await runPropertyLookupCanary();
+    expect(result.ok).toBe(false);
+    expect(result.failures).toContain('Manatee golden parcel: address search resolved the wrong parcel');
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it('an address-search timeout is transient with the browser-UA probe, streaks like by-parcel', async () => {
+    mockSearchByAddress.mockImplementation(async (county) => {
+      if (county === 'Sarasota') throw abortError();
+      return { parcelId: GOLDEN_PARCELS.find((g) => g.parcel.county === county)?.parcel.paoParcelId };
+    });
+    const n1 = await runPropertyLookupCanary();
+    expect(n1.ok).toBe(true);
+    expect(n1.suppressed.some((s) => s.includes('Sarasota golden parcel: address search threw (timeout) — browser-UA probe:'))).toBe(true);
+    await runPropertyLookupCanary();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+    const n3 = await runPropertyLookupCanary();
+    expect(n3.ok).toBe(false);
+    expect(n3.failures.some((f) => /address search threw \(timeout\).*3 nights running/.test(f))).toBe(true);
+  });
+
+  it('an address search finding nothing is transient (streaks), not an instant page', async () => {
+    mockSearchByAddress.mockImplementation(async (county) => (
+      county === 'Charlotte'
+        ? null
+        : { parcelId: GOLDEN_PARCELS.find((g) => g.parcel.county === county)?.parcel.paoParcelId }
+    ));
+    const n1 = await runPropertyLookupCanary();
+    expect(n1.ok).toBe(true);
+    expect(n1.suppressed.some((s) => s.includes('Charlotte golden parcel: address search found no parcel'))).toBe(true);
     expect(mockTriggerNotification).not.toHaveBeenCalled();
   });
 
@@ -312,7 +358,11 @@ describe('runPropertyLookupCanary', () => {
     await runPropertyLookupCanary(); // night 2 transient
     expect(mockTriggerNotification).not.toHaveBeenCalled();
 
-    mockLookupByParcel.mockResolvedValue(healthyRecord()); // clean night resets
+    mockLookupByParcel.mockResolvedValue(healthyRecord());
+  // Address-search default: every county resolves its own golden pin.
+  mockSearchByAddress.mockImplementation(async (county) => ({
+    parcelId: GOLDEN_PARCELS.find((g) => g.parcel.county === county)?.parcel.paoParcelId,
+  })); // clean night resets
     const clean = await runPropertyLookupCanary();
     expect(clean.ok).toBe(true);
 

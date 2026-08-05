@@ -806,6 +806,26 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY TURF VARIANCE DIGEST (kill: TURF_VARIANCE_DIGEST_DISABLED=1)
+  // Monday 7:05am ET — owner ACT email ONLY when the last 30 days of
+  // estimate-actuals turf deltas drift past the alert threshold; a green
+  // window sends nothing (exception-based). Reads the ledger the nightly
+  // estimate-actuals reconcile maintains; sends to the internal ops inbox.
+  // =========================================================================
+  cron.schedule('5 7 * * 1', async () => {
+    try {
+      // runExclusive: a deploy-overlap tick must not double-send the email.
+      await runExclusive('turf-variance-digest', async () => {
+        const { runTurfVarianceDigest } = require('./turf-variance-digest');
+        const result = await runTurfVarianceDigest();
+        logger.info(`[turf-variance] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, avg: result.avgDeltaPct ?? null, samples: result.samples ?? null })}`);
+      });
+    } catch (err) {
+      logger.error(`Weekly turf variance digest failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY NEWSLETTER INACTIVITY SUNSET (gated: GATE_NEWSLETTER_SUNSET)
   // Monday 7:30am ET — flags subscribers with 90+ days of zero opens/clicks
   // across 6+ delivered campaigns, parks ONE win-back draft for the owner to

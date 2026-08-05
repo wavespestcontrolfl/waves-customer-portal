@@ -39,7 +39,7 @@ const logger = require('./logger');
 const db = require('../models/db');
 const { runExclusive } = require('../utils/cron-lock');
 const { triggerNotification } = require('./notification-triggers');
-const { lookupPropertyFromCountyByParcel } = require('./property-lookup/ai-property-lookup');
+const { lookupPropertyFromCountyByParcel, searchCountyParcelByAddress } = require('./property-lookup/ai-property-lookup');
 const { lookupParcelByPoint } = require('./property-lookup/parcel-gis');
 
 const CANARY_TIMEOUT_MS = 20000;
@@ -267,7 +267,7 @@ async function persistCheckStates(checks, nextCounts) {
 
 async function runPropertyLookupCanaryInner() {
   logger.info('[property-lookup-canary] canary started', {
-    parcels: GOLDEN_PARCELS.length, pointChecks: 1,
+    parcels: GOLDEN_PARCELS.length, addressChecks: GOLDEN_PARCELS.length, pointChecks: 1,
   });
 
   // Classify every check this run into ok/transient/regression. Throws and
@@ -327,6 +327,38 @@ async function runPropertyLookupCanaryInner() {
     }
   }
 
+  // Address-search half — the entry point every estimate-time lookup uses,
+  // and the only path the by-parcel goldens don't cover (2026-08-05: a
+  // transient Manatee address-search failure priced a lawn from vision alone
+  // with zero flags while the by-parcel canary stayed green). One search
+  // request per county, sequential for the same politeness reason as above;
+  // same transient/regression taxonomy, streak escalation, and browser-UA
+  // probe as the by-parcel checks.
+  for (const golden of GOLDEN_PARCELS) {
+    let errCode = null;
+    const searchAddress = `${golden.parcel.situsAddress}, ${golden.parcel.situsCity}, FL`;
+    const match = await searchCountyParcelByAddress(golden.parcel.county, searchAddress, { timeoutMs: CANARY_TIMEOUT_MS })
+      .catch((err) => { errCode = errLabel(err); return null; });
+    const key = `golden_addr:${golden.parcel.county}`;
+    if (errCode) {
+      logger.warn('[property-lookup-canary] address search threw', { label: golden.label, code: errCode });
+      const probe = errCode === 'timeout' ? await probeCountyHostWithBrowserUa(golden.parcel.county) : null;
+      const probeNote = probe ? ` — browser-UA probe: ${probe}` : '';
+      checks.push({ key, status: 'transient', details: [`${golden.label}: address search threw (${errCode})${probeNote}`] });
+    } else if (!match || !match.parcelId) {
+      // Couldn't distinguish an empty/challenged response from a real miss —
+      // transient like the by-parcel convention; the consecutive-failure
+      // streak escalates a persistent miss.
+      checks.push({ key, status: 'transient', details: [`${golden.label}: address search found no parcel`] });
+    } else if (String(match.parcelId) !== golden.parcel.paoParcelId) {
+      // The roll ANSWERED with a different parcel — candidate-builder or
+      // result-picker regression. Page immediately.
+      checks.push({ key, status: 'regression', details: [`${golden.label}: address search resolved the wrong parcel`] });
+    } else {
+      checks.push({ key, status: 'ok', details: [] });
+    }
+  }
+
   // Escalate against the persisted streak.
   const priorCounts = await loadPriorCounts(checks.map((c) => c.key));
   const stateAvailable = priorCounts !== null;
@@ -369,7 +401,7 @@ async function runPropertyLookupCanaryInner() {
     failures: alertFailures,
     suppressed,
     delivered,
-    checked: GOLDEN_PARCELS.length + 1,
+    checked: checks.length,
   };
 }
 

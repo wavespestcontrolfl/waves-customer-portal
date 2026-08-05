@@ -2148,6 +2148,27 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
 }
 
+// Address-search half of each county lookup, exposed for the nightly canary:
+// resolves a street address to { parcelId } WITHOUT fetching the detail
+// models (the politest probe available — the by-parcel golden checks already
+// exercise the detail half). This is exactly the half a real estimate-time
+// lookup enters through, and the half that failed silently on 2026-08-05
+// (vision-only pricing with zero flags). Unknown county → null, like the
+// per-county gates.
+const COUNTY_ADDRESS_SEARCHERS = {
+  Manatee: (address, timeoutMs) => searchManateeParcel(address, timeoutMs),
+  Sarasota: (address, timeoutMs) => searchSarasotaParcel(address, timeoutMs),
+  Charlotte: (address, timeoutMs) => searchCharlotteParcel(address, timeoutMs),
+  Hillsborough: (address, timeoutMs) => searchHillsboroughParcel(address, timeoutMs),
+};
+
+async function searchCountyParcelByAddress(county, address, options = {}) {
+  const searcher = COUNTY_ADDRESS_SEARCHERS[county];
+  if (!searcher) return null;
+  const timeoutMs = positiveInt(options.timeoutMs || process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+  return searcher(address, timeoutMs);
+}
+
 async function searchManateeParcel(address, timeoutMs, startedAt = Date.now()) {
   const candidates = manateeAddressSearchCandidates(address);
   for (const candidate of candidates) {
@@ -4982,6 +5003,7 @@ module.exports = {
   lookupPropertyFromCountyRecords,
   lookupPropertyFromAITrio,
   lookupPropertyFromCountyByParcel,
+  searchCountyParcelByAddress,
   _private: {
     applyCountyGisTypeOverride,
     attachParcelMeta,
