@@ -40,7 +40,7 @@ jest.mock('../models/db', () => {
     // an events read distinguish "is THIS row proven" probes (the r23
     // rebound-child fix makes two of them with different ids in one pass).
     let whereScheduledId;
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'orderByRaw', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning', 'forUpdate']) {
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNotExists', 'orderBy', 'orderByRaw', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning', 'forUpdate']) {
       chain[m] = jest.fn((...args) => {
         mockChainCalls.push({ m, args });
         if (m === 'join' || m === 'leftJoin') joined = true;
@@ -984,6 +984,21 @@ describe('kill-switch posture — what must keep working while dark', () => {
     expect(res).toHaveProperty('reversed');
   });
 
+  it('the sweep audits open offers for a receipt channel — durable, never just a timer (r30 P2)', async () => {
+    // The closeout-time recheck is an in-memory timer; a restart during
+    // its wait dropped the no-channel alert forever (marker recovery skips
+    // visits whose offer exists). The hourly sweep re-runs the channel
+    // decision for open offers, pre-filtered to visits with NO paid
+    // invoice so the resend helper's PDF path never runs from the sweep.
+    await sweepInspectionCreditRedemptions();
+    expect(mockChainCalls.some((c) => c.m === 'whereNotExists')).toBe(true);
+    // And the queued recheck skips the volatile defer (source contract).
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    expect(source).toContain('queueCreditReceiptResend({ scheduledServiceId: row.visit_id, offerId: row.id, attempt: 1 })');
+  });
+
   it('recovers a COMMITTED opt-in marker while dark — the kill switch stops new promises, not old ones (r24 P2)', async () => {
     // A closeout that committed its marker while the lane was LIVE, whose
     // offer insert then crashed, must not stay stranded because the gate
@@ -1013,9 +1028,26 @@ describe('window + receipt copy', () => {
     // creditable) the credit must honor.
     expect(isCreditableInspectionProfile({ category: 'inspection', serviceKey: 'wdo_walkthrough' })).toBe(true);
     expect(isCreditableInspectionProfile({ category: 'rodent', serviceKey: 'rodent_inspection' })).toBe(true);
+    // termite_inspection is category 'termite' since 20260713100000 (r30 P2)
+    expect(isCreditableInspectionProfile({ category: 'termite', serviceKey: 'termite_inspection' })).toBe(true);
+    expect(isCreditableInspectionProfile({ category: 'termite', serviceKey: 'termite_spot_treatment' })).toBe(false);
     expect(isCreditableInspectionProfile({ category: 'rodent', serviceKey: 'rodent_trapping_exclusion' })).toBe(false);
     expect(isCreditableInspectionProfile({ category: 'pest', serviceKey: 'pest_control' })).toBe(false);
     expect(isCreditableInspectionProfile(null)).toBe(false);
+  });
+
+  it('a pg DATE object anchors the window on its OWN ET day, never the previous (r30 P1)', () => {
+    const { etDateOnlyToDate } = require('../services/inspection-credit');
+    const etDay = (d) => d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    // DATE columns parse to midnight-UTC Dates, which ET formatting rolls
+    // back a day — passed through unchanged, an Aug 5 inspection's window
+    // anchored on Aug 4 and expired the promise a day early.
+    expect(etDay(etDateOnlyToDate(new Date('2026-08-05T00:00:00Z')))).toBe('2026-08-05');
+    // And the derived expiry names the right last-bookable day.
+    const expiry = etEndOfDayAfterDays(etDateOnlyToDate(new Date('2026-08-05T00:00:00Z')), 30);
+    expect(etDay(new Date(expiry.getTime() - 1000))).toBe('2026-09-04');
+    // String date-only values keep their existing noon-ET behavior.
+    expect(etDay(etDateOnlyToDate('2026-08-05'))).toBe('2026-08-05');
   });
 
   it('honors the existing rodent precedent, defaults everything else', () => {

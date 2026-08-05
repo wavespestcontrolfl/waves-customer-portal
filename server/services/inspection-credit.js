@@ -85,17 +85,22 @@ function configuredCreditAmountForServiceKey(serviceKey) {
 /**
  * Whether a completion profile describes an inspection visit that earns the
  * credit. The CATEGORY covers generic inspections, but typed family
- * profiles carry their family's category instead — `rodent_inspection`'s
- * active profile row is category 'rodent' since the rodent-family typed
- * cutover (20260612000012), so gating on the category alone silently
- * excluded the one service whose estimator promise the credit must honor
- * (Codex #3178 r24 P0). Keyed on the STABLE service key, matching how the
- * amount/window overrides key.
+ * profiles carry their family's category instead — `rodent_inspection` is
+ * category 'rodent' since the rodent-family cutover (20260612000012) and
+ * `termite_inspection` is category 'termite' since the termite cutover
+ * (20260713100000) — so gating on the category alone silently excluded
+ * eligible inspections (Codex #3178 r24 P0, r30 P2). Keyed on the STABLE
+ * service keys, matching how the amount/window overrides key. An explicit
+ * set, not an `_inspection` suffix match: `wdo_inspection` is a paid
+ * formal-report product (special_project mode) that deliberately does not
+ * ride this lane.
  */
+const TYPED_INSPECTION_SERVICE_KEYS = new Set(['rodent_inspection', 'termite_inspection']);
+
 function isCreditableInspectionProfile(profile) {
   if (!profile) return false;
   if (String(profile.category || '') === 'inspection') return true;
-  return String(profile.serviceKey || '') === 'rodent_inspection';
+  return TYPED_INSPECTION_SERVICE_KEYS.has(String(profile.serviceKey || ''));
 }
 
 /**
@@ -108,7 +113,16 @@ function isCreditableInspectionProfile(profile) {
  */
 function etDateOnlyToDate(value) {
   if (!value) return null;
-  if (value instanceof Date) return value;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    // A DATE column parses to a MIDNIGHT-UTC Date (repo canon —
+    // service-report/time-format.js), which America/New_York rolls back to
+    // the PREVIOUS day: passing it through unchanged anchored an Aug 5
+    // inspection's window on Aug 4 and expired the promise a day early
+    // (Codex #3178 r30 P1). Re-anchor at 16:00Z from the UTC date parts —
+    // inside the ET day year-round, same convention as the string branch.
+    return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate(), 16));
+  }
   const str = String(value);
   const m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!m) {
@@ -769,6 +783,38 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       }
     } catch (err) {
       logger.error(`[inspection-credit] closeout recovery failed: ${err.message}`);
+    }
+
+    // Receipt-channel audit (Codex #3178 r30 P2): the closeout-time
+    // no-channel recheck is an in-memory timer — a restart during its
+    // 2-minute wait dropped it permanently, and marker recovery skips
+    // visits whose offer already exists, so nobody ever alerted. This
+    // durable pass revisits OPEN offers older than 10 minutes whose visit
+    // has no PAID customer invoice (pre-filtered here so the resend
+    // helper's paid path — PDF generation — never runs from the sweep) and
+    // re-runs the channel decision: a live invoice appeared → silent; still
+    // nothing → the once-per-offer office alert. attempt: 1 skips the
+    // volatile defer. Runs while dark like the recovery resends — it
+    // delivers/announces promises already made, never new ones.
+    try {
+      const auditCutoff = new Date(now.getTime() - 10 * 60 * 1000);
+      const unchanneled = await db('inspection_credit_offers as o')
+        .where('o.status', 'offered')
+        .where('o.expires_at', '>=', now)
+        .where('o.created_at', '<=', auditCutoff)
+        .whereNotExists(function paidInvoiceExists() {
+          this.select('*').from('invoices')
+            .whereRaw('invoices.scheduled_service_id = o.source_scheduled_service_id')
+            .where('invoices.status', 'paid')
+            .whereNull('invoices.payer_id');
+        })
+        .limit(limit)
+        .select('o.id as id', 'o.source_scheduled_service_id as visit_id');
+      for (const row of unchanneled) {
+        queueCreditReceiptResend({ scheduledServiceId: row.visit_id, offerId: row.id, attempt: 1 });
+      }
+    } catch (auditErr) {
+      logger.error(`[inspection-credit] receipt-channel audit failed: ${auditErr.message}`);
     }
 
     // Everything below MOVES OR EXPIRES MONEY-BEARING STATE — that is what
