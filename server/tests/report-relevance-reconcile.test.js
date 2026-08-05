@@ -54,6 +54,13 @@ describe('reconcileRainFigure', () => {
     expect(reconcileRainFigure('Rain this week means you can skip adding 0.25 inches of irrigation.', 2.96)).toBeNull();
   });
 
+  test('a prior-week rain amount is never rewritten (codex P2 r22)', () => {
+    expect(reconcileRainFigure(
+      'Last week rainfall totaled 1.2 inches, while this week rainfall totaled 2.72 inches.',
+      2.96,
+    )).toBe('Last week rainfall totaled 1.2 inches, while this week rainfall totaled 2.96 inches.');
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -444,6 +451,26 @@ describe('reconcileLawnReport — relevance pass integration', () => {
     expect(fix.insights).toBeNull();
     expect(fix.photoSummary).toBeNull();
     expect(fix.warnings.some((w) => /rain/.test(w.code))).toBe(false);
+  });
+
+  test('the lawn assessment the assistant answers from is reconciled too (codex P2 r22)', () => {
+    const input = base();
+    input.data.lawnAssessment.customerSummary = 'Thinning tan patches could be chinch bug activity or a dry pocket.';
+    input.data.lawnAssessment.snapshot = {
+      summary: 'Recent rainfall totaling 2.72 inches raised pressure, and thin areas could be drought stress.',
+      nextWatchItems: ['Recheck the thin strip for chinch bug or drought stress.'],
+      findings: [{ customerCopy: 'Stress that could be consistent with localized drought.' }],
+    };
+    const fix = reconcileLawnReport(input);
+    expect(fix.lawnAssessment.customerSummary).toMatch(/uneven sprinkler coverage/);
+    expect(fix.lawnAssessment.snapshot.summary).toMatch(/totaling 2\.96 inches/);
+    expect(fix.lawnAssessment.snapshot.summary).toMatch(/uneven sprinkler coverage/);
+    expect(fix.lawnAssessment.snapshot.nextWatchItems[0]).toMatch(/uneven sprinkler coverage/);
+    expect(fix.lawnAssessment.snapshot.findings[0].customerCopy).toMatch(/uneven sprinkler coverage/);
+    // An untouched assessment returns null (keep what the payload has).
+    const clean = base();
+    clean.data.lawnAssessment = { customerSummary: 'The lawn is thickening nicely.' };
+    expect(reconcileLawnReport(clean).lawnAssessment).toBeNull();
   });
 
   test('the rendered nextVisitPlan row is reconciled too (codex P2 r1)', () => {

@@ -181,6 +181,12 @@ function reconcileRainFigure(text, canonicalRain) {
       // "Wednesday brought 1.36 inches of rain, contributing to this week's
       // wet turf" must not become a false daily amount (codex P2 r17).
       if (/\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|yesterday|overnight|storm|downpour|one day|single day)\b[^.\d]{0,16}$/i.test(before)) return match;
+      // A figure attached to a PRIOR week is history, not the current total —
+      // "Last week rainfall totaled 1.2 inches, while this week…" keeps the
+      // historical amount while the current figure still reconciles. Clause-
+      // scoped so the current-week half of the comparison isn't shielded;
+      // skips without consuming the attempt (codex P2 r22).
+      if (/\b(?:last|previous|prior)\s+week\b/i.test(sentence.slice(0, offset).split(/[,;:]/).pop())) return match;
       // Likewise a figure attached to IRRIGATION is not the rain total —
       // "Irrigation added 0.75 inches while rain totaled 2.72 inches" must
       // skip the 0.75 (without consuming the attempt) so the actual stale
@@ -540,6 +546,65 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     }
   }
 
+  // ── Ask-Waves lawn-assessment reconciliation (lawn only) ─────────────────
+  // The public ask route answers lawn questions from data.lawnAssessment
+  // (snapshot.summary / customerSummary / card + finding copy / watch items —
+  // report-assistant.js). Patching only the page payload let the assistant
+  // serve the unreconciled drought answer right after the visible cards were
+  // rewritten to the coverage differential (codex P2 r22). Same passes, same
+  // gates, returned as a patch (null = untouched).
+  let lawnAssessment = null;
+  if (lawnPass && data.lawnAssessment) {
+    let droughtTouched = false;
+    const fixText = (text) => {
+      if (text == null || text === '') return null;
+      const t0 = String(text);
+      let out = t0;
+      if (canonicalRain != null) out = reconcileRainFigure(out, canonicalRain) || out;
+      if (rainWellAboveTarget) {
+        const d = replaceDroughtHypothesis(out);
+        if (d) { out = d; droughtTouched = true; }
+      }
+      return out === t0 ? null : out;
+    };
+    const laSrc = data.lawnAssessment;
+    const next = { ...laSrc };
+    let touched = false;
+    for (const f of ['customerSummary', 'aiSummary', 'observations']) {
+      const replaced = fixText(laSrc[f]);
+      if (replaced) { next[f] = replaced; touched = true; }
+    }
+    if (laSrc.snapshot) {
+      const snapFields = {};
+      let snapTouched = false;
+      const summaryFix = fixText(laSrc.snapshot.summary);
+      if (summaryFix) { snapFields.summary = summaryFix; snapTouched = true; }
+      if (Array.isArray(laSrc.snapshot.nextWatchItems)) {
+        const items = laSrc.snapshot.nextWatchItems.map((w) => fixText(w) || w);
+        if (items.some((w, idx) => w !== laSrc.snapshot.nextWatchItems[idx])) { snapFields.nextWatchItems = items; snapTouched = true; }
+      }
+      if (Array.isArray(laSrc.snapshot.findings)) {
+        const findingsFixed = laSrc.snapshot.findings.map((fi) => {
+          const replaced = fi && fixText(fi.customerCopy);
+          return replaced ? { ...fi, customerCopy: replaced } : fi;
+        });
+        if (findingsFixed.some((fi, idx) => fi !== laSrc.snapshot.findings[idx])) { snapFields.findings = findingsFixed; snapTouched = true; }
+      }
+      if (snapTouched) { next.snapshot = { ...laSrc.snapshot, ...snapFields }; touched = true; }
+    }
+    if (Array.isArray(laSrc.recommendationCards)) {
+      const cards = laSrc.recommendationCards.map((card) => {
+        const replaced = card && fixText(card.customerCopy);
+        return replaced ? { ...card, customerCopy: replaced } : card;
+      });
+      if (cards.some((c, idx) => c !== laSrc.recommendationCards[idx])) { next.recommendationCards = cards; touched = true; }
+    }
+    if (touched) {
+      lawnAssessment = next;
+      if (droughtTouched) droughtWarn('The lawn assessment (assistant answers)');
+    }
+  }
+
   return {
     todaysResult,
     reentry,
@@ -551,6 +616,7 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     photoSummary,
     snapshot,
     insights: insights === rawInsights ? null : insights,
+    lawnAssessment,
   };
 }
 
@@ -584,6 +650,9 @@ function applyLawnReportReconciliation(data, dynamicContext = null) {
     // Stale weekly-rain figure in the AI summary rewritten to the widget's
     // total so the report never quotes two different rain numbers.
     if (fix.summary) data.summary = fix.summary;
+    // Ask Waves answers from lawnAssessment — keep it in step with the page
+    // (codex P2 r22).
+    if (fix.lawnAssessment) data.lawnAssessment = fix.lawnAssessment;
     if (fix.reentry && dynamicContext && dynamicContext.reentry) {
       dynamicContext.reentry = { ...dynamicContext.reentry, petAdvisory: fix.reentry.petAdvisory };
     }

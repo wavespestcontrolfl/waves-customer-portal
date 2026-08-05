@@ -34,6 +34,16 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     expect(screen.queryByText('Total')).not.toBeInTheDocument();
   });
 
+  it('no schedule on file: an irrigation/total-flavored explanation is suppressed with the row (codex P2 r22)', () => {
+    render(<WaterIntakeBar water={{ rainInches: 2.96, irrigationInches: 0, targetInches: 0.75, status: 'high', confidence: 'low', scheduleOnFile: false, explanation: 'Your irrigation schedule added 0" this week for a total of 2.96".' }} />);
+    expect(screen.queryByText(/irrigation schedule added/)).not.toBeInTheDocument();
+  });
+
+  it('no schedule on file: a pure rain narrative explanation still renders', () => {
+    render(<WaterIntakeBar water={{ rainInches: 2.96, irrigationInches: 0, targetInches: 0.75, status: 'high', confidence: 'low', scheduleOnFile: false, explanation: 'Heavy rain this week kept the lawn well above its weekly needs.' }} />);
+    expect(screen.getByText(/Heavy rain this week/)).toBeInTheDocument();
+  });
+
   it('a real schedule keeps the numeric row and the standard confidence tag', () => {
     render(<WaterIntakeBar water={{ rainInches: 1.2, irrigationInches: 0.5, totalInches: 1.7, targetInches: 0.75, status: 'high', confidence: 'high', scheduleOnFile: true }} />);
     expect(screen.getByText('0.5"')).toBeInTheDocument();

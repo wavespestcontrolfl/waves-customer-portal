@@ -681,7 +681,12 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
             the low-confidence label warning about the rain (codex P2 r2/r6). */}
         {water.confidence ? <ConfidenceTag confidence={water.confidence} overrideLabel={!irrOnFile && hasRain ? 'Irrigation not on file' : null} /> : null}
       </div>
-      {water.explanation ? (
+      {/* The server-built explanation was composed assuming the irrigation
+          figure is real — with no schedule on file it can claim a schedule,
+          a 0" irrigation add, or a rain-only "total", contradicting the
+          "Not on file" row above (codex P2 r22). Irrigation/total-flavored
+          prose is suppressed with the row; a pure rain narrative stays. */}
+      {water.explanation && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)) ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
       ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
