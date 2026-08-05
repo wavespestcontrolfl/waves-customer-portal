@@ -663,35 +663,47 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       }
     } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
 
-    // Auto-reply to lead — always send (whether call connected or not),
-    // 24/7. The template acknowledges the quote request; later inbound
-    // replies can still be classified by server/services/lead-intake.js
-    // when they include service interest or address details. Edit copy in
-    // the admin UI.
+    // Auto-reply to lead — send AT MOST ONCE per person, ever (owner
+    // ruling 2026-08-05). shouldRunLeadAcquisition() already limits this
+    // to new customer rows, but the same person can produce a second
+    // "new" row (phone stored in a different format, deleted/merged
+    // record, double submission racing the 5-min window — 20 phones got
+    // the menu text twice in prod). Dedup on any prior auto_reply row in
+    // sms_log by phone digits, same matching rule the inbound-SMS
+    // customer lookup uses. Fails CLOSED: if the check errors we skip
+    // the send — a missed greeting beats texting a customer twice.
+    // Later inbound replies are still classified by
+    // server/services/lead-intake.js. Edit copy in the admin UI.
     try {
-      const replyMsg = await renderRequiredSmsTemplate(
-        'lead_auto_reply_biz',
-        { first_name: firstName },
-        { workflow: 'lead_webhook_auto_reply', entity_type: 'customer', entity_id: customer.id }
-      );
+      const alreadyAutoReplied = await hasPriorLeadAutoReply(phoneFormatted);
 
-      const smsResult = await sendCustomerMessage({
-        to: phoneFormatted,
-        body: replyMsg,
-        channel: 'sms',
-        audience: 'lead',
-        purpose: 'conversational',
-        customerId: customer.id,
-        identityTrustLevel: 'phone_matches_customer',
-        entryPoint: 'lead_webhook_auto_reply',
-        metadata: {
-          original_message_type: 'auto_reply',
-          customerLocationId: location.id,
-          lead_source: leadSource.source,
-        },
-      });
-      if (!smsResult.sent) {
-        logger.warn(`[lead-webhook] Auto-reply blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      if (alreadyAutoReplied) {
+        logger.info(`[lead-webhook] Auto-reply skipped for customer ${customer.id}: already sent once to this phone`);
+      } else {
+        const replyMsg = await renderRequiredSmsTemplate(
+          'lead_auto_reply_biz',
+          { first_name: firstName },
+          { workflow: 'lead_webhook_auto_reply', entity_type: 'customer', entity_id: customer.id }
+        );
+
+        const smsResult = await sendCustomerMessage({
+          to: phoneFormatted,
+          body: replyMsg,
+          channel: 'sms',
+          audience: 'lead',
+          purpose: 'conversational',
+          customerId: customer.id,
+          identityTrustLevel: 'phone_matches_customer',
+          entryPoint: 'lead_webhook_auto_reply',
+          metadata: {
+            original_message_type: 'auto_reply',
+            customerLocationId: location.id,
+            lead_source: leadSource.source,
+          },
+        });
+        if (!smsResult.sent) {
+          logger.warn(`[lead-webhook] Auto-reply blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        }
       }
 
       // Seed the intake state machine so the customer's next inbound SMS
@@ -1450,6 +1462,31 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
   return !!isNewCustomer && !isDuplicateSubmission;
 }
 
+/**
+ * The lead auto-reply (lead_auto_reply_biz) is sent AT MOST ONCE per
+ * person, ever (owner ruling 2026-08-05). Matches prior sends by the
+ * last 10 phone digits — the same rule the inbound-SMS customer lookup
+ * uses — so a re-created customer row or a differently-formatted phone
+ * can't earn a second copy of the same menu text.
+ *
+ * FAIL CLOSED: if the dedup query errors, report "already sent" so the
+ * caller skips the send. A missed greeting is recoverable (the lead
+ * alert to the operator still fires); texting a customer the same
+ * automated message twice is the failure this guard exists to prevent.
+ */
+async function hasPriorLeadAutoReply(phoneFormatted) {
+  try {
+    const prior = await db('sms_log')
+      .where({ direction: 'outbound', message_type: 'auto_reply' })
+      .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(phoneFormatted).slice(-10)])
+      .first();
+    return !!prior;
+  } catch (dedupErr) {
+    logger.warn(`[lead-webhook] auto-reply dedup check failed — skipping send (fail closed): ${dedupErr.message}`);
+    return true;
+  }
+}
+
 function cleanPhone(value) {
   if (!value) return '';
   return String(value).replace(/\D/g, '').replace(/^1(\d{10})$/, '$1');
@@ -1471,6 +1508,7 @@ module.exports._test = {
   serviceInterestUpdateFromTriage,
   shouldApplyTriageServiceInterest,
   shouldRunLeadAcquisition,
+  hasPriorLeadAutoReply,
   applyLeadEstimateAutomationGate,
   determineLeadSource,
   isHoneypotTripped,
