@@ -1757,7 +1757,9 @@ async function syncConstantsFromDB(dbInstance) {
       const lawnRows = await db('lawn_pricing_brackets')
         .orderBy('grass_track').orderBy('sqft_bracket').orderBy('tier');
       if (lawnRows.length) {
-        const TIER_INDEX = { basic: 0, standard: 1, enhanced: 2, premium: 3 };
+        // basic/4x fully retired (owner 2026-08-04): its DB rows (idx
+        // undefined) are skipped so a legacy row can never seed a column.
+        const TIER_INDEX = { standard: 0, enhanced: 1, premium: 2 };
         const byTrack = {};
         for (const row of lawnRows) {
           const track = row.grass_track;

@@ -1292,6 +1292,103 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
   }
 });
 
+// POST /api/admin/communications/reservice-link  { phone, customerId? }
+// Composer helper: resolve the recipient's self-serve /reservice/:token short
+// link (customers.reservice_token — the standing free re-service scheduler)
+// for insertion into the SMS body. Identity resolution mirrors
+// /reschedule-link above exactly (POST body, full-10-digit phone,
+// customerId↔phone cross-check, account expansion, multi-account 409) — the
+// reservice token is the same class of BEARER credential. Two extra gates:
+//   - 404 while GATE_RESERVICE_SELF_SERVE is dark (buildReserviceLink also
+//     mints nothing then — belt and braces);
+//   - the link only resolves for an account row with an ELIGIBLE lane
+//     (services/reservice-scheduler.js) so the composer can't text a
+//     link that lands on the not-eligible page. Final eligibility stays
+//     owned by the public page — plan state can change after the text.
+router.post('/reservice-link', requireAdmin, async (req, res) => {
+  try {
+    const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('../services/reservice-scheduler');
+    if (!reserviceSelfServeEnabled()) {
+      return res.status(404).json({ error: 'Self-serve re-service links are not enabled' });
+    }
+    const last10 = fullPhoneLast10(req.body?.phone);
+    if (!last10) {
+      return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
+    }
+
+    const customerId = req.body?.customerId;
+    let customerIds = [];
+    if (customerId && UUID_RE.test(String(customerId))) {
+      const customer = await db('customers')
+        .where({ id: customerId })
+        .whereNull('deleted_at')
+        .first('id', 'phone', 'account_id');
+      if (!customer) return res.status(404).json({ error: 'Customer not found' });
+      if (fullPhoneLast10(customer.phone) !== last10) {
+        return res.status(400).json({ error: 'phone must match the selected customer' });
+      }
+      customerIds = await customerIdsForAccount(customer.account_id || customer.id);
+    } else {
+      const matches = await db('customers')
+        .whereNull('deleted_at')
+        .whereRaw("right(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+        .select('id', 'account_id');
+      if (!matches.length) {
+        return res.status(404).json({ error: 'No customer found for that number' });
+      }
+      const accountKeys = [...new Set(matches.map((m) => m.account_id || m.id))];
+      if (accountKeys.length > 1) {
+        return res.status(409).json({
+          error: 'That number is on file for more than one customer account — pick the customer from the search dropdown first',
+        });
+      }
+      customerIds = await customerIdsForAccount(accountKeys[0]);
+    }
+    if (!customerIds.length) {
+      return res.status(404).json({ error: 'No customer found for that number' });
+    }
+
+    // The operator-selected row is checked FIRST — the /reservice page
+    // builds availability around the token row's ADDRESS, so on a
+    // multi-property account the sibling scan below must never shadow the
+    // property the operator actually picked (codex P2 #3194). Remaining
+    // siblings follow in a sorted (deterministic) order —
+    // customerIdsForAccount has no ORDER BY of its own. First eligible row
+    // wins; none → nothing to insert.
+    const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
+    const orderedIds = selectedId
+      ? [selectedId, ...customerIds.filter((id) => id !== selectedId).sort()]
+      : [...customerIds].sort();
+    let eligible = null;
+    let lanes = [];
+    for (const id of orderedIds) {
+      const row = await db('customers')
+        .where({ id })
+        .whereNull('deleted_at')
+        .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
+      if (!row || row.active === false || !row.reservice_token) continue;
+      const rowLanes = await reserviceLanesForCustomer(row);
+      if (rowLanes.length) {
+        eligible = row;
+        lanes = rowLanes;
+        break;
+      }
+    }
+    if (!eligible) {
+      return res.status(404).json({ error: 'No active recurring plan on this account — a free re-service needs an active plan' });
+    }
+
+    const { buildReserviceLink } = require('../services/reservice-link');
+    const { url, line } = await buildReserviceLink(eligible.id);
+    if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
+
+    res.json({ url, line, customerId: eligible.id, lanes });
+  } catch (err) {
+    logger.error(`reservice-link lookup failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/admin/communications/ai-auto-reply-status
 router.get('/ai-auto-reply-status', async (req, res) => {
   try {

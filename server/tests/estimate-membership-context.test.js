@@ -590,6 +590,43 @@ describe('computeMembershipContext', () => {
     ]);
   });
 
+  test('a margin-guarded service shows ITS capped rate, not the blended aggregate', async () => {
+    const database = fakeDb({ scheduledRows: futurePestRows() });
+
+    // Gold bundle where the guard capped tree_shrub at ~6% while lawn took
+    // the full 15%. Blended aggregate = 1 - 1356.5/1550 ≈ 12.5% — the old
+    // uniform smear advertised 12% on BOTH lines.
+    const ctx = await computeMembershipContext(database, {
+      customerId: 'cust-1',
+      estData: {
+        result: {
+          results: { lawn: [{ v: 12, recommended: true }], ts: [{ v: 6, selected: true }] },
+          recurring: {
+            discount: 0.15,
+            annualBeforeDiscount: 1550,
+            annualAfterDiscount: 1356.5,
+            services: [
+              { name: 'Lawn Care', mo: 55, annualAfterDiscount: 561 },
+              { name: 'Tree & Shrub', mo: 36.5, perTreatment: 73, visitsPerYear: 6, annualAfterDiscount: 411.3 },
+            ],
+          },
+        },
+      },
+    });
+
+    const byKey = Object.fromEntries(ctx.newServices.map((s) => [s.key, s]));
+    // Lawn: full tier rate from its own before/after pair (660 → 561 = 15%).
+    expect(byKey.lawn_care).toMatchObject({
+      discountPct: 15,
+      monthlySavings: 8.25,
+      perApplicationSavings: 8.25,
+    });
+    // Tree & Shrub: the guard kept 438 → 411.3, a 6% effective rate. The
+    // card must not advertise more than that line actually received.
+    expect(byKey.tree_shrub).toMatchObject({ discountPct: 6 });
+    expect(byKey.tree_shrub.perApplicationSavings).toBeCloseTo(73 * (1 - 411.3 / 438), 2);
+  });
+
   test('setup line items are excluded from the last-paid per-visit basis', async () => {
     const database = fakeDb({
       scheduledRows: futurePestRows(),

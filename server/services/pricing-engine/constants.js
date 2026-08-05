@@ -227,19 +227,19 @@ const PEST = {
 // ============================================================
 // LAWN CARE — 4 Tracks (St. Augustine merged, Bermuda, Zoysia, Bahia)
 // ============================================================
-// Tiers: standard(6x), enhanced(9x), premium(12x) are sold. basic(4x) is
-// RETIRED for new sales (owner directive 2026-07-09: no more $25–34/mo
-// quarterly lawn plans) — hidden:true drops it from the sold ladder while
-// keeping it priceable via includeHiddenTiers for legacy/admin flows. The
-// flag is DB-tunable (lawn_pricing_v2.tiers.basic.hidden via db-bridge), so
-// re-enabling quarterly needs no deploy.
+// Tiers: standard(6x), enhanced(9x), premium(12x). basic(4x) is FULLY
+// RETIRED (owner directive 2026-08-04, extending the 2026-07-09
+// no-quarterly-plans ruling): the tier, its bracket column, and its
+// lawn_pricing_brackets rows are gone — a half-removed hidden column would
+// make the db-bridge seed $0 basic cells for any bracket row without one.
+// Legacy lawnFreq=4 inputs normalize to the enhanced default (see
+// resolveLawnTier), matching the client mirror's resolveLawnFreq.
 const LAWN_TIERS = {
-  basic:    { freq: 4,  index: 0, label: '4x applications/yr', hidden: true },
-  standard: { freq: 6,  index: 1, label: '6x applications/yr' },
-  enhanced: { freq: 9,  index: 2, label: '9x applications/yr' },
-  premium:  { freq: 12, index: 3, label: '12x applications/yr' },
+  standard: { freq: 6,  index: 0, label: '6x applications/yr' },
+  enhanced: { freq: 9,  index: 1, label: '9x applications/yr' },
+  premium:  { freq: 12, index: 2, label: '12x applications/yr' },
 };
-const LAWN_SOLD_TIERS = ['basic', 'standard', 'enhanced', 'premium'];
+const LAWN_SOLD_TIERS = ['standard', 'enhanced', 'premium'];
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
   // Program minimum DISARMED (owner ruling 2026-07-17: "forget all floors").
@@ -266,7 +266,7 @@ const LAWN_PRICING_V2 = {
   // _LADDER_CAP (2026-07-29): Premium 12x bracket column retuned + runtime
   // cap so 12x per-app never exceeds 9x per-app — estimates stamped
   // _SPOT_RESERVE priced 12x on the pre-cap (higher, inverting) column.
-  pricingVersion: 'LAWN_PRICING_V2_LADDER_CAP',
+  pricingVersion: 'LAWN_PRICING_V2_GRID_500',
   laborRateLoaded: 35,
   equipmentIncludedInLabor: true,
   equipmentReservePerVisit: 0,
@@ -283,7 +283,7 @@ const LAWN_PRICING_V2 = {
   },
 };
 
-const LAWN_FREQS = [4, 6, 9, 12];
+const LAWN_FREQS = [6, 9, 12];
 const LAWN_TABLE_MAX_SQFT = 20000;
 const LAWN_TRACK_DISPLAY = {
   st_augustine: { code: 'A', label: 'St. Augustine' },
@@ -298,65 +298,111 @@ const GRASS_TYPE_ALIASES = {
   bahia: ['D', 'BAHIA', 'bahia'],
 };
 
-// Bracket tables: [sqft, 4-app, 6-app, 9-app, 12-app]
+// Bracket tables: [sqft, 6-app, 9-app, 12-app] (basic/4x column removed —
+// owner directive 2026-08-04; the tier is fully retired, see LAWN_TIERS).
 // Base prices — credit card surcharge (up to 2.9%) applied at checkout, not baked in here.
 // Revised 2026-06-17: 35% fully loaded gross margin floor (prior 45% curve scaled
 // by 0.55/0.65 ≈ 0.846 — a floor-binding cell moves from exactly 45% to exactly 35%).
 // Premium (12x) column retuned 2026-07-29 (owner directive, pricing audit
-// 2026-07-28): the 12x per-application price must never exceed the 9x
-// per-application price at the same size — the previous column inverted the
-// ladder above ~4,100 sqft (monthly read as the most expensive cadence per
-// application on estimate cards). Rule: premium_monthly =
-// min(previous, floor(enhanced_monthly × 4/3)); small-lawn cells that
-// already sat under the cap are unchanged.
+// 2026-07-28): premium_monthly = min(previous, floor(enhanced_monthly x 4/3))
+// so the 12x per-application price never exceeds 9x at the same size.
+// Re-gridded 2026-08-04 (owner directive): 500-sqft rows 1,500-8,000 and
+// 1,000-sqft rows to 12,000 for finer owner control. Every pre-existing
+// anchor row keeps its exact price; the new in-between rows are the linear
+// interpolation of the old curve rounded to whole dollars, and the new
+// sub-3,000 rows taper small-lawn tickets that previously clamped to the
+// first row (0-for-12 close rate; every cell verified >=35% list margin
+// against calcLawnAnnualCostFloorDetails). st_augustine 3,000-row 9x also
+// softened 47 -> 44 (owner-approved shoulder fix: $62.67 -> $58.67/app puts
+// the 3,000-3,300 sqft rate under the $20/1k-sqft dead zone).
 const LAWN_BRACKETS = {
   st_augustine: [
-    [3000,  r(30),  r(38),  r(47),  r(55)],
-    [3500,  r(30),  r(38),  r(47),  r(58)],
-    [4000,  r(30),  r(38),  r(47),  r(62)],
-    [5000,  r(30),  r(38),  r(50),  r(66)],
-    [6000,  r(30),  r(39),  r(56),  r(74)],
-    [7000,  r(32),  r(42),  r(62),  r(82)],
-    [8000,  r(35),  r(47),  r(68),  r(90)],
-    [10000, r(40),  r(54),  r(80),  r(106)],
-    [12000, r(46),  r(62),  r(92),  r(122)],
-    [15000, r(53),  r(73),  r(110), r(146)],
-    [20000, r(68),  r(91),  r(140), r(186)],
+    [1500,  r(30),  r(34),  r(40)],
+    [2000,  r(32),  r(38),  r(44)],
+    [2500,  r(35),  r(42),  r(49)],
+    [3000,  r(38),  r(44),  r(55)],
+    [3500,  r(38),  r(47),  r(58)],
+    [4000,  r(38),  r(47),  r(62)],
+    [4500,  r(38),  r(48),  r(64)],
+    [5000,  r(38),  r(50),  r(66)],
+    [5500,  r(38),  r(53),  r(70)],
+    [6000,  r(39),  r(56),  r(74)],
+    [6500,  r(40),  r(59),  r(78)],
+    [7000,  r(42),  r(62),  r(82)],
+    [7500,  r(44),  r(65),  r(86)],
+    [8000,  r(47),  r(68),  r(90)],
+    [9000,  r(50),  r(74),  r(98)],
+    [10000,  r(54),  r(80),  r(106)],
+    [11000,  r(58),  r(86),  r(114)],
+    [12000,  r(62),  r(92),  r(122)],
+    [15000,  r(73),  r(110),  r(146)],
+    [20000,  r(91),  r(140),  r(186)],
   ],
   bermuda: [
-    [4000,  r(34), r(42),  r(51),  r(63)],
-    [5000,  r(34), r(42),  r(51),  r(68)],
-    [6000,  r(34), r(42),  r(57),  r(76)],
-    [7000,  r(34), r(43),  r(63),  r(84)],
-    [8000,  r(36), r(47),  r(69),  r(92)],
-    [10000, r(41), r(55),  r(81),  r(108)],
-    [12000, r(47), r(63),  r(94),  r(125)],
-    [15000, r(55), r(74),  r(112), r(149)],
-    [20000, r(69), r(94),  r(143), r(190)],
+    [1500,  r(31),  r(36),  r(42)],
+    [2000,  r(34),  r(40),  r(46)],
+    [2500,  r(37),  r(44),  r(52)],
+    [3000,  r(39),  r(46),  r(56)],
+    [3500,  r(40),  r(49),  r(59)],
+    [4000,  r(42),  r(51),  r(63)],
+    [4500,  r(42),  r(51),  r(65)],
+    [5000,  r(42),  r(51),  r(68)],
+    [5500,  r(42),  r(54),  r(72)],
+    [6000,  r(42),  r(57),  r(76)],
+    [6500,  r(42),  r(60),  r(80)],
+    [7000,  r(43),  r(63),  r(84)],
+    [7500,  r(45),  r(66),  r(88)],
+    [8000,  r(47),  r(69),  r(92)],
+    [9000,  r(51),  r(75),  r(100)],
+    [10000,  r(55),  r(81),  r(108)],
+    [11000,  r(59),  r(87),  r(116)],
+    [12000,  r(63),  r(94),  r(125)],
+    [15000,  r(74),  r(112),  r(149)],
+    [20000,  r(94),  r(143),  r(190)],
   ],
   zoysia: [
-    [4000,  r(34), r(42),  r(51),  r(63)],
-    [5000,  r(34), r(42),  r(52),  r(69)],
-    [6000,  r(34), r(42),  r(58),  r(77)],
-    [7000,  r(34), r(44),  r(63),  r(84)],
-    [8000,  r(36), r(47),  r(70),  r(93)],
-    [10000, r(41), r(56),  r(82),  r(109)],
-    [12000, r(47), r(63),  r(95),  r(126)],
-    [15000, r(56), r(75),  r(113), r(150)],
-    [20000, r(70), r(95),  r(145), r(193)],
+    [1500,  r(31),  r(36),  r(42)],
+    [2000,  r(34),  r(40),  r(46)],
+    [2500,  r(37),  r(44),  r(52)],
+    [3000,  r(39),  r(46),  r(56)],
+    [3500,  r(40),  r(49),  r(59)],
+    [4000,  r(42),  r(51),  r(63)],
+    [4500,  r(42),  r(51),  r(66)],
+    [5000,  r(42),  r(52),  r(69)],
+    [5500,  r(42),  r(55),  r(73)],
+    [6000,  r(42),  r(58),  r(77)],
+    [6500,  r(43),  r(60),  r(80)],
+    [7000,  r(44),  r(63),  r(84)],
+    [7500,  r(45),  r(66),  r(88)],
+    [8000,  r(47),  r(70),  r(93)],
+    [9000,  r(51),  r(76),  r(101)],
+    [10000,  r(56),  r(82),  r(109)],
+    [11000,  r(59),  r(88),  r(117)],
+    [12000,  r(63),  r(95),  r(126)],
+    [15000,  r(75),  r(113),  r(150)],
+    [20000,  r(95),  r(145),  r(193)],
   ],
   bahia: [
-    [3000,  r(25), r(34),  r(42),  r(51)],
-    [3500,  r(25), r(34),  r(42),  r(53)],
-    [4000,  r(25), r(34),  r(42),  r(56)],
-    [5000,  r(25), r(34),  r(47),  r(62)],
-    [6000,  r(27), r(36),  r(52),  r(69)],
-    [7000,  r(30), r(39),  r(57),  r(76)],
-    [8000,  r(31), r(42),  r(62),  r(82)],
-    [10000, r(36), r(49),  r(73),  r(97)],
-    [12000, r(41), r(56),  r(83),  r(110)],
-    [15000, r(48), r(65),  r(99),  r(132)],
-    [20000, r(60), r(82),  r(125), r(166)],
+    [1500,  r(27),  r(30),  r(36)],
+    [2000,  r(29),  r(34),  r(39)],
+    [2500,  r(31),  r(38),  r(44)],
+    [3000,  r(34),  r(42),  r(51)],
+    [3500,  r(34),  r(42),  r(53)],
+    [4000,  r(34),  r(42),  r(56)],
+    [4500,  r(34),  r(44),  r(58)],
+    [5000,  r(34),  r(47),  r(62)],
+    [5500,  r(35),  r(49),  r(65)],
+    [6000,  r(36),  r(52),  r(69)],
+    [6500,  r(37),  r(54),  r(72)],
+    [7000,  r(39),  r(57),  r(76)],
+    [7500,  r(40),  r(59),  r(78)],
+    [8000,  r(42),  r(62),  r(82)],
+    [9000,  r(45),  r(67),  r(89)],
+    [10000,  r(49),  r(73),  r(97)],
+    [11000,  r(52),  r(78),  r(103)],
+    [12000,  r(56),  r(83),  r(110)],
+    [15000,  r(65),  r(99),  r(132)],
+    [20000,  r(82),  r(125),  r(166)],
   ],
 };
 
@@ -442,9 +488,11 @@ const SHADE_RULES = {
 // ============================================================
 const TREE_SHRUB = {
   tiers: {
+    // Tier names are application counts (owner directive 2026-08-04: no
+    // Standard/Enhanced/Premium marketing names anywhere) — keys stay.
     light:     { label: 'Light', frequency: 4, monthlyFloor: r(22) },
-    standard:  { label: 'Standard', frequency: 6, monthlyFloor: r(35) },
-    enhanced:  { label: 'Enhanced', frequency: 9, monthlyFloor: r(48) },
+    standard:  { label: '6x applications/yr', frequency: 6, monthlyFloor: r(35) },
+    enhanced:  { label: '9x applications/yr', frequency: 9, monthlyFloor: r(48) },
   },
   defaultTier: 'standard',
   recommendedTier: 'standard',

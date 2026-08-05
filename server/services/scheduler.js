@@ -4572,6 +4572,27 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 7:10 AM ET — Schedule-integrity watchdog. Pages two silent-loss
+  // classes: past-dated visits stuck in on_site/en_route (performed but
+  // never completed → no service record / invoice / report / SMS) and
+  // upcoming recurring series with no price on any row. Morning tick so a
+  // price gap rings before that day's route starts. Dark behind
+  // GATE_SCHEDULE_INTEGRITY_WATCHDOG. See
+  // server/services/schedule-integrity-watchdog.js.
+  // =========================================================================
+  cron.schedule('10 7 * * *', async () => {
+    try {
+      const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
+      const result = await runScheduleIntegrityWatchdog();
+      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0)) {
+        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} alerted=${result.alerted}`);
+      }
+    } catch (err) {
+      logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // HOURLY :46 — Retroactive call_log→customer linking. Heals calls that
   // arrived before their customer record existed (unambiguous primary-phone
   // match only, same rule as webhook intake; idempotent). Dark behind

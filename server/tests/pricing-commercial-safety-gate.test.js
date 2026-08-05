@@ -271,13 +271,14 @@ describe('commercial safety gate in generateEstimate', () => {
     const lawn = estimate.lineItems.find((line) => line.service === 'lawn_care');
 
     expect(pest).toMatchObject({ monthly: 37.33, annual: 448, perApp: 112 });
-    // Lawn prices off the market bracket ($600/yr here) with the 35% cost
-    // floor disarmed (owner 2026-07-17 "forget all pricing floors"; the floor
-    // basis would have lifted this quote to $621).
+    // Lawn prices off the market bracket ($588/yr here — the 2026-08-04
+    // 500-sqft re-grid floors the old half-round interpolation at this
+    // size) with the 35% cost floor disarmed (owner 2026-07-17 "forget all
+    // pricing floors"; the floor basis would have lifted this quote).
     expect(lawn).toMatchObject({
-      monthly: 50,
-      annual: 600,
-      perApp: 66.67,
+      monthly: 49,
+      annual: 588,
+      perApp: 65.33,
       costFloorApplied: false,
       programMinimumApplied: false,
     });
@@ -290,19 +291,19 @@ describe('commercial safety gate in generateEstimate', () => {
       marginGuardApplied: false,
       programFloorApplied: false,
     });
-    expect(lawn).toMatchObject({ annualAfterDiscount: 540, monthlyAfterDiscount: 45 });
+    expect(lawn).toMatchObject({ annualAfterDiscount: 529.2, monthlyAfterDiscount: 44.1 });
     expect(estimate.summary).toMatchObject({
-      recurringAnnualBeforeDiscount: 1048,
-      // Silver 10% applies in full: pest 448 → 403.20, lawn 600 → 540;
-      // 403.20 + 540 = 943.20 (pest base 112, owner ruling 2026-08-03).
-      // (Re-armed — useLawnCostFloor — the margin guard binds at the 642.76
-      // reserve-folded floor and the monthly CEILs; pinned in
-      // lawn-pricing-followup.test.js.)
-      recurringAnnualAfterDiscount: 943.2,
-      recurringMonthlyAfterDiscount: 78.6,
-      year1Total: 943,
-      year2Annual: 943,
-      year2Monthly: 78.6,
+      recurringAnnualBeforeDiscount: 1036,
+      // Silver 10% applies in full: pest 448 → 403.20, lawn 588 → 529.20;
+      // 403.20 + 529.20 = 932.40 (pest base 112 owner 2026-08-03; lawn
+      // 500-sqft re-grid owner 2026-08-04). (Re-armed — useLawnCostFloor —
+      // the margin guard binds at the reserve-folded floor and the monthly
+      // CEILs; pinned in lawn-pricing-followup.test.js.)
+      recurringAnnualAfterDiscount: 932.4,
+      recurringMonthlyAfterDiscount: 77.7,
+      year1Total: 932,
+      year2Annual: 932,
+      year2Monthly: 77.7,
     });
     expect(estimate.waveGuard).toMatchObject({
       tier: 'silver',

@@ -239,3 +239,212 @@ describe('wdo-report-pdf', () => {
     expect(fromDataUrl.equals(fromRaw)).toBe(true);
   });
 });
+
+// Section 3 used to print EVERY category's text on the Attic row: the line
+// pool targeted only that row's three fields while the checkboxes were
+// keyword-detected independently, so a form could tick Interior/Exterior and
+// then print those limitations beside the empty Attic box.
+//
+// The fix deliberately does NOT parse the blob into per-row segments. Eight
+// review rounds on a free-text category parser each traded one defect for
+// another (a comma is both a list separator and a clause delimiter; a period
+// ends a sentence, abbreviates a unit, and opens a decimal), and the final
+// round produced an input that LOST ticked boxes relative to the shipped
+// rule. Instead the shipped permissive tick rule is kept bit-for-bit — ticks
+// can never regress — and only the text placement changes: the whole blob
+// prints on the FIRST ticked row.
+describe('wdo-report-pdf Section 3 — ticks (parity with the shipped rule)', () => {
+  const { inaccessibleTickedKeys } = _private;
+  const keys = (t) => inaccessibleTickedKeys({ inaccessible_areas: t });
+
+  // Independent literal transcription of the rule as it has always shipped
+  // (applyCheckboxes on main). Any drift in inaccessibleTickedKeys fails here.
+  function shippedRule(text) {
+    const inacc = String(text == null ? '' : text).trim().toLowerCase();
+    if (!inacc) return [];
+    const ticked = [];
+    const attic = inacc.includes('attic');
+    const interior = inacc.includes('interior');
+    const exterior = inacc.includes('exterior');
+    const crawl = inacc.includes('crawl');
+    if (attic) ticked.push('attic');
+    if (interior) ticked.push('interior');
+    if (exterior) ticked.push('exterior');
+    if (crawl) ticked.push('crawlspace');
+    if (inacc.includes('other') || !(attic || interior || exterior || crawl)) ticked.push('other');
+    return ticked;
+  }
+
+  // The adversarial corpus accumulated across all eight review rounds of the
+  // abandoned parser, plus the shipped placeholder and the real filing text.
+  const CORPUS = [
+    'Attic: blocked by insulation, interior and exterior were blocked by stored goods',
+    'Attic — insulation; Crawlspace — no hatch',
+    'Crawlspace: skirting closed, no access. Interior: wall voids. Exterior: soffit wrap.',
+    'Areas of the interior and exterior were blocked by stored goods',
+    'Attic, interior, exterior and crawlspace areas were not fully accessible',
+    'Attic, interior, exterior, crawlspace, other: specific areas and reasons',
+    'Attic: insulation; interior and exterior were blocked',
+    'Attic: insulation. Interior and exterior were blocked by stored goods',
+    'Interior: .5-inch opening was inaccessible',
+    'Crawlspace present — verify access and clearance on site.',
+    'Crawlspace: N/A — slab-on-grade foundation.',
+    'Locked utility shed was not opened',
+    'Attic: inaccessible at exterior-facing eaves due to insulation',
+    'Exterior-facing eaves were inaccessible',
+    'Attic: North side blocked by insulation\nand HVAC ductwork',
+    'Not inspected. Interior: wall voids.',
+    'Crawl-space: no hatch',
+    'Crawl space: no hatch',
+    'Other: locked shed. 6 in. gap at meter box.',
+    'Crawlspace: skirting was closed at the time of inspection; the area beneath was not inspected. '
+      + 'Interior: wall and ceiling voids. Exterior: soffit and fascia wrap.',
+  ];
+
+  test.each(CORPUS)('tick parity with the shipped rule: %p', (input) => {
+    expect(keys(input)).toEqual(shippedRule(input));
+  });
+
+  // The input that killed the parser approach: under it, two disclosed
+  // limitations lost their checkbox relative to the shipped rule.
+  test('REGRESSION (parser r8): multi-category prose after a labelled clause keeps every tick', () => {
+    expect(keys('Attic: blocked by insulation, interior and exterior were blocked by stored goods'))
+      .toEqual(['attic', 'interior', 'exterior']);
+  });
+
+  test('keys come back in form row order (topmost ticked row first)', () => {
+    expect(keys('Exterior soffits and attic insulation')).toEqual(['attic', 'exterior']);
+  });
+
+  test('empty findings tick nothing', () => {
+    expect(keys('')).toEqual([]);
+    expect(keys(undefined)).toEqual([]);
+  });
+
+  test('text naming no category is disclosed under Other', () => {
+    expect(keys('Locked utility shed was not opened')).toEqual(['other']);
+  });
+
+  test('an "other:" convention ticks Other alongside named categories', () => {
+    expect(keys('Attic: insulation. Other: locked shed.')).toEqual(['attic', 'other']);
+  });
+});
+
+describe('wdo-report-pdf Section 3 — text placement', () => {
+  const { fillInaccessibleAreas, INACCESSIBLE_ROWS } = _private;
+  const fs = require('fs');
+  const path = require('path');
+
+  async function fillSection3(text) {
+    const { PDFDocument, StandardFonts } = require('pdf-lib');
+    const bytes = fs.readFileSync(path.join(__dirname, '..', 'assets', 'forms', 'fdacs-13645-fillable.pdf'));
+    const doc = await PDFDocument.load(bytes);
+    const form = doc.getForm();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const overflows = [];
+    fillInaccessibleAreas(form, font, { inaccessible_areas: text }, overflows);
+    const rowText = {};
+    for (const row of INACCESSIBLE_ROWS) {
+      rowText[row.key] = row.fields
+        .map((f) => form.getTextField(f).getText() || '')
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+    }
+    return { rowText, overflows };
+  }
+
+  test('REGRESSION: text never again prints on an unticked Attic row', async () => {
+    // Mentions interior/exterior/crawl but never "attic" — the shipped bug put
+    // this whole statement on the Attic row.
+    const { rowText } = await fillSection3(
+      'Crawlspace: skirting closed, no access. Interior: wall voids. Exterior: soffit wrap.'
+    );
+    expect(rowText.attic).toBe('');
+    // First ticked row in form order is Interior — the blob prints there, whole.
+    const printed = rowText.interior;
+    expect(printed).toContain('skirting closed');
+    expect(printed).toContain('wall voids');
+    expect(printed).toContain('soffit wrap');
+  });
+
+  test('when Attic is ticked, placement is exactly the shipped behavior', async () => {
+    const { rowText } = await fillSection3('Attic — insulation; Crawlspace — no hatch');
+    expect(rowText.attic).toContain('insulation');
+    expect(rowText.attic).toContain('no hatch');
+    expect(rowText.interior).toBe('');
+    expect(rowText.crawlspace).toBe('');
+  });
+
+  test('exactly one row carries the text', async () => {
+    const { rowText } = await fillSection3(
+      'Areas of the interior and exterior were blocked by stored goods'
+    );
+    const nonEmpty = INACCESSIBLE_ROWS.filter((r) => rowText[r.key]);
+    expect(nonEmpty.map((r) => r.key)).toEqual(['interior']);
+  });
+
+  test('text naming no category prints on the Other row', async () => {
+    const { rowText } = await fillSection3('Locked utility shed was not opened');
+    expect(rowText.other).toContain('Locked utility shed');
+    expect(rowText.attic).toBe('');
+  });
+
+  test('a leading decimal survives to the form (.5-inch is not 5-inch)', async () => {
+    const { rowText } = await fillSection3('Interior: .5-inch opening was inaccessible');
+    expect(rowText.interior).toContain('.5-inch');
+  });
+
+  test('empty findings write nothing and record no overflow', async () => {
+    const { rowText, overflows } = await fillSection3('');
+    for (const row of INACCESSIBLE_ROWS) expect(rowText[row.key]).toBe('');
+    expect(overflows).toEqual([]);
+  });
+
+  test('overflow continues under the section label, not a per-category one', async () => {
+    const long = Array.from({ length: 60 }, (_, i) => `Interior limitation detail ${i + 1};`).join(' ');
+    const { overflows } = await fillSection3(long);
+    expect(overflows).toHaveLength(1);
+    expect(overflows[0].label).toBe('Section 3 - Obstructions / inaccessible areas (specific areas and reasons)');
+    expect(overflows[0].text).toContain('Interior limitation detail 60');
+  });
+
+  // Compliance guard: a renamed/typo'd field would silently drop the whole
+  // entry off the official filing.
+  test('every mapped Section 3 field exists in the bundled FDACS template', async () => {
+    const { PDFDocument } = require('pdf-lib');
+    const tpl = path.join(__dirname, '..', 'assets', 'forms', 'fdacs-13645-fillable.pdf');
+    const doc = await PDFDocument.load(fs.readFileSync(tpl));
+    const form = doc.getForm();
+    const names = new Set(form.getFields().map((f) => f.getName()));
+    for (const row of INACCESSIBLE_ROWS) {
+      expect(names.has(row.checkbox)).toBe(true);
+      for (const f of row.fields) expect(names.has(f)).toBe(true);
+    }
+  });
+
+  test('no writing line is shared between two rows', () => {
+    const all = INACCESSIBLE_ROWS.flatMap((r) => r.fields);
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  test('end-to-end: a real-filing-shaped report builds and stays two pages', async () => {
+    const { PDFDocument } = require('pdf-lib');
+    const project = {
+      id: 'p1',
+      project_type: 'wdo_inspection',
+      tech_name: 'Adam Tech',
+      created_at: '2026-05-20',
+      findings: {
+        wdo_finding: 'No visible signs of WDO observed',
+        inaccessible_areas:
+          'Crawlspace: skirting was closed at the time of inspection; the area beneath was not inspected. '
+          + 'Interior: wall and ceiling voids. Exterior: soffit and fascia wrap.',
+      },
+    };
+    const buf = await buildWdoReportPDFBuffer({ project, customer: {} });
+    expect(buf.slice(0, 5).toString()).toBe('%PDF-');
+    expect((await PDFDocument.load(buf)).getPageCount()).toBe(2);
+  });
+});
+

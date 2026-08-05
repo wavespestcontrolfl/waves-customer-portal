@@ -1,6 +1,6 @@
 const mockBuildReportV1Data = jest.fn(async () => ({}));
 const mockBuildServiceReportDynamicContext = jest.fn(async () => ({}));
-const mockRenderServiceReportV1Pdf = jest.fn(async () => Buffer.from('%PDF-1.4'));
+const mockRenderServiceReportV1Pdf = jest.fn(async () => ({ pdf: Buffer.from('%PDF-1.4'), imageFailures: 0 }));
 const mockGetHealthyStoredReportPdf = jest.fn(async () => null);
 const mockPutReportPdf = jest.fn(async (recordId, pdf, { visibilitySignature } = {}) => (
   `reports/${recordId}/report-${visibilitySignature}.pdf`
@@ -30,6 +30,9 @@ jest.mock('../services/service-report/dynamic-context', () => ({
 }));
 jest.mock('../services/service-report/pdf', () => ({
   renderServiceReportV1Pdf: mockRenderServiceReportV1Pdf,
+  // Photo-reachability probe (codex P2 #3176 r18): reachable here — this
+  // suite asserts the config keying, not the photo gate.
+  countUnreachableReportPhotos: jest.fn().mockResolvedValue(0),
 }));
 jest.mock('../services/service-report/pdf-storage', () => ({
   getHealthyStoredReportPdf: mockGetHealthyStoredReportPdf,
@@ -44,6 +47,14 @@ jest.mock('../services/service-report/pdf-storage', () => ({
 jest.mock('../services/pest-pressure/store', () => ({
   loadActiveConfig: mockLoadActiveConfig,
   pestPressureVisibilitySignature: mockPestPressureVisibilitySignature,
+}));
+jest.mock('../utils/portal-url', () => ({
+  ...jest.requireActual('../utils/portal-url'),
+  // Env-dependent key component (r18/r20) stubbed empty: this suite asserts
+  // the Pest Pressure config threading with exact key strings, and the
+  // origin hash varies with the machine's CLIENT_URL. Its own behavior is
+  // pinned in portal-url.test.js.
+  publicOriginPdfSignature: () => '',
 }));
 jest.mock('../services/logger', () => ({
   warn: jest.fn(),

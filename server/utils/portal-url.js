@@ -68,4 +68,65 @@ function portalUrl(path) {
   return `${base}${p.startsWith('/') ? '' : '/'}${p}`;
 }
 
-module.exports = { publicPortalUrl, portalUrl };
+/**
+ * The canonical public origin ONLY when it has been explicitly configured —
+ * '' otherwise. publicPortalUrl() always resolves to something (it falls back
+ * to CLIENT_URL and then to the production default), which is right for
+ * server-side link building but wrong for deciding whether a rendered
+ * artifact should trust it: a preview deployment configured only through
+ * CLIENT_URL / SERVICE_REPORT_PDF_BASE_URL would otherwise be handed the
+ * production origin and bake a preview-only token into a link that cannot
+ * resolve. CLIENT_URL is deliberately excluded — on prod it is the raw
+ * Railway hostname, which is what made this distinction necessary.
+ */
+function configuredPublicPortalOrigin() {
+  const explicit = process.env.PUBLIC_PORTAL_URL
+    || process.env.PORTAL_URL
+    || process.env.PORTAL_DOMAIN;
+  if (explicit) return normalize(explicit);
+  // Production's only portal var today is CLIENT_URL — the raw Railway
+  // hostname (docs/email-deliverability-audit-2026-06-01.md) — so returning
+  // '' here sent the document to its renderer-origin fallback, which in the
+  // PDF pipeline is exactly that Railway host: permanent PDFs embedded the
+  // infrastructure URL (codex P2 r17, tightening r12). The environment NAME
+  // separates the two cases r12 conflated: only the production environment
+  // takes the canonical default, while a preview keeps '' — its tokens
+  // resolve solely on the preview host, and handing it the production
+  // origin would bake links that cannot resolve (the r3 finding).
+  const envName = String(process.env.RAILWAY_ENVIRONMENT_NAME
+    || process.env.RAILWAY_ENVIRONMENT || '').toLowerCase();
+  if (envName === 'production') return PRODUCTION_DEFAULT;
+  return '';
+}
+
+/**
+ * PDF cache-key component for the public origin the document prints
+ * (codex P2 #3176 r18). The interactive-report link baked into every PDF
+ * comes from configuredPublicPortalOrigin(), so a domain migration (or the
+ * production-name fallback flipping) changes what the document renders —
+ * the key must change with it or a stored PDF keeps directing customers to
+ * the obsolete origin forever. Short hash, not the raw URL: origins carry
+ * schemes and slashes that don't belong in an S3 key. '' when no origin is
+ * configured (the document then prints renderer-relative links, which don't
+ * vary by env config).
+ */
+function publicOriginPdfSignature() {
+  // With NO configured origin the document falls back to the renderer's
+  // own origin — which still varies with the PDF base configuration
+  // (SERVICE_REPORT_PDF_BASE_URL / CLIENT_URL, the same precedence
+  // pdf-puppeteer's serviceReportPublicBase reads), so that effective
+  // origin is hashed instead (codex P2 #3176 r20): a preview whose base
+  // moved must not keep serving PDFs that link the obsolete host. ''
+  // only when neither is set (links are then truly renderer-relative).
+  const origin = configuredPublicPortalOrigin()
+    || process.env.SERVICE_REPORT_PDF_BASE_URL
+    || process.env.CLIENT_URL
+    || '';
+  if (!origin) return '';
+  const hash = require('crypto').createHash('sha1').update(normalize(origin)).digest('hex').slice(0, 8);
+  return `-o${hash}`;
+}
+
+module.exports = {
+  publicPortalUrl, portalUrl, configuredPublicPortalOrigin, publicOriginPdfSignature,
+};

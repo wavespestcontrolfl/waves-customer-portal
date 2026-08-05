@@ -3092,6 +3092,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [upcoming, setUpcoming] = useState([]);
+  // Self-serve re-service tie-in: /api/schedule includes { url, lanes } only
+  // when GATE_RESERVICE_SELF_SERVE is on AND the customer's live plan grants
+  // a lane — absent, the CTA card below simply doesn't render.
+  const [reservice, setReservice] = useState(null);
   const [prefs, setPrefs] = useState(null);
   const [prefsError, setPrefsError] = useState(false);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
@@ -3122,6 +3126,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         .catch(() => ({ data: null, failed: true })),
     ]).then(([schedData, prefsResult, propertyPrefsData]) => {
       setUpcoming(schedData.upcoming || []);
+      setReservice(schedData.reservice || null);
       setPrefsError(prefsResult.failed);
       if (prefsResult.data) setPrefs(prefsResult.data);
       // A failed refresh must not keep rendering stale interactive settings
@@ -3675,6 +3680,30 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         // Future (3+ days): compact card
         return renderCompactCard(s);
       })}
+
+      {/* Free re-service tie-in — same self-serve scheduler the office
+          texts (/reservice/:token). Server-gated: `reservice` is only in
+          the payload when the gate is on and the plan grants a lane. */}
+      {reservice?.url ? (
+        <section data-glass="card" style={{ ...card, padding: compact ? 20 : 24 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy }}>
+                {reservice.lanes?.includes('lawn') && !reservice.lanes?.includes('pest')
+                  ? 'Lawn trouble between visits?'
+                  : 'Pests back between visits?'}
+              </div>
+              <div style={{ marginTop: 4, fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
+                Breakthrough activity is covered by your plan — book a free
+                re-service and we'll send a tech back out, no charge.
+              </div>
+            </div>
+            <a href={reservice.url} data-glass-accent="" style={{ ...secondaryButton, padding: '10px 14px', textDecoration: 'none', fontSize: 14, flexShrink: 0 }}>
+              Book a free re-service
+            </a>
+          </div>
+        </section>
+      ) : null}
 
       {/* Recent Completed Visits */}
       {recentCompleted.length > 0 && (

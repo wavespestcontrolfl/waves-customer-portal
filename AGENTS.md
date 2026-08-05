@@ -972,6 +972,38 @@ violations at the severity noted.
   and the POST commit revalidation would not themselves offer.
   Treat the reschedule token and any change to this route family's payload
   or commit path as security-critical).
+  `/api/public/reservice/:token` (GET + POST, plus `POST /:token/find-slots`;
+  customer self-serve FREE re-service (callback) scheduler — the standing
+  customer link texted by the office/comms composer and surfaced on the
+  portal Visits tab. Whole surface is dark behind GATE_RESERVICE_SELF_SERVE
+  (fail-closed `==='true'` in every env — every route 404s while off).
+  `customers.reservice_token` (64-hex, `TOKEN_RE` format gate; standing for
+  the life of the customer like the /card token) is the ONLY gate, plus
+  60 req/min router limit, 10 req/min on the commit POST, 15 req/min on
+  find-slots, and noStore privacy headers (the `/reservice/<token>` SPA
+  shell carries noindex/no-referrer/no-store via sensitive-spa-headers).
+  GET returns lane eligibility from LIVE plan state (pest and/or lawn —
+  active recurring coverage / WaveGuard membership only; rodent-, termite-,
+  mosquito-, tree-shrub-only and one-time customers get no lane), the
+  per-lane open-callback dedupe (an existing open re-service answers with
+  that visit's /reschedule link instead of a second booking), and open
+  slots from the /book availability engine around the token row's address.
+  POST is a WRITE limited to the token's own customer: lane re-validated,
+  slot re-validated against a fresh single-day availability build (route
+  feasibility, lunch reserve, day caps — the anti-forgery model
+  reschedule-public uses in place of the funnel's signed-offer HMAC), then
+  committed through `createSelfBooking`'s transaction with the
+  internal-only `callbackVisit` option (is_callback=true — completion
+  never bills the monthly rate; re-service catalog service_id; card-capture
+  step + ad attribution skipped; `/booking/confirm` pins the option null
+  after the body spread). The lane dedupe is re-checked INSIDE the commit
+  transaction under a customer+lane advisory lock, so parallel commits
+  cannot double-book a lane's free visit. find-slots mirrors the
+  reschedule search: model-backed parseWhen clamped on BOTH ends to the
+  booking window, READ-ONLY, no raw query logging. Generic 404 for
+  bad/unknown tokens and while the gate is off. Treat the reservice token,
+  the lane-eligibility gates, and the $0/is_callback commit contract as
+  security-critical).
   `/api/reviews/featured` (read-only public featured Google reviews for the
   marketing site — no auth, no token, location filter + limit; reads
   `google_reviews` only).

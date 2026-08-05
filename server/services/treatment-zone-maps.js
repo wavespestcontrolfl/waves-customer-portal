@@ -216,10 +216,52 @@ async function treatmentZonePdfSignature(service, knex = db) {
     if (!scheduledServiceId) return '';
     const row = await knex('treatment_zone_maps')
       .where({ scheduled_service_id: scheduledServiceId })
-      .first('updated_at', 'created_at');
+      .first('updated_at', 'created_at', 'capture_mode');
     if (!row) return '';
     const stamp = new Date(row.updated_at || row.created_at || 0).getTime();
-    return `-tz${Number.isFinite(stamp) ? stamp : 0}`;
+    // Trace-eligibility component (GATE_TRACE_ELIGIBILITY): the live view
+    // suppresses ineligible traces at render, and a cached PDF must not
+    // keep serving the old spray map after the flip — owner ruling
+    // 2026-08-04: invalidate on next open, no bulk regen. Appended ONLY
+    // when the gate is on, so pre-flip keys are untouched and each traced
+    // record re-renders exactly once on its next open. Mirrors the render
+    // inputs (snapshot findingsType is the authority, live profile widens,
+    // display names last) — the verdict itself comes from the shared
+    // resolver, so registry changes invalidate here for free.
+    let eligibilityComponent = '';
+    const { resolveTraceRenderVerdict } = require('./service-report/trace-eligibility');
+    // Callers with PARTIAL rows (the PDF lookup path selects a narrow
+    // column set) must still key on the same evidence the renderer sees —
+    // a missing areas_serviced column made the lookup verdict diverge
+    // from the stored one and forced a browser re-render on every
+    // attachment fetch (codex P2 r20). Fail-soft: an unloadable row just
+    // uses what the caller passed.
+    let verdictRecord = service;
+    if (service?.id
+      && (service.areas_serviced === undefined || service.structured_notes === undefined
+        || service.service_data === undefined)) {
+      try {
+        const fullRow = await knex('service_records')
+          .where({ id: service.id })
+          .first('areas_serviced', 'structured_notes', 'service_data', 'service_type');
+        if (fullRow) verdictRecord = { ...fullRow, ...service };
+      } catch { /* partial row stands */ }
+    }
+    const verdict = await resolveTraceRenderVerdict(verdictRecord, knex);
+    if (verdict.eligibility) {
+      eligibilityComponent = verdict.suppressed
+        ? '-te0'
+        : `-te1${verdict.eligibility.variant || ''}`;
+      // The capture PRESENTATION keys the cached PDF too (codex P1 r19):
+      // the live builder harmonizes variant/copy with capture_mode (a
+      // lawn-family capture renders outline regardless of the winning
+      // verdict; lawn vs lawn_highlight changes the wording), and the
+      // trace timestamp doesn't change at deploy — without the mode in
+      // the key, pre-harmonization PDFs would serve stale spray/highlight
+      // wording forever. Gate-on only, like the verdict component.
+      eligibilityComponent += `-cm${String(row.capture_mode || 'none')}`;
+    }
+    return `-tz${Number.isFinite(stamp) ? stamp : 0}${eligibilityComponent}`;
   } catch {
     return '';
   }

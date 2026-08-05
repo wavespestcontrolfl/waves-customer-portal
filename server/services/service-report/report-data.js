@@ -44,6 +44,7 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
+const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
 let PhotoService = null;
 try {
@@ -124,6 +125,18 @@ function taggedNoteLines(notes, tags) {
     })
     .filter((entry) => entry && tagSet.has(entry.tag))
     .map((entry) => entry.text);
+}
+
+// Whether the row RECORDS its method, as opposed to methodFromProduct
+// inferring one from category/service-line. The distinction is load-bearing
+// for the document (pre-push P1 #3176 r19): an EXPLICIT station_check is a
+// deliberate device inspection and must never be re-classified as a product
+// application, however pesticide-flavored the product — only an INFERRED
+// station_check (legacy null application_method on a termite/rodent product)
+// may be overridden by pesticide identity.
+function hasExplicitApplicationMethod(product) {
+  const raw = String(product.application_method || product.method || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  return !!raw && raw !== 'null';
 }
 
 function methodFromProduct(product, serviceLine) {
@@ -516,8 +529,42 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
 // guidance (codex P1 #3007 r9/r17). Lives here (not reentry.js) so the
 // report payload's own advisory normalization can use it without a
 // require cycle.
-async function resolveTracedExteriorZone(record, knex = db) {
+async function resolveTracedExteriorZone(record, knex = db, { precomputedTraceVerdict = null } = {}) {
   if (!record?.scheduled_service_id) return false;
+  // Centralized eligibility (GATE_TRACE_ELIGIBILITY): an ineligible lane's
+  // saved trace must not drive the exterior dry-down timer either. This
+  // function is the single choke point for the report payload, the
+  // re-entry context — which reports-public and email-delivery each build
+  // independently — and the completion SMS, so the verdict lives HERE
+  // rather than at any one call site (codex P1 r2). Gate ON, the verdict
+  // ALONE decides (frozen identity + add-on aware — the label checks
+  // above read the mutable row and would override in both directions;
+  // codex P2 r16). Fail-soft: helper errors fall through to the lookup.
+  try {
+    const { resolveTraceRenderVerdict, traceEligibilityGateOn } = require('./trace-eligibility');
+    if (traceEligibilityGateOn()) {
+      // The report-payload caller passes its ALREADY-COMBINED verdict
+      // (codex P2 r24): recomputing here meant a transient failure in
+      // the second add-on pass could strip exterior re-entry guidance
+      // from the same payload whose map just rendered. Independent
+      // callers (reports-public, email-delivery, SMS) resolve internally.
+      const renderVerdict = precomputedTraceVerdict
+        || await resolveTraceRenderVerdict(record, knex);
+      if (renderVerdict.suppressed) return false;
+      // Same conservative error semantics as the legacy lookup below
+      // (codex P1 r17): only a MISSING TABLE means "no trace" — any other
+      // transient failure preserves the exterior dry-down guidance rather
+      // than silently dropping customer re-entry advice.
+      try {
+        return !!(await knex('treatment_zone_maps')
+          .where({ scheduled_service_id: record.scheduled_service_id })
+          .first());
+      } catch (traceErr) {
+        return !(traceErr?.code === '42P01'
+          || /no such table|does not exist/i.test(String(traceErr?.message || '')));
+      }
+    }
+  } catch { /* proceed to the ordinary lookup */ }
   // Interior-only treatments (bed bug): a trace saved before the tracer was
   // hidden for this lane is stale EXTERIOR evidence — never let it drive
   // the exterior dry-down timer. Single choke point for the report payload,
@@ -2487,15 +2534,25 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     : undefined;
   const serviceLine = service.service_line || detectServiceLine(service.service_type);
   const config = getServiceLineConfig(serviceLine);
+  // Images this build EXPECTS but drops because their URL would not resolve
+  // (presign failure on a gallery/turf/gauge photo or the traced snapshot).
+  // Rides the payload so the cacheability gate — and the page's own render
+  // counter — can refuse to cache a silently incomplete PDF (codex P2
+  // #3176 r21).
+  let imageResolutionFailures = 0;
   // Owner ruling 2026-07-16: the report kicker mirrors the customer's LINKED
   // service on the schedule ("Monthly Lawn Care Service"), so the scheduled
   // row's service_type (the catalog name) wins over the record's snapshot
   // when the visit is linked; unlinked/legacy records keep the snapshot.
+  // A REJECTED row lookup is not the same as "unlinked" (codex P2 r22):
+  // the flag routes the record into the unresolved-linked-identity
+  // sentinel below instead of the editable label fallback.
+  let scheduleRowLookupFailed = false;
   const scheduledServiceRow = service.scheduled_service_id
     ? await knex('scheduled_services')
       .where({ id: service.scheduled_service_id })
       .first('id', 'service_id', 'service_type')
-      .catch(() => null)
+      .catch(() => { scheduleRowLookupFailed = true; return null; })
     : null;
   const linkedServiceName = String(scheduledServiceRow?.service_type || '').trim()
     || serviceDisplayName(service);
@@ -2522,16 +2579,72 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // it exists to remove. The immutable snapshot is the authority; the live
   // profile only widens it. Seeded before the try/catch so a throw leaves
   // the snapshot verdict standing.
-  let trapLaneNoSprayMap = parseJsonObject(service.service_data)
-    ?.typedReportSnapshot?.type === 'rodent_trapping';
+  const snapshotForTrace = parseJsonObject(service.service_data)?.typedReportSnapshot || null;
+  const snapshotFindingsType = snapshotForTrace?.type || null;
+  let trapLaneNoSprayMap = snapshotFindingsType === 'rodent_trapping';
+  let laneProfile = null;
+  let laneProfileLookupFailed = false;
   if (!interiorOnlyLane && scheduledServiceRow) {
     try {
       const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
-      const laneProfile = await resolveCompletionProfileForScheduledService(scheduledServiceRow, knex);
+      laneProfile = await resolveCompletionProfileForScheduledService(scheduledServiceRow, knex);
       interiorOnlyLane = laneProfile?.serviceKey === 'bed_bug_treatment';
       trapLaneNoSprayMap = trapLaneNoSprayMap || laneProfile?.findingsType === 'rodent_trapping';
-    } catch { /* label fallback stands */ }
+    } catch { laneProfileLookupFailed = true; /* label fallback stands for the legacy belts */ }
   }
+  // Centralized trace eligibility (GATE_TRACE_ELIGIBILITY, dark): ONE
+  // registry decides whether this report may carry a spray trace,
+  // generalizing the two hand-built lane exclusions above (which stay as
+  // the gate-off behavior AND as belt-and-suspenders when it is on). The
+  // frozen snapshot's findings type outranks the live profile — the same
+  // snapshot-is-authority rule the trap lane ratified — and display names
+  // are the last-resort fallback. Scoped require matches this file's
+  // pattern for report-time helpers.
+  const {
+    resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts,
+    addonVerdictsFromLines, renderAreasFromRecord, traceEligibilityGateOn,
+  } = require('./trace-eligibility');
+  // Completion-frozen primary identity wins over the live profile —
+  // update-details can repoint the schedule row after completion (codex
+  // P2 r15); legacy records (field absent) keep the live resolution.
+  const frozenTraceData = parseJsonObject(service.service_data) || {};
+  const hasFrozenPrimary = Object.prototype.hasOwnProperty.call(frozenTraceData, 'completedServiceKey');
+  let traceEligibility = resolveTraceEligibility({
+    // A LINKED row whose profile lookup failed must not fall to the
+    // editable display name — the unresolvable sentinel reuses the
+    // supplied-identity fail-closed rule (codex P2 r20). Unlinked legacy
+    // rows (no scheduledServiceRow) keep name fallback.
+    serviceKey: hasFrozenPrimary
+      ? (frozenTraceData.completedServiceKey || null)
+      : (laneProfile?.serviceKey
+        || ((laneProfileLookupFailed || scheduleRowLookupFailed) ? 'unresolved:linked_service' : null)),
+    findingsType: snapshotFindingsType || (hasFrozenPrimary ? null : laneProfile?.findingsType) || null,
+    displayName: `${service.service_type || ''} ${hasFrozenPrimary ? (frozenTraceData.completedServiceName || '') : (scheduledServiceRow?.service_type || '')}`,
+    // Render side: conditional lanes (roach family) need the frozen
+    // snapshot's recorded treatment — null (no snapshot) fails closed —
+    // and generic evidence lanes (pest_re_service) read the recorded
+    // areas/actions (codex P1 r13).
+    typedValues: snapshotForTrace?.values ?? null,
+    renderAreas: renderAreasFromRecord(service),
+  });
+  // The customer report must reach the same multi-line verdict the PDF
+  // signature and re-entry resolver reach through the shared helper — an
+  // eligible ADD-ON line rescues an ineligible primary here too (codex
+  // P2 r12). Fail-soft: an addon lookup error leaves the primary verdict.
+  if (traceEligibilityGateOn() && !traceEligibility.eligible) {
+    try {
+      // Completion-frozen add-on identities win over the mutable schedule
+      // rows; legacy records fall back to the live rows (codex P2 r14).
+      const frozenAddonLines = parseJsonObject(service.service_data)?.completedAddonLines;
+      traceEligibility = combineLineVerdicts(
+        traceEligibility,
+        Array.isArray(frozenAddonLines)
+          ? await addonVerdictsFromLines(frozenAddonLines, knex, { renderSide: true })
+          : await resolveAddonVerdicts(service.scheduled_service_id, knex, { renderSide: true }),
+      );
+    } catch { /* primary verdict stands */ }
+  }
+  const traceSuppressed = traceEligibilityGateOn() && !traceEligibility.eligible;
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
@@ -2972,6 +3085,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         facts_approved: !!product.approved_report_product_facts,
       },
       method,
+      // Explicit vs inferred decides whether pesticide identity may override
+      // a station_check classification in the document (see
+      // hasExplicitApplicationMethod).
+      methodInferred: !hasExplicitApplicationMethod(product),
       methodLabel: METHOD_LABELS[method] || method.replace(/_/g, ' '),
       zone_ids: matchZoneIds(product, zones, areaLabels),
       rate: product.application_rate,
@@ -3076,8 +3193,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // outline — a trace saved before the tracer was hidden for this lane
     // is stale exterior evidence on an interior treatment's report
     // (codex P2 r6; stable-key classification r9).
+    // Gate ON: the centralized combined verdict (frozen identity,
+    // add-on aware) is the ONLY decider — the legacy lane booleans read
+    // the MUTABLE row/label and would both hide a frozen-eligible map
+    // after a repoint and override an add-on rescue (codex P2 r16). Gate
+    // OFF: the legacy belts, bit-for-bit.
     if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id
-      && !interiorOnlyLane && !trapLaneNoSprayMap) {
+      && (traceEligibilityGateOn()
+        ? !traceSuppressed
+        : (!interiorOnlyLane && !trapLaneNoSprayMap))) {
       const tracedRow = await knex('treatment_zone_maps')
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
@@ -3087,6 +3211,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           tracedRow.snapshot_s3_key,
           PhotoService.CUSTOMER_DWELL_TTL_SECONDS
         ).catch(() => null);
+        // A traced row whose snapshot would not presign is an EXPECTED image
+        // silently omitted from the artifact (codex P2 #3176 r21) — the
+        // cacheability gate must know.
+        if (!tracedSnapshotUrl) imageResolutionFailures += 1;
         if (tracedSnapshotUrl) {
           // lawn_highlight rows may carry the transparent highlight layer —
           // the report pulses it over the snapshot (owner 2026-07-30).
@@ -3121,6 +3249,24 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             pathPoints: parseJsonArray(tracedRow.path_points)
               .map((p) => ({ x: numberOrNull(p?.px?.x), y: numberOrNull(p?.px?.y) }))
               .filter((p) => p.x != null && p.y != null),
+            // Server-decided render variant/caption from the eligibility
+            // registry — GATE-SCOPED (codex P1 r11): with the gate off the
+            // fields stay null so gate-off payloads render exactly as
+            // today (the client's legacy serviceLine switch), matching the
+            // legacy capture mode those visits were traced with. The
+            // variant goes live with the same flip that changes capture.
+            // The PRESENTATION must match the captured bitmap (codex P1
+            // r18): a lawn-family capture renders as outline even when the
+            // winning verdict came from a spray add-on line — the saved
+            // lawn geometry cannot honestly wear spray copy/animation.
+            variant: (traceEligibilityGateOn() && traceEligibility.eligible)
+              ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
+                ? 'outline' : traceEligibility.variant)
+              : null,
+            captionKey: (traceEligibilityGateOn() && traceEligibility.eligible)
+              ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
+                ? 'lawnCoverage' : traceEligibility.captionKey)
+              : null,
           };
         }
       }
@@ -3264,6 +3410,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     try {
       const gaugePhoto = photos.find((p) => String(p.id) === String(gaugePhotoId));
       const gaugeUrl = gaugePhoto ? await photoUrl(gaugePhoto) : null;
+      if (gaugePhoto && !gaugeUrl) imageResolutionFailures += 1;
       if (gaugeUrl) mowingHeight = { ...mowingHeight, photoUrl: gaugeUrl };
     } catch { /* fail-soft: report still renders the reading without the photo */ }
   }
@@ -3284,6 +3431,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       prevHashSha256: photo.prev_hash_sha256 || null,
       aiTags: parseJsonArray(photo.ai_tags),
     })));
+  // Photos that EXIST on the record but whose URL would not resolve are
+  // silent omissions the page's onError counter can never see (codex P2
+  // #3176 r21) — count them for the cacheability gate.
+  imageResolutionFailures += photoPayload.filter((p) => !p.url).length;
   // Lawn visits capture turf photos in the tech's Lawn Assessment block instead
   // of a separate Service Photos upload. Surface those turf photos in the
   // customer gallery so the single capture point feeds both the lawn scorecard
@@ -3315,7 +3466,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         .catch(() => []);
       const turfGalleryItems = (await Promise.all(turfPhotos.map(async (photo) => {
         const url = await lawnPhotoUrl(photo);
-        if (!url) return null;
+        // Dropped-but-expected turf photo — same silent-omission class.
+        if (!url) { imageResolutionFailures += 1; return null; }
         return {
           id: `lawn-${photo.id}`,
           url,
@@ -3336,9 +3488,20 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     : { valid: null, photo_count: photos.length, broken_at: null };
   // Pass the already-resolved classification so the resolver does not
   // re-resolve the profile for the report payload path.
-  const payloadTracedExteriorZone = interiorOnlyLane
+  // An ineligible lane's trace must not assert an exterior re-entry window
+  // either — a trace on an inspection would otherwise emit a false
+  // advisory (scope RC3).
+  const payloadTracedExteriorZone = (traceEligibilityGateOn()
+    ? traceSuppressed
+    : interiorOnlyLane)
     ? false
-    : await resolveTracedExteriorZone({ ...service, interior_only_lane: false }, knex);
+    : await resolveTracedExteriorZone({ ...service, interior_only_lane: false }, knex, {
+      // Reuse the payload's combined verdict — ONE verdict per report
+      // (codex P2 r24); the resolver only re-checks the zone row.
+      ...(traceEligibilityGateOn()
+        ? { precomputedTraceVerdict: { suppressed: traceSuppressed, eligibility: traceEligibility } }
+        : {}),
+    });
   const advisory = normalizeAdvisoryForTreatmentScope({
     ...config.advisoryDefaults,
     ...parseJsonObject(service.advisory),
@@ -3664,6 +3827,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       const { buildTreeShrubAssessmentReportData } = require('../tree-shrub-assessment');
       const treeShrubAssessment = await buildTreeShrubAssessmentReportData(service, serviceLine, knex);
       if (treeShrubAssessment) {
+        // Assessment photos the builder dropped for a failed signing are
+        // expected images the artifact silently omits (codex P2 #3176 r22).
+        imageResolutionFailures += Number(treeShrubAssessment.droppedPhotoCount) || 0;
         reportV2 = buildTreeShrubReportV2({
           treeShrubAssessment,
           applications,
@@ -4202,6 +4368,39 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       : photoPayload,
     photoChain,
     pdfUrl: `/api/reports/${token}`,
+    // Canonical PUBLIC origin for links baked into the permanent PDF, and ''
+    // when none is configured. The headless renderer opens the page through
+    // CLIENT_URL / SERVICE_REPORT_PDF_BASE_URL, which on prod is the raw
+    // Railway hostname, so the document can't trust its own origin there.
+    // But it must NOT be handed the production default either: a preview
+    // deployment's token only resolves on that preview, so with no explicit
+    // origin configured the document falls back to its own (see portalBase).
+    publicOrigin: configuredPublicPortalOrigin(),
+    // A station/trap visit whose placement section was dropped because the
+    // LIVE basemap call failed transiently (quota, network, provider config
+    // unavailable) — not because the lane is off or the visit has no
+    // stations (codex P2 #3176 r23). The cache key hashes provider/env
+    // configuration, which is unchanged by a transient miss, so without
+    // this flag the map-less PDF would be stored under exactly the key
+    // expected after the provider recovers and the report would never
+    // regain its map. Counted like an image drop: serve it, cache nothing.
+    stationMapTransientlyUnavailable: stationMap?.available === false
+      && ['satellite_unavailable', 'provider_config_unavailable', 'build_failed']
+        .includes(String(stationMap?.reason || '')),
+    // Images this build EXPECTED but silently dropped (URL resolution
+    // failed): the document folds this into its render-failure counter and
+    // the store paths refuse to cache on it (codex P2 #3176 r21) — a
+    // placeholder-free but incomplete PDF must not become the permanent
+    // healthy object.
+    // Approved moments whose media would not sign come back with a null
+    // mediaUrl and the document filters them before any <img> mounts, so
+    // neither the page counter nor the URL probe can see them (codex P2
+    // #3176 r22). Counted HERE, at the payload boundary, because the
+    // moments load long before this return. Videos are excluded — the
+    // document never renders them.
+    imageResolutionFailures: imageResolutionFailures
+      + (Array.isArray(approvedVisualMoments) ? approvedVisualMoments : [])
+        .filter((m) => m && m.mediaType !== 'video' && !m.mediaUrl).length,
     legacy: {
       // No raw technician_notes here (owner ruling 2026-07-16): the field is
       // internal — access codes, billing notes — and the only sanctioned path

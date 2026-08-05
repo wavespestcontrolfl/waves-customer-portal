@@ -109,10 +109,72 @@ async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
   }
 }
 
+/**
+ * Cacheability probe for the photos the document prints (codex P2 #3176
+ * r18): a photo that fails during the headless render is replaced by its
+ * placeholder and the renderer still returns success, so the store paths
+ * would key that output as the healthy PDF and serve the placeholder
+ * forever. The browser's own fetch outcome is invisible from here (the
+ * Cloudflare renderer returns only bytes), so the store-time proxy is the
+ * server re-probing each printed photo URL: any unreachable photo marks the
+ * render uncacheable — it is still SERVED (availability > completeness),
+ * just not stored, so the next view re-renders once the photo is back.
+ * Ranged GETs, not HEAD: presigned S3 URLs are method-specific and a HEAD
+ * against a GET-presign 403s. Fail-soft per URL — a probe error counts as
+ * unreachable, which only costs a re-render.
+ */
+/**
+ * Every remote image URL the document prints, from the payload — the
+ * server-side mirror of ServiceReportDocument's gallery assembly (its
+ * galleryPhotos + v2AssessmentPhotos + momentPhotos + gaugePhoto sources,
+ * plus the traced-map snapshot). Probing only data.photos left the other
+ * four sources cacheable with placeholders (pre-push P1 r19) — keep this
+ * list in lockstep with what the component renders.
+ */
+function collectRenderedImageUrls(data) {
+  const urls = [
+    ...(Array.isArray(data?.photos) ? data.photos : []).map((p) => p?.url),
+    ...(Array.isArray(data?.reportV2?.photos) ? data.reportV2.photos : [])
+      .map((p) => p?.url || p?.imageUrl),
+    ...((data?.proofMoments || data?.visualServiceMoments || [])
+      .filter((m) => m && m.mediaType !== 'video')
+      .map((m) => m?.mediaUrl)),
+    data?.mowingHeight?.photoUrl,
+    data?.treatmentMap?.traced?.snapshotUrl,
+  ];
+  return [...new Set(urls.filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u)))];
+}
+
+async function countUnreachableReportPhotos(data, { timeoutMs = 2500 } = {}) {
+  const urls = collectRenderedImageUrls(data);
+  if (!urls.length) return 0;
+  const probes = urls.map(async (url) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' },
+        signal: controller.signal,
+      });
+      return (res.ok || res.status === 206) ? 0 : 1;
+    } catch {
+      return 1;
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+  return (await Promise.all(probes)).reduce((a, b) => a + b, 0);
+}
+
+// Normalized render result: { pdf, imageFailures }. imageFailures is the
+// page's own count of image-load fallbacks (Playwright reads it after
+// page.pdf()); null = unknown — the Cloudflare renderer returns only bytes,
+// so callers fall back to the server-side URL probe there.
 async function renderReportPdf(url, { serviceRecordId } = {}) {
   const provider = selectedPdfRenderer();
   if (provider === 'cloudflare_browser_rendering') {
-    return renderReportPdfWithCloudflare(url, { serviceRecordId });
+    return { pdf: await renderReportPdfWithCloudflare(url, { serviceRecordId }), imageFailures: null };
   }
   return renderReportPdfWithBrowser(url);
 }
@@ -129,10 +191,8 @@ async function renderServiceReportV1Pdf(data, {
   const started = Date.now();
 
   try {
-    const pdf = assertPdfBuffer(
-      await renderReportPdf(url, { serviceRecordId: recordId }),
-      provider,
-    );
+    const rendered = await renderReportPdf(url, { serviceRecordId: recordId });
+    const pdf = assertPdfBuffer(rendered.pdf, provider);
     const elapsedMs = Date.now() - started;
     emitPdfRenderSuccess({
       service_record_id: recordId,
@@ -140,7 +200,9 @@ async function renderServiceReportV1Pdf(data, {
       elapsed_ms: elapsedMs,
       bytes: pdf.byteLength,
     });
-    return pdf;
+    // imageFailures: the page's own image-load outcome (null = unknown,
+    // e.g. the Cloudflare renderer) — store paths gate caching on it.
+    return { pdf, imageFailures: rendered.imageFailures ?? null };
   } catch (err) {
     const elapsedMs = Date.now() - started;
     const errText = safePdfRenderError(err);
@@ -161,6 +223,7 @@ module.exports = {
   launchBrowser,
   assertPdfBuffer,
   cfBrowserRenderingTimeoutMs,
+  countUnreachableReportPhotos,
   isPdfBuffer,
   renderReportPdf,
   renderReportPdfWithBrowser,

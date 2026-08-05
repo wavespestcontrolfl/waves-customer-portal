@@ -856,6 +856,137 @@ describe('review fixes', () => {
     expect(validateIntent(partialStinging).valid).toBe(false);
     const fullStinging = { ...baseIntent(), services: { stinging: { species: 'PAPER_WASP', tier: 2, removal: 'SMALL' } }, service_interest_label: 'Wasp Treatment' };
     expect(validateIntent(fullStinging).valid).toBe(true);
+    // germanRoach: priceGermanRoach silently DEFAULTS a missing/invalid
+    // severity to the light (cheapest) tier — a severity-less intent must
+    // fail validation, not green-lane a guessed underquote.
+    const partialGermanRoach = { ...baseIntent(), services: { germanRoach: {} }, service_interest_label: 'German Roach Cleanout' };
+    expect(validateIntent(partialGermanRoach).valid).toBe(false);
+    // 'severe' is a pricer-side alias, not a canonical tier — out of vocab.
+    const aliasSeverity = { ...baseIntent(), services: { germanRoach: { severity: 'severe' } }, service_interest_label: 'German Roach Cleanout' };
+    expect(validateIntent(aliasSeverity).valid).toBe(false);
+    const fullGermanRoach = { ...baseIntent(), services: { germanRoach: { severity: 'light' } }, service_interest_label: 'German Roach Cleanout' };
+    expect(validateIntent(fullGermanRoach).valid).toBe(true);
+    // flea: normalizeFleaComplexity silently defaults to 'light' (cheapest)
+    // — a complexity-less intent must fail validation, not green-lane a
+    // guessed underquote.
+    const partialFlea = { ...baseIntent(), services: { flea: {} }, service_interest_label: 'Flea Treatment' };
+    expect(validateIntent(partialFlea).valid).toBe(false);
+    const fullFlea = {
+      ...baseIntent(),
+      services: { flea: { fleaComplexity: 'moderate', fleaExterior: true, offerKey: 'flea_elimination_two_visit' } },
+      service_interest_label: 'Flea Elimination',
+    };
+    expect(validateIntent(fullFlea).valid).toBe(true);
+    // mosquito: an unset tier silently priced the pricer's default program —
+    // seasonal-vs-monthly is the product choice, required.
+    const partialMosquito = { ...baseIntent(), services: { mosquito: {} }, service_interest_label: 'Mosquito Program' };
+    expect(validateIntent(partialMosquito).valid).toBe(false);
+    const fullMosquito = { ...baseIntent(), services: { mosquito: { tier: 'seasonal9' } }, service_interest_label: 'Mosquito Program' };
+    expect(validateIntent(fullMosquito).valid).toBe(true);
+    // palm: pricePalmInjection THROWS without a count; only the fixed-rate
+    // nutrition treatment is composable (size/diagnosis treatments skip).
+    const partialPalm = { ...baseIntent(), services: { palm: { treatmentType: 'nutrition' } }, service_interest_label: 'Palm Injection' };
+    expect(validateIntent(partialPalm).valid).toBe(false);
+    const sizeTieredPalm = { ...baseIntent(), services: { palm: { treatmentType: 'insecticide', palmCount: 6 } }, service_interest_label: 'Palm Injection' };
+    expect(validateIntent(sizeTieredPalm).valid).toBe(false);
+    const fullPalm = { ...baseIntent(), services: { palm: { treatmentType: 'nutrition', palmCount: 6 } }, service_interest_label: 'Palm Injection' };
+    expect(validateIntent(fullPalm).valid).toBe(true);
+  });
+
+  test('oneTimeLawn carries the caller-stated grass track without a recurring lawn key', () => {
+    const tracked = {
+      ...baseIntent(),
+      services: { oneTimeLawn: { treatmentType: 'weed', track: 'bahia', tier: 'standard' } },
+      service_interest_label: 'One-Time Weed Treatment',
+    };
+    expect(validateIntent(tracked).valid).toBe(true);
+    const badTrack = {
+      ...baseIntent(),
+      services: { oneTimeLawn: { treatmentType: 'weed', track: 'centipede' } },
+      service_interest_label: 'One-Time Weed Treatment',
+    };
+    expect(validateIntent(badTrack).valid).toBe(false);
+  });
+
+  test('a germanRoach intent prices the severity-tier cleanout, not generic one-time pest', () => {
+    const { generateEstimate } = require('../services/pricing-engine');
+    const { SPECIALTY } = require('../services/pricing-engine/constants');
+    const intent = {
+      ...baseIntent(),
+      services: { germanRoach: { severity: 'light' } },
+      service_interest_label: 'German Roach Cleanout',
+    };
+    const input = buildEngineInput({
+      intent,
+      propertyFacts: {
+        home: { value: 2100, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] },
+        lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] },
+        newConstruction: false,
+        tenant: false,
+      },
+      context: {},
+    });
+    const result = generateEstimate(input);
+    const line = (result.lineItems || []).find((l) => l.service === 'german_roach');
+    expect(line).toBeTruthy();
+    expect(line.visits).toBe(SPECIALTY.germanRoach.tiers.light.visits);
+    expect(line.price).toBe(SPECIALTY.germanRoach.tiers.light.price);
+    expect(line.severityWasDefaulted).toBe(false);
+    // No generic one-time pest line rides along uninvited.
+    expect((result.lineItems || []).some((l) => l.service === 'one_time_pest')).toBe(false);
+    // The cleanout lands in the one-time bucket of the draft totals.
+    const totals = deriveTotals(result);
+    expect(totals.oneTime).toBe(line.price);
+    expect(totals.monthly).toBe(0);
+  });
+
+  test('palm and flea intents price through the engine with their composed options', () => {
+    const { generateEstimate } = require('../services/pricing-engine');
+    const factsFixture = () => ({
+      home: { value: 2100, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] },
+      lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] },
+      newConstruction: false,
+      tenant: false,
+    });
+    // palm: a nutrition intent with a caller-stated count must PRICE (the
+    // pricer throws without a count — the required schema keeps that
+    // unreachable) and land as a recurring annual line.
+    const palmInput = buildEngineInput({
+      intent: { ...baseIntent(), services: { palm: { treatmentType: 'nutrition', palmCount: 6 } } },
+      propertyFacts: factsFixture(),
+      context: {},
+    });
+    const palmResult = generateEstimate(palmInput);
+    const palmLine = (palmResult.lineItems || []).find((l) => l.service === 'palm_injection' || String(l.service || '').includes('palm'));
+    expect(palmLine).toBeTruthy();
+    expect(palmLine.palmCount).toBe(6);
+    expect(Number(palmLine.annual)).toBeGreaterThan(0);
+    // flea: the composed complexity/exterior options must reach priceFlea —
+    // a moderate+exterior intent prices above the bare light/interior
+    // default the old empty schema silently produced.
+    const fleaIntent = (fleaServices) => buildEngineInput({
+      intent: { ...baseIntent(), services: { flea: fleaServices } },
+      propertyFacts: factsFixture(),
+      context: {},
+    });
+    const bare = generateEstimate(fleaIntent({ fleaComplexity: 'light' }));
+    const loaded = generateEstimate(fleaIntent({ fleaComplexity: 'heavy', fleaExterior: true }));
+    const bareLine = (bare.lineItems || []).find((l) => l.serviceKey === 'flea');
+    const loadedLine = (loaded.lineItems || []).find((l) => l.serviceKey === 'flea');
+    expect(bareLine).toBeTruthy();
+    expect(loadedLine).toBeTruthy();
+    expect(loadedLine.total).toBeGreaterThan(bareLine.total);
+    // oneTimeLawn: the priced line carries the track the lawn pricer
+    // actually used — the coercion guard in classifyLane reads it, so this
+    // passthrough is what keeps a coerced paspalum one-off out of green.
+    const oneTimeLawnResult = generateEstimate(buildEngineInput({
+      intent: { ...baseIntent(), services: { oneTimeLawn: { treatmentType: 'weed', track: 'paspalum' } } },
+      propertyFacts: factsFixture(),
+      context: {},
+    }));
+    const otLawnLine = (oneTimeLawnResult.lineItems || []).find((l) => l.service === 'one_time_lawn');
+    expect(otLawnLine).toBeTruthy();
+    expect(otLawnLine.track).toBe('st_augustine'); // coerced — differs from the intent's paspalum
   });
 
   test('structural lookup facts and the graduated water multiplier reach the engine input', () => {

@@ -9879,6 +9879,16 @@ export function CompletionPanel({
   // (soil readings, treatment plan/calibration, tank cleanout) never apply.
   const isLawn =
     !isTypedFindings && detectServiceCategory(service.serviceType) === "lawn";
+  // The tracer's capture mode follows the SERVER's eligibility variant
+  // when the feed carries one (codex P2 r3): typed lawn visits
+  // (aeration/fungicide/insect control) set isTypedFindings, which forces
+  // isLawn false — without this, their newly enabled mapper would run the
+  // building-perimeter workflow and store a spray barrier the report then
+  // renders as a treated-lawn outline. Absent variant (gate off, other
+  // feeds) keeps the isLawn heuristic.
+  const traceOutlineMode = service.traceVariant
+    ? service.traceVariant === "outline"
+    : isLawn;
   // Lawn visits replace the Service Photos uploader with the turf photos from
   // the Lawn Assessment block — but only for a PURE lawn visit. A combined
   // visit (e.g. lawn + Tree & Shrub) carries a companion findings schema whose
@@ -14000,14 +14010,21 @@ export function CompletionPanel({
                 Rodent trapping skips it too — nothing is sprayed on a trapping
                 stop, and the trap map below is that visit's spatial story
                 (owner 2026-08-02). */}
-            {!quickComplete && !isBedBugVisit && !isRodentTrappingVisit && (
+            {/* traceEligible rides the schedule feed (GATE_TRACE_ELIGIBILITY):
+                bait/inspection/exclusion visits hide the tracer here too —
+                the standalone TechHome button was only one of the two entry
+                points, and inviting a trace the save route will 403 is a
+                dead end (codex P2 r1). Absent flag (other feeds, gate off)
+                keeps today's behavior; the named lane checks stay as belt. */}
+            {!quickComplete && !isBedBugVisit && !isRodentTrappingVisit
+              && service.traceEligible !== false && (
               <Field label="Treatment zone map">
                 <button
                   type="button"
                   onClick={() => setZoneMapOpen(true)}
                   style={secondaryPill}
                 >
-                  {isLawn ? "Outline the treated lawn" : "Trace where we sprayed"}
+                  {traceOutlineMode ? "Outline the treated lawn" : "Trace where we sprayed"}
                 </button>
                 {zoneMapOpen && (
                   <TechTreatmentZoneModal
@@ -14019,11 +14036,11 @@ export function CompletionPanel({
                     onClose={() => setZoneMapOpen(false)}
                     onSaved={applyTracedTreatmentZone}
                     appearance="light"
-                    lawnMode={isLawn}
+                    lawnMode={traceOutlineMode}
                   />
                 )}
                 <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>
-                  {isLawn
+                  {traceOutlineMode
                     ? "Auto-trace the lawn on the satellite photo — it renders as a highlighted treated-area outline on the customer report."
                     : "Auto-trace the perimeter on the satellite photo — it renders as the spray map on the customer report."}
                 </span>

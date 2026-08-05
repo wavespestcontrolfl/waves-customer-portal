@@ -275,7 +275,7 @@ describe('sendNewsletterProof', () => {
     expect(mockSendOne).toHaveBeenCalledTimes(1);
     const args = mockSendOne.mock.calls[0][0];
     expect(args.to).toBe('contact@wavespestcontrol.com');
-    expect(args.subject).toBe(`[PROOF-${r.token}] Bubbles & Sea Lions`);
+    expect(args.subject).toBe(`ACT: [PROOF-${r.token}] Bubbles & Sea Lions`);
     // Reply must come back to the mailbox the Gmail sync watches
     expect(args.replyTo).toBe('contact@wavespestcontrol.com');
     // Internal control message — newsletter suppression must not apply

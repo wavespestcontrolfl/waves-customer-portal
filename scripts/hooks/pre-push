@@ -230,8 +230,26 @@ for i in "${!REF_SHAS[@]}"; do
       echo "[codex-review] $AUDIT_LABEL ($SHORT_SHA): codex timed out after ${CODEX_TIMEOUT}s — skipping this ref (set CODEX_REVIEW_TIMEOUT to adjust)." >&2
       continue
     fi
-    echo "[codex-review] codex exec failed for $AUDIT_LABEL — skipping this ref:" >&2
-    sed -n '1,40p' "$TMPDIR_RUN/codex-$i.stderr" >&2
+    # Errors land at the END of stderr (after the banner + prompt echo) —
+    # the old head-40 dump hid the real cause behind the prompt echo and
+    # made quota exhaustion read as mystery infra flakiness (2026-08-04:
+    # every push that day shipped locally unaudited before anyone saw the
+    # actual error). Detect the usage-limit signature explicitly and say
+    # what it means for the push.
+    if grep -Eq "^ERROR:.*hit your usage limit" "$TMPDIR_RUN/codex-$i.stderr" 2>/dev/null; then
+      # Anchor on the ERROR: prefix and take the LAST match — the prompt
+      # echo earlier in stderr can contain the phrase (it did: this very
+      # patch's diff), and real errors land at the end of the stream.
+      LIMIT_LINE="$(grep -E "^ERROR:.*hit your usage limit" "$TMPDIR_RUN/codex-$i.stderr" | tail -1)"
+      echo "" >&2
+      echo "[codex-review] ⚠️  CODEX USAGE LIMIT — the local audit CANNOT run." >&2
+      echo "[codex-review] $LIMIT_LINE" >&2
+      echo "[codex-review] Until the limit resets, the GitHub @codex round is the ONLY audit" >&2
+      echo "[codex-review] on this push — do not treat this pass-through as a clean review." >&2
+      continue
+    fi
+    echo "[codex-review] codex exec failed for $AUDIT_LABEL — skipping this ref; last stderr lines:" >&2
+    tail -n 15 "$TMPDIR_RUN/codex-$i.stderr" >&2
     continue
   fi
 

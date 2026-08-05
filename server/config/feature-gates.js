@@ -398,6 +398,19 @@ const gates = {
   // shows. Dark until Adam flips it in prod.
   bookingCustomersOnly: isProd ? process.env.GATE_BOOKING_CUSTOMERS_ONLY === 'true' : true,
 
+  // Customer self-serve re-service scheduler — the standing /reservice/:token
+  // link (customers.reservice_token) that lets an active recurring / WaveGuard
+  // customer book their free pest/lawn re-service callback themselves, on the
+  // same route-aware availability engine as /book and /reschedule. Gates the
+  // WHOLE surface: the public route 404s, buildReserviceLink mints nothing,
+  // the portal schedule payload omits its reservice block, and the admin
+  // comms composer helper 404s. Customer-facing scheduling surface, so opt-in
+  // in EVERY environment (fail-closed ==='true', like securePlanChoice).
+  // Kill switch: unset GATE_RESERVICE_SELF_SERVE — the surface goes dark
+  // again with no data cleanup needed (booked callbacks are ordinary
+  // is_callback visits the office already manages).
+  reserviceSelfServe: process.env.GATE_RESERVICE_SELF_SERVE === 'true',
+
   // Portal "Pay now" — authenticated /billing/balance includes the
   // customer's open-invoice pay links (`openInvoices`) so the Billing tab
   // can offer the existing tokenized /pay checkout in-app instead of the
@@ -691,6 +704,14 @@ const gates = {
   // admin notifications.
   // Off → cron ticks are no-ops.
   callBookingMissWatchdog: process.env.GATE_CALL_BOOKING_MISS_WATCHDOG === 'true',
+  // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
+  // past-dated visits stuck in on_site/en_route (performed but never
+  // completed → no service record, invoice, report, or post-service SMS;
+  // 89 found in prod 2026-08-04) and upcoming recurring series with no price
+  // on any row (a Tree & Shrub series was live wholly unpriced the same
+  // day). Reads scheduled_services; writes only admin notifications.
+  // Off → cron ticks are no-ops.
+  scheduleIntegrityWatchdog: process.env.GATE_SCHEDULE_INTEGRITY_WATCHDOG === 'true',
   // Retroactive call_log→customer linking: an hourly cron that links
   // customer_id-NULL calls to a customer by UNAMBIGUOUS primary-phone match
   // (same single-match rule as webhook intake) — heals calls that arrived
