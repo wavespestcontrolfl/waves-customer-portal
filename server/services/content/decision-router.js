@@ -257,7 +257,14 @@ function route(opportunity, signals = {}) {
 
   // ── final score + page_type ───────────────────────────────────────
   const finalScore = Object.values(breakdown).reduce((a, b) => a + b, 0);
-  const pageType = derivePageType(action, serp_profile);
+  // Page-anchored refreshes keep the 'refresh' brief/gate contract even
+  // when the SERP looks like a blog: REFRESH_PAGE_TYPE_BY_SERP would remap
+  // to supporting-blog, whose quality bundle drops the refresh bundle's
+  // hard improvement_over_prior check — the one guard against a refresh
+  // that guts or fails to improve the existing page.
+  const pageType = PAGE_ANCHORED_BUCKETS.has(opportunity.bucket) && action === 'refresh_existing_page'
+    ? 'refresh'
+    : derivePageType(action, serp_profile);
 
   return {
     action_type: action,

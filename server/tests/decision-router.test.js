@@ -311,6 +311,22 @@ describe('page-anchored bucket pinning (answer_gap)', () => {
     );
     expect(r.action_type).toBe('refresh_existing_page');
     expect(r.router_notes).toMatch(/page-anchored bucket answer_gap/);
+    // Blog-looking SERP must NOT remap the page type to supporting-blog —
+    // that bundle drops the refresh bundle's hard improvement_over_prior.
+    expect(r.page_type).toBe('refresh');
+  });
+
+  test('answer_gap page type stays refresh even without a SERP profile', () => {
+    const r = route(
+      opp({
+        bucket: 'answer_gap',
+        action_type: 'refresh_existing_page',
+        page_url: '/blog/do-ant-baits-work-outdoors/',
+      }),
+      {}
+    );
+    expect(r.action_type).toBe('refresh_existing_page');
+    expect(r.page_type).toBe('refresh');
   });
 
   test('answer_gap still honors SERP safety demotions (public-health)', () => {

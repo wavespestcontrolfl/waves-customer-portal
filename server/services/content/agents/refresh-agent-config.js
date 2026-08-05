@@ -63,7 +63,10 @@ each query YOU judge genuinely unanswered AND in-scope for this page:
   section, otherwise before the final CTA section.
 - On BLOG pages the blocks stay informational — never near-me/transactional
   phrasing, never pricing. Pricing-flavored queries answer with how pricing
-  works and link /pest-control-calculator/ — never a dollar amount.
+  works and link the page's SERVICE conversion path — never a dollar amount:
+  /pest-control-calculator/ for pest/termite/mosquito/rodent topics;
+  /contact/ for lawn and tree & shrub (those services have NO calculator
+  flow — a pest-pricing calculator link on a lawn page is the wrong CTA).
 - notes_for_reviewer must map every listed query → its new block, or its
   skip reason.
 
