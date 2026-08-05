@@ -226,10 +226,22 @@ function replaceDroughtHypothesis(text) {
       // (codex P2 r3/r4/r7).
       if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}$/i.test(sentence.slice(0, offset))) return m;
       if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !cueBefore(offset)) return m;
-      // Hyphenated adjectival forms ("drought-related", "drought-stressed",
-      // "drought-stress symptoms" — codex P2 r9) take the adjectival
+      // dry pocket/spell: a hypothesis under a cue OR a terse headline
+      // ("Dry pocket near the sidewalk") — but never an OBSERVATION sentence
+      // ("Dry pockets were noted in thin turf", codex P2 r10): observation
+      // verbs veto the headline path.
+      if (/dry\s+(?:pockets?|spells?)/i.test(m) && !cueBefore(offset)) {
+        const sentenceStart = /^\W*$/.test(sentence.slice(0, offset));
+        const observed = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(sentence);
+        if (!sentenceStart || observed) return m;
+      }
+      // Adjectival forms — hyphenated ("drought-related", "drought-stressed"
+      // — codex P2 r9) or a space form directly modifying a noun ("drought
+      // stress symptoms/signs" — codex P2 r10) — take the adjectival
       // replacement so the sentence stays grammatical.
-      if (/drought[- ]related|drought-stress/i.test(m)) {
+      const tail = sentence.slice(offset + m.length);
+      if (/drought[- ]related|drought-stress/i.test(m)
+        || (/drought(?:\s+stress)?$/i.test(m) && /^\s*(?:symptoms?|signs?|related)\b/i.test(tail))) {
         return /^[A-Z]/.test(m) ? 'Sprinkler-coverage-related' : 'sprinkler-coverage-related';
       }
       return /^[A-Z]/.test(m) ? 'Uneven sprinkler coverage' : 'uneven sprinkler coverage';

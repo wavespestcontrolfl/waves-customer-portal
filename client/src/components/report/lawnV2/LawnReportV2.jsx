@@ -632,7 +632,11 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   const hasTarget = known(water.targetInches);
   const status = water.status || 'unknown';
   const meta = statusMeta(status === 'unknown' ? 'tracking' : status);
-  const axisMax = Math.max(hasTotal ? total : 0, hasTarget ? target : 0) * 1.25 || 2;
+  // The bar scales to what it DRAWS: the stacked visible segments count even
+  // when the Total row is suppressed, or a lone rain segment clamps to a full
+  // bar and misplaces the target marker (codex P2 r10).
+  const stackedExtent = (hasRain ? rain : 0) + (hasIrr && irrOnFile ? irrigation : 0);
+  const axisMax = Math.max(hasTotal ? total : 0, stackedExtent, hasTarget ? target : 0) * 1.25 || 2;
   const pctOf = (v) => `${clamp((v / axisMax) * 100)}%`;
 
   return (

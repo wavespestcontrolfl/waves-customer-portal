@@ -65,6 +65,15 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     expect(screen.queryByText('Irrigation not on file')).not.toBeInTheDocument();
   });
 
+  it('the bar scales to visible segments when the Total row is hidden (codex P2 r10)', () => {
+    // Rain 2.86 vs 0.75 target, no schedule → Total hidden but the axis must
+    // still include the rain segment: the target marker lands ~21%, not 80%.
+    const { container } = render(<WaterIntakeBar water={{ rainInches: 2.86, irrigationInches: 0, totalInches: 2.86, targetInches: 0.75, status: 'high', confidence: 'low', scheduleOnFile: false }} />);
+    const marker = container.querySelector('[title="Target"]');
+    expect(marker).toBeTruthy();
+    expect(parseFloat(marker.style.left)).toBeLessThan(30);
+  });
+
   it('a stale positive irrigation figure stays numeric so the total adds up (codex P2 r3)', () => {
     // scheduleOnFile false but inches present (prefs-only schedule): the total
     // includes them, so the row must show the number, not "Not on file".

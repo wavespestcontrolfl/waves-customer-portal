@@ -204,6 +204,22 @@ describe('replaceDroughtHypothesis', () => {
     expect(replaceDroughtHypothesis('Color is improving or stable; dry spots were noted in thin turf.')).toBeNull();
   });
 
+  test('dry pocket/spell observations are preserved; terse headlines still rewrite (codex P2 r10)', () => {
+    expect(replaceDroughtHypothesis('Dry pockets were noted in thin turf.')).toBeNull();
+    expect(replaceDroughtHypothesis('Dry spells were observed across the stressed strip.')).toBeNull();
+    // The terse headline form (no observation verb) still qualifies.
+    expect(replaceDroughtHypothesis('Dry pocket near the sidewalk'))
+      .toBe('Uneven sprinkler coverage near the sidewalk');
+  });
+
+  test('non-hyphenated "drought stress symptoms/signs" reads adjectivally (codex P2 r10)', () => {
+    expect(replaceDroughtHypothesis('Drought stress symptoms are showing in the thin areas.'))
+      .toBe('Sprinkler-coverage-related symptoms are showing in the thin areas.');
+    // The plain noun form keeps the noun replacement.
+    expect(replaceDroughtHypothesis('No pests were seen; drought stress remains possible in the thin areas.'))
+      .toMatch(/uneven sprinkler coverage remains possible/);
+  });
+
   test('hyphenated drought-stress forms are covered (codex P2 r9)', () => {
     expect(replaceDroughtHypothesis('The thin strip is possibly drought-stressed.'))
       .toBe('The thin strip is possibly sprinkler-coverage-related.');
