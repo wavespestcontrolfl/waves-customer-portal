@@ -1696,8 +1696,11 @@ function pricePestInitialRoach(property, options = {}) {
   const overrideProvided = priceOverride !== undefined && priceOverride !== null
     && String(priceOverride).trim() !== '';
   const overrideValue = overrideProvided ? Number(priceOverride) : NaN;
-  const overrideValid = Number.isFinite(overrideValue) && overrideValue > 0;
-  const price = overrideValid ? roundMoney(overrideValue) : bracketPrice;
+  // Validate the ROUNDED amount: a sub-cent entry like 0.004 rounds to $0.00
+  // and would ship a free knockdown stamped priceOverridden (codex P3 #3223).
+  const overrideRounded = Number.isFinite(overrideValue) ? roundMoney(overrideValue) : NaN;
+  const overrideValid = Number.isFinite(overrideValue) && overrideValue > 0 && overrideRounded >= 0.01;
+  const price = overrideValid ? overrideRounded : bracketPrice;
 
   // Cost detail mirrors pricePestControl's costing block so the margin
   // panel can reason about the fee. Visit-1 burden estimate: heavier

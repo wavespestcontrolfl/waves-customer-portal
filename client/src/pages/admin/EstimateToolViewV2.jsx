@@ -1355,9 +1355,14 @@ function previewLineAmount(price) {
 // pest_initial_roach line from the typed override rather than the bracket.
 // Lives next to the override input — the customer-preview fee card is a 1:1
 // replica of the customer page and must not grow internal annotations.
-function RoachOverrideAppliedNote({ estimate }) {
+// `variant` matches the line to the input's own branch: an estimate can carry
+// BOTH a recurring auto-fired line and a standalone native line, each with
+// its own override field (codex P2 #3223).
+function RoachOverrideAppliedNote({ estimate, variant }) {
   const item = (estimate?.oneTime?.items || []).find(
-    (it) => it.service === "pest_initial_roach",
+    (it) =>
+      it.service === "pest_initial_roach" &&
+      (variant === "standalone" ? it.standalone : it.autoFiredFromRecurringPest),
   );
   if (!item || !item.priceOverridden) return null;
   return (
@@ -2136,6 +2141,7 @@ export default function EstimateToolViewV2({
     treeCount: "",
     roachModifier: "NONE",
     roachFeeOverride: "",
+    standaloneRoachFeeOverride: "",
     lawnFreq: "9",
     measuredTurfSf: "",
     pestFreq: "4",
@@ -3708,19 +3714,37 @@ export default function EstimateToolViewV2({
         }
       }
 
-      // Per-estimate override for the one-time pest_initial_roach fee
-      // (recurring-pest auto-fire or standalone native). A filled-but-invalid
-      // entry fails loudly — silently dropping it would regenerate at the
-      // bracket price with no notice (same class as the manual-discount
-      // silent-drop guard above).
+      // Per-estimate overrides for the one-time pest_initial_roach fee.
+      // Recurring auto-fire and standalone native carry SEPARATE fields so an
+      // estimate with both lines never reprices one from the other's input
+      // (codex P2 #3223). A filled-but-invalid entry fails loudly — silently
+      // dropping it would regenerate at the bracket price with no notice
+      // (same class as the manual-discount silent-drop guard above).
       const roachFeeOverrideRaw = String(form.roachFeeOverride ?? "").trim();
       const roachFeeOverride = parsePositiveNumber(form.roachFeeOverride);
       const roachFeeOverrideRelevant =
-        (form.svcPest && form.roachModifier && form.roachModifier !== "NONE") ||
-        (form.svcRoach && form.roachType === "REGULAR");
+        form.svcPest && form.roachModifier && form.roachModifier !== "NONE";
+      const standaloneRoachFeeOverrideRaw = String(
+        form.standaloneRoachFeeOverride ?? "",
+      ).trim();
+      const standaloneRoachFeeOverride = parsePositiveNumber(
+        form.standaloneRoachFeeOverride,
+      );
+      const standaloneRoachFeeOverrideRelevant =
+        form.svcRoach && form.roachType === "REGULAR";
       if (roachFeeOverrideRelevant && roachFeeOverrideRaw && !roachFeeOverride) {
         alert(
           "Roach one-time fee override must be a positive dollar amount — leave it blank to use the engine price.",
+        );
+        return null;
+      }
+      if (
+        standaloneRoachFeeOverrideRelevant &&
+        standaloneRoachFeeOverrideRaw &&
+        !standaloneRoachFeeOverride
+      ) {
+        alert(
+          "Standalone roach fee override must be a positive dollar amount — leave it blank to use the engine price.",
         );
         return null;
       }
@@ -3735,6 +3759,9 @@ export default function EstimateToolViewV2({
         recurringRoachType: form.roachModifier || "NONE",
         ...(roachFeeOverrideRelevant && roachFeeOverride
           ? { initialRoachPriceOverride: roachFeeOverride }
+          : {}),
+        ...(standaloneRoachFeeOverrideRelevant && standaloneRoachFeeOverride
+          ? { standaloneRoachPriceOverride: standaloneRoachFeeOverride }
           : {}),
         mosquitoProgram: form.mosquitoProgram || "monthly12",
         mosquitoStationCount: parseInt(form.mosquitoStationCount, 10) || 0,
@@ -4392,6 +4419,10 @@ export default function EstimateToolViewV2({
       treeCount: "",
       measuredTurfSf: "",
       topDressArea: "",
+      // Per-estimate dollar overrides never carry into the next customer's
+      // quote (codex P2 #3223) — services stay selected, custom fees do not.
+      roachFeeOverride: "",
+      standaloneRoachFeeOverride: "",
       fleaOfferKey: "flea_elimination_two_visit",
       fleaComplexity: "light",
       fleaExteriorSourceSuspected: false,
@@ -5779,7 +5810,10 @@ export default function EstimateToolViewV2({
                           />
                         </FieldV2>
                       </div>
-                      <RoachOverrideAppliedNote estimate={estimate} />
+                      <RoachOverrideAppliedNote
+                        estimate={estimate}
+                        variant="recurring"
+                      />
                     </>
                   )}
                   <div className="text-11 text-ink-secondary mt-2">
@@ -6785,7 +6819,7 @@ export default function EstimateToolViewV2({
                     <>
                       <FieldV2 label="Fee Override ($)" className="mb-0 mt-2">
                         <InputV2
-                          k="roachFeeOverride"
+                          k="standaloneRoachFeeOverride"
                           type="number"
                           placeholder="Engine price"
                         />
@@ -6793,7 +6827,10 @@ export default function EstimateToolViewV2({
                       <div className="text-11 text-ink-secondary mt-2">
                         Leave blank to use the engine's footprint-bracket price.
                       </div>
-                      <RoachOverrideAppliedNote estimate={estimate} />
+                      <RoachOverrideAppliedNote
+                        estimate={estimate}
+                        variant="standalone"
+                      />
                     </>
                   )}
                 </div>

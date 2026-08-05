@@ -71,6 +71,7 @@ describe('pricePestInitialRoach priceOverride', () => {
     ['non-numeric', 'abc'],
     ['negative', -50],
     ['zero', 0],
+    ['sub-cent (rounds to $0.00)', 0.004],
   ])('present-but-invalid override (%s) falls back to the bracket price with a warning', (_name, bad) => {
     const line = pricePestInitialRoach(PROPERTY, {
       roachType: 'german',
@@ -125,6 +126,27 @@ describe('generateEstimate override plumbing', () => {
     expect(line.priceOverridden).toBe(true);
   });
 
+  test('recurring and standalone lines on ONE estimate price from their own overrides', () => {
+    // Recurring German auto-fire + standalone native both produce a
+    // pest_initial_roach line — each must honor only its own override
+    // (codex P2 #3223: a shared field silently repriced both lines).
+    const v1 = generateEstimate({
+      homeSqFt: 2000,
+      services: {
+        pest: { frequency: 'quarterly', roachType: 'german', initialRoachPriceOverride: 275 },
+        pestInitialRoach: { roachType: 'regular', priceOverride: 300 },
+      },
+    });
+    const lines = (v1.lineItems || []).filter((li) => li.service === 'pest_initial_roach');
+    expect(lines).toHaveLength(2);
+    const auto = lines.find((li) => li.autoFiredFromRecurringPest);
+    const standalone = lines.find((li) => li.standalone);
+    expect(auto.price).toBe(275);
+    expect(auto.bracketPrice).toBe(199);
+    expect(standalone.price).toBe(300);
+    expect(standalone.bracketPrice).toBe(239);
+  });
+
   test('legacy mapper carries the override flags onto the persisted one-time item', () => {
     const v1 = generateEstimate({
       homeSqFt: 2000,
@@ -152,12 +174,37 @@ describe('translateV2CallToV1Input override forwarding', () => {
     expect(v1Input.services.pest.initialRoachPriceOverride).toBe(250);
   });
 
-  test('standalone native path forwards it as priceOverride', () => {
+  test('standalone native path forwards standaloneRoachPriceOverride as priceOverride', () => {
     const v1Input = translateV2CallToV1Input(PROFILE, ['ROACH'], {
       roachType: 'REGULAR',
-      initialRoachPriceOverride: 260,
+      standaloneRoachPriceOverride: 260,
     });
     expect(v1Input.services.pestInitialRoach.priceOverride).toBe(260);
+  });
+
+  test('each option maps ONLY to its own branch — never crosses over', () => {
+    const v1Input = translateV2CallToV1Input(PROFILE, ['PEST', 'ROACH'], {
+      roachModifier: 'GERMAN',
+      roachType: 'REGULAR',
+      initialRoachPriceOverride: 275,
+      standaloneRoachPriceOverride: 300,
+    });
+    expect(v1Input.services.pest.initialRoachPriceOverride).toBe(275);
+    expect(v1Input.services.pestInitialRoach.priceOverride).toBe(300);
+
+    const recurringOnly = translateV2CallToV1Input(PROFILE, ['PEST', 'ROACH'], {
+      roachModifier: 'GERMAN',
+      roachType: 'REGULAR',
+      initialRoachPriceOverride: 275,
+    });
+    expect('priceOverride' in recurringOnly.services.pestInitialRoach).toBe(false);
+
+    const standaloneOnly = translateV2CallToV1Input(PROFILE, ['PEST', 'ROACH'], {
+      roachModifier: 'GERMAN',
+      roachType: 'REGULAR',
+      standaloneRoachPriceOverride: 300,
+    });
+    expect('initialRoachPriceOverride' in standaloneOnly.services.pest).toBe(false);
   });
 
   test('absent or blank override adds no keys', () => {
@@ -166,7 +213,7 @@ describe('translateV2CallToV1Input override forwarding', () => {
 
     const blank = translateV2CallToV1Input(PROFILE, ['ROACH'], {
       roachType: 'REGULAR',
-      initialRoachPriceOverride: '   ',
+      standaloneRoachPriceOverride: '   ',
     });
     expect('priceOverride' in blank.services.pestInitialRoach).toBe(false);
   });

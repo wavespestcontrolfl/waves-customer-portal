@@ -2976,6 +2976,29 @@ describe('create_pending_estimate server reprice (P1-8)', () => {
     expect(mockGenerateEstimate).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['services.pest.initialRoachPriceOverride', { pest: { frequency: 'quarterly', roachType: 'german', initialRoachPriceOverride: 50 } }],
+    ['services.pestInitialRoach.priceOverride', { pestInitialRoach: { roachType: 'regular', priceOverride: 50 } }],
+    ['services.pest.standaloneRoachPriceOverride', { pest: { frequency: 'quarterly', standaloneRoachPriceOverride: 50 } }],
+  ])('the roach fee override key %s is refused by the forbidden-input wall (codex P1 #3223)', async (_path, services) => {
+    // The per-estimate roach fee override (#3223) is an OPERATOR lever in the
+    // estimator UI only. The wall's unanchored `override` pattern alternative
+    // must keep catching these names — this pins that so a pattern refactor
+    // can't silently open an LLM-priced dollar path.
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      engineInputs: { homeSqFt: 2000, services },
+    });
+
+    expect(result.error).toMatch(/cannot set price, cost, discount, margin, or manager-override/i);
+    expect(writes).toEqual([]);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
   test('a lead phone mismatch refuses the write before anything reprices', async () => {
     const { database, writes } = makeDatabase({
       lead: { id: 'lead-1', customer_id: null, estimate_id: null, phone: '9415550100', email: 'road@example.com' },

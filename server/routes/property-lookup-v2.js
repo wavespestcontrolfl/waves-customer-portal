@@ -3016,13 +3016,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (recurringRoachMeta.roachWarnings.length) {
     pricingMetadata.warnings.push(...recurringRoachMeta.roachWarnings);
   }
-  // Per-estimate operator override for the pest_initial_roach fee (auto-fired
-  // or standalone). Forwarded raw whenever present so the engine's own
-  // validation runs — a present-but-invalid entry surfaces as an engine
-  // warning instead of being silently dropped here.
-  const initialRoachOverrideProvided = o.initialRoachPriceOverride !== undefined
-    && o.initialRoachPriceOverride !== null
-    && String(o.initialRoachPriceOverride).trim() !== '';
+  // Per-estimate operator overrides for the pest_initial_roach fee. Two
+  // SEPARATE client options — recurring auto-fire vs standalone native — so
+  // an estimate carrying both lines (recurring German + standalone native)
+  // never reprices one line from the other's input (codex P2 #3223).
+  // Forwarded raw whenever present so the engine's own validation runs — a
+  // present-but-invalid entry surfaces as an engine warning instead of being
+  // silently dropped here.
+  const overridePresent = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+  const initialRoachOverrideProvided = overridePresent(o.initialRoachPriceOverride);
+  const standaloneRoachOverrideProvided = overridePresent(o.standaloneRoachPriceOverride);
 
   // Recurring
   if (sel.has('PEST')) {
@@ -3286,8 +3289,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         ...(o.standaloneRoachSeverity || o.roachSeverity
           ? { severity: o.standaloneRoachSeverity || o.roachSeverity, severitySource: 'admin' }
           : {}),
-        ...(initialRoachOverrideProvided
-          ? { priceOverride: o.initialRoachPriceOverride }
+        ...(standaloneRoachOverrideProvided
+          ? { priceOverride: o.standaloneRoachPriceOverride }
           : {}),
       };
     }
