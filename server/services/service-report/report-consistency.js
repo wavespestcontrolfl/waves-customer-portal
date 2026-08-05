@@ -154,7 +154,9 @@ function reconcileRainFigure(text, canonicalRain) {
       // (codex P2 r9). "0.75 inch target, rain totaled 2.72" also lets 2.72
       // qualify.
       const before = sentence.slice(Math.max(0, offset - 24), offset);
-      const after = sentence.slice(offset + match.length, offset + match.length + 24);
+      // 40 chars: the delta form "above the 0.75-inch target" must fit in
+      // the window or the target word gets truncated out of the guard.
+      const after = sentence.slice(offset + match.length, offset + match.length + 40);
       const TARGET_WORD = '(?:target|goal|aim(?:ing)?|recommend(?:ed|s)?|ideal)';
       // After-guard tolerates a rate qualifier between the figure and the
       // target word — "0.75 inches per week target" is still the target
