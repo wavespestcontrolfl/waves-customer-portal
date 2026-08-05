@@ -28,6 +28,13 @@ describe('reconcileRainFigure', () => {
     );
   });
 
+  test('an irrigation amount is never rewritten to the rain total (codex P2 r19)', () => {
+    expect(reconcileRainFigure(
+      'Irrigation added 0.75 inches while rain totaled 2.72 inches this week.',
+      2.96,
+    )).toBe('Irrigation added 0.75 inches while rain totaled 2.96 inches this week.');
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -284,6 +291,10 @@ describe('replaceDroughtHypothesis', () => {
       .toBe('The thinning could be sprinkler-coverage-related damage.');
     expect(replaceDroughtHypothesis('Drought-stress-related thinning is possible near the edge.'))
       .toBe('Sprinkler-coverage-related thinning is possible near the edge.');
+  });
+
+  test('a pre-phrase "less likely to be" dismissal is preserved (codex P2 r19)', () => {
+    expect(replaceDroughtHypothesis('The thinning is less likely to be drought stress.')).toBeNull();
   });
 
   test('a negated dismissal with modifiers still reconciles (codex P2 r18)', () => {

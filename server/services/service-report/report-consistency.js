@@ -174,6 +174,13 @@ function reconcileRainFigure(text, canonicalRain) {
       // "Wednesday brought 1.36 inches of rain, contributing to this week's
       // wet turf" must not become a false daily amount (codex P2 r17).
       if (/\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|yesterday|overnight|storm|downpour|one day|single day)\b[^.\d]{0,16}$/i.test(before)) return match;
+      // Likewise a figure attached to IRRIGATION is not the rain total —
+      // "Irrigation added 0.75 inches while rain totaled 2.72 inches" must
+      // skip the 0.75 (without consuming the attempt) so the actual stale
+      // rain figure still reconciles (codex P2 r19). Sentences where the
+      // figure IS a combined rain+irrigation total are already skipped whole
+      // by the sentence-level guard above.
+      if (/\b(?:irrigation|sprinklers?|watering)\b[^.\d]{0,16}$/i.test(before)) return match;
       // A range endpoint ("0.75 to 1 inch") is target copy, not a total —
       // skip a figure preceded by number + range connector (codex P2 r17).
       if (/\d[\s"″]*(?:to|–|—|through|and)\s*$/i.test(before)) return match;
@@ -278,7 +285,9 @@ function replaceDroughtHypothesis(text) {
       // (codex P2 r17).
       const pre = sentence.slice(0, offset);
       if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}$/i.test(pre)) return m;
-      if (/\b(?:unlikely|doubtful)\s+to\s+be\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
+      // The pre-phrase dismissal set mirrors the post-phrase guard's
+      // ("less likely to be drought stress" — codex P2 r19).
+      if (/\b(?:unlikely|less\s+likely|doubtful|improbable)\s+to\s+be\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
       if (/\bruled?\s+out\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)
         && !/\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}rule\b/i.test(pre.slice(-40))) return m;
       if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !cueBefore(offset)) return m;
