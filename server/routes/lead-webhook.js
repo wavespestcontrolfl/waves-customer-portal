@@ -834,8 +834,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     let leadRecord = null;
     // True when this submission attached to an existing call-pipeline lead
     // (via the voicemail text-back prefill token OR the phone-match fallback)
-    // instead of inserting a fresh leads row.
+    // instead of inserting a fresh leads row. attachedVia records which mode
+    // ('prefill' | 'phone') — the attribution block below treats them
+    // differently when the call side can't record a funnel row.
     let attachedCallLead = false;
+    let attachedVia = null;
     try {
       const webhookStage = {
         ...webhookStageBase,
@@ -858,17 +861,20 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         fields: buildPrefillAttachFields(),
         webhookStage,
       });
-      // Token-less fallback: a prospect who left a voicemail but never
-      // clicked the text-back link (found the main-site form on their own)
-      // arrives here with no prefill token — match their open call-pipeline
-      // lead by phone instead of minting a duplicate row next to it.
-      if (!attached) {
+      if (attached) {
+        attachedVia = 'prefill';
+      } else {
+        // Token-less fallback: a prospect who left a voicemail but never
+        // clicked the text-back link (found the main-site form on their own)
+        // arrives here with no prefill token — match their open call-pipeline
+        // lead by phone instead of minting a duplicate row next to it.
         attached = await attachOpenCallLeadByPhone({
           phoneFormatted,
           typedFirstName: firstName,
           fields: buildPrefillAttachFields(),
           webhookStage,
         });
+        if (attached) attachedVia = 'phone';
       }
       if (attached) {
         leadRecord = attached;
@@ -1128,13 +1134,25 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // call time, no call row exists yet either: BACKFILL it now that this
     // handler has linked the customer (lead_id dedupe + first-touch inside).
     try {
+      let needWebRow = !attachedCallLead;
       if (attachedCallLead) {
-        await backfillCallLeadAttribution({
+        const backfill = await backfillCallLeadAttribution({
           leadId: leadRecord?.id || null,
           customerId: customer.id,
           serviceInterest: serviceInterest || null,
         });
-      } else {
+        // Phone-match mode only: when the call side can NEVER record a row
+        // (untracked number — no lead_source_id / source gone / no channel
+        // mapping), fall back to the tracked web row this submission carries
+        // so the funnel doesn't lose it entirely. 'bridge_target' stays
+        // suppressed (the unclaimed-bridge sweep owns those) and transient
+        // errors stay conservative. Token attach keeps its long-standing
+        // contract unchanged: call-source-or-nothing.
+        needWebRow = attachedVia === 'phone'
+          && backfill?.recorded !== true
+          && ['no_lead_source', 'source_not_found', 'no_channel'].includes(backfill?.reason);
+      }
+      if (needWebRow) {
         await db('ad_service_attribution').insert({
           customer_id: customer.id,
           // Stamp the lead so the call-attribution path dedupes against this row
@@ -1251,11 +1269,12 @@ async function applyLeadAttachUpdate(leadId, fields, webhookStage, extraWhere) {
 //    closed as 'unresponsive' months ago stays closed and the form gets a
 //    fresh row with fresh attribution. The reopen CASE in the shared UPDATE
 //    is intentionally unreachable from this path;
-//  - unambiguous number only: if MORE THAN ONE customer row carries this
-//    phone (multi-property households share numbers), skip — the webhook's
-//    customers.first() pick is arbitrary and could pin the voicemail's call
-//    attribution on the wrong account (mirrors findCustomerByPhone's
-//    never-auto-link-ambiguous rule in lead-from-extraction);
+//  - unambiguous number only, on BOTH sides: 2+ open call leads on the
+//    number (the call pipeline splits household members into separate rows)
+//    or 2+ customer rows carrying it (multi-property households) → skip —
+//    newest-wins / customers.first() picks are arbitrary and could pin the
+//    voicemail's call attribution on the wrong person or account (mirrors
+//    findCustomerByPhone's never-auto-link-ambiguous rule);
 //  - never cross-link: a candidate already linked to a DIFFERENT customer is
 //    someone else's lead (shared line) — skip;
 //  - first-name conflict guard (mirrors lead-from-extraction.nameConflicts):
@@ -1275,15 +1294,24 @@ async function attachOpenCallLeadByPhone({ phoneFormatted, typedFirstName, field
   const digits = String(phoneFormatted || '').replace(/\D/g, '').slice(-10);
   if (digits.length !== 10) return null;
   try {
-    const candidate = await db('leads')
+    const candidates = await db('leads')
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
       .where({ first_contact_channel: 'call' })
       .whereIn('status', OPEN_LEAD_STATUSES)
       .whereNull('converted_at')
       .whereNull('deleted_at')
       .orderBy('created_at', 'desc')
-      .first();
+      .limit(2);
+    const [candidate, rival] = candidates || [];
     if (!candidate) return null;
+    if (rival) {
+      // Two+ live call leads on one number = the call pipeline already split
+      // household members on a shared line (its name-conflict guard mints
+      // separate rows). Newest-wins could hand this form to the wrong
+      // person's voicemail — ambiguous phone history never auto-attaches.
+      logger.info(`[lead-webhook] phone-match: multiple open call leads share the number; not attaching`);
+      return null;
+    }
 
     const phoneCustomers = await db('customers')
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
@@ -1316,6 +1344,7 @@ async function attachOpenCallLeadByPhone({ phoneFormatted, typedFirstName, field
 
     const attached = await applyLeadAttachUpdate(candidate.id, merged, webhookStage, (query) => {
       query.whereIn('status', OPEN_LEAD_STATUSES);
+      query.whereNull('deleted_at');
       if (fields.customer_id) {
         query.where(function ownershipGuard() {
           this.whereNull('customer_id').orWhere('customer_id', fields.customer_id);

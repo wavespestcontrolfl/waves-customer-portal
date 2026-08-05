@@ -44,7 +44,8 @@ function makeBuilder(table) {
   b.orderBy = jest.fn(() => b);
   b.limit = jest.fn(() => {
     state.selects.push({ table, builder: b });
-    return Promise.resolve(state.customerRows);
+    if (state.selectError) return Promise.reject(state.selectError);
+    return Promise.resolve(table === 'customers' ? state.customerRows : state.leadCandidates);
   });
   b.first = jest.fn(() => {
     state.selects.push({ table, builder: b });
@@ -61,7 +62,7 @@ function makeBuilder(table) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  state = { updates: [], selects: [], returningRows: [], candidateRow: null, customerRows: [], updateError: null, selectError: null };
+  state = { updates: [], selects: [], returningRows: [], candidateRow: null, leadCandidates: [], customerRows: [], updateError: null, selectError: null };
   db.mockImplementation((table) => makeBuilder(table));
   db.raw.mockImplementation((sql, bindings) => ({ __raw: sql, bindings }));
   verifyLeadPrefillToken.mockReturnValue(true);
@@ -197,7 +198,7 @@ describe('attachOpenCallLeadByPhone — candidate gate', () => {
   });
 
   test('no open call lead on the number → null, no update', async () => {
-    state.candidateRow = null;
+    state.leadCandidates = [];
     const result = await attachOpenCallLeadByPhone(phoneArgs());
     expect(result).toBeNull();
     expect(state.updates).toHaveLength(0);
@@ -218,29 +219,39 @@ describe('attachOpenCallLeadByPhone — candidate gate', () => {
   });
 
   test('phone shared by 2+ customer rows → null, no update (ambiguous account pick)', async () => {
-    state.candidateRow = { id: CALL_LEAD_ID, first_name: null, customer_id: null };
+    state.leadCandidates = [{ id: CALL_LEAD_ID, first_name: null, customer_id: null }];
     state.customerRows = [{ id: 'cust-1' }, { id: 'cust-2' }];
     const result = await attachOpenCallLeadByPhone(phoneArgs());
     expect(result).toBeNull();
     expect(state.updates).toHaveLength(0);
   });
 
+  test('2+ open call leads share the number → null, no update (split household line)', async () => {
+    state.leadCandidates = [
+      { id: CALL_LEAD_ID, first_name: null, customer_id: null },
+      { id: 'aaaa1111-3333-4444-9555-666677778888', first_name: 'Miguel', customer_id: null },
+    ];
+    const result = await attachOpenCallLeadByPhone(phoneArgs());
+    expect(result).toBeNull();
+    expect(state.updates).toHaveLength(0);
+  });
+
   test('candidate linked to a DIFFERENT customer → null, no update (shared line)', async () => {
-    state.candidateRow = { id: CALL_LEAD_ID, first_name: 'Dana', customer_id: 'cust-OTHER' };
+    state.leadCandidates = [{ id: CALL_LEAD_ID, first_name: 'Dana', customer_id: 'cust-OTHER' }];
     const result = await attachOpenCallLeadByPhone(phoneArgs());
     expect(result).toBeNull();
     expect(state.updates).toHaveLength(0);
   });
 
   test('typed first name conflicts with captured first name → null, no update', async () => {
-    state.candidateRow = { id: CALL_LEAD_ID, first_name: 'Miguel', customer_id: null };
+    state.leadCandidates = [{ id: CALL_LEAD_ID, first_name: 'Miguel', customer_id: null }];
     const result = await attachOpenCallLeadByPhone(phoneArgs());
     expect(result).toBeNull();
     expect(state.updates).toHaveLength(0);
   });
 
   test("webhook 'Unknown' placeholder is not a typed name — attach proceeds", async () => {
-    state.candidateRow = { id: CALL_LEAD_ID, first_name: 'Miguel', customer_id: null };
+    state.leadCandidates = [{ id: CALL_LEAD_ID, first_name: 'Miguel', customer_id: null }];
     state.returningRows = [{ id: CALL_LEAD_ID }];
     const result = await attachOpenCallLeadByPhone(phoneArgs({
       top: { typedFirstName: 'Unknown' },
@@ -255,7 +266,7 @@ describe('attachOpenCallLeadByPhone — candidate gate', () => {
 
 describe('attachOpenCallLeadByPhone — attach semantics', () => {
   test('open nameless voicemail lead attaches; update keyed to candidate id with open guards', async () => {
-    state.candidateRow = { id: CALL_LEAD_ID, first_name: null, customer_id: null };
+    state.leadCandidates = [{ id: CALL_LEAD_ID, first_name: null, customer_id: null }];
     state.returningRows = [{ id: CALL_LEAD_ID, status: 'new' }];
     const result = await attachOpenCallLeadByPhone(phoneArgs());
     expect(result).toMatchObject({ id: CALL_LEAD_ID });
@@ -271,6 +282,8 @@ describe('attachOpenCallLeadByPhone — attach semantics', () => {
     expect(builder.wheres).toContainEqual({ id: CALL_LEAD_ID });
     expect(builder.whereIns).toContainEqual(['status', ['new', 'contacted', 'estimate_sent', 'estimate_viewed']]);
     expect(builder.whereNulls).toContain('converted_at');
+    // Soft-delete between SELECT and UPDATE must miss too (codex r2).
+    expect(builder.whereNulls).toContain('deleted_at');
     // Ownership guard: unlinked-or-same-customer, as a grouped where.
     expect(builder.wheres.some((w) => typeof w === 'function')).toBe(true);
     // Name guard: captured first name absent or normalizes to the typed one.
@@ -283,7 +296,7 @@ describe('attachOpenCallLeadByPhone — attach semantics', () => {
   });
 
   test('no typed first name → no name guard in the UPDATE (nothing to conflict)', async () => {
-    state.candidateRow = { id: CALL_LEAD_ID, first_name: 'Miguel', customer_id: null };
+    state.leadCandidates = [{ id: CALL_LEAD_ID, first_name: 'Miguel', customer_id: null }];
     state.returningRows = [{ id: CALL_LEAD_ID }];
     await attachOpenCallLeadByPhone(phoneArgs({
       top: { typedFirstName: 'Unknown' },
@@ -294,7 +307,7 @@ describe('attachOpenCallLeadByPhone — attach semantics', () => {
   });
 
   test('empty typed values never blank captured data (token attach stays typed-wins)', async () => {
-    state.candidateRow = { id: CALL_LEAD_ID, first_name: 'Dana', customer_id: null };
+    state.leadCandidates = [{ id: CALL_LEAD_ID, first_name: 'Dana', customer_id: null }];
     state.returningRows = [{ id: CALL_LEAD_ID }];
     await attachOpenCallLeadByPhone(phoneArgs({
       fields: { last_name: '', email: null, address: '', service_interest: null },
@@ -308,7 +321,7 @@ describe('attachOpenCallLeadByPhone — attach semantics', () => {
   });
 
   test('closed-between-lookup-and-update → UPDATE matches nothing → null', async () => {
-    state.candidateRow = { id: CALL_LEAD_ID, first_name: null, customer_id: null };
+    state.leadCandidates = [{ id: CALL_LEAD_ID, first_name: null, customer_id: null }];
     state.returningRows = [];
     await expect(attachOpenCallLeadByPhone(phoneArgs())).resolves.toBeNull();
   });
@@ -319,7 +332,7 @@ describe('attachOpenCallLeadByPhone — attach semantics', () => {
   });
 
   test('update error → null (caller falls back), never throws', async () => {
-    state.candidateRow = { id: CALL_LEAD_ID, first_name: null, customer_id: null };
+    state.leadCandidates = [{ id: CALL_LEAD_ID, first_name: null, customer_id: null }];
     state.updateError = new Error('deadlock');
     await expect(attachOpenCallLeadByPhone(phoneArgs())).resolves.toBeNull();
   });
