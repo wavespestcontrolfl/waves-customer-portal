@@ -232,17 +232,19 @@ describe('translate adapter drops a stale county ceiling (codex P1)', () => {
     expect(translate(noParts).countyTurfCeilingSf).toBeNull();
   });
 
-  test('a gross-under-roof footprint ignores home-size edits but still validates lot and stories', () => {
-    const gross = {
+  test('an unrecognized footprint basis fails closed — no producer, no forwarding (codex r2)', () => {
+    const unknownBasis = {
       ...baseProfile,
-      footprintTurfParts: {
-        lotSqFt: 10000, footprintSf: 1600, footprintBasis: 'gross_under_roof',
-        imperviousSf: 800, imperviousKnown: true, stories: 2,
-      },
+      footprintTurfParts: { ...baseProfile.footprintTurfParts, footprintBasis: 'gross_under_roof' },
     };
-    expect(translate({ ...gross, homeSqFt: 3200 }).countyTurfCeilingSf).toBe(8000);
-    expect(translate({ ...gross, lotSqFt: 14000 }).countyTurfCeilingSf).toBeNull();
-    expect(translate({ ...gross, stories: 1 }).countyTurfCeilingSf).toBeNull();
+    expect(translate(unknownBasis).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('an operator type correction to a shared-turf type drops the ceiling (codex r2 P1)', () => {
+    expect(translate({ ...baseProfile, propertyType: 'Townhome' }).countyTurfCeilingSf).toBeNull();
+    expect(translate({ ...baseProfile, propertyType: 'Interior Townhome' }).countyTurfCeilingSf).toBeNull();
+    expect(translate({ ...baseProfile, propertyType: 'Condo' }).countyTurfCeilingSf).toBeNull();
+    expect(translate({ ...baseProfile, propertyType: 'Single Family' }).countyTurfCeilingSf).toBe(8000);
   });
 });
 

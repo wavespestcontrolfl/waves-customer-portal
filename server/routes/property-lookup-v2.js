@@ -2943,27 +2943,29 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
 // Sub-steps land incrementally: urgency/afterHours fan-out → 2b-2,
 // roachModifier auto-fire → 2b-3, manualDiscount → 2b-4.
 // ─────────────────────────────────────────────
-// Ceiling-vs-request dimension check for the translate adapter (see the
+// Ceiling-vs-request validity check for the translate adapter (see the
 // countyTurfCeilingSf mapping below). footprintTurfParts records the exact
-// inputs the county ceiling was computed from. Basis 'living_area' (and
-// pre-basis records, where the key is absent) derived its footprint from
-// squareFootage/stories, so an edited home size invalidates; a
-// gross-under-roof footprint doesn't budge with homeSqFt, so only the lot
-// (and stories, when the parts record them) are checked there.
+// inputs the county ceiling was computed from — today's sole producer
+// (computeFootprintTurf) derives the footprint from squareFootage/stories,
+// so an edited home size, lot, or story count invalidates. Any OTHER
+// footprintBasis value is unrecognized and fails closed (codex #3224 r2
+// P2): a new basis may only pass once its producer ships alongside
+// matching validation here. An operator type correction to a shared-turf
+// type also drops the ceiling (codex #3224 r2 P1) — the unit's lawn
+// legitimately spans beyond the parcel the ceiling described.
 function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
   if (p?.countyTurfCeilingSf == null) return false;
+  if (SHARED_TURF_TYPE_RE.test(String(p.propertyType || '').toUpperCase())) return false;
   const parts = p?.footprintTurfParts && typeof p.footprintTurfParts === 'object'
     ? p.footprintTurfParts
     : null;
   if (!parts) return false;
+  if (String(parts.footprintBasis || 'living_area') !== 'living_area') return false;
   if (!(lotSqFt > 0) || Math.abs(lotSqFt - Number(parts.lotSqFt)) > 1) return false;
   if (parts.stories != null
       && Math.abs(Math.max(1, Number(stories) || 1) - Number(parts.stories)) > 0.01) return false;
-  const basis = String(parts.footprintBasis || 'living_area');
-  if (basis === 'living_area') {
-    const expectedFootprint = Math.round((Number(homeSqFt) || 0) / Math.max(1, Number(stories) || 1));
-    if (!(expectedFootprint > 0) || Math.abs(expectedFootprint - Number(parts.footprintSf)) > 1) return false;
-  }
+  const expectedFootprint = Math.round((Number(homeSqFt) || 0) / Math.max(1, Number(stories) || 1));
+  if (!(expectedFootprint > 0) || Math.abs(expectedFootprint - Number(parts.footprintSf)) > 1) return false;
   return true;
 }
 
