@@ -2995,10 +2995,15 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
 // ─────────────────────────────────────────────
 // Ceiling-vs-request validity check for the translate adapter (see the
 // countyTurfCeilingSf mapping below). footprintTurfParts records the exact
-// inputs the county ceiling was computed from — today's sole producer
-// (computeFootprintTurf) derives the footprint from squareFootage/stories,
-// so an edited home size, lot, or story count invalidates. Any OTHER
-// footprintBasis value is unrecognized and fails closed (codex #3224 r2
+// inputs the county ceiling was computed from. Two recognized bases, both
+// produced by computeFootprintTurf:
+//   'living_area' (also pre-basis records, where the key is absent) —
+//     footprint = squareFootage/stories, so an edited home size, lot, or
+//     story count invalidates;
+//   'gross_under_roof' — footprint = the roll's per-building gross areas ÷
+//     stories, which doesn't budge with homeSqFt, so only the lot and the
+//     recorded story count are checked.
+// Any OTHER basis value is unrecognized and fails closed (codex #3224 r2
 // P2): a new basis may only pass once its producer ships alongside
 // matching validation here. An operator type correction to a shared-turf
 // type also drops the ceiling (codex #3224 r2 P1) — the unit's lawn
@@ -3010,10 +3015,17 @@ function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
     ? p.footprintTurfParts
     : null;
   if (!parts) return false;
-  if (String(parts.footprintBasis || 'living_area') !== 'living_area') return false;
+  const basis = String(parts.footprintBasis || 'living_area');
+  if (basis !== 'living_area' && basis !== 'gross_under_roof') return false;
   if (!(lotSqFt > 0) || Math.abs(lotSqFt - Number(parts.lotSqFt)) > 1) return false;
   if (parts.stories != null
       && Math.abs(Math.max(1, Number(stories) || 1) - Number(parts.stories)) > 0.01) return false;
+  if (basis === 'gross_under_roof') {
+    // The gross basis always records its stories (computeFootprintTurf) —
+    // a stories edit is caught above; homeSqFt edits can't be validated
+    // against a gross footprint and legitimately don't move it.
+    return parts.stories != null;
+  }
   const expectedFootprint = Math.round((Number(homeSqFt) || 0) / Math.max(1, Number(stories) || 1));
   if (!(expectedFootprint > 0) || Math.abs(expectedFootprint - Number(parts.footprintSf)) > 1) return false;
   return true;
