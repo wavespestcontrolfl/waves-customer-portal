@@ -115,6 +115,63 @@ function hasAffirmativeRodentMention(text) {
   return RODENT_RE.test(cleaned);
 }
 
+// Existing-customer re-service anchoring (owner catalog rule 2026-07-10; miss
+// observed 2026-08-05: a quarterly customer's "pest control revisit" booked as
+// the generic "Waves Pest Control Appointment Service"). The covered re-service
+// rows are booking_enabled=false ON PURPOSE — the reservice self-serve lane
+// owns their public eligibility — so they never render in the extraction
+// prompt's catalog block and the model structurally cannot pick them. This
+// deterministic override is the phone-path equivalent: it fires only when the
+// caller has COMPLETED service history (a never-serviced caller has nothing to
+// re-service) and the model's pick was absent or one of the generic
+// anything-rows; a specific pick (e.g. "Rodent Inspection Service") always
+// outranks a stray revisit mention. Bare "retreat" is excluded on purpose —
+// too common as a plain English word.
+const RE_SERVICE_KEYS = { pest: 'pest_re_service', lawn: 'lawn_re_service' };
+const RE_SERVICE_INTENT_RE = /\bre[-\s]?service\b|\bre[-\s]?visit\b|\brevisit\b|\bre[-\s]treat(?:ment)?\b|\bretreatment\b|\bspray\s+again\b|\btreat\s+again\b|\bcome\s+back\s+out\b/i;
+const RE_SERVICE_LAWN_CONTEXT_RE = /\b(?:lawn|turf|grass|weeds?|fertili[sz]\w*|chinch|sod)\b/i;
+const GENERIC_CALL_CATALOG_ROW_RE = /^(?:waves pest control appointment service|waves assessment|waves appointment)$/i;
+
+function isGenericCallCatalogRow(row) {
+  if (!row) return false;
+  return row.service_key === 'general_appointment'
+    || GENERIC_CALL_CATALOG_ROW_RE.test(String(row.name || '').trim());
+}
+
+// The two covered re-service rows, loaded OUTSIDE loadBookableCallServices on
+// purpose: adding them there would change the prompt's catalog block (and its
+// order-sensitive extractionPromptVersion hash) and let the model book a free
+// re-service for anyone. Fails open to [] like the bookable load.
+async function loadCallReServiceRows(conn) {
+  try {
+    const rows = await conn('services')
+      .where({ is_active: true })
+      .whereIn('service_key', Object.values(RE_SERVICE_KEYS))
+      .select(BOOKABLE_SERVICE_COLUMNS);
+    return Array.isArray(rows) ? rows : [];
+  } catch (err) {
+    logger.warn(`[call-booking-catalog] Failed to load re-service rows (revisit calls fall back to generic anchoring): ${err.message}`);
+    return [];
+  }
+}
+
+// Completed-history summary for the re-service override, from the same
+// loadCustomerServiceContext shape the coarse resolver already receives
+// (serviceRecords + scheduledServices are completed-only there; estimates are
+// deliberately ignored — a quote is not service history).
+function summarizeCallReServiceHistory(customerServiceContext) {
+  const rows = [
+    ...(customerServiceContext?.serviceRecords || []),
+    ...(customerServiceContext?.scheduledServices || []),
+  ];
+  const types = rows.map((r) => String(r.service_type || '').toLowerCase());
+  return {
+    hasCompleted: rows.length > 0,
+    lawn: types.some((t) => RE_SERVICE_LAWN_CONTEXT_RE.test(t)),
+    pest: types.some((t) => /\b(?:pest|quarterly|waveguard|roach|ant|spider|rodent|mosquito|termite|bed\s*bug)/.test(t)),
+  };
+}
+
 const KEYWORD_SERVICE_RULES = [
   {
     serviceKey: 'cockroach_control',
@@ -173,13 +230,12 @@ function findServiceByName(services, value) {
  * then deterministic keyword rules over the extraction + transcript.
  * Returns a catalog row or null (null -> legacy coarse service label).
  */
-function resolveCallBookingCatalogService({ extracted = {}, transcription = '', services = [] } = {}) {
+function resolveCallBookingCatalogService({ extracted = {}, transcription = '', services = [], reServices = [], reServiceHistory = null } = {}) {
   if (!Array.isArray(services) || services.length === 0) return null;
 
   const byModelPick = findServiceByName(services, extracted.specific_service_name)
     || findServiceByName(services, extracted.matched_service)
     || findServiceByName(services, extracted.requested_service);
-  if (byModelPick) return byModelPick;
 
   const haystack = [
     extracted.requested_service,
@@ -187,6 +243,26 @@ function resolveCallBookingCatalogService({ extracted = {}, transcription = '', 
     extracted.call_summary,
     transcription,
   ].filter(Boolean).join(' ');
+
+  // Re-service override (see RE_SERVICE_INTENT_RE block above): revisit intent
+  // from a caller with completed service history anchors to the covered
+  // re-service row — but only over an absent or generic pick, and the lane
+  // comes from what was actually serviced (single-lane history wins; mixed or
+  // unknown history falls back to lawn wording in the call, defaulting pest).
+  if (
+    (!byModelPick || isGenericCallCatalogRow(byModelPick))
+    && reServiceHistory?.hasCompleted
+    && haystack
+    && RE_SERVICE_INTENT_RE.test(haystack)
+  ) {
+    const laneKey = reServiceHistory.lawn && !reServiceHistory.pest ? RE_SERVICE_KEYS.lawn
+      : reServiceHistory.pest && !reServiceHistory.lawn ? RE_SERVICE_KEYS.pest
+        : (RE_SERVICE_LAWN_CONTEXT_RE.test(haystack) ? RE_SERVICE_KEYS.lawn : RE_SERVICE_KEYS.pest);
+    const reServiceRow = (Array.isArray(reServices) ? reServices : []).find((s) => s.service_key === laneKey);
+    if (reServiceRow) return reServiceRow;
+  }
+
+  if (byModelPick) return byModelPick;
   if (!haystack) return null;
 
   for (const rule of KEYWORD_SERVICE_RULES) {
@@ -428,6 +504,8 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId }) {
 
 module.exports = {
   loadBookableCallServices,
+  loadCallReServiceRows,
+  summarizeCallReServiceHistory,
   resolveCallBookingCatalogService,
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,

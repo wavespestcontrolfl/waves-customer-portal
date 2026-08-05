@@ -95,7 +95,7 @@ const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
-const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
+const { loadBookableCallServices, loadCallReServiceRows, summarizeCallReServiceHistory, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
 const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -5221,6 +5221,11 @@ const CallRecordingProcessor = {
     // can name a specific bookable service) and to the booking block below
     // (service_id / price / duration / follow-up interval). Fails open to [].
     const bookableCallServices = await loadBookableCallServices(db);
+    // Covered re-service rows, loaded separately: NOT part of the prompt
+    // catalog block (they are booking_enabled=false by design — the reservice
+    // self-serve lane owns eligibility), only reachable through the
+    // deterministic existing-customer revisit override in the resolver.
+    const callReServiceRows = await loadCallReServiceRows(db);
     const bookableServiceNames = bookableCallServices.map((s) => s.name).filter(Boolean);
     // Catalog-aware provenance: the catalog block is part of the rendered
     // V2 prompt, so every stamp for this call must carry its hash.
@@ -8002,6 +8007,8 @@ const CallRecordingProcessor = {
       extracted,
       transcription,
       services: bookableCallServices,
+      reServices: callReServiceRows,
+      reServiceHistory: summarizeCallReServiceHistory(customerServiceContext),
     });
     // Never book a made-up service (owner directive 2026-07-10): service_type
     // MUST be a real admin-catalog service. When the service was UNCLEAR
