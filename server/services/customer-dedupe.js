@@ -1037,9 +1037,11 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       let rowIds = null;
       try {
         await trx.transaction(async (sp) => {
+          // Bounded like the FK prefetch (r36): over-cap stores {count}.
           rowIds = (await sp(table)
             .where({ [typeColumn]: 'customer', [idColumn]: loserId })
-            .select('id')).map((r) => r.id);
+            .select('id')
+            .limit(REPOINT_ID_CAP + 1)).map((r) => r.id);
         });
       } catch {
         rowIds = null;
@@ -1932,6 +1934,11 @@ const TABLE_TIMESTAMP_COLUMNS = {
   satisfaction_responses: ['created_at', 'updated_at'],
   // timestamps(true, true) — 20260714000042; liveness = resolved_at NULL.
   stripe_invoice_charge_attempts: ['created_at', 'updated_at'],
+  // explicit pair — 20260626000021; timestamps(true,true) — 20260516000001/2, 20260401000048.
+  review_sequences: ['created_at', 'updated_at'],
+  service_report_deliveries: ['created_at', 'updated_at'],
+  service_report_events: ['created_at', 'updated_at'],
+  self_booked_appointments: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2645,6 +2652,12 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           // the record — an unjournaled invoice on a journaled record
           // would keep its pay token on the kept customer.
           { table: 'invoices', label: 'invoice(s) billed from the record' },
+          // r36: review cadences + v1 report delivery/audit rows also
+          // carry customer_id + service_record_id and advance without
+          // touching the record.
+          { table: 'review_sequences', label: 'review cadence(s)' },
+          { table: 'service_report_deliveries', label: 'service-report delivery record(s)' },
+          { table: 'service_report_events', label: 'service-report audit event(s)' },
         ];
         for (const probe of serviceRecordChildProbes) {
           let childRows = [];
@@ -2680,6 +2693,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         { table: 'estimate_card_holds', column: 'estimate_id', label: 'card hold(s)' },
         { table: 'estimate_deposits', column: 'estimate_id', label: 'deposit(s)' },
         { table: 'scheduled_services', column: 'source_estimate_id', label: 'booked appointment(s)' },
+        // r36: availability.confirmBooking writes the public booking row
+        // with estimate_id while its dispatch row carries NO
+        // source_estimate_id stamp — the row above never sees it.
+        { table: 'self_booked_appointments', column: 'estimate_id', label: 'self-booked appointment(s)' },
         // r30: a service-outline packet copies estimate_id AND the
         // estimate's then-current customer_id, mints a public token, and
         // never updates the estimate — moving the estimate back would

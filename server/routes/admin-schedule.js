@@ -3276,6 +3276,21 @@ router.post('/', requireAdmin, async (req, res, next) => {
           err.code = 'CUSTOMER_CHANGED_RETRY';
           throw err;
         }
+        // Linked-estimate ownership revalidates under the fence too (r36):
+        // a journaled estimate a merge-undo just returned would stamp the
+        // restored loser's source_estimate_id onto a kept-customer visit.
+        if (linkedEstimateId) {
+          const freshLinkedEstimate = await trx('estimates')
+            .where({ id: linkedEstimateId }).first('id', 'customer_id');
+          if (!freshLinkedEstimate
+            || (freshLinkedEstimate.customer_id && String(freshLinkedEstimate.customer_id) !== String(customerId))) {
+            const estErr = new Error('The linked estimate changed while booking (a merge was undone) — reload and book again.');
+            estErr.statusCode = 409;
+            estErr.isOperational = true;
+            estErr.code = 'CUSTOMER_CHANGED_RETRY';
+            throw estErr;
+          }
+        }
       }
       // Global lock order for recurring creators: CUSTOMER ROW first, series
       // advisory lock second — the same order estimate-converter uses (it

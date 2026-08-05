@@ -347,6 +347,18 @@ class AvailabilityEngine {
         if (!freshAvailCustomer || fp(freshAvailCustomer) !== fp(preFenceAvailCustomer)) {
           throw bookingError('Your account details just changed — please refresh and book again.', 'CUSTOMER_CHANGED_RETRY');
         }
+        // Estimate linkage revalidates under the fence too (r36): a
+        // journaled estimate a merge-undo just returned no longer belongs
+        // to this customer — the self-booking row would link the restored
+        // loser's estimate to a kept-customer visit.
+        if (estimateId) {
+          const freshAvailEstimate = await trx('estimates')
+            .where({ id: estimateId }).first('id', 'customer_id');
+          if (!freshAvailEstimate
+            || (freshAvailEstimate.customer_id && String(freshAvailEstimate.customer_id) !== String(customerId))) {
+            throw bookingError('That quote was just updated — please refresh and book again.', 'CUSTOMER_CHANGED_RETRY');
+          }
+        }
       }
       const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
         excludeSelfBookingId: options.excludeSelfBookingId || null,
