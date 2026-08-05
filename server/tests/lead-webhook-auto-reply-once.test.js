@@ -49,7 +49,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { _test } = require('../routes/lead-webhook');
-const { hasPriorLeadAutoReply } = _test;
+const { hasPriorLeadAutoReply, resolveLeadAutoReplyClaim } = _test;
 
 const PHONE = '+19415551234';
 const PHONE_HASH = crypto.createHash('sha256').update(PHONE, 'utf8').digest('hex');
@@ -111,6 +111,11 @@ describe('hasPriorLeadAutoReply', () => {
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('fail closed'));
   });
 
+  test('unresolved pre-send claim (null twilio_sid) also suppresses — fail closed on crash mid-send', async () => {
+    db.__state.marker = async () => ({ phone_digits: '9415551234', twilio_sid: null });
+    await expect(hasPriorLeadAutoReply(PHONE)).resolves.toBe(true);
+  });
+
   test('accepts a transaction handle and runs all legs on it', async () => {
     const calls = [];
     const mkChain = () => {
@@ -126,5 +131,48 @@ describe('hasPriorLeadAutoReply', () => {
     await expect(hasPriorLeadAutoReply(PHONE, trx)).resolves.toBe(false);
     expect(calls).toEqual(['lead_auto_reply_sends', 'messaging_audit_log', 'sms_log']);
     expect(db).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveLeadAutoReplyClaim', () => {
+  const mkDbc = () => {
+    const chain = {
+      where: jest.fn(() => chain),
+      whereNull: jest.fn(() => chain),
+      update: jest.fn(async () => 1),
+      del: jest.fn(async () => 1),
+    };
+    const dbc = jest.fn(() => chain);
+    dbc.__chain = chain;
+    return dbc;
+  };
+
+  test('real SID → claim confirmed (twilio_sid stamped), nothing deleted', async () => {
+    const dbc = mkDbc();
+    await resolveLeadAutoReplyClaim('9415551234', { sent: true, providerMessageId: 'SMabc123' }, dbc);
+    expect(dbc).toHaveBeenCalledWith('lead_auto_reply_sends');
+    expect(dbc.__chain.where).toHaveBeenCalledWith({ phone_digits: '9415551234' });
+    expect(dbc.__chain.update).toHaveBeenCalledWith({ twilio_sid: 'SMabc123' });
+    expect(dbc.__chain.del).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['wrapper block / provider failure', { sent: false, code: 'PROVIDER_FAILURE' }],
+    ['gate/template sentinel sid', { sent: true, providerMessageId: 'gate-blocked' }],
+    ['render throw (no result)', null],
+  ])('%s → claim released so a later submission can greet', async (_label, smsResult) => {
+    const dbc = mkDbc();
+    await resolveLeadAutoReplyClaim('9415551234', smsResult, dbc);
+    // Only an UNCONFIRMED claim may be deleted — a stamped SID is immutable.
+    expect(dbc.__chain.whereNull).toHaveBeenCalledWith('twilio_sid');
+    expect(dbc.__chain.del).toHaveBeenCalled();
+    expect(dbc.__chain.update).not.toHaveBeenCalled();
+  });
+
+  test('settlement error never throws — claim stays, fail closed, warns', async () => {
+    const dbc = mkDbc();
+    dbc.__chain.del = jest.fn(async () => { throw new Error('pool exhausted'); });
+    await expect(resolveLeadAutoReplyClaim('9415551234', { sent: false }, dbc)).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('fail closed'));
   });
 });

@@ -3,10 +3,12 @@
  *
  * messaging_audit_log is written best-effort AFTER the Twilio send — it can
  * return {id:null} on error, leaving a delivered menu text invisible to the
- * once-per-person dedup in routes/lead-webhook.js (Codex P2 on #3214). This
- * table is the durable claim: the webhook inserts a row inside the same
- * advisory-lock transaction that guards the send, keyed by the last 10
- * phone digits, only when Twilio returned a real message SID.
+ * once-per-person dedup in routes/lead-webhook.js (Codex P2s on #3214). This
+ * table is the durable CLAIM: the webhook commits a row (twilio_sid null)
+ * keyed by the last 10 phone digits BEFORE calling Twilio, stamps the real
+ * SID on confirmed delivery, and deletes the row when nothing was delivered.
+ * A row with a null twilio_sid is an unresolved claim (crash mid-send) and
+ * suppresses future auto-replies fail-closed; delete it to re-arm a phone.
  *
  * Starts empty — history is covered by the audit-log and frozen sms_log
  * legs of the dedup predicate.
