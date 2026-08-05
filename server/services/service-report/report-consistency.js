@@ -110,11 +110,17 @@ const toNum = (v) => {
 const formatInches = (n) => String(Math.round(n * 100) / 100);
 
 // The rain matcher accepts spelled amounts ("one inch", "one and a half
-// inches", "half an inch") alongside digits (codex P2 r30) — this converts
-// either form to its numeric value; NaN for anything unrecognized.
+// inches", "half an inch") alongside digits (codex P2 r30) and numeric
+// fractions ("2 1/2", "1/2" — codex P2 r32) — this converts any form to its
+// numeric value; NaN for anything unrecognized.
 const SPELLED_INCH_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
 function spelledOrNumericInches(raw) {
   const s = String(raw).toLowerCase().replace(/\s+/g, ' ').trim();
+  const frac = s.match(/^(?:(\d+) )?(\d+)\/(\d+)$/);
+  if (frac) {
+    const denominator = Number(frac[3]);
+    return denominator ? Number(frac[1] || 0) + Number(frac[2]) / denominator : NaN;
+  }
   if (/^[\d.]/.test(s)) return Number(s);
   if (s === 'half a' || s === 'half an') return 0.5;
   const m = s.match(/^([a-z]+)( and a half)?$/);
@@ -179,8 +185,11 @@ function reconcileRainFigure(text, canonicalRain) {
     // amounts qualify too — the narrative prompt doesn't require digit
     // formatting, so "one inch" / "one and a half inches" / "half an inch"
     // can carry the stale total (codex P2 r30); they rewrite to the digit
-    // form of the canonical figure.
-    return sentence.replace(/(?<![\d.])(\d+(?:\.\d+)?|\.\d+|\b(?:one|two|three|four|five|six|seven|eight|nine|ten)(?:\s+and\s+a\s+half)?\b|\bhalf\s+an?\b)([\s-]*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|["″”])/gi, (match, value, gap, unit, offset) => {
+    // form of the canonical figure. Numeric fractions match as a WHOLE
+    // ("2 1/2 inches", "1/2 inch") and the lookbehind rejects a leading
+    // slash — matching just the denominator produced "2 1/2.96 inches"
+    // (codex P2 r32).
+    return sentence.replace(/(?<![\d./])(\d+\s+\d+\/\d+|\d+\/\d+|\d+(?:\.\d+)?|\.\d+|\b(?:one|two|three|four|five|six|seven|eight|nine|ten)(?:\s+and\s+a\s+half)?\b|\bhalf\s+an?\b)([\s-]*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|["″”])/gi, (match, value, gap, unit, offset) => {
       if (done) return match;
       const v = spelledOrNumericInches(value);
       if (!Number.isFinite(v)) return match;

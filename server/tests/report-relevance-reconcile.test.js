@@ -214,6 +214,15 @@ describe('reconcileRainFigure', () => {
       .toBe('This week 2.96 inches of rain fell across the area.');
   });
 
+  test('mixed-fraction rain amounts rewrite as a whole (codex P2 r32)', () => {
+    expect(reconcileRainFigure('Rainfall totaled 2 1/2 inches this week.', 2.96))
+      .toBe('Rainfall totaled 2.96 inches this week.');
+    expect(reconcileRainFigure('Rainfall totaled 1/2 inch this week.', 2.96))
+      .toBe('Rainfall totaled 2.96 inches this week.');
+    // A fraction equal to the canonical figure is already in agreement.
+    expect(reconcileRainFigure('Rainfall totaled 2 1/2 inches this week.', 2.5)).toBeNull();
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
