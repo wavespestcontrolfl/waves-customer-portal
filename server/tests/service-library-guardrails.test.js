@@ -272,6 +272,26 @@ describe('service library guardrails', () => {
       });
   });
 
+  test('accepts the seasonal_feb_oct frequency on a catalog edit (mosquito seasonal, 20260805000010)', async () => {
+    // The admin ServiceForm submits the complete row, so after the
+    // activation migration stamps frequency='seasonal_feb_oct', ANY edit to
+    // the seasonal service replays that value — the validator rejecting it
+    // would brick every catalog edit on the row (codex #3225 P2).
+    const before = serviceRow({ service_key: 'mosquito_seasonal', frequency: 'seasonal_feb_oct' });
+    const after = serviceRow({ service_key: 'mosquito_seasonal', frequency: 'seasonal_feb_oct', name: 'Renamed' });
+    mockServiceDb({ before, after });
+
+    await expect(serviceLibrary.updateService('service-1', { name: 'Renamed', frequency: 'seasonal_feb_oct' }))
+      .resolves.toEqual(after);
+  });
+
+  test('rejects an unknown service frequency', async () => {
+    mockServiceDb();
+
+    await expect(serviceLibrary.updateService('service-1', { frequency: 'fortnightly' }))
+      .rejects.toMatchObject({ status: 400, message: 'Invalid service frequency' });
+  });
+
   test('allows non-pricing edits to a legacy row with inconsistent pricing', async () => {
     const before = serviceRow({ pricing_type: 'fixed', base_price: null });
     const after = serviceRow({ pricing_type: 'fixed', base_price: null, name: 'Renamed' });

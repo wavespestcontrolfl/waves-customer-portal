@@ -37,7 +37,7 @@ const VALID_CATEGORIES = new Set([
 ]);
 const VALID_BILLING_TYPES = new Set(['recurring', 'one_time', 'free']);
 const VALID_PRICING_TYPES = new Set(['variable', 'fixed', 'quoted']);
-const VALID_FREQUENCIES = new Set(['', 'monthly', 'every_6_weeks', 'bimonthly', 'quarterly', 'semiannual', 'annual']);
+const VALID_FREQUENCIES = new Set(['', 'monthly', 'every_6_weeks', 'seasonal_feb_oct', 'bimonthly', 'quarterly', 'semiannual', 'annual']);
 const NON_LIVE_SCHEDULE_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 const BOOLEAN_COLS = new Set([
   'is_waveguard', 'requires_follow_up', 'is_taxable', 'requires_license',
