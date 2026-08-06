@@ -105,20 +105,18 @@ async function loadCallbackCalls(cutoff = new Date()) {
       AND NOT EXISTS (
         SELECT 1 FROM ai_follow_up_tasks dt
         WHERE dt.task_type = 'call_back'
-          -- Linked tasks match by customer; unlinked coach tasks match by
-          -- the source call's SID on the score row (codex r33) — one
-          -- obligation must not appear in both lanes either way.
-          AND ((dt.customer_id IS NOT NULL AND dt.customer_id = c.customer_id)
-            OR (dt.customer_id IS NULL AND EXISTS (
+          -- Exact SID provenance dedupes UNCONDITIONALLY (codex r34):
+          -- late recording processing can mint the task hours after the
+          -- call. The 45-minute end-of-call window (codex r26) remains
+          -- only for the legacy customer-matched fallback.
+          AND (EXISTS (
               SELECT 1 FROM csr_call_scores dcs
               WHERE dcs.id = dt.call_score_id
                 AND dcs.metadata->>'callSid' = c.twilio_call_sid
                 AND COALESCE(c.twilio_call_sid, '') <> ''
-            )))
-          -- End-of-call boundary (codex r26): recovered rows (Studio /
-          -- status fallback) are created near call END; adding duration
-          -- again would overshoot. Bridged rows end at bridge + duration.
-          AND dt.created_at BETWEEN c.created_at AND COALESCE(c.bridged_at, c.created_at) + CASE WHEN c.bridged_at IS NOT NULL THEN make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE interval '0' END + interval '45 minutes'
+            )
+            OR (dt.customer_id IS NOT NULL AND dt.customer_id = c.customer_id
+              AND dt.created_at BETWEEN c.created_at AND COALESCE(c.bridged_at, c.created_at) + CASE WHEN c.bridged_at IS NOT NULL THEN make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE interval '0' END + interval '45 minutes'))
       )
       -- Already returned: a later outbound CALL to the same number, or a
       -- later human-typed text, clears the item (codex #3232 r1).
@@ -193,6 +191,20 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
     WHERE NOT (t.task_type = 'send_estimate' AND EXISTS (
         SELECT 1 FROM estimates fe
         WHERE fe.customer_id = t.customer_id AND fe.sent_at > t.created_at
+      ))
+      -- Unlinked send_sms tasks fulfill through the source call's SID and
+      -- recipient phone (codex r34): a human-typed/approved text to the
+      -- source caller after the task is the requested outreach.
+      AND NOT (t.task_type = 'send_sms' AND t.customer_id IS NULL AND EXISTS (
+        SELECT 1 FROM call_log src, sms_log fsms
+        WHERE src.twilio_call_sid = cs.metadata->>'callSid'
+          AND COALESCE(cs.metadata->>'callSid', '') <> ''
+          AND fsms.direction = 'outbound'
+          AND fsms.message_type IN ${HUMAN_REPLY_TYPES}
+          AND fsms.status IN ('queued', 'sent', 'delivered')
+          AND fsms.created_at > t.created_at
+          AND RIGHT(REGEXP_REPLACE(COALESCE(fsms.to_phone, ''), '\\D', '', 'g'), 10)
+            = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN src.direction = 'outbound' THEN src.to_phone ELSE src.from_phone END, ''), '\\D', '', 'g'), 10)
       ))
       -- Unlinked send_estimate tasks fulfill through the source call's
       -- provenance (codex r33): an engine estimate carrying the call id,
@@ -362,6 +374,10 @@ async function loadUnansweredThreads(cutoff = new Date()) {
           -- whose confirmation goes out BEFORE the inbound row is
           -- persisted — they are never 'unanswered' (codex r29).
           AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply')
+          -- Standalone courtesy closers ("Thanks!", "Got it", "Perfect")
+          -- end a conversation, they don't await one (codex r34) —
+          -- deterministic pattern, no LLM verdict involved.
+          AND TRIM(COALESCE(message_body, '')) !~* '^(thanks?( you| u)?|thank you( so much| very much)?|ty|tysm|got it|perfect|great|awesome|ok(ay)?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
       ) inbound
       WHERE peer <> ''
       ORDER BY peer, created_at DESC

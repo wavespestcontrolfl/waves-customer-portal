@@ -309,3 +309,24 @@ describe('cant-make absence forms (codex r33)', () => {
     expect(hasRescheduleOrAwayIntent("I can't make the payment this month")).toBe(false);
   });
 });
+
+describe('unable-to-attend forms and plan-change vetoes (codex r34)', () => {
+  test('wont be able to attend flags', () => {
+    expect(hasRescheduleOrAwayIntent("I won't be able to attend tomorrow's appointment")).toBe(true);
+  });
+  test('unable to attend flags', () => {
+    expect(hasRescheduleOrAwayIntent("I'm unable to attend Friday's service")).toBe(true);
+  });
+  test('plan change stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent('I need to change my service from quarterly to monthly')).toBe(false);
+  });
+  test('provider change stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent('I am changing service providers')).toBe(false);
+  });
+  test('plan upgrade stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent('Can you bump my service up to the premium plan?')).toBe(false);
+  });
+  test('move service to a weekday still flags', () => {
+    expect(hasRescheduleOrAwayIntent('Can you move my service to Thursday?')).toBe(true);
+  });
+});
