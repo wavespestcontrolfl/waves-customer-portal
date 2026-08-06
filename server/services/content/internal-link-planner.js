@@ -341,7 +341,7 @@ function findEligiblePlacement(body, phrase, { fromIndex = 0 } = {}) {
  * first-eligible scan would silently select a different (weaker) one.
  * Falls back to the scan when the file drifted since planning.
  */
-function placementForTask(body, task) {
+function placementForTask(body, task, { targetTerms = null } = {}) {
   const anchor = String(task?.anchor_text || '');
   if (!anchor) return null;
   const text = String(body || '');
@@ -361,20 +361,23 @@ function placementForTask(body, task) {
       return { index: offset, length: anchor.length, snippet: snippetAround(text, offset, anchor.length), paragraph, anchor };
     }
   }
-  // Drifted file: relocate using the persisted target facts and context
-  // (the full scored paragraph) — the planner may have deliberately scanned
-  // past a thin early mention, and a plain first-eligible scan would revive
-  // exactly that occurrence.
-  return relocateByContext(text, anchor, task);
+  // Drifted file: relocate using the target's topical terms and the
+  // persisted context (the full scored paragraph) — the planner may have
+  // deliberately scanned past a thin early mention, and a plain
+  // first-eligible scan would revive exactly that occurrence.
+  return relocateByContext(text, anchor, task, { targetTerms });
 }
 
-function relocateByContext(body, phrase, task = {}) {
+function relocateByContext(body, phrase, task = {}, { targetTerms = null } = {}) {
   const contextSnippet = task?.context_snippet;
-  // Keyword PLUS inferred cluster — both derivable from the task row at
-  // every call site. Keyword-only ranking ties occurrences for targets
-  // whose cluster term ("rodent" for an "attic noises" target) is not in
-  // the keyword, and the gate scores topic+cluster+keyword.
-  const targetTermsText = [
+  // Prefer the EXECUTOR'S effective target terms when the caller has the
+  // target page in hand (the gate scores frontmatter topic+cluster+keyword,
+  // which can differ from the brief keyword). The task-row reconstruction
+  // (keyword + filename-inferred cluster) is only the fallback for callers
+  // without target facts — in practice the pinned offset governs there,
+  // because applyTaskToBody patches the same body the dry-run just
+  // validated.
+  const targetTermsText = targetTerms || [
     task?.target_keyword,
     inferCluster(task?.target_file || task?.target_url || '', { primary_keyword: task?.target_keyword }),
   ].filter(Boolean).join(' ');

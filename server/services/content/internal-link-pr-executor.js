@@ -640,12 +640,25 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   if (sourceUrl === targetUrl) return skipped(base, 'self_link');
   if (pageAlreadyLinksTo(sourcePage.body, targetUrl)) return skipped(base, 'source_already_links_target');
 
+  // Target facts FIRST — relocation after a drift must rank occurrences by
+  // the same effective terms this gate scores (frontmatter topic + cluster
+  // + keyword), not a reconstruction from the brief keyword and filename.
+  const targetFacts = pageFacts(targetPage, { url: targetUrl });
+  if (!targetFacts.keyword && task.target_keyword) {
+    // Legacy targets without a frontmatter keyword: use the keyword the
+    // planner persisted on the task so the core denominator carries the
+    // topic instead of the descriptive title — mirrors the planner's merge.
+    targetFacts.keyword = task.target_keyword;
+    targetFacts.topic = task.target_keyword;
+  }
+  const targetTerms = [targetFacts.topic, targetFacts.topic_cluster, targetFacts.keyword].filter(Boolean).join(' ');
+
   // Prefer the exact occurrence the planner recorded (source_offset) — the
   // planner may have chosen a later occurrence whose paragraph carries the
   // topical support — with a scan fallback for drifted files. When no
   // occurrence survives, report the first occurrence's specific failure so
   // skip reasons stay diagnostic.
-  const occurrence = placementForTask(sourcePage.body, task);
+  const occurrence = placementForTask(sourcePage.body, task, { targetTerms });
   if (!occurrence) {
     const first = findFirstUnlinkedOccurrence(sourcePage.body, task.anchor_text);
     if (!first) return skipped(base, 'anchor_not_found');
@@ -667,14 +680,6 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   // anchor phrase was found IN it). Masked first: hidden MDX props/comments
   // must not lift topical overlap for text the reader never sees.
   const sourceFacts = pageFacts(sourcePage, { url: sourceUrl, bodyExcerpt: maskExcludedRegions(paragraph) });
-  const targetFacts = pageFacts(targetPage, { url: targetUrl });
-  if (!targetFacts.keyword && task.target_keyword) {
-    // Legacy targets without a frontmatter keyword: use the keyword the
-    // planner persisted on the task so the core denominator carries the
-    // topic instead of the descriptive title — mirrors the planner's merge.
-    targetFacts.keyword = task.target_keyword;
-    targetFacts.topic = task.target_keyword;
-  }
   const opportunity = policy.evaluateLinkOpportunity({
     source: sourceFacts,
     target: targetFacts,
