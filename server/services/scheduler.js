@@ -886,6 +886,110 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // COMMS GUARDS — three daily exception emails (2026-08-05 weekly sweep).
+  // Each is exception-based (a quiet day sends nothing), carries its own
+  // env kill switch, and dedupes via ops_email_send_state. Cron minutes are
+  // deliberately unused elsewhere in this file (#3208 pool-timeout outage:
+  // never share a minute with other jobs).
+  // =========================================================================
+
+  // Reschedule/away texts whose visit never moved (kill:
+  // RESCHEDULE_INTENT_WATCHER_DISABLED=1) — daily 6:53am ET.
+  cron.schedule('30 53 6 * * *', async () => {
+    try {
+      const lockRes = await runExclusive('reschedule-intent-watcher', async () => {
+        const { runRescheduleIntentWatcher } = require('./reschedule-intent-watcher');
+        const result = await runRescheduleIntentWatcher();
+        logger.info(`[reschedule-intent-watcher] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0 })}`);
+        // Delivery-BLOCKING skips count as failures; expected skips
+        // (nothing_found / disabled / recent_send) stay healthy.
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`reschedule-intent watcher did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      // A pool-exhausted tick returns {skipped} instead of throwing —
+      // surface it so job_health records the missed daily run (codex r16).
+      if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
+        // lease_held = another instance is running this watcher (deploy
+        // overlap) — that IS the daily run, not a miss (codex r18).
+        // job_health must record the missed daily run (codex r17) — the
+        // skip path returns before runExclusive's own bookkeeping.
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('reschedule-intent-watcher').catch(() => {});
+        await recordJobEnd('reschedule-intent-watcher', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`reschedule-intent watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Reschedule-intent watcher failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Quotes promised on calls with no estimate sent since (kill:
+  // PROMISED_ESTIMATE_WATCHER_DISABLED=1) — daily 7:11am ET.
+  cron.schedule('30 11 7 * * *', async () => {
+    try {
+      const lockRes = await runExclusive('promised-estimate-watcher', async () => {
+        const { runPromisedEstimateWatcher } = require('./promised-estimate-watcher');
+        const result = await runPromisedEstimateWatcher();
+        logger.info(`[promised-estimate-watcher] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0 })}`);
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`promised-estimate watcher did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      // A pool-exhausted tick returns {skipped} instead of throwing —
+      // surface it so job_health records the missed daily run (codex r16).
+      if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
+        // lease_held = another instance is running this watcher (deploy
+        // overlap) — that IS the daily run, not a miss (codex r18).
+        // job_health must record the missed daily run (codex r17) — the
+        // skip path returns before runExclusive's own bookkeeping.
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('promised-estimate-watcher').catch(() => {});
+        await recordJobEnd('promised-estimate-watcher', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`promised-estimate watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Promised-estimate watcher failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Today's unworked callbacks / follow-ups / unanswered texts (kill:
+  // UNWORKED_COMMS_WATCHER_DISABLED=1) — daily 6:17pm ET, after the 6:00pm
+  // missed-appointment check and before the 6:40pm stale-visit sweep.
+  cron.schedule('30 17 18 * * *', async () => {
+    try {
+      const lockRes = await runExclusive('unworked-comms-eod', async () => {
+        const { runUnworkedCommsWatcher } = require('./unworked-comms-watcher');
+        const result = await runUnworkedCommsWatcher();
+        logger.info(`[unworked-comms] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, total: result.total || 0 })}`);
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`unworked-comms watcher did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      // A pool-exhausted tick returns {skipped} instead of throwing —
+      // surface it so job_health records the missed daily run (codex r16).
+      if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
+        // lease_held = another instance is running this watcher (deploy
+        // overlap) — that IS the daily run, not a miss (codex r18).
+        // job_health must record the missed daily run (codex r17) — the
+        // skip path returns before runExclusive's own bookkeeping.
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('unworked-comms-eod').catch(() => {});
+        await recordJobEnd('unworked-comms-eod', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`unworked-comms watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Unworked-comms watcher failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY NEWSLETTER INACTIVITY SUNSET (gated: GATE_NEWSLETTER_SUNSET)
   // Monday 7:30am ET — flags subscribers with 90+ days of zero opens/clicks
   // across 6+ delivered campaigns, parks ONE win-back draft for the owner to
@@ -3373,8 +3477,24 @@ function initScheduledJobs() {
   cron.schedule('30 * * * *', async () => {
     logger.info('Running: follow-up task verification');
     try {
-      const CSRCoach = require('./csr/csr-coach');
-      await CSRCoach.verifyFollowUps();
+      // runExclusive: verifyFollowUps expires past-deadline tasks — a
+      // deploy-overlap tick racing itself can double-process the same rows.
+      const verifyLock = await runExclusive('csr-follow-up-verify', async () => {
+        const CSRCoach = require('./csr/csr-coach');
+        await CSRCoach.verifyFollowUps();
+        // Hourly: resolve actioned flags FIRST, then replay bells
+        // (codex #3232 r21/r23).
+        const riw = require('./reschedule-intent-watcher');
+        await riw.resolveActionedFlags();
+        await riw.replayPendingBells();
+      });
+      if (verifyLock && verifyLock.skipped && verifyLock.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('csr-follow-up-verify').catch(() => {});
+        await recordJobEnd('csr-follow-up-verify', t0, new Error(`tick skipped: ${verifyLock.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`follow-up verification tick skipped: ${verifyLock.reason || 'no_connection'}`);
+      }
     } catch (err) {
       logger.error(`Follow-up verification failed: ${err.message}`);
     }

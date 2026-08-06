@@ -29,6 +29,9 @@ const { isEnabled } = require('../config/feature-gates');
 const TRIGGER_BELL_ALLOWLIST = new Set([
   'new_lead',
   'sms_reply',
+  // A reschedule/away text with a visit still armed is time-critical — its
+  // 'schedule' category is silenced-by-default, so the key must ring here.
+  'appointment_reschedule_intent',
   'customer_voicemail_callback',
   'payment_failed',
   'bill_payment_error',

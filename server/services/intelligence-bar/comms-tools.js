@@ -719,12 +719,16 @@ async function getCsrOverview(days) {
   } catch { /* table may not exist */ }
 
   try {
-    // Follow-up tasks
-    tasks = await db('csr_follow_up_tasks')
-      .where('status', 'pending')
-      .leftJoin('customers', 'csr_follow_up_tasks.customer_id', 'customers.id')
-      .select('csr_follow_up_tasks.*', 'customers.first_name', 'customers.last_name', 'customers.phone')
-      .orderBy('csr_follow_up_tasks.due_date').limit(10);
+    // Follow-up tasks. The real table is ai_follow_up_tasks (csr_coach
+    // migration) — this queried a non-existent csr_follow_up_tasks for
+    // months and the try/catch silently returned nothing.
+    tasks = await db('ai_follow_up_tasks')
+      // Same active set as the canonical admin-csr task route (codex
+      // #3232 r25): in_progress is being worked, not done.
+      .whereIn('status', ['pending', 'in_progress'])
+      .leftJoin('customers', 'ai_follow_up_tasks.customer_id', 'customers.id')
+      .select('ai_follow_up_tasks.*', 'customers.first_name', 'customers.last_name', 'customers.phone')
+      .orderBy('ai_follow_up_tasks.deadline').limit(10);
   } catch { /* table may not exist */ }
 
   try {
@@ -750,9 +754,9 @@ async function getCsrOverview(days) {
       id: t.id,
       customer: t.first_name ? `${t.first_name} ${t.last_name}` : 'Unknown',
       phone: t.phone,
-      task: t.description,
-      due: t.due_date,
-      priority: t.priority,
+      task: t.recommended_action || t.context_summary || t.task_type,
+      due: t.deadline,
+      type: t.task_type,
     })),
     lost_lead_reasons: (leadQuality || []).map(r => ({
       reason: r.loss_reason, count: parseInt(r.count),

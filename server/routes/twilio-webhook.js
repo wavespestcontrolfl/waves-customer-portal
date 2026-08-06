@@ -11,7 +11,7 @@ const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/m
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
-const { hasSchedulingIntent, isSmsReaction } = require('../services/sms-intent');
+const { hasSchedulingIntent, isSmsReaction, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { properCase } = require('../utils/name-case');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -159,6 +159,10 @@ router.post('/sms', async (req, res) => {
     const { From, To, Body, MessageSid } = req.body;
     const smsReaction = isSmsReaction(Body);
     const schedulingIntent = hasSchedulingIntent(Body);
+    // NOT a subset of schedulingIntent (codex #3232 r10): away phrases
+    // ("I won't be home") carry no scheduling keyword — the AI auto-reply
+    // gates must stand down for these too.
+    const rescheduleAsk = Body ? hasRescheduleOrAwayIntent(Body) : false;
 
     // ── Idempotency claim (must run before spam-block + all side-effects) ──
     // Twilio can redeliver the same MessageSid (edge retry, a slow handler
@@ -275,6 +279,50 @@ router.post('/sms', async (req, res) => {
       // (The alert is internal to the owner, unaffected by the SMS opt-out.)
       fireEventRescore('sms_opt_out');
 
+      // Opt-out COMBINED with an appointment ask (codex #3232 r45/r46):
+      // "STOP, and cancel tomorrow's service" — the durable reschedule
+      // flag and its INTERNAL bell still persist; only customer-facing
+      // SMS is suppressed by the opt-out. Service contacts resolve via
+      // the same all-slots unique lookup as the main flag path.
+      if (Body && rescheduleAsk) {
+        let optFlagCustomer = customer;
+        let optFlagEligible = Boolean(customer);
+        if (!customer) {
+          const key = phoneLookupKey(From);
+          if (key) {
+            const matches = await db('customers')
+              .whereNull('deleted_at')
+              .where(function anyPhoneSlot() {
+                for (const col of ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
+                  this.orWhereRaw(`RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`, [key]);
+                }
+              })
+              .limit(2)
+              .catch(() => []);
+            if (matches.length === 1) {
+              optFlagCustomer = matches[0];
+              optFlagEligible = true;
+            } else {
+              optFlagEligible = matches.length > 1;
+            }
+          }
+        }
+        if (optFlagEligible) {
+          const flagResult = await require('../services/reschedule-intent-flagger')
+            .flagInboundRescheduleIntent({
+              customer: optFlagCustomer,
+              phone: From,
+              body: Body,
+              smsLogId: null,
+              messageSid: MessageSid || null,
+            })
+            .catch(() => null);
+          if (flagResult?.flagged === true && typeof flagResult.fireBell === 'function') {
+            setImmediate(() => { flagResult.fireBell().catch(() => {}); });
+          }
+        }
+      }
+
       return res.type('text/xml').send(
         `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`
       );
@@ -384,8 +432,11 @@ router.post('/sms', async (req, res) => {
     // backyard") would exist only in the comms log for someone to find by
     // hand. Only the quote-generating branch is skipped.
     let intakeScopeVetoed = false;
+    // A reschedule/away ask about an EXISTING visit must never be consumed
+    // by the intake flow (codex #3232 r29) — consumption returns before
+    // the durable reschedule flag below, silently dropping the guard.
     if (customer && Body && customer.lead_intake_status &&
-        customer.lead_intake_status !== 'estimate_drafted') {
+        customer.lead_intake_status !== 'estimate_drafted' && !rescheduleAsk) {
       try {
         const LeadIntake = require('../services/lead-intake');
         const intakeResult = await LeadIntake.handleIntakeReply(customer, Body);
@@ -507,6 +558,7 @@ router.post('/sms', async (req, res) => {
       }
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
 
+
     // Log inbound message
     const messageType = numberConfig.type === 'domain_tracking' ? 'domain_lead'
       : numberConfig.type === 'van_tracking' ? 'van_lead' : 'inbound';
@@ -526,6 +578,61 @@ router.post('/sms', async (req, res) => {
     // The inbound message is now durably recorded — releasing the claim on a
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
+
+    // Reschedule/away flag persists AFTER the sms_log row and BEFORE the
+    // Twilio ack (codex r18): the webhook SID claim short-circuits
+    // retries, so any pre-log crash would lose the MESSAGE — strictly
+    // worse than losing the flag. The residual row-without-flag window is
+    // one awaited insert wide.
+    // The bell fires post-ack via flagResult.fireBell.
+    let rescheduleFlagResult = null;
+    if (Body && !smsReaction && rescheduleAsk) {
+      // No matched customer can mean a SHARED phone (findSingleCustomerByPhone
+      // deliberately returns null on multiple actives) — those requests are
+      // just as real, so persist an UNLINKED flag rather than dropping the
+      // durable guard entirely (codex #3232 r25). Unknown numbers (zero
+      // matches) stay in the lead lane.
+      // Reminders go to service contacts too (codex r45): a reschedule
+      // reply from service_contact*_phone must resolve to its customer,
+      // not read as an unknown sender. A UNIQUE match across all phone
+      // slots links the flag; multiple matches persist unlinked.
+      let flagCustomer = customer;
+      let flagEligible = Boolean(customer);
+      if (!customer) {
+        const key = phoneLookupKey(From);
+        if (key) {
+          const matches = await db('customers')
+            .whereNull('deleted_at')
+            .where(function anyPhoneSlot() {
+              for (const col of ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
+                this.orWhereRaw(`RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`, [key]);
+              }
+            })
+            .limit(2)
+            .catch(() => []);
+          if (matches.length === 1) {
+            flagCustomer = matches[0];
+            flagEligible = true;
+          } else {
+            flagEligible = matches.length > 1;
+          }
+        }
+      }
+      if (flagEligible) {
+        rescheduleFlagResult = await require('../services/reschedule-intent-flagger')
+          .flagInboundRescheduleIntent({
+            customer: flagCustomer,
+            phone: From,
+            body: Body,
+            smsLogId: smsLogEntry?.id || null,
+            messageSid: MessageSid || null,
+          })
+          .catch((err) => {
+            logger.warn(`[reschedule-intent] flag rejected: ${err.message}`);
+            return null;
+          });
+      }
+    }
 
     // Event-driven health rescore for any matched customer (the opt-out branch
     // above already fired for cancellations). Not gated on messageType: an
@@ -575,12 +682,27 @@ router.post('/sms', async (req, res) => {
     // never rang (observed 2026-07-17, customer texting three Waves numbers).
     const shouldNotifyKnownInbound = numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking' || isTrackingLeadInbound;
 
+    // Reschedule/away flag — customer texts asking to move or miss a visit
+    // are invisible to the reminder/en-route automation (2026-08-05: a
+    // 12:30am "can we reschedule?" was followed by the visit running and
+    // invoicing on schedule). Detect-and-surface only; never mutates the
+    // appointment. Fire-and-forget: the flagger is fail-soft internally.
+    let rescheduleFlagged = false;
+    if (rescheduleFlagResult?.flagged === true && typeof rescheduleFlagResult.fireBell === 'function') {
+      // Suppress the generic alert only when the urgent one actually
+      // LANDED (bell/push/deliberate suppression).
+      rescheduleFlagged = await rescheduleFlagResult.fireBell().catch(() => false);
+    }
+
     // In-app + push notification for inbound SMS from known customers.
     // knownInboundNotified records whether this modern bell/push actually
     // landed — when it did, the legacy owner-SMS forward below is suppressed
     // so a single inbound message can't raise two admin notifications.
-    let knownInboundNotified = false;
-    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction) {
+    // A landed urgent reschedule alert counts as the admin notification
+    // for this message — the legacy owner-SMS forward must not re-alert
+    // (codex #3232 r4).
+    let knownInboundNotified = rescheduleFlagged;
+    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !rescheduleFlagged) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
         const stats = await triggerNotification('sms_reply', {
@@ -679,7 +801,7 @@ router.post('/sms', async (req, res) => {
     // through to Virginia's inbox.
     const legacyAiDraftsEnabled = isEnabled('legacyAiDrafts');
 
-    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !smsReaction) {
+    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction) {
       try {
         const WavesAssistant = require('../services/ai-assistant/assistant');
         const aiResult = await WavesAssistant.processMessage({
@@ -760,7 +882,7 @@ router.post('/sms', async (req, res) => {
 
         logger.info(`AI Assistant processed: ${From} escalated=${aiResult.escalated} conv=${aiResult.conversationId}`);
       } catch (e) { logger.error(`AI Assistant failed: ${e.message}`); }
-    } else if (schedulingIntent && aiAutoReplyOn) {
+    } else if ((schedulingIntent || rescheduleAsk) && aiAutoReplyOn) {
       // Log the intentional skip so we can audit the gate and see volume.
       logger.info('[sms-intent] scheduling-intent detected; skipping auto-reply, routing to human inbox');
     } else if (smsReaction && aiAutoReplyOn) {
@@ -768,7 +890,7 @@ router.post('/sms', async (req, res) => {
     }
 
     // LEGACY AI DRAFT — still create drafts for admin review alongside the AI assistant
-    if (customer && numberConfig.type === 'location' && Body && legacyAiDraftsEnabled && !schedulingIntent && !smsReaction) {
+    if (customer && numberConfig.type === 'location' && Body && legacyAiDraftsEnabled && !schedulingIntent && !rescheduleAsk && !smsReaction) {
       try {
         const ContextAggregator = require('../services/context-aggregator');
         const ResponseDrafter = require('../services/response-drafter');
@@ -849,7 +971,7 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`AI draft pipeline failed: ${e.message}`); }
     } else if (customer && numberConfig.type === 'location' && Body && !legacyAiDraftsEnabled) {
       logger.info('[sms-intent] legacy AI draft gate disabled; skipping draft creation');
-    } else if (customer && numberConfig.type === 'location' && Body && schedulingIntent) {
+    } else if (customer && numberConfig.type === 'location' && Body && (schedulingIntent || rescheduleAsk)) {
       logger.info('[sms-intent] scheduling-intent detected; skipping legacy AI draft');
     } else if (customer && numberConfig.type === 'location' && Body && smsReaction) {
       logger.info('[sms-intent] SMS reaction detected; skipping legacy AI draft');
