@@ -648,11 +648,16 @@ function estimateFamilyKeysForAdoption(estimate, estData, { serviceMode, service
         .find((keys) => keys.length > 0);
       return new Set(primary || []);
     }
-    return new Set(
-      (recurringSvcList || [])
-        .map((svc) => serviceFamilyKeyForAdoption(svc))
-        .filter(Boolean),
-    );
+    // PRIMARY service here too (codex #3228 r14): a multi-service recurring
+    // accept books its reserved row under the primary line — the converter's
+    // reserved-row path deliberately does NOT schedule ordinary remaining
+    // services — so letting an add-on family adopt (pest-plus-tree plan
+    // adopting a tree & shrub visit) restamps the add-on row while the
+    // primary pest work is never scheduled.
+    const primaryRecurring = (recurringSvcList || [])
+      .map((svc) => serviceFamilyKeyForAdoption(svc))
+      .find((key) => !!key);
+    return new Set(primaryRecurring ? [primaryRecurring] : []);
   });
   return keySets.reduce((acc, set) => new Set([...acc].filter((k) => set.has(k))));
 }

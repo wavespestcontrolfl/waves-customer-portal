@@ -447,6 +447,44 @@ describe('family-scoped existing-appointment adoption', () => {
     )).toBe(true);
   });
 
+  test('multi-service recurring accepts adopt only under the PRIMARY service (codex r14)', () => {
+    const pestPlusTree = {
+      result: {
+        recurring: {
+          services: [
+            {
+              name: 'Quarterly Pest Control Service',
+              service: 'pest_control',
+              frequency: 'quarterly',
+              selected: true,
+              isSelected: true,
+            },
+            {
+              name: 'Bi-Monthly Tree & Shrub Care Service',
+              service: 'tree_shrub',
+              frequency: 'bi_monthly',
+              selected: true,
+              isSelected: true,
+            },
+          ],
+        },
+      },
+    };
+    const keys = estimateFamilyKeysForAdoption({}, pestPlusTree, { serviceMode: 'recurring' });
+    expect([...keys]).toEqual(['pest_control']);
+    // The add-on family's visit must not be restamped — the reserved-row
+    // path never schedules the remaining services, so the primary pest work
+    // would be lost.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Bi-Monthly Tree & Shrub Care Service' },
+      keys,
+    )).toBe(false);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Quarterly Pest Control Service' },
+      keys,
+    )).toBe(true);
+  });
+
   test('Bora-Care never adopts a trenching visit (codex r13)', () => {
     const boraData = {
       result: {
