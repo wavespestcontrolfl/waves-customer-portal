@@ -68,6 +68,16 @@ describe('treatment narrative prompt + validator (owner 2026-07-21)', () => {
       'Artavia was applied to the turf today.',
       ['Artavia 2 SC (Azoxy)'], ['Azoxystrobin'],
     )).toBe('trade_name');
+    // ...and scoped PER PRODUCT: another product's active ingredient must not
+    // act as a global allowlist for this product's brand token.
+    expect(validateNarrative(
+      'A bifen application was made along the foundation.',
+      ['Bifen Brand X', 'Other Product'], ['Imidacloprid', 'Bifenthrin'],
+    )).toBe('trade_name');
+    expect(validateNarrative(
+      'A bifenthrin barrier and an imidacloprid drench were applied.',
+      ['Bifen I/T', 'Dominion 2L'], ['Bifenthrin', 'Imidacloprid'],
+    )).toBe(null);
   });
 });
 

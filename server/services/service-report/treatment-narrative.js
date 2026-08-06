@@ -115,20 +115,25 @@ function validateNarrative(text, productNames = [], activeIngredients = []) {
   if (FORBIDDEN.some((re) => re.test(t))) return 'forbidden_copy';
   // Brand-name echo check: any distinctive token of a recorded product name
   // appearing in the copy fails the actives-only contract (codex P3).
-  // Tokens that appear inside a recorded active ingredient are exempt: the
-  // prompt REQUIRES actives language, and many catalog names embed the
-  // active ("Artavia 2 SC (Azoxy)" / azoxystrobin, "Bifen I/T" / bifenthrin)
-  // — without the exemption every narrative for such products fails on both
-  // providers (prod: 100% trade_name rejections 07-31 → 08-04).
+  // Tokens that appear inside the SAME product's recorded active ingredient
+  // are exempt: the prompt REQUIRES actives language, and many catalog names
+  // embed the active ("Artavia 2 SC (Azoxy)" / azoxystrobin, "Bifen I/T" /
+  // bifenthrin) — without the exemption every narrative for such products
+  // fails on both providers (prod: 100% trade_name rejections 07-31 → 08-04).
+  // activeIngredients is index-aligned with productNames; scoping the
+  // exemption per product keeps one product's active from acting as a
+  // global allowlist for another product's brand token.
   const hay = t.toLowerCase();
-  const actives = activeIngredients.map((a) => String(a || '').toLowerCase()).filter(Boolean);
-  const echoed = productNames.some((name) => String(name || '')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= 4
-      && !GENERIC_NAME_TOKENS.has(token)
-      && !actives.some((active) => active.includes(token)))
-    .some((token) => hay.includes(token)));
+  const echoed = productNames.some((name, i) => {
+    const active = String(activeIngredients[i] || '').toLowerCase();
+    return String(name || '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length >= 4
+        && !GENERIC_NAME_TOKENS.has(token)
+        && !(active && active.includes(token)))
+      .some((token) => hay.includes(token));
+  });
   if (echoed) return 'trade_name';
   const banned = findBannedCustomerCopy(t);
   if (banned.length) return `banned:${banned.join(',')}`;
@@ -207,8 +212,12 @@ async function buildTreatmentNarrative({
         findingsText: facts.findingsText,
         photoSummary: facts.photoSummary,
       });
-      const productNames = products.map((p) => p.name).filter(Boolean);
-      const productActives = products.map((p) => p.activeIngredient).filter(Boolean);
+      // Index-aligned pair: validateNarrative scopes each name's exemption
+      // to ITS OWN active ingredient — filter products first, never the
+      // two arrays independently.
+      const namedProducts = products.filter((p) => p.name);
+      const productNames = namedProducts.map((p) => p.name);
+      const productActives = namedProducts.map((p) => p.activeIngredient || '');
       const generated = await dispatchWithFallback(
         MODELS.TEXT_POLICIES.report,
         { text: prompt, jsonMode: false, maxTokens: 400 },
