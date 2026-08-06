@@ -678,8 +678,12 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       coarseServiceLabel: 'General Pest Control',
     });
     expect(row?.service_key).toBe('pest_general_quarterly');
+    // Bare abstract objects without a determiner are blocked too (codex follow-up).
+    expect(hasCallReServiceIntent({ call_summary: 'revisit pricing and schedule the regular quarterly visit' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'wants to revisit billing next month' })).toBe(false);
     // Noun usage keeps its intent.
     expect(hasCallReServiceIntent({ requested_service: 'schedule a revisit' })).toBe(true);
+    expect(hasCallReServiceIntent({ requested_service: 'Pest control revisit' })).toBe(true);
   });
 
   test('agent-offered re-service wording in the transcript is NOT the caller\'s intent (codex r9)', () => {

@@ -136,7 +136,7 @@ function hasAffirmativeRodentMention(text) {
 //     termite resolution is a different service, not a covered re-service.
 // Bare "retreat" is excluded on purpose — too common as a plain English word.
 const RE_SERVICE_KEYS = { pest: 'pest_re_service', lawn: 'lawn_re_service' };
-const RE_SERVICE_PHRASE = "(?:re[-\\s]?service|re[-\\s]?visit(?!\\s+(?:the|my|our|your|this|that|it|them)\\b)|revisit(?!\\s+(?:the|my|our|your|this|that|it|them)\\b)|re[-\\s]treat(?:ment)?|retreatment|spray\\s+again|treat\\s+again|come\\s+back\\s+out)";
+const RE_SERVICE_PHRASE = "(?:re[-\\s]?service|re[-\\s]?visit(?!\\s+(?:(?:the|my|our|your|this|that|it|them)\\b|(?:pric(?:e|es|ing)|bill(?:s|ing)?|invoice|invoices|quote|quotes|estimate|estimates|contract|contracts|plan|plans|terms|schedule|scheduling|decision|decisions|discussion|conversation|question|questions|topic|issue|issues)\\b))|revisit(?!\\s+(?:(?:the|my|our|your|this|that|it|them)\\b|(?:pric(?:e|es|ing)|bill(?:s|ing)?|invoice|invoices|quote|quotes|estimate|estimates|contract|contracts|plan|plans|terms|schedule|scheduling|decision|decisions|discussion|conversation|question|questions|topic|issue|issues)\\b))|re[-\\s]treat(?:ment)?|retreatment|spray\\s+again|treat\\s+again|come\\s+back\\s+out)";
 const RE_SERVICE_INTENT_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b`, 'i');
 // Negated wording ("I don't need a re-service, just my regular visit") is not
 // intent (codex #3222 r3) — same shape as NEGATED_ROACH_RE: negation word +

@@ -8781,7 +8781,10 @@ const CallRecordingProcessor = {
                   // Don't convert the lead for a pending outbound-review booking
                   // (same as the fresh-insert path) — it closes from the office
                   // confirmation, not a reused/reprocessed pending row.
-                  if (!outboundReviewBooking) {
+                  // A covered re-service is a $0 callback, not a closed sale
+                  // (codex #3222 follow-up): converting the lead would record
+                  // a won deal and promote funnel metrics off a free visit.
+                  if (!outboundReviewBooking && !isReServiceCatalogRow(callBookingCatalogRow)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -8891,8 +8894,9 @@ const CallRecordingProcessor = {
                   const primaryRow = stamped;
                   // The deal still closed — same idempotent, ownership-guarded
                   // conversion as the reuse path above, same outbound-review
-                  // exception (that lead closes from the office confirmation).
-                  if (!outboundReviewBooking) {
+                  // exception (that lead closes from the office confirmation)
+                  // and the same re-service exception ($0 callback, not a sale).
+                  if (!outboundReviewBooking && !isReServiceCatalogRow(callBookingCatalogRow)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -9000,7 +9004,7 @@ const CallRecordingProcessor = {
                 // holds too: fail closed, never a possibly-duplicate free
                 // visit.
                 if (isReServiceCatalogRow(callBookingCatalogRow)) {
-                  const { reserviceLanesForCustomer, reserviceLaneCoversProperty, openCallbackExistsForLane } = require('./reservice-scheduler');
+                  const { reserviceLanesForCustomer, openCallbackExistsForLane } = require('./reservice-scheduler');
                   const reServiceLane = reServiceLaneForRow(callBookingCatalogRow);
                   // Eligibility REVALIDATED under the locks (codex #3222 r6
                   // — mirrors the reservice route's commit-time re-check),
@@ -9011,39 +9015,66 @@ const CallRecordingProcessor = {
                   // commit instead of landing between check and insert.
                   // Unverifiable → hold, fail closed.
                   let lockedReServiceCustomer = null;
-                  let laneStillEligible = false;
                   try {
                     lockedReServiceCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
-                    // Lanes read ON THE TRANSACTION with the qualifying
-                    // coverage rows locked (codex r9): an admin cancellation
-                    // of the recurring coverage now serializes against this
-                    // booking instead of committing between the lane read
-                    // and the callback insert.
-                    laneStillEligible = !!lockedReServiceCustomer && lockedReServiceCustomer.active !== false
-                      && (await reserviceLanesForCustomer(lockedReServiceCustomer, trx, { lockCoverage: true })).includes(reServiceLane);
-                  } catch (eligErr) {
-                    logger.warn(`[call-proc] re-service eligibility recheck failed for ${maskSid(callSid)} (holding for review): ${eligErr.message}`);
+                  } catch (lockErr) {
+                    logger.warn(`[call-proc] re-service customer lock failed for ${maskSid(callSid)} (holding for review): ${lockErr.message}`);
                   }
-                  if (!laneStillEligible) {
+                  if (!lockedReServiceCustomer || lockedReServiceCustomer.active === false) {
                     return { __held: { reason: 'reservice_eligibility_lapsed' } };
                   }
-                  // Multi-property guard (codex #3222 r7+r8): the lane grant
-                  // is account-level, but this booking dispatches to the
-                  // call's RESOLVED premise. Classify it first — a linked
-                  // PRIMARY property (or the on-file address, matched by
-                  // key) rides the account grant (legacy coverage rows carry
-                  // null property_id and must not false-hold the primary); a
-                  // linked NON-primary property needs its own qualifying
-                  // live coverage; an address matching neither holds.
+                  // Premise FIRST (codex #3222 r7/r8/r10): the coverage that
+                  // may back this free visit is the premise's own —
+                  //   primary/on-file  → legacy unlinked rows + rows linked
+                  //                      to the primary property (coverage
+                  //                      living ONLY at a rental must not
+                  //                      back a free visit at the primary);
+                  //   non-primary      → only rows linked to that property;
+                  //   unmatched addr   → hold.
                   const reServicePremise = await classifyReServiceBookingPremise({
                     customer: lockedReServiceCustomer,
                     propertyLinkage,
                     trx,
                   });
-                  if (reServicePremise.scope === 'unknown'
-                    || (reServicePremise.scope === 'property'
-                      && !(await reserviceLaneCoversProperty(customerId, reServiceLane, reServicePremise.propertyId, trx, { lockCoverage: true })))) {
+                  if (reServicePremise.scope === 'unknown') {
                     return { __held: { reason: 'reservice_property_uncovered' } };
+                  }
+                  let coverageScope = null;
+                  if (reServicePremise.scope === 'property') {
+                    coverageScope = { propertyId: reServicePremise.propertyId, includeUnlinked: false };
+                  } else {
+                    let primaryPropertyId = null;
+                    try {
+                      const primaryProp = await trx('customer_properties')
+                        .where({ customer_id: customerId, is_primary: true, active: true })
+                        .first('id');
+                      primaryPropertyId = primaryProp?.id || null;
+                    } catch (primErr) {
+                      logger.warn(`[call-proc] primary-property lookup failed for ${maskSid(callSid)} (unlinked coverage only): ${primErr.message}`);
+                    }
+                    coverageScope = { propertyId: primaryPropertyId, includeUnlinked: true };
+                  }
+                  // Lanes read ON THE TRANSACTION with the qualifying
+                  // coverage rows locked (codex r9) and premise-scoped
+                  // (r10): an admin cancellation serializes against this
+                  // booking, and only the premise's own coverage counts.
+                  // Unverifiable → hold, fail closed.
+                  let laneStillEligible = false;
+                  try {
+                    laneStillEligible = (await reserviceLanesForCustomer(
+                      lockedReServiceCustomer, trx, { lockCoverage: true, coverageScope },
+                    )).includes(reServiceLane);
+                  } catch (eligErr) {
+                    logger.warn(`[call-proc] re-service eligibility recheck failed for ${maskSid(callSid)} (holding for review): ${eligErr.message}`);
+                  }
+                  if (!laneStillEligible) {
+                    return {
+                      __held: {
+                        reason: reServicePremise.scope === 'property'
+                          ? 'reservice_property_uncovered'
+                          : 'reservice_eligibility_lapsed',
+                      },
+                    };
                   }
                   let laneCallbackOpen = true;
                   try {
@@ -9209,14 +9240,19 @@ const CallRecordingProcessor = {
                     // admin-leads schedule-appointment route), so the conversion
                     // can't commit without the appointment row. Every other booking
                     // path already converts; this one silently didn't, stranding
-                    // phone-booked callers as `new` in the pipeline.
-                    await convertCallLeadOnPhoneBooking(trx, {
-                      leadId,
-                      customerId,
-                      scheduledServiceId: created.id,
-                      callSid,
-                      keepOpenForQuote: callQuotePromised,
-                    });
+                    // phone-booked callers as `new` in the pipeline. EXCEPT a
+                    // covered re-service: a $0 callback is not a closed sale
+                    // (codex #3222 follow-up) — the caller is already a plan
+                    // customer and the lead must not record a won deal.
+                    if (!isReServiceCatalogRow(callBookingCatalogRow)) {
+                      await convertCallLeadOnPhoneBooking(trx, {
+                        leadId,
+                        customerId,
+                        scheduledServiceId: created.id,
+                        callSid,
+                        keepOpenForQuote: callQuotePromised,
+                      });
+                    }
                   }
                   followUpCreated = await ensureCallFollowUpVisit(created);
                   return created;
@@ -9246,9 +9282,10 @@ const CallRecordingProcessor = {
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
                   // Same as the reuse path above: the appointment exists, so
                   // the lead must still convert (idempotent, ownership-guarded) —
-                  // unless this is a pending outbound-review booking, which closes
-                  // its lead from the office confirmation path, not here.
-                  if (!outboundReviewBooking) {
+                  // unless this is a pending outbound-review booking (closes from
+                  // the office confirmation path) or a covered re-service ($0
+                  // callback, not a sale).
+                  if (!outboundReviewBooking && !isReServiceCatalogRow(callBookingCatalogRow)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
