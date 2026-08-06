@@ -464,6 +464,47 @@ function shapeLinkedAppointment(row) {
   };
 }
 
+// serviceKeyFor's fallback for names that resolve to no known family. Both
+// sides of the adoption match must treat it as "no family": letting two
+// unclassifiable labels match each other would adopt an arbitrary row.
+const SERVICE_FAMILY_FALLBACK_KEY = 'service';
+
+function serviceFamilyKeyForAdoption(value) {
+  // The CANONICAL scheduled-row classifier (recurring-appointment-seeder), on
+  // BOTH the estimate's services and the candidate rows — the duplicate-series
+  // guard and follow-up seeding bucket by the same function, so "may this row
+  // stand in" and "would seeding treat these as one family" can never
+  // disagree. (The route's recurringServiceKey diverges on combined labels:
+  // "Pest & Rodent Control" is pest-primary there per the seeder, rodent
+  // here — codex #3228 r1.)
+  const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
+  const key = serviceKeyFor(value || {});
+  return key && key !== SERVICE_FAMILY_FALLBACK_KEY ? key : null;
+}
+
+// Service families this estimate actually covers — the only families whose
+// existing appointment may stand in for the estimate's first visit (see the
+// customer-wide fallback in findLinkedUpcomingAppointment). Derived from the
+// same acceptance lists the accept handler schedules from, so "what we'd
+// book" and "what an existing row may replace" can never disagree.
+function estimateFamilyKeysForAdoption(estData) {
+  const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData || {});
+  return new Set(
+    [...(recurringSvcList || []), ...(oneTimeList || [])]
+      .map((svc) => serviceFamilyKeyForAdoption(svc))
+      .filter(Boolean),
+  );
+}
+
+// Whether an existing scheduled_services row belongs to one of the estimate's
+// service families. Rows whose service_type doesn't resolve to a family key
+// (generic assessment shells, blank types) never match — adopting them would
+// re-create the cross-family clobber this guard exists to prevent.
+function appointmentMatchesEstimateFamily(row = {}, familyKeys = new Set()) {
+  const key = serviceFamilyKeyForAdoption({ service_type: row.service_type });
+  return !!key && familyKeys.has(key);
+}
+
 async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts = {}) {
   const conn = opts.database || db;
   const requestedId = opts.appointmentId ? String(opts.appointmentId) : '';
@@ -498,22 +539,48 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   if (requestedId) q.where('id', requestedId);
   let row = await q.first();
 
-  // Customer-wide fallback (gated): a customer who already has ANY upcoming
-  // appointment shouldn't be pushed through the slot picker again — the
-  // acceptance contract swaps the scheduler for payment options instead.
-  // Estimate-linked rows always take precedence (query above). Restricted to
-  // rows this customer owns that no other estimate has claimed
-  // (source_estimate_id null) and that aren't an in-flight reservation hold,
-  // so an offered row can't 409 at accept time — the accept-path UPDATE
-  // requires these same conditions.
+  // Customer-wide fallback (gated): a customer who already has an upcoming
+  // appointment for the SAME service family shouldn't be pushed through the
+  // slot picker again — the acceptance contract swaps the scheduler for
+  // payment options instead. Estimate-linked rows always take precedence
+  // (query above). Restricted to rows this customer owns that no other
+  // estimate has claimed (source_estimate_id null) and that aren't an
+  // in-flight reservation hold, so an offered row can't 409 at accept time —
+  // the accept-path UPDATE requires these same conditions.
+  //
+  // FAMILY-SCOPED (owner case 2026-08-05): this fallback used to offer ANY
+  // upcoming appointment, so an existing quarterly-pest customer accepting a
+  // tree & shrub ADD-ON plan had the pest visit adopted as the add-on's
+  // first visit — the slot picker never rendered, the accept stamped the
+  // add-on's per-visit price over the pest visit's price, and the
+  // duplicate-series guard then matched the (pest) reserved row's family so
+  // no tree & shrub series was ever seeded. Only a row whose service family
+  // this estimate actually covers may stand in for its first visit;
+  // cross-family accepts fall through to the standard slot pick.
   if (!row && estimate.customer_id
     && featureGates.isEnabled('estimateExistingApptCustomerWide')) {
-    const cw = baseQuery()
-      .where('customer_id', estimate.customer_id)
-      .whereNull('source_estimate_id')
-      .whereNull('reservation_expires_at');
-    if (requestedId) cw.where('id', requestedId);
-    row = await cw.first();
+    const familyKeys = estimateFamilyKeysForAdoption(data);
+    if (familyKeys.size > 0) {
+      // Page through the candidate list until a same-family row appears — a
+      // fixed pre-filter LIMIT would hide a valid later appointment behind a
+      // wall of seeded cross-family visits (codex #3228 r1). The family
+      // filter can't move into SQL without a second, divergent copy of the
+      // service classifier, so pagination does the bounding instead.
+      const CANDIDATE_PAGE_SIZE = 50;
+      for (let offset = 0; !row; offset += CANDIDATE_PAGE_SIZE) {
+        const cw = baseQuery()
+          .where('customer_id', estimate.customer_id)
+          .whereNull('source_estimate_id')
+          .whereNull('reservation_expires_at');
+        if (requestedId) cw.where('id', requestedId);
+        const candidates = await cw.limit(CANDIDATE_PAGE_SIZE).offset(offset);
+        if (!Array.isArray(candidates) || candidates.length === 0) break;
+        row = candidates.find(
+          (cand) => appointmentMatchesEstimateFamily(cand, familyKeys),
+        ) || null;
+        if (candidates.length < CANDIDATE_PAGE_SIZE) break;
+      }
+    }
   }
 
   if (!row) return null;
@@ -9908,6 +9975,22 @@ router.put('/:token/accept', async (req, res, next) => {
         ).catch((e) => logger.error(`[estimate-accept] commercial-schedule admin notify failed: ${e.message}`));
       } catch (e) {
         logger.error(`[estimate-accept] commercial-schedule admin notify setup failed: ${e.message}`);
+      }
+    }
+    // Deferred combined-tier upgrade review notification — same post-commit
+    // contract as the commercial-schedule notify above.
+    if (acceptConversion?.tierUpgradeNotification) {
+      const tierNotify = acceptConversion.tierUpgradeNotification;
+      try {
+        const NotificationService = require('../services/notification-service');
+        void NotificationService.notifyAdmin(
+          tierNotify.type,
+          tierNotify.title,
+          tierNotify.body,
+          tierNotify.options,
+        ).catch((e) => logger.error(`[estimate-accept] tier-upgrade admin notify failed: ${e.message}`));
+      } catch (e) {
+        logger.error(`[estimate-accept] tier-upgrade admin notify setup failed: ${e.message}`);
       }
     }
     // The standard conversion runs in-transaction with skipMembershipEmail,
@@ -19428,6 +19511,8 @@ module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
 // Test hooks (audit 2026-07-28): curve resolution for unstamped pest replays
 // and the mirrored-section label rule.
 module.exports.extractEngineInputs = extractEngineInputs;
+module.exports.estimateFamilyKeysForAdoption = estimateFamilyKeysForAdoption;
+module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFamily;
 module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.

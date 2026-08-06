@@ -739,6 +739,22 @@ async function markEstimateManuallyAccepted({
         logger.warn(`[estimate-manual-acceptance] commercial-schedule admin notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
       }
     }
+    // Deferred combined-tier upgrade review notification — same post-commit
+    // contract as the commercial-schedule notify above.
+    if (conversion?.tierUpgradeNotification) {
+      const tierNotify = conversion.tierUpgradeNotification;
+      try {
+        const NotificationService = require('./notification-service');
+        void NotificationService.notifyAdmin(
+          tierNotify.type,
+          tierNotify.title,
+          tierNotify.body,
+          tierNotify.options,
+        ).catch((err) => logger.warn(`[estimate-manual-acceptance] tier-upgrade admin notify failed for estimate ${acceptedEstimate.id}: ${err.message}`));
+      } catch (err) {
+        logger.warn(`[estimate-manual-acceptance] tier-upgrade admin notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
+      }
+    }
   }
 
   return {

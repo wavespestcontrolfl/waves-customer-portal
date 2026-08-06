@@ -21,10 +21,16 @@ function makeFakeConn(resultsByQuery) {
       return q;
     };
     const q = {};
-    ['whereIn', 'where', 'andWhere', 'orWhere', 'whereNull', 'orWhereRaw', 'orderBy'].forEach((m) => {
+    ['whereIn', 'where', 'andWhere', 'orWhere', 'whereNull', 'orWhereRaw', 'orderBy', 'limit', 'offset'].forEach((m) => {
       q[m] = record(m);
     });
-    q.first = async () => resultsByQuery[index] ?? null;
+    q.first = async () => {
+      const r = resultsByQuery[index] ?? null;
+      return Array.isArray(r) ? (r[0] ?? null) : r;
+    };
+    // The family-scoped fallback awaits the builder itself (a candidate LIST,
+    // not .first()) — make the fake thenable, resolving the queued result.
+    q.then = (resolve, reject) => Promise.resolve(resultsByQuery[index] ?? null).then(resolve, reject);
     return q;
   };
   conn.queries = queries;
@@ -47,9 +53,40 @@ function clauseArgs(rec, method) {
   return rec.clauses.filter(([m]) => m === method).map(([, args]) => args);
 }
 
-const ESTIMATE = { id: 'est-1', customer_id: 'cust-1', estimate_data: '{}' };
+// The estimate covers quarterly pest — the fallback may only offer rows of
+// that family (family-scoped, owner case 2026-08-05).
+const ESTIMATE = {
+  id: 'est-1',
+  customer_id: 'cust-1',
+  estimate_data: JSON.stringify({
+    result: {
+      recurring: {
+        services: [{
+          name: 'Quarterly Pest Control Service',
+          service: 'pest_control',
+          frequency: 'quarterly',
+          selected: true,
+          isSelected: true,
+        }],
+      },
+    },
+  }),
+};
 const LINKED_ROW = { id: 'ss-linked', customer_id: 'cust-1', source_estimate_id: 'est-1' };
-const CW_ROW = { id: 'ss-anywhere', customer_id: 'cust-1', source_estimate_id: null };
+const CW_ROW = {
+  id: 'ss-anywhere',
+  customer_id: 'cust-1',
+  source_estimate_id: null,
+  service_type: 'Quarterly Pest Control Service',
+};
+// An upcoming visit of a DIFFERENT family — must never stand in for this
+// estimate's first visit (the owner-case 2026-08-05 clobber).
+const CW_ROW_CROSS_FAMILY = {
+  id: 'ss-tree-shrub',
+  customer_id: 'cust-1',
+  source_estimate_id: null,
+  service_type: 'Bi-Monthly Tree & Shrub Care Service',
+};
 
 beforeEach(() => {
   featureGates.isEnabled.mockReset();
@@ -79,9 +116,9 @@ describe('findLinkedUpcomingAppointment — customer-wide fallback (gated)', () 
     expect(conn.queries).toHaveLength(1);
   });
 
-  it('gate ON: no linked row → falls back to any upcoming unclaimed appointment for the customer', async () => {
+  it('gate ON: no linked row → falls back to an upcoming unclaimed SAME-FAMILY appointment', async () => {
     featureGates.isEnabled.mockImplementation((k) => k === 'estimateExistingApptCustomerWide');
-    const conn = makeFakeConn([null, CW_ROW]);
+    const conn = makeFakeConn([null, [CW_ROW]]);
     const row = await findLinkedUpcomingAppointment(ESTIMATE, null, { database: conn });
     expect(row).toEqual(CW_ROW);
     expect(conn.queries).toHaveLength(2);
@@ -114,9 +151,35 @@ describe('findLinkedUpcomingAppointment — customer-wide fallback (gated)', () 
     expect(conn.queries).toHaveLength(1);
   });
 
+  it('gate ON: a cross-family upcoming appointment is NEVER offered — falls through to the slot picker', async () => {
+    featureGates.isEnabled.mockImplementation((k) => k === 'estimateExistingApptCustomerWide');
+    const conn = makeFakeConn([null, [CW_ROW_CROSS_FAMILY]]);
+    const row = await findLinkedUpcomingAppointment(ESTIMATE, null, { database: conn });
+    expect(row).toBe(null);
+  });
+
+  it('gate ON: with mixed candidates only the same-family row is offered', async () => {
+    featureGates.isEnabled.mockImplementation((k) => k === 'estimateExistingApptCustomerWide');
+    const conn = makeFakeConn([null, [CW_ROW_CROSS_FAMILY, CW_ROW]]);
+    const row = await findLinkedUpcomingAppointment(ESTIMATE, null, { database: conn });
+    expect(row).toEqual(CW_ROW);
+  });
+
+  it('gate ON: an estimate with no resolvable service families never adopts (fallback query never runs)', async () => {
+    featureGates.isEnabled.mockImplementation((k) => k === 'estimateExistingApptCustomerWide');
+    const conn = makeFakeConn([null, [CW_ROW]]);
+    const row = await findLinkedUpcomingAppointment(
+      { id: 'est-1', customer_id: 'cust-1', estimate_data: '{}' },
+      null,
+      { database: conn }
+    );
+    expect(row).toBe(null);
+    expect(conn.queries).toHaveLength(1);
+  });
+
   it('gate ON: the accept-side re-resolve (appointmentId) reaches the fallback query too', async () => {
     featureGates.isEnabled.mockImplementation((k) => k === 'estimateExistingApptCustomerWide');
-    const conn = makeFakeConn([null, CW_ROW]);
+    const conn = makeFakeConn([null, [CW_ROW]]);
     const row = await findLinkedUpcomingAppointment(ESTIMATE, null, {
       database: conn,
       appointmentId: 'ss-anywhere',
@@ -133,7 +196,7 @@ describe('findLinkedUpcomingAppointment — customer-wide fallback (gated)', () 
 
   it('gate ON: a fallback row that is not the requested id is rejected (id pinning)', async () => {
     featureGates.isEnabled.mockImplementation((k) => k === 'estimateExistingApptCustomerWide');
-    const conn = makeFakeConn([null, { ...CW_ROW, id: 'ss-other' }]);
+    const conn = makeFakeConn([null, [{ ...CW_ROW, id: 'ss-other' }]]);
     const row = await findLinkedUpcomingAppointment(ESTIMATE, null, {
       database: conn,
       appointmentId: 'ss-anywhere',
