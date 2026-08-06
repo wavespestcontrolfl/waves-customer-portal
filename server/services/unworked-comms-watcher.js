@@ -93,7 +93,10 @@ async function loadCallbackCalls(cutoff = new Date()) {
     -- an uncleared item must reappear until worked, so no marker boundary
     -- can strand it (this also moots the mutable-updated_at window
     -- concern) and overflow beyond the cap resurfaces on later runs.
-    WHERE c.updated_at >= now() - interval '30 days'
+    -- Horizon on IMMUTABLE created_at (codex r27): reprocessing months-old
+    -- calls restamps updated_at and would resurrect them; the updated_at
+    -- cutoff below still admits rows only once processing settled.
+    WHERE c.created_at >= now() - interval '30 days'
       AND c.updated_at <= :cutoff
       AND c.disposition = 'callback_task_created'
       -- One obligation, one lane (codex r22): when the coach minted a

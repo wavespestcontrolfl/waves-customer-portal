@@ -96,9 +96,12 @@ const CANCEL_RE = /\bcancel\w*\b/i;
 // are not reschedule asks (codex #3232 r3): require appointment context,
 // exclude negations and non-appointment objects.
 const CANCEL_CONTEXT_RE = /\b(?:appointment|appt|visit|service|treatment|today|tomorrow|(?:next|this)\s+week|the\s+\d{1,2}(?:st|nd|rd|th)|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day)\b/i;
-const CANCEL_NEGATION_RE = /\b(?:don'?t|do\s+not|not|never|no\s+need\s+to)\s+(?:want\s+to\s+|need\s+to\s+|going\s+to\s+)?cancel/i;
+// Up to three intervening words catch subjects and passives (codex r27):
+// "don't want YOU TO cancel", "don't want MY APPOINTMENT canceled",
+// "was not ASKING TO cancel".
+const CANCEL_NEGATION_RE = /\b(?:don'?t|do\s+not|not|never|no\s+need\s+to)\s+(?:\w+\s+){0,3}?cancel/i;
 const CANCEL_NONAPPT_RE = /\bcancel\w*\s+(?:[\w'’]+\s+){0,2}?(?:invoice|autopay|payment|card|subscription|estimate|quote)s?\b/i;
-const AWAY_RE = /\b(?:out\s+of\s+town|on\s+vacation|leav(?:e|ing)\s+for\s+vacation|going\s+out\s+of\s+town|(?:won'?t|will\s+not|not\s+going\s+to)\s+be\s+(?:home|here|there|in\s+town)|away\s+(?:until|till|through|for)|travel(?:ing|ling)\s+(?:until|till|through|next|this)|back\s+(?:in\s+town\s+)?(?:on|until|till)\b|not\s+(?:be\s+)?back\s+(?:till|until)|(?:am|'m)\s+away\b|away\s+(?:this|next)\s+(?:week|month)|not\s+(?:at\s+)?home\s+(?:today|tomorrow|this|next|until|till))\b/i;
+const AWAY_RE = /\b(?:out\s+of\s+town|on\s+vacation|leav(?:e|ing)\s+for\s+vacation|going\s+out\s+of\s+town|(?:won'?t|will\s+not|not\s+going\s+to|can'?t|cannot|can\s+not)\s+be\s+(?:home|here|there|available|around|in\s+town)|(?:nobody|no\s+one)\s+(?:will\s+be|is|'?s\s+going\s+to\s+be)\s+(?:home|here|there)|away\s+(?:until|till|through|for)|travel(?:ing|ling)\s+(?:until|till|through|next|this)|back\s+(?:in\s+town\s+)?(?:on|until|till)\b|not\s+(?:be\s+)?back\s+(?:till|until)|(?:am|'m)\s+away\b|away\s+(?:this|next)\s+(?:week|month)|not\s+(?:at\s+)?home\s+(?:today|tomorrow|this|next|until|till))\b/i;
 // Away + permission = a heads-up, not a reschedule ask ("won't be home but
 // here's the gate code" / "exterior only is fine"). Permission only
 // suppresses the AWAY leg — an explicit reschedule/cancel verb still wins.
@@ -129,8 +132,14 @@ function hasRescheduleOrAwayIntent(body) {
   // reschedule" must not disarm the negation guard below.
   const needAsk = /\b(?:need|want|like|have)\s+to\s+(?:re-?schedul|postpon)/i.test(text)
     && !/\b(?:don'?t|do\s+not|doesn'?t|won'?t|not|no|never)\s+(?:\w+\s+){0,2}?(?:need|want|like|have)\s+to\s+(?:re-?schedul|postpon)/i.test(text);
+  // Correction verbs beyond reschedule/postpone need an appointment-ish
+  // object or temporal target (codex r27) — "please move my appointment
+  // to Friday" / "please skip Friday" are fresh asks; "please move
+  // forward with the treatment" is not.
+  const GUARDED_MOVE = "(?:mov(?:e|ing)|skip|re-?book|chang(?:e|ing))\\b[^.!?]{0,25}\\b(?:appointment|appt|visit|service|us|me|today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\\s+(?:week|month)|this\\s+week)\\b";
   const freshAsk = needAsk
-    || /\bplease\s+(?:re-?schedul|postpon)|\bactually\b[^.!?]{0,30}\b(?:please|can|could|need|want)\b[^.!?]{0,20}\b(?:re-?schedul|postpon)|\b(?:re-?schedul|postpon)\w*(?:\s+\w+){0,2}\s+again\b/i.test(text);
+    || /\bplease\s+(?:re-?schedul|postpon)|\bactually\b[^.!?]{0,30}\b(?:please|can|could|need|want)\b[^.!?]{0,20}\b(?:re-?schedul|postpon)|\b(?:re-?schedul|postpon)\w*(?:\s+\w+){0,2}\s+again\b/i.test(text)
+    || new RegExp(`\\bplease\\s+${GUARDED_MOVE}|\\bactually\\b[^.!?]{0,30}\\b(?:please|can|could|need|want)\\b[^.!?]{0,20}\\b${GUARDED_MOVE}`, 'i').test(text);
   // A self-correction ("Don't reschedule Tuesday. Actually, please
   // reschedule for Friday.") is a live ask — the fresh ask outranks the
   // whole-message negation scan (codex r24).

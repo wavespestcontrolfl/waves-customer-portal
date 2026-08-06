@@ -210,3 +210,33 @@ describe('negated need/want phrases are not fresh asks (codex r26)', () => {
     expect(hasRescheduleOrAwayIntent('I need to reschedule my appointment')).toBe(true);
   });
 });
+
+describe('absence forms, cancel negations, correction verbs (codex r27)', () => {
+  test('cant-be-there absence flags', () => {
+    expect(hasRescheduleOrAwayIntent("I can't be there tomorrow")).toBe(true);
+  });
+  test('wont-be-available absence flags', () => {
+    expect(hasRescheduleOrAwayIntent("I won't be available for tomorrow's service")).toBe(true);
+  });
+  test('nobody-home absence flags', () => {
+    expect(hasRescheduleOrAwayIntent('Nobody will be home tomorrow')).toBe(true);
+  });
+  test('dont-want-you-to-cancel suppresses', () => {
+    expect(hasRescheduleOrAwayIntent("I don't want you to cancel tomorrow's appointment")).toBe(false);
+  });
+  test('dont-want-my-appointment-canceled suppresses', () => {
+    expect(hasRescheduleOrAwayIntent("I don't want my appointment canceled")).toBe(false);
+  });
+  test('was-not-asking-to-cancel suppresses', () => {
+    expect(hasRescheduleOrAwayIntent("I was not asking to cancel tomorrow's service")).toBe(false);
+  });
+  test('move correction overrides negation', () => {
+    expect(hasRescheduleOrAwayIntent("Don't move Tuesday. Actually, please move my appointment to Friday")).toBe(true);
+  });
+  test('skip correction overrides negation', () => {
+    expect(hasRescheduleOrAwayIntent("Don't skip Tuesday. Actually, please skip Friday")).toBe(true);
+  });
+  test('please-move-forward business phrase stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent('Please move forward with the treatment plan')).toBe(false);
+  });
+});
