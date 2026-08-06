@@ -20,6 +20,7 @@ const {
   tierQualifyingRecurringServiceKeys,
   combinedTierQualifyingCount,
   determineTier,
+  isMembershipTierUpgrade,
 } = require('../services/estimate-converter');
 
 const treeShrubEstimateData = {
@@ -68,6 +69,26 @@ describe('combined membership tier on add-on accepts', () => {
       { name: 'Palm Tree Injections', service: 'palm_injection', selected: true },
       { name: 'Rodent Bait Stations', service: 'rodent_bait', selected: true },
     ])).toEqual([]);
+  });
+});
+
+describe('tier-upgrade review gating (persisted-tier comparison, codex r2)', () => {
+  test('an accept that moves the STORED tier up is an upgrade', () => {
+    expect(isMembershipTierUpgrade('Bronze', 'Silver')).toBe(true);
+    // Bronze-stamped legacy customer whose rows already supported Silver:
+    // the accept that actually raises the stored tier still alerts.
+    expect(isMembershipTierUpgrade('bronze', 'Silver')).toBe(true);
+    expect(isMembershipTierUpgrade(null, 'Bronze')).toBe(true);
+    expect(isMembershipTierUpgrade('One-Time', 'Silver')).toBe(true);
+    expect(isMembershipTierUpgrade('Commercial', 'Silver')).toBe(true);
+  });
+
+  test('same tier or a downgrade is never an "upgrade"', () => {
+    expect(isMembershipTierUpgrade('Silver', 'Silver')).toBe(false);
+    // Stale-stamped Gold whose rows only support Silver: downgrade, no alert.
+    expect(isMembershipTierUpgrade('Gold', 'Silver')).toBe(false);
+    expect(isMembershipTierUpgrade('Platinum', 'Gold')).toBe(false);
+    expect(isMembershipTierUpgrade('Silver', 'none')).toBe(false);
   });
 });
 

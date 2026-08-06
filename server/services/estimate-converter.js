@@ -464,6 +464,17 @@ function countTierQualifyingRecurringServices(services = []) {
   return tierQualifyingRecurringServiceKeys(services).length;
 }
 
+// Rank order for upgrade detection ONLY (notification gating) — non-member
+// sentinels (none/One-Time/Commercial/null) rank below every membership tier
+// so a first real membership tier counts as an upgrade.
+const WAVEGUARD_TIER_RANK = { bronze: 1, silver: 2, gold: 3, platinum: 4 };
+
+function isMembershipTierUpgrade(previousTier, nextTier) {
+  const prev = WAVEGUARD_TIER_RANK[String(previousTier || '').trim().toLowerCase()] || 0;
+  const next = WAVEGUARD_TIER_RANK[String(nextTier || '').trim().toLowerCase()] || 0;
+  return next > prev;
+}
+
 // Distinct qualifying-family count across the customer's EXISTING plans plus
 // this estimate's additions — the number the combined membership tier is
 // determined from. Same union the quote side advertises (estimate-membership-
@@ -2744,7 +2755,11 @@ const EstimateConverter = {
     await database('activity_log').insert({
       customer_id: customerId,
       action: 'estimate_converted',
-      description: `Estimate #${estimateId} converted: ${customer.first_name} ${customer.last_name} → WaveGuard ${tier} at $${monthlyRate.toFixed(2)}/mo (${serviceCount} services, ${scheduledCount} scheduled)`,
+      // Combined count in the operator-visible line (codex #3228 r2): the
+      // tier is activated from prior + added families, and the timeline
+      // reads this description without the metadata — an estimate-only
+      // count beside a combined tier reads as a contradiction.
+      description: `Estimate #${estimateId} converted: ${customer.first_name} ${customer.last_name} → WaveGuard ${tier} at $${monthlyRate.toFixed(2)}/mo (${combinedServiceCount} combined qualifying services, ${serviceCount} from this estimate, ${scheduledCount} scheduled)`,
       metadata: JSON.stringify({
         estimateId, tier, discount, monthlyRate, serviceCount, scheduledCount, firstScheduledServiceId,
         priorQualifyingKeys, combinedServiceCount,
@@ -3336,10 +3351,16 @@ const EstimateConverter = {
     // notification: in-transaction callers dispatch post-commit so a
     // rolled-back accept can't page staff.
     let tierUpgradeNotification = null;
+    // Upgrade = the activated tier outranks the customer's PERSISTED tier
+    // (codex #3228 r2) — not the tier the prior rows alone would derive. A
+    // stale-stamped Gold customer whose rows only support Silver is a
+    // downgrade (no "upgrade" alert), while a Bronze-stamped legacy customer
+    // whose existing rows already supported Silver gets the review alert the
+    // moment an accept actually moves the stored tier up.
     if (!suppressRecurringConversion && !commercialOnlyRecurring
       && priorQualifyingKeys.length > 0
       && tier && tier !== 'none'
-      && determineTier(priorQualifyingKeys.length, true).tier !== tier) {
+      && isMembershipTierUpgrade(customer.waveguard_tier, tier)) {
       const discountPct = Math.round((discount || 0) * 100);
       const tierReviewPayload = {
         type: 'estimate_converted',
@@ -3442,6 +3463,7 @@ module.exports.calculateAnnualPrepayAmount = calculateAnnualPrepayAmount;
 module.exports.countTierQualifyingRecurringServices = countTierQualifyingRecurringServices;
 module.exports.tierQualifyingRecurringServiceKeys = tierQualifyingRecurringServiceKeys;
 module.exports.combinedTierQualifyingCount = combinedTierQualifyingCount;
+module.exports.isMembershipTierUpgrade = isMembershipTierUpgrade;
 module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;

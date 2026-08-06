@@ -528,7 +528,12 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
         .orWhereRaw('reservation_expires_at > NOW()');
     })
     .orderBy('scheduled_date', 'asc')
-    .orderBy('window_start', 'asc');
+    .orderBy('window_start', 'asc')
+    // Unique final key: scheduled_date + window_start is not a total order
+    // (bundled/multi-property visits tie), and the fallback below paginates —
+    // without a stable tiebreaker LIMIT/OFFSET pages can repeat or skip tied
+    // rows and miss a same-family appointment (codex #3228 r2).
+    .orderBy('id', 'asc');
 
   const q = baseQuery()
     .where((builder) => {
