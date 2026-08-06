@@ -933,6 +933,66 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan.plan[0].templateKey).toBe('first_treatment_ask');
   });
 
+  test('mixed-linkage trapping programs, primary-premise equivalence, and the opener trace (codex #3243 r3)', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+    const inFive = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+
+    // LINKED visit 2 + UNLINKED booked visit 3: the structural final return
+    // must yield to the family look-ahead → middle, no cadence yet.
+    let mock = makeMock({
+      scheduled_services: [
+        { id: 'mx-1', customer_id: 'mx', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping' },
+        { id: 'mx-2', customer_id: 'mx', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', parent_service_id: 'mx-1', follow_up_interval_days: 3 },
+        { id: 'mx-3', customer_id: 'mx', service_id: 'svc-trap-fu', status: 'scheduled', scheduled_date: inFive, service_key: 'rodent_trapping_followup' },
+      ],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'mx', scheduledServiceId: 'mx-2' });
+    expect(plan.skip).toBe('multi_treatment_middle');
+
+    // Inverse shape: UNLINKED completed opener + LINKED live child — the
+    // liveChild branch must not restart the series with another first ask.
+    mock = makeMock({
+      scheduled_services: [
+        { id: 'iv-1', customer_id: 'iv', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping' },
+        { id: 'iv-2', customer_id: 'iv', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+        { id: 'iv-3', customer_id: 'iv', service_id: 'svc-trap-fu', status: 'scheduled', scheduled_date: inFive, service_key: 'rodent_trapping_followup', parent_service_id: 'iv-2' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'iv', scheduledServiceId: 'iv-2' });
+    expect(plan.skip).toBe('multi_treatment_middle');
+
+    // Legacy NULL rows and backfilled-primary rows are ONE premise: a prior
+    // stamped with the primary property id still makes a NULL-row final.
+    mock = makeMock({
+      customer_properties: [{ id: 'prop-primary', customer_id: 'pe', is_primary: true }],
+      scheduled_services: [
+        { id: 'pe-1', customer_id: 'pe', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: 'prop-primary' },
+        { id: 'pe-2', customer_id: 'pe', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3, property_id: null },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'pe', scheduledServiceId: 'pe-2' });
+    expect(plan.seriesFinal).toBe(true);
+    expect(plan.plan).toHaveLength(3);
+
+    // Opener trace: days 0/20/40 — the final's direct window (30d) misses
+    // the day-40 opener, the hop via day-20 reaches it and exempts its ask.
+    mock = makeMock({
+      scheduled_services: [
+        { id: 'op-1', customer_id: 'op', service_id: 'svc-trap', status: 'completed', scheduled_date: d(40), service_key: 'rodent_trapping' },
+        { id: 'op-2', customer_id: 'op', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(20), service_key: 'rodent_trapping_followup' },
+        { id: 'op-3', customer_id: 'op', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [{ id: 'seq-opener', customer_id: 'op', scheduled_service_id: 'op-1', status: 'completed' }],
+    });
+    db.mockImplementation(mock);
+    const exempt = await ReviewService._seriesExemptSequenceIds('op', { scheduledServiceId: 'op-3' });
+    expect(exempt).toContain('seq-opener');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
