@@ -656,6 +656,8 @@ async function getCampaignContext({ topic, city, service }) {
         .where('reviewer_name', '!=', '_stats')
         .where('star_rating', 5)
         .whereNotNull('review_text')
+        // Never quote a review Google has removed in marketing content.
+        .whereNull('missing_since')
         .where(function activeLocations() {
           this.where('location_id', location.id).orWhereNull('location_id');
         })

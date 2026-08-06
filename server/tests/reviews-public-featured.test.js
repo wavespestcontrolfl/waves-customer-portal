@@ -19,6 +19,7 @@ function mockMakeBuilder(rows, calls) {
     where(...args) { calls.push(['where', ...args]); return builder; },
     whereNot(...args) { calls.push(['whereNot', ...args]); return builder; },
     whereNotNull(...args) { calls.push(['whereNotNull', ...args]); return builder; },
+    whereNull(...args) { calls.push(['whereNull', ...args]); return builder; },
     whereRaw(...args) { calls.push(['whereRaw', ...args]); return builder; },
     orderBy(...args) { calls.push(['orderBy', ...args]); return builder; },
     limit(...args) { calls.push(['limit', ...args]); return builder; },
@@ -91,5 +92,19 @@ describe('GET /api/reviews/featured', () => {
     );
     expect(exclusionIdx).toBeGreaterThanOrEqual(0);
     expect(firstLocationIdx).toBeGreaterThan(exclusionIdx);
+  });
+
+  test('excludes reviews Google has removed (missing_since stamped), applied before clone', async () => {
+    const res = await fetch(`${base}/api/reviews/featured?location=bradenton&limit=8`);
+    expect(res.status).toBe(200);
+
+    const missingExclusionIdx = mockDbCalls.findIndex(
+      ([method, col]) => method === 'whereNull' && col === 'missing_since',
+    );
+    const firstLocationIdx = mockDbCalls.findIndex(
+      ([method, col]) => method === 'where' && col === 'location_id',
+    );
+    expect(missingExclusionIdx).toBeGreaterThanOrEqual(0);
+    expect(firstLocationIdx).toBeGreaterThan(missingExclusionIdx);
   });
 });

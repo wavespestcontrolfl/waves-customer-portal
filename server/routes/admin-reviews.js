@@ -229,6 +229,9 @@ router.get('/', async (req, res, next) => {
         reviewCreatedAt: r.review_created_at,
         matchedCustomer: r.cust_first ? { name: `${r.cust_first} ${r.cust_last}`, tier: r.cust_tier, id: r.customer_id } : null,
         syncedAt: r.synced_at,
+        // Non-null = this review no longer appears on Google (removed or
+        // filtered) as of this timestamp; the row is kept as evidence.
+        missingSince: r.missing_since || null,
       })),
       stats: {
         totalReviews: totalGoogleReviews || parseInt(totals?.total || 0),

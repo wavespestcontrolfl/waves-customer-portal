@@ -9,6 +9,9 @@ jest.mock('../config/locations', () => ({
 jest.mock('../config/models', () => ({ FLAGSHIP: 'test-flagship' }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
+// Advisory-lock helper needs a real pg pool — model it as pass-through; the
+// degraded-alert dedupe under test is the 24h notification check inside it.
+jest.mock('../utils/cron-lock', () => ({ runExclusive: async (name, fn) => fn() }));
 
 function createDbMock(initialRows = {}) {
   const state = {
@@ -149,7 +152,7 @@ function createDbMock(initialRows = {}) {
           }),
         };
       },
-      async update(record) {
+      async update(record, returning) {
         const rows = (state.rows[this._table] || [])
           .filter(row => matchesWhere(row, this._where))
           .filter(row => this._rawFilters.every(fn => fn(row)))
@@ -159,6 +162,9 @@ function createDbMock(initialRows = {}) {
           Object.assign(row, record);
           state.updates.push({ table, id: row.id, record });
         });
+        if (returning) {
+          return rows.map(row => Object.fromEntries(returning.map(col => [col, row[col]])));
+        }
         return rows.length;
       },
       then(resolve, reject) {
@@ -827,6 +833,24 @@ describe('Google Business review sync', () => {
     expect(alert.title).toContain('1 Google review removed at Lakewood Ranch');
     expect(alert.body).toContain('Vanished Vera');
     expect(alert.link).toBe('/admin/reviews');
+  });
+
+  test('never stamps a Places-sampled row without an authoritative GBP identity', async () => {
+    // An edited review moves the Places timestamp; the GBP feed may carry it
+    // under its resource name while the orphaned sample row goes stale —
+    // that is not a removal.
+    seedSyncedReview({
+      id: 'places-orphan',
+      google_review_id: 'places_place-1_1700000000',
+      gbp_review_name: null,
+      reviewer_name: 'Sample Sally',
+    });
+    gbpFeed([]);
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'places-orphan').missing_since).toBeNull();
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(0);
   });
 
   test('does not re-alert on later syncs for a review already stamped missing', async () => {

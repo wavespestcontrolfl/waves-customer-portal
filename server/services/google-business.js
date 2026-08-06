@@ -9,6 +9,7 @@ const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
 const NotificationService = require('./notification-service');
+const { runExclusive } = require('../utils/cron-lock');
 const DRAFT_REPLY_PREFIX = '[DRAFT]';
 
 function isDraftReply(reply) {
@@ -759,16 +760,19 @@ class GoogleBusinessService {
         }
 
         if (!usedGbp) {
+          if (loc.googleLocationResourceName) {
+            // Running blind — removals and most new reviews are invisible
+            // until the GBP credentials work. Alert BEFORE attempting the
+            // fallible Places fallback: if that throws too, the outer catch
+            // would otherwise skip the alert and recreate the silent
+            // failure this watchdog exists to detect.
+            await this._notifyDegradedSync(loc, gbpFailure || 'no_client');
+          }
           const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY);
           totalSynced += sample.synced;
           totalNew += sample.new;
           sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
           logger.info(`[gbp] Synced ${sample.synced} review sample rows for ${loc.name} via Places API fallback`);
-          if (loc.googleLocationResourceName) {
-            // Running blind on the ~5-review Places sample — removals and
-            // most new reviews are invisible until the GBP token works.
-            await this._notifyDegradedSync(loc, gbpFailure || 'no_client');
-          }
         }
       } catch (err) {
         logger.error(`Review sync failed for ${loc.name}: ${err.message}`);
@@ -803,25 +807,42 @@ class GoogleBusinessService {
    */
   async _reconcileMissingReviews(loc, syncStart) {
     try {
-      const gone = await db('google_reviews')
+      // Only rows with an authoritative GBP identity: a Places-sampled row
+      // (gbp_review_name null) can go stale legitimately — an edit moves the
+      // Places timestamp, the GBP upsert may insert the same review under
+      // its resource name, and the orphaned sample row would be falsely
+      // reported as removed.
+      const candidates = await db('google_reviews')
         .where({ location_id: loc.id })
         .where('reviewer_name', '!=', '_stats')
+        .whereNotNull('gbp_review_name')
         .whereNull('missing_since')
         .where('synced_at', '<', syncStart)
         .select('id', 'reviewer_name', 'star_rating', 'review_created_at');
+      if (candidates.length === 0) return;
+
+      // Atomic claim: the hourly job and the manual admin sync (or two
+      // instances overlapping during a deploy) can both select the same
+      // rows. Conditioning the update on missing_since IS NULL means only
+      // one runner claims each row, so only one notification fires.
+      const claimedRows = await db('google_reviews')
+        .whereIn('id', candidates.map(r => r.id))
+        .whereNull('missing_since')
+        .update({ missing_since: db.fn.now() }, ['id']);
+      const claimedIds = new Set((claimedRows || []).map(r => r.id));
+      const gone = candidates.filter(r => claimedIds.has(r.id));
       if (gone.length === 0) return;
 
-      await db('google_reviews').whereIn('id', gone.map(r => r.id)).update({ missing_since: db.fn.now() });
-
-      const names = gone.slice(0, 5)
+      const names = gone.slice(0, 15)
         .map(r => `${r.reviewer_name || 'Anonymous'} (${Number(r.star_rating) || 0}-star)`)
         .join(', ');
-      const suffix = gone.length > 5 ? ` and ${gone.length - 5} more` : '';
+      const suffix = gone.length > 15 ? ` and ${gone.length - 15} more` : '';
       await NotificationService.notifyAdmin(
         'review',
         `${gone.length} Google review${gone.length === 1 ? '' : 's'} removed at ${loc.name}`,
         `Google no longer returns these reviews for ${loc.name}: ${names}${suffix}. The full text is kept in the portal. If they are legitimate customer reviews caught in a spam sweep, file a missing-reviews case with Google Business Profile support and escalate by replying in-thread.`,
         {
+          bell: true,
           link: '/admin/reviews',
           metadata: { locationId: loc.id, reason: 'reviews_missing', count: gone.length, reviewIds: gone.map(r => r.id) },
         },
@@ -846,26 +867,56 @@ class GoogleBusinessService {
   async _notifyDegradedSync(loc, cause) {
     try {
       const title = `Google review sync degraded for ${loc.name}`;
-      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-      const recent = await db('notifications')
-        .where({ recipient_type: 'admin', title })
-        .where('created_at', '>', dayAgo)
-        .first();
-      if (recent) return;
+      // The advisory lock serializes the check-then-insert across the hourly
+      // job, the manual admin sync, and overlapping deploy instances — a
+      // plain read-then-insert here would double-notify. A held lock means
+      // another runner is already alerting; skipping is correct.
+      await runExclusive(`gbp-degraded-notify:${loc.id}`, async () => {
+        const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const recent = await db('notifications')
+          .where({ recipient_type: 'admin', title })
+          .where('created_at', '>', dayAgo)
+          .first();
+        if (recent) return;
 
-      const tokenEnv = loc.googleRefreshTokenEnv || 'GBP refresh token';
-      const detail = cause === 'no_client'
-        ? (process.env[loc.googleRefreshTokenEnv] ? `the GBP client could not be initialized (${tokenEnv} may be invalid)` : `${tokenEnv} is not set`)
-        : `the GBP Reviews API pull failed: ${cause}`;
-      await NotificationService.notifyAdmin(
-        'review',
-        title,
-        `Review tracking for ${loc.name} fell back to the ~5-review Places sample because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP token works. Re-authorize the token to restore full tracking.`,
-        { link: '/admin/reviews', metadata: { locationId: loc.id, reason: 'gbp_sync_degraded', cause } },
-      );
-      logger.warn(`[gbp] Review sync degraded for ${loc.name} (${cause === 'no_client' ? 'no client' : 'pull failed'}) — admin notified`);
+        const detail = cause === 'no_client'
+          ? `the GBP client could not be initialized: ${await this._describeCredentialGap(loc)}`
+          : `the GBP Reviews API pull failed: ${cause}`;
+        await NotificationService.notifyAdmin(
+          'review',
+          title,
+          `Review tracking for ${loc.name} fell back to the ~5-review Places sample because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`,
+          { bell: true, link: '/admin/reviews', metadata: { locationId: loc.id, reason: 'gbp_sync_degraded', cause } },
+        );
+        logger.warn(`[gbp] Review sync degraded for ${loc.name} (${cause === 'no_client' ? 'no client' : 'pull failed'}) — admin notified`);
+      }, { recordHealth: false });
     } catch (err) {
       logger.warn(`[gbp] Degraded-sync notify failed for ${loc.name}: ${err.message}`);
+    }
+  }
+
+  /**
+   * Name the credential component that is actually missing, mirroring the
+   * checks _getClient performs (env client id/secret; refresh token from
+   * system_settings first, env fallback) — so the degraded-sync alert sends
+   * the admin to the right knob instead of guessing "token not set".
+   */
+  async _describeCredentialGap(loc) {
+    try {
+      const envKey = LOCATION_ENV_KEYS[loc.id];
+      if (!envKey) return 'no GBP credential mapping exists for this location';
+      const missing = [];
+      if (!process.env[`GBP_CLIENT_ID_${envKey}`] || !process.env[`GBP_CLIENT_SECRET_${envKey}`]) {
+        missing.push(`the OAuth client credentials (GBP_CLIENT_ID_${envKey} / GBP_CLIENT_SECRET_${envKey})`);
+      }
+      const stored = await this._getStoredTokens(loc.id);
+      if (!stored.refresh_token && !process.env[`GBP_REFRESH_TOKEN_${envKey}`]) {
+        missing.push(`a refresh token (connect the location in admin Google settings, or set GBP_REFRESH_TOKEN_${envKey})`);
+      }
+      if (missing.length === 0) return 'credentials are present but the client still failed to initialize';
+      return `missing ${missing.join(' and ')}`;
+    } catch {
+      return 'the GBP credential state could not be determined';
     }
   }
 
