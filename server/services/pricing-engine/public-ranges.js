@@ -81,10 +81,13 @@ function buildRows() {
     unit: 'per application',
     // Sweep every supported cadence via the engine's tiers array — monthly
     // per-application prices sit below quarterly, so quarterly-only would
-    // overstate the low end of an advertised option.
+    // overstate the low end of an advertised option — and every residential
+    // property type (condo/townhome adjustments lower the floor).
     values: sweepValues(
-      FOOTPRINTS_SQFT.flatMap((f) => PEST_PROFILES.map((p) => ({ f, p }))),
-      ({ f, p }) => sp.pricePestControl({ footprint: f, ...p.property }, { frequency: 'quarterly', ...p.options }),
+      FOOTPRINTS_SQFT.flatMap((f) =>
+        PEST_PROFILES.flatMap((p) =>
+          Object.keys(constants.PROPERTY_TYPE_ADJ).map((propertyType) => ({ f, p, propertyType })))),
+      ({ f, p, propertyType }) => sp.pricePestControl({ footprint: f, propertyType, ...p.property }, { frequency: 'quarterly', ...p.options }),
       (r) => (r.tiers || []).map((t) => t.perApp)),
     notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features. One-time initial service fee $${Math.round(constants.PEST.initialFee)}.`,
   }));
@@ -131,7 +134,7 @@ function buildRows() {
     values: sweepValues(
       [1500, 2200, 3000, 4000].flatMap((footprint) =>
         [1, 2, 3].flatMap((stories) =>
-          [1, 2, 3, 4].flatMap((rooms) =>
+          [1, 2, 4, 7, 10].flatMap((rooms) =>
             ['light', 'moderate', 'heavy'].flatMap((severity) =>
               Object.keys(constants.BED_BUG.prepStatus).flatMap((prepStatus) =>
                 ['singleFamily', 'apartment'].flatMap((occupancyType) =>
@@ -149,7 +152,7 @@ function buildRows() {
         { footprint, stories },
         { rooms, method, severity, prepStatus, occupancyType, equipment, heatScope }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.total ?? r.price))),
-    notes: '1-4 rooms; priced by rooms, severity, home size, stories, occupancy, and method (chemical, or in-house heat/hybrid where eligible). Severe or under-prepared jobs are quoted after inspection.',
+    notes: '1-10 rooms; priced by rooms, severity, home size, stories, occupancy, and method (chemical, or in-house heat/hybrid where eligible). Severe or under-prepared jobs are quoted after inspection.',
   }));
 
   // Low- and high-pressure residential feature sets — the pricer's pressure
@@ -170,7 +173,8 @@ function buildRows() {
     name: 'Mosquito Program',
     unit: 'per application',
     values: sweepValues(
-      LOTS_SQFT.flatMap((lotSqFt) => MOSQUITO_PROFILES.map((p) => ({ lotSqFt, p }))),
+      // Through the ACRE lot category the recurring program prices directly.
+      [...LOTS_SQFT, 45560].flatMap((lotSqFt) => MOSQUITO_PROFILES.map((p) => ({ lotSqFt, p }))),
       ({ lotSqFt, p }) => sp.priceMosquito({ footprint: 2000, lotSqFt, features: p.features }, p.options),
       (r) => (r.tiers || []).map((t) => t.perVisit)),
     notes: 'Seasonal (9 applications/yr) or monthly (12 applications/yr) program; priced by treatable area and mosquito pressure.',
@@ -219,13 +223,13 @@ function buildRows() {
   ];
   add('flea_elimination', () => rangeRow({
     key: 'flea_elimination',
-    name: 'Flea Elimination (2-visit package)',
-    unit: 'per package',
+    name: 'Flea Treatment',
+    unit: 'per program',
     values: sweepValues(
       FOOTPRINTS_SQFT.flatMap((f) => FLEA_PROFILES.map((p) => ({ f, p }))),
       ({ f, p }) => sp.priceFlea({ footprint: f, ...p }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.total)),
-    notes: 'Priced by home size, infestation severity, and optional exterior treatment area.',
+    notes: 'Single-visit knockdown or 2-visit elimination package; priced by home size, infestation severity, and optional exterior treatment area.',
   }));
 
   add('rodent_bait_program', () => rangeRow({
@@ -249,7 +253,13 @@ function buildRows() {
     name: 'Rodent Trapping',
     unit: 'per program',
     values: sweepValues(
-      [{ plan: 'standard' }, { plan: 'unlimited' }, { plan: 'standard', upgradeToUnlimited: true }],
+      [
+        { plan: 'standard' },
+        { plan: 'unlimited' },
+        { plan: 'standard', upgradeToUnlimited: true },
+        // Standard plan with included callbacks exhausted + billable extras.
+        { plan: 'standard', callbacksUsed: 2, extraCallbackCount: 2 },
+      ],
       (opts) => sp.priceRodentTrapping({}, opts),
       (r) => r.price),
     notes: 'Standard (setup + 2 included callbacks), unlimited-callback plan, or mid-program upgrade to unlimited; emergency same-day service carries a surcharge quoted at booking.',
@@ -265,7 +275,7 @@ function buildRows() {
     values: sweepValues(
       Object.keys(constants.RODENT.sanitation)
         .filter((tier) => constants.RODENT.sanitation[tier] && typeof constants.RODENT.sanitation[tier] === 'object' && 'base' in constants.RODENT.sanitation[tier])
-        .flatMap((tier) => [250, 500, 1000, 1500].flatMap((affectedSqFt) =>
+        .flatMap((tier) => [250, 500, 1500, 4000].flatMap((affectedSqFt) =>
           [0, 50].flatMap((insulationRemovalCuFt) =>
             ['normal', 'crawlspace', 'tight'].map((accessType) => ({ tier, affectedSqFt, insulationRemovalCuFt, accessType }))))),
       ({ tier, affectedSqFt, insulationRemovalCuFt, accessType }) =>
@@ -286,6 +296,9 @@ function buildRows() {
         { standardWireMeshPoints: 0 },
         { standardWireMeshPoints: 5, meshSoftLF: 20 },
         { standardWireMeshPoints: 10, meshSoftLF: 50 },
+        // Inspection-waived configurations (service opt-in / qualifying total).
+        { standardWireMeshPoints: 10, meshSoftLF: 50, waiveInspection: true },
+        { standardWireMeshPoints: 5, meshSoftLF: 20, waiveInspection: true, hasServiceOptIn: true },
         { standardWireMeshPoints: 20, meshSoftLF: 50 },
         { advancedWireMeshPoints: 10, meshConcreteLF: 50 },
         { standardWireMeshPoints: 10, advancedWireMeshPoints: 10, standardBirdBoxes: 2, tileHighBirdBoxes: 2, customBirdBoxes: 2, meshSoftLF: 30, meshConcreteLF: 30 },
