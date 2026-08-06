@@ -279,3 +279,12 @@ describe('determiner-less skip asks (codex r30)', () => {
     expect(hasRescheduleOrAwayIntent('Could you skip upcoming appointment?')).toBe(true);
   });
 });
+
+describe('direct travel targets (codex r31)', () => {
+  test('traveling tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent('I will be traveling tomorrow')).toBe(true);
+  });
+  test('traveling Friday flags', () => {
+    expect(hasRescheduleOrAwayIntent('We are traveling Friday')).toBe(true);
+  });
+});

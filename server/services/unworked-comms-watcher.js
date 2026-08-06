@@ -151,7 +151,11 @@ async function loadCallbackCalls(cutoff = new Date()) {
           )
           AND os.status IN ('queued', 'sent', 'delivered')
           AND os.created_at > COALESCE(c.bridged_at, c.created_at) + CASE WHEN c.bridged_at IS NOT NULL THEN make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE interval '0' END
-          AND (c.customer_id IS NULL OR os.customer_id IS NULL OR os.customer_id = c.customer_id)
+          -- Same identity rule as the outbound-call leg (codex r31): a
+          -- LINKED callback is cleared only by a text linked to the same
+          -- customer — an unlinked manual send on a shared number may
+          -- concern the other household member.
+          AND (c.customer_id IS NULL OR os.customer_id = c.customer_id)
           AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10)
             = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, ''), '\\D', '', 'g'), 10)
       )
