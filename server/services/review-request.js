@@ -647,6 +647,27 @@ const ReviewService = {
                 .where("scheduled_date", "<", anchorStr)
                 .where("scheduled_date", ">=", windowFloor)
                 .first();
+          if (prior && isTrappingSeries) {
+            // An already-booked LATER family visit means THIS is a middle
+            // check, not the final — unlinked programs book several checks
+            // up front, and the child queries above can't see them (they
+            // are unlinked too). Non-dead statuses only ('completed' counts:
+            // a late-paid middle enrollment must not fire the cadence the
+            // real final visit carries), bounded to the family window
+            // ahead — a far-future booking is a new series.
+            const ceilStr = new Date(Date.parse(`${anchorStr}T00:00:00Z`) + windowDays * 86400000)
+              .toISOString().slice(0, 10);
+            const later = await db("scheduled_services as fs")
+              .leftJoin("services as fsv", "fs.service_id", "fsv.id")
+              .where("fs.customer_id", customerId)
+              .where("fs.id", "!=", svc.id)
+              .where("fs.scheduled_date", ">", anchorStr)
+              .where("fs.scheduled_date", "<=", ceilStr)
+              .whereNotIn("fs.status", [...FOLLOWUP_CHILD_INACTIVE_STATUSES])
+              .whereIn("fsv.service_key", [...TRAPPING_MULTI_TREATMENT_KEYS])
+              .first();
+            if (later) return { skip: "multi_treatment_middle" };
+          }
           return prior
             ? { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true }
             : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };

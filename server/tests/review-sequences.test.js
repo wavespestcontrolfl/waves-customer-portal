@@ -852,6 +852,33 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(exempt).toContain('seq-first-trap');
   });
 
+  test('an unlinked trapping program with a LATER booked check stands down at the middle visit (codex #3243 r1)', async () => {
+    mockGates.reviewSequences = true;
+    const tenAgo = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
+    const today = new Date().toISOString().slice(0, 10);
+    const inFive = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+    // Three unlinked family visits booked up front; completing visit 2 finds
+    // visit 1 behind AND visit 3 ahead → middle, no cadence yet.
+    const mock = makeMock({
+      customers: [{ id: 'tr-3', first_name: 'Mia', last_name: 'V', phone: '+19410000063', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-tr3', customer_id: 'tr-3', scheduled_service_id: 'ss-mid' }],
+      scheduled_services: [
+        { id: 'ss-first', customer_id: 'tr-3', service_id: 'svc-trap', status: 'completed', scheduled_date: tenAgo, service_key: 'rodent_trapping' },
+        { id: 'ss-mid', customer_id: 'tr-3', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: today, service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+        { id: 'ss-later', customer_id: 'tr-3', service_id: 'svc-trap-fu', status: 'scheduled', scheduled_date: inFive, service_key: 'rodent_trapping_followup' },
+      ],
+    });
+    db.mockImplementation(mock);
+    const result = await ReviewService.enrollPostService({ customerId: 'tr-3', serviceRecordId: 'sr-tr3', completedAt: new Date() });
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('multi_treatment_middle');
+    // A cancelled later booking does NOT hold the series open.
+    mock.__state.rows.scheduled_services.find((r) => r.id === 'ss-later').status = 'cancelled';
+    const rerun = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'tr-3', scheduledServiceId: 'ss-mid' });
+    expect(rerun.seriesFinal).toBe(true);
+    expect(rerun.plan).toHaveLength(3);
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
