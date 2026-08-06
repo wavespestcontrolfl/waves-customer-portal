@@ -357,3 +357,15 @@ describe('miss/delay/put-off asks (codex r36)', () => {
     expect(hasRescheduleOrAwayIntent('Sorry I missed your call earlier')).toBe(false);
   });
 });
+
+describe('gate-code affirmative and past-inability vetoes (codex r37)', () => {
+  test('no gate code still flags away', () => {
+    expect(hasRescheduleOrAwayIntent("I won't be home tomorrow and I don't have a gate code")).toBe(true);
+  });
+  test('affirmative gate code suppresses away heads-up', () => {
+    expect(hasRescheduleOrAwayIntent("I won't be home tomorrow, the gate code is 4321")).toBe(false);
+  });
+  test('past unable-to-attend stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("I was unable to attend yesterday's appointment")).toBe(false);
+  });
+});

@@ -105,7 +105,7 @@ const AWAY_RE = /\b(?:out\s+of\s+town|on\s+vacation|leav(?:e|ing)\s+for\s+vacati
 // Away + permission = a heads-up, not a reschedule ask ("won't be home but
 // here's the gate code" / "exterior only is fine"). Permission only
 // suppresses the AWAY leg — an explicit reschedule/cancel verb still wins.
-const AWAY_PERMISSION_RE = /\b(?:gate\s*code|door\s+(?:is\s+|will\s+be\s+)?(?:open|unlocked)|garage\s+(?:is\s+|will\s+be\s+)?open|no\s+need\s+to\s+(?:be|get|come)\s+in|don'?t\s+need\s+to\s+(?:be|get|come)\s+in|(?:it|that)'?s\s+fine|exterior\s+(?:only\s+)?(?:is\s+)?fine|(?:you|y'?all)\s+can\s+still\s+(?:come|do|spray|treat)|go\s+ahead)\b/i;
+const AWAY_PERMISSION_RE = /\b(?:(?:the\s+)?gate\s*code\s+is\b|gate\s*code\b[^.!?]{0,25}?[:#]\s*\d{3,}|(?:i|we)\s+(?:do\s+)?have\s+(?:a|the)\s+gate\s*code\b|(?:here'?s|i'?ll\s+(?:text|send|give|leave)(?:\s+you)?)\s+(?:the\s+)?gate\s*code|use\s+(?:the\s+)?gate\s*code|door\s+(?:is\s+|will\s+be\s+)?(?:open|unlocked)|garage\s+(?:is\s+|will\s+be\s+)?open|no\s+need\s+to\s+(?:be|get|come)\s+in|don'?t\s+need\s+to\s+(?:be|get|come)\s+in|(?:it|that)'?s\s+fine|exterior\s+(?:only\s+)?(?:is\s+)?fine|(?:you|y'?all)\s+can\s+still\s+(?:come|do|spray|treat)|go\s+ahead)\b/i;
 
 function hasRescheduleOrAwayIntent(body) {
   if (!body || typeof body !== 'string') return false;
@@ -171,7 +171,9 @@ function hasRescheduleOrAwayIntent(body) {
   if (cancelAsk) return true;
   // Past absences are history, not a request (codex r17): "we were out
   // of town last week".
-  const pastAway = /\b(?:were|was|got\s+back|just\s+got\s+back|returned)\b[^.!?]{0,25}\b(?:out\s+of\s+town|on\s+vacation|away)\b|\b(?:out\s+of\s+town|on\s+vacation|away)\b[^.!?]{0,15}\blast\s+(?:week|month|weekend)\b/i.test(text);
+  // Past inability is history too (codex r37): "I was unable to attend
+  // yesterday's appointment" reports, it doesn't request.
+  const pastAway = /\b(?:were|was|got\s+back|just\s+got\s+back|returned)\b[^.!?]{0,25}\b(?:out\s+of\s+town|on\s+vacation|away)\b|\b(?:out\s+of\s+town|on\s+vacation|away)\b[^.!?]{0,15}\blast\s+(?:week|month|weekend)\b|\b(?:was|were)\s+unable\s+to\s+(?:attend|make)\b|\b(?:couldn'?t|could\s+not)\s+(?:attend|make)\s+(?:it\s+)?(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service|yesterday)\b|\bunable\s+to\s+attend\b[^.!?]{0,20}\byesterday/i.test(text);
   return AWAY_RE.test(text) && !AWAY_PERMISSION_RE.test(text) && !pastAway;
 }
 

@@ -99,6 +99,11 @@ async function loadCallbackCalls(cutoff = new Date()) {
     WHERE c.created_at >= now() - interval '30 days'
       AND c.updated_at <= :cutoff
       AND c.disposition = 'callback_task_created'
+      -- Not yet due (codex r37): an explicitly agreed future callback
+      -- time (scheduling.follow_up_start_at) is scheduled work, not an
+      -- unworked obligation, until that time arrives.
+      AND (COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') = ''
+        OR (c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}')::timestamptz <= now())
       -- One obligation, one lane (codex r22): when the coach minted a
       -- call_back task for the same customer around this call, the task
       -- lane carries it (with the richer recommended action).
