@@ -834,7 +834,11 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // PRE_DISPATCH_CHECK_FAILED — that's transient infra (our fence's DB
     // read failed), retryable, not a deterministic block (codex r25).
     sendOutcome.retryable = sendOutcome.retryable === true || result.retryable === true
-      || result.code === 'PRE_DISPATCH_CHECK_FAILED';
+      // Consent/suppression lookup failures are transient infra by
+      // contract (codex r47) — terminal suppression would drop the
+      // notice permanently on a blip.
+      || result.code === 'PRE_DISPATCH_CHECK_FAILED'
+      || result.code === 'CONSENT_LOOKUP_FAILED';
     sendOutcome.blockedCode = result.code || null;
   }
   if (result.blocked || result.sent === false) {
@@ -2929,6 +2933,11 @@ const AppointmentReminders = {
       // it, a sweep delayed past the old 25-minute window still recovers.
       await db('appointment_reminders')
         .whereNull('cancellation_notice_at')
+        // Current-era guard (codex r47): a draining gate-on pod must not
+        // late-claim cancels committed after a NEWER disable was stamped
+        // (on→off rolling deploy) — late-claiming is allowed only while
+        // the enable boundary postdates the newest observed disable.
+        .whereRaw("COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-enabled-at'), '-infinity'::timestamptz) > COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-disabled-at'), '-infinity'::timestamptz)")
         .whereIn('scheduled_service_id', function recentCancels() {
           this.select('h.job_id').from('job_status_history as h')
             .where('h.to_status', 'cancelled')
