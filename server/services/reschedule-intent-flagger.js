@@ -40,13 +40,19 @@ const WORKFLOW = 'comms_guards';
 async function nextUpcomingVisit(customerId) {
   const { UPCOMING_SERVICE_STATUSES } = require('./context-aggregator');
   const horizon = horizonDays();
-  return db('scheduled_services')
+  const rows = await db('scheduled_services')
     .where({ customer_id: customerId })
     .where('scheduled_date', '>=', etDateString())
     .where('scheduled_date', '<=', db.raw(`(now() at time zone 'America/New_York')::date + ?::int`, [horizon]))
     .whereIn('status', UPCOMING_SERVICE_STATUSES)
     .orderBy([{ column: 'scheduled_date', order: 'asc' }, { column: 'window_start', order: 'asc' }])
-    .first('id', 'scheduled_date', 'window_start', 'service_type', 'status');
+    .limit(2)
+    .select('id', 'scheduled_date', 'window_start', 'service_type', 'status');
+  // Multiple upcoming visits: guessing links the flag (and its
+  // resolved-when-moved logic) to the wrong appointment — "move next
+  // week's termite inspection" is not about tomorrow's pest visit
+  // (codex #3232 r4). Flag without an entity; the bell says so.
+  return { visit: rows[0] || null, ambiguous: rows.length > 1 };
 }
 
 
@@ -59,7 +65,8 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
   try {
     if (!customer?.id || !body) return { flagged: false, reason: 'no_customer_or_body' };
 
-    const visit = await nextUpcomingVisit(customer.id);
+    const { visit: nearestVisit, ambiguous } = await nextUpcomingVisit(customer.id);
+    const visit = ambiguous ? null : nearestVisit;
     // Atomic dedupe (codex r2): the check and insert share a transaction
     // serialized by a per-customer advisory lock — two texts processed
     // concurrently cannot both pass the check and double-bell.
@@ -106,7 +113,9 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
       }),
       reasoning_summary: visit
         ? `Inbound SMS reads as a reschedule/away request with a visit on ${String(visit.scheduled_date).slice(0, 10)} still armed.`
-        : 'Inbound SMS reads as a reschedule/away request; no upcoming visit inside the horizon.',
+        : (ambiguous
+          ? 'Inbound SMS reads as a reschedule/away request; multiple upcoming visits — not auto-linked.'
+          : 'Inbound SMS reads as a reschedule/away request; no upcoming visit inside the horizon.'),
       });
     });
     if (!inserted) return { flagged: false, reason: 'recent_flag' };

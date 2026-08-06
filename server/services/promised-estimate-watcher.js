@@ -71,7 +71,7 @@ async function loadUnkeptPromises() {
       -- The PROMISE signal is required: decideDisposition maps a mere
       -- quote_requested to estimate_send too, and a caller who only asked
       -- for pricing is not a broken promise (codex r2).
-      AND (c.ai_extraction::text ~ '"quote_promised"\s*:\s*true'
+      AND (c.ai_extraction::text ~ '"quote_promised"\\s*:\\s*true'
            OR c.ai_extraction_enriched #>> '{service_request,quote_promised}' = 'true')
       AND (c.disposition IS NULL
            OR c.disposition NOT IN ('spam_discarded', 'wrong_number_closed'))
@@ -138,6 +138,7 @@ function composePromisedEstimateDigest(rows) {
     `<ul style="margin:0 0 12px 18px;padding:0;">${lines.map((l) =>
       `<li style="margin:0 0 6px 0;">${esc(l.day)} (<strong>${esc(l.age)}d ago</strong>) ${esc(l.who)} — ${esc(l.mins)}${l.summary ? `: ${esc(l.summary)}` : ''}</li>`,
     ).join('')}</ul>`,
+    ...(total > lines.length ? [`<p>…and ${total - lines.length} more not shown</p>`] : []),
     `<p><a href="${esc(adminPortalUrl())}/admin/communications?tab=calls">Open call log</a></p>`,
   ].join('\n');
 

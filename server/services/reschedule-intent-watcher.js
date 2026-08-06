@@ -30,7 +30,7 @@ const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wa
 const LOOKBACK_DAYS = 4;
 // Outbound types that count as a human answer to a waiting customer —
 // automated broadcasts (reminders, receipts, review asks) do not.
-const HUMAN_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised', 'estimate_sent', 'invoice', 'voicemail_quote_link', 'appointment_rescheduled', 'reschedule_series_confirmation'];
+const HUMAN_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised', 'estimate_sent', 'appointment_rescheduled', 'reschedule_series_confirmation'];
 const MAX_ROWS = 12;
 
 function esc(value) {
@@ -122,6 +122,7 @@ function composeRescheduleIntentDigest(rows) {
     `<ul style="margin:0 0 12px 18px;padding:0;">${lines.map((l) =>
       `<li style="margin:0 0 6px 0;">${esc(l.asked)} <a href="${esc(adminPortalUrl())}/admin/communications?thread=${esc(l.customerId || '')}"><strong>${esc(l.name)}</strong></a>: &quot;${esc(l.excerpt)}&quot; — ${esc(l.visit)}</li>`,
     ).join('')}</ul>`,
+    ...(total > lines.length ? [`<p>…and ${total - lines.length} more not shown</p>`] : []),
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
   ].join('\n');
 

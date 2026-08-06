@@ -37,7 +37,7 @@ const MAX_PER_SECTION = 12;
 // Outbound types that count as a human answer — automated broadcasts
 // (reminders, en-route, receipts, review asks) must not clear a waiting
 // customer from the digest (codex #3232 r1).
-const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised', 'estimate_sent', 'invoice', 'voicemail_quote_link', 'appointment_rescheduled', 'reschedule_series_confirmation')";
+const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised', 'estimate_sent', 'appointment_rescheduled', 'reschedule_series_confirmation')";
 
 // Scan window: since the previous SUCCESSFUL send (the ops_email_send_state
 // marker), bounded to 7 days — windows tile exactly run-to-run, including
@@ -117,7 +117,7 @@ async function loadDroppedFollowUps() {
            COUNT(*) OVER () AS total_count
     FROM ai_follow_up_tasks t
     LEFT JOIN customers cu ON cu.id = t.customer_id
-    WHERE (t.status = 'pending' AND t.deadline <= now())
+    WHERE (t.status IN ('pending', 'in_progress') AND t.deadline <= now())
        -- "Expired today": judged by the DEADLINE window — the hourly
        -- verifier's UPDATE does not bump updated_at (no pg auto-touch;
        -- codex #3232 r1), so a deadline inside the last ~25h means the
@@ -125,7 +125,7 @@ async function loadDroppedFollowUps() {
        -- Half-open 24h window tiles exactly with the daily 6:15pm run —
        -- a 25h window re-reported yesterday's expiries (codex r2).
        OR (t.status = 'expired' AND t.action_verified = false
-           AND t.deadline > now() - interval '24 hours' AND t.deadline <= now())
+           AND t.deadline > ${ET_DAY_START_SQL} AND t.deadline <= now())
     ORDER BY t.deadline ASC NULLS LAST
     LIMIT :cap
     `,
@@ -180,6 +180,15 @@ async function loadUnansweredThreads() {
         AND os.status IN ('queued', 'sent', 'delivered')
         AND os.created_at > l.created_at
         AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10) = l.peer
+    )
+    -- A later STOP ends the thread: an opted-out customer must not be
+    -- surfaced as waiting for a reply nobody may send (codex r4).
+    AND NOT EXISTS (
+      SELECT 1 FROM sms_log oo
+      WHERE oo.direction = 'inbound'
+        AND oo.message_type = 'opt_out'
+        AND oo.created_at > l.created_at
+        AND RIGHT(REGEXP_REPLACE(COALESCE(oo.from_phone, ''), '\\D', '', 'g'), 10) = l.peer
     )
     ORDER BY l.created_at ASC
     LIMIT :cap

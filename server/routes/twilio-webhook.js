@@ -608,7 +608,10 @@ router.post('/sms', async (req, res) => {
     // knownInboundNotified records whether this modern bell/push actually
     // landed — when it did, the legacy owner-SMS forward below is suppressed
     // so a single inbound message can't raise two admin notifications.
-    let knownInboundNotified = false;
+    // A landed urgent reschedule alert counts as the admin notification
+    // for this message — the legacy owner-SMS forward must not re-alert
+    // (codex #3232 r4).
+    let knownInboundNotified = rescheduleFlagged;
     if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !rescheduleFlagged) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
