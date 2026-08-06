@@ -4558,6 +4558,11 @@ export default function EstimateToolViewV2({
   }
 
   function nextEstimate() {
+    // A fresh estimate is OUTSIDE any group build: a stale anchor would make
+    // the next unrelated save carry groupWithEstimateId and 400 on the
+    // same-customer guard (codex #3244 r5). Clearing it also lets the
+    // intake-list effect clear extracted addresses.
+    setGroupAnchorId(null);
     setForm((f) => ({
       ...f,
       address: "",

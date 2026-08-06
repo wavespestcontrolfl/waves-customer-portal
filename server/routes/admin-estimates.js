@@ -764,8 +764,12 @@ async function claimGroupSiblingsForPublish(estimate) {
   }
   const claimed = [];
   for (const sibling of siblings) {
+    // updated_at joins the claim predicate (codex #3244 r5): a revision
+    // between this function's read and the claim bumps updated_at, so the
+    // claim misses and the group send aborts instead of publishing (and
+    // snapshotting) a stale validation of a newly quote-required revision.
     const won = await db('estimates')
-      .where({ id: sibling.id, status: sibling.status })
+      .where({ id: sibling.id, status: sibling.status, updated_at: sibling.updated_at })
       .whereNull('price_locked_at')
       .update({ status: 'sending', updated_at: db.fn.now() });
     if (won) claimed.push(sibling);
@@ -1222,9 +1226,11 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
         .whereIn('status', ['sent', 'viewed'])
         .whereNull('archived_at')
         .whereNull('price_locked_at')
-        .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', nextExpiresAt))
         .update({
-          expires_at: nextExpiresAt,
+          // Forward-only expiry inside the SET (not the WHERE): a sibling
+          // already extended past this send still needs its reminder flags
+          // burned — the anchor owns all group comms (codex #3244 r5).
+          expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [nextExpiresAt, nextExpiresAt]),
           followup_unviewed_sent: true,
           followup_viewed_sent: true,
           followup_final_sent: true,

@@ -172,7 +172,16 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', newExpiry))
         .update({
           expires_at: newExpiry,
-          followup_expiring_sent: false,
+          // Siblings' expiry reminders stay BURNED — only the extended
+          // estimate (the group's comms owner) re-arms its own nudge; a
+          // per-sibling re-arm would send one expiry reminder per property
+          // (codex #3244 r5).
+          followup_expiring_sent: true,
+          // Burn the public auto-extension grant across the group: without
+          // this each sibling token could farm its own seven-day grant
+          // after every expiry (codex #3244 r5). Admin extensions burning
+          // it too is deliberate — admins can always extend again.
+          extension_auto_granted_at: db.raw('COALESCE(extension_auto_granted_at, NOW())'),
           status: db.raw("CASE WHEN status IN ('expired','send_failed') THEN (CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END) ELSE status END"),
           updated_at: db.fn.now(),
         });

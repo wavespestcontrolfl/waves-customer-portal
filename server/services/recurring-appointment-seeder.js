@@ -585,9 +585,8 @@ async function findActiveRecurringSeries(conn, {
       && serviceKeyFor({ service_type: parent.service_type }) === targetKey;
     if (!idMatch && !keyMatch) continue;
     if (serviceAddressScope && columns.service_address_line1 && serviceAddressScope.estimateStreet) {
-      const normalizeStreet = (v) => String(v || '')
-        .toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-      let parentStreet = normalizeStreet(parent.service_address_line1);
+      const { normalizedEstimateStreet } = require('./estimate-property-linkage');
+      let parentStreet = normalizedEstimateStreet(parent.service_address_line1);
       if (!parentStreet && parent.source_estimate_id) {
         // Unstamped parent: the post-commit linkage hook may not have run yet
         // (or the gate is off), and under concurrent group accepts the other
@@ -597,7 +596,7 @@ async function findActiveRecurringSeries(conn, {
         // so it is authoritative and race-free.
         try {
           const src = await conn('estimates').where({ id: parent.source_estimate_id }).first('address');
-          parentStreet = normalizeStreet(String(src?.address || '').split(',')[0]);
+          parentStreet = normalizedEstimateStreet(src?.address);
         } catch { /* fall back to the primary-street heuristic below */ }
       }
       parentStreet = parentStreet || String(serviceAddressScope.customerPrimaryStreet || '');

@@ -777,6 +777,22 @@ async function ensureEstimateGroupId(trx, anchorEstimateId, sibling = {}, random
   if (!sameCustomer) {
     throw errorWithStatus('Grouped estimates must belong to the same customer as the anchor estimate', 400);
   }
+  // Duplicate-address guard (codex #3244 r5): quoting the same street twice
+  // in one group would double-message one property and hand the added copy
+  // an unearned 10% multi-home preset. Compare normalized streets against
+  // every live member (the anchor alone when minting).
+  const { normalizedEstimateStreet } = require('./estimate-property-linkage');
+  const siblingStreet = normalizedEstimateStreet(sibling.address);
+  if (siblingStreet) {
+    const members = anchor.estimate_group_id
+      ? await trx('estimates').where({ estimate_group_id: anchor.estimate_group_id }).whereNull('archived_at').select('address')
+      : [anchor];
+    for (const member of members) {
+      if (normalizedEstimateStreet(member.address) === siblingStreet) {
+        throw errorWithStatus('This address is already in the group — each property is quoted once', 400);
+      }
+    }
+  }
   if (anchor.estimate_group_id) return anchor.estimate_group_id;
   const groupId = randomUUID();
   await trx('estimates').where({ id: anchorId }).update({ estimate_group_id: groupId });
@@ -1133,7 +1149,26 @@ async function resolveEstimateWritePayload({
   // the same customer, so the account's existing services must not feed its
   // tier context; it prices standalone. The recurring-customer 15% one-time
   // perk below stays account-level — the person IS a recurring customer.
-  const groupedEstimate = !!(body.groupWithEstimateId || body.estimateGroupId);
+  let groupedEstimate = !!(body.groupWithEstimateId || body.estimateGroupId);
+  // The ANCHOR of a future group is saved before any group exists (codex
+  // #3244 r5): an existing customer quoting a NON-primary address must
+  // already price per-property, or the anchor keeps the combined account
+  // tier forever (grouping later never reprices it). Both streets must parse
+  // cleanly to flip — parse uncertainty keeps the long-standing combined
+  // behavior for same-property requotes with formatting drift.
+  if (!groupedEstimate && body.customerId && body.address) {
+    try {
+      const { normalizedEstimateStreet } = require('./estimate-property-linkage');
+      const custRow = await database('customers').where({ id: body.customerId }).first('address_line1');
+      const estimateStreet = normalizedEstimateStreet(body.address);
+      const customerStreet = normalizedEstimateStreet(custRow?.address_line1);
+      if (estimateStreet && customerStreet && estimateStreet !== customerStreet) {
+        groupedEstimate = true;
+      }
+    } catch (err) {
+      logger.warn(`[admin-estimate] per-property tier address check skipped: ${err.message}`);
+    }
+  }
   if (body.customerId) {
     if (!groupedEstimate) {
       try {
@@ -1484,12 +1519,20 @@ async function reviseAdminEstimate({
     recompute,
   });
 
-  // A revision that changes or introduces a group id must clear the same
-  // same-customer bar as creation (codex #3244 r4). The self-derived id
-  // (threaded above from the row) passes trivially — its members are the
-  // row's own guarded siblings.
-  if (writeFields.estimate_group_id
-    && String(writeFields.estimate_group_id) !== String(estimate.estimate_group_id || '')) {
+  // A revision that changes or introduces a group id — OR changes the
+  // estimate's contact identity while grouped (codex #3244 r5: a lead-only
+  // sibling has no customer_id, so an in-place contact edit could hand its
+  // group slot to a different person) — must clear the same same-customer
+  // bar as creation. The unchanged self-derived id with unchanged identity
+  // passes trivially.
+  const groupIdChanged = writeFields.estimate_group_id
+    && String(writeFields.estimate_group_id) !== String(estimate.estimate_group_id || '');
+  const groupIdentityChanged = writeFields.estimate_group_id && (
+    String(writeFields.customer_id ?? '') !== String(estimate.customer_id ?? '')
+    || String(writeFields.customer_phone ?? '') !== String(estimate.customer_phone ?? '')
+    || String(writeFields.customer_email ?? '') !== String(estimate.customer_email ?? '')
+  );
+  if (groupIdChanged || groupIdentityChanged) {
     await assertGroupAssignmentAllowed(database, writeFields.estimate_group_id, writeFields, estimate.id);
   }
 

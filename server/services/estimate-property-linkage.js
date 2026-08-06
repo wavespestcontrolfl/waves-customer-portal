@@ -225,8 +225,23 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
   }
 }
 
+// Canonical street extraction + normalization for property-scope compares
+// (series guard, rate classifier, tier scoping, duplicate-address checks).
+// parseEstimateAddress keeps the WHOLE street portion — "Unit 4, 100 Beach
+// Rd" survives intact where a naive split(',')[0] would keep only "Unit 4"
+// (codex #3244 r5). Returns '' when no street can be extracted.
+function normalizedEstimateStreet(raw) {
+  const parts = parseEstimateAddress(raw);
+  return String(parts?.address_line1 || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 module.exports = {
   parseEstimateAddress,
+  normalizedEstimateStreet,
   refreshHasMultiHome,
   linkAcceptedEstimateProperty,
 };

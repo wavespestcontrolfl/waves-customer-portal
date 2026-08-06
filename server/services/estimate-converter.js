@@ -624,18 +624,17 @@ async function addOnPreservedMonthlyRateBase({
     // grouped estimates take this path — ungrouped accepts are byte-identical.
     let replaceEvidenceRows = planRows;
     if (estimate?.estimate_group_id && estimate.address) {
-      const normalizeStreet = (v) => String(v || '')
-        .toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-      const estimateStreet = normalizeStreet(String(estimate.address).split(',')[0]);
+      const { normalizedEstimateStreet } = require('./estimate-property-linkage');
+      const estimateStreet = normalizedEstimateStreet(estimate.address);
       if (estimateStreet) {
         replaceEvidenceRows = await database.transaction(async (sp) => {
-          const customerPrimaryStreet = normalizeStreet(customer?.address_line1);
+          const customerPrimaryStreet = normalizedEstimateStreet(customer?.address_line1);
           const kept = [];
           for (const row of planRows) {
-            let street = normalizeStreet(row.service_address_line1);
+            let street = normalizedEstimateStreet(row.service_address_line1);
             if (!street && row.source_estimate_id) {
               const src = await sp('estimates').where({ id: row.source_estimate_id }).first('address');
-              street = normalizeStreet(String(src?.address || '').split(',')[0]);
+              street = normalizedEstimateStreet(src?.address);
             }
             street = street || customerPrimaryStreet;
             if (!street || street === estimateStreet) kept.push(row);
@@ -2272,13 +2271,15 @@ const EstimateConverter = {
     // grouped estimates only — ungrouped accepts keep the exact legacy guard.
     let seriesAddressScope = null;
     if (estimate?.estimate_group_id && estimate.address) {
-      const normalizeStreet = (v) => String(v || '')
-        .toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-      const estimateStreet = normalizeStreet(String(estimate.address).split(',')[0]);
+      // normalizedEstimateStreet keeps the whole street portion (unit lines
+      // survive) — a naive split(',')[0] mis-scoped "Unit 4, 100 Beach Rd"
+      // (codex #3244 r5).
+      const { normalizedEstimateStreet } = require('./estimate-property-linkage');
+      const estimateStreet = normalizedEstimateStreet(estimate.address);
       let customerPrimaryStreet = '';
       try {
         const custRow = await database('customers').where({ id: customerId }).first('address_line1');
-        customerPrimaryStreet = normalizeStreet(custRow?.address_line1);
+        customerPrimaryStreet = normalizedEstimateStreet(custRow?.address_line1);
       } catch { /* scope falls back to stamped addresses only */ }
       if (estimateStreet) seriesAddressScope = { estimateStreet, customerPrimaryStreet };
     }
