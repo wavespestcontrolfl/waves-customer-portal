@@ -303,8 +303,15 @@ function buildRows() {
     name: 'Mosquito Program',
     unit: 'per application',
     values: sweepValues(
-      // Through the ACRE lot category the recurring program prices directly.
-      [...LOTS_SQFT, 45560].flatMap((lotSqFt) => MOSQUITO_PROFILES.map((p) => ({ lotSqFt, p }))),
+      // Lot spans derive from the LIVE category boundaries (each category's
+      // max and the first sq ft of the next), so admin boundary edits
+      // propagate; the trailing entries cover the open-ended top category.
+      [...new Set([
+        ...(constants.MOSQUITO.lotCategories || [])
+          .flatMap((cat) => (Number.isFinite(cat.maxSqFt) ? [cat.maxSqFt + 2000, cat.maxSqFt + 2001] : []))
+          .map((treatable) => treatable), // + footprint 2000 passed below
+        ...LOTS_SQFT, 45560, 62000,
+      ])].flatMap((lotSqFt) => MOSQUITO_PROFILES.map((p) => ({ lotSqFt, p }))),
       ({ lotSqFt, p }) => sp.priceMosquito({ footprint: 2000, lotSqFt, features: p.features }, { ...p.options, ...p.addOns }),
       // Per-application amount including any station/dunk add-ons amortized
       // across the program's applications (add-ons bill annually).
@@ -342,19 +349,20 @@ function buildRows() {
   // auto-priced by the live estimate path.
   const FLEA_PROFILES = [
     {},
-    {
+    ...((constants.SPECIALTY.flea.exterior || {}).enabled === false ? [] : [{
       infestationComplexity: 'heavy',
       features: { trees: 'heavy', complexity: 'complex' },
       fleaExterior: true,
       fleaExteriorAreaSqFt: 4000,
-    },
-    {
+    }]),
+    // Exterior profiles only while the add-on is enabled in live config.
+    ...((constants.SPECIALTY.flea.exterior || {}).enabled === false ? [] : [{
       infestationComplexity: 'heavy',
       features: { trees: 'heavy', complexity: 'complex' },
       fleaExterior: true,
       // Largest directly priced exterior tier — ceiling read from live config.
       fleaExteriorAreaSqFt: Number((constants.SPECIALTY.flea.exterior || {}).maxSqFt) || 20000,
-    },
+    }]),
     // Selectable single-visit knockdown offer (lower entry price).
     { fleaOfferKey: 'flea_knockdown_single' },
     // The pricer applies the recurring-customer perk INTERNALLY (respecting
@@ -463,7 +471,12 @@ function buildRows() {
         { advancedWireMeshPoints: 50 },
       ],
       (opts) => sp.priceRodentExclusionV2(opts),
-      (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : (r.total ?? r.price))),
+      (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : (r.total ?? r.price)))
+      // The public quote path estimates full exclusion via
+      // calculateExclusionPrice(sqft) — merge its span too.
+      .concat(sweepValues(FOOTPRINTS_SQFT,
+        (sqft) => sp.calculateExclusionPrice({ sqft }),
+        (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : r.price))),
     notes: `Scope set by inspection findings; components price per unit (standard point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.standard)}, advanced/roof point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.advancedRoofHigh)}, soft mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.softRatePerLF)}/LF, concrete mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.hardRatePerLF)}/LF), so larger scopes extend beyond this range at those rates. The low end reflects small jobs with the inspection fee waived (service opt-in or qualifying totals); otherwise the rodent inspection fee is included. ${rodentBundleTerms}`,
   }));
 
@@ -614,7 +627,15 @@ function buildRows() {
     oneTimePerkKey: 'wdo_inspection',
     name: 'WDO Inspection',
     unit: 'per inspection',
-    values: sweepValues([1000, 2000, 3000, 4000, 6000], (f) => sp.priceWDO(f), (r) => r.price),
+    // Footprints derive from the LIVE bracket boundaries so an added
+    // higher-priced bracket sweeps automatically.
+    values: sweepValues(
+      [...new Set([
+        ...(constants.SPECIALTY.wdo.brackets || [])
+          .flatMap((b) => (Number.isFinite(b.maxSqFt) ? [b.maxSqFt, b.maxSqFt + 1] : [])),
+        1000, 3000, 6000, 12000,
+      ])],
+      (f) => sp.priceWDO(f), (r) => r.price),
     notes: 'Wood-destroying organism inspection with official FDACS report.',
   }));
 
@@ -752,6 +773,7 @@ function buildRows() {
     // routes the estimate; the priced line is still published.
     { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 20, access: 'moderate' } },
     { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 40, access: 'moderate' } },
+    { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 14, access: 'difficult' } },
   ];
   add('tree_shrub_care', () => rangeRow({
     key: 'tree_shrub_care',
