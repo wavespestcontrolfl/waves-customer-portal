@@ -37,7 +37,21 @@ function sweepValues(inputs, fn, pick) {
   return values.filter((v) => Number.isFinite(v) && v > 0);
 }
 
-function rangeRow({ key, name, unit, values, notes = null, decimals = 0 }) {
+// Engine-wide recurring-customer one-time perk: the discount engine is the
+// authority on which service keys are eligible (excluded keys return 0%).
+// Rows passing oneTimePerkKey publish the customer-paid floor alongside
+// list prices.
+function oneTimePerkRate(engineServiceKey) {
+  const { getEffectiveDiscount } = require('./discount-engine');
+  const d = getEffectiveDiscount(engineServiceKey, 'bronze', { isRecurringCustomer: true, isOneTimeService: true });
+  return (d && d.effectiveDiscount) || 0;
+}
+
+function rangeRow({ key, name, unit, values, notes = null, decimals = 0, oneTimePerkKey = null }) {
+  if (oneTimePerkKey) {
+    const rate = oneTimePerkRate(oneTimePerkKey);
+    if (rate) values = values.concat(values.map((v) => v * (1 - rate)));
+  }
   if (!values.length) throw new Error(`No priced values for ${key}`);
   // Round outward (floor the low, ceil the high) so a valid exact engine
   // quote with cents can never fall outside the advertised range.
@@ -141,6 +155,7 @@ function buildRows() {
 
   add('cockroach_treatment', () => rangeRow({
     key: 'cockroach_treatment',
+    oneTimePerkKey: 'pest_initial_roach',
     name: 'Cockroach Treatment (native / palmetto / German knockdown)',
     unit: 'per treatment',
     // Standalone and recurring-plan-attached knockdowns, regular and German
@@ -157,6 +172,7 @@ function buildRows() {
 
   add('one_time_pest', () => rangeRow({
     key: 'one_time_pest',
+    oneTimePerkKey: 'one_time_pest',
     name: 'One-Time Pest Treatment',
     unit: 'per treatment',
     // Derives from the quarterly baseline, so it sweeps the same profiles.
@@ -171,6 +187,7 @@ function buildRows() {
 
   add('german_roach_cleanout', () => rangeRow({
     key: 'german_roach_cleanout',
+    oneTimePerkKey: 'german_roach',
     name: 'German Roach Cleanout',
     unit: 'per program',
     values: sweepValues(
@@ -182,6 +199,7 @@ function buildRows() {
 
   add('bed_bug_treatment', () => rangeRow({
     key: 'bed_bug_treatment',
+    oneTimePerkKey: 'bed_bug',
     name: 'Bed Bug Treatment',
     unit: 'per treatment program',
     // Footprint and story count carry ordinary size/story multipliers on
@@ -241,6 +259,7 @@ function buildRows() {
 
   add('wasp_hornet_removal', () => rangeRow({
     key: 'wasp_hornet_removal',
+    oneTimePerkKey: 'stinging_insect_v2',
     name: 'Wasp / Hornet / Stinging Insect Removal',
     unit: 'per job',
     // priceStingingInsect is the pricer the exact estimate branch uses —
@@ -284,6 +303,7 @@ function buildRows() {
   ];
   add('flea_elimination', () => rangeRow({
     key: 'flea_elimination',
+    oneTimePerkKey: 'flea_package',
     name: 'Flea Treatment',
     unit: 'per program',
     values: sweepValues(
@@ -311,6 +331,7 @@ function buildRows() {
 
   add('rodent_trapping', () => rangeRow({
     key: 'rodent_trapping',
+    oneTimePerkKey: 'rodent_trapping',
     name: 'Rodent Trapping',
     unit: 'per program',
     // The mid-program upgrade is an incremental delta, not a program price —
@@ -329,6 +350,7 @@ function buildRows() {
 
   add('rodent_sanitation', () => rangeRow({
     key: 'rodent_sanitation',
+    oneTimePerkKey: 'rodent_sanitation',
     name: 'Rodent Sanitation',
     unit: 'per job',
     // Affected area × debris removal × access type — the live path passes
@@ -348,6 +370,7 @@ function buildRows() {
 
   add('rodent_exclusion', () => rangeRow({
     key: 'rodent_exclusion',
+    oneTimePerkKey: 'rodent_exclusion',
     name: 'Rodent Exclusion',
     unit: 'per job',
     // Every component type the exact estimate path forwards: standard and
@@ -444,6 +467,7 @@ function buildRows() {
 
   add('bora_care', () => rangeRow({
     key: 'bora_care',
+    oneTimePerkKey: 'bora_care',
     name: 'Bora-Care Wood Treatment',
     unit: 'per job',
     values: sweepValues(
@@ -463,6 +487,7 @@ function buildRows() {
 
   add('termite_trenching', () => rangeRow({
     key: 'termite_trenching',
+    oneTimePerkKey: 'trenching',
     name: 'Termite Trenching (liquid barrier)',
     unit: 'per job',
     // Perimeter x product x application rate x depth x warranty x concrete
@@ -487,6 +512,7 @@ function buildRows() {
 
   add('pre_slab_termiticide', () => rangeRow({
     key: 'pre_slab_termiticide',
+    oneTimePerkKey: 'pre_slab_termiticide',
     name: 'Pre-Slab Termiticide Treatment',
     unit: 'per job',
     // Through the full auto-priced residential span — the public quote route
@@ -506,6 +532,7 @@ function buildRows() {
 
   add('wdo_inspection', () => rangeRow({
     key: 'wdo_inspection',
+    oneTimePerkKey: 'wdo_inspection',
     name: 'WDO Inspection',
     unit: 'per inspection',
     values: sweepValues([1000, 2000, 3000, 4000, 6000], (f) => sp.priceWDO(f), (r) => r.price),
@@ -527,6 +554,7 @@ function buildRows() {
 
   add('one_time_lawn', () => rangeRow({
     key: 'one_time_lawn',
+    oneTimePerkKey: 'one_time_lawn',
     name: 'One-Time Lawn Treatment',
     unit: 'per treatment',
     // Track and tier feed the recurring baseline this pricer derives from,
@@ -543,6 +571,7 @@ function buildRows() {
 
   add('dethatching', () => rangeRow({
     key: 'dethatching',
+    oneTimePerkKey: 'dethatching',
     name: 'Lawn Dethatching',
     unit: 'per job',
     // Bermuda/Zoysia lawns under 10,000 sq ft with recorded thatch depth
@@ -555,17 +584,13 @@ function buildRows() {
             ['easy', 'moderate'].map((access) => ({ sq, grassType, cleanupLevel, access }))))),
       ({ sq, grassType, cleanupLevel, access }) =>
         sp.priceDethatching(sq, { grassType, cleanupLevel, thatchDepthInches: 1, access }),
-      (r) => {
-        if (r.quoteRequired || r.requiresManualReview) return NaN;
-        const price = r.price ?? r.estimatedPrice;
-        // Include the engine's recurring-customer one-time perk floor.
-        return [price, sp.applyOneTimeRecurringCustomerDiscount(price, { isRecurringCustomer: true }).price];
-      }),
+      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.estimatedPrice))),
     notes: 'Bermuda and Zoysia lawns; St. Augustine and heavy-debris jobs are quoted after inspection.',
   }));
 
   add('one_time_mosquito', () => rangeRow({
     key: 'one_time_mosquito',
+    oneTimePerkKey: 'one_time_mosquito',
     name: 'One-Time Mosquito Treatment',
     unit: 'per treatment',
     // Station/dunk add-ons raise the high; the recurring-customer discount
@@ -582,6 +607,7 @@ function buildRows() {
 
   add('lawn_plugging', () => rangeRow({
     key: 'lawn_plugging',
+    oneTimePerkKey: 'plugging',
     name: 'Lawn Plugging',
     unit: 'per sq ft',
     decimals: 2,
@@ -596,6 +622,7 @@ function buildRows() {
 
   add('top_dressing', () => rangeRow({
     key: 'top_dressing',
+    oneTimePerkKey: 'top_dressing',
     name: 'Lawn Top Dressing',
     unit: 'per job',
     // Both pricing modes: estimated area (65% reduction) and exact-area
@@ -605,9 +632,7 @@ function buildRows() {
       [...LAWNS_SQFT, 40000].flatMap((sq) =>
         ['eighth', 'quarter'].flatMap((depth) => [false, true].map((exactArea) => ({ sq, depth, exactArea })))),
       ({ sq, depth, exactArea }) => sp.priceTopDressing(sq, depth, exactArea),
-      // Active recurring customers get the engine's one-time perk on this
-      // line — include the discounted floor.
-      (r) => [r.price, sp.applyOneTimeRecurringCustomerDiscount(r.price, { isRecurringCustomer: true }).price]),
+      (r) => r.price),
     notes: 'Recurring-plan customers receive a discounted rate.',
   }));
 
@@ -635,26 +660,43 @@ function buildRows() {
     notes: 'Monthly-billed program; 4, 6, or 9 applications per year by tier; priced by planting beds and tree count; WaveGuard bundle tiers discount up to 20%.',
   }));
 
-  add('rodent_plugging', () => rangeRow({
-    key: 'rodent_plugging',
-    name: 'Rodent Entry-Point Plugging',
-    unit: 'per job',
-    values: sweepValues(
-      [5, 15, 30].flatMap((entryPoints) =>
-        ['caulkSealant', 'steelWool', 'copperMesh', 'xcluder'].flatMap((materialType) =>
-          ['standard', 'difficult'].flatMap((accessDifficulty) =>
-            [true, false].map((isStandalone) => ({ entryPoints, materialType, accessDifficulty, isStandalone }))))),
-      (cfg) => sp.calculatePluggingPrice(cfg),
-      (r) => r.price),
-    notes: 'Priced by entry points, sealing material, and access; discounted when bundled with exclusion work.',
-  }));
+  // rodent_plugging (calculatePluggingPrice) is deliberately NOT published:
+  // no live route or client populates services.rodentPlugging — same
+  // reachability rule as the omitted termite_foam pricer.
 
   // termite_foam (calculateFoamPrice) is deliberately NOT published: no live
   // route or client populates services.termiteFoam (DECISIONS.md records the
   // pricer as dead); the purchasable drill-and-foam path is the foam_drill row.
 
+  add('rodent_wire_mesh', () => rangeRow({
+    key: 'rodent_wire_mesh',
+    oneTimePerkKey: 'rodent_wire_mesh',
+    name: 'Rodent Wire Mesh Exclusion',
+    unit: 'per job',
+    values: sweepValues(
+      [0, 30, 60, 120].flatMap((meshLinearFeet) =>
+        Object.keys(constants.RODENT.wireMesh.substrates).map((meshSubstrate) => ({ meshLinearFeet, meshSubstrate }))),
+      (opts) => sp.priceRodentWireMesh(opts),
+      (r) => (r && !r.customQuoteRecommended ? r.price : NaN)),
+    notes: 'Priced per linear foot by substrate, with a job minimum.',
+  }));
+
+  add('rodent_bird_boxes', () => rangeRow({
+    key: 'rodent_bird_boxes',
+    oneTimePerkKey: 'rodent_bird_boxes',
+    name: 'Roof-Entry Covers / Bird Boxes',
+    unit: 'per job',
+    values: sweepValues(
+      ['small_bird_box', 'standard_bird_box', 'large_bird_box', 'oversized_complex_custom'].flatMap((birdBoxType) =>
+        [1, 2, 4].map((birdBoxQuantity) => ({ birdBoxType, birdBoxQuantity }))),
+      (opts) => sp.priceRodentBirdBoxes(opts),
+      (r) => (r ? r.price : NaN)),
+    notes: 'Priced by cover type and quantity; same-visit additional standard boxes are discounted.',
+  }));
+
   add('rodent_inspection', () => rangeRow({
     key: 'rodent_inspection',
+    oneTimePerkKey: 'rodent_inspection',
     name: 'Rodent Inspection',
     unit: 'per inspection',
     values: [sp.priceRodentInspection({}).price].filter((v) => Number.isFinite(v) && v > 0),
@@ -712,6 +754,7 @@ function buildRows() {
 
   add('foam_drill', () => rangeRow({
     key: 'foam_drill',
+    oneTimePerkKey: 'foam_drill',
     name: 'Drill-and-Foam Termite Treatment',
     unit: 'per job',
     // Distinct from the termite_foam spot treatment: this is the tiered
