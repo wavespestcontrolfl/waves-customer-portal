@@ -3333,6 +3333,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
       const { transitionJobStatus } = require('../services/job-status');
       let targets = [];
       let ongoingStopped = 0;
+      // Shared claim token for every target's trx claim — declared out
+      // here because the post-commit series handler needs it too.
+      const seriesClaimToken = require('../services/job-status').nextClaimTs();
       await db.transaction(async (trx) => {
         // Serialize with the per-parent series-maintenance advisory lock
         // (runRecurringSeriesMaintenance, admin-schedule) BEFORE selecting
@@ -3377,6 +3380,12 @@ router.put('/:serviceId/status', async (req, res, next) => {
             lng,
             notes,
             trx,
+            // Caller-owned: the series branch below runs its own awaited
+            // per-visit handleCancellation (notify-or-suppress per the
+            // request flag) plus one combined notice — the hook must stand
+            // down entirely, not race those claims.
+            notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
+            cancelNoticeToken: seriesClaimToken,
           });
         }
 
@@ -3411,6 +3420,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
         await AppointmentReminders.handleSeriesCancellation(targetIds, svc.id, {
           sendNotification: notifyCustomer !== false,
           scope,
+          // The trx claims were minted under this shared token — the
+          // series claim adopts exactly them, never a foreign lease.
+          claimToken: seriesClaimToken,
           ...(cancelNoticeOutcome ? { outcome: cancelNoticeOutcome } : {}),
         });
       } catch (e) { logger.error(`[admin-dispatch] series cancellation reminder handling failed: ${e.message}`); }
@@ -3563,6 +3575,12 @@ router.put('/:serviceId/status', async (req, res, next) => {
           lng,
           notes,
           trx,
+          // This route owns the cancellation notice end-to-end (its cancel
+          // branch below sends or suppresses per the request flag) — the
+          // shared-writer hook must stand down entirely, or its
+          // fire-and-forget claim could race and steal the marker from the
+          // operator-requested text.
+          notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
         });
       });
     } catch (err) {

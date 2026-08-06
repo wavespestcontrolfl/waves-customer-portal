@@ -1,5 +1,9 @@
 const cron = require('node-cron');
 const db = require('../models/db');
+// Boundary-rotation generation guard (codex #3233 r37/r38): captured at
+// process startup, NOT at query-build time — a marker stamped after this
+// instant belongs to a newer gate-on pod and must never be deleted.
+const PROCESS_BOOT_AT = new Date();
 const TwilioService = require('./twilio');
 const logger = require('./logger');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -401,6 +405,52 @@ function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
   logGateStatus();
 
+  // Cancel-notice late-claim rollout boundary (codex #3233 r35): stamped
+  // at BOOT when the hook gate is on, so the boundary necessarily
+  // predates every gated cancellation this deploy processes — a cancel
+  // whose in-trx claim failed before the first 15-minute sweep tick is
+  // still inside the late-claim window. Idempotent (first stamp wins);
+  // the sweep keeps its own stamp as a backstop. Fail-soft: a miss here
+  // only narrows recovery to the sweep's stamp.
+  if (isEnabled('cancelNoticeHook')) {
+    db('ops_email_send_state')
+      // Stamped with this pod's BOOT time, same as the sweep-side stamp
+      // (codex #3233 r39/r41): a late fire-and-forget insert must not
+      // look newer than a gate-off pod's boot and survive its guards.
+      .insert({ email_key: 'cancel-notice-hook-enabled-at', last_sent_at: PROCESS_BOOT_AT, updated_at: db.fn.now() })
+      .onConflict('email_key')
+      .ignore()
+      .catch((err) => logger.warn(`[scheduler] cancel-notice boundary stamp failed: ${err.message}`));
+    // Replace a boundary from a PREVIOUS enable interval (older than the
+    // newest observed disable) instead of ignoring it (codex r42).
+    db.raw(
+      "UPDATE ops_email_send_state SET last_sent_at = ?, updated_at = now() WHERE email_key = 'cancel-notice-hook-enabled-at' AND last_sent_at < COALESCE((SELECT ds.last_sent_at FROM ops_email_send_state ds WHERE ds.email_key = 'cancel-notice-hook-disabled-at'), '-infinity'::timestamptz)",
+      [PROCESS_BOOT_AT],
+    ).catch((err) => logger.warn(`[scheduler] cancel-notice boundary refresh failed: ${err.message}`));
+  } else {
+    // Gate OFF: clear the boundary so a later re-enable stamps a FRESH
+    // one (codex #3233 r36) — cancellations made while the gate was off
+    // must never backfill claims on re-enable. Env gates only change
+    // across a restart, so this boot-time clear segments every enable
+    // interval; the sweep repeats it as a backstop.
+    db('ops_email_send_state')
+      .where({ email_key: 'cancel-notice-hook-enabled-at' })
+      // Generation guard (codex #3233 r37/r38): never delete a marker
+      // stamped after this process booted — it belongs to a newer
+      // gate-on pod.
+      .where('last_sent_at', '<', PROCESS_BOOT_AT)
+      .del()
+      .catch((err) => logger.warn(`[scheduler] cancel-notice boundary clear failed: ${err.message}`));
+    // Durable disable record (codex r42) — survives a draining gate-on
+    // pod recreating the boundary after this one-shot clear.
+    db.raw(
+      "INSERT INTO ops_email_send_state (email_key, last_sent_at, updated_at) VALUES ('cancel-notice-hook-disabled-at', ?, now()) ON CONFLICT (email_key) DO UPDATE SET last_sent_at = GREATEST(ops_email_send_state.last_sent_at, EXCLUDED.last_sent_at), updated_at = now()",
+      [PROCESS_BOOT_AT],
+    ).catch((err) => logger.warn(`[scheduler] cancel-notice disable stamp failed: ${err.message}`));
+  }
+
+  // Boundary maintenance runs BEFORE this early return (codex r40):
+  // disabling scheduled tasks must not preserve a stale feature interval.
   if (!isEnabled('cronJobs')) {
     logger.info('[feature-gates] Cron jobs DISABLED — skipping all scheduled tasks');
     return;
@@ -1870,6 +1920,10 @@ function initScheduledJobs() {
       await runExclusive('appointment-reminders', async () => {
         const reminders = require('./appointment-reminders');
         await reminders.checkAndSendReminders();
+        // Settle stale cancellation-notice leases (GATE_CANCEL_NOTICE_HOOK;
+        // no-op while the gate is off) — the durable half of the
+        // shared-writer cancellation-notice hook in job-status.js.
+        await reminders.sweepStaleCancellationClaims();
       });
     } catch (err) {
       logger.error(`Reminder check failed: ${err.message}`);

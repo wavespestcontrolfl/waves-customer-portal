@@ -239,6 +239,12 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
           toStatus: 'cancelled',
           transitionedBy: null,
           notes: cancelReason,
+          // Caller-owned: this processor suppresses per-visit notices via
+          // its OWN awaited handleCancellation AFTER its went-live
+          // compensation check — a fire-and-forget hook claim here could
+          // land after a compensating revert and close the reminder row of
+          // a re-armed active visit (codex r3).
+          notifyCustomer: 'caller_suppress',
         });
         flipped = true;
       } catch (err) {

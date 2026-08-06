@@ -658,7 +658,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
           entity_type: 'scheduled_service',
           entity_id: serviceId,
         });
-      }, 'appointment_rescheduled', 'appointment_confirmation', {}, {
+      }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: serviceId }, {
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.
@@ -4649,6 +4649,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 transitionedBy: req.technicianId,
                 notes: 'Bulk cancellation',
                 trx,
+                // This branch owns the cancellation notice end-to-end
+                // (notify-or-suppress below per the bulk flag) — the
+                // shared-writer hook must stand down, not race the claim.
+                notifyCustomer: payload?.notifyCustomer === false ? 'caller_suppress' : 'caller',
               });
             });
             try {
@@ -7483,6 +7487,9 @@ router.put('/:id/status', async (req, res, next) => {
           transitionedBy: req.technicianId,
           notes: notes || null,
           trx,
+          // This route's cancel branch sends its own notice below — the
+          // shared-writer hook must stand down, not race the claim.
+          notifyCustomer: 'caller',
         });
       });
     } catch (err) {

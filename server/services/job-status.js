@@ -126,6 +126,18 @@ const ADMIN_ROOM = 'dispatch:admins';
 const STALE_TECH_STATUS_MS = 5 * 60 * 1000;
 const CUSTOMER_ETA_TIMEOUT_MS = 750;
 
+// Strictly-increasing claim timestamps within this process — the sweep
+// groups series claims by (customer, exact token), and two independent
+// same-millisecond cancels must not read as one series (codex #3233 r12;
+// cross-process same-ms collision remains theoretical and its consequence
+// is only a combined-copy notice).
+let lastClaimMs = 0;
+function nextClaimTs() {
+  const now = Date.now();
+  lastClaimMs = now > lastClaimMs ? now : lastClaimMs + 1;
+  return new Date(lastClaimMs);
+}
+
 function customerRoom(customerId) {
   return `customer:${customerId}`;
 }
@@ -288,7 +300,7 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *           the two payloads broadcast (or, with an outer trx, the
  *           payloads that will broadcast on commit)
  */
-async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx }) {
+async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer, cancelNoticeToken }) {
   if (!jobId || !toStatus || fromStatus == null) {
     throw new Error(
       'transitionJobStatus: jobId, fromStatus, and toStatus are required'
@@ -298,6 +310,11 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   const auditLat = finiteNumber(lat);
   const auditLng = finiteNumber(lng);
   const auditNotes = notes == null || notes === '' ? null : String(notes);
+
+  // Set inside doWrites when this transition durably claimed a pending
+  // cancellation-notice obligation; read by the post-commit worker.
+  let cancelNoticeClaimTs = null;
+  let cancelNoticeLateClaim = false;
 
   async function doWrites(t) {
     // A pending outbound-callback booking (AI call pipeline, held for office
@@ -392,6 +409,95 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       jobId, resolvedBy: transitionedBy, trx: t, toStatus,
     });
 
+    // Durable cancellation-notice obligation (codex #3233 r4): for
+    // hook-owned cancel paths the claim commits WITH the transition — a
+    // crash after commit can no longer lose the notice (the 15-minute
+    // reminder cron sweeps stale 'pending' claims). Caller-owned paths
+    // ('caller') manage their own claims via handleCancellation.
+    // Savepoint-confined best-effort: a claim hiccup must never block the
+    // cancellation itself (an error inside a Postgres trx aborts every
+    // later statement, so the try/catch needs its own savepoint).
+    if (['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'].includes(String(toStatus || ''))) {
+      // A visit transitioned BACK to a live status (compensated cancel,
+      // re-arm) sheds any cancellation-notice marker — a stale terminal
+      // 'suppressed'/'sent' would otherwise block the notice for a later
+      // real cancellation (codex r8; closes the r3 compensation window).
+      try {
+        await t.transaction(async (sp) => {
+          await sp('appointment_reminders')
+            .where({ scheduled_service_id: jobId })
+            .whereNotNull('cancellation_notice_state')
+            .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+        });
+      } catch (clearErr) {
+        logger.warn(`[job-status] cancellation-marker clear failed for ${jobId}: ${clearErr.message}`);
+      }
+    }
+    if (String(toStatus || '') === 'cancelled') {
+      try {
+        const { isEnabled } = require('../config/feature-gates');
+        if (isEnabled('cancelNoticeHook')) {
+          await t.transaction(async (sp) => {
+            // Series routes pass ONE shared token for every target so the
+            // sweep sees a single group even if the process dies before
+            // the post-commit series handler coalesces them (codex r10).
+            const claimTs = cancelNoticeToken instanceof Date ? cancelNoticeToken : nextClaimTs();
+            // 'caller_suppress' = the route will suppress (operator chose
+            // no-text / consolidated comms): finalize terminally NOW so a
+            // crash before the route's own call cannot let the sweep text
+            // against that intent (codex r8).
+            // 'caller' paths get a durable 'pending' claim too (codex r7):
+            // their awaited handleCancellation ADOPTS it (tokenless claims
+            // accept pending rows) and settles send/suppress; if the route
+            // crashes in its post-commit window, the sweep settles instead
+            // — the obligation can no longer vanish. Only an explicit
+            // suppress intent finalizes terminally here.
+            let targetState = (notifyCustomer === false || notifyCustomer === 'caller_suppress')
+              ? 'suppressed'
+              : (notifyCustomer === 'caller' ? 'pending_notify' : 'pending');
+            // Merged-slot survivor (codex r12): when the status-sync
+            // trigger promoted a sibling for the SAME customer/slot, the
+            // customer still has a live visit at that time — a
+            // cancellation text would be wrong. Suppress terminally.
+            if (targetState !== 'suppressed') {
+              const own = await sp('appointment_reminders')
+                .where({ scheduled_service_id: jobId })
+                .first('customer_id', 'appointment_time');
+              if (own) {
+                const survivor = await sp('appointment_reminders')
+                  .where({ customer_id: own.customer_id, appointment_time: own.appointment_time, cancelled: false })
+                  .whereNot('scheduled_service_id', jobId)
+                  .first('id');
+                if (survivor) targetState = 'suppressed';
+              }
+            }
+            const claimedRows = await sp('appointment_reminders')
+              .where({ scheduled_service_id: jobId })
+              .where(function claimable() {
+                this.whereNull('cancellation_notice_at').orWhere(function staleLease() {
+                  // Singleton leases only (codex r39): a stale SHARED
+                  // (series) token stays owned as a group — the sweep
+                  // recovers it with the combined copy; stealing one row
+                  // here would double-text that visit.
+                  this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                    .where('cancellation_notice_at', '<', sp.raw("now() - interval '15 minutes'"))
+                    .whereRaw("NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN ('pending', 'pending_notify'))");
+                });
+              })
+              .update({ cancellation_notice_at: claimTs, cancellation_notice_state: targetState, updated_at: claimTs });
+            // The immediate post-commit worker runs only for hook-owned
+            // paths; 'caller' claims are settled by the route (or sweep).
+            if (claimedRows && targetState === 'pending' && notifyCustomer !== 'caller') cancelNoticeClaimTs = claimTs;
+          });
+        }
+      } catch (claimErr) {
+        // The transition still commits; the post-commit worker attempts a
+        // LATE claim so the obligation isn't lost (codex r20).
+        cancelNoticeLateClaim = notifyCustomer === undefined || notifyCustomer === true;
+        logger.warn(`[job-status] cancellation-notice claim failed for ${jobId}: ${claimErr.message}`);
+      }
+    }
+
     return buildPayloads(t, jobId, fromStatus, toStatus, transitionedBy);
   }
 
@@ -402,6 +508,103 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // ordering easier to follow.
     emitToCustomer(customerId, customerPayload);
     emitToAdmins(adminPayload);
+  }
+
+  function processCancelNoticeClaim() {
+    // Post-commit best-effort attempt on the durably-claimed notice (codex
+    // #3233 r4): the 'pending' claim committed WITH the transition inside
+    // doWrites, so a crash here just leaves it for the 15-minute
+    // reminder-cron sweep (sweepStaleCancellationClaims). This immediate
+    // path sends only when delivery evidence ALREADY exists; a no-evidence
+    // result stays pending rather than terminally suppressing — an
+    // in-flight reminder is dispatched to the provider BEFORE its audit
+    // row persists, and the sweep re-checks after the lease expires.
+    // Evidence = THIS visit's messaging_audit_log rows (sms_log never
+    // stores the visit id) with provider acceptance and a genuine Twilio
+    // SID; sends predating the linkage close silently via the sweep.
+    if (!cancelNoticeClaimTs && !cancelNoticeLateClaim) return;
+    void (async () => {
+      try {
+        if (!cancelNoticeClaimTs && cancelNoticeLateClaim) {
+          // In-trx claim failed (r20): take it now, outside the trx.
+          const lateTs = nextClaimTs();
+          const won = await db('appointment_reminders')
+            .where({ scheduled_service_id: jobId })
+            .where(function claimable() {
+              this.whereNull('cancellation_notice_at')
+                .orWhere(function stale() {
+                  // Singleton-only (codex r21): stale shared groups are
+                  // the sweep's — it recovers with the combined copy.
+                  this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                    .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
+                    .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
+                });
+            })
+            .update({ cancellation_notice_at: lateTs, cancellation_notice_state: 'pending', updated_at: lateTs });
+          if (!won) return;
+          cancelNoticeClaimTs = lateTs;
+        }
+        let delivered = Boolean(await db('messaging_audit_log')
+          .where({ appointment_id: String(jobId) })
+          .whereIn('purpose', ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'])
+          .whereNotNull('sent_at')
+          .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel = 'email')")
+          .first('id'));
+        if (!delivered) {
+          // Appointment EMAILS audit into customer_interactions, not
+          // messaging_audit_log (codex r23).
+          delivered = Boolean(await db('customer_interactions')
+            .where({ interaction_type: 'email_outbound' })
+            .whereRaw("metadata->>'scheduled_service_id' = ?", [String(jobId)])
+            .whereRaw("metadata->>'status' = 'sent'")
+            .first('id'));
+        }
+        if (!delivered) {
+          // Legacy-grace (codex r15): rows created before the linkage
+          // epoch have unlinked audits — judge announcement by the
+          // reminder flags for that bounded window only.
+          delivered = Boolean(await db('appointment_reminders')
+            .where({ scheduled_service_id: jobId })
+            // Self-calibrating epoch (codex r27) — see the sweep's leg.
+            .whereRaw("created_at < (SELECT COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-linkage-epoch'), 'infinity'))")
+            .where(function announced() {
+              this.where('reminder_72h_sent', true)
+                .orWhere('reminder_24h_sent', true)
+                .orWhere('confirmation_sent', true);
+            })
+            // Flags are bookkeeping — also require a REAL customer-level
+            // reminder/confirmation SMS (codex r29).
+            .whereRaw(`EXISTS (
+              SELECT 1 FROM sms_log lsl
+              WHERE lsl.customer_id = appointment_reminders.customer_id
+                AND lsl.direction = 'outbound'
+                AND lsl.twilio_sid ~ '^(SM|MM)'
+                -- Per-FLAG correlation (codex r35): a confirmation flag is
+                -- only announced by a confirmation SMS near registration
+                -- (real bookings text within minutes; seeded rows never
+                -- do), a reminder flag only by a reminder SMS inside the
+                -- visit's own reminder window — an overlapping visit's
+                -- SMS months apart can no longer be borrowed.
+                AND (
+                  (appointment_reminders.confirmation_sent = true
+                    AND lsl.message_type = 'confirmation'
+                    AND lsl.created_at BETWEEN appointment_reminders.created_at - interval '5 minutes'
+                                           AND appointment_reminders.created_at + interval '1 hour')
+                  OR ((appointment_reminders.reminder_72h_sent = true OR appointment_reminders.reminder_24h_sent = true)
+                    AND lsl.message_type IN ('reminder_72h', 'appointment_reminder')
+                    AND lsl.created_at BETWEEN appointment_reminders.appointment_time - interval '80 hours'
+                                           AND appointment_reminders.appointment_time)
+                )
+            )`)
+            .first('id'));
+        }
+        if (!delivered) return;
+        const AppointmentReminders = require('./appointment-reminders');
+        await AppointmentReminders.handleCancellation(jobId, { claimToken: cancelNoticeClaimTs });
+      } catch (e) {
+        logger.warn(`[job-status] cancellation-notice worker failed for ${jobId}: ${e.message}`);
+      }
+    })();
   }
 
   function maybeReparkFollowupObligation() {
@@ -458,6 +661,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
         .then(() => {
           emitBoth(customerId, customerPayload, adminPayload);
           maybeReparkFollowupObligation();
+          processCancelNoticeClaim();
         })
         .catch(() => {
           // Rollback path. Caller will see the rejection on their
@@ -481,6 +685,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   // trx committed by here.
   emitBoth(captured.customerId, captured.customerPayload, captured.adminPayload);
   maybeReparkFollowupObligation();
+  processCancelNoticeClaim();
   return {
     customerPayload: captured.customerPayload,
     adminPayload: captured.adminPayload,
@@ -529,6 +734,7 @@ function evaluateTerminalTransition(fromStatus, toStatus) {
 }
 
 module.exports = {
+  nextClaimTs,
   transitionJobStatus,
   evaluateTerminalTransition,
   CUSTOMER_EVENT,
