@@ -356,11 +356,11 @@ function placementForTask(body, task) {
       return { index: offset, length: anchor.length, snippet: snippetAround(text, offset, anchor.length), paragraph, anchor };
     }
   }
-  // Drifted file: relocate using the persisted context snippet — the planner
-  // may have deliberately scanned past a thin early mention, and a plain
-  // first-eligible scan would revive exactly that occurrence. Among the
-  // eligible occurrences, prefer the one whose surroundings best match the
-  // context recorded at plan time.
+  // Drifted file: relocate using the persisted context (the full scored
+  // paragraph) — the planner may have deliberately scanned past a thin
+  // early mention, and a plain first-eligible scan would revive exactly
+  // that occurrence. Among the eligible occurrences, prefer the one whose
+  // paragraph best matches the one scored at plan time.
   return relocateByContext(text, anchor, task?.context_snippet);
 }
 
@@ -663,7 +663,11 @@ class InternalLinkPlanner {
             target_file: targetFile,
             target_keyword: target.keyword || null,
             anchor_text: occ.anchor,
-            context_snippet: occ.snippet,
+            // The FULL scored paragraph, not a ±50-char snippet — drift
+            // relocation compares this against candidate paragraphs, and a
+            // truncated context ties occurrences that share local anchor
+            // wording, reviving the thin mention planning rejected.
+            context_snippet: occ.paragraph,
             source_offset: occ.index,
             opportunity_id: opportunityId,
           },

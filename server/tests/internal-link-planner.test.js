@@ -798,6 +798,9 @@ describe('planForTarget', () => {
     // richer paragraph is selected and its offset persisted.
     expect(tasks.length).toBe(1);
     expect(page.body.slice(0, tasks[0].source_offset)).toContain('in passing last month');
+    // The persisted context is the FULL scored paragraph (drift relocation
+    // compares paragraphs), not a ±50-char snippet.
+    expect(tasks[0].context_snippet).toBe('For pest-control purposes, bed bug bites and flea bites in Florida homes deserve a professional look.');
   });
   test('placementForTask honors the planned offset and falls back on drift', () => {
     const { placementForTask } = planner._internals;
