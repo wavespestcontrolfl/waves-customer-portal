@@ -95,11 +95,11 @@ function buildRows() {
   add('mosquito_program', () => rangeRow({
     key: 'mosquito_program',
     name: 'Mosquito Program',
-    unit: 'per visit',
+    unit: 'per application',
     values: sweepValues(LOTS_SQFT,
       (lotSqFt) => sp.priceMosquito({ footprint: 2000, lotSqFt }, {}),
       (r) => (r.tiers || []).map((t) => t.perVisit)),
-    notes: 'Seasonal 9-visit or monthly 12-visit program.',
+    notes: 'Seasonal (9 applications/yr) or monthly (12 applications/yr) program.',
   }));
 
   add('wasp_hornet_removal', () => rangeRow({

@@ -65,11 +65,10 @@ describe('public pricing ranges', () => {
   test('units obey the owner copy rules', () => {
     for (const s of payload.services) {
       const text = `${s.name} ${s.unit} ${s.notes || ''}`;
-      // "per visit" is banned copy for recurring services; mosquito is the
-      // one sanctioned per-visit program (visits are the billing unit there).
-      if (s.key !== 'mosquito_program') {
-        expect(s.unit).not.toMatch(/per visit/i);
-      }
+      // "per visit" is banned customer-facing copy everywhere (owner rule;
+      // only commercial is exempt, and commercial is not published here).
+      // Visit COUNTS ("2-visit package") are fine; the unit phrasing is not.
+      expect(text).not.toMatch(/per visit|\$\s*\d[\d,.]*\s*\/\s*visit/i);
       if (s.unit === 'per month') {
         expect(MONTHLY_BILLED_KEYS.has(s.key)).toBe(true);
       }
