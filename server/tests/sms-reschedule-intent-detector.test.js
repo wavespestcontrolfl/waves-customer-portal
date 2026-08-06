@@ -92,3 +92,9 @@ describe('r8 regression cases', () => {
     expect(hasRescheduleOrAwayIntent('Please cancel on the 12th')).toBe(true);
   });
 });
+
+describe('r13 regression cases', () => {
+  test('present-perfect confirmations do not flag', () => {
+    expect(hasRescheduleOrAwayIntent('Has my appointment been rescheduled?')).toBe(false);
+  });
+});

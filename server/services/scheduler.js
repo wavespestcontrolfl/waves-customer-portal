@@ -845,7 +845,7 @@ function initScheduledJobs() {
 
   // Reschedule/away texts whose visit never moved (kill:
   // RESCHEDULE_INTENT_WATCHER_DISABLED=1) — daily 6:53am ET.
-  cron.schedule('53 6 * * *', async () => {
+  cron.schedule('30 53 6 * * *', async () => {
     try {
       await runExclusive('reschedule-intent-watcher', async () => {
         const { runRescheduleIntentWatcher } = require('./reschedule-intent-watcher');
@@ -865,7 +865,7 @@ function initScheduledJobs() {
 
   // Quotes promised on calls with no estimate sent since (kill:
   // PROMISED_ESTIMATE_WATCHER_DISABLED=1) — daily 7:11am ET.
-  cron.schedule('11 7 * * *', async () => {
+  cron.schedule('30 11 7 * * *', async () => {
     try {
       await runExclusive('promised-estimate-watcher', async () => {
         const { runPromisedEstimateWatcher } = require('./promised-estimate-watcher');
@@ -884,7 +884,7 @@ function initScheduledJobs() {
   // Today's unworked callbacks / follow-ups / unanswered texts (kill:
   // UNWORKED_COMMS_WATCHER_DISABLED=1) — daily 6:17pm ET, after the 6:00pm
   // missed-appointment check and before the 6:40pm stale-visit sweep.
-  cron.schedule('17 18 * * *', async () => {
+  cron.schedule('30 17 18 * * *', async () => {
     try {
       await runExclusive('unworked-comms-eod', async () => {
         const { runUnworkedCommsWatcher } = require('./unworked-comms-watcher');

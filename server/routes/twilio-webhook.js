@@ -531,6 +531,25 @@ router.post('/sms', async (req, res) => {
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
 
+    // Reschedule/away flag persists BEFORE the Twilio ack (codex r13): a
+    // deploy between ack and post-ack side effects must not lose the
+    // durable agent_decisions row (Twilio will not retry an acked SID).
+    // The bell fires post-ack via flagResult.fireBell.
+    let rescheduleFlagResult = null;
+    if (customer && Body && !smsReaction && rescheduleAsk) {
+      rescheduleFlagResult = await require('../services/reschedule-intent-flagger')
+        .flagInboundRescheduleIntent({
+          customer,
+          body: Body,
+          smsLogId: smsLogEntry?.id || null,
+          messageSid: MessageSid || null,
+        })
+        .catch((err) => {
+          logger.warn(`[reschedule-intent] flag rejected: ${err.message}`);
+          return null;
+        });
+    }
+
     // Event-driven health rescore for any matched customer (the opt-out branch
     // above already fired for cancellations). Not gated on messageType: an
     // existing customer texting a churn message to a domain/van tracking number
@@ -585,27 +604,10 @@ router.post('/sms', async (req, res) => {
     // invoicing on schedule). Detect-and-surface only; never mutates the
     // appointment. Fire-and-forget: the flagger is fail-soft internally.
     let rescheduleFlagged = false;
-    if (customer && Body && !smsReaction && rescheduleAsk) {
-      // Awaited (we are post-ack): when the urgent reschedule bell fires,
-      // the generic sms_reply bell below is suppressed — one text must not
-      // produce two bells + two pushes (codex #3232 r2). The flagger is
-      // fail-soft internally; the catch is the required last-resort
-      // rejection handler for its own error paths.
-      const flagResult = await require('../services/reschedule-intent-flagger')
-        .flagInboundRescheduleIntent({
-          customer,
-          body: Body,
-          smsLogId: smsLogEntry?.id || null,
-          messageSid: MessageSid || null,
-        })
-        .catch((err) => {
-          logger.warn(`[reschedule-intent] flag rejected: ${err.message}`);
-          return null;
-        });
+    if (rescheduleFlagResult?.flagged === true && typeof rescheduleFlagResult.fireBell === 'function') {
       // Suppress the generic alert only when the urgent one actually
-      // LANDED (bell/push/deliberate suppression) — a flag row alone must
-      // not silence every notification for the message (codex r3).
-      rescheduleFlagged = flagResult?.alerted === true;
+      // LANDED (bell/push/deliberate suppression).
+      rescheduleFlagged = await rescheduleFlagResult.fireBell().catch(() => false);
     }
 
     // In-app + push notification for inbound SMS from known customers.

@@ -151,8 +151,9 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
     });
     if (!inserted) return { flagged: false, reason: 'recent_flag' };
 
-    let alerted = false;
-    try {
+    const fireBell = async () => {
+      let alerted = false;
+      try {
       const { triggerNotification } = require('./notification-triggers');
       const stats = await triggerNotification('appointment_reschedule_intent', {
         name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') || 'Customer',
@@ -165,11 +166,16 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
       });
       alerted = Boolean(stats && !stats.error
         && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
-    } catch (e) {
-      logger.warn(`[reschedule-intent] bell failed: ${e.message}`);
-    }
+      } catch (e) {
+        logger.warn(`[reschedule-intent] bell failed: ${e.message}`);
+      }
+      return alerted;
+    };
 
-    return { flagged: true, alerted, visitId: visit?.id || null };
+    // The durable flag row is committed by the time we return — callers
+    // invoke fireBell AFTER acking Twilio so the webhook ack is never
+    // delayed, while the row itself survives a crash (codex r13).
+    return { flagged: true, fireBell, visitId: visit?.id || null };
   } catch (err) {
     logger.warn(`[reschedule-intent] flag failed: ${err.message}`);
     return { flagged: false, reason: 'error' };
