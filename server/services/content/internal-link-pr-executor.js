@@ -22,6 +22,7 @@ const {
   pageAlreadyLinksTo,
   findFirstUnlinkedOccurrence,
   findEligiblePlacement,
+  placementForTask,
   paragraphAround,
   paragraphHasLink,
   robotsNoindex,
@@ -638,11 +639,12 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   if (sourceUrl === targetUrl) return skipped(base, 'self_link');
   if (pageAlreadyLinksTo(sourcePage.body, targetUrl)) return skipped(base, 'source_already_links_target');
 
-  // Same eligible-placement scan the planner used — the occurrence chosen at
-  // plan time is the occurrence evaluated (and later patched) here. When no
+  // Prefer the exact occurrence the planner recorded (source_offset) — the
+  // planner may have chosen a later occurrence whose paragraph carries the
+  // topical support — with a scan fallback for drifted files. When no
   // occurrence survives, report the first occurrence's specific failure so
   // skip reasons stay diagnostic.
-  const occurrence = findEligiblePlacement(sourcePage.body, task.anchor_text);
+  const occurrence = placementForTask(sourcePage.body, task);
   if (!occurrence) {
     const first = findFirstUnlinkedOccurrence(sourcePage.body, task.anchor_text);
     if (!first) return skipped(base, 'anchor_not_found');

@@ -773,6 +773,49 @@ describe('planForTarget', () => {
     expect(page.body.slice(tasks[0].source_offset, tasks[0].source_offset + tasks[0].anchor_text.length)).toBe('bed bug bites');
     expect(page.body.slice(0, tasks[0].source_offset)).toContain('Standalone paragraph');
   });
+  test('scans past a low-relevance occurrence to a richer paragraph of the same phrase', () => {
+    const page = {
+      file: 'src/content/blog/two-clean-mentions.md',
+      body: [
+        '---',
+        'title: Reader Questions',
+        'category: home-maintenance',
+        'primary_keyword: reader questions',
+        '---',
+        '',
+        'A reader mentioned bed bug bites in passing last month.',
+        '',
+        'For pest-control purposes, bed bug bites and flea bites in Florida homes deserve a professional look.',
+      ].join('\n'),
+      url: '/blog/two-clean-mentions/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [page], cap: 1 }
+    );
+    // Both paragraphs are clean placements; the first scores below the floor
+    // (no flea/pest support) and must not discard the phrase — the second,
+    // richer paragraph is selected and its offset persisted.
+    expect(tasks.length).toBe(1);
+    expect(page.body.slice(0, tasks[0].source_offset)).toContain('in passing last month');
+  });
+  test('placementForTask honors the planned offset and falls back on drift', () => {
+    const { placementForTask } = planner._internals;
+    const body = [
+      'First bed bug bites mention here.',
+      '',
+      'Second bed bug bites mention with more context.',
+    ].join('\n');
+    const secondIdx = body.indexOf('bed bug bites', body.indexOf('Second'));
+    const task = { anchor_text: 'bed bug bites', source_offset: secondIdx };
+    // Honors the recorded (second) occurrence even though the first is
+    // eligible too.
+    expect(placementForTask(body, task).index).toBe(secondIdx);
+    // Drifted file: offset no longer matches the anchor → falls back to the
+    // first eligible occurrence.
+    const drifted = `X${body}`;
+    expect(placementForTask(drifted, task).index).toBe(drifted.indexOf('bed bug bites'));
+  });
   test('hidden comment tokens do not lift relevance over the floor', () => {
     const page = {
       file: 'src/content/blog/comment-inflated.md',

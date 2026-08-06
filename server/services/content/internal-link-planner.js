@@ -318,8 +318,7 @@ const MAX_PLACEMENT_SCAN = 20;
  * THIS scan, so they always select the same occurrence — an early
  * ineligible mention no longer hides a later clean one.
  */
-function findEligiblePlacement(body, phrase) {
-  let fromIndex = 0;
+function findEligiblePlacement(body, phrase, { fromIndex = 0 } = {}) {
   for (let i = 0; i < MAX_PLACEMENT_SCAN; i++) {
     const occ = findFirstUnlinkedOccurrence(body, phrase, { fromIndex });
     if (!occ) return null;
@@ -332,6 +331,32 @@ function findEligiblePlacement(body, phrase) {
     fromIndex = occ.index + occ.length;
   }
   return null;
+}
+
+/**
+ * The placement to evaluate/patch for a QUEUED task. Prefers the exact
+ * occurrence the planner recorded (task.source_offset) when it is still
+ * present and eligible — the planner may have deliberately chosen a later
+ * occurrence whose paragraph carries more topical support, and a fresh
+ * first-eligible scan would silently select a different (weaker) one.
+ * Falls back to the scan when the file drifted since planning.
+ */
+function placementForTask(body, task) {
+  const anchor = String(task?.anchor_text || '');
+  if (!anchor) return null;
+  const text = String(body || '');
+  const offset = Number.isInteger(task?.source_offset) ? task.source_offset : null;
+  if (offset != null && offset >= 0 && text.slice(offset, offset + anchor.length) === anchor) {
+    const paragraph = paragraphAround(text, offset);
+    if (!paragraphHasLink(paragraph)
+      && policy.validateAnchorPolicy(anchor, { surroundingText: paragraph }).ok
+      // Confirms the occurrence at the offset is itself matchable (not
+      // inside a link/heading/masked region) — slice equality alone can't.
+      && findFirstUnlinkedOccurrence(text, anchor, { fromIndex: offset })?.index === offset) {
+      return { index: offset, length: anchor.length, snippet: snippetAround(text, offset, anchor.length), paragraph, anchor };
+    }
+  }
+  return findEligiblePlacement(text, anchor);
 }
 
 function snippetAround(text, start, length, padding = 50) {
@@ -554,25 +579,38 @@ class InternalLinkPlanner {
       // task the executor's relevance gate then rejects.
       const pageMatches = [];
       for (const { phrase, priority } of candidates) {
-        // findEligiblePlacement scans past occurrences the executor would
-        // reject (linked paragraph, contextual anchor-policy failure) and
-        // returns the first placement that survives — the executor dry-run
-        // and applyTaskToBody run the SAME scan, so the occurrence chosen
-        // here is the one that gets evaluated and patched. occ.anchor
-        // preserves the original casing from the matched text.
-        const occ = findEligiblePlacement(page.body, phrase);
+        // Scan placements the executor would accept (findEligiblePlacement
+        // skips linked paragraphs and contextual anchor-policy failures)
+        // AND keep scanning past placements whose paragraph scores below
+        // the gate's floor — an early thin mention must not discard a later
+        // occurrence whose paragraph carries the supporting terms. The
+        // chosen occurrence is persisted as source_offset; the executor and
+        // applyTaskToBody re-locate it via placementForTask, so what was
+        // scored here is what gets evaluated and patched.
+        let occ = null;
+        let relevance = 0;
+        let fromIndex = 0;
+        for (let i = 0; i < MAX_PLACEMENT_SCAN; i++) {
+          const candidateOcc = findEligiblePlacement(page.body, phrase, { fromIndex });
+          if (!candidateOcc) break;
+          const score = policy.scoreTopicalRelevance(
+            // Mask non-rendered regions (MDX props, HTML comments, code)
+            // before scoring — hidden tokens must not lift topical overlap
+            // for text the reader never sees.
+            topicalFacts(page.file, front, { bodyExcerpt: maskExcludedRegions(candidateOcc.paragraph) }),
+            targetFacts
+          );
+          // At or above the gate's floor the executor accepts this exact
+          // placement (identical facts on both sides); below it, try the
+          // phrase's next occurrence.
+          if (score >= minTopicalRelevance) {
+            occ = candidateOcc;
+            relevance = score;
+            break;
+          }
+          fromIndex = candidateOcc.index + candidateOcc.length;
+        }
         if (!occ) continue;
-        const relevance = policy.scoreTopicalRelevance(
-          // Mask non-rendered regions (MDX props, HTML comments, code)
-          // before scoring — hidden tokens must not lift topical overlap
-          // for text the reader never sees; the occurrence finder already
-          // excludes those regions from matching.
-          topicalFacts(page.file, front, { bodyExcerpt: maskExcludedRegions(occ.paragraph) }),
-          targetFacts
-        );
-        // Below the gate's floor the executor is certain to reject — with
-        // identical facts on both sides the scores match, so skip here.
-        if (relevance < minTopicalRelevance) continue;
         pageMatches.push({
           priority,
           relevance,
@@ -606,9 +644,10 @@ class InternalLinkPlanner {
     if (!body || !task) return body;
     const targetUrl = canonicalInternalPath(task.target_url);
     if (!targetUrl || pageAlreadyLinksTo(body, targetUrl)) return body;
-    // Same eligible-placement scan the planner and executor dry-run use, so
-    // the occurrence that was validated is the occurrence that gets linked.
-    const occ = findEligiblePlacement(body, task.anchor_text);
+    // Prefer the exact occurrence the planner recorded (source_offset), with
+    // a scan fallback — the occurrence that was validated is the occurrence
+    // that gets linked.
+    const occ = placementForTask(body, task);
     if (!occ) return body;
     const replacement = `[${occ.anchor}](${targetUrl})`;
     return body.slice(0, occ.index) + replacement + body.slice(occ.index + occ.length);
@@ -778,6 +817,7 @@ module.exports._internals = {
   blankRegion,
   findFirstUnlinkedOccurrence,
   findEligiblePlacement,
+  placementForTask,
   isInsideMarkdownHeading,
   hasPhraseBoundary,
   isWordChar,
