@@ -105,7 +105,7 @@ const AWAY_RE = /\b(?:out\s+of\s+town|on\s+vacation|leav(?:e|ing)\s+for\s+vacati
 // Away + permission = a heads-up, not a reschedule ask ("won't be home but
 // here's the gate code" / "exterior only is fine"). Permission only
 // suppresses the AWAY leg — an explicit reschedule/cancel verb still wins.
-const AWAY_PERMISSION_RE = /\b(?:(?:the\s+)?gate\s*code\s+is\b|gate\s*code\b[^.!?]{0,25}?[:#]\s*\d{3,}|(?:i|we)\s+(?:do\s+)?have\s+(?:a|the)\s+gate\s*code\b|(?:here'?s|i'?ll\s+(?:text|send|give|leave)(?:\s+you)?)\s+(?:the\s+)?gate\s*code|use\s+(?:the\s+)?gate\s*code|door\s+(?:is\s+|will\s+be\s+)?(?:open|unlocked)|garage\s+(?:is\s+|will\s+be\s+)?open|no\s+need\s+to\s+(?:be|get|come)\s+in|don'?t\s+need\s+to\s+(?:be|get|come)\s+in|(?:it|that)'?s\s+fine|exterior\s+(?:only\s+)?(?:is\s+)?fine|(?:you|y'?all)\s+can\s+still\s+(?:come|do|spray|treat)|go\s+ahead)\b/i;
+const AWAY_PERMISSION_RE = /\b(?:(?:the\s+)?gate\s*code\s+is\b|gate\s*code\b[^.!?]{0,25}?[:#]\s*\d{3,}|(?:i|we)\s+(?:do\s+)?have\s+(?:a|the)\s+gate\s*code\b|(?:here'?s|i'?ll\s+(?:text|send|give|leave)(?:\s+you)?)\s+(?:the\s+)?gate\s*code|(?:can|could|may|feel\s+free\s+to|just|please)\s+use\s+(?:the\s+)?gate\s*code|door\s+(?:is\s+|will\s+be\s+)?(?:open|unlocked)|garage\s+(?:is\s+|will\s+be\s+)?open|no\s+need\s+to\s+(?:be|get|come)\s+in|don'?t\s+need\s+to\s+(?:be|get|come)\s+in|(?:it|that)'?s\s+fine|exterior\s+(?:only\s+)?(?:is\s+)?fine|(?:you|y'?all)\s+can\s+still\s+(?:come|do|spray|treat)|go\s+ahead)\b/i;
 
 // Explicit stand-down asks (codex #3232 r39): "Please don't come
 // tomorrow" is a reschedule-class request even though no move/cancel verb
@@ -152,6 +152,10 @@ function hasRescheduleOrAwayIntent(body) {
   const freshAsk = needAsk
     || /\bplease\s+(?:re-?schedul|postpon)|\bactually\b[^.!?]{0,30}\b(?:please|can|could|need|want)\b[^.!?]{0,20}\b(?:re-?schedul|postpon)|\b(?:re-?schedul|postpon)\w*(?:\s+\w+){0,2}\s+again\b/i.test(text)
     || new RegExp(`\\bplease\\s+${GUARDED_MOVE}|\\bactually\\b[^.!?]{0,30}\\b(?:please|can|could|need|want)\\b[^.!?]{0,20}\\b${GUARDED_MOVE}`, 'i').test(text);
+  // A fresh ask whose OBJECT is explicitly the appointment (codex r41):
+  // only this form may override the billing-object vetoes — "reschedule
+  // my payment" must not.
+  const freshApptAsk = /\b(?:(?:need|want|like|have)\s+to|please)\s+(?:re-?schedul\w*|postpon\w*)\s+(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service)s?\b/i.test(text);
   // A self-correction ("Don't reschedule Tuesday. Actually, please
   // reschedule for Friday.") is a live ask — the fresh ask outranks the
   // whole-message negation scan (codex r24).
@@ -168,11 +172,14 @@ function hasRescheduleOrAwayIntent(body) {
     // (codex r25): "Did you skip/reschedule tomorrow?" asks, not asks-for.
     || (!freshAsk && /\bdid\s+you\b[^.!?]{0,25}\b(?:re-?schedul|postpon|skip|mov)/i.test(text))
     // Non-appointment reschedule objects (codex r16): "reschedule my
-    // autopay/payment" is billing, not an appointment change.
-    || /\b(?:re-?schedul\w*|postpon\w*|mov(?:e|ing)|push(?:ing|ed)?|defer(?:ring)?|delay(?:ing)?|chang(?:e|ing))\s+(?:[\w'’]+\s+){0,2}?(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b/i.test(text)
+    // autopay/payment" is billing, not an appointment change. A
+    // SEPARATELY grounded appointment ask in the same message overrides
+    // the billing clause (codex r41): "postpone my payment. Also
+    // reschedule tomorrow's appointment."
+    || (!freshApptAsk && /\b(?:re-?schedul\w*|postpon\w*|mov(?:e|ing)|push(?:ing|ed)?|defer(?:ring)?|delay(?:ing)?|chang(?:e|ing))\s+(?:[\w'’]+\s+){0,2}?(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b/i.test(text))
     // Billing subjects with date-only phrasing (codex r23): "can I make
     // my payment a different day?"
-    || /\b(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b[^.!?]{0,30}\b(?:different|another)\s+(?:day|date|time)\b|\b(?:different|another)\s+(?:day|date|time)\b[^.!?]{0,20}\b(?:autopay|payment|invoice|bill|billing)s?\b/i.test(text);
+    || (!freshApptAsk && /\b(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b[^.!?]{0,30}\b(?:different|another)\s+(?:day|date|time)\b|\b(?:different|another)\s+(?:day|date|time)\b[^.!?]{0,20}\b(?:autopay|payment|invoice|bill|billing)s?\b/i.test(text));
   if (!negated && (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text))) return true;
   if (cancelAsk) return true;
   // Past absences are history, not a request (codex r17): "we were out

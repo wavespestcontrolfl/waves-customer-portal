@@ -402,3 +402,21 @@ describe('alternative-date instead asks (codex r40)', () => {
     expect(hasRescheduleOrAwayIntent("I'd rather you email me instead")).toBe(false);
   });
 });
+
+describe('billing veto per-clause override and negated gate-code use (codex r41)', () => {
+  test('postpone payment plus reschedule appointment flags', () => {
+    expect(hasRescheduleOrAwayIntent("I need to postpone my payment. I also need to reschedule tomorrow's appointment")).toBe(true);
+  });
+  test('move payment plus reschedule appointment flags', () => {
+    expect(hasRescheduleOrAwayIntent('Please move my payment to Friday; also please reschedule my appointment to next week')).toBe(true);
+  });
+  test('reschedule my payment alone stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent('Can you reschedule my payment to Friday?')).toBe(false);
+  });
+  test('cant use the gate code still flags away', () => {
+    expect(hasRescheduleOrAwayIntent("I won't be home tomorrow and you can't use the gate code")).toBe(true);
+  });
+  test('you can use the gate code suppresses', () => {
+    expect(hasRescheduleOrAwayIntent("I won't be home tomorrow but you can use the gate code")).toBe(false);
+  });
+});

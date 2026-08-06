@@ -100,16 +100,22 @@ async function loadCallbackCalls(cutoff = new Date()) {
     -- callbacks (codex r38): a callback agreed 35 days out must surface
     -- when due, not fall off the created_at horizon before it. Unscheduled
     -- callbacks keep the created_at horizon.
-    WHERE ((COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') = ''
+    WHERE (((c.v2_extraction_status IS DISTINCT FROM 'valid'
+              OR COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') = '')
             AND c.created_at >= now() - interval '30 days')
-        OR (COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') <> ''
+        OR (c.v2_extraction_status = 'valid'
+            AND COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') <> ''
             AND (c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}')::timestamptz >= now() - interval '30 days'))
       AND c.updated_at <= :cutoff
       AND c.disposition = 'callback_task_created'
       -- Not yet due (codex r37): an explicitly agreed future callback
       -- time (scheduling.follow_up_start_at) is scheduled work, not an
       -- unworked obligation, until that time arrives.
-      AND (COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') = ''
+      -- Only VALIDATED payloads are cast (codex r41): a schema-failed
+      -- extraction can carry a non-ISO value and one bad cast would kill
+      -- the whole digest as query_failed.
+      AND (c.v2_extraction_status IS DISTINCT FROM 'valid'
+        OR COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') = ''
         OR (c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}')::timestamptz <= now())
       -- One obligation, one lane (codex r22): when the coach minted a
       -- call_back task for the same customer around this call, the task
@@ -121,6 +127,11 @@ async function loadCallbackCalls(cutoff = new Date()) {
           -- late recording processing can mint the task hours after the
           -- call. The 45-minute end-of-call window (codex r26) remains
           -- only for the legacy customer-matched fallback.
+          -- The task must still be VISIBLE somewhere (codex r41): a task
+          -- that aged past the follow-up lane's 30-day deadline horizon
+          -- (and wasn't completed) no longer suppresses the callback row,
+          -- or the obligation would appear in neither section.
+          AND (dt.deadline > now() - interval '30 days' OR dt.status = 'completed')
           AND (EXISTS (
               SELECT 1 FROM csr_call_scores dcs
               WHERE dcs.id = dt.call_score_id

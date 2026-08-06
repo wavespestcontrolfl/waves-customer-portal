@@ -91,8 +91,17 @@ async function loadUnkeptPromises() {
           -- bridge-start + duration; late-created rows (recording/status
           -- callback) already carry post-call created_at — adding
           -- duration there would overshoot.
-          AND e.sent_at > COALESCE(c.bridged_at, c.created_at)
-            + CASE WHEN c.bridged_at IS NOT NULL THEN make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE interval '0' END
+          -- End-of-call boundary (codex r23/r41): bridged rows end at
+          -- bridge + duration; NORMAL inbound rows are inserted at RING
+          -- time (bridged_at null) so their end is created_at + duration —
+          -- an estimate sent mid-call must not clear a promise made later
+          -- in the same call. Only recovered rows (outbound, created near
+          -- call end by status callbacks) use bare created_at.
+          AND e.sent_at > CASE
+            WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
+            WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
+            ELSE c.created_at
+          END
           AND (
                e.estimate_data #>> '{estimatorEngine,callLogId}' = c.id::text
             OR EXISTS (
