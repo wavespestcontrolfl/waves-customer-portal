@@ -392,6 +392,7 @@ function buildTurfRequestProfile(baseProfile, form) {
   profile.isCommercial = formIsCommercial;
   profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
   profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
+  profile.commercialPestCadence = formIsCommercial ? form.commercialPestCadence || null : null;
   profile.treeShrubDensity = formIsCommercial ? form.treeShrubDensity || null : null;
   profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
   return profile;
@@ -2112,6 +2113,7 @@ export default function EstimateToolViewV2({
     isCommercial: "NO",
     commercialSubtype: "",
     commercialRiskType: "",
+    commercialPestCadence: "",
     treeShrubDensity: "",
     mosquitoPressure: "",
     commercialPricingMode: "manual_quote",
@@ -2966,6 +2968,7 @@ export default function EstimateToolViewV2({
     form.isCommercial,
     form.commercialSubtype,
     form.commercialRiskType,
+    form.commercialPestCadence,
     form.treeShrubDensity,
     form.mosquitoPressure,
     form.hasPool,
@@ -3875,6 +3878,7 @@ export default function EstimateToolViewV2({
         commercialPricingMode: form.commercialPricingMode || "manual_quote",
         commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
         commercialRiskType: formIsCommercial ? form.commercialRiskType || "" : "",
+        commercialPestCadence: formIsCommercial ? form.commercialPestCadence || "" : "",
         treeShrubDensity: formIsCommercial ? form.treeShrubDensity || "" : "",
         mosquitoPressure: formIsCommercial ? form.mosquitoPressure || "" : "",
         fleaOfferKey: form.fleaOfferKey || "flea_elimination_two_visit",
@@ -4396,6 +4400,7 @@ export default function EstimateToolViewV2({
       isCommercial: "NO",
       commercialSubtype: "",
       commercialRiskType: "",
+      commercialPestCadence: "",
       treeShrubDensity: "",
       mosquitoPressure: "",
       commercialPricingMode: "manual_quote",
@@ -5072,6 +5077,7 @@ export default function EstimateToolViewV2({
                       isCommercial: "NO",
                       commercialSubtype: "",
                       commercialRiskType: "",
+                      commercialPestCadence: "",
                       treeShrubDensity: "",
                       mosquitoPressure: "",
                       commercialPricingMode: "manual_quote",
@@ -5433,6 +5439,19 @@ export default function EstimateToolViewV2({
                       { value: "healthcare_childcare", label: "Healthcare / childcare" },
                       { value: "hotel_resort", label: "Hotel / resort" },
                       { value: "multifamily", label: "Multifamily" },
+                    ]}
+                  />
+                </FieldV2>
+              )}
+              {(commercialDetected || form.commercialPestCadence) && (
+                <FieldV2 label="Pest cadence override">
+                  <SelectV2
+                    k="commercialPestCadence"
+                    options={[
+                      { value: "", label: "Program default (by business type)" },
+                      { value: "quarterly", label: "Quarterly (4x/yr)" },
+                      { value: "bimonthly", label: "Bi-monthly (6x/yr)" },
+                      { value: "monthly", label: "Monthly (12x/yr)" },
                     ]}
                   />
                 </FieldV2>

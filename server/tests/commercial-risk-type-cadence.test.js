@@ -7,6 +7,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
 const {
   resolveCommercialCadence,
+  resolveCommercialPestCadenceOverride,
   COMMERCIAL_RISK_TYPE_CADENCE,
   isCommercialRiskType,
 } = require('../services/pricing-engine/commercial-risk-type');
@@ -99,5 +100,40 @@ describe('cadence threads through generateEstimate (input.commercialRiskType)', 
   test('no risk type → today\'s defaults (pest 12 / rodent 4) — backward compatible', () => {
     expect(lineFor(undefined, 'commercial_pest').visitsPerYear).toBe(12);
     expect(lineFor(undefined, 'commercial_rodent_bait').visitsPerYear).toBe(4);
+  });
+});
+
+describe('direct pest-cadence override (input.commercialPestCadence)', () => {
+  test('resolveCommercialPestCadenceOverride maps cadences to visits, else null', () => {
+    expect(resolveCommercialPestCadenceOverride('quarterly')).toBe(4);
+    expect(resolveCommercialPestCadenceOverride('bimonthly')).toBe(6);
+    expect(resolveCommercialPestCadenceOverride('bi_monthly')).toBe(6);
+    expect(resolveCommercialPestCadenceOverride('monthly')).toBe(12);
+    expect(resolveCommercialPestCadenceOverride('MONTHLY')).toBe(12); // case-insensitive
+    expect(resolveCommercialPestCadenceOverride('')).toBe(null);
+    expect(resolveCommercialPestCadenceOverride(undefined)).toBe(null);
+    expect(resolveCommercialPestCadenceOverride('nonsense')).toBe(null);
+  });
+
+  const base = { propertyType: 'commercial', isCommercial: true, footprintSqFt: 20000 };
+  const lineFor = (input, service) => generateEstimate({
+    ...base, ...input, services: { pest: {}, rodentBait: {} },
+  }).lineItems.find((l) => l.service === service);
+
+  test('override beats the risk-type bucket for PEST only — rodent stays on the bucket', () => {
+    const pest = lineFor({ commercialRiskType: 'multifamily', commercialPestCadence: 'quarterly' }, 'commercial_pest');
+    const rodent = lineFor({ commercialRiskType: 'multifamily', commercialPestCadence: 'quarterly' }, 'commercial_rodent_bait');
+    expect(pest.visitsPerYear).toBe(4); // multifamily bucket says 12; override wins
+    expect(rodent.visitsPerYear).toBe(12); // bucket cadence untouched
+  });
+
+  test('override works with no risk type set (beats the program default)', () => {
+    expect(lineFor({ commercialPestCadence: 'bimonthly' }, 'commercial_pest').visitsPerYear).toBe(6);
+  });
+
+  test('unset/unrecognized override → risk-type bucket, then program default', () => {
+    expect(lineFor({ commercialRiskType: 'office_low', commercialPestCadence: '' }, 'commercial_pest').visitsPerYear).toBe(4);
+    expect(lineFor({ commercialRiskType: 'office_low', commercialPestCadence: 'nonsense' }, 'commercial_pest').visitsPerYear).toBe(4);
+    expect(lineFor({ commercialPestCadence: 'nonsense' }, 'commercial_pest').visitsPerYear).toBe(12);
   });
 });
