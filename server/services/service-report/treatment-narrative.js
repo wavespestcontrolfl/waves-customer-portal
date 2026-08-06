@@ -16,7 +16,11 @@ const { dispatchWithFallback } = require('../llm/call');
 const { buildTreatmentSummary, METHOD_PHRASES } = require('./treatment-summary');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'treatment_narrative_v3'; // v3: + HUMAN_PROSE_RULES (owner style block 07-30)
+// v4: active-ingredient tokens exempt from the trade_name echo check (v3's
+// check rejected 100% of narratives for products named after their active,
+// permanently caching every such report as deterministic fallback — the bump
+// re-arms those cache keys so they regenerate on next read).
+const PROMPT_VERSION = 'treatment_narrative_v4';
 
 // Request-path budget: a report read ships the deterministic sentence after
 // this long and lets generation finish in the background.
@@ -104,19 +108,33 @@ const GENERIC_NAME_TOKENS = new Set([
   'shrub', 'weed', 'grass', 'pest', 'oil', 'emulsion', 'systemic',
 ]);
 
-function validateNarrative(text, productNames = []) {
+function validateNarrative(text, productNames = [], activeIngredients = []) {
   const t = String(text || '').trim();
   if (!t) return 'empty';
   if (t.length > 1200) return 'too_long';
   if (FORBIDDEN.some((re) => re.test(t))) return 'forbidden_copy';
   // Brand-name echo check: any distinctive token of a recorded product name
   // appearing in the copy fails the actives-only contract (codex P3).
+  // The prompt REQUIRES actives language, and many catalog names embed the
+  // active ("Artavia 2 SC (Azoxy)" / azoxystrobin, "Bifen I/T" / bifenthrin)
+  // — without an exemption every narrative for such products fails on both
+  // providers (prod: 100% trade_name rejections 07-31 → 08-04). So: scrub
+  // copy WORDS that contain a full recorded active-ingredient word (that is
+  // legitimate actives language wherever it appears), then run the echo scan
+  // on the remainder — a standalone brand alias ("Bifen was applied") is not
+  // scrubbed and still fails (codex P2 r1).
   const hay = t.toLowerCase();
+  const activeWords = activeIngredients
+    .flatMap((a) => String(a || '').toLowerCase().split(/[^a-z0-9]+/))
+    .filter((w) => w.length >= 4);
+  const scrubbed = hay.split(/[^a-z0-9]+/)
+    .filter((word) => !activeWords.some((active) => word.includes(active)))
+    .join(' ');
   const echoed = productNames.some((name) => String(name || '')
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((token) => token.length >= 4 && !GENERIC_NAME_TOKENS.has(token))
-    .some((token) => hay.includes(token)));
+    .some((token) => scrubbed.includes(token)));
   if (echoed) return 'trade_name';
   const banned = findBannedCustomerCopy(t);
   if (banned.length) return `banned:${banned.join(',')}`;
@@ -196,13 +214,14 @@ async function buildTreatmentNarrative({
         photoSummary: facts.photoSummary,
       });
       const productNames = products.map((p) => p.name).filter(Boolean);
+      const productActives = products.map((p) => p.activeIngredient).filter(Boolean);
       const generated = await dispatchWithFallback(
         MODELS.TEXT_POLICIES.report,
         { text: prompt, jsonMode: false, maxTokens: 400 },
-        { validate: (result) => validateNarrative(result.text, productNames) },
+        { validate: (result) => validateNarrative(result.text, productNames, productActives) },
       );
       const text = generated.ok ? String(generated.text || '').trim() : '';
-      const problem = text ? validateNarrative(text, productNames) : 'generation_failed';
+      const problem = text ? validateNarrative(text, productNames, productActives) : 'generation_failed';
       const finalText = problem ? fallback : text;
       const finalStamp = new Date();
       const finalStatus = problem ? 'fallback' : 'ok';

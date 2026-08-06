@@ -50,6 +50,41 @@ describe('treatment narrative prompt + validator (owner 2026-07-21)', () => {
     // Trade-name echoes and confirmed-diagnosis terms fail validation.
     expect(validateNarrative('Safari was applied as a soil drench today.', ['Safari 20 SG'])).toBe('trade_name');
     expect(validateNarrative('We treated the scale infestation on the palms.')).toBe('forbidden_copy');
+    // Name tokens that live inside the recorded active ingredient are actives
+    // language, not brand echo — the prompt REQUIRES the active, so a product
+    // named after it must still validate (prod 07-31→08-04: every narrative
+    // for such products failed trade_name on both providers).
+    expect(validateNarrative(
+      'An azoxystrobin fungicide was applied to the turf to protect against fungal spread.',
+      ['Artavia 2 SC (Azoxy)'], ['Azoxystrobin'],
+    )).toBe(null);
+    expect(validateNarrative(
+      'A bifenthrin barrier treatment was applied around the exterior.',
+      ['Bifen I/T'], ['Bifenthrin 7.9%'],
+    )).toBe(null);
+    // The exemption is scoped to the active — a distinctive brand token that
+    // is NOT part of the active still fails.
+    expect(validateNarrative(
+      'Artavia was applied to the turf today.',
+      ['Artavia 2 SC (Azoxy)'], ['Azoxystrobin'],
+    )).toBe('trade_name');
+    // ...and scoped to occurrences INSIDE the full active word: a standalone
+    // brand alias still fails even when it prefixes the product's own active
+    // (codex P2 r1 — "Bifen" alone is the trade name, "bifenthrin" is not).
+    expect(validateNarrative(
+      'Bifen was applied around the exterior.',
+      ['Bifen I/T'], ['Bifenthrin 7.9%'],
+    )).toBe('trade_name');
+    // Another product's active ingredient must not act as a global
+    // allowlist for this product's brand token.
+    expect(validateNarrative(
+      'A bifen application was made along the foundation.',
+      ['Bifen Brand X', 'Other Product'], ['Imidacloprid', 'Bifenthrin'],
+    )).toBe('trade_name');
+    expect(validateNarrative(
+      'A bifenthrin barrier and an imidacloprid drench were applied.',
+      ['Bifen I/T', 'Dominion 2L'], ['Bifenthrin', 'Imidacloprid'],
+    )).toBe(null);
   });
 });
 
