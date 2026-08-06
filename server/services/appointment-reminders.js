@@ -3278,10 +3278,16 @@ const AppointmentReminders = {
               // Plain 'pending' only (codex r43) — 'pending_notify' keeps
               // its lease so the caller-notify intent survives for the
               // sweep to settle without re-deriving delivery evidence.
+              // AND only as a UNIT (codex r44): a mixed group (one
+              // target's savepoint failed and was re-adopted plain) must
+              // not split — released members would late-claim into a
+              // second group and the customer would get two combined
+              // texts. Any pending_notify sibling retains the whole group.
               await db('appointment_reminders')
                 .whereIn('scheduled_service_id', ids)
                 .where('cancellation_notice_state', 'pending')
                 .where('cancellation_notice_at', seriesToken)
+                .whereRaw("NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.cancellation_notice_state = 'pending_notify')")
                 .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
             }
             return;
