@@ -214,6 +214,8 @@ function buildRows() {
       fleaExteriorAreaSqFt: 20000,
     },
     { isRecurringCustomer: true },
+    // Selectable single-visit knockdown offer (lower entry price).
+    { fleaOfferKey: 'flea_knockdown_single' },
   ];
   add('flea_elimination', () => rangeRow({
     key: 'flea_elimination',
@@ -505,7 +507,7 @@ function buildRows() {
     // (measured, or recurring-lawn customers) — the live estimate path uses
     // exact-area for measured jobs, which prices above the estimated mode.
     values: sweepValues(
-      LAWNS_SQFT.flatMap((sq) =>
+      [...LAWNS_SQFT, 30000].flatMap((sq) =>
         ['eighth', 'quarter'].flatMap((depth) => [false, true].map((exactArea) => ({ sq, depth, exactArea })))),
       ({ sq, depth, exactArea }) => sp.priceTopDressing(sq, depth, exactArea),
       (r) => r.price),
@@ -559,6 +561,14 @@ function buildRows() {
     notes: 'Localized Termidor foam application; discounted as an add-on to a liquid treatment.',
   }));
 
+  add('rodent_inspection', () => rangeRow({
+    key: 'rodent_inspection',
+    name: 'Rodent Inspection',
+    unit: 'per inspection',
+    values: [sp.priceRodentInspection({}).price].filter((v) => Number.isFinite(v) && v > 0),
+    notes: 'Creditable toward remediation work within 14 days.',
+  }));
+
   add('rodent_guarantee', () => rangeRow({
     key: 'rodent_guarantee',
     name: 'Rodent Guarantee',
@@ -601,7 +611,7 @@ function buildRows() {
         ['quarterly', 'bimonthly', 'monthly'].map((cadence) => ({ points, cadence }))),
       ({ points, cadence }) => sp.priceRecurringFoam(points, { cadence }),
       (r) => r.perTreatment),
-    notes: 'Quarterly or bi-monthly foam program; discounted vs one-time treatments.',
+    notes: 'Quarterly, bi-monthly, or monthly foam program; discounted vs one-time treatments.',
   }));
 
   add('foam_drill', () => rangeRow({

@@ -29,6 +29,7 @@ const EXPECTED_KEYS = [
   'termite_foam',
   'trap_only_retainer',
   'recurring_foam',
+  'rodent_inspection',
   'rodent_guarantee',
   'dethatching',
   'foam_drill',
