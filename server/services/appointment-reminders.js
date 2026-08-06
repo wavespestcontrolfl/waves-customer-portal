@@ -2992,6 +2992,12 @@ const AppointmentReminders = {
             .whereIn('ss.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
         })
         .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+      // Restoration also voids any un-applied caller-intent outbox row
+      // (codex r10): a re-cancel within 72h must not inherit the OLD
+      // cycle's notify intent.
+      await db.raw(
+        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND EXISTS (SELECT 1 FROM scheduled_services ss WHERE 'cn-ci-' || ss.id::text = ok.email_key AND ss.status IN ('pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'))",
+      ).catch(() => {});
 
       // Age-out runs regardless of the gate (r12): a notice older than
       // 72h is moot — texting "your visit was cancelled" days later is

@@ -597,7 +597,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             logger.warn(`[job-status] caller claim repair classification failed for ${jobId}: ${classifyErr.message}`);
             return;
           }
-          await db('appointment_reminders')
+          const repaired = await db('appointment_reminders')
             .where({ scheduled_service_id: jobId })
             .where(function claimable() {
               this.whereNull('cancellation_notice_at')
@@ -619,10 +619,16 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
               }
             })
             .update({ cancellation_notice_at: callerTs, cancellation_notice_state: repairState, updated_at: callerTs });
-          await db('ops_email_send_state')
-            .where({ email_key: `cn-ci-${jobId}` })
-            .del()
-            .catch(() => {});
+          // Consume the outbox ONLY when this repair actually recorded
+          // the intent (codex r10): zero rows means the route's own
+          // plain-pending claim won the race — the outbox must survive
+          // so the sweep's upgrade pass can apply it if the route dies.
+          if (repaired) {
+            await db('ops_email_send_state')
+              .where({ email_key: `cn-ci-${jobId}` })
+              .del()
+              .catch(() => {});
+          }
           return;
         }
         if (!cancelNoticeClaimTs && cancelNoticeLateClaim) {
