@@ -2261,12 +2261,8 @@ const AppointmentReminders = {
         return null;
       }
 
-      await db('appointment_reminders')
-        .where({ id: record.id })
-        .update({ cancelled: true, updated_at: new Date() });
-
       // A restored visit is LIVE — a stale cancellation worker must not
-      // re-close its reminder row or touch claims (codex r13).
+      // re-close its reminder row or touch claims (codex r13; ordered BEFORE the cancelled flag write — r14).
       const svcNow = await db('scheduled_services')
         .where({ id: scheduledServiceId })
         .first('status');
@@ -2275,6 +2271,10 @@ const AppointmentReminders = {
         reportOutcome(false, `visit is ${svcNow.status} — no cancellation processed`);
         return record;
       }
+
+      await db('appointment_reminders')
+        .where({ id: record.id })
+        .update({ cancelled: true, updated_at: new Date() });
 
       // Send-once via the dedicated atomic claim. `cancelled` is NOT
       // usable as evidence — the status-sync trigger (20260720000000) sets
@@ -2330,7 +2330,17 @@ const AppointmentReminders = {
           .where({ id: record.id })
           .where(function claimable() {
             this.whereNull('cancellation_notice_at')
-              .orWhereIn('cancellation_notice_state', ['pending', 'pending_notify']);
+              .orWhere(function freshSingleton() {
+                // Adopt fresh pending claims only when NOT group-shared —
+                // a same-token sibling means an in-progress series owns
+                // this obligation (r14); stale groups belong to the sweep.
+                this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                  .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
+              })
+              .orWhere(function staleLease() {
+                this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                  .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"));
+              });
           })
           .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'pending', updated_at: noticeToken });
       }
@@ -2663,10 +2673,14 @@ const AppointmentReminders = {
       // evaluates fresh.
       await db('appointment_reminders')
         .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
-        .where('cancellation_notice_at', '<', db.raw("now() - interval '72 hours'"))
-        // Terminal (codex r13): releasing to NULL let a cancelled→cancelled
-        // retry reclaim and text a days-old cancellation. A genuine future
-        // cycle passes through a live restore, which clears markers.
+        // Aged from the ORIGINAL cancellation (r14): reclaims refresh the
+        // claim token every 15 minutes during an outage, so the token
+        // cannot carry the age — the visit's latest real cancelled
+        // transition can. Terminal 'suppressed' (r13): releasing let a
+        // cancelled→cancelled retry text a days-old cancellation.
+        .whereRaw(
+          "(SELECT COALESCE(MAX(h.transitioned_at), 'infinity') FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled') < now() - interval '72 hours'",
+        )
         .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
       const { isEnabled } = require('../config/feature-gates');
       if (!isEnabled('cancelNoticeHook')) return { swept: 0 };
@@ -2835,7 +2849,12 @@ const AppointmentReminders = {
           // (route trx claim / sweep reclaim), and stale leases — never a
           // fresh foreign single-visit lease mid-send (codex r13): those
           // must stay visible to the handoff fence.
-          this.whereNull('cancellation_notice_at');
+          this.where(function unclaimedStillCancelled() {
+            this.whereNull('cancellation_notice_at')
+              // Restoration deliberately cleared this marker — a live
+              // target must not be re-claimed by the series sender (r14).
+              .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')");
+          });
           if (priorGroupToken) this.orWhere('cancellation_notice_at', priorGroupToken);
           this.orWhere(function staleLease() {
             this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
@@ -2852,13 +2871,12 @@ const AppointmentReminders = {
       const finalizeSeriesClaims = async (accepted, { retryable = false } = {}) => {
         try {
           if (!accepted && retryable) {
-            // Transient provider failure: keep the pending leases so the
-            // sweep's group recovery retries — releasing would strand the
-            // series (targets are already cancelled, so the dispatch
-            // retry finds nothing to re-cancel; codex r7). Gate off = no
-            // sweep → release for a manual retry.
-            const { isEnabled } = require('../config/feature-gates');
-            if (isEnabled('cancelNoticeHook')) return;
+            // Keep the leases REGARDLESS of the gate (r14): a series has
+            // no manual retry (the route's target query excludes
+            // already-cancelled rows), so releasing strands the
+            // obligation. The sweep's pre-gate 72h age-out still settles
+            // permanently-failing groups even while the gate is off.
+            return;
           }
           await db('appointment_reminders')
             .whereIn('scheduled_service_id', ids)
