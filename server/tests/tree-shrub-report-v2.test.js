@@ -68,8 +68,15 @@ describe('treatment narrative prompt + validator (owner 2026-07-21)', () => {
       'Artavia was applied to the turf today.',
       ['Artavia 2 SC (Azoxy)'], ['Azoxystrobin'],
     )).toBe('trade_name');
-    // ...and scoped PER PRODUCT: another product's active ingredient must not
-    // act as a global allowlist for this product's brand token.
+    // ...and scoped to occurrences INSIDE the full active word: a standalone
+    // brand alias still fails even when it prefixes the product's own active
+    // (codex P2 r1 — "Bifen" alone is the trade name, "bifenthrin" is not).
+    expect(validateNarrative(
+      'Bifen was applied around the exterior.',
+      ['Bifen I/T'], ['Bifenthrin 7.9%'],
+    )).toBe('trade_name');
+    // Another product's active ingredient must not act as a global
+    // allowlist for this product's brand token.
     expect(validateNarrative(
       'A bifen application was made along the foundation.',
       ['Bifen Brand X', 'Other Product'], ['Imidacloprid', 'Bifenthrin'],
