@@ -37,7 +37,10 @@ const MAX_PER_SECTION = 12;
 // Outbound types that count as a human answer — automated broadcasts
 // (reminders, en-route, receipts, review asks) must not clear a waiting
 // customer from the digest (codex #3232 r1).
-const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised', 'estimate_sent')";
+// Canonical human-authored types ONLY (codex r8): estimate_sent can be
+// an automated lane send for a SEPARATE matter — treating it as an
+// answer advanced the marker and lost the waiting item permanently.
+const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised')";
 
 // Scan window: since the previous SUCCESSFUL send (the ops_email_send_state
 // marker), bounded to 7 days — windows tile exactly run-to-run, including
@@ -131,7 +134,10 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
        -- a 25h window re-reported yesterday's expiries (codex r2).
        OR (t.status = 'expired' AND t.action_verified = false
            AND t.deadline > ${ET_DAY_START_SQL} AND t.deadline <= :cutoff)
-    ORDER BY t.deadline ASC NULLS LAST
+    -- Newest-first (codex r8): oldest-first returned the same stuck 12
+    -- forever and newer tasks never surfaced with details; yesterday's
+    -- rows were already reported and live on in the overflow count.
+    ORDER BY t.deadline DESC NULLS LAST
     LIMIT :cap
     `,
     { cap: MAX_PER_SECTION, cutoff },

@@ -84,3 +84,11 @@ describe('r6 regression cases', () => {
     expect(hasRescheduleOrAwayIntent('Cancel my next invoice')).toBe(false);
   });
 });
+
+describe('r8 regression cases', () => {
+  test('relative-date cancellations flag', () => {
+    expect(hasRescheduleOrAwayIntent('I need to cancel for next week')).toBe(true);
+    expect(hasRescheduleOrAwayIntent("cancel this week's treatment")).toBe(true);
+    expect(hasRescheduleOrAwayIntent('Please cancel on the 12th')).toBe(true);
+  });
+});
