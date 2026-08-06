@@ -2327,10 +2327,18 @@ const AppointmentReminders = {
         return record;
       }
 
+      // Scoped to the CURRENT cancellation cycle (codex r9): a visit
+      // restored to live and cancelled again must not reconcile against
+      // the first cancellation's SMS — only audits at/after the latest
+      // cancelled transition count.
       const acceptedCancellationAudit = async () => Boolean(await db('messaging_audit_log')
         .where({ appointment_id: String(scheduledServiceId), purpose: 'appointment_cancellation' })
         .whereNotNull('sent_at')
         .whereRaw("provider_message_id ~ '^(SM|MM)'")
+        .whereRaw(
+          "sent_at >= (SELECT COALESCE(MAX(h.created_at), '-infinity') FROM job_status_history h WHERE h.job_id = ? AND h.to_status = 'cancelled')",
+          [scheduledServiceId],
+        )
         .first('id'));
 
       if (!claimed) {
@@ -2348,7 +2356,11 @@ const AppointmentReminders = {
           .where({ id: record.id, cancellation_notice_state: 'pending' })
           .where('cancellation_notice_at', noticeToken)
           .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
-        reportOutcome(false, 'A cancellation notice was already accepted for this visit — not re-sending');
+        // The customer DID get the text (prior attempt, provider-accepted)
+        // — report success so bulk/single operators don't see a phantom
+        // notification failure (codex r9).
+        reportOutcome(true, null);
+        logger.info(`[appt-remind] Cancellation notice already accepted for ${scheduledServiceId} — reconciled as sent`);
         return record;
       }
 
@@ -2662,6 +2674,11 @@ const AppointmentReminders = {
           .where({ purpose: 'appointment_cancellation' })
           .whereNotNull('sent_at')
           .whereRaw("provider_message_id ~ '^(SM|MM)'")
+          // Current cancellation cycle only (codex r9) — see
+          // acceptedCancellationAudit.
+          .whereRaw(
+            "sent_at >= (SELECT COALESCE(MAX(h.created_at), '-infinity') FROM job_status_history h WHERE h.job_id = messaging_audit_log.appointment_id::uuid AND h.to_status = 'cancelled')",
+          )
           .first('id'));
         if (alreadyAccepted) {
           await db('appointment_reminders')
@@ -2841,8 +2858,18 @@ const AppointmentReminders = {
               .first('id');
             const foreign = await db('appointment_reminders')
               .whereIn('scheduled_service_id', ids)
-              .where({ cancellation_notice_state: 'pending' })
               .whereNot('cancellation_notice_at', seriesToken)
+              .where(function foreignOwner() {
+                // A pending foreign claim = an adopter mid-send; a SENT
+                // row stamped after our claim = an adopter that already
+                // texted (codex r9). Either way the combined send would
+                // double-text.
+                this.where('cancellation_notice_state', 'pending')
+                  .orWhere(function freshSent() {
+                    this.where('cancellation_notice_state', 'sent')
+                      .where('updated_at', '>=', seriesToken);
+                  });
+              })
               .first('id');
             return (own && !foreign)
               ? { ok: true }
