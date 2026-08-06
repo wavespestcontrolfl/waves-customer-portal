@@ -567,6 +567,15 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
                 .orWhere('reminder_24h_sent', true)
                 .orWhere('confirmation_sent', true);
             })
+            // Flags are bookkeeping — also require a REAL customer-level
+            // reminder/confirmation SMS (codex r29).
+            .whereRaw(`EXISTS (
+              SELECT 1 FROM sms_log lsl
+              WHERE lsl.customer_id = appointment_reminders.customer_id
+                AND lsl.direction = 'outbound'
+                AND lsl.message_type IN ('reminder_72h', 'appointment_reminder', 'confirmation')
+                AND lsl.twilio_sid ~ '^(SM|MM)'
+            )`)
             .first('id'));
         }
         if (!delivered) return;

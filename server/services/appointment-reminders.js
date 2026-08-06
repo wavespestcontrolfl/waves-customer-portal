@@ -2445,8 +2445,19 @@ const AppointmentReminders = {
         .first('id'));
 
       if (!claimed) {
-        logger.info(`[appt-remind] Cancellation notice already handled for ${scheduledServiceId} — not re-sending`);
-        reportOutcome(false, 'A cancellation notice was already handled for this visit');
+        // A terminal 'sent' marker means the customer HAS the text — a
+        // lost-response retry must report success, not a phantom failure
+        // (codex r29).
+        const current = await db('appointment_reminders')
+          .where({ id: record.id })
+          .first('cancellation_notice_state');
+        if (current?.cancellation_notice_state === 'sent') {
+          logger.info(`[appt-remind] Cancellation notice already SENT for ${scheduledServiceId} — reconciled as success`);
+          reportOutcome(true, null);
+        } else {
+          logger.info(`[appt-remind] Cancellation notice already handled for ${scheduledServiceId} — not re-sending`);
+          reportOutcome(false, 'A cancellation notice was already handled for this visit');
+        }
         return record;
       }
 
@@ -2961,6 +2972,18 @@ const AppointmentReminders = {
                 .orWhere('reminder_24h_sent', true)
                 .orWhere('confirmation_sent', true);
             })
+            // Flags are bookkeeping (registration pre-sets confirmation_sent;
+            // closed windows mark sent without sending — codex r29): also
+            // require a REAL customer-level reminder/confirmation SMS
+            // (genuine SID), the best obtainable evidence for
+            // pre-linkage rows.
+            .whereRaw(`EXISTS (
+              SELECT 1 FROM sms_log lsl
+              WHERE lsl.customer_id = appointment_reminders.customer_id
+                AND lsl.direction = 'outbound'
+                AND lsl.message_type IN ('reminder_72h', 'appointment_reminder', 'confirmation')
+                AND lsl.twilio_sid ~ '^(SM|MM)'
+            )`)
             .first('id'));
         }
         if (group.length > 1) {
