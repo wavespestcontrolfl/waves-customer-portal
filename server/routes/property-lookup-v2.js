@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -1195,20 +1195,96 @@ Return a JSON object with exactly these fields:
 // loop; NOT read by pricing — computeTurfArea consumes estimatedTurfSf /
 // measuredTurfSf only. Promoting this from shadow to a pricing input is a
 // deliberate later flip once the logged deltas have been judged.
+// Ground-floor footprint from the county's own per-building rows, when EVERY
+// row carries a gross/under-roof area (Manatee UnRoof, Sarasota Gross Area,
+// Charlotte Total Area, Hillsborough grossArea — one gross-less row would
+// silently understate the sum, so any miss falls back whole-record). Gross
+// is summed across floors, so each building divides by its own story count.
+// Living area misses the garage/lanai — the 2026-08-05 audit measured
+// living/stories at 2,085 where the roll's under-roof said 2,771 and the
+// GIS roofprint 3,099.
+function countyBuildingFootprintSf(rc) {
+  const rows = Array.isArray(rc?._buildings) ? rc._buildings : [];
+  if (!rows.length) return null;
+  // A tech-verified story correction updates record.stories but NOT the
+  // preserved _buildings rows (lookup-cache applyVerifiedOverrides), so the
+  // roll's per-row story counts are stale relative to what a human measured
+  // — the gross basis stands down and living / verified-stories governs
+  // (codex #3229 r3).
+  if (String(rc?._fieldEvidence?.stories?.sourceType || '').toLowerCase() === 'verified') return null;
+  let total = 0;
+  for (const row of rows) {
+    const gross = firstNonNegativeNumber(row?.underRoofSqft, row?.grossAreaSqft, row?.totalAreaSqft);
+    if (!(gross > 0)) return null;
+    // Each row must carry its OWN story count (codex #3229 P2): inheriting
+    // the record-level count would divide a 1-story accessory by the
+    // 2-story primary's floors and halve its footprint; defaulting to 1
+    // would double a story-less primary's. Either miss fails the whole
+    // record back to living/stories.
+    const rowStories = Number(row?.stories);
+    if (!(rowStories >= 1)) return null;
+    total += gross / rowStories;
+  }
+  return Math.round(total);
+}
+
 function computeFootprintTurf(rc) {
   const lotSqFt = Number(rc?.lotSize);
   const homeSqFt = Number(rc?.squareFootage);
   if (!Number.isFinite(lotSqFt) || lotSqFt <= 0) return null;
   if (!Number.isFinite(homeSqFt) || homeSqFt <= 0) return null;
   const stories = Math.max(1, Number(rc?.stories) || 1);
-  const footprintSf = Math.round(homeSqFt / stories);
+  const livingFootprintSf = Math.round(homeSqFt / stories);
+  // Prefer the roll's gross-under-roof footprint; the ground floor can never
+  // be smaller than living/stories, so a short gross parse must not shrink
+  // the footprint below the living-area floor.
+  const grossFootprintSf = countyBuildingFootprintSf(rc);
+  // Never combine an uncapped gross area with a capped lot (codex #3229 r3):
+  // the county parsers cap lotSize at COUNTY_LOT_SQFT_MAX while _buildings
+  // gross areas ride uncapped, so a campus footprint can exceed the "lot"
+  // and emit a trusted ZERO ceiling that clamps real turf to nothing. An
+  // at-cap lot or impossible geometry (footprint >= lot) rejects the gross
+  // basis outright — living/stories governs as before.
+  const grossUsable = Boolean(grossFootprintSf)
+    && lotSqFt < COUNTY_LOT_SQFT_MAX
+    && grossFootprintSf < lotSqFt;
+  const footprintSf = Math.max(livingFootprintSf, grossUsable ? grossFootprintSf : 0);
+  // The basis records which component actually DETERMINED footprintSf
+  // (codex #3229 r2 P1): a short gross parse loses the max() to
+  // living/stories, and labeling it gross would make the adapter treat the
+  // footprint as independent of home-size edits it in fact tracks.
+  const grossGoverns = grossUsable && grossFootprintSf >= livingFootprintSf;
   const imperviousRaw = Number(rc?.imperviousAreaSf);
   const imperviousKnown = rc?.imperviousAreaSf != null && Number.isFinite(imperviousRaw);
   const imperviousSf = imperviousKnown ? imperviousRaw : 0;
-  const turfSf = Math.max(0, Math.round(lotSqFt - footprintSf - imperviousSf));
+  // Screen cage: pervious on the roll (mesh doesn't seal the ground) but not
+  // treatable turf either. Subtract only the slice not already counted by
+  // its interior pool-family rows — and only when poolImperviousSf is
+  // present (records shaped before that field must not have the full cage
+  // subtracted; see the shaper note).
+  const cageSf = Number(rc?.poolCageSqft);
+  // Same null-vs-0 discipline as imperviousKnown: Number(null) is 0, so a
+  // bare Number.isFinite check would read a pre-field record as "family 0"
+  // and net the full cage.
+  const poolFamilyKnown = rc?.poolImperviousSf != null && Number.isFinite(Number(rc.poolImperviousSf));
+  const enclosureNetSf = imperviousKnown && cageSf > 0 && poolFamilyKnown
+    ? Math.max(0, Math.round(cageSf - Number(rc.poolImperviousSf)))
+    : 0;
+  const turfSf = Math.max(0, Math.round(lotSqFt - footprintSf - imperviousSf - enclosureNetSf));
   return {
     turfSf,
-    parts: { lotSqFt: Math.round(lotSqFt), footprintSf, imperviousSf, imperviousKnown },
+    parts: {
+      lotSqFt: Math.round(lotSqFt),
+      footprintSf,
+      footprintBasis: grossGoverns ? 'gross_under_roof' : 'living_area',
+      // Recorded so the translate adapter's stale-ceiling guard can validate
+      // an operator stories edit even when the footprint basis is gross
+      // (gross/stories doesn't reconstruct from homeSqFt).
+      stories,
+      imperviousSf,
+      imperviousKnown,
+      enclosureNetSf,
+    },
   };
 }
 
@@ -2945,10 +3021,15 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
 // ─────────────────────────────────────────────
 // Ceiling-vs-request validity check for the translate adapter (see the
 // countyTurfCeilingSf mapping below). footprintTurfParts records the exact
-// inputs the county ceiling was computed from — today's sole producer
-// (computeFootprintTurf) derives the footprint from squareFootage/stories,
-// so an edited home size, lot, or story count invalidates. Any OTHER
-// footprintBasis value is unrecognized and fails closed (codex #3224 r2
+// inputs the county ceiling was computed from. Two recognized bases, both
+// produced by computeFootprintTurf:
+//   'living_area' (also pre-basis records, where the key is absent) —
+//     footprint = squareFootage/stories, so an edited home size, lot, or
+//     story count invalidates;
+//   'gross_under_roof' — footprint = the roll's per-building gross areas ÷
+//     stories, which doesn't budge with homeSqFt, so only the lot and the
+//     recorded story count are checked.
+// Any OTHER basis value is unrecognized and fails closed (codex #3224 r2
 // P2): a new basis may only pass once its producer ships alongside
 // matching validation here. An operator type correction to a shared-turf
 // type also drops the ceiling (codex #3224 r2 P1) — the unit's lawn
@@ -2960,10 +3041,23 @@ function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
     ? p.footprintTurfParts
     : null;
   if (!parts) return false;
-  if (String(parts.footprintBasis || 'living_area') !== 'living_area') return false;
+  const basis = String(parts.footprintBasis || 'living_area');
+  if (basis !== 'living_area' && basis !== 'gross_under_roof') return false;
   if (!(lotSqFt > 0) || Math.abs(lotSqFt - Number(parts.lotSqFt)) > 1) return false;
   if (parts.stories != null
       && Math.abs(Math.max(1, Number(stories) || 1) - Number(parts.stories)) > 0.01) return false;
+  if (basis === 'gross_under_roof') {
+    // The gross basis always records its stories (computeFootprintTurf) —
+    // a stories edit is caught above. A homeSqFt edit usually doesn't move
+    // a gross footprint (the roll's figure governs), EXCEPT when the edited
+    // living/stories would exceed it: computeFootprintTurf floors the
+    // footprint at living/stories, so that edit would have RAISED the
+    // footprint and lowered the ceiling — forwarding the stale higher
+    // ceiling would price excess turf (codex #3229 P1). Drop it there.
+    if (parts.stories == null) return false;
+    const livingFootprint = Math.round((Number(homeSqFt) || 0) / Math.max(1, Number(stories) || 1));
+    return livingFootprint <= Number(parts.footprintSf) + 1;
+  }
   const expectedFootprint = Math.round((Number(homeSqFt) || 0) / Math.max(1, Number(stories) || 1));
   if (!(expectedFootprint > 0) || Math.abs(expectedFootprint - Number(parts.footprintSf)) > 1) return false;
   return true;

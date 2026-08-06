@@ -235,9 +235,41 @@ describe('translate adapter drops a stale county ceiling (codex P1)', () => {
   test('an unrecognized footprint basis fails closed — no producer, no forwarding (codex r2)', () => {
     const unknownBasis = {
       ...baseProfile,
-      footprintTurfParts: { ...baseProfile.footprintTurfParts, footprintBasis: 'gross_under_roof' },
+      footprintTurfParts: { ...baseProfile.footprintTurfParts, footprintBasis: 'satellite_roofprint' },
     };
     expect(translate(unknownBasis).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('gross-under-roof basis: home edits pass, lot/stories edits and missing stories drop', () => {
+    const gross = {
+      ...baseProfile,
+      footprintTurfParts: {
+        lotSqFt: 10000, footprintSf: 1600, footprintBasis: 'gross_under_roof',
+        stories: 2, imperviousSf: 800, imperviousKnown: true, enclosureNetSf: 0,
+      },
+    };
+    expect(translate(gross).countyTurfCeilingSf).toBe(8000);
+    // Edited living area still under the recorded gross footprint (1,600
+    // × 2 stories) — the gross figure governs, ceiling stays.
+    expect(translate({ ...gross, homeSqFt: 3100 }).countyTurfCeilingSf).toBe(8000);
+    expect(translate({ ...gross, lotSqFt: 14000 }).countyTurfCeilingSf).toBeNull();
+    expect(translate({ ...gross, stories: 1 }).countyTurfCeilingSf).toBeNull();
+    const { stories, ...noStories } = gross.footprintTurfParts;
+    expect(translate({ ...gross, footprintTurfParts: noStories }).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('a home edit that outgrows the gross footprint drops the ceiling (codex #3229 P1)', () => {
+    const gross = {
+      ...baseProfile,
+      footprintTurfParts: {
+        lotSqFt: 10000, footprintSf: 1600, footprintBasis: 'gross_under_roof',
+        stories: 2, imperviousSf: 800, imperviousKnown: true, enclosureNetSf: 0,
+      },
+    };
+    // 3,400 / 2 stories = 1,700 living footprint > the 1,600 gross — the
+    // edit would have raised the footprint and LOWERED the ceiling, so the
+    // stale higher ceiling must not be forwarded.
+    expect(translate({ ...gross, homeSqFt: 3400 }).countyTurfCeilingSf).toBeNull();
   });
 
   test('an operator type correction to a shared-turf type drops the ceiling (codex r2 P1)', () => {

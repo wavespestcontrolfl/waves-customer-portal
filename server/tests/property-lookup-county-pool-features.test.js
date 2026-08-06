@@ -106,6 +106,7 @@ describe('county extractors (live-probe fixtures)', () => {
     expect(manateePoolFeatures(MANATEE_FEATURES)).toEqual({
       hasPool: true, poolAreaSqft: 288, poolCageSqft: 1066, hasSpa: true,
       imperviousAreaSf: 1018, // flag-driven: pool 288 + spa 1 + deck 729; cage flagged NO
+      poolImperviousSf: 1018, // all three impervious rows are pool-family
       hasDetachedGarage: false, detachedGarageSqft: null, hasDock: false,
     });
   });
@@ -120,6 +121,7 @@ describe('county extractors (live-probe fixtures)', () => {
     expect(sarasotaPoolFeatures(SARASOTA_POOL_HTML)).toEqual({
       hasPool: true, poolAreaSqft: 392, poolCageSqft: 1066, hasSpa: false,
       imperviousAreaSf: 1066, // keyword fallback: pool 392 + patio 674; enclosure excluded
+      poolImperviousSf: 1066, // pool + patio are both pool-family
       hasDetachedGarage: false, detachedGarageSqft: null, hasDock: false,
     });
   });
@@ -142,6 +144,7 @@ describe('county extractors (live-probe fixtures)', () => {
     expect(charlottePoolFeatures(CHARLOTTE_POOL_HTML)).toEqual({
       hasPool: true, poolAreaSqft: 392, poolCageSqft: 840, hasSpa: false,
       imperviousAreaSf: 512, // keyword fallback: pool 392 + porch/deck 120; screen cage excluded
+      poolImperviousSf: 512, // pool + porch/deck are both pool-family
       hasDetachedGarage: false, detachedGarageSqft: null, hasDock: false,
     });
   });

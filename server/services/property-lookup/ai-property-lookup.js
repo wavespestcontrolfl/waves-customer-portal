@@ -3269,13 +3269,23 @@ const SPA_FEATURE_RE = /\bSPA\b|JACUZZI|HOT\s*TUB|WHIRLPOOL/i;
 const IMPERVIOUS_FEATURE_RE = /\b(POOL|PATIO|DECK|PORCH|DRIVEWAY|WALKWAY|SIDEWALK|CARPORT|PAVER|SPA|GARAGE|SHED)\b/i;
 const IMPERVIOUS_FEATURE_EXCLUDE_RE = /CAGE|ENCLOS|SCREEN|HEATER|EQUIP|BATH|DOCK|BOAT|LIFT|FENCE|WALL|SOLAR/i;
 
-// Returns { imperviousAreaSf } — total assessed impervious sqft for the
-// parcel. Tri-state like hasPool: callers that never parsed a features
-// table return {} upstream (imperviousAreaSf stays null on the record);
-// a parsed table with zero impervious rows is a meaningful 0.
+// Pool-family surfaces (pool/spa/deck/patio) — the impervious rows that
+// normally sit INSIDE a screen cage. Deliberately over-inclusive (patio
+// counts even though some patios are uncaged): over-counting the family
+// shrinks the cage's net non-turf slice below, which under-subtracts from
+// the turf ceiling — the safe direction for an upper bound.
+const POOL_FAMILY_FEATURE_RE = /\b(POOL|SPA|DECK|PATIO)\b/i;
+
+// Returns { imperviousAreaSf, poolImperviousSf } — total assessed
+// impervious sqft for the parcel, plus the pool-family (pool/spa/deck/
+// patio) subset used to net the screen cage out of the turf ceiling.
+// Tri-state like hasPool: callers that never parsed a features table
+// return {} upstream (both fields stay null on the record); a parsed
+// table with zero impervious rows is a meaningful 0.
 function imperviousFactsFromFeatures(features) {
   if (!Array.isArray(features)) return {};
   let total = 0;
+  let poolFamily = 0;
   for (const item of features) {
     const sqft = coerceInt(item?.sqft, 1, 200000);
     if (!sqft) continue;
@@ -3286,9 +3296,12 @@ function imperviousFactsFromFeatures(features) {
     const counts = flag != null
       ? flag
       : (IMPERVIOUS_FEATURE_RE.test(description) && !IMPERVIOUS_FEATURE_EXCLUDE_RE.test(description));
-    if (counts) total += sqft;
+    if (counts) {
+      total += sqft;
+      if (POOL_FAMILY_FEATURE_RE.test(description)) poolFamily += sqft;
+    }
   }
-  return { imperviousAreaSf: total };
+  return { imperviousAreaSf: total, poolImperviousSf: poolFamily };
 }
 
 // Detached structures + waterfront structures from the same assessed rows.
@@ -4561,6 +4574,11 @@ function shapeAsPropertyRecord(p, address, provider = 'ai') {
     // Tri-state like hasPool: number (possibly 0) only when a county
     // features table was parsed; null = no signal.
     imperviousAreaSf: p.imperviousAreaSf ?? null,
+    // Pool-family (pool/spa/deck/patio) subset of the impervious total —
+    // nets the screen cage out of the turf ceiling. Null on records shaped
+    // before this field existed; consumers must treat null as "don't net"
+    // (subtracting the full cage against an old record over-subtracts).
+    poolImperviousSf: p.poolImperviousSf ?? null,
     hasDetachedGarage: p.hasDetachedGarage ?? null,
     detachedGarageSqft: p.detachedGarageSqft || null,
     hasDock: p.hasDock ?? null,
@@ -4962,6 +4980,10 @@ function summarizeProviderError(err) {
 }
 
 module.exports = {
+  // Lot values from the county parsers are capped at this bound —
+  // consumers combining them with UNCAPPED figures (e.g. _buildings gross
+  // areas) must treat an at-cap lot as unusable for geometry math.
+  COUNTY_LOT_SQFT_MAX: LOT_SQFT_MAX,
   auditAddressHouseNumber,
   hasCountyEvidence,
   buildPropertyDataQuality,

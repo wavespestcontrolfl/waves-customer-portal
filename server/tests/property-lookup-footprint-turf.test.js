@@ -39,7 +39,7 @@ describe('imperviousFactsFromFeatures', () => {
       { description: 'SPA-ATTACHED', sqft: '1', impervious: 'YES' },
       { description: 'POOL DECK GOOD', sqft: '729', impervious: 'YES' },
     ]);
-    expect(facts).toEqual({ imperviousAreaSf: 288 + 1 + 729 });
+    expect(facts).toEqual({ imperviousAreaSf: 288 + 1 + 729, poolImperviousSf: 288 + 1 + 729 });
   });
 
   test('flag beats keywords both directions', () => {
@@ -49,7 +49,7 @@ describe('imperviousFactsFromFeatures', () => {
       // Keyword would NOT match; county says YES → counted.
       { description: 'UTILITY BUILDING', sqft: '120', impervious: 'YES' },
     ]);
-    expect(facts).toEqual({ imperviousAreaSf: 120 });
+    expect(facts).toEqual({ imperviousAreaSf: 120, poolImperviousSf: 0 });
   });
 
   test('keyword fallback (no flag): pool + patio count, enclosure/cage and walls do not', () => {
@@ -60,7 +60,7 @@ describe('imperviousFactsFromFeatures', () => {
       { description: 'Swimming Pool', sqft: '392' },
       { description: 'Privacy Wall Residential', sqft: '55' },
     ]);
-    expect(facts).toEqual({ imperviousAreaSf: 674 + 392 });
+    expect(facts).toEqual({ imperviousAreaSf: 674 + 392, poolImperviousSf: 674 + 392 });
   });
 
   test('Charlotte-style rows: pool + porch/deck count, screen cage does not', () => {
@@ -69,7 +69,7 @@ describe('imperviousFactsFromFeatures', () => {
       { description: 'Screen Cage, 8 - Aluminum Frame - 3 Walls (sq. Ft.)', sqft: '840' },
       { description: 'Porch/Deck', sqft: '120' },
     ]);
-    expect(facts).toEqual({ imperviousAreaSf: 392 + 120 });
+    expect(facts).toEqual({ imperviousAreaSf: 392 + 120, poolImperviousSf: 392 + 120 });
   });
 
   test('equipment never counts: pool heater excluded', () => {
@@ -77,13 +77,13 @@ describe('imperviousFactsFromFeatures', () => {
       { description: 'POOL HEATER', sqft: '12' },
       { description: 'BOAT DOCK', sqft: '400' },
     ]);
-    expect(facts).toEqual({ imperviousAreaSf: 0 });
+    expect(facts).toEqual({ imperviousAreaSf: 0, poolImperviousSf: 0 });
   });
 
   test('parsed table with zero impervious rows is a meaningful 0', () => {
     expect(imperviousFactsFromFeatures([
       { description: 'FENCE - CHAIN LINK', sqft: '200' },
-    ])).toEqual({ imperviousAreaSf: 0 });
+    ])).toEqual({ imperviousAreaSf: 0, poolImperviousSf: 0 });
   });
 
   test('non-array input returns {} (table never parsed → null on the record)', () => {
@@ -95,7 +95,7 @@ describe('imperviousFactsFromFeatures', () => {
     expect(imperviousFactsFromFeatures([
       { description: 'RESIDENTIAL POOL', sqft: null },
       { description: 'PATIO', sqft: '0' },
-    ])).toEqual({ imperviousAreaSf: 0 });
+    ])).toEqual({ imperviousAreaSf: 0, poolImperviousSf: 0 });
   });
 });
 
@@ -109,8 +109,177 @@ describe('computeFootprintTurf', () => {
     });
     expect(result).toEqual({
       turfSf: 10000 - 1200 - 800,
-      parts: { lotSqFt: 10000, footprintSf: 1200, imperviousSf: 800, imperviousKnown: true },
+      parts: {
+        lotSqFt: 10000,
+        footprintSf: 1200,
+        footprintBasis: 'living_area',
+        stories: 2,
+        imperviousSf: 800,
+        imperviousKnown: true,
+        enclosureNetSf: 0,
+      },
     });
+  });
+
+  test('gross-under-roof building rows beat living/stories, cage nets against pool-family (2026-08-05 audit shape)', () => {
+    // Bolton-class parcel: living 2,085 said footprint 2,085 while the
+    // roll's under-roof said 2,771; cage 1,066 wraps pool-family 1,018.
+    const result = computeFootprintTurf({
+      lotSize: 7523,
+      squareFootage: 2085,
+      stories: 1,
+      imperviousAreaSf: 1018,
+      poolCageSqft: 1066,
+      poolImperviousSf: 1018,
+      _buildings: [{ livingAreaSqft: 2085, underRoofSqft: 2771, stories: 1 }],
+    });
+    expect(result.parts.footprintSf).toBe(2771);
+    expect(result.parts.footprintBasis).toBe('gross_under_roof');
+    expect(result.parts.enclosureNetSf).toBe(48);
+    expect(result.turfSf).toBe(7523 - 2771 - 1018 - 48);
+  });
+
+  test('each building divides its gross by its own story count (Sarasota Gross Area shape)', () => {
+    const result = computeFootprintTurf({
+      lotSize: 10000,
+      squareFootage: 3239,
+      stories: 2,
+      imperviousAreaSf: 0,
+      _buildings: [{ livingAreaSqft: 3239, grossAreaSqft: 3945, stories: 2 }],
+    });
+    // max(living/stories = 1,620, gross/stories = 1,973)
+    expect(result.parts.footprintSf).toBe(1973);
+    expect(result.parts.footprintBasis).toBe('gross_under_roof');
+  });
+
+  test('Charlotte Total Area shape is recognized', () => {
+    const result = computeFootprintTurf({
+      lotSize: 9000,
+      squareFootage: 1800,
+      stories: 1,
+      imperviousAreaSf: 0,
+      _buildings: [{ acAreaSqft: 1800, totalAreaSqft: 2350, stories: 1 }],
+    });
+    expect(result.parts.footprintSf).toBe(2350);
+    expect(result.parts.footprintBasis).toBe('gross_under_roof');
+  });
+
+  test('a gross row without its OWN story count falls back whole-record (codex #3229 P2)', () => {
+    // A 1-story accessory next to a 2-story primary must not inherit the
+    // record-level count (halves its footprint) nor default to 1 (doubles
+    // a story-less primary's).
+    const result = computeFootprintTurf({
+      lotSize: 20000,
+      squareFootage: 4000,
+      stories: 2,
+      imperviousAreaSf: 0,
+      _buildings: [
+        { livingAreaSqft: 4000, underRoofSqft: 4800, stories: 2 },
+        { underRoofSqft: 500 },
+      ],
+    });
+    expect(result.parts.footprintBasis).toBe('living_area');
+    expect(result.parts.footprintSf).toBe(2000);
+  });
+
+  test('an at-cap lot rejects the gross basis — capped lot never meets uncapped gross (codex r3)', () => {
+    // Commercial parsers cap lotSize at 200k while building gross rides
+    // uncapped: a campus footprint above the "lot" would emit a trusted
+    // ZERO ceiling and clamp real turf to nothing.
+    const result = computeFootprintTurf({
+      lotSize: 200000,
+      squareFootage: 120000,
+      stories: 1,
+      imperviousAreaSf: 0,
+      _buildings: [{ underRoofSqft: 250000, stories: 1 }],
+    });
+    expect(result.parts.footprintBasis).toBe('living_area');
+    expect(result.parts.footprintSf).toBe(120000);
+  });
+
+  test('a gross footprint at/above the lot (impossible geometry) rejects the gross basis (codex r3)', () => {
+    const result = computeFootprintTurf({
+      lotSize: 5000,
+      squareFootage: 1500,
+      stories: 1,
+      imperviousAreaSf: 0,
+      _buildings: [{ underRoofSqft: 6000, stories: 1 }],
+    });
+    expect(result.parts.footprintBasis).toBe('living_area');
+    expect(result.parts.footprintSf).toBe(1500);
+  });
+
+  test('a tech-verified story correction stands the gross basis down (codex r3)', () => {
+    // applyVerifiedOverrides updates record.stories but not the preserved
+    // _buildings rows — gross/staleStories would inflate the footprint, so
+    // living / verified-stories governs instead.
+    const result = computeFootprintTurf({
+      lotSize: 10000,
+      squareFootage: 3200,
+      stories: 1, // tech-corrected from the county's 2
+      imperviousAreaSf: 0,
+      _fieldEvidence: {
+        stories: { sourceType: 'verified' },
+      },
+      _buildings: [{ livingAreaSqft: 3200, underRoofSqft: 3900, stories: 2 }],
+    });
+    expect(result.parts.footprintBasis).toBe('living_area');
+    expect(result.parts.footprintSf).toBe(3200);
+  });
+
+  test('one gross-less building row falls back whole-record to living/stories', () => {
+    const result = computeFootprintTurf({
+      lotSize: 20000,
+      squareFootage: 4000,
+      stories: 1,
+      imperviousAreaSf: 0,
+      _buildings: [
+        { livingAreaSqft: 2500, underRoofSqft: 3000, stories: 1 },
+        { livingAreaSqft: 1500, stories: 1 },
+      ],
+    });
+    expect(result.parts.footprintSf).toBe(4000);
+    expect(result.parts.footprintBasis).toBe('living_area');
+  });
+
+  test('a short gross parse never shrinks the footprint below living/stories — and the basis records that living won (codex r2)', () => {
+    const result = computeFootprintTurf({
+      lotSize: 9000,
+      squareFootage: 1500,
+      stories: 1,
+      imperviousAreaSf: 0,
+      _buildings: [{ livingAreaSqft: 1500, underRoofSqft: 900, stories: 1 }],
+    });
+    expect(result.parts.footprintSf).toBe(1500);
+    // living/stories determined the footprint, so home edits DO move it —
+    // the adapter must keep validating them.
+    expect(result.parts.footprintBasis).toBe('living_area');
+  });
+
+  test('cage on a pre-poolImperviousSf record (field null) nets nothing — no over-subtraction', () => {
+    const result = computeFootprintTurf({
+      lotSize: 7523,
+      squareFootage: 2085,
+      stories: 1,
+      imperviousAreaSf: 1018,
+      poolCageSqft: 1066,
+      poolImperviousSf: null,
+    });
+    expect(result.parts.enclosureNetSf).toBe(0);
+    expect(result.turfSf).toBe(7523 - 2085 - 1018);
+  });
+
+  test('cage with zero pool-family rows nets its full area', () => {
+    const result = computeFootprintTurf({
+      lotSize: 8000,
+      squareFootage: 1500,
+      stories: 1,
+      imperviousAreaSf: 600,
+      poolCageSqft: 840,
+      poolImperviousSf: 0,
+    });
+    expect(result.parts.enclosureNetSf).toBe(840);
+    expect(result.turfSf).toBe(8000 - 1500 - 600 - 840);
   });
 
   test('stories defaults to 1 (single-story footprint = living area)', () => {
@@ -201,6 +370,19 @@ describe('county turf prior (vision-missing seed)', () => {
     expect(profile.estimatedTurfSf).toBe(0);
     expect(profile.turfSource).toBe('none');
     expect(profile.countyTurfPriorSf).toBeNull();
+  });
+
+  test('gross-under-roof building rows refine the ceiling the prior seeds from', () => {
+    // footprint = max(2400/2, 3200/2) = 1,600 → ceiling 10000 − 1600 − 800
+    // = 7,600 → prior 3,800 (was 4,000 off the living-area footprint).
+    const profile = buildEnrichedProfile(
+      countyRecord({ _buildings: [{ livingAreaSqft: 2400, underRoofSqft: 3200, stories: 2 }] }),
+      null, 27.4, -82.4,
+    );
+    expect(profile.footprintTurfSf).toBe(7600);
+    expect(profile.footprintTurfParts.footprintBasis).toBe('gross_under_roof');
+    expect(profile.countyTurfPriorSf).toBe(3800);
+    expect(profile.estimatedTurfSf).toBe(3800);
   });
 
   test('TRUSTED shared-turf types never seed from their own parcel', () => {
