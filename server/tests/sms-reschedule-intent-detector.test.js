@@ -330,3 +330,12 @@ describe('unable-to-attend forms and plan-change vetoes (codex r34)', () => {
     expect(hasRescheduleOrAwayIntent('Can you move my service to Thursday?')).toBe(true);
   });
 });
+
+describe('not-available and cannot-attend forms (codex r35)', () => {
+  test('not available tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent("I'm not available tomorrow")).toBe(true);
+  });
+  test('cannot attend flags', () => {
+    expect(hasRescheduleOrAwayIntent("I cannot attend tomorrow's appointment")).toBe(true);
+  });
+});

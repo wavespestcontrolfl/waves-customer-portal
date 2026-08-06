@@ -180,8 +180,11 @@ async function loadUnactionedFlags() {
       // 4-day lookback while the visit is still upcoming (codex r24).
       this.where('ad.created_at', '>=', db.raw(`now() - interval '${LOOKBACK_DAYS} days'`))
         .orWhere(function liveLinkedVisit() {
+          // Completed visits stay one extra day (codex r35): a visit that
+          // COMPLETED after yesterday's 6:53am run must still reach the
+          // next digest to emit its "COMPLETED despite the request" line.
           this.whereNotNull('ad.entity_id')
-            .whereRaw("ss.scheduled_date >= (now() at time zone 'America/New_York')::date");
+            .whereRaw("(ss.scheduled_date >= (now() at time zone 'America/New_York')::date OR (ss.status = 'completed' AND ss.scheduled_date >= (now() at time zone 'America/New_York')::date - 1))");
         })
         // Ambiguous flags carry entity_id NULL by design (multi-visit) —
         // retain them too while ANY of the customer's upcoming visits is
