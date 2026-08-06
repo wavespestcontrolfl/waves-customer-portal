@@ -494,6 +494,14 @@ function serviceFamilyKeyForAdoption(value) {
     if (raw.includes('commercial')) {
       return recurringServiceKey({ name: raw }) || null;
     }
+    // Foam spot treatments are NOT trenching (codex #3228 r12):
+    // recurringServiceKey's termidor/treatment tokens would claim
+    // "Termidor Foam Spot Treatment" for termite_trenching and let a foam
+    // accept adopt a liquid-trenching visit. Mirror
+    // isTermiteFoamOneTimeItem's foam split — the RECURRING foam program
+    // stays the seeder's foam_recurring family (delegated below).
+    const isRecurringFoam = /foam\s*recurring|recurring\s*foam/.test(raw);
+    if (!isRecurringFoam && raw.includes('foam')) return 'termite_foam';
     // Termite work keeps its specialty split (codex #3228 r11): serviceKeyFor's
     // generic termite branch buckets Bora-Care / liquid / trenching WITH the
     // bait program, so a one-time specialty treatment could adopt (and

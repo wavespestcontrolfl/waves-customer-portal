@@ -447,6 +447,31 @@ describe('family-scoped existing-appointment adoption', () => {
     )).toBe(true);
   });
 
+  test('foam spot treatments never adopt a trenching visit (codex r12)', () => {
+    const foamData = {
+      result: {
+        oneTime: {
+          items: [{ name: 'Termidor Foam Spot Treatment', service: 'termite_foam', price: 350 }],
+        },
+      },
+    };
+    const foamKeys = estimateFamilyKeysForAdoption({}, foamData, { serviceMode: 'one_time' });
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Liquid Termite Trenching Treatment' },
+      foamKeys,
+    )).toBe(false);
+    // Foam-to-foam adoption still works.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Drill-and-Foam Termite Treatment' },
+      foamKeys,
+    )).toBe(true);
+    // The RECURRING foam program keeps its own seeder family.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Recurring Foam Treatment' },
+      foamKeys,
+    )).toBe(false);
+  });
+
   test('an unselectable one-time toggle never joins the contract intersection (codex r10)', () => {
     const pestRecurringData = {
       result: {
