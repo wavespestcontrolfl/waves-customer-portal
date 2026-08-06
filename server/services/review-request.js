@@ -15,6 +15,23 @@ const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 const CAP_TOUCH_SQL = OUTREACH.CAP_TOUCH_SQL;
+// Trapping-family catalog keys (owner ruling 2026-08-06: "rodent/wildlife
+// should be deemed multiple visits") — multi-treatment REVIEW-CADENCE
+// semantics only. Deliberately NOT merged into TWO_TREATMENT_PACKAGE_KEYS:
+// its other consumers (admin-dispatch follow-up alert, typed follow-up
+// obligations) encode exactly-two-visit package semantics that open-ended
+// trapping programs do not share. Keys mirror the prod services catalog —
+// every trapping row plus rodent_exclusion, whose catalog name is "Rodent
+// Exclusion & Trapping Service" (7-day return visit standard).
+const TRAPPING_MULTI_TREATMENT_KEYS = new Set([
+  "rodent_trapping",
+  "rodent_trapping_followup",
+  "rodent_trapping_exclusion",
+  "rodent_trapping_exclusion_sanitation",
+  "rodent_trapping_sanitation",
+  "rodent_exclusion",
+  "wildlife_trapping",
+]);
 const { toE164 } = require("../utils/phone");
 const { runExclusive } = require("../utils/cron-lock");
 
@@ -585,7 +602,8 @@ const ReviewService = {
           // cap/cooldown exemption.
           return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true };
         }
-        if (TWO_TREATMENT_PACKAGE_KEYS.has(svc.service_key)) {
+        const isTrappingSeries = TRAPPING_MULTI_TREATMENT_KEYS.has(svc.service_key);
+        if (TWO_TREATMENT_PACKAGE_KEYS.has(svc.service_key) || isTrappingSeries) {
           // Named multi-treatment service with no child linkage — position in
           // the series comes from history: a completed same-service visit in
           // the prior 60 days makes THIS the follow-up treatment (owner spec:
@@ -600,14 +618,35 @@ const ReviewService = {
           // days after the previous one must not read as its follow-up —
           // real roach/bed-bug follow-ups run ~14 days.
           const intervalDays = Number(svc.follow_up_interval_days) > 0 ? Number(svc.follow_up_interval_days) : 15;
-          const windowDays = Math.min(60, intervalDays * 2);
+          // Trapping-family window floors at 30 days: catalog intervals are
+          // 1-7 days but a program's checks stretch across weeks, and a
+          // routine gap between checks must not reset position to "first".
+          // Packages keep the tight 2x-interval window — a new package 60
+          // days later is a NEW series.
+          const windowDays = isTrappingSeries
+            ? Math.min(60, Math.max(30, intervalDays * 2))
+            : Math.min(60, intervalDays * 2);
           const { anchorStr, floorStr: windowFloor } = etDayWindow(svc.scheduled_date, windowDays);
-          const prior = await db("scheduled_services")
-            .where({ customer_id: customerId, service_id: svc.service_id, status: "completed" })
-            .where("id", "!=", svc.id)
-            .where("scheduled_date", "<", anchorStr)
-            .where("scheduled_date", ">=", windowFloor)
-            .first();
+          // Trapping position matches the whole FAMILY, not one service_id:
+          // the return check is booked under its own catalog row
+          // (rodent_trapping_followup), so same-service matching would never
+          // see the initial visit.
+          const prior = isTrappingSeries
+            ? await db("scheduled_services as ps")
+                .leftJoin("services as psv", "ps.service_id", "psv.id")
+                .where("ps.customer_id", customerId)
+                .where("ps.status", "completed")
+                .where("ps.id", "!=", svc.id)
+                .where("ps.scheduled_date", "<", anchorStr)
+                .where("ps.scheduled_date", ">=", windowFloor)
+                .whereIn("psv.service_key", [...TRAPPING_MULTI_TREATMENT_KEYS])
+                .first()
+            : await db("scheduled_services")
+                .where({ customer_id: customerId, service_id: svc.service_id, status: "completed" })
+                .where("id", "!=", svc.id)
+                .where("scheduled_date", "<", anchorStr)
+                .where("scheduled_date", ">=", windowFloor)
+                .first();
           return prior
             ? { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true }
             : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
@@ -2854,7 +2893,7 @@ const ReviewService = {
       const visit = await db("scheduled_services as s")
         .leftJoin("services as sv", "s.service_id", "sv.id")
         .where("s.id", visitId)
-        .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "sv.follow_up_interval_days")
+        .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "sv.service_key", "sv.follow_up_interval_days")
         .first();
       if (!visit) return [];
       // Walk the FULL ancestor chain (codex #3235 r7 P1): in a 3+ visit
@@ -2882,15 +2921,31 @@ const ReviewService = {
         // Same anchoring as the plan resolver (codex #3235 r10 P1): the
         // series' earlier visits, relative to THIS visit's date — never a
         // now-relative window that payment-deferred enrollment would skew.
+        const isTrappingSeries = TRAPPING_MULTI_TREATMENT_KEYS.has(visit.service_key);
         const intervalDays = Number(visit.follow_up_interval_days) > 0 ? Number(visit.follow_up_interval_days) : 15;
-        const windowDays = Math.min(60, intervalDays * 2);
+        // Same family-window rules as the plan resolver: trapping matches
+        // any trapping-family key (the return check has its own catalog row)
+        // with a 30-day floor; packages stay same-service, 2x-interval.
+        const windowDays = isTrappingSeries
+          ? Math.min(60, Math.max(30, intervalDays * 2))
+          : Math.min(60, intervalDays * 2);
         const w = etDayWindow(visit.scheduled_date, windowDays);
-        const priors = await db("scheduled_services")
-          .where({ customer_id: customerId, service_id: visit.service_id, status: "completed" })
-          .where("id", "!=", visit.id)
-          .where("scheduled_date", "<", w.anchorStr)
-          .where("scheduled_date", ">=", w.floorStr)
-          .select("id");
+        const priors = isTrappingSeries
+          ? await db("scheduled_services as ps")
+              .leftJoin("services as psv", "ps.service_id", "psv.id")
+              .where("ps.customer_id", customerId)
+              .where("ps.status", "completed")
+              .where("ps.id", "!=", visit.id)
+              .where("ps.scheduled_date", "<", w.anchorStr)
+              .where("ps.scheduled_date", ">=", w.floorStr)
+              .whereIn("psv.service_key", [...TRAPPING_MULTI_TREATMENT_KEYS])
+              .select("ps.id as id")
+          : await db("scheduled_services")
+              .where({ customer_id: customerId, service_id: visit.service_id, status: "completed" })
+              .where("id", "!=", visit.id)
+              .where("scheduled_date", "<", w.anchorStr)
+              .where("scheduled_date", ">=", w.floorStr)
+              .select("id");
         sourceIds = priors.map((r) => r.id);
       }
       if (!sourceIds.length) return [];

@@ -805,6 +805,53 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mock.__state.rows.review_sequences[0].series_final).toBe(true);
   });
 
+  test('trapping family (owner 2026-08-06) is multi-treatment: first visit = one ask; a cross-key follow-up check inside the 30d family window = full cadence', async () => {
+    mockGates.reviewSequences = true;
+
+    // First wildlife trapping visit — no prior family completion → single ask.
+    let mock = makeMock({
+      customers: [{ id: 'tr-1', first_name: 'Ava', last_name: 'T', phone: '+19410000061', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-tr1', customer_id: 'tr-1', scheduled_service_id: 'ss-wt1' }],
+      scheduled_services: [
+        { id: 'ss-wt1', customer_id: 'tr-1', service_id: 'svc-wt', status: 'completed', scheduled_date: new Date().toISOString().slice(0, 10), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+      ],
+    });
+    db.mockImplementation(mock);
+    let result = await ReviewService.enrollPostService({ customerId: 'tr-1', serviceRecordId: 'sr-tr1', completedAt: new Date() });
+    expect(result.started).toBe(true);
+    let plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+
+    // Return check 20 days later, booked under its OWN catalog row
+    // (rodent_trapping_followup, different service_id) — same-service
+    // matching would miss the initial visit, and the raw 2x-interval window
+    // (interval 3 → 6d) would too. Family match + 30d floor classify it
+    // series-final → full cadence.
+    const twentyAgo = new Date(Date.now() - 20 * 86400000).toISOString().slice(0, 10);
+    mock = makeMock({
+      customers: [{ id: 'tr-2', first_name: 'Ivy', last_name: 'U', phone: '+19410000062', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-tr2', customer_id: 'tr-2', scheduled_service_id: 'ss-tf2' }],
+      scheduled_services: [
+        { id: 'ss-tp1', customer_id: 'tr-2', service_id: 'svc-trap', status: 'completed', scheduled_date: twentyAgo, service_key: 'rodent_trapping' },
+        { id: 'ss-tf2', customer_id: 'tr-2', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: new Date().toISOString().slice(0, 10), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+    });
+    db.mockImplementation(mock);
+    result = await ReviewService.enrollPostService({ customerId: 'tr-2', serviceRecordId: 'sr-tr2', completedAt: new Date() });
+    expect(result.started).toBe(true);
+    plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(3);
+    expect(mock.__state.rows.review_sequences[0].series_final).toBe(true);
+
+    // The exemption lookup walks the same family window: the first visit's
+    // sequence is exempt for the final visit's cap/cooldown check even
+    // though the two visits carry different catalog rows.
+    mock.__state.rows.review_sequences.push({ id: 'seq-first-trap', customer_id: 'tr-2', scheduled_service_id: 'ss-tp1', status: 'completed' });
+    const exempt = await ReviewService._seriesExemptSequenceIds('tr-2', { scheduledServiceId: 'ss-tf2' });
+    expect(exempt).toContain('seq-first-trap');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
