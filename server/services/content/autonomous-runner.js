@@ -3193,8 +3193,11 @@ class AutonomousRunner {
         if (!tasks.length) {
           logger.warn(`[autonomous-runner] internal-link planner planned ZERO NEW link tasks for freshly published ${out.published_url} (keyword: ${brief.target_keyword || 'none'}) across ${corpus.length} corpus pages`);
         }
+        // Same insert-or-refresh helper as the action path — a raw
+        // onConflict().ignore() here discarded the current plan's keyword
+        // and placement fields on duplicates and left skipped rows parked.
         for (const task of tasks) {
-          await db('content_internal_link_tasks').insert(task).onConflict(['source_file', 'target_url', 'anchor_text']).ignore().catch(() => {});
+          await queueInternalLinkTaskForDryRun(task, run.opportunity_id).catch(() => {});
         }
         out.link_tasks_queued = tasks.length;
       } catch (err) {

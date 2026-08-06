@@ -823,6 +823,24 @@ describe('planForTarget', () => {
     };
     expect(placementForTask(drifted, contextTask).index).toBe(drifted.indexOf('bed bug bites', drifted.indexOf('Second')));
   });
+  test('drift relocation compares full paragraphs, not just snippet windows', () => {
+    const { placementForTask } = planner._internals;
+    const body = [
+      'Bed bug bites at the hotel happen.',
+      '',
+      'Bed bug bites after long trips usually trace back to hotel luggage seams, and inspection tips help travelers check them.',
+    ].join('\n');
+    const task = {
+      anchor_text: 'Bed bug bites',
+      source_offset: 9999, // stale — forces relocation
+      context_snippet: 'hotel luggage seams inspection tips travelers check bed bug bites',
+    };
+    // Both occurrences' ±50-char snippets tie on shared tokens (bed, bug,
+    // bites, hotel); only the second paragraph's tail carries luggage/
+    // seams/inspection/tips — a snippet-level comparison would keep the
+    // thin first mention.
+    expect(placementForTask(body, task).index).toBe(body.indexOf('Bed bug bites after'));
+  });
   test('hidden comment tokens do not lift relevance over the floor', () => {
     const page = {
       file: 'src/content/blog/comment-inflated.md',

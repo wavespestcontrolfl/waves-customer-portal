@@ -380,7 +380,11 @@ function relocateByContext(body, phrase, contextSnippet) {
   let bestOverlap = -1;
   for (const occ of occurrences) {
     let overlap = 0;
-    for (const token of snippetTokens(occ.snippet)) {
+    // Compare against the occurrence's FULL paragraph, not its ±50-char
+    // snippet — the planned paragraph's distinguishing terms can sit beyond
+    // the snippet window, and a snippet-level tie would keep the earlier
+    // thin mention that planning deliberately rejected.
+    for (const token of snippetTokens(occ.paragraph)) {
       if (contextTokens.has(token)) overlap++;
     }
     if (overlap > bestOverlap) {
@@ -553,14 +557,12 @@ class InternalLinkPlanner {
    * Returns [{ source_file, target_url, anchor_text, context_snippet,
    *            source_offset, opportunity_id }]
    */
-  planForTarget(target, {
-    corpus = [],
-    opportunityId = null,
-    cap = DEFAULT_LINK_CAP,
-    perPageCap = DEFAULT_PER_PAGE_CAP,
-    maxSourceContextualLinks = DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS,
-    minTopicalRelevance = Number(process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE ?? 0.75),
-  } = {}) {
+  planForTarget(target, { corpus = [], opportunityId = null, cap = DEFAULT_LINK_CAP, perPageCap = DEFAULT_PER_PAGE_CAP } = {}) {
+    // Deliberately NOT per-call options: the executor resolves these from
+    // its own env/defaults, and a caller overriding only the planner side
+    // would plan tasks the gate rejects (or starve valid ones).
+    const maxSourceContextualLinks = DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS;
+    const minTopicalRelevance = Number(process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE ?? 0.75);
     if (!target?.url) return [];
     const candidates = anchorCandidates(target);
     if (!candidates.length) return [];
