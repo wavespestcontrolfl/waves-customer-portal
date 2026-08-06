@@ -513,3 +513,27 @@ describe('hold-off asks (codex r48)', () => {
     expect(hasRescheduleOrAwayIntent("Please don't hold off on my service, come as planned")).toBe(false);
   });
 });
+
+describe('no-need stand-downs and per-clause permission (codex r49)', () => {
+  test('dont need service tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent("We don't need service tomorrow")).toBe(true);
+  });
+  test('wont need tomorrows service flags', () => {
+    expect(hasRescheduleOrAwayIntent("We won't need tomorrow's service")).toBe(true);
+  });
+  test('no need for the appointment tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent('No need for the appointment tomorrow')).toBe(true);
+  });
+  test('dont need service on the shed stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("We don't need service on the shed")).toBe(false);
+  });
+  test('permission today plus away next week flags', () => {
+    expect(hasRescheduleOrAwayIntent("Please use the gate code for today's service. I won't be home next week")).toBe(true);
+  });
+  test('door unlocked today plus out of town next week flags', () => {
+    expect(hasRescheduleOrAwayIntent('The door will be unlocked today. We will be out of town next week')).toBe(true);
+  });
+  test('same-clause permission still suppresses', () => {
+    expect(hasRescheduleOrAwayIntent("I won't be home tomorrow but you can use the gate code")).toBe(false);
+  });
+});

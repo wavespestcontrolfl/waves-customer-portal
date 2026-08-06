@@ -111,6 +111,10 @@ const AWAY_PERMISSION_RE = /\b(?:(?:the\s+)?gate\s*code\s+is\b|gate\s*code\b[^.!
 // tomorrow" is a reschedule-class request even though no move/cancel verb
 // appears. Requires an appointment or future-time object so "don't come
 // to the front door" stays quiet.
+// Clause-scoped no-need stand-downs (codex r49): a visit noun AND a
+// future-time reference are both required — "we don't need service on
+// the shed" stays quiet.
+const NO_NEED_RE = /\b(?:don'?t|won'?t|do\s+not|will\s+not|no)\s+need\s+(?:for\s+)?(?:[\w'\u2019]+\s+){0,2}?(?:service|appointment|appt|visit|treatment)s?\b[^.!?]{0,20}\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|this\s+week|next\s+week)\b|\b(?:don'?t|won'?t|do\s+not|will\s+not)\s+need\s+(?:today|tomorrow)(?:'s)?\s+(?:service|appointment|appt|visit|treatment)s?\b/i;
 const DONT_COME_RE = /\b(?:(?:please\s+)?(?:don'?t|do\s+not)|can\s+you\s+not|could\s+you\s+not)\s+(?:come|show\s+up|stop\s+by|treat|spray|service)\b(?!\s+(?:to|through|via|by|in(?:side)?|around|near)\b[^.!?]{0,20}\b(?:door|gate|entrance|back|front|side|garage|yard|porch|driveway|house))(?!\s+(?:the\s+|my\s+|our\s+)?(?:front|back|side|garden|inside|indoors|interior|bed|bush|plant|shrub|lawn|yard))[^.!?]{0,25}\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|appointment|appt|visit|this\s+week|next\s+week)\b|\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|appointment|appt|visit)\b[^.!?]{0,30}\b(?:(?:please\s+)?(?:don'?t|do\s+not)|can\s+you\s+not|could\s+you\s+not)\s+(?:come|show\s+up|stop\s+by|treat|spray|service)\b(?!\s+(?:to|through|via|by|in(?:side)?|around|near)\b[^.!?]{0,20}\b(?:door|gate|entrance|back|front|side|garage|yard|porch|driveway|house))(?!\s+(?:the\s+|my\s+|our\s+)?(?:front|back|side|garden|inside|indoors|interior|bed|bush|plant|shrub|lawn|yard))/i;
 
 function hasRescheduleOrAwayIntent(body) {
@@ -198,7 +202,13 @@ function hasRescheduleOrAwayIntent(body) {
   // yesterday's appointment" reports, it doesn't request.
   const pastAway = /\b(?:were|was|got\s+back|just\s+got\s+back|returned)\b[^.!?]{0,25}\b(?:out\s+of\s+town|on\s+vacation|away)\b|\b(?:out\s+of\s+town|on\s+vacation|away)\b[^.!?]{0,15}\blast\s+(?:week|month|weekend)\b|\b(?:was|were)\s+unable\s+to\s+(?:attend|make)\b|\b(?:couldn'?t|could\s+not)\s+(?:attend|make)\s+(?:it\s+)?(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service|yesterday)\b|\bunable\s+to\s+attend\b[^.!?]{0,20}\byesterday/i.test(text);
   if (DONT_COME_RE.test(text)) return true;
-  return AWAY_RE.test(text) && !AWAY_PERMISSION_RE.test(text) && !pastAway;
+  if (NO_NEED_RE.test(text)) return true;
+  // Permission suppresses only the CLAUSE it shares with the away
+  // statement (codex r49): "use the gate code for today's service. I
+  // won't be home next week" carries a fresh, unpermissioned absence.
+  if (pastAway) return false;
+  const clauses = text.split(/[.!?;\n]+/);
+  return clauses.some((clause) => AWAY_RE.test(clause) && !AWAY_PERMISSION_RE.test(clause));
 }
 
 function escapeRe(s) {

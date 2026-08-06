@@ -104,7 +104,7 @@ async function flagInboundRescheduleIntent({ customer, phone, body, smsLogId, me
         // Unlinked (null-customer) flags match replies by the phone the
         // reply went TO instead of a customer id (codex r25).
         this.select(1).from('sms_log as sl')
-          .whereRaw("(sl.customer_id = agent_decisions.customer_id OR (agent_decisions.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail'))")
+          .whereRaw("((COALESCE(agent_decisions.input_snapshot->>'phone_tail', '') <> '' AND RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail') OR (COALESCE(agent_decisions.input_snapshot->>'phone_tail', '') = '' AND sl.customer_id = agent_decisions.customer_id))")
           .where('sl.direction', 'outbound')
           .whereIn('sl.message_type', ['manual', 'ai_approved', 'ai_revised', 'appointment_rescheduled', 'reschedule_series_confirmation'])
           .whereIn('sl.status', ['queued', 'sent', 'delivered'])
