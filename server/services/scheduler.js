@@ -1,5 +1,9 @@
 const cron = require('node-cron');
 const db = require('../models/db');
+// Boundary-rotation generation guard (codex #3233 r37/r38): captured at
+// process startup, NOT at query-build time — a marker stamped after this
+// instant belongs to a newer gate-on pod and must never be deleted.
+const PROCESS_BOOT_AT = new Date();
 const TwilioService = require('./twilio');
 const logger = require('./logger');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -427,9 +431,10 @@ function initScheduledJobs() {
     // interval; the sweep repeats it as a backstop.
     db('ops_email_send_state')
       .where({ email_key: 'cancel-notice-hook-enabled-at' })
-      // Generation guard (codex #3233 r37): never delete a marker stamped
-      // after this process booted — it belongs to a newer gate-on pod.
-      .where('last_sent_at', '<', new Date())
+      // Generation guard (codex #3233 r37/r38): never delete a marker
+      // stamped after this process booted — it belongs to a newer
+      // gate-on pod.
+      .where('last_sent_at', '<', PROCESS_BOOT_AT)
       .del()
       .catch((err) => logger.warn(`[scheduler] cancel-notice boundary clear failed: ${err.message}`));
   }
