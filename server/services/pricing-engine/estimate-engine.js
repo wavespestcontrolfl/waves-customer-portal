@@ -101,7 +101,7 @@ const {
   isCommercialProperty,
   buildCommercialManualQuoteResult,
 } = require('./commercial-helpers');
-const { resolveCommercialCadence } = require('./commercial-risk-type');
+const { resolveCommercialCadence, resolveCommercialPestCadenceOverride } = require('./commercial-risk-type');
 
 function serviceSelected(value) {
   if (value === true) return true;
@@ -509,7 +509,11 @@ function generateEstimate(input) {
   // Risk-type CADENCE (owner-locked): the commercial business-type bucket drives
   // pest/rodent visits-per-year. NULL/unrecognized → nulls, so the pricers keep
   // their program defaults (pest 12 / rodent 4) — backward compatible.
-  const { pestVisits: commercialPestVisits, rodentVisits: commercialRodentVisits } = resolveCommercialCadence(input.commercialRiskType);
+  const { pestVisits: riskTypePestVisits, rodentVisits: commercialRodentVisits } = resolveCommercialCadence(input.commercialRiskType);
+  // Direct pest-cadence override (input.commercialPestCadence, admin estimator):
+  // wins over the risk-type bucket for PEST visits only; rodent stays on the
+  // bucket. Unset → bucket cadence → pricer program default.
+  const commercialPestVisits = resolveCommercialPestCadenceOverride(input.commercialPestCadence) ?? riskTypePestVisits;
   const hasExplicitCommercialFlag = hasCommercialFlagInput(input.isCommercial);
   const inputIsCommercial = normalizeCommercialFlag(input.isCommercial);
   const commercialContext = {
