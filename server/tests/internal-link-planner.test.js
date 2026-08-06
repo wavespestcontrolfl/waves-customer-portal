@@ -811,10 +811,17 @@ describe('planForTarget', () => {
     // Honors the recorded (second) occurrence even though the first is
     // eligible too.
     expect(placementForTask(body, task).index).toBe(secondIdx);
-    // Drifted file: offset no longer matches the anchor → falls back to the
-    // first eligible occurrence.
+    // Drifted file without persisted context → first eligible occurrence.
     const drifted = `X${body}`;
     expect(placementForTask(drifted, task).index).toBe(drifted.indexOf('bed bug bites'));
+    // Drifted file WITH persisted context → relocates to the occurrence
+    // whose surroundings match the planned context, not the thin first one.
+    const contextTask = {
+      anchor_text: 'bed bug bites',
+      source_offset: secondIdx, // stale after the drift
+      context_snippet: 'Second bed bug bites mention with more context.',
+    };
+    expect(placementForTask(drifted, contextTask).index).toBe(drifted.indexOf('bed bug bites', drifted.indexOf('Second')));
   });
   test('hidden comment tokens do not lift relevance over the floor', () => {
     const page = {

@@ -356,7 +356,48 @@ function placementForTask(body, task) {
       return { index: offset, length: anchor.length, snippet: snippetAround(text, offset, anchor.length), paragraph, anchor };
     }
   }
-  return findEligiblePlacement(text, anchor);
+  // Drifted file: relocate using the persisted context snippet — the planner
+  // may have deliberately scanned past a thin early mention, and a plain
+  // first-eligible scan would revive exactly that occurrence. Among the
+  // eligible occurrences, prefer the one whose surroundings best match the
+  // context recorded at plan time.
+  return relocateByContext(text, anchor, task?.context_snippet);
+}
+
+function relocateByContext(body, phrase, contextSnippet) {
+  const occurrences = [];
+  let fromIndex = 0;
+  for (let i = 0; i < MAX_PLACEMENT_SCAN; i++) {
+    const occ = findEligiblePlacement(body, phrase, { fromIndex });
+    if (!occ) break;
+    occurrences.push(occ);
+    fromIndex = occ.index + occ.length;
+  }
+  if (!occurrences.length) return null;
+  const contextTokens = snippetTokens(contextSnippet);
+  if (!contextTokens.size) return occurrences[0];
+  let best = occurrences[0];
+  let bestOverlap = -1;
+  for (const occ of occurrences) {
+    let overlap = 0;
+    for (const token of snippetTokens(occ.snippet)) {
+      if (contextTokens.has(token)) overlap++;
+    }
+    if (overlap > bestOverlap) {
+      best = occ;
+      bestOverlap = overlap;
+    }
+  }
+  return best;
+}
+
+function snippetTokens(value) {
+  return new Set(
+    String(value || '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length > 2)
+  );
 }
 
 function snippetAround(text, start, length, padding = 50) {

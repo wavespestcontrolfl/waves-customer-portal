@@ -3618,10 +3618,14 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
     .update({
       status: 'queued',
       opportunity_id: opportunityId || task.opportunity_id || null,
-      // Rows planned before the target_keyword column existed carry null —
-      // refresh it or the executor scores legacy targets with the
-      // title-flooded denominator this field exists to prevent.
+      // Refresh what the current plan selected — keyword (rows planned
+      // before the column existed carry null) AND the placement fields: a
+      // stale source_offset would pin the executor to an occurrence an
+      // earlier planner chose, not the one this plan scored.
       target_keyword: task.target_keyword || null,
+      target_file: task.target_file || null,
+      source_offset: Number.isInteger(task.source_offset) ? task.source_offset : null,
+      context_snippet: task.context_snippet || null,
       skip_reason: null,
       failure_reason: null,
       updated_at: new Date(),
