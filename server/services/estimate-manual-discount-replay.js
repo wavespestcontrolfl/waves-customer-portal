@@ -51,8 +51,13 @@ function storedManualDiscountForReplay(estData = {}) {
     && (item.type === 'PERCENT' || item.type === 'FIXED')
     && Number(item.value) > 0);
   if (!stored) return null;
-  const storedOneTime = Number(stored.oneTimeAmount);
-  if (stored.type === 'FIXED' && storedOneTime !== 0) return null;
+  // Strictly a STORED numeric zero (codex #3241 r2 P1): Number() coerces
+  // null / '' / false / whitespace to 0, which would let unknown legacy
+  // allocations masquerade as proven-zero and replay anyway.
+  if (stored.type === 'FIXED'
+    && !(typeof stored.oneTimeAmount === 'number' && stored.oneTimeAmount === 0)) {
+    return null;
+  }
   const out = {
     source: stored.source || 'stored_summary_replay',
     type: stored.type === 'PERCENT' ? 'PERCENT' : 'FIXED',

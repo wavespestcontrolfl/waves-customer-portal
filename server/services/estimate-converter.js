@@ -533,12 +533,22 @@ async function addOnPreservedMonthlyRateBase({
     // Lazy require — estimate-public requires this module inline only, so a
     // function-scope require cannot create a load cycle. Same classifier
     // spine as the adoption gate (one taxonomy, #3228 r5).
+    // EVERY recurring line's family, not the adoption helper's primary-only
+    // set (codex #3241 r2 P1): estimateFamilyKeysForAdoption deliberately
+    // narrows a mixed estimate to its primary family (pest whenever
+    // present), so an active T&S customer accepting a pest+T&S estimate
+    // would look cross-family and get the old rate summed onto a total
+    // that already re-prices T&S. Overlap must see the full family union.
     const {
-      estimateFamilyKeysForAdoption,
+      serviceFamilyKeyForAdoption,
       appointmentMatchesEstimateFamily,
     } = require('../routes/estimate-public');
-    const familyKeys = estimateFamilyKeysForAdoption(estimate, estimateData, { serviceMode: 'recurring' });
-    if (!(familyKeys instanceof Set) || familyKeys.size === 0) return 0;
+    const familyKeys = new Set(
+      recurringServicesFromEstimateData(estimateData)
+        .map((svc) => serviceFamilyKeyForAdoption(svc))
+        .filter(Boolean),
+    );
+    if (familyKeys.size === 0) return 0;
     // The customer's OTHER plans: future recurring rows not sourced from
     // THIS estimate. The adoption path has already stamped source_estimate_id
     // on an adopted (same-family) row inside this transaction, but that
@@ -2009,7 +2019,10 @@ const EstimateConverter = {
       : await addOnPreservedMonthlyRateBase({
         database, estimateId, estimate, estimateData, customer,
       });
-    const convertedMonthlyRate = addOnPreservedRateBase > 0
+    // Provisional figure for the audit outputs below — the WRITE itself is
+    // an atomic in-database increment (see customerUpdates), and the actual
+    // post-update value is re-read after the update for logs/email/return.
+    let convertedMonthlyRate = addOnPreservedRateBase > 0
       ? Math.round((addOnPreservedRateBase + monthlyRate) * 100) / 100
       : monthlyRate;
     // Pre-migration compatibility (Codex round-8): billing_mode +
@@ -2054,8 +2067,15 @@ const EstimateConverter = {
           // Only SET it for commercial; never downgrade a residential customer.
           ...(hasCommercialRecurring ? { property_type: 'commercial' } : {}),
           // Add-on accepts SUM onto the existing rate; everything else
-          // (new signups, re-signups, same-family re-quotes) replaces.
-          monthly_rate: convertedMonthlyRate,
+          // (new signups, re-signups, same-family re-quotes) replaces. The
+          // sum is an atomic in-database increment (codex #3241 r2 P1): two
+          // concurrent add-on accepts each computing old + own slice in JS
+          // would lose one increment (last customer write wins even though
+          // both service sets commit); the SQL increment serializes on the
+          // row, so concurrent add-ons stack correctly.
+          monthly_rate: addOnPreservedRateBase > 0
+            ? database.raw('COALESCE(monthly_rate, 0) + ?', [monthlyRate])
+            : convertedMonthlyRate,
           // Estimate-flow recurring customers bill PER VISIT (owner ruling
           // 2026-07-09), never as a monthly membership subscription: the
           // monthly billing cron skips non-membership modes and completion
@@ -2123,6 +2143,20 @@ const EstimateConverter = {
     // seeding steps take it per-step in runSeedingStep below.
     if (database.isTransaction) await lockCustomerComms(database, customerId);
     await database('customers').where({ id: customerId }).update(customerUpdates);
+    if (addOnPreservedRateBase > 0) {
+      // The atomic increment's actual result for the audit outputs below
+      // (activity log, converter log, membership email, return value) — the
+      // provisional JS sum can be stale under the very concurrent-accept
+      // race the increment exists to survive. Fail-soft: the provisional
+      // figure stands if the re-read hiccups.
+      try {
+        const postUpdateRow = await database('customers').where({ id: customerId }).first();
+        const postUpdateRate = Number(postUpdateRow?.monthly_rate);
+        if (Number.isFinite(postUpdateRate) && postUpdateRate > 0) {
+          convertedMonthlyRate = Math.round(postUpdateRate * 100) / 100;
+        }
+      } catch { /* provisional sum stands */ }
+    }
 
     // 1b. Persist grass type captured during the estimate so lawn reports use
     //     the real turf instead of the St. Augustine default. ONLY for estimates

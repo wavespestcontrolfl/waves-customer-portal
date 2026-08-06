@@ -18083,10 +18083,15 @@ function storedPostManualAnnualReference(estData = {}) {
   const root = estData?.result && typeof estData.result === 'object'
     ? estData.result
     : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : estData);
-  const y2 = Number(root?.totals?.year2);
-  if (Number.isFinite(y2) && y2 > 0) return y2;
-  const annualTotal = Number(root?.recurring?.annualTotal);
-  if (Number.isFinite(annualTotal) && annualTotal > 0) return annualTotal;
+  // A stored ZERO is valid evidence (codex #3241 r2 P1): a 100% discount
+  // (or a FIXED discount consuming the whole recurring base) legitimately
+  // stores 0 as the post-manual annual, and treating it as "no reference"
+  // would let degraded positive columns keep billing the undiscounted
+  // figure. Only a genuinely absent/non-numeric field yields null.
+  const y2 = root?.totals?.year2;
+  if (typeof y2 === 'number' && Number.isFinite(y2) && y2 >= 0) return y2;
+  const annualTotal = root?.recurring?.annualTotal;
+  if (typeof annualTotal === 'number' && Number.isFinite(annualTotal) && annualTotal >= 0) return annualTotal;
   return null;
 }
 
@@ -18100,8 +18105,11 @@ function storedPostManualAnnualReference(estData = {}) {
 function estimateTotalsReflectManualDiscount(estData = {}, estimate = {}) {
   const ref = storedPostManualAnnualReference(estData);
   if (ref == null) return null;
+  // Zero columns are comparable too — a fully discounted estimate stores 0
+  // in both places (reflecting), while positive degraded columns against a
+  // zero reference are exactly the mismatch this detects.
   const annual = Number(estimate?.annual_total);
-  if (!Number.isFinite(annual) || !(annual > 0)) return null;
+  if (!Number.isFinite(annual) || annual < 0) return null;
   return Math.abs(annual - ref) <= 0.02;
 }
 
@@ -20043,6 +20051,7 @@ module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
 module.exports.extractEngineInputs = extractEngineInputs;
 module.exports.estimateFamilyKeysForAdoption = estimateFamilyKeysForAdoption;
 module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFamily;
+module.exports.serviceFamilyKeyForAdoption = serviceFamilyKeyForAdoption;
 module.exports.adoptionServiceModesForContract = adoptionServiceModesForContract;
 module.exports.netManualDiscountIntoFrequencyRow = netManualDiscountIntoFrequencyRow;
 module.exports.pricingBundleLacksManualDiscountNetting = pricingBundleLacksManualDiscountNetting;

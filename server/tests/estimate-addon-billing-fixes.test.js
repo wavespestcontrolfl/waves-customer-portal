@@ -93,6 +93,14 @@ describe('storedManualDiscountForReplay', () => {
     expect(storedManualDiscountForReplay({
       summary: { manualDiscount: { type: 'FIXED', value: 100 } },
     })).toBeNull();
+    // Coercible-to-zero values are NOT a proven zero (codex r2): null and
+    // '' both Number() to 0 but record an unknown allocation.
+    expect(storedManualDiscountForReplay({
+      summary: { manualDiscount: { type: 'FIXED', value: 100, oneTimeAmount: null } },
+    })).toBeNull();
+    expect(storedManualDiscountForReplay({
+      summary: { manualDiscount: { type: 'FIXED', value: 100, oneTimeAmount: '' } },
+    })).toBeNull();
     // PERCENT is per-bucket by definition -> always replay-stable.
     expect(storedManualDiscountForReplay({
       summary: { manualDiscount: { type: 'PERCENT', value: 15, oneTimeAmount: 12 } },
@@ -188,6 +196,14 @@ describe('estimateTotalsReflectManualDiscount', () => {
   test('null without reference evidence', () => {
     expect(estimateTotalsReflectManualDiscount({}, { annual_total: 394.4 })).toBeNull();
     expect(estimateTotalsReflectManualDiscount(blob, {})).toBeNull();
+  });
+
+  test('a stored ZERO post-discount annual is valid evidence (codex r2)', () => {
+    const fullDiscountBlob = { result: { totals: { year2: 0 } } };
+    // Degraded columns still carry the undiscounted positive annual -> mismatch.
+    expect(estimateTotalsReflectManualDiscount(fullDiscountBlob, { annual_total: 394.4 })).toBe(false);
+    // Fully discounted columns agree with the zero reference.
+    expect(estimateTotalsReflectManualDiscount(fullDiscountBlob, { annual_total: 0 })).toBe(true);
   });
 });
 
