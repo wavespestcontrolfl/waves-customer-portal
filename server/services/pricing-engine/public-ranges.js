@@ -156,11 +156,19 @@ function buildRows() {
     key: 'wasp_hornet_removal',
     name: 'Wasp / Hornet Nest Removal',
     unit: 'per job',
+    // Scope dimensions the exact path forwards (nest count, species,
+    // location) plus the legacy base tiers; urgency/after-hours surcharges
+    // are excluded by the standard-scheduling contract in the disclaimer.
     values: [
-      sp.calculateStingingPrice({ footprint: 2500 }, {}).price,
+      ...sweepValues(
+        [1, 2, 3].flatMap((nestCount) =>
+          ['mudDauber', 'wasp', 'hornet', 'yellowJacket'].flatMap((nestType) =>
+            ['ground', 'eave', 'tree', 'wall', 'attic', 'high'].map((location) => ({ nestCount, nestType, location })))),
+        (cfg) => sp.calculateStingingPrice(cfg),
+        (r) => r.price),
       ...(constants.SPECIALTY.wasp.tiers || []).filter(Number.isFinite),
     ].filter((v) => Number.isFinite(v) && v > 0),
-    notes: 'Height, aggressiveness, and confined-space add-ons priced separately. Free with an active recurring pest plan where eligible.',
+    notes: 'Priced by nest count, species, and location; free with an active recurring pest plan where eligible.',
   }));
 
   // Base, worst-case (heavy infestation, dense landscaping, priced exterior
@@ -194,7 +202,12 @@ function buildRows() {
     values: sweepValues(
       LOTS_SQFT.flatMap((lot) => FOOTPRINTS_SQFT.map((f) => ({ f, lot }))),
       ({ f, lot }) => sp.priceRodentBait({ footprint: f, lotSqFt: lot, features: {} }, {}),
-      (r) => r.monthly),
+      (r) => r.monthly).concat(sweepValues(
+      LOTS_SQFT.flatMap((lot) => FOOTPRINTS_SQFT.map((f) => ({ f, lot }))),
+      // Tile-roof properties carry the derived rodentRoofAdj the estimate
+      // path forwards.
+      ({ f, lot }) => sp.priceRodentBait({ footprint: f, lotSqFt: lot, features: {} }, { modifiers: { rodentRoofAdj: 50 } }),
+      (r) => r.monthly)),
     notes: 'Monthly-billed monitoring program with quarterly service visits.',
   }));
 
@@ -203,7 +216,7 @@ function buildRows() {
     name: 'Rodent Trapping',
     unit: 'per program',
     values: sweepValues(['standard', 'unlimited'], (plan) => sp.priceRodentTrapping({}, { plan }), (r) => r.price),
-    notes: 'Standard (setup + 2 included callbacks) or unlimited-callback plan.',
+    notes: 'Standard (setup + 2 included callbacks) or unlimited-callback plan; emergency same-day service carries a surcharge quoted at booking.',
   }));
 
   add('rodent_sanitation', () => rangeRow({
@@ -246,18 +259,31 @@ function buildRows() {
     notes: 'Includes the rodent inspection fee. Scope set by inspection findings.',
   }));
 
+  // Simple and complex-perimeter/structural profiles — the exact path
+  // forwards complexity plus derived construction/foundation modifiers.
+  const TERMITE_BAIT_PROFILES = [
+    {},
+    { complexity: 'complex', modifiers: { termiteConstructionMult: 1.3, termiteFoundationAdj: 150 } },
+  ];
   add('termite_bait_install', () => rangeRow({
     key: 'termite_bait_install',
     name: 'Termite Bait System Installation (Trelona)',
     unit: 'per installation',
-    values: sweepValues(FOOTPRINTS_SQFT, (f) => sp.priceTermiteBait({ footprint: f }, {}), (r) => r.installation && r.installation.price),
+    values: sweepValues(
+      FOOTPRINTS_SQFT.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
+      ({ f, opts }) => sp.priceTermiteBait({ footprint: f }, opts),
+      (r) => (r.requiresManualReview ? NaN : r.installation && r.installation.price)),
+    notes: 'Priced by home perimeter and structural complexity.',
   }));
 
   add('termite_bait_monitoring', () => rangeRow({
     key: 'termite_bait_monitoring',
     name: 'Termite Bait Monitoring',
     unit: 'per application',
-    values: sweepValues(FOOTPRINTS_SQFT, (f) => sp.priceTermiteBait({ footprint: f }, {}), (r) => r.perApp),
+    values: sweepValues(
+      FOOTPRINTS_SQFT.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
+      ({ f, opts }) => sp.priceTermiteBait({ footprint: f }, opts),
+      (r) => (r.requiresManualReview ? NaN : r.perApp)),
     notes: 'Quarterly station-check applications.',
   }));
 
@@ -311,10 +337,22 @@ function buildRows() {
     key: 'termite_trenching',
     name: 'Termite Trenching (liquid barrier)',
     unit: 'per job',
-    values: sweepValues([150, 200, 250, 300, 400],
-      (perimeterLF) => sp.priceTrenching({ footprint: 2500 }, { perimeterLF, concretePct: 0.2, labelConfirmed: true }),
-      (r) => r.price),
-    notes: 'Scales with treated perimeter; exact footage measured on site.',
+    // Perimeter x product x application rate x depth x warranty x concrete
+    // share — ordinary configuration fields the exact estimate flow passes;
+    // manual-review configurations are excluded.
+    values: sweepValues(
+      [150, 250, 400].flatMap((perimeterLF) =>
+        Object.keys(constants.SPECIALTY.trenching.products).flatMap((productKey) =>
+          ['standard', 'high'].flatMap((applicationRate) =>
+            [0.5, 1].flatMap((trenchDepthFt) =>
+              ['none', 'one_year_retreat', 'five_year_repair_retreat'].flatMap((warrantyTier) =>
+                [0.2, 0.5].map((concretePct) => ({ perimeterLF, productKey, applicationRate, trenchDepthFt, warrantyTier, concretePct }))))))),
+      (opts) => sp.priceTrenching({ footprint: 2500 }, { ...opts, labelConfirmed: true }),
+      // Explicit perimeter input always flags measurement-provenance review
+      // reasons; that's about verifying footage on site, not a refusal to
+      // quote — exclude only configurations the engine won't price.
+      (r) => (r.quoteRequired || !Number.isFinite(r.price) ? NaN : r.price)),
+    notes: 'Priced by treated perimeter, product, application rate, trench depth, warranty term, and concrete share; exact footage measured on site.',
   }));
 
   add('pre_slab_termiticide', () => rangeRow({
@@ -375,9 +413,14 @@ function buildRows() {
     key: 'one_time_mosquito',
     name: 'One-Time Mosquito Treatment',
     unit: 'per treatment',
-    values: sweepValues(LOTS_SQFT,
-      (lotSqFt) => sp.priceOneTimeMosquito({ footprint: 2000, lotSqFt }, {}),
+    // Station/dunk add-ons raise the high; the recurring-customer discount
+    // lowers the low — both forwarded by the exact estimate path.
+    values: sweepValues(
+      LOTS_SQFT.flatMap((lotSqFt) =>
+        [{}, { stationCount: 4, dunkCount: 4 }, { isRecurringCustomer: true }].map((opts) => ({ lotSqFt, opts }))),
+      ({ lotSqFt, opts }) => sp.priceOneTimeMosquito({ footprint: 2000, lotSqFt }, opts),
       (r) => r.price),
+    notes: 'Priced by treatable area; station and dunk add-ons available.',
   }));
 
   add('lawn_plugging', () => rangeRow({
@@ -385,8 +428,13 @@ function buildRows() {
     name: 'Lawn Plugging',
     unit: 'per sq ft',
     decimals: 2,
-    values: sweepValues([6, 9, 12], (spacing) => sp.pricePlugging(1000, spacing), (r) => r.perSf),
-    notes: 'Rate depends on plug spacing (6", 9", or 12").',
+    // Effective per-sq-ft rate varies with treated area because of the job
+    // floor, so areas are swept alongside spacing (standard scheduling).
+    values: sweepValues(
+      [500, 1000, 3000, 6000].flatMap((area) => [6, 9, 12].map((spacing) => ({ area, spacing }))),
+      ({ area, spacing }) => sp.pricePlugging(area, spacing),
+      (r) => r.perSf),
+    notes: 'Rate depends on plug spacing (6", 9", or 12") and treated area; small jobs carry a minimum.',
   }));
 
   add('top_dressing', () => rangeRow({
@@ -424,6 +472,31 @@ function buildRows() {
     notes: 'Monthly-billed program; 4, 6, or 9 applications per year by tier; priced by planting beds and tree count.',
   }));
 
+  add('rodent_plugging', () => rangeRow({
+    key: 'rodent_plugging',
+    name: 'Rodent Entry-Point Plugging',
+    unit: 'per job',
+    values: sweepValues(
+      [5, 15, 30].flatMap((entryPoints) =>
+        ['caulkSealant', 'steelWool', 'copperMesh', 'xcluder'].flatMap((materialType) =>
+          ['standard', 'difficult'].map((accessDifficulty) => ({ entryPoints, materialType, accessDifficulty })))),
+      (cfg) => sp.calculatePluggingPrice({ ...cfg, isStandalone: true }),
+      (r) => r.price),
+    notes: 'Priced by entry points, sealing material, and access; discounted when bundled with exclusion work.',
+  }));
+
+  add('termite_foam', () => rangeRow({
+    key: 'termite_foam',
+    name: 'Termite Foam Spot Treatment',
+    unit: 'per job',
+    values: sweepValues(
+      [5, 15, 30].flatMap((applicationPoints) =>
+        ['accessible', 'drillRequired'].map((accessType) => ({ applicationPoints, accessType }))),
+      (cfg) => sp.calculateFoamPrice(cfg),
+      (r) => r.price),
+    notes: 'Localized Termidor foam application; discounted as an add-on to a liquid treatment.',
+  }));
+
   add('palm_injection', () => rangeRow({
     key: 'palm_injection',
     name: 'Palm Injection',
@@ -457,7 +530,7 @@ function computePublicPricingRanges() {
   return {
     generatedAt: new Date().toISOString(),
     currency: 'USD',
-    disclaimer: 'Typical ranges for residential properties in our SW Florida service area. Your exact price depends on property size and conditions — get an instant quote at https://www.wavespestcontrol.com/pest-control-calculator/. Commercial properties are custom-quoted.',
+    disclaimer: 'Typical ranges for residential properties in our SW Florida service area under standard scheduling. Emergency, urgent, or after-hours service carries surcharges quoted at booking. Your exact price depends on property size and conditions — get an instant quote at https://www.wavespestcontrol.com/pest-control-calculator/. Commercial properties are custom-quoted.',
     services: rows,
     errors,
   };
