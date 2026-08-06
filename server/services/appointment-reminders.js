@@ -799,10 +799,14 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     ...(typeof preDispatchCheck === 'function' ? { preDispatchCheck } : {}),
   });
   } catch (sendErr) {
-    // A throw from inside the sender can postdate provider acceptance
-    // (audit persistence is after dispatch) — callers with durable claims
-    // must treat it as dispatch-uncertain, never retry it (codex r16).
-    if (sendOutcome && typeof sendOutcome === 'object') sendOutcome.dispatchUncertain = true;
+    // Only a throw AFTER the provider handoff began is dispatch-uncertain
+    // (audit persistence follows dispatch); the fence preDispatchCheck
+    // marks dispatchStarted immediately before the handoff, so earlier
+    // throws (contact load, validation, blocked-audit) stay retryable
+    // (codex r16/r17).
+    if (sendOutcome && typeof sendOutcome === 'object' && sendOutcome.dispatchStarted === true) {
+      sendOutcome.dispatchUncertain = true;
+    }
     throw sendErr;
   }
   // Callers that must distinguish transient provider failures (Twilio
@@ -2511,9 +2515,11 @@ const AppointmentReminders = {
               const svc = await db('scheduled_services')
                 .where({ id: scheduledServiceId })
                 .first('status');
-              return String(svc?.status) === 'cancelled'
-                ? { ok: true }
-                : { ok: false, code: 'appointment_restored', reason: `appointment is now ${svc?.status || 'missing'}` };
+              if (String(svc?.status) !== 'cancelled') {
+                return { ok: false, code: 'appointment_restored', reason: `appointment is now ${svc?.status || 'missing'}` };
+              }
+              sendOutcome.dispatchStarted = true;
+              return { ok: true };
             },
           });
           if (noticeSent) {
@@ -2879,7 +2885,9 @@ const AppointmentReminders = {
       // finalizes only after the combined send is attempted (r5 — marking
       // 'sent' upfront made a failed send unretryable). Unclaimed rows
       // only: never clobber an existing terminal state.
-            const seriesToken = new Date();
+            // Shared monotonic generator (r17): the sweep groups on THIS value —
+      // an inline new Date() could collide across independent series.
+      const seriesToken = require('./job-status').nextClaimTs();
       const priorGroupToken = options.claimToken instanceof Date ? options.claimToken : null;
       await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
@@ -3011,9 +3019,20 @@ const AppointmentReminders = {
                   });
               })
               .first('id');
-            return (own && !foreign)
-              ? { ok: true }
-              : { ok: false, code: 'notice_claim_lost', reason: 'series notice lease was reclaimed or partially adopted' };
+            if (!own || foreign) {
+              return { ok: false, code: 'notice_claim_lost', reason: 'series notice lease was reclaimed or partially adopted' };
+            }
+            // A restored target's claim columns are fully NULL and its
+            // visit is live — the combined copy would be wrong (r17).
+            const restored = await db('scheduled_services')
+              .whereIn('id', ids)
+              .whereNot('status', 'cancelled')
+              .first('id');
+            if (restored) {
+              return { ok: false, code: 'appointment_restored', reason: 'a series target is live again' };
+            }
+            seriesSendOutcome.dispatchStarted = true;
+            return { ok: true };
           },
         });
         if (noticeSent) {
