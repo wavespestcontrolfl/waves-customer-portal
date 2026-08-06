@@ -15260,6 +15260,13 @@ function singleCadenceFrequencyFromRow(row, {
   includedProgramLabel,
   defaultCadence,
   gradeUnmappedVisits = false,
+  // Emit the V1-ladder key style ('bi_monthly'/'Bi-monthly') instead of the
+  // foam-style 'bimonthly'. The public page's pest-cadence normalization and
+  // the accept handler's exact key match both speak the V1 form, so a
+  // commercial-pest entry keyed 'bimonthly' 400s on acceptance (codex #3240
+  // r5). Foam keeps its historical 'bimonthly' key — its accept flow posts
+  // the entry's own key back, so changing it would break sold foam plans.
+  canonicalV1Keys = false,
 }) {
   const VISITS = { quarterly: 4, bimonthly: 6, monthly: 12 };
   const VISITS_TO_CADENCE = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
@@ -15306,12 +15313,13 @@ function singleCadenceFrequencyFromRow(row, {
   // sizing. The slot profile reads frequencies[].perServiceTreatments first, so
   // carry it both on the frequency and on a per-service treatment row.
   const estimatedDurationMinutes = finiteNumberOrNull(row.estimatedDurationMinutes ?? row.estimated_duration_minutes);
-  const label = LABELS[cadence];
+  const freqKey = canonicalV1Keys && cadence === 'bimonthly' ? 'bi_monthly' : cadence;
+  const label = canonicalV1Keys && cadence === 'bimonthly' ? 'Bi-monthly' : LABELS[cadence];
   return {
-    key: cadence,
+    key: freqKey,
     label,
     serviceCategory: serviceKey,
-    serviceTierKey: cadence,
+    serviceTierKey: freqKey,
     monthlyBase,
     monthly,
     annual,
@@ -15328,7 +15336,7 @@ function singleCadenceFrequencyFromRow(row, {
     // WaveGuard/percent-discountable), so no manual-discount shaping here.
     manualDiscount: null,
     included: [{
-      key: `${serviceKey}_${cadence}`,
+      key: `${serviceKey}_${freqKey}`,
       label: includedProgramLabel(label),
       detail: visits ? `${Math.round(visits)} visits per year` : null,
       includedAtThisFrequency: true,
@@ -15374,6 +15382,7 @@ function commercialPestFrequenciesFromV1Services(services = []) {
     includedProgramLabel: (label) => `${label} commercial pest program`,
     defaultCadence: 'monthly', // commercial pest program default is 12/yr, not quarterly
     gradeUnmappedVisits: true,
+    canonicalV1Keys: true,
   })];
 }
 
@@ -18554,9 +18563,28 @@ async function buildPricingBundleInner(estimate) {
     const foamFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'foam_recurring'
       ? foamFrequenciesFromV1Services(v1.services)
       : [];
-    const commercialPestFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'commercial_pest'
+    // Solo commercial pest replaces the generic entry outright. A MIXED bundle
+    // keeps the generic entry's bundle totals + per-service treatment rows but
+    // re-keys it to the sold pest cadence: the accept handler exact-matches the
+    // posted cadence key against these frequencies, so a Quarterly-only list
+    // 400s a bi-monthly/monthly commercial acceptance (codex #3240 r5) — and
+    // the split sections already display per-service cadences.
+    const commercialPestShaped = !hasPest && recurringKeys.includes('commercial_pest')
       ? commercialPestFrequenciesFromV1Services(v1.services)
       : [];
+    const commercialPestFreqs = !commercialPestShaped.length
+      ? []
+      : recurringKeys.length === 1
+        ? commercialPestShaped
+        : frequencies.length
+          ? [{
+            ...frequencies[0],
+            key: commercialPestShaped[0].key,
+            label: commercialPestShaped[0].label,
+            serviceTierKey: commercialPestShaped[0].serviceTierKey,
+            visitsPerYear: commercialPestShaped[0].visitsPerYear,
+          }]
+          : [];
     const finalFreqs = hasPest
       ? frequencies
       : (treeShrubFreqs.length ? treeShrubFreqs

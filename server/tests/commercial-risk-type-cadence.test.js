@@ -196,9 +196,11 @@ describe('public frequency entry tracks the commercial pest cadence', () => {
     perApp: Math.round((1200 / visitsPerYear) * 100) / 100,
   });
 
-  test('maps 4/6/12 visits to quarterly/bimonthly/monthly entries', () => {
+  test('maps 4/6/12 visits to canonical V1 frequency keys (accept exact-matches these)', () => {
     expect(commercialPestFrequenciesFromV1Services([row(4)])[0]).toMatchObject({ key: 'quarterly', label: 'Quarterly', visitsPerYear: 4 });
-    expect(commercialPestFrequenciesFromV1Services([row(6)])[0]).toMatchObject({ key: 'bimonthly', label: 'Bimonthly', visitsPerYear: 6 });
+    // 'bi_monthly', NOT foam-style 'bimonthly' — the public page's pest-cadence
+    // normalization posts 'bi_monthly' and the accept handler exact-matches it.
+    expect(commercialPestFrequenciesFromV1Services([row(6)])[0]).toMatchObject({ key: 'bi_monthly', label: 'Bi-monthly', visitsPerYear: 6 });
     expect(commercialPestFrequenciesFromV1Services([row(12)])[0]).toMatchObject({ key: 'monthly', label: 'Monthly', visitsPerYear: 12 });
   });
 
@@ -247,7 +249,7 @@ describe('mixed commercial bundle keeps the pest cadence on its section', () => 
     const sections = buildPricingServices(payload, {}, estData);
     const pestSection = sections.find((s) => s.key === 'commercial_pest');
     expect(pestSection).toBeTruthy();
-    expect(pestSection.frequencies[0]).toMatchObject({ key: 'bimonthly', label: 'Bimonthly', visitsPerYear: 6 });
+    expect(pestSection.frequencies[0]).toMatchObject({ key: 'bi_monthly', label: 'Bi-monthly', visitsPerYear: 6 });
     expect(pestSection.frequencies[0].annual).toBe(1200);
   });
 

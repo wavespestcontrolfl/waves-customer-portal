@@ -1158,6 +1158,24 @@ function fallbackCadenceForPreview(E) {
       period: "/quarter",
     };
   }
+  // Commercial pest sells one cadence (risk bucket / estimator override) and
+  // has no residential pest tiers, so without this the preview takes the
+  // monthly path and shows annual/12 as "$X/mo" even for a 4x/6x program.
+  // monthlyTotal × intervalMonths lands on the per-application amount
+  // (annual/12 × 3 = annual/4 for quarterly).
+  const commercialPest = services.find((s) => {
+    const label = String(s?.service || s?.name || s?.label || s?.displayName || "").toLowerCase();
+    return label.includes("commercial") && label.includes("pest");
+  });
+  if (commercialPest) {
+    const visits = Number(commercialPest.visitsPerYear ?? commercialPest.visits ?? commercialPest.frequency) || 12;
+    if (visits < 6) {
+      return { key: "quarterly", label: "Quarterly", intervalMonths: 3, period: "/quarter" };
+    }
+    if (visits < 12) {
+      return { key: "bi_monthly", label: "Bi-monthly", intervalMonths: 2, period: "/2 months" };
+    }
+  }
   return {
     key: "monthly",
     label: "Monthly",
