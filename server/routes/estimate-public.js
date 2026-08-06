@@ -15242,17 +15242,28 @@ function mosquitoFrequenciesFromResultStats(estData = {}) {
 // service row's cadence/visitsPerYear/monthly. Without this, a non-quarterly
 // foam quote falls back to frequencies.slice(0,1) and is presented/billed as
 // quarterly. Billed monthly (annual/12); serviced at the cadence's visitsPerYear.
-function foamFrequenciesFromV1Services(services = []) {
-  const row = (Array.isArray(services) ? services : [])
-    .find((svc) => recurringServiceKey(svc) === 'foam_recurring');
-  if (!row) return [];
+// Shared shaper for solo single-cadence services (recurring foam, commercial
+// pest): they have no residential pest ladder, so their public frequency entry
+// is built from the sold service row itself. One implementation keeps cadence
+// normalization, the annual/monthly/per-treatment fallback math, billing flags,
+// and the treatment-row shape from diverging per service (codex #3240 r3).
+//
+// Cadence chain — compact engine-backed rows (quote wizard / lead automation)
+// persist name + frequency but drop `cadence`, so derive it: explicit field →
+// exact visit count → the cadence baked into the line name → optional
+// visit-count grading (≥12 monthly, ≥6 bimonthly — commercial pest cadence is
+// a bare visit count from risk bucket/override) → the service's own default.
+// (Check bi-monthly before monthly — "bimonthly" contains "monthly".)
+function singleCadenceFrequencyFromRow(row, {
+  serviceKey,
+  serviceLabel,
+  includedProgramLabel,
+  defaultCadence,
+  gradeUnmappedVisits = false,
+}) {
   const VISITS = { quarterly: 4, bimonthly: 6, monthly: 12 };
   const VISITS_TO_CADENCE = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
   const LABELS = { quarterly: 'Quarterly', bimonthly: 'Bimonthly', monthly: 'Monthly' };
-  // Compact engine-backed rows (quote wizard / lead automation) persist name +
-  // frequency but drop `cadence`, so derive it: explicit field → visit count →
-  // the cadence baked into the line name, before defaulting to quarterly. (Check
-  // bi-monthly before monthly — "bimonthly" contains "monthly".)
   const rawVisits = finiteNumberOrNull(row.visitsPerYear ?? row.visits ?? row.frequency);
   const nameLc = String(row.name ?? row.displayName ?? row.label ?? '').toLowerCase();
   const cadenceFromName = /bi-?monthly/.test(nameLc) ? 'bimonthly'
@@ -15260,7 +15271,7 @@ function foamFrequenciesFromV1Services(services = []) {
     : /quarterly/.test(nameLc) ? 'quarterly'
     : null;
   // Normalize aliases (bi_monthly → bimonthly) so an explicit row.cadence in the
-  // alias form doesn't short-circuit the chain into the quarterly fallback.
+  // alias form doesn't short-circuit the chain into the default fallback.
   const CADENCE_ALIASES = { bi_monthly: 'bimonthly', 'bi-monthly': 'bimonthly', bimonth: 'bimonthly' };
   const normCadence = (c) => {
     const key = String(c || '').toLowerCase();
@@ -15269,11 +15280,14 @@ function foamFrequenciesFromV1Services(services = []) {
   const cadenceCandidate = normCadence(row.cadence)
     || normCadence(row.frequencyKey)
     || (rawVisits != null ? VISITS_TO_CADENCE[rawVisits] : null)
-    || cadenceFromName;
-  const cadence = ['quarterly', 'bimonthly', 'monthly'].includes(cadenceCandidate) ? cadenceCandidate : 'quarterly';
+    || cadenceFromName
+    || (gradeUnmappedVisits && rawVisits != null
+      ? (rawVisits >= 12 ? 'monthly' : rawVisits >= 6 ? 'bimonthly' : 'quarterly')
+      : null);
+  const cadence = ['quarterly', 'bimonthly', 'monthly'].includes(cadenceCandidate) ? cadenceCandidate : defaultCadence;
   const visits = rawVisits || VISITS[cadence];
   const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
-  const perTreatmentBase = finiteNumberOrNull(row.perTreatment ?? row.perVisit ?? row.pv);
+  const perTreatmentBase = finiteNumberOrNull(row.perTreatment ?? row.perVisit ?? row.perApp ?? row.pv);
   // Prefer the authoritative sold annual (e.g. engine persists annual:1108,
   // monthly:92.33) so accept/invoice lock the engine price, not 92.33×12=1107.96.
   const annualBase = finiteNumberOrNull(row.annual ?? row.ann);
@@ -15288,15 +15302,15 @@ function foamFrequenciesFromV1Services(services = []) {
   const perTreatment = perTreatmentBase != null
     ? perTreatmentBase
     : (annual != null && visits ? roundMonthly(annual / visits) : null);
-  // Tier labor duration (priceRecurringFoam → 60/90/120/180) drives slot sizing.
-  // The slot profile reads frequencies[].perServiceTreatments first, so carry it
-  // both on the frequency and on a per-service treatment row.
+  // Tier labor duration (e.g. priceRecurringFoam → 60/90/120/180) drives slot
+  // sizing. The slot profile reads frequencies[].perServiceTreatments first, so
+  // carry it both on the frequency and on a per-service treatment row.
   const estimatedDurationMinutes = finiteNumberOrNull(row.estimatedDurationMinutes ?? row.estimated_duration_minutes);
   const label = LABELS[cadence];
-  return [{
+  return {
     key: cadence,
     label,
-    serviceCategory: 'foam_recurring',
+    serviceCategory: serviceKey,
     serviceTierKey: cadence,
     monthlyBase,
     monthly,
@@ -15309,96 +15323,58 @@ function foamFrequenciesFromV1Services(services = []) {
     // 2026-07-23: billing is always per application).
     ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
     estimatedDurationMinutes,
-    // foam_recurring is non-discountable (cadence multiplier is its only
-    // discount), so no manual-discount shaping here.
+    // Both callers are flat/non-discountable services (foam's cadence
+    // multiplier is its only discount; commercial pest is never
+    // WaveGuard/percent-discountable), so no manual-discount shaping here.
     manualDiscount: null,
     included: [{
-      key: `foam_recurring_${cadence}`,
-      label: `${label} foam treatment program`,
+      key: `${serviceKey}_${cadence}`,
+      label: includedProgramLabel(label),
       detail: visits ? `${Math.round(visits)} visits per year` : null,
       includedAtThisFrequency: true,
     }],
     addOns: [],
     perServiceTreatments: [{
-      service: 'foam_recurring',
-      label: 'Recurring Foam Treatment',
+      service: serviceKey,
+      label: serviceLabel,
       perTreatment,
       displayPrice: perTreatment,
       visitsPerYear: visits,
       estimatedDurationMinutes,
       waveGuardDiscountEligible: false,
     }],
-  }];
+  };
+}
+
+function foamFrequenciesFromV1Services(services = []) {
+  const row = (Array.isArray(services) ? services : [])
+    .find((svc) => recurringServiceKey(svc) === 'foam_recurring');
+  if (!row) return [];
+  return [singleCadenceFrequencyFromRow(row, {
+    serviceKey: 'foam_recurring',
+    serviceLabel: 'Recurring Foam Treatment',
+    includedProgramLabel: (label) => `${label} foam treatment program`,
+    defaultCadence: 'quarterly',
+  })];
 }
 
 // Solo commercial pest has no residential pestTiers, so the v1 build would fall
 // back to the first V1 frequency entry — always "Quarterly" — while the service
 // row prices 6 or 12 visits/yr (codex #3240 P1: the estimator's pest-cadence
-// override made the mismatch rep-chosen). Shape a single entry from the
-// commercial_pest service line so the public key/label track the sold cadence.
+// override made the mismatch rep-chosen). Same single-cadence shape as foam,
+// with visit-count grading (the cadence arrives as a bare visit count from the
+// risk bucket / override) and the commercial program's monthly default.
 function commercialPestFrequenciesFromV1Services(services = []) {
   const row = (Array.isArray(services) ? services : [])
     .find((svc) => recurringServiceKey(svc) === 'commercial_pest');
   if (!row) return [];
-  const VISITS_TO_CADENCE = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
-  const LABELS = { quarterly: 'Quarterly', bimonthly: 'Bimonthly', monthly: 'Monthly' };
-  const rawVisits = finiteNumberOrNull(row.visitsPerYear ?? row.visits ?? row.frequency);
-  // Commercial pest cadence is a visit count (risk bucket / override / program
-  // default 12) — grade off it like commercialCadenceLabel: ≥12 monthly,
-  // ≥6 bimonthly, else quarterly.
-  const cadence = rawVisits != null
-    ? (VISITS_TO_CADENCE[rawVisits]
-      || (rawVisits >= 12 ? 'monthly' : rawVisits >= 6 ? 'bimonthly' : 'quarterly'))
-    : 'monthly'; // commercial pest program default is 12/yr, not quarterly
-  const visits = rawVisits != null ? rawVisits : 12;
-  const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
-  const perTreatmentBase = finiteNumberOrNull(row.perTreatment ?? row.perVisit ?? row.perApp ?? row.pv);
-  const annualBase = finiteNumberOrNull(row.annual ?? row.ann);
-  const annual = annualBase != null
-    ? annualBase
-    : (monthlyBase != null
-      ? roundMonthly(monthlyBase * 12)
-      : (perTreatmentBase != null && visits ? roundMonthly(perTreatmentBase * visits) : null));
-  const monthly = monthlyBase != null
-    ? monthlyBase
-    : (annual != null ? roundMonthly(annual / 12) : null);
-  const perTreatment = perTreatmentBase != null
-    ? perTreatmentBase
-    : (annual != null && visits ? roundMonthly(annual / visits) : null);
-  const estimatedDurationMinutes = finiteNumberOrNull(row.estimatedDurationMinutes ?? row.estimated_duration_minutes);
-  const label = LABELS[cadence];
-  return [{
-    key: cadence,
-    label,
-    serviceCategory: 'commercial_pest',
-    serviceTierKey: cadence,
-    monthlyBase,
-    monthly,
-    annual,
-    perTreatment,
-    visitsPerYear: visits,
-    billingFrequencyKey: 'monthly',
-    ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
-    estimatedDurationMinutes,
-    // Commercial pest is FLAT — never WaveGuard/percent-discountable.
-    manualDiscount: null,
-    included: [{
-      key: `commercial_pest_${cadence}`,
-      label: `${label} commercial pest program`,
-      detail: visits ? `${Math.round(visits)} visits per year` : null,
-      includedAtThisFrequency: true,
-    }],
-    addOns: [],
-    perServiceTreatments: [{
-      service: 'commercial_pest',
-      label: 'Commercial Pest Control',
-      perTreatment,
-      displayPrice: perTreatment,
-      visitsPerYear: visits,
-      estimatedDurationMinutes,
-      waveGuardDiscountEligible: false,
-    }],
-  }];
+  return [singleCadenceFrequencyFromRow(row, {
+    serviceKey: 'commercial_pest',
+    serviceLabel: 'Commercial Pest Control',
+    includedProgramLabel: (label) => `${label} commercial pest program`,
+    defaultCadence: 'monthly', // commercial pest program default is 12/yr, not quarterly
+    gradeUnmappedVisits: true,
+  })];
 }
 
 // Engine-invocation path: build the foam frequency from the live engine result's
