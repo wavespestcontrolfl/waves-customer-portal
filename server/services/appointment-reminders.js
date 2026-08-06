@@ -2957,7 +2957,11 @@ const AppointmentReminders = {
           // AND restores the shared group token stored as its value, so
           // partial series failures rejoin their siblings' group. Only
           // FRESH rows (within the 72h horizon) are honored.
-          cancellation_notice_state: db.raw("CASE WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') THEN 'pending_notify' ELSE 'pending' END"),
+          // Live-sibling survivor check applies here too (codex r11): a
+          // merged-slot survivor downgrades the outbox intent to the
+          // evidence-gated default rather than texting against a live
+          // visit.
+          cancellation_notice_state: db.raw("CASE WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') AND NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id) THEN 'pending_notify' ELSE 'pending' END"),
           updated_at: new Date(),
         });
       // Apply outstanding caller intent to plain 'pending' markers first
@@ -2966,13 +2970,18 @@ const AppointmentReminders = {
       // operator's notify intent and must upgrade the marker, not be
       // consumed past it.
       await db.raw(
-        "UPDATE appointment_reminders SET cancellation_notice_state = 'pending_notify', updated_at = now() WHERE cancellation_notice_state = 'pending' AND EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours')",
+        "UPDATE appointment_reminders SET cancellation_notice_state = 'pending_notify', updated_at = now() WHERE cancellation_notice_state = 'pending' AND EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') AND NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id)",
       ).catch(() => {});
       // Consume outbox rows only once their intent is APPLIED — marker
       // present and no longer plain 'pending' (codex r8/r9) — and age out
       // anything past the 72h horizon.
+      // 'sent' can be the IN-FLIGHT pre-dispatch fence, which a retryable
+      // failure reverts to plain pending (codex r11) — consume only on
+      // states that durably carry or settle the intent. Genuinely
+      // finalized 'sent' rows keep their key until the 72h age-out;
+      // harmless, since claims on a terminal marker are blocked anyway.
       await db.raw(
-        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND (ok.last_sent_at < now() - interval '72 hours' OR EXISTS (SELECT 1 FROM appointment_reminders ar WHERE 'cn-ci-' || ar.scheduled_service_id::text = ok.email_key AND ar.cancellation_notice_at IS NOT NULL AND ar.cancellation_notice_state IS DISTINCT FROM 'pending'))",
+        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND (ok.last_sent_at < now() - interval '72 hours' OR EXISTS (SELECT 1 FROM appointment_reminders ar WHERE 'cn-ci-' || ar.scheduled_service_id::text = ok.email_key AND ar.cancellation_notice_state IN ('pending_notify', 'suppressed')))",
       ).catch(() => {});
       }
 
