@@ -218,7 +218,9 @@ function buildRows() {
         ...Object.values((constants.PEST.pestInitialRoach || {}))
           .filter(Array.isArray)
           .flatMap((arr) => arr.map((b) => Number(b.sqft)).filter((v) => Number.isFinite(v) && v > 0))
-          .flatMap((v) => [v, v + 1]),
+          // v-1 guarantees a sample below each (exclusive) boundary even
+          // if an admin lowers the first one beneath the base grid.
+          .flatMap((v) => [v - 1, v, v + 1]).filter((v) => v > 0),
       ])].flatMap((f) =>
         ['regular', 'german'].flatMap((roachType) =>
           [true, false].map((standalone) => ({ f, roachType, standalone })))),
