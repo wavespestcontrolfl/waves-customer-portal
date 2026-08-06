@@ -321,3 +321,16 @@ describe('scheme-less URLs detected generically (codex #3235 r16 — closes the 
     expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us out, e.g. the lanai work. If anything looks off, just reply to this email and we will make it right.', { firstName: 'Aaron' })).toBeNull();
   });
 });
+
+describe('deadline and access-instruction frames are banned (codex #3235 r17 — closes the timing-instruction class)', () => {
+  test('clock times, until-deadlines, and pet-exclusion frames all reject', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, keep pets inside until 3 PM. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyEmailIntro('Hi Aaron, wait until tomorrow then all set. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyDraftBody('Hi Aaron, stay off the lawn today: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyDraftBody('Hi Aaron, before letting the dogs out check with us: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
+  });
+
+  test('mentioning pets warmly (no instruction frame) still passes', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, hope the pups are enjoying the yard again. If anything looks off, just reply to this email.', { firstName: 'Aaron' })).toBeNull();
+  });
+});

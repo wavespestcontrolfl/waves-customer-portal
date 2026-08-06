@@ -89,6 +89,17 @@ const BANNED_RE = new RegExp(
     // previous quantity enumerations). A review ask has no legitimate use
     // for these units; a rejected draft just falls back to the template.
     "\\b(?:minutes?|mins?|hours?|hrs?)\\b",
+    // Deadline/instruction frames (codex r17 — the interval class morphs
+    // into clock times and "until X" deadlines): a review ask has no
+    // business carrying ANY timing or access instruction, so the frames are
+    // banned wholesale rather than enumerating time expressions.
+    "\\b\\d{1,2}(?::\\d{2})?\\s*[ap]\\.?m\\.?\\b",
+    "\\bo'?clock\\b",
+    "\\b(?:noon|midnight)\\b",
+    "\\bun?till?\\b", // until / till / til — the deadline connective itself
+    "\\bkeep\\s+(?:your\\s+|the\\s+)?(?:pets?|dogs?|cats?|kids?|children|animals?|everyone)\\b",
+    "\\bstay\\s+(?:off|out|inside|away)\\b",
+    "\\b(?:let|letting)\\s+(?:your\\s+|the\\s+)?(?:pets?|dogs?|cats?|kids?|children|animals?)\\s+(?:back\\s+)?(?:out|in|outside|inside)\\b",
     "\\bguarantee[ds]?\\b", // no invented promises; specifics live on the estimate
   ].join("|"),
   "i",
@@ -258,7 +269,7 @@ RULES (all mandatory):
 - Reference at most ONE concrete detail from their history (their pest issue, something they said, their property) — the single most relevant one, in a few words. If the history is empty, keep it generic but warm. With so few characters, prefer the detail over pleasantries.
 - End with a very short reply invite ("Reply if anything's off" or similar) — an unhappy customer should reply, not review.
 - No emojis. No dollar amounts. Never offer anything in return for a review (nothing free, no discounts, gift cards, rewards, credits, or the like). Never suggest a star rating or what the review should say.
-- Never use the words: safe, safely, non-toxic, chemical-free, EPA, guarantee, minute, minutes, hour, hours. Never mention drying times or re-entry times.
+- Never use the words: safe, safely, non-toxic, chemical-free, EPA, guarantee, minute, minutes, hour, hours, until. Never mention drying times, re-entry times, clock times, or any instruction about pets, kids, or lawn access.
 - Never mention call recordings, transcripts, or "our records" — you naturally remember the conversation.
 - Never invent facts not in the history (no made-up pests, prices, promises, or appointments).
 
@@ -314,7 +325,7 @@ RULES (all mandatory):
 - Reference at most ONE concrete detail from their history (their pest issue, something they said, their property) — the single most relevant one. If the history is empty, keep it generic but warm.
 - Invite a reply if anything isn't right — an unhappy customer should reply, not review.
 - No emojis. No dollar amounts. Never offer anything in return for a review (nothing free, no discounts, gift cards, rewards, credits, or the like). Never suggest a star rating or what the review should say.
-- Never use the words: safe, safely, non-toxic, chemical-free, EPA, guarantee, minute, minutes, hour, hours. Never mention drying times or re-entry times.
+- Never use the words: safe, safely, non-toxic, chemical-free, EPA, guarantee, minute, minutes, hour, hours, until. Never mention drying times, re-entry times, clock times, or any instruction about pets, kids, or lawn access.
 - Never mention call recordings, transcripts, or "our records" — you naturally remember the conversation.
 - Never invent facts not in the history (no made-up pests, prices, promises, or appointments).
 
