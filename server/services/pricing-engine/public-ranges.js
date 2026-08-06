@@ -58,7 +58,11 @@ function buildRows() {
   const PEST_PROFILES = [
     { property: {}, options: {} },
     {
-      property: { features: { shrubs: 'heavy', trees: 'heavy', complexity: 'complex', indoor: true, poolCage: true, poolCageSize: 'large' } },
+      property: {
+        attachedGarage: true,
+        nearWater: true,
+        features: { shrubs: 'heavy', trees: 'heavy', complexity: 'complex', indoor: true, poolCage: true, poolCageSize: 'large', attachedGarage: true, nearWater: true },
+      },
       options: { modifiers: { pestAgeAdj: 10 } },
     },
   ];
@@ -252,7 +256,7 @@ function buildRows() {
         { standardWireMeshPoints: 10, meshSoftLF: 50 },
         { standardWireMeshPoints: 20, meshSoftLF: 50 },
         { advancedWireMeshPoints: 10, meshConcreteLF: 50 },
-        { standardWireMeshPoints: 10, advancedWireMeshPoints: 10, standardBirdBoxes: 2, tileHighBirdBoxes: 2, meshSoftLF: 30, meshConcreteLF: 30 },
+        { standardWireMeshPoints: 10, advancedWireMeshPoints: 10, standardBirdBoxes: 2, tileHighBirdBoxes: 2, customBirdBoxes: 2, meshSoftLF: 30, meshConcreteLF: 30 },
       ],
       (opts) => sp.priceRodentExclusionV2(opts),
       (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : (r.total ?? r.price))),
@@ -297,8 +301,9 @@ function buildRows() {
       key: 'termite_station_rental',
       name: 'Termite Bait Station Rental',
       unit: 'per application',
-      values: sweepValues(FOOTPRINTS_SQFT,
-        (f) => sp.priceTermiteStationRental(sp.priceTermiteBait({ footprint: f }, {}).installation?.price),
+      values: sweepValues(
+        FOOTPRINTS_SQFT.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
+        ({ f, opts }) => sp.priceTermiteStationRental(sp.priceTermiteBait({ footprint: f }, opts).installation?.price),
         (r) => r && r.perApp),
       notes: 'Rented-station alternative to the upfront installation; rides quarterly applications.',
     }));
@@ -325,8 +330,10 @@ function buildRows() {
     unit: 'per job',
     values: sweepValues(
       [
-        { atticSqFt: 500 }, { atticSqFt: 1000 }, { atticSqFt: 2000 },
+        { atticSqFt: 500 }, { atticSqFt: 1000 }, { atticSqFt: 2000 }, { atticSqFt: 4500 },
         { surfaceLinearFt: 50, surfaceHeightFt: 2 }, { surfaceLinearFt: 150, surfaceHeightFt: 4 },
+        { atticSqFt: 2000, surfaceLinearFt: 150, surfaceHeightFt: 4 },
+        { atticSqFt: 4500, surfaceLinearFt: 150, surfaceHeightFt: 4 },
       ],
       (opts) => sp.priceBoraCare({ footprint: 2500 }, opts),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
@@ -361,8 +368,15 @@ function buildRows() {
     unit: 'per job',
     // Through the full auto-priced residential span — the public quote route
     // accepts slab measurements well past 4,000 sq ft with no quote boundary.
-    values: sweepValues([500, 1000, 2000, 4000, 6000, 8000, 12000, 20000],
-      (slabSqFt) => sp.pricePreSlabTermiticide({ slabSqFt }, { labelConfirmed: true }),
+    // Slab area x product x job context x volume discount x extended
+    // warranty — the selectable options the exact estimate branch forwards.
+    values: sweepValues(
+      [500, 1000, 2000, 4000, 6000, 8000, 12000, 20000].flatMap((slabSqFt) =>
+        Object.keys(constants.SPECIALTY.preSlabTermiticide.products).flatMap((productKey) =>
+          ['standalone', 'builderBatch', 'sameTripAddOn'].flatMap((jobContext) =>
+            ['none', '5plus', '10plus'].flatMap((volumeDiscount) =>
+              [false, true].map((warrantyExtendedSelected) => ({ slabSqFt, productKey, jobContext, volumeDiscount, warrantyExtendedSelected })))))),
+      ({ slabSqFt, ...opts }) => sp.pricePreSlabTermiticide({ slabSqFt }, { ...opts, labelConfirmed: true }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.treatmentPrice))),
     notes: 'New-construction slab pre-treatment; priced by slab area, volume discounts available.',
   }));
@@ -479,8 +493,9 @@ function buildRows() {
     values: sweepValues(
       [5, 15, 30].flatMap((entryPoints) =>
         ['caulkSealant', 'steelWool', 'copperMesh', 'xcluder'].flatMap((materialType) =>
-          ['standard', 'difficult'].map((accessDifficulty) => ({ entryPoints, materialType, accessDifficulty })))),
-      (cfg) => sp.calculatePluggingPrice({ ...cfg, isStandalone: true }),
+          ['standard', 'difficult'].flatMap((accessDifficulty) =>
+            [true, false].map((isStandalone) => ({ entryPoints, materialType, accessDifficulty, isStandalone }))))),
+      (cfg) => sp.calculatePluggingPrice(cfg),
       (r) => r.price),
     notes: 'Priced by entry points, sealing material, and access; discounted when bundled with exclusion work.',
   }));
@@ -491,10 +506,36 @@ function buildRows() {
     unit: 'per job',
     values: sweepValues(
       [5, 15, 30].flatMap((applicationPoints) =>
-        ['accessible', 'drillRequired'].map((accessType) => ({ applicationPoints, accessType }))),
+        ['accessible', 'drillRequired'].flatMap((accessType) =>
+          [false, true].map((isAddOnToLiquid) => ({ applicationPoints, accessType, isAddOnToLiquid })))),
       (cfg) => sp.calculateFoamPrice(cfg),
       (r) => r.price),
     notes: 'Localized Termidor foam application; discounted as an add-on to a liquid treatment.',
+  }));
+
+  add('trap_only_retainer', () => rangeRow({
+    key: 'trap_only_retainer',
+    name: 'Trap-Only Rodent Monitoring Retainer',
+    unit: 'per month',
+    values: sweepValues(
+      Object.keys(constants.RODENT.trapOnlyRetainer.plans).map((plan) => ({ plan })),
+      (opts) => sp.priceTrapOnlyRetainer(opts),
+      (r) => r.trapOnlyRetainerMonthlyPrice),
+    notes: `Monthly-billed monitoring with scheduled visits and included response callbacks; one-time setup fee $${Math.round(constants.RODENT.trapOnlyRetainer.setupFee)}. No structural warranty without exclusion.`,
+  }));
+
+  add('recurring_foam', () => rangeRow({
+    key: 'recurring_foam',
+    name: 'Recurring Foam Treatment',
+    unit: 'per application',
+    values: sweepValues(
+      // 20 points is the configured recurring-foam maximum; larger jobs are
+      // one-time foam or custom.
+      [5, 12, 20].flatMap((points) =>
+        ['quarterly', 'bimonthly'].map((cadence) => ({ points, cadence }))),
+      ({ points, cadence }) => sp.priceRecurringFoam(points, { cadence }),
+      (r) => r.perTreatment),
+    notes: 'Quarterly or bi-monthly foam program; discounted vs one-time treatments.',
   }));
 
   add('palm_injection', () => rangeRow({
@@ -514,7 +555,9 @@ function buildRows() {
         { treatmentType: 'treeAge', dbhInches: 20 },
       ].flatMap((opts) => [1, 5, 10].map((palmCount) => ({ ...opts, palmCount }))),
       (opts) => sp.pricePalmInjection({}, opts),
-      (r) => r.pricePerPalm),
+      // Actually-charged per palm per treatment — the per-visit minimum
+      // raises small palm counts above the raw catalog rate.
+      (r, { palmCount }) => r.perVisit / palmCount),
     notes: 'Nutrition, insecticide, combo, and TREE-age treatments. Fungal and lethal-bronzing work is diagnosed and quoted on site.',
   }));
 

@@ -27,6 +27,8 @@ const EXPECTED_KEYS = [
   'bora_care',
   'rodent_plugging',
   'termite_foam',
+  'trap_only_retainer',
+  'recurring_foam',
   'lawn_plugging',
   'top_dressing',
   'tree_shrub_care',
@@ -37,6 +39,7 @@ const EXPECTED_KEYS = [
 const MONTHLY_BILLED_KEYS = new Set([
   'rodent_bait_program',
   'tree_shrub_care',
+  'trap_only_retainer',
 ]);
 
 describe('public pricing ranges', () => {
