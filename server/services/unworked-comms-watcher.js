@@ -193,6 +193,19 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
           AND COALESCE(fc.duration_seconds, 0) >= 60
           AND fc.created_at > t.created_at
       ))
+      -- Unlinked (shared-phone / unmatched) coach tasks correlate through
+      -- the SOURCE call's SID stored on the score row (codex r32): a
+      -- connected outbound call to the source caller's number fulfills.
+      AND NOT (t.task_type = 'call_back' AND t.customer_id IS NULL AND EXISTS (
+        SELECT 1 FROM call_log src
+        JOIN call_log fc ON fc.direction = 'outbound'
+          AND COALESCE(fc.duration_seconds, 0) >= 60
+          AND fc.created_at > t.created_at
+          AND RIGHT(REGEXP_REPLACE(COALESCE(fc.to_phone, ''), '\D', '', 'g'), 10)
+            = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN src.direction = 'outbound' THEN src.to_phone ELSE src.from_phone END, ''), '\D', '', 'g'), 10)
+        WHERE src.twilio_call_sid = cs.metadata->>'callSid'
+          AND COALESCE(cs.metadata->>'callSid', '') <> ''
+      ))
       AND ((t.status IN ('pending', 'in_progress')
            -- Same rolling 30-day horizon as every other leg (codex r30):
            -- a task stuck pending for months is moot, not daily ACT news.

@@ -79,10 +79,17 @@ async function resolveActionedFlags() {
         }).orWhere(function ambiguousRescheduled() {
           // Null-entity flags can't observe slot changes — a delivered
           // reschedule confirmation to the customer is the proof
-          // (codex r23).
-          this.whereNull('agent_decisions.entity_id').whereExists(function confirmed() {
+          // (codex r23). Scoped in r32: only NON-ambiguous, customer-
+          // linked flags (no upcoming visit at flag time). For a
+          // multi-visit customer the moved visit may not be the requested
+          // one, and on a shared number it may be the other member's —
+          // those stay pending for staff review.
+          this.whereNull('agent_decisions.entity_id')
+            .whereRaw("COALESCE(agent_decisions.input_snapshot->>'ambiguous', 'false') <> 'true'")
+            .whereNotNull('agent_decisions.customer_id')
+            .whereExists(function confirmed() {
             this.select(1).from('sms_log as rc')
-              .whereRaw("(rc.customer_id = agent_decisions.customer_id OR (agent_decisions.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(rc.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail'))")
+              .whereRaw('rc.customer_id = agent_decisions.customer_id')
               .where('rc.direction', 'outbound')
               .whereIn('rc.message_type', ['appointment_rescheduled', 'reschedule_series_confirmation'])
               .where('rc.status', 'delivered')

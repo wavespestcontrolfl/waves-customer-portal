@@ -288,3 +288,12 @@ describe('direct travel targets (codex r31)', () => {
     expect(hasRescheduleOrAwayIntent('We are traveling Friday')).toBe(true);
   });
 });
+
+describe('present-state cancel status questions (codex r32)', () => {
+  test('is-my-appointment-canceled suppresses', () => {
+    expect(hasRescheduleOrAwayIntent('Is my appointment canceled?')).toBe(false);
+  });
+  test('confirm-is-canceled suppresses', () => {
+    expect(hasRescheduleOrAwayIntent('Can you confirm my appointment is canceled?')).toBe(false);
+  });
+});
