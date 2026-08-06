@@ -206,6 +206,16 @@ function buildRows() {
     notes: 'Multi-visit program; visits vary by severity.',
   }));
 
+  add('german_roach_initial', () => rangeRow({
+    key: 'german_roach_initial',
+    oneTimePerkKey: 'german_roach_initial',
+    name: 'German Roach Initial (3-Visit)',
+    unit: 'per application',
+    // Agent-selectable initial series priced per visit by the engine.
+    values: sweepValues(FOOTPRINTS_SQFT, (f) => sp.priceGermanRoachInitial({ footprint: f }, {}), (r) => r.price),
+    notes: '3-visit initial series for German roach activity within a recurring plan; heavy infestations use the cleanout program.',
+  }));
+
   add('bed_bug_treatment', () => rangeRow({
     key: 'bed_bug_treatment',
     oneTimePerkKey: 'bed_bug',
@@ -228,6 +238,7 @@ function buildRows() {
                     { method: 'HEAT', equipment: 'INHOUSE', heatScope: 'ROOMS_ONLY' },
                     { method: 'HEAT', equipment: 'INHOUSE', heatScope: 'WHOLE_HOME' },
                     { method: 'HYBRID', equipment: 'INHOUSE', heatScope: 'ROOMS_ONLY' },
+                    { method: 'HYBRID', equipment: 'INHOUSE', heatScope: 'WHOLE_HOME' },
                   ]
                     .map((m) => ({ footprint, stories, rooms, severity, prepStatus, occupancyType, ...m })))))))),
       ({ footprint, stories, rooms, severity, prepStatus, occupancyType, method, equipment, heatScope }) => sp.priceBedBugTreatment(
@@ -408,7 +419,7 @@ function buildRows() {
       ],
       (opts) => sp.priceRodentExclusionV2(opts),
       (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : (r.total ?? r.price))),
-    notes: 'Includes the rodent inspection fee. Scope set by inspection findings.',
+    notes: 'Scope set by inspection findings. The low end reflects small jobs with the inspection fee waived (service opt-in or qualifying totals); otherwise the rodent inspection fee is included.',
   }));
 
   // Simple and complex-perimeter/structural profiles — the exact path

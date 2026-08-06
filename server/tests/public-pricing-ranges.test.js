@@ -7,6 +7,7 @@ const EXPECTED_KEYS = [
   'general_pest_quarterly',
   'cockroach_treatment',
   'german_roach_cleanout',
+  'german_roach_initial',
   'bed_bug_treatment',
   'mosquito_program',
   'wasp_hornet_removal',
