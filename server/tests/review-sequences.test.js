@@ -1283,6 +1283,72 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan.skip).toBe('series_engaged');
   });
 
+  test('linked finals honor engagement, the walk bound survives dequeues, declared initials override linkage, and omitted units inherit the primary (codex #3243 r12)', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // LINKED final + engaged opener → series_engaged, not the full cadence.
+    let mock = makeMock({
+      scheduled_services: [
+        { id: 'lf-1', customer_id: 'lf', service_id: 'svc-trap', status: 'completed', scheduled_date: d(8), service_key: 'rodent_trapping' },
+        { id: 'lf-2', customer_id: 'lf', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3, parent_service_id: 'lf-1' },
+      ],
+      review_sequences: [{ id: 'seq-lf', customer_id: 'lf', scheduled_service_id: 'lf-1', status: 'completed' }],
+      review_requests: [{ id: 'req-lf', customer_id: 'lf', sequence_id: 'seq-lf', status: 'rated' }],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'lf', scheduledServiceId: 'lf-2' });
+    expect(plan.skip).toBe('series_engaged');
+
+    // Walk bound persists across dequeues: final d0 → middle d5 → declared
+    // initial d10; the old program's d20 visit stays outside even when the
+    // middle's own window rediscovers it.
+    mock = makeMock({
+      service_records: [{ id: 'sr-bd', customer_id: 'bd', scheduled_service_id: 'bd-init', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Initial setup' } } }) }],
+      scheduled_services: [
+        { id: 'bd-old', customer_id: 'bd', service_id: 'svc-trap', status: 'completed', scheduled_date: d(20), service_key: 'rodent_trapping' },
+        { id: 'bd-init', customer_id: 'bd', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping' },
+        { id: 'bd-mid', customer_id: 'bd', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(5), service_key: 'rodent_trapping_followup' },
+        { id: 'bd-fin', customer_id: 'bd', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [
+        { id: 'seq-bd-old', customer_id: 'bd', scheduled_service_id: 'bd-old', status: 'completed' },
+        { id: 'seq-bd-init', customer_id: 'bd', scheduled_service_id: 'bd-init', status: 'completed' },
+      ],
+    });
+    db.mockImplementation(mock);
+    const exempt = await ReviewService._seriesExemptSequenceIds('bd', { scheduledServiceId: 'bd-fin' });
+    expect(exempt).toContain('seq-bd-init');
+    expect(exempt).not.toContain('seq-bd-old');
+
+    // A declared initial wrongly LINKED to an old visit still opens a new
+    // series (single opener ask), not middle/final.
+    mock = makeMock({
+      service_records: [{ id: 'sr-dl', customer_id: 'dl', scheduled_service_id: 'dl-2', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Initial setup' } } }) }],
+      scheduled_services: [
+        { id: 'dl-1', customer_id: 'dl', service_id: 'svc-trap', status: 'completed', scheduled_date: d(12), service_key: 'rodent_trapping' },
+        { id: 'dl-2', customer_id: 'dl', service_id: 'svc-trap', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping', follow_up_interval_days: 3, parent_service_id: 'dl-1' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'dl', serviceRecordId: 'sr-dl' });
+    expect(plan.plan).toHaveLength(1);
+    expect(plan.plan[0].templateKey).toBe('first_treatment_ask');
+
+    // A phone-booked stamp that omits the unit inherits the primary's unit:
+    // it still priors the fully stamped visit at that unit.
+    mock = makeMock({
+      customers: [{ id: 'iu', first_name: 'Ann', address_line1: '100 Main St', address_line2: 'Apt 7', zip: '34205' }],
+      scheduled_services: [
+        { id: 'iu-1', customer_id: 'iu', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null, service_address_line1: '100 Main St', service_address_line2: 'Apt 7', service_address_zip: '34205' },
+        { id: 'iu-2', customer_id: 'iu', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3, property_id: null, service_address_line1: '100 Main St', service_address_zip: '34205' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'iu', scheduledServiceId: 'iu-2' });
+    expect(plan.seriesFinal).toBe(true);
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);

@@ -68,6 +68,21 @@ function premiseStampConflicts(a, b) {
   const cb = cityNorm(b?.service_address_city);
   return !!(ca && cb && ca !== cb);
 }
+// A stamp matching a reference's street but omitting the unit INHERITS the
+// reference's unit (codex #3243 r12 P2 — the canonical stamped-address rule:
+// phone extractions often omit line 2, so a missing stamped unit is unknown,
+// not different). A stamp that ADDS a unit the reference lacks stays
+// divergent (r10: a sub-unit is not the whole-street premise).
+function inheritReferenceUnit(row, reference) {
+  const { streetKey, unitKey, streetEmbeddedUnitKey } = require("./customer-properties");
+  if (!row || !reference) return row;
+  const rowUnit = unitKey(row.service_address_line2) || streetEmbeddedUnitKey(row.service_address_line1);
+  if (rowUnit) return row;
+  if (!reference.service_address_line2) return row;
+  const rs = streetKey(row.service_address_line1);
+  if (!rs || rs !== streetKey(reference.service_address_line1)) return row;
+  return { ...row, service_address_line2: reference.service_address_line2 };
+}
 // Premise predicate for trapping history (codex #3243 r2+r3+r5 P2): a linked
 // NON-primary property (rental, second home) is strict; the primary premise
 // spans BOTH legacy NULL rows and rows carrying the backfilled primary
@@ -107,11 +122,13 @@ async function trappingPremiseMatcher(customerId, visit) {
         service_address_zip: prop.zip,
       };
       const propStreet = streetKey(prop.address_line1);
-      return (row) => row.property_id === visit.property_id
-        || (row.property_id == null
-          && !!propStreet
-          && streetKey(row?.service_address_line1) === propStreet
-          && !premiseStampConflicts(row, propStamp));
+      return (row) => {
+        if (row.property_id === visit.property_id) return true;
+        if (row.property_id != null || !propStreet) return false;
+        const rowN = inheritReferenceUnit(row, propStamp);
+        return streetKey(rowN?.service_address_line1) === propStreet
+          && !premiseStampConflicts(rowN, propStamp);
+      };
     }
   }
   // Primary-or-NULL visit. NULL is ambiguous — legacy primary OR an
@@ -128,23 +145,29 @@ async function trappingPremiseMatcher(customerId, visit) {
   };
   const primary = await db("customer_properties").where({ customer_id: customerId, is_primary: true }).select("id").first();
   const primaryId = primary?.id || null;
-  if (premiseStampConflicts(visit, primaryStamp)) {
+  // Missing stamped units inherit the primary's unit before any conflict
+  // decision (codex #3243 r12 P2) — phone extractions often omit line 2.
+  const visitN = inheritReferenceUnit(visit, primaryStamp);
+  if (premiseStampConflicts(visitN, primaryStamp)) {
     // The visit is a stamped UNMATCHED premise (a rental the property
     // table doesn't know): only rows stamped with the SAME address are
     // the same series — unstamped legacy rows are the primary, not it.
     return (row) => {
       const { streetKey } = require("./customer-properties");
-      return !!streetKey(row?.service_address_line1) && !premiseStampConflicts(row, visit);
+      return !!streetKey(row?.service_address_line1) && !premiseStampConflicts(row, visitN);
     };
   }
   // The visit IS the primary premise: legacy NULL rows and rows carrying
   // the backfilled primary id match; a row stamped with a DIFFERENT
   // address than the primary does not, whatever its property_id.
-  return (row) => !premiseStampConflicts(row, primaryStamp)
-    && !premiseStampConflicts(row, visit)
-    && (row.property_id == null
-      || row.property_id === visit.property_id
-      || (primaryId != null && row.property_id === primaryId));
+  return (row) => {
+    const rowN = inheritReferenceUnit(row, primaryStamp);
+    return !premiseStampConflicts(rowN, primaryStamp)
+      && !premiseStampConflicts(rowN, visitN)
+      && (row.property_id == null
+        || row.property_id === visit.property_id
+        || (primaryId != null && row.property_id === primaryId));
+  };
 }
 // Order two visits sharing a scheduled_date (codex #3243 r5 P2: trap setup
 // and same-day capture/removal). window_start is a time-of-day string and
@@ -713,8 +736,6 @@ const ReviewService = {
         const anyChild = liveChild
           || (await childQuery("followup_source_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES))
           || (await childQuery("parent_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES));
-        const isFollowUpChild = !!(svc.parent_service_id || svc.followup_source_service_id);
-
         // Trapping position resolves BEFORE the structural returns (codex
         // #3243 r3 P1): a program can mix linkage styles — a linked visit 2
         // with an unlinked booked visit 3, or an unlinked opener with a
@@ -729,6 +750,8 @@ const ReviewService = {
         let trapPrior = null;
         let trapLaterLive = null;
         let trapLaterCompleted = null;
+        let visitDeclaredInitial = false;
+        let trapEngaged = false;
         if (isTrappingSeries) {
           const intervalDays = Number(svc.follow_up_interval_days) > 0 ? Number(svc.follow_up_interval_days) : 15;
           const windowDays = Math.min(60, Math.max(30, intervalDays * 2));
@@ -779,14 +802,37 @@ const ReviewService = {
           trapLaterLive = laterInPremise.find((r) => r.status !== "completed") || null;
           trapLaterCompleted = laterInPremise.find((r) => r.status === "completed") || null;
           // A technician-declared initial setup outranks history inference
-          // (codex #3243 r10 P2): a new program starting at the same
-          // premise inside the window of an old one must not inherit its
-          // position — trap_visit_type is REQUIRED on rodent_trapping
-          // reports and frozen into the typed report snapshot.
-          if (trapPrior && await this._isDeclaredInitialTrapVisit({ serviceRecordId, scheduledServiceId: svc.id })) {
+          // AND structural linkage (codex #3243 r10 P2 + r12 P2): a new
+          // program starting inside the window of an old one — even one
+          // wrongly linked to it — must not inherit its position.
+          // trap_visit_type is REQUIRED on rodent_trapping reports and
+          // frozen into the typed report snapshot.
+          visitDeclaredInitial = await this._isDeclaredInitialTrapVisit({ serviceRecordId, scheduledServiceId: svc.id });
+          if (trapPrior && visitDeclaredInitial) {
             trapPrior = null;
           }
+          // Series engagement, computed ONCE for every path that can
+          // classify this visit final (codex #3243 r12 P1: linked finals
+          // returned before the unlinked branch's check ran): a customer
+          // who already responded to the series' first ask — private
+          // rating, submit, or Google click — must not get three more
+          // asks. Separate simple queries by design (no OR groups).
+          if (trapPrior || svc.parent_service_id || svc.followup_source_service_id) {
+            const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId: svc.id });
+            if (seriesIds.length) {
+              const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked"]).first())
+                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereIn("status", ["submitted", "reviewed", "rated"]).first())
+                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("redirected_at").first())
+                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("rated_at").first())
+                || (await db("review_requests").whereIn("sequence_id", seriesIds).where({ google_review_clicked: true }).first());
+              trapEngaged = !!engaged;
+            }
+          }
         }
+        // A declared initial never reads as a follow-up child — stale or
+        // cross-service linkage must not demote the opener to middle/final
+        // (codex #3243 r12 P2). Non-trapping visits are unaffected.
+        const isFollowUpChild = !visitDeclaredInitial && !!(svc.parent_service_id || svc.followup_source_service_id);
 
         if (liveChild) {
           // Another treatment in this series is still on the books. An
@@ -810,6 +856,10 @@ const ReviewService = {
           // (completed → the final carried the cadence).
           if (trapLaterLive) return { skip: "multi_treatment_middle" };
           if (trapLaterCompleted) return { skip: "series_completed" };
+          // Engagement on the series' earlier asks stands the final down
+          // here too (codex #3243 r12 P1 — linked finals bypassed the
+          // unlinked branch's check).
+          if (trapEngaged) return { skip: "series_engaged" };
           // The series is done; run the full cadence with the series-final
           // cap/cooldown exemption.
           return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true };
@@ -825,23 +875,9 @@ const ReviewService = {
           // the owner-spec first ask.
           if (trapPrior && (trapLaterLive || trapLaterCompleted)) return { skip: "multi_treatment_middle" };
           if (!trapPrior && trapLaterCompleted) return { skip: "series_completed" };
-          if (trapPrior) {
-            // Opener engagement stands the final cadence down (codex #3243
-            // r11 P1): a customer who already responded to this series'
-            // first ask — private rating, submit, or Google click — must
-            // not get three more asks; the new sequence's own response
-            // checks only see its own sequence_id. Separate simple queries
-            // by design (no OR groups).
-            const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId: svc.id });
-            if (seriesIds.length) {
-              const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked"]).first())
-                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereIn("status", ["submitted", "reviewed", "rated"]).first())
-                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("redirected_at").first())
-                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("rated_at").first())
-                || (await db("review_requests").whereIn("sequence_id", seriesIds).where({ google_review_clicked: true }).first());
-              if (engaged) return { skip: "series_engaged" };
-            }
-          }
+          // Opener engagement stands the final cadence down (codex #3243
+          // r11 P1) — computed once in the hoisted block.
+          if (trapPrior && trapEngaged) return { skip: "series_engaged" };
           return trapPrior
             ? { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true }
             : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
@@ -3258,15 +3294,28 @@ const ReviewService = {
         const windowDays = Math.min(60, Math.max(30, intervalDays * 2));
         const seriesKeys = trappingSeriesKeysFor(visit.service_key);
         const inPremise = await trappingPremiseMatcher(customerId, visit);
-        const collected = new Set(sourceIds);
+        const seedIds = new Set(sourceIds);
+        const collectedRows = new Map(); // walk discoveries: id -> row
         const queue = [visit, ...ancestorRows.filter((r) => r.scheduled_date != null)];
         const walkSelect = ["ps.id", "ps.scheduled_date", "ps.property_id", "ps.service_address_line1", "ps.service_address_line2", "ps.service_address_city", "ps.service_address_zip", "ps.window_start", "ps.created_at"];
+        // The declared-opener boundary is GLOBAL across dequeues (codex
+        // #3243 r12 P1): later cursors re-open windows behind the opener,
+        // so the bound persists (and retro-prunes) rather than living one
+        // iteration.
+        let boundOpener = null;
+        const afterBound = (r) => {
+          if (!boundOpener || r.id === boundOpener.id) return true;
+          const day = etDayWindow(r.scheduled_date, 0).anchorStr;
+          const bDay = etDayWindow(boundOpener.scheduled_date, 0).anchorStr;
+          if (day > bDay) return true;
+          return day === bDay && compareSameDayVisits(r, boundOpener) >= 0;
+        };
         // Exhaust the queue (codex #3243 r6 P2): a dequeue cap truncated
         // long chains — each cursor can enqueue several same-window
         // siblings, starving the path to the opener. Termination is the
         // seen-set (nothing enqueues twice); the collected-size bound is a
         // runaway guard sized far above any real program.
-        while (queue.length && collected.size < 300) {
+        while (queue.length && collectedRows.size < 300) {
           const c = queue.shift();
           const w = etDayWindow(c.scheduled_date, windowDays);
           const rows = await db("scheduled_services as ps")
@@ -3288,7 +3337,7 @@ const ReviewService = {
             .whereIn("psv.service_key", seriesKeys)
             .select(...walkSelect);
           const fresh = [...rows, ...sameDay.filter((r) => compareSameDayVisits(r, c) < 0)]
-            .filter((r) => r.id !== visit.id && !collected.has(r.id) && inPremise(r));
+            .filter((r) => r.id !== visit.id && !collectedRows.has(r.id) && inPremise(r));
           // A declared initial is ITS series' opener (codex #3243 r11 P1):
           // it stays in the exemption set, but nothing EARLIER than it —
           // in this window or via further traversal — belongs to this
@@ -3297,27 +3346,25 @@ const ReviewService = {
           for (const r of fresh) {
             declaredFlags.set(r.id, await this._isDeclaredInitialTrapVisit({ scheduledServiceId: r.id }));
           }
-          const declared = fresh.filter((r) => declaredFlags.get(r.id));
-          let bounded = fresh;
-          if (declared.length) {
-            const latest = declared.reduce((a, b) => (
-              etDayWindow(a.scheduled_date, 0).anchorStr >= etDayWindow(b.scheduled_date, 0).anchorStr ? a : b));
-            const latestDay = etDayWindow(latest.scheduled_date, 0).anchorStr;
-            bounded = fresh.filter((r) => {
-              if (r.id === latest.id) return true;
-              const day = etDayWindow(r.scheduled_date, 0).anchorStr;
-              if (day > latestDay) return true;
-              return day === latestDay && compareSameDayVisits(r, latest) >= 0;
-            });
+          for (const r of fresh) {
+            // The NEAREST declared initial wins; raising the bound also
+            // retro-prunes anything admitted before it was known.
+            if (declaredFlags.get(r.id) && (!boundOpener || afterBound(r))) {
+              boundOpener = r;
+              for (const [id, row] of [...collectedRows]) {
+                if (!afterBound(row)) collectedRows.delete(id);
+              }
+            }
           }
-          for (const r of bounded) {
-            collected.add(r.id);
+          for (const r of fresh) {
+            if (!afterBound(r)) continue;
+            collectedRows.set(r.id, r);
             if (!declaredFlags.get(r.id)) {
               queue.push(r);
             }
           }
         }
-        sourceIds = [...collected];
+        sourceIds = [...new Set([...seedIds, ...collectedRows.keys()])];
       } else if (!sourceIds.length && visit.service_id) {
         // Same anchoring as the plan resolver (codex #3235 r10 P1): the
         // series' earlier visits, relative to THIS visit's date — never a
