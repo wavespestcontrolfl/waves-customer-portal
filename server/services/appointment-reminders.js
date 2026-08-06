@@ -2791,7 +2791,12 @@ const AppointmentReminders = {
   // still none → terminal silent suppression. Fenced by the reclaim token.
   async sweepStaleCancellationClaims() {
     try {
-      // Late-claim fallback (codex r25): a cancel whose in-trx claim AND
+      // Late-claim fallback (codex r25) — claim CREATION is gated like
+      // every other creation path (codex r26): a dark feature must not
+      // mint new obligations; settlement of existing ones stays ungated.
+      const { isEnabled: gateEnabled } = require('../config/feature-gates');
+      if (gateEnabled('cancelNoticeHook')) {
+      // (codex r25): a cancel whose in-trx claim AND
       // in-memory fallback were both lost (savepoint failure + crash)
       // leaves a recent cancelled visit with NO claim. Claim it here,
       // backdated to its cancel time so this same run can settle it.
@@ -2810,6 +2815,7 @@ const AppointmentReminders = {
           cancellation_notice_state: 'pending',
           updated_at: new Date(),
         });
+      }
 
       // Repair pass (codex r22): a restoration whose in-trx marker clear
       // failed leaves a stale terminal marker on a LIVE visit — shed it
