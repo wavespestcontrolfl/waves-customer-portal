@@ -9803,6 +9803,13 @@ router.put('/:token/accept', async (req, res, next) => {
           autoSendInvoice: false,
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
+          // Genuinely ADOPTED pre-existing appointment (not a reservation
+          // hold): the converter's add-on classification re-admits it BY ID
+          // so it stands on its own billed-plan evidence (codex #3241 r4/r5).
+          adoptedExistingAppointmentId: (existingAppointmentRow
+            && !isReservationHeldAppointment(existingAppointmentRow))
+            ? existingAppointmentRow.id
+            : null,
         });
         if (!annualPrepayConversionResult?.draftInvoiceId) {
           throw new Error('Annual prepay invoice was not created');
@@ -9852,6 +9859,16 @@ router.put('/:token/accept', async (req, res, next) => {
           skipMembershipEmail: true,
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
+          // Genuinely ADOPTED pre-existing appointment (not a reservation
+          // hold): the converter's add-on classification re-admits it BY ID
+          // — its own is_recurring/family is the billed-plan evidence, so a
+          // re-priced plan's only row still forces replace (codex r4) while
+          // an adopted ad-hoc visit doesn't block a true add-on's sum
+          // (codex r5).
+          adoptedExistingAppointmentId: (existingAppointmentRow
+            && !isReservationHeldAppointment(existingAppointmentRow))
+            ? existingAppointmentRow.id
+            : null,
         });
         // Mint the standard setup/first-application invoice on THIS
         // transaction — the same invoice the converter's standard branch
@@ -11828,6 +11845,20 @@ function extractEngineInputs(estData) {
       eligibilityConfirmed: true,
       floorBreachAcknowledged: opAdj.floorBreachAcknowledged === true,
     };
+  }
+  // Admin-editor discounts: the assembled manualDiscount object never
+  // round-trips into the stored inputs (the editor posts the raw form), so
+  // a replay from those inputs silently repriced the quote UNDISCOUNTED
+  // while the stored summary still showed the discount — and the accept
+  // then billed the undiscounted ladder row (2026-08-05 T&S add-on accept,
+  // account b5f6e627).
+  // Reconstruct it from the stored summary exactly like the
+  // operatorPriceAdjustment branch above; an explicit manualDiscount in the
+  // stored inputs still wins.
+  if (!out.manualDiscount) {
+    const storedManual = require('../services/estimate-manual-discount-replay')
+      .storedManualDiscountForReplay(estData);
+    if (storedManual) out.manualDiscount = storedManual;
   }
   // Curve provenance for unstamped pest inputs (audit 2026-07-28): agent
   // drafts persisted engineInputs WITHOUT services.pest.version, and the
@@ -18136,6 +18167,120 @@ function pricingBundleHasLawnIdentifiableRow(bundle = {}) {
 // line (the bug this PR fixes). Those snapshots must not fast-path: they
 // recompute through shapeFromV1/shapeFrequencyEntry, which stamp `monthly`
 // on flat-monthly rows. Traversal mirrors pricingBundleViolatesLawnPolicy.
+// Net a bundle frequency row that reached the manual-discount back-fill
+// WITHOUT its own row-level manualDiscount or suppression flag. Back-filling
+// a bare metadata object breaks the PriceCard / accept contract ("a
+// frequency carrying manualDiscount has its monthly already net of it") —
+// the row displays a discount its price never absorbed and the accept bills
+// the undiscounted figure. Rows landing here came from a builder that never
+// netted, so subtract the same per-cadence slice the ladder builders compute
+// (manualDiscountForRecurringBase against the row's own annual base).
+function netManualDiscountIntoFrequencyRow(frequency, manual, manualWithMonthly) {
+  const monthlyBase = Number(frequency?.monthly);
+  const annualBase = Number(frequency?.annual);
+  const discountBaseAnnual = Number.isFinite(annualBase) && annualBase > 0
+    ? annualBase
+    : (Number.isFinite(monthlyBase) && monthlyBase > 0 ? Math.round(monthlyBase * 12 * 100) / 100 : 0);
+  const rowManual = manualDiscountForRecurringBase(manual, discountBaseAnnual);
+  if (!rowManual || !(Number(rowManual.amount) > 0)) {
+    // Nothing billable to net (quote-required / zero-amount rows) — the
+    // metadata stays display-only exactly as before.
+    return { ...frequency, manualDiscount: manualWithMonthly };
+  }
+  const amount = Number(rowManual.amount);
+  const monthlySlice = Number(rowManual.monthlyAmount || 0)
+    || Math.round((amount / 12) * 100) / 100;
+  const visits = Number(frequency?.visitsPerYear ?? frequency?.visits);
+  const perTreatmentBase = Number(frequency?.perTreatment);
+  return {
+    ...frequency,
+    ...(Number.isFinite(monthlyBase) && monthlyBase > 0
+      ? { monthly: Math.max(0, Math.round((monthlyBase - monthlySlice) * 100) / 100) }
+      : {}),
+    ...(Number.isFinite(annualBase) && annualBase > 0
+      ? { annual: Math.max(0, Math.round((annualBase - amount) * 100) / 100) }
+      : {}),
+    ...(Number.isFinite(perTreatmentBase) && perTreatmentBase > 0 && Number.isFinite(visits) && visits > 0
+      ? { perTreatment: Math.max(0, Math.round((perTreatmentBase - amount / visits) * 100) / 100) }
+      : {}),
+    manualDiscount: rowManual,
+  };
+}
+
+// The blob's own claim of the POST-manual recurring annual: the mapper
+// writes totals.year2 / recurring.annualTotal from the discounted summary,
+// so these figures reflect the manual discount whenever the blob's totals
+// pipeline ran with it.
+function storedPostManualAnnualReference(estData = {}) {
+  const root = estData?.result && typeof estData.result === 'object'
+    ? estData.result
+    : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : estData);
+  // A stored ZERO is valid evidence (codex #3241 r2 P1): a 100% discount
+  // (or a FIXED discount consuming the whole recurring base) legitimately
+  // stores 0 as the post-manual annual, and treating it as "no reference"
+  // would let degraded positive columns keep billing the undiscounted
+  // figure. Only a genuinely absent/non-numeric field yields null.
+  const y2 = root?.totals?.year2;
+  if (typeof y2 === 'number' && Number.isFinite(y2) && y2 >= 0) return y2;
+  const annualTotal = root?.recurring?.annualTotal;
+  if (typeof annualTotal === 'number' && Number.isFinite(annualTotal) && annualTotal >= 0) return annualTotal;
+  return null;
+}
+
+// Do the PERSISTED estimate totals already absorb the manual discount?
+// true  → the columns equal the blob's post-manual reference (already-netted
+//         world; frozen snapshots must be preserved).
+// false → the columns disagree with the blob's own discounted figures — the
+//         degraded state (2026-08-05 T&S accept: annual_total 394.40 vs
+//         totals.year2 354.96).
+// null  → no reference evidence either way.
+function estimateTotalsReflectManualDiscount(estData = {}, estimate = {}) {
+  const ref = storedPostManualAnnualReference(estData);
+  if (ref == null) return null;
+  // Zero columns are comparable too — a fully discounted estimate stores 0
+  // in both places (reflecting), while positive degraded columns against a
+  // zero reference are exactly the mismatch this detects. A SQL NULL column
+  // is MISSING evidence, not zero (codex #3241 r3): Number(null) coerces to
+  // 0 and would report a false mismatch that discards a frozen snapshot.
+  if (estimate?.annual_total == null) return null;
+  const annual = Number(estimate.annual_total);
+  if (!Number.isFinite(annual) || annual < 0) return null;
+  return Math.abs(annual - ref) <= 0.02;
+}
+
+// A discount-bearing bundle is invalid when there is positive EVIDENCE of
+// the degraded state: the persisted totals disagree with the blob's own
+// post-manual figures (estimateTotalsReflectManualDiscount === false, the
+// 2026-08-05 T&S accept shape). Row-level markers are deliberately NOT
+// consulted (codex #3241 r3): the previous back-fill attached metadata-only
+// manualDiscount markers to rows it never netted, so on a mismatched-totals
+// bundle a marker proves nothing — and the snapshot fast path only serves
+// bundles whose headline totals MATCH those mismatched columns, so every
+// row it would serve is selling the undiscounted figure regardless of
+// marks. Conversely, marker absence alone is not proof of degradation:
+// legacy snapshots may have netted without stamping the marker, and
+// discarding those frozen bundles would reprice an outstanding tokenized
+// estimate through live constants (codex #3241 r1; AGENTS.md
+// in-flight-token rule). Reflecting or evidence-less bundles are preserved.
+function pricingBundleLacksManualDiscountNetting(bundle = {}, estData = {}, estimate = {}) {
+  const manual = normalizeManualDiscountSummary(estData);
+  if (!manual) return false;
+  const frequencies = Array.isArray(bundle.frequencies) ? bundle.frequencies : [];
+  if (!frequencies.length) return false;
+  const reflect = estimateTotalsReflectManualDiscount(estData, estimate);
+  if (reflect === false) return true;
+  // Zero-total trivial match (codex #3241 r4 P0): a fully discounted
+  // estimate persists annual_total = 0, and pricingBundleMatchesEstimateTotals
+  // passes a 0-vs-0 comparison without inspecting a single frequency — so a
+  // legacy positive, metadata-only snapshot would be "reflecting" while its
+  // rows still sell the undiscounted figure. Positive rows contradicting
+  // the zero totals recompute; rows genuinely netted to zero pass.
+  if (reflect === true && Number(estimate?.annual_total) === 0) {
+    return frequencies.some((f) => Number(f?.monthly) > 0 || Number(f?.annual) > 0);
+  }
+  return false;
+}
+
 function pricingBundleHasStaleTermiteRow(bundle = {}) {
   const rowStale = (rows) => Array.isArray(rows) && rows.some((r) => recurringServiceKey(r) === 'termite_bait'
     && !(Number(r?.monthly) > 0)
@@ -18493,6 +18638,12 @@ async function buildPricingBundleInner(estimate) {
       // recurring slice; the one-time slice is shown in the one-time breakdown.
       monthlyAmount: Math.round((Number(manual.recurringAmount ?? manual.amount) / 12) * 100) / 100,
     };
+    // Netting an unmarked row is only safe with EVIDENCE its amounts are
+    // undiscounted (the persisted totals disagree with the blob's own
+    // discounted figures). Already-netted legacy rows and evidence-less
+    // shapes keep the metadata-only attach — netting them would double-
+    // discount (codex #3241 r1 P1).
+    const netUnmarkedRows = estimateTotalsReflectManualDiscount(estData, estimate) === false;
     return {
       ...payload,
       manualDiscount: payload.manualDiscount || manualWithMonthly,
@@ -18503,7 +18654,9 @@ async function buildPricingBundleInner(estimate) {
             // savings the price doesn't reflect.
             (frequency?.manualDiscount || frequency?.manualDiscountSuppressed === true)
               ? frequency
-              : { ...frequency, manualDiscount: manualWithMonthly }
+              : (netUnmarkedRows
+                ? netManualDiscountIntoFrequencyRow(frequency, manual, manualWithMonthly)
+                : { ...frequency, manualDiscount: manualWithMonthly })
           ))
         : payload.frequencies,
     };
@@ -18542,6 +18695,12 @@ async function buildPricingBundleInner(estimate) {
     // path will invoice) recompute instead of fast-pathing.
     && !pricingBundleHasStaleTermiteRow(snapshotBundle)
     && !pricingBundleMissingRequiredSetupFee(snapshotBundle, estData)
+    // Snapshots whose rows never netted the estimate's manual discount
+    // (evidenced by the persisted totals disagreeing with the blob's own
+    // discounted figures) re-derive through the live (discount-aware)
+    // builders — fast-pathing them would bill the undiscounted row a
+    // discounted quote displayed. Already-netted legacy snapshots pass.
+    && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate)
   ) {
     return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,
@@ -18554,7 +18713,8 @@ async function buildPricingBundleInner(estimate) {
   // Same missing-fee guard as the snapshot fast path: a cached bundle built
   // before the fee rule (or restored oddly) must not serve a first-visit
   // total the converter won't bill.
-  if (cached && !pricingBundleMissingRequiredSetupFee(cached, estData)) {
+  if (cached && !pricingBundleMissingRequiredSetupFee(cached, estData)
+    && !pricingBundleLacksManualDiscountNetting(cached, estData, estimate)) {
     return finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({ ...cached, cacheHit: true })), estimate, estData);
   }
 
@@ -20090,7 +20250,11 @@ module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
 module.exports.extractEngineInputs = extractEngineInputs;
 module.exports.estimateFamilyKeysForAdoption = estimateFamilyKeysForAdoption;
 module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFamily;
+module.exports.serviceFamilyKeyForAdoption = serviceFamilyKeyForAdoption;
 module.exports.adoptionServiceModesForContract = adoptionServiceModesForContract;
+module.exports.netManualDiscountIntoFrequencyRow = netManualDiscountIntoFrequencyRow;
+module.exports.pricingBundleLacksManualDiscountNetting = pricingBundleLacksManualDiscountNetting;
+module.exports.estimateTotalsReflectManualDiscount = estimateTotalsReflectManualDiscount;
 module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
 module.exports.buildPricingServices = buildPricingServices;
