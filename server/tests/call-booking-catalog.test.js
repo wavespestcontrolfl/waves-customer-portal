@@ -692,6 +692,11 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     expect(hasCallReServiceIntent({ call_summary: 'please revisit kitchen because the ants are back' })).toBe(true);
     expect(hasCallReServiceIntent({ call_summary: 'revisit ants' })).toBe(true);
     expect(hasCallReServiceIntent({ call_summary: 'revisit the lanai for wasps' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit next week for the ants' })).toBe(true);
+    // A temporal modifier alone never launders an administrative object
+    // (codex #3231 r3).
+    expect(hasCallReServiceIntent({ call_summary: "revisit next month's pricing and book the regular quarterly visit" })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit after the invoice goes out' })).toBe(false);
     // Noun usage keeps its intent.
     expect(hasCallReServiceIntent({ requested_service: 'schedule a revisit' })).toBe(true);
     expect(hasCallReServiceIntent({ requested_service: 'Pest control revisit' })).toBe(true);
