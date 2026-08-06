@@ -68,7 +68,7 @@ async function resolveActionedFlags() {
             .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             // Approved click-followup nudges are proactive, not replies
             // (codex r24) — matched by draft intent + finalize sent_at.
-            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.sms_log_id IS NULL AND mdx.customer_id = sl.customer_id AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
+            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.sms_log_id IS NULL AND (mdx.customer_id = sl.customer_id OR (mdx.customer_id IS NULL AND sl.customer_id IS NULL)) AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
             // Resolution is a durable status write — only CONFIRMED
             // delivery counts (codex r26): a queued/sent reply can still
             // fail, and nothing reopens an auto_resolved decision. The
@@ -190,6 +190,14 @@ async function loadUnactionedFlags() {
           this.whereNull('ad.entity_id')
             .whereNotNull('ad.customer_id')
             .whereRaw("EXISTS (SELECT 1 FROM scheduled_services live WHERE live.customer_id = ad.customer_id AND live.scheduled_date >= (now() at time zone 'America/New_York')::date AND live.status IN ('pending', 'confirmed', 'en_route', 'on_site'))");
+        })
+        // Unlinked shared-phone flags (customer AND entity null) are
+        // retained while ANY phone-matched customer's visit is still
+        // armed (codex r33) — without choosing a customer.
+        .orWhere(function livePhoneMatched() {
+          this.whereNull('ad.customer_id')
+            .whereRaw("COALESCE(ad.input_snapshot->>'phone_tail', '') <> ''")
+            .whereRaw("EXISTS (SELECT 1 FROM customers pc JOIN scheduled_services pss ON pss.customer_id = pc.id WHERE pc.deleted_at IS NULL AND RIGHT(regexp_replace(COALESCE(pc.phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail' AND pss.scheduled_date >= (now() at time zone 'America/New_York')::date AND pss.status IN ('pending', 'confirmed', 'en_route', 'on_site'))");
         });
     })
     // A HUMAN reply that actually left (accepted carrier statuses) clears
@@ -204,7 +212,7 @@ async function loadUnactionedFlags() {
         .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             // Approved click-followup nudges are proactive, not replies
             // (codex r24) — matched by draft intent + finalize sent_at.
-            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.sms_log_id IS NULL AND mdx.customer_id = sl.customer_id AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
+            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.sms_log_id IS NULL AND (mdx.customer_id = sl.customer_id OR (mdx.customer_id IS NULL AND sl.customer_id IS NULL)) AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
         .whereIn('sl.status', ['queued', 'sent', 'delivered'])
         .whereRaw('sl.created_at > ad.created_at');
     })

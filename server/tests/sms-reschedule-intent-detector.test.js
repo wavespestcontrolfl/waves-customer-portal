@@ -297,3 +297,15 @@ describe('present-state cancel status questions (codex r32)', () => {
     expect(hasRescheduleOrAwayIntent('Can you confirm my appointment is canceled?')).toBe(false);
   });
 });
+
+describe('cant-make absence forms (codex r33)', () => {
+  test('cant make tomorrows appointment flags', () => {
+    expect(hasRescheduleOrAwayIntent("I can't make tomorrow's appointment")).toBe(true);
+  });
+  test('cant make it Friday flags', () => {
+    expect(hasRescheduleOrAwayIntent("Sorry, we can't make it Friday")).toBe(true);
+  });
+  test('cant make the payment stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("I can't make the payment this month")).toBe(false);
+  });
+});

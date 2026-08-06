@@ -105,8 +105,16 @@ async function loadCallbackCalls(cutoff = new Date()) {
       AND NOT EXISTS (
         SELECT 1 FROM ai_follow_up_tasks dt
         WHERE dt.task_type = 'call_back'
-          AND dt.customer_id IS NOT NULL
-          AND dt.customer_id = c.customer_id
+          -- Linked tasks match by customer; unlinked coach tasks match by
+          -- the source call's SID on the score row (codex r33) — one
+          -- obligation must not appear in both lanes either way.
+          AND ((dt.customer_id IS NOT NULL AND dt.customer_id = c.customer_id)
+            OR (dt.customer_id IS NULL AND EXISTS (
+              SELECT 1 FROM csr_call_scores dcs
+              WHERE dcs.id = dt.call_score_id
+                AND dcs.metadata->>'callSid' = c.twilio_call_sid
+                AND COALESCE(c.twilio_call_sid, '') <> ''
+            )))
           -- End-of-call boundary (codex r26): recovered rows (Studio /
           -- status fallback) are created near call END; adding duration
           -- again would overshoot. Bridged rows end at bridge + duration.
@@ -145,7 +153,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
           AND NOT EXISTS (
             SELECT 1 FROM message_drafts mdx
             WHERE mdx.sms_log_id IS NULL
-              AND mdx.customer_id = os.customer_id
+              AND (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL))
               AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
                                   AND os.created_at + interval '2 minutes'
           )
@@ -186,6 +194,19 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
         SELECT 1 FROM estimates fe
         WHERE fe.customer_id = t.customer_id AND fe.sent_at > t.created_at
       ))
+      -- Unlinked send_estimate tasks fulfill through the source call's
+      -- provenance (codex r33): an engine estimate carrying the call id,
+      -- or any sent estimate to the source caller's number.
+      AND NOT (t.task_type = 'send_estimate' AND t.customer_id IS NULL AND EXISTS (
+        SELECT 1 FROM call_log src, estimates fe
+        WHERE src.twilio_call_sid = cs.metadata->>'callSid'
+          AND COALESCE(cs.metadata->>'callSid', '') <> ''
+          AND fe.sent_at IS NOT NULL AND fe.sent_at > t.created_at
+          AND (fe.estimate_data #>> '{estimatorEngine,callLogId}' = src.id::text
+            OR (fe.customer_phone IS NOT NULL
+              AND RIGHT(REGEXP_REPLACE(fe.customer_phone, '\\D', '', 'g'), 10)
+                = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN src.direction = 'outbound' THEN src.to_phone ELSE src.from_phone END, ''), '\\D', '', 'g'), 10)))
+      ))
       AND NOT (t.task_type = 'call_back' AND t.customer_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM call_log fc
         WHERE fc.direction = 'outbound'
@@ -201,8 +222,8 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
         JOIN call_log fc ON fc.direction = 'outbound'
           AND COALESCE(fc.duration_seconds, 0) >= 60
           AND fc.created_at > t.created_at
-          AND RIGHT(REGEXP_REPLACE(COALESCE(fc.to_phone, ''), '\D', '', 'g'), 10)
-            = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN src.direction = 'outbound' THEN src.to_phone ELSE src.from_phone END, ''), '\D', '', 'g'), 10)
+          AND RIGHT(REGEXP_REPLACE(COALESCE(fc.to_phone, ''), '\\D', '', 'g'), 10)
+            = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN src.direction = 'outbound' THEN src.to_phone ELSE src.from_phone END, ''), '\\D', '', 'g'), 10)
         WHERE src.twilio_call_sid = cs.metadata->>'callSid'
           AND COALESCE(cs.metadata->>'callSid', '') <> ''
       ))
@@ -222,7 +243,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                AND NOT EXISTS (
                  SELECT 1 FROM message_drafts mdx
                  WHERE mdx.sms_log_id IS NULL
-                   AND mdx.customer_id = ps.customer_id
+                   AND (mdx.customer_id = ps.customer_id OR (mdx.customer_id IS NULL AND ps.customer_id IS NULL))
                    AND mdx.sent_at BETWEEN ps.created_at - interval '2 minutes'
                                        AND ps.created_at + interval '2 minutes'
                )
@@ -258,7 +279,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                AND NOT EXISTS (
                  SELECT 1 FROM message_drafts mdx
                  WHERE mdx.sms_log_id IS NULL
-                   AND mdx.customer_id = es.customer_id
+                   AND (mdx.customer_id = es.customer_id OR (mdx.customer_id IS NULL AND es.customer_id IS NULL))
                    AND mdx.sent_at BETWEEN es.created_at - interval '2 minutes'
                                        AND es.created_at + interval '2 minutes'
                )
@@ -290,7 +311,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                AND NOT EXISTS (
                  SELECT 1 FROM message_drafts mdx
                  WHERE mdx.sms_log_id IS NULL
-                   AND mdx.customer_id = vs.customer_id
+                   AND (mdx.customer_id = vs.customer_id OR (mdx.customer_id IS NULL AND vs.customer_id IS NULL))
                    AND mdx.sent_at BETWEEN vs.created_at - interval '2 minutes'
                                        AND vs.created_at + interval '2 minutes'
                )
@@ -376,7 +397,7 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         AND NOT EXISTS (
           SELECT 1 FROM message_drafts mdx
           WHERE mdx.sms_log_id IS NULL
-            AND mdx.customer_id = os.customer_id
+            AND (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL))
             AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
                                 AND os.created_at + interval '2 minutes'
         )
