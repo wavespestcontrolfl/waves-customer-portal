@@ -101,7 +101,12 @@ const BANNED_RE = new RegExp(
 // actually carries — g.page, maps.app.goo.gl, bit.ly-alikes (codex #3235
 // r6 P2): an echoed bare "g.page/r/…" would auto-link in mail clients and
 // compete with the tracked CTA.
-const URL_RE = /(?:https?:\/\/|www\.)|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|io|co|us|biz|info|page|app|gl|ly|me|dev|link|site)\b/i;
+// Three detectors (codex #3235 r6→r16, closing the class): explicit scheme,
+// GENERIC hostname-shape with a path (any dotted host followed by /path —
+// no TLD enumeration to dodge), and a bare-domain TLD belt for the common
+// pathless echoes. Prose like "e.g." survives because the generic form
+// requires the /path; a false reject just falls back to the template.
+const URL_RE = /(?:https?:\/\/|www\.)|\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\/[^\s]+|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|io|co|us|biz|info|page|app|gl|ly|me|dev|link|site)\b/i;
 
 // Word-bounded first-name presence (codex #3235 r7 P2): a substring check
 // let "Al" pass on "all"/"always", sending personalized copy that never

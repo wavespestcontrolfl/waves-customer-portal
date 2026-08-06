@@ -309,3 +309,15 @@ describe('time-unit words are banned outright (codex #3235 r15 — closes the in
     expect(Drafter.verifyDraftBody('Hi Aaron, back in an hour: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
   });
 });
+
+describe('scheme-less URLs detected generically (codex #3235 r16 — closes the TLD enumeration class)', () => {
+  test('any dotted host with a path rejects, regardless of TLD', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, see example.ai/review for details. Reply anytime.', { firstName: 'Aaron' })).toBe('raw_url');
+    expect(Drafter.verifyEmailIntro('Hi Aaron, feedback.xyz/r/123 has it. Reply anytime.', { firstName: 'Aaron' })).toBe('raw_url');
+    expect(Drafter.verifyDraftBody('Hi Aaron, maps.app.goo.gl/abc then {review_url}', { firstName: 'Aaron' })).toBe('raw_url');
+  });
+
+  test('ordinary prose with abbreviations still passes', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us out, e.g. the lanai work. If anything looks off, just reply to this email and we will make it right.', { firstName: 'Aaron' })).toBeNull();
+  });
+});
