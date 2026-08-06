@@ -26,7 +26,6 @@ const EXPECTED_KEYS = [
   'one_time_mosquito',
   'bora_care',
   'rodent_plugging',
-  'termite_foam',
   'trap_only_retainer',
   'recurring_foam',
   'rodent_inspection',

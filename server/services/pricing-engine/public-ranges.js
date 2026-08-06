@@ -58,7 +58,7 @@ function rangeRow({ key, name, unit, values, notes = null, decimals = 0 }) {
 // published lows must include these post-discount amounts.
 function waveGuardBundleValues() {
   const { generateEstimate } = require('./estimate-engine');
-  const out = { pest: [], mosquito: [], treeShrub: [], lawn: [] };
+  const out = { pest: [], mosquito: [], treeShrub: [], lawn: [], palm: [] };
   for (const footprint of FOOTPRINTS_SQFT) {
     for (const lotSqFt of [5000, 8000, 20000]) {
       for (const propertyType of ['single_family', 'condo_upper']) {
@@ -66,7 +66,7 @@ function waveGuardBundleValues() {
       const est = generateEstimate({
         propertyType,
         property: { footprint, lotSqFt, lawnSqFt: 6000 },
-        services: { lawn: {}, pest: { frequency }, mosquito: {}, treeShrub: {}, termiteBait: {} },
+        services: { lawn: {}, pest: { frequency }, mosquito: {}, treeShrub: {}, termiteBait: {}, palm: { treatmentType: 'nutrition', palmCount: 5 } },
       });
       for (const li of est.lineItems || []) {
         const ratio = li.annualBeforeDiscount > 0 && Number.isFinite(li.annualAfterDiscount)
@@ -78,6 +78,10 @@ function waveGuardBundleValues() {
           out.mosquito.push(li.annualAfterDiscount / li.visits);
         }
         if (li.service === 'tree_shrub' && Number.isFinite(li.monthlyAfterDiscount)) out.treeShrub.push(li.monthlyAfterDiscount);
+        if (li.service === 'palm_injection' && Number.isFinite(li.pricePerPalm)
+          && li.annualBeforeCredits > 0 && Number.isFinite(li.annualAfterCredits)) {
+          out.palm.push(li.pricePerPalm * (li.annualAfterCredits / li.annualBeforeCredits));
+        }
       }
         }
       }
@@ -107,6 +111,8 @@ function buildRows() {
   // attached garages, and home-age adjustments, all valid auto-priced inputs.
   const PEST_PROFILES = [
     { property: {}, options: {} },
+    // Light shrubs + simple landscaping subtract from the base price.
+    { property: { features: { shrubs: 'light', complexity: 'simple' } }, options: {} },
     {
       property: {
         attachedGarage: true,
@@ -393,8 +399,14 @@ function buildRows() {
     values: sweepValues(
       FOOTPRINTS_SQFT.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
       ({ f, opts }) => sp.priceTermiteBait({ footprint: f }, opts),
-      (r) => (r.quoteRequired ? NaN : r.perApp)),
-    notes: 'Quarterly station-check applications.',
+      // Bait monitoring is WaveGuard %-discount eligible — include the
+      // max-tier customer-paid floor.
+      (r) => {
+        if (r.quoteRequired) return NaN;
+        const maxDiscount = Math.max(...Object.values(constants.WAVEGUARD.tiers).map((t) => t.discount || 0));
+        return [r.perApp, r.perApp * (1 - maxDiscount)];
+      }),
+    notes: 'Quarterly station-check applications; WaveGuard bundle tiers discount up to 20%.',
   }));
 
   // Station rental publishes only while its purchase gate is on — the
@@ -543,7 +555,12 @@ function buildRows() {
             ['easy', 'moderate'].map((access) => ({ sq, grassType, cleanupLevel, access }))))),
       ({ sq, grassType, cleanupLevel, access }) =>
         sp.priceDethatching(sq, { grassType, cleanupLevel, thatchDepthInches: 1, access }),
-      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.estimatedPrice))),
+      (r) => {
+        if (r.quoteRequired || r.requiresManualReview) return NaN;
+        const price = r.price ?? r.estimatedPrice;
+        // Include the engine's recurring-customer one-time perk floor.
+        return [price, sp.applyOneTimeRecurringCustomerDiscount(price, { isRecurringCustomer: true }).price];
+      }),
     notes: 'Bermuda and Zoysia lawns; St. Augustine and heavy-debris jobs are quoted after inspection.',
   }));
 
@@ -585,10 +602,13 @@ function buildRows() {
     // (measured, or recurring-lawn customers) — the live estimate path uses
     // exact-area for measured jobs, which prices above the estimated mode.
     values: sweepValues(
-      [...LAWNS_SQFT, 30000].flatMap((sq) =>
+      [...LAWNS_SQFT, 40000].flatMap((sq) =>
         ['eighth', 'quarter'].flatMap((depth) => [false, true].map((exactArea) => ({ sq, depth, exactArea })))),
       ({ sq, depth, exactArea }) => sp.priceTopDressing(sq, depth, exactArea),
-      (r) => r.price),
+      // Active recurring customers get the engine's one-time perk on this
+      // line — include the discounted floor.
+      (r) => [r.price, sp.applyOneTimeRecurringCustomerDiscount(r.price, { isRecurringCustomer: true }).price]),
+    notes: 'Recurring-plan customers receive a discounted rate.',
   }));
 
   // Auto-priced residential shapes only: bare lots plus planted/treed
@@ -598,6 +618,9 @@ function buildRows() {
     { property: { footprint: 2000 }, options: {} },
     { property: { footprint: 2000, bedArea: 4000 }, options: { treeCount: 6, access: 'moderate' } },
     { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 14, access: 'moderate' } },
+    // High tree counts stay numerically priced — the review flag only
+    // routes the estimate; the priced line is still published.
+    { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 20, access: 'moderate' } },
   ];
   add('tree_shrub_care', () => rangeRow({
     key: 'tree_shrub_care',
@@ -608,7 +631,7 @@ function buildRows() {
         ['light', 'standard', 'enhanced'].flatMap((tier) =>
           TREE_SHRUB_PROFILES.map((p) => ({ lot, tier, p })))),
       ({ lot, tier, p }) => sp.priceTreeShrub({ ...p.property, lotSqFt: lot }, { ...p.options, tier }),
-      (r) => (r.requiresManualReview ? NaN : r.monthly)).concat(bundle('treeShrub')),
+      (r) => r.monthly).concat(bundle('treeShrub')),
     notes: 'Monthly-billed program; 4, 6, or 9 applications per year by tier; priced by planting beds and tree count; WaveGuard bundle tiers discount up to 20%.',
   }));
 
@@ -626,18 +649,9 @@ function buildRows() {
     notes: 'Priced by entry points, sealing material, and access; discounted when bundled with exclusion work.',
   }));
 
-  add('termite_foam', () => rangeRow({
-    key: 'termite_foam',
-    name: 'Termite Foam Spot Treatment',
-    unit: 'per job',
-    values: sweepValues(
-      [5, 15, 30].flatMap((applicationPoints) =>
-        ['accessible', 'drillRequired'].flatMap((accessType) =>
-          [false, true].map((isAddOnToLiquid) => ({ applicationPoints, accessType, isAddOnToLiquid })))),
-      (cfg) => sp.calculateFoamPrice(cfg),
-      (r) => r.price),
-    notes: 'Localized Termidor foam application; discounted as an add-on to a liquid treatment.',
-  }));
+  // termite_foam (calculateFoamPrice) is deliberately NOT published: no live
+  // route or client populates services.termiteFoam (DECISIONS.md records the
+  // pricer as dead); the purchasable drill-and-foam path is the foam_drill row.
 
   add('rodent_inspection', () => rangeRow({
     key: 'rodent_inspection',
@@ -679,7 +693,7 @@ function buildRows() {
       (r) => (r.trapOnlyRetainerBilling === 'annual'
         ? r.trapOnlyRetainerAnnualPrice / 12
         : r.trapOnlyRetainerMonthlyPrice)),
-    notes: 'Monitoring with scheduled visits and included response callbacks; monthly billing or discounted annual prepay. A one-time setup fee may apply. No structural warranty without exclusion.',
+    notes: 'Monitoring with scheduled visits and included response callbacks; monthly billing, or discounted annual prepay (setup fee waived). A one-time setup fee applies to monthly billing. No structural warranty without exclusion.',
   }));
 
   add('recurring_foam', () => rangeRow({
@@ -727,7 +741,7 @@ function buildRows() {
       (opts) => sp.pricePalmInjection({}, opts),
       // Actually-charged per palm per treatment — the per-visit minimum
       // raises small palm counts above the raw catalog rate.
-      (r, { palmCount }) => r.perVisit / palmCount),
+      (r, { palmCount }) => r.perVisit / palmCount).concat(bundle('palm')),
     notes: 'Nutrition, insecticide, combo, and TREE-age treatments. Fungal and lethal-bronzing work is diagnosed and quoted on site.',
   }));
 
