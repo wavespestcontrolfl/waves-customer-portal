@@ -2344,8 +2344,17 @@ const AppointmentReminders = {
           .where(function claimable() {
             this.whereNull('cancellation_notice_at')
               .orWhere(function singletonPending() {
-                this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
-                  .where('cancellation_notice_at', '<', db.raw("now() - interval '90 seconds'"))
+                // pending_notify is ROUTE-owned — the route's own awaited
+                // call adopts it immediately (the 90s in-flight guard only
+                // protects hook-owned 'pending' workers, which always hold
+                // a claimToken; codex r21). Singleton-only in both cases.
+                this.where(function ownable() {
+                  this.where('cancellation_notice_state', 'pending_notify')
+                    .orWhere(function agedPending() {
+                      this.where('cancellation_notice_state', 'pending')
+                        .where('cancellation_notice_at', '<', db.raw("now() - interval '90 seconds'"));
+                    });
+                })
                   .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
               });
           })
@@ -2369,8 +2378,17 @@ const AppointmentReminders = {
                 // this obligation (r14); stale groups belong to the sweep.
                 // >=90s old only (r20): an ACTIVE hook worker settles in
                 // seconds — don't steal a lease mid-flight.
-                this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
-                  .where('cancellation_notice_at', '<', db.raw("now() - interval '90 seconds'"))
+                // pending_notify is ROUTE-owned — the route's own awaited
+                // call adopts it immediately (the 90s in-flight guard only
+                // protects hook-owned 'pending' workers, which always hold
+                // a claimToken; codex r21). Singleton-only in both cases.
+                this.where(function ownable() {
+                  this.where('cancellation_notice_state', 'pending_notify')
+                    .orWhere(function agedPending() {
+                      this.where('cancellation_notice_state', 'pending')
+                        .where('cancellation_notice_at', '<', db.raw("now() - interval '90 seconds'"));
+                    });
+                })
                   .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
               })
               .orWhere(function staleLease() {
@@ -2489,7 +2507,10 @@ const AppointmentReminders = {
             if (isEnabled('cancelNoticeHook')) return false;
           }
           await db('appointment_reminders')
-            .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+            .where({ id: record.id })
+            // Includes the pre-dispatch 'sent' stamp under OUR token so a
+            // definite provider failure reverts it (codex r21).
+            .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
             .where('cancellation_notice_at', noticeToken)
             .update(accepted
               ? { cancellation_notice_state: 'sent', updated_at: new Date() }
@@ -2545,6 +2566,15 @@ const AppointmentReminders = {
               if (String(svc?.status) !== 'cancelled') {
                 return { ok: false, code: 'appointment_restored', reason: `appointment is now ${svc?.status || 'missing'}` };
               }
+              // Durable pre-dispatch stamp (codex r21): a process exit
+              // between provider acceptance and audit persistence must
+              // read as SENT, never retry. A definite failure reverts via
+              // the token-fenced finalize below; a pre-acceptance crash
+              // sacrifices the notice rather than risking a double text.
+              await db('appointment_reminders')
+                .where({ id: record.id })
+                .where('cancellation_notice_at', noticeToken)
+                .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
               sendOutcome.dispatchStarted = true;
               return { ok: true };
             },
@@ -2978,7 +3008,9 @@ const AppointmentReminders = {
           }
           await db('appointment_reminders')
             .whereIn('scheduled_service_id', ids)
-            .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+            // Includes the pre-dispatch 'sent' stamp under OUR token so a
+            // definite failure reverts it (codex r21).
+            .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
             .where('cancellation_notice_at', seriesToken)
             .update(accepted
               ? { cancellation_notice_state: 'sent', updated_at: new Date() }
@@ -3080,6 +3112,12 @@ const AppointmentReminders = {
             if (restored) {
               return { ok: false, code: 'appointment_restored', reason: 'a series target is live again' };
             }
+            // Durable pre-dispatch stamp for the group (codex r21).
+            await db('appointment_reminders')
+              .whereIn('scheduled_service_id', ids)
+              .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+              .where('cancellation_notice_at', seriesToken)
+              .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
             seriesSendOutcome.dispatchStarted = true;
             return { ok: true };
           },

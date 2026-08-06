@@ -528,8 +528,11 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             .where(function claimable() {
               this.whereNull('cancellation_notice_at')
                 .orWhere(function stale() {
+                  // Singleton-only (codex r21): stale shared groups are
+                  // the sweep's — it recovers with the combined copy.
                   this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
-                    .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"));
+                    .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
+                    .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
                 });
             })
             .update({ cancellation_notice_at: lateTs, cancellation_notice_state: 'pending', updated_at: lateTs });
