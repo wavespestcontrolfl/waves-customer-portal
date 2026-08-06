@@ -607,6 +607,49 @@ describe('family-scoped existing-appointment adoption', () => {
       { service_type: 'Rodent Trapping Service' },
       trapKeys,
     )).toBe(true);
+    // Wire-mesh exclusion (codex r19): the service key carries no exclusion
+    // token and would contribute rodent_bait through the field union — the
+    // specific identity must purge it.
+    const wireMeshData = {
+      result: {
+        oneTime: {
+          items: [{ service: 'rodent_wire_mesh', name: 'Rodent Wire Mesh Exclusion', price: 780 }],
+        },
+      },
+    };
+    const meshKeys = estimateFamilyKeysForAdoption({}, wireMeshData, { serviceMode: 'one_time' });
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Rodent Bait Station Monitoring' },
+      meshKeys,
+    )).toBe(false);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Rodent Wire Mesh Exclusion' },
+      meshKeys,
+    )).toBe(true);
+  });
+
+  test('stale service_type slugs never bypass catalog authority (codex r19)', () => {
+    const roachData = {
+      result: {
+        oneTime: {
+          items: [{ service: 'pest_initial_roach', name: 'Cockroach Treatment', price: 350 }],
+        },
+      },
+    };
+    const roachKeys = estimateFamilyKeysForAdoption({}, roachData, { serviceMode: 'one_time' });
+    // Catalog-linked ordinary pest row wearing a stale "Cockroach Treatment"
+    // snapshot: the catalog family check rejects it, and the slug door must
+    // not resurrect the match from the stale label.
+    expect(appointmentMatchesEstimateFamily({
+      service_type: 'Cockroach Treatment',
+      catalog_service_key: 'quarterly_pest_control',
+      catalog_service_name: 'Quarterly Pest Control Service',
+    }, roachKeys)).toBe(false);
+    // Unlinked legacy rows still match by label slug.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Cockroach Treatment' },
+      roachKeys,
+    )).toBe(true);
   });
 
   test('multi-service one-time accepts adopt only under the PRIMARY service (codex r13)', () => {

@@ -523,7 +523,9 @@ function classifyServiceFamilyText(text) {
   // (and restamp) a bait-station monitoring visit. Same regexes as
   // slot-reservation.
   if (/rodent.*trap|trap.*rodent/.test(raw)) return 'rodent_trapping';
-  if (/rodent.*exclusion|exclusion.*rodent/.test(raw)) return 'rodent_exclusion';
+  // Wire-mesh/seal wording is exclusion work (codex r19: the supported
+  // rodent_wire_mesh catalog key carries no "exclusion" token).
+  if (/rodent.*(?:exclusion|wire\s*mesh|seal)|(?:exclusion|wire\s*mesh|seal).*rodent/.test(raw)) return 'rodent_exclusion';
   if (/rodent.*sanitation|sanitation.*rodent/.test(raw)) return 'rodent_sanitation';
   // The CANONICAL scheduled-row classifier (recurring-appointment-seeder),
   // on BOTH the estimate's services and the candidate rows — the
@@ -616,15 +618,21 @@ function oneTimeItemFamilyKeys(item = {}) {
     const key = classifyServiceFamilyText(field);
     if (key) keys.add(key);
   }
+  // Specific rodent identities EXCLUDE the bait family entirely (codex
+  // #3228 r18/r19): when any field resolves trapping / exclusion /
+  // sanitation, a bait key contributed by ANOTHER field of the same item
+  // (rodent_wire_mesh's service key has no exclusion token) must be
+  // removed too — suppressing only the category bridge left it in place
+  // and a bait-station monitoring visit stayed adoptable.
+  const hasSpecificRodent = [...keys].some(
+    (k) => k === 'rodent_trapping' || k === 'rodent_exclusion' || k === 'rodent_sanitation',
+  );
+  if (hasSpecificRodent) {
+    keys.delete('rodent_bait');
+    keys.delete('rodent');
+  }
   if (category) {
-    // The rodent bridge only for GENERIC rodent work (codex #3228 r18):
-    // when the fields resolve a specific rodent identity (trapping /
-    // exclusion / sanitation, mirroring the slot profile), adding the bait
-    // family would let a bait-station monitoring visit stand in for sold
-    // trapping/exclusion work.
-    const specificRodent = category === 'rodent'
-      && [...keys].some((k) => k === 'rodent_trapping' || k === 'rodent_exclusion' || k === 'rodent_sanitation');
-    if (!specificRodent) {
+    if (!(category === 'rodent' && hasSpecificRodent)) {
       for (const key of (ONE_TIME_CATEGORY_FAMILIES[category] || [category])) keys.add(key);
     }
   }
@@ -742,8 +750,15 @@ function appointmentMatchesEstimateFamily(row = {}, familyKeys = new Set()) {
   // exactly "Cockroach Treatment" was rejected and the customer sent to
   // book a duplicate. The row's own field slugs may satisfy a specialty
   // key; broad family-key slugs stay excluded so this door never widens
-  // generic adoption.
-  for (const field of [row.catalog_service_key, row.catalog_service_name, row.service_type]) {
+  // generic adoption. Catalog authority holds here too (codex r19): when
+  // the row is catalog-linked, only the catalog fields may supply slugs —
+  // a stale service_type snapshot ("Cockroach Treatment" on an ordinary
+  // pest catalog row) must not resurrect the match the catalog family
+  // check just rejected.
+  const slugFields = (row.catalog_service_key || row.catalog_service_name)
+    ? [row.catalog_service_key, row.catalog_service_name]
+    : [row.service_type];
+  for (const field of slugFields) {
     const slug = String(field || '').toLowerCase()
       .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
     if (slug && !BROAD_ADOPTION_FAMILY_KEYS.has(slug) && familyKeys.has(slug)) return true;
