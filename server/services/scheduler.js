@@ -1870,6 +1870,10 @@ function initScheduledJobs() {
       await runExclusive('appointment-reminders', async () => {
         const reminders = require('./appointment-reminders');
         await reminders.checkAndSendReminders();
+        // Settle stale cancellation-notice leases (GATE_CANCEL_NOTICE_HOOK;
+        // no-op while the gate is off) — the durable half of the
+        // shared-writer cancellation-notice hook in job-status.js.
+        await reminders.sweepStaleCancellationClaims();
       });
     } catch (err) {
       logger.error(`Reminder check failed: ${err.message}`);

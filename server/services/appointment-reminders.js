@@ -2261,20 +2261,38 @@ const AppointmentReminders = {
       // provider acceptance) is reclaimable so the crash window cannot
       // recreate the silent-cancellation failure (r3); 'suppressed' and
       // 'sent' are terminal and never reclaimed.
-      const claimed = await db('appointment_reminders')
-        .where({ id: record.id })
-        .where(function claimable() {
-          this.whereNull('cancellation_notice_at').orWhere(function staleLease() {
-            this.where('cancellation_notice_state', 'pending')
-              .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"));
-          });
-        })
-        .update({ cancellation_notice_at: new Date(), cancellation_notice_state: 'pending', updated_at: new Date() });
+      // options.claimToken = the caller already holds the durable claim
+      // (job-status trx claim or the stale-claim sweep) — verify ownership
+      // by the claim timestamp (fence token, codex r4) instead of
+      // re-claiming. Otherwise take the claim atomically here.
+      const claimToken = options.claimToken || null;
+      let noticeToken;
+      let claimed;
+      if (claimToken) {
+        noticeToken = claimToken;
+        claimed = await db('appointment_reminders')
+          .where({ id: record.id, cancellation_notice_state: 'pending' })
+          .where('cancellation_notice_at', claimToken)
+          .update({ updated_at: new Date() });
+      } else {
+        noticeToken = new Date();
+        claimed = await db('appointment_reminders')
+          .where({ id: record.id })
+          .where(function claimable() {
+            this.whereNull('cancellation_notice_at').orWhere(function staleLease() {
+              this.where('cancellation_notice_state', 'pending')
+                .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"));
+            });
+          })
+          .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'pending', updated_at: noticeToken });
+      }
 
       if (!sendNotification) {
         if (claimed) {
+          // Fenced: only the claim owner may finalize as suppressed.
           await db('appointment_reminders')
-            .where({ id: record.id })
+            .where({ id: record.id, cancellation_notice_state: 'pending' })
+            .where('cancellation_notice_at', noticeToken)
             .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
         }
         logger.info(`[appt-remind] Cancellation notice suppressed for ${scheduledServiceId}`);
@@ -2304,8 +2322,13 @@ const AppointmentReminders = {
               .whereRaw("provider_message_id ~ '^(SM|MM)'")
               .first('id'));
           }
+          // Fenced by the claim token (codex r4): if the lease was
+          // reclaimed while we worked (stale-claim sweep), our finalize
+          // matches 0 rows and the current owner's state stands — the
+          // evidence check above keeps the reclaimer from double-texting.
           await db('appointment_reminders')
-            .where({ id: record.id })
+            .where({ id: record.id, cancellation_notice_state: 'pending' })
+            .where('cancellation_notice_at', noticeToken)
             .update(accepted
               ? { cancellation_notice_state: 'sent', updated_at: new Date() }
               : { cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
@@ -2490,6 +2513,53 @@ const AppointmentReminders = {
    * cancelled, then send one series-level notice through the same guarded
    * contact path as single-appointment cancellation.
    */
+  // Durable-retry sweep for the shared-writer cancellation-notice hook
+  // (codex #3233 r4). The job-status trx commits a 'pending' claim with
+  // the cancel transition; the immediate post-commit worker only sends
+  // when delivery evidence already exists. This sweep — run from the
+  // 15-minute reminder cron — reclaims stale pending leases and settles
+  // them: evidence by now (late audit persist, crashed worker) → send;
+  // still none → terminal silent suppression. Fenced by the reclaim token.
+  async sweepStaleCancellationClaims() {
+    try {
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('cancelNoticeHook')) return { swept: 0 };
+      const stale = await db('appointment_reminders as ar')
+        .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
+        .where('ar.cancellation_notice_state', 'pending')
+        .where('ar.cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
+        .where('ss.status', 'cancelled')
+        .orderBy('ar.cancellation_notice_at', 'asc')
+        .limit(20)
+        .select('ar.id as reminder_id', 'ar.scheduled_service_id');
+      let settled = 0;
+      for (const row of stale) {
+        const token = new Date();
+        const reclaimed = await db('appointment_reminders')
+          .where({ id: row.reminder_id, cancellation_notice_state: 'pending' })
+          .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
+          .update({ cancellation_notice_at: token, updated_at: token });
+        if (!reclaimed) continue;
+        const delivered = Boolean(await db('messaging_audit_log')
+          .where({ appointment_id: String(row.scheduled_service_id) })
+          .whereIn('purpose', ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'])
+          .whereNotNull('sent_at')
+          .whereRaw("provider_message_id ~ '^(SM|MM)'")
+          .first('id'));
+        await this.handleCancellation(row.scheduled_service_id, {
+          sendNotification: delivered,
+          claimToken: token,
+        });
+        settled += 1;
+      }
+      if (settled) logger.info(`[appt-remind] cancellation-claim sweep settled ${settled} stale lease(s)`);
+      return { swept: settled };
+    } catch (err) {
+      logger.warn(`[appt-remind] cancellation-claim sweep failed: ${err.message}`);
+      return { swept: 0, error: true };
+    }
+  },
+
   async handleSeriesCancellation(scheduledServiceIds, representativeScheduledServiceId, options = {}) {
     // Same optional out-param contract as handleCancellation — callers that
     // surface send results pass options.outcome = {} and read
@@ -2512,6 +2582,21 @@ const AppointmentReminders = {
         .update({ cancelled: true, updated_at: new Date() });
 
       const sendNotification = options.sendNotification !== false;
+
+      // Claim every target's cancellation-notice marker terminally (codex
+      // #3233 r4): the combined series message IS these visits' notice
+      // (or its deliberate suppression) — without the claim, a later
+      // same-status retry through a single-cancel route could take a
+      // target's null marker and send an unwanted per-visit text.
+      // Unclaimed rows only: never clobber an existing terminal state.
+      await db('appointment_reminders')
+        .whereIn('scheduled_service_id', ids)
+        .whereNull('cancellation_notice_at')
+        .update({
+          cancellation_notice_at: new Date(),
+          cancellation_notice_state: sendNotification ? 'sent' : 'suppressed',
+          updated_at: new Date(),
+        });
       if (!sendNotification) {
         logger.info(`[appt-remind] Series cancellation notices suppressed for ${ids.length} appointment(s)`);
         return { cancelledCount: ids.length };
