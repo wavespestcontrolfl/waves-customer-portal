@@ -2574,9 +2574,15 @@ const AppointmentReminders = {
             if (isEnabled('cronJobs') && (claimToken || isEnabled('cancelNoticeHook'))) return false;
             // Explicit RELEASE — falling through would hit the terminal
             // 'suppressed' write reserved for deterministic non-delivery.
+            // Only plain 'pending' releases (codex r43): the late-claim
+            // sweep recreates released rows as evidence-gated 'pending',
+            // which would silently drop an operator-requested notify for
+            // a visit with no prior reminder. 'pending_notify' keeps its
+            // lease — a route retry adopts it after 15 minutes, and the
+            // sweep settles it (intent intact) once cron returns.
             await db('appointment_reminders')
               .where({ id: record.id })
-              .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+              .where('cancellation_notice_state', 'pending')
               .where('cancellation_notice_at', noticeToken)
               .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
             return false;
@@ -3269,9 +3275,12 @@ const AppointmentReminders = {
             // returns, rather than stranding pending leases forever.
             const { isEnabled: cronGate } = require('../config/feature-gates');
             if (!cronGate('cronJobs')) {
+              // Plain 'pending' only (codex r43) — 'pending_notify' keeps
+              // its lease so the caller-notify intent survives for the
+              // sweep to settle without re-deriving delivery evidence.
               await db('appointment_reminders')
                 .whereIn('scheduled_service_id', ids)
-                .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                .where('cancellation_notice_state', 'pending')
                 .where('cancellation_notice_at', seriesToken)
                 .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
             }
