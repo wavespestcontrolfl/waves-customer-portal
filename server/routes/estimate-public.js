@@ -18107,33 +18107,35 @@ function estimateTotalsReflectManualDiscount(estData = {}, estimate = {}) {
   if (ref == null) return null;
   // Zero columns are comparable too — a fully discounted estimate stores 0
   // in both places (reflecting), while positive degraded columns against a
-  // zero reference are exactly the mismatch this detects.
-  const annual = Number(estimate?.annual_total);
+  // zero reference are exactly the mismatch this detects. A SQL NULL column
+  // is MISSING evidence, not zero (codex #3241 r3): Number(null) coerces to
+  // 0 and would report a false mismatch that discards a frozen snapshot.
+  if (estimate?.annual_total == null) return null;
+  const annual = Number(estimate.annual_total);
   if (!Number.isFinite(annual) || annual < 0) return null;
   return Math.abs(annual - ref) <= 0.02;
 }
 
-// A discount-bearing estimate's bundle rows must each either carry the
-// row-level manualDiscount they already netted (ladder builders, shapeFromV1,
-// replay entries) or the explicit suppression flag (lawn program minimum).
-// A row with NEITHER predates that contract — but marker absence alone is
-// NOT proof the amounts are undiscounted: legacy snapshots may have netted
-// without stamping the marker, and discarding those frozen snapshots would
-// reprice an outstanding tokenized estimate through live constants (codex
-// #3241 r1 P1; AGENTS.md in-flight-token rule). Invalidate only on positive
-// EVIDENCE of the degraded state: the persisted totals disagree with the
-// blob's own post-manual figures (estimateTotalsReflectManualDiscount ===
-// false, the 2026-08-05 T&S accept shape). Reflecting or evidence-less
-// bundles keep the frozen snapshot and the metadata-only back-fill.
+// A discount-bearing bundle is invalid when there is positive EVIDENCE of
+// the degraded state: the persisted totals disagree with the blob's own
+// post-manual figures (estimateTotalsReflectManualDiscount === false, the
+// 2026-08-05 T&S accept shape). Row-level markers are deliberately NOT
+// consulted (codex #3241 r3): the previous back-fill attached metadata-only
+// manualDiscount markers to rows it never netted, so on a mismatched-totals
+// bundle a marker proves nothing — and the snapshot fast path only serves
+// bundles whose headline totals MATCH those mismatched columns, so every
+// row it would serve is selling the undiscounted figure regardless of
+// marks. Conversely, marker absence alone is not proof of degradation:
+// legacy snapshots may have netted without stamping the marker, and
+// discarding those frozen bundles would reprice an outstanding tokenized
+// estimate through live constants (codex #3241 r1; AGENTS.md
+// in-flight-token rule). Reflecting or evidence-less bundles are preserved.
 function pricingBundleLacksManualDiscountNetting(bundle = {}, estData = {}, estimate = {}) {
   const manual = normalizeManualDiscountSummary(estData);
   if (!manual) return false;
   if (estimateTotalsReflectManualDiscount(estData, estimate) !== false) return false;
   const frequencies = Array.isArray(bundle.frequencies) ? bundle.frequencies : [];
-  if (!frequencies.length) return false;
-  return frequencies.some((f) => f
-    && !(f.manualDiscount && Number(f.manualDiscount.amount) > 0)
-    && f.manualDiscountSuppressed !== true);
+  return frequencies.length > 0;
 }
 
 function pricingBundleHasStaleTermiteRow(bundle = {}) {

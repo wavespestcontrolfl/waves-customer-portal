@@ -45,6 +45,22 @@ function candidateList(estData = {}) {
   ];
 }
 
+// The persisted breach approval lives on the engine OUTPUT as
+// floorBreach.acknowledged (and is mirrored to
+// pricingMetadata.manualDiscountFloorBreach.acknowledged) — the INPUT flag
+// floorBreachAcknowledged is transient and never stored (codex #3241 r3).
+// Without deriving it from the stored evidence, a replay of an
+// operator-approved sub-floor discount re-applies the floor cap and raises
+// the price above what was approved.
+function storedFloorBreachAcknowledged(estData = {}, stored = {}) {
+  if (stored.floorBreachAcknowledged === true) return true;
+  if (stored.floorBreach && stored.floorBreach.acknowledged === true) return true;
+  const root = estData?.result && typeof estData.result === 'object'
+    ? estData.result
+    : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : estData);
+  return root?.pricingMetadata?.manualDiscountFloorBreach?.acknowledged === true;
+}
+
 function storedManualDiscountForReplay(estData = {}) {
   const stored = candidateList(estData).find((item) => item
     && typeof item === 'object'
@@ -67,7 +83,7 @@ function storedManualDiscountForReplay(estData = {}) {
     // Preserved as stored so a replay reproduces the same eligibility
     // warnings the original compute stamped — never promoted to true.
     eligibilityConfirmed: stored.eligibilityConfirmed === true,
-    floorBreachAcknowledged: stored.floorBreachAcknowledged === true,
+    floorBreachAcknowledged: storedFloorBreachAcknowledged(estData, stored),
   };
   // Ladder slicing (manualDiscountForRecurringBase) anchors a FIXED
   // discount's recurring slice on the saved one-time allocation — carry the

@@ -568,7 +568,11 @@ async function addOnPreservedMonthlyRateBase({
         'services.name as catalog_service_name',
       )
       .where('scheduled_services.customer_id', customer.id)
-      .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+      // Every nonterminal status (codex #3241 r3): a customer whose only
+      // live plan row is currently en_route/on_site (annual visit, no
+      // future child seeded yet) still HAS that plan — same status set the
+      // reminder machinery treats as live.
+      .whereIn('scheduled_services.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
       .where('scheduled_services.scheduled_date', '>=', etDateString())
       .where('scheduled_services.is_recurring', true)
       .where((builder) => builder
@@ -576,8 +580,18 @@ async function addOnPreservedMonthlyRateBase({
         .orWhereNot('scheduled_services.source_estimate_id', estimateId)));
     const planRows = (Array.isArray(otherPlanRows) ? otherPlanRows : [])
       .filter((row) => row && row.is_callback !== true);
-    if (planRows.length > 0
-      && !planRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
+    if (planRows.length === 0) return 0;
+    // Fail CLOSED on unclassifiable plan rows (codex #3241 r3): a legacy/
+    // generic row that resolves to NO family can't prove it's a different
+    // family — treating it as disjoint would sum the old rate onto an
+    // estimate that may re-price that very plan. Unknown → replace.
+    const everyRowClassifiable = planRows.every((row) => serviceFamilyKeyForAdoption({
+      service: row.catalog_service_key || null,
+      name: row.catalog_service_name || null,
+      service_type: row.service_type,
+    }));
+    if (!everyRowClassifiable) return 0;
+    if (!planRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
       return existingMonthlyRate;
     }
     return 0;
@@ -2142,20 +2156,21 @@ const EstimateConverter = {
     // inside a caller transaction (public accept); the standalone path's
     // seeding steps take it per-step in runSeedingStep below.
     if (database.isTransaction) await lockCustomerComms(database, customerId);
-    await database('customers').where({ id: customerId }).update(customerUpdates);
-    if (addOnPreservedRateBase > 0) {
-      // The atomic increment's actual result for the audit outputs below
-      // (activity log, converter log, membership email, return value) — the
-      // provisional JS sum can be stale under the very concurrent-accept
-      // race the increment exists to survive. Fail-soft: the provisional
-      // figure stands if the re-read hiccups.
-      try {
-        const postUpdateRow = await database('customers').where({ id: customerId }).first();
-        const postUpdateRate = Number(postUpdateRow?.monthly_rate);
-        if (Number.isFinite(postUpdateRate) && postUpdateRate > 0) {
-          convertedMonthlyRate = Math.round(postUpdateRate * 100) / 100;
-        }
-      } catch { /* provisional sum stands */ }
+    // RETURNING carries the atomic increment's actual result for the audit
+    // outputs below (activity log, converter log, membership email, return
+    // value) — a separate follow-up read could raise on the caller's accept
+    // transaction and leave it aborted despite a catch (codex #3241 r3),
+    // and the provisional JS sum can be stale under the concurrent-accept
+    // race the increment exists to survive. Fakes/mocks that ignore the
+    // returning arg fall through to the provisional figure.
+    const customerUpdateResult = await database('customers')
+      .where({ id: customerId })
+      .update(customerUpdates, ['monthly_rate']);
+    if (addOnPreservedRateBase > 0 && Array.isArray(customerUpdateResult)) {
+      const returnedRate = Number(customerUpdateResult[0]?.monthly_rate);
+      if (Number.isFinite(returnedRate) && returnedRate > 0) {
+        convertedMonthlyRate = Math.round(returnedRate * 100) / 100;
+      }
     }
 
     // 1b. Persist grass type captured during the estimate so lawn reports use

@@ -78,6 +78,24 @@ describe('storedManualDiscountForReplay', () => {
     expect(storedManualDiscountForReplay({ summary: { manualDiscount: { type: 'NONE', value: 15 } } })).toBeNull();
   });
 
+  test('floor-breach approval is derived from the persisted evidence shapes (codex r3)', () => {
+    // Engine OUTPUT stores approval at floorBreach.acknowledged.
+    expect(storedManualDiscountForReplay({
+      summary: { manualDiscount: { type: 'PERCENT', value: 20, floorBreach: { acknowledged: true } } },
+    })).toEqual(expect.objectContaining({ floorBreachAcknowledged: true }));
+    // pricingMetadata mirror counts too.
+    expect(storedManualDiscountForReplay({
+      result: {
+        manualDiscount: { type: 'PERCENT', value: 20 },
+        pricingMetadata: { manualDiscountFloorBreach: { acknowledged: true } },
+      },
+    })).toEqual(expect.objectContaining({ floorBreachAcknowledged: true }));
+    // No breach evidence stays false.
+    expect(storedManualDiscountForReplay({
+      summary: { manualDiscount: { type: 'PERCENT', value: 20, floorBreach: null } },
+    })).toEqual(expect.objectContaining({ floorBreachAcknowledged: false }));
+  });
+
   test('FIXED discounts replay only with a proven-zero one-time allocation', () => {
     // Zero slice: allocation is replay-stable -> inject, carrying the anchor.
     const zeroSlice = storedManualDiscountForReplay({
@@ -198,6 +216,10 @@ describe('estimateTotalsReflectManualDiscount', () => {
     expect(estimateTotalsReflectManualDiscount(blob, {})).toBeNull();
   });
 
+  test('a SQL NULL persisted annual is missing evidence, never zero (codex r3)', () => {
+    expect(estimateTotalsReflectManualDiscount(blob, { annual_total: null })).toBeNull();
+  });
+
   test('a stored ZERO post-discount annual is valid evidence (codex r2)', () => {
     const fullDiscountBlob = { result: { totals: { year2: 0 } } };
     // Degraded columns still carry the undiscounted positive annual -> mismatch.
@@ -241,7 +263,21 @@ describe('pricingBundleLacksManualDiscountNetting', () => {
     )).toBe(false);
   });
 
-  test('false when every row carries its netted discount or the suppression flag', () => {
+  test('markers do NOT rescue a bundle whose totals mismatch (metadata-only legacy back-fill, codex r3)', () => {
+    // The previous back-fill attached bare manualDiscount metadata to rows
+    // it never netted — on proven-mismatched totals a marker proves nothing.
+    expect(pricingBundleLacksManualDiscountNetting(
+      {
+        frequencies: [
+          { key: 'monthly', monthly: 32.87, manualDiscount: { amount: 62.64 } },
+        ],
+      },
+      discountEstData,
+      degradedEstimate,
+    )).toBe(true);
+  });
+
+  test('marked rows are preserved when the persisted totals reflect the discount', () => {
     expect(pricingBundleLacksManualDiscountNetting(
       {
         frequencies: [
@@ -250,7 +286,7 @@ describe('pricingBundleLacksManualDiscountNetting', () => {
         ],
       },
       discountEstData,
-      degradedEstimate,
+      nettedEstimate,
     )).toBe(false);
   });
 
