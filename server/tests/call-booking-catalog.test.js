@@ -685,9 +685,13 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     // not just a listed noun — payment/account/terms included.
     expect(hasCallReServiceIntent({ call_summary: 'revisit payment terms and book the regular quarterly visit' })).toBe(false);
     expect(hasCallReServiceIntent({ call_summary: 'we should revisit the account setup' })).toBe(false);
-    // Service-ish objects keep their intent.
+    // Service-ish objects keep their intent — locations and pests included
+    // (codex #3231 r2).
     expect(hasCallReServiceIntent({ call_summary: 'can you revisit the house this week' })).toBe(true);
     expect(hasCallReServiceIntent({ call_summary: 'revisit between treatments, the ants are back' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'please revisit kitchen because the ants are back' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit ants' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit the lanai for wasps' })).toBe(true);
     // Noun usage keeps its intent.
     expect(hasCallReServiceIntent({ requested_service: 'schedule a revisit' })).toBe(true);
     expect(hasCallReServiceIntent({ requested_service: 'Pest control revisit' })).toBe(true);
