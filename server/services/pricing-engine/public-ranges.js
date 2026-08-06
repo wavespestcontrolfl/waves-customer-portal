@@ -282,7 +282,7 @@ function buildRows() {
       // Per-application amount including any station/dunk add-ons amortized
       // across the program's applications (add-ons bill annually).
       (r) => (r.tiers || []).map((t) => t.perVisit + ((r.addOns && r.addOns.annualAddOns) || 0) / t.visits)).concat(bundle('mosquito')),
-    notes: `Seasonal (9 applications/yr) or monthly (12 applications/yr) program; priced by treatable area and mosquito pressure; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
+    notes: `Seasonal (9 applications/yr) or monthly (12 applications/yr) program; priced by treatable area and mosquito pressure; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%. Optional add-ons bill annually per unit: mosquito stations $${Math.round(constants.MOSQUITO.addOns.in2CareStation.price)} each, Bti dunks $${Math.round(constants.MOSQUITO.addOns.dunkTablet.price)} each — larger counts extend beyond this range at those rates.`,
   }));
 
   add('wasp_hornet_removal', () => rangeRow({
@@ -374,12 +374,15 @@ function buildRows() {
         { plan: 'standard' },
         { plan: 'unlimited' },
         // Standard plan with the configured callback allowance exhausted
-        // plus billable extras (allowance read from live config).
+        // plus billable extras (allowance read from live config). Extra
+        // callbacks are additive per-unit with no cap — the note discloses
+        // the live per-callback rate so any count is quotable.
         { plan: 'standard', callbacksUsed: Number(constants.RODENT.trapping.includedFollowUps) || 2, extraCallbackCount: 2 },
+        { plan: 'standard', callbacksUsed: Number(constants.RODENT.trapping.includedFollowUps) || 2, extraCallbackCount: 6 },
       ],
       (opts) => sp.priceRodentTrapping({}, opts),
       (r) => r.price),
-    notes: `Standard (setup + 2 included callbacks) or unlimited-callback plan; existing Standard customers can upgrade to unlimited mid-program for $${Math.round(sp.priceRodentTrapping({}, { plan: 'standard', upgradeToUnlimited: true }).price)}. Emergency same-day service carries a surcharge quoted at booking.`,
+    notes: `Standard (setup + ${Number(constants.RODENT.trapping.includedFollowUps) || 2} included callbacks) or unlimited-callback plan; additional callbacks beyond the range $${Math.round(Number(constants.RODENT.trapping.additionalFollowUpRate) || 125)} each; existing Standard customers can upgrade to unlimited mid-program for $${Math.round(sp.priceRodentTrapping({}, { plan: 'standard', upgradeToUnlimited: true }).price)}. Emergency same-day service carries a surcharge quoted at booking.`,
   }));
 
   add('rodent_sanitation', () => rangeRow({
@@ -656,7 +659,7 @@ function buildRows() {
         [{}, { stationCount: 5, dunkCount: 9 }, { isRecurringCustomer: true }].map((opts) => ({ lotSqFt, opts }))),
       ({ lotSqFt, opts }) => sp.priceOneTimeMosquito({ footprint: 2000, lotSqFt }, opts),
       (r) => (r.quoteRequired ? NaN : r.price)),
-    notes: 'Priced by treatable area; station and dunk add-ons available.',
+    notes: `Priced by treatable area. Add-ons per unit: mosquito stations $${Math.round(constants.MOSQUITO.addOns.in2CareStation.price)} each, Bti dunks $${Math.round(constants.MOSQUITO.addOns.dunkTablet.price)} each — larger counts extend beyond this range at those rates.`,
   }));
 
   add('lawn_plugging', () => rangeRow({
@@ -744,10 +747,12 @@ function buildRows() {
     unit: 'per job',
     values: sweepValues(
       ['small_bird_box', 'standard_bird_box', 'large_bird_box', 'oversized_complex_custom'].flatMap((birdBoxType) =>
-        [1, 2, 4].map((birdBoxQuantity) => ({ birdBoxType, birdBoxQuantity }))),
+        [1, 2, 4, 8].map((birdBoxQuantity) => ({ birdBoxType, birdBoxQuantity }))),
       (opts) => sp.priceRodentBirdBoxes(opts),
       (r) => (r ? r.price : NaN)),
-    notes: 'Priced by cover type and quantity; same-visit additional standard boxes are discounted.',
+    // Quantity is unbounded and strictly additive per unit — disclose the
+    // live per-cover rates so any count is quotable beyond the range.
+    notes: `Priced per cover: small $${Math.round(constants.RODENT.birdBoxes.small_bird_box)}, standard $${Math.round(constants.RODENT.birdBoxes.standard_bird_box)} (same-visit additional $${Math.round(constants.RODENT.birdBoxes.additional_standard_same_visit)}), large $${Math.round(constants.RODENT.birdBoxes.large_bird_box)}, oversized/custom $${Math.round(constants.RODENT.birdBoxes.oversized_complex_custom)}; larger quantities extend beyond this range at those rates.`,
   }));
 
   add('rodent_inspection', () => rangeRow({
