@@ -553,6 +553,36 @@ describe('family-scoped existing-appointment adoption', () => {
     )).toBe(false);
   });
 
+  test('recognized pest and lawn specialties never adopt ordinary visits (codex r17)', () => {
+    // Roach specialty: the service key's pest token and the name's roach
+    // token must not re-add the broad pest family through the field union.
+    const roachData = {
+      result: {
+        oneTime: {
+          items: [{ service: 'pest_initial_roach', name: 'Cockroach Treatment', price: 350 }],
+        },
+      },
+    };
+    const roachKeys = estimateFamilyKeysForAdoption({}, roachData, { serviceMode: 'one_time' });
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Quarterly Pest Control Service' },
+      roachKeys,
+    )).toBe(false);
+    // Lawn specialty: top dressing must not adopt an ordinary Lawn Care visit.
+    const topDressData = {
+      result: {
+        oneTime: {
+          items: [{ service: 'top_dressing', name: 'Lawn Top Dressing', price: 480 }],
+        },
+      },
+    };
+    const lawnKeys = estimateFamilyKeysForAdoption({}, topDressData, { serviceMode: 'one_time' });
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Lawn Care' },
+      lawnKeys,
+    )).toBe(false);
+  });
+
   test('multi-service one-time accepts adopt only under the PRIMARY service (codex r13)', () => {
     const pestPlusBora = {
       result: {

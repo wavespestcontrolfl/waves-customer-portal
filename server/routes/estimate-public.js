@@ -569,37 +569,58 @@ function oneTimeItemFamilyKeys(item = {}) {
   if (!/foam\s*recurring|recurring\s*foam/.test(joined) && joined.includes('foam')) {
     return ['termite_foam'];
   }
-  // Canonical category AND per-field keys merge: the category supplies the
-  // semantic family (a flea package is pest_control specialty) while a
-  // single field's stable slug still matches a row whose label is the only
-  // identity it has — the category alone can't reach a label-slug row, and
-  // the slugs alone miss the semantic family (codex #3228 r13).
-  const keys = new Set();
-  const category = serviceCategoryForOneTimeItem(item);
-  if (category) {
-    // The BROAD pest category only for genuinely GENERIC choices (codex
-    // #3228 r16): a specialty item the category classifier files under
-    // pest_control (flea_package) must not make an ordinary quarterly-pest
-    // visit adoptable — acceptance restamps that row without changing its
-    // service type, and the specialty work never reaches dispatch. Generic
-    // = the derived one-time pest choice or a plainly pest-named line;
-    // specialty items keep only their specific identities (field union).
-    const genericPest = isOneTimePestChoiceItem(item)
-      || String(item?.service || '').toLowerCase() === 'one_time_pest'
-      || isPestServiceName(item?.name || item?.label || '');
-    if (category !== 'pest_control' || genericPest) {
-      for (const key of (ONE_TIME_CATEGORY_FAMILIES[category] || [category])) keys.add(key);
-    }
-  }
-  for (const field of [
+  const fields = [
     item?.service, item?.service_key, item?.key, item?.kind,
     item?.name, item?.label, item?.displayName,
-  ]) {
+  ];
+  const category = serviceCategoryForOneTimeItem(item);
+  // A SPECIALTY in a broad category must never make an ordinary visit of
+  // that category adoptable (codex #3228 r16/r17): acceptance restamps the
+  // adopted row's source and price without changing its service identity,
+  // so the specialty work (flea package, roach treatment, top dressing,
+  // dethatching, plugging) never reaches dispatch. Generic pest = the
+  // derived one-time pest choice or a plainly pest-named line.
+  const genericPest = isOneTimePestChoiceItem(item)
+    || String(item?.service || '').toLowerCase() === 'one_time_pest'
+    || isPestServiceName(item?.name || item?.label || '');
+  const specialtyText = fields.filter(Boolean).join(' ').toLowerCase();
+  const lawnSpecialty = /top[ -_]?dress|dethatch|\bplugging\b/.test(specialtyText);
+  if ((category === 'pest_control' && !genericPest) || lawnSpecialty) {
+    // Specific slug identities ONLY — no broad classifier, whose pest/roach
+    // and lawn tokens would re-add the broad family through the field union
+    // (codex r17). Matches only a row whose own label reduces to the same
+    // slug; anything else goes to the slot picker (fail-safe).
+    const slugKeys = new Set();
+    for (const field of fields) {
+      const slug = String(field || '').toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      if (slug && !BROAD_ADOPTION_FAMILY_KEYS.has(slug)) slugKeys.add(slug);
+    }
+    return [...slugKeys];
+  }
+  // Canonical category AND per-field keys merge for generic items: the
+  // category supplies the semantic family while a single field's stable
+  // slug still matches a row whose label is the only identity it has
+  // (codex #3228 r13).
+  const keys = new Set();
+  if (category) {
+    for (const key of (ONE_TIME_CATEGORY_FAMILIES[category] || [category])) keys.add(key);
+  }
+  for (const field of fields) {
     const key = classifyServiceFamilyText(field);
     if (key) keys.add(key);
   }
   return [...keys];
 }
+
+// Family keys the specialty slug path must never emit — a specialty item
+// whose field happens to BE a family key (service: 'pest_control' on a
+// mislabeled row) must not become broad-adoptable through the slug door.
+const BROAD_ADOPTION_FAMILY_KEYS = new Set([
+  'pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'palm_injection',
+  'termite_bait', 'termite_trenching', 'pre_slab_termiticide', 'termite_foam',
+  'foam_recurring', 'bora_care', 'rodent', 'rodent_bait',
+]);
 
 // Service families this estimate actually covers — the only families whose
 // existing appointment may stand in for the estimate's first visit (see the
