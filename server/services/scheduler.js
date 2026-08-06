@@ -806,6 +806,36 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY TURF VARIANCE DIGEST (kill: TURF_VARIANCE_DIGEST_DISABLED=1)
+  // Monday 7:05am ET — owner ACT email ONLY when the last 30 days of
+  // estimate-actuals turf deltas drift past the alert threshold; a green
+  // window sends nothing (exception-based). Reads the ledger the nightly
+  // estimate-actuals reconcile maintains; sends to the internal ops inbox.
+  // =========================================================================
+  cron.schedule('5 7 * * 1', async () => {
+    try {
+      // runExclusive: a deploy-overlap tick must not double-send the email.
+      await runExclusive('turf-variance-digest', async () => {
+        const { runTurfVarianceDigest } = require('./turf-variance-digest');
+        const result = await runTurfVarianceDigest();
+        logger.info(`[turf-variance] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, avg: result.avgDeltaPct ?? null, samples: result.samples ?? null })}`);
+        // A swallowed failure must still read as a FAILED run in job_health
+        // (codex #3230 P2, both rounds) — rethrow so runExclusive records it
+        // and the outer handler logs it. Delivery-BLOCKING skips count as
+        // failures (unconfigured mailer, non-internal recipient: drift was
+        // found but the ACT email cannot leave); expected skips
+        // (within_threshold / disabled / recent_send) stay healthy.
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`turf variance digest did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Weekly turf variance digest failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY NEWSLETTER INACTIVITY SUNSET (gated: GATE_NEWSLETTER_SUNSET)
   // Monday 7:30am ET — flags subscribers with 90+ days of zero opens/clicks
   // across 6+ delivered campaigns, parks ONE win-back draft for the owner to

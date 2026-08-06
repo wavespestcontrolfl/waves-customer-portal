@@ -1079,7 +1079,7 @@ Return a JSON object with exactly these fields:
   "shadeCoveragePercent": number (0-100, percentage of turf under tree canopy),
 
   "imperviousSurfacePercent": number (0-100, percentage of lot that is hardscape/concrete/roof/paved),
-  "estimatedTurfSf": number (estimated treatable turf area in sq ft),
+  "estimatedTurfSf": number (estimated treatable turf area in sq ft — GRASS ONLY: exclude driveways/walkways/patios, mulch/rock beds, water, and the ENTIRE footprint of any screened pool enclosure/cage — nothing under a cage is treatable lawn),
 
   "mulchBeds": "YES" | "NO" | "UNKNOWN",
   "rockBeds": "YES" | "NO" | "UNKNOWN",
@@ -3986,7 +3986,7 @@ Return ONLY valid JSON with these fields:
   "possibleGrassType": "ST_AUGUSTINE" | "BERMUDA" | "BAHIA" | "ZOYSIA" | "MIXED" | "UNKNOWN",
   "shadeCoveragePercent": number,
   "imperviousSurfacePercent": number,
-  "estimatedTurfSf": number,
+  "estimatedTurfSf": number (estimated treatable turf area in sq ft — GRASS ONLY: exclude driveways/walkways/patios, mulch/rock beds, water, and the ENTIRE footprint of any screened pool enclosure/cage — nothing under a cage is treatable lawn),
   "mulchBeds": "YES" | "NO" | "UNKNOWN",
   "rockBeds": "YES" | "NO" | "UNKNOWN",
   "bedMaterial": "MULCH" | "ROCK" | "MIXED" | "BARE" | "UNKNOWN",
