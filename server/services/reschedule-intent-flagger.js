@@ -80,7 +80,10 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
           detected_intent: DETECTED_INTENT,
           status: 'pending_review',
         })
-        .where('created_at', '>=', trx.raw(`now() - interval '${DEDUPE_HOURS} hours'`));
+        // Null-entity flags (ambiguous or no visit) have no slot to compare
+        // for re-arming, so they dedupe on a short 6h thread-window only
+        // (codex #3232 r7) — a next-morning follow-up bells again.
+        .where('created_at', '>=', trx.raw(`now() - interval '${visit?.id ? DEDUPE_HOURS : 6} hours'`));
       if (visit?.id) dupe.where('entity_id', visit.id);
       else dupe.whereNull('entity_id');
       // A prior flag that staff already resolved (delivered human reply,
@@ -125,6 +128,7 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
       confidence_label: 'medium',
       input_snapshot: JSON.stringify({
         body_excerpt: String(body).slice(0, 240),
+        ambiguous: ambiguous === true,
         visit: visit ? {
           id: visit.id,
           scheduled_date: visit.scheduled_date,

@@ -37,7 +37,7 @@ const MAX_PER_SECTION = 12;
 // Outbound types that count as a human answer — automated broadcasts
 // (reminders, en-route, receipts, review asks) must not clear a waiting
 // customer from the digest (codex #3232 r1).
-const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised', 'estimate_sent', 'appointment_rescheduled', 'reschedule_series_confirmation')";
+const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised', 'estimate_sent')";
 
 // Scan window: since the previous SUCCESSFUL send (the ops_email_send_state
 // marker), bounded to 7 days — windows tile exactly run-to-run, including
@@ -65,7 +65,7 @@ function etTime(value) {
 }
 
 // Lane 1: callback-requested calls from today with nothing behind them.
-async function loadCallbackCalls() {
+async function loadCallbackCalls(cutoff = new Date()) {
   const { rows } = await db.raw(
     `
     SELECT c.id, c.created_at, c.duration_seconds,
@@ -76,6 +76,7 @@ async function loadCallbackCalls() {
     FROM call_log c
     LEFT JOIN customers cu ON cu.id = c.customer_id
     WHERE c.created_at >= ${ET_DAY_START_SQL}
+      AND c.created_at <= :cutoff
       AND c.disposition = 'callback_task_created'
       -- Already returned: a later outbound CALL to the same number, or a
       -- later human-typed text, clears the item (codex #3232 r1).
@@ -106,14 +107,14 @@ async function loadCallbackCalls() {
     ORDER BY c.created_at ASC
     LIMIT :cap
     `,
-    { cap: MAX_PER_SECTION },
+    { cap: MAX_PER_SECTION, cutoff },
   );
   return rows;
 }
 
 // Lane 2: follow-up tasks that are overdue-pending, or were auto-expired
 // today without any verified action — the silent-drop class.
-async function loadDroppedFollowUps() {
+async function loadDroppedFollowUps(cutoff = new Date()) {
   const { rows } = await db.raw(
     `
     SELECT t.id, t.task_type, t.deadline, t.status, t.recommended_action,
@@ -121,7 +122,7 @@ async function loadDroppedFollowUps() {
            COUNT(*) OVER () AS total_count
     FROM ai_follow_up_tasks t
     LEFT JOIN customers cu ON cu.id = t.customer_id
-    WHERE (t.status IN ('pending', 'in_progress') AND t.deadline <= now())
+    WHERE (t.status IN ('pending', 'in_progress') AND t.deadline <= :cutoff)
        -- "Expired today": judged by the DEADLINE window — the hourly
        -- verifier's UPDATE does not bump updated_at (no pg auto-touch;
        -- codex #3232 r1), so a deadline inside the last ~25h means the
@@ -129,18 +130,18 @@ async function loadDroppedFollowUps() {
        -- Half-open 24h window tiles exactly with the daily 6:15pm run —
        -- a 25h window re-reported yesterday's expiries (codex r2).
        OR (t.status = 'expired' AND t.action_verified = false
-           AND t.deadline > ${ET_DAY_START_SQL} AND t.deadline <= now())
+           AND t.deadline > ${ET_DAY_START_SQL} AND t.deadline <= :cutoff)
     ORDER BY t.deadline ASC NULLS LAST
     LIMIT :cap
     `,
-    { cap: MAX_PER_SECTION },
+    { cap: MAX_PER_SECTION, cutoff },
   );
   return rows;
 }
 
 // Lane 3: threads whose last message today is inbound — customer waiting.
 // Peer = normalized last-10 counterpart phone; reactions/opt-flows excluded.
-async function loadUnansweredThreads() {
+async function loadUnansweredThreads(cutoff = new Date()) {
   const { rows } = await db.raw(
     `
     WITH last_inbound AS (
@@ -150,6 +151,7 @@ async function loadUnansweredThreads() {
                RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) AS peer
         FROM sms_log
         WHERE created_at >= ${ET_DAY_START_SQL}
+          AND created_at <= :cutoff
           AND direction = 'inbound'
           AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request')
       ) inbound
@@ -197,7 +199,7 @@ async function loadUnansweredThreads() {
     ORDER BY l.created_at ASC
     LIMIT :cap
     `,
-    { cap: MAX_PER_SECTION },
+    { cap: MAX_PER_SECTION, cutoff },
   );
   return rows;
 }
@@ -298,9 +300,9 @@ async function runUnworkedCommsWatcher(opts = {}) {
   let sections;
   try {
     const [callbacks, followUps, unanswered] = await Promise.all([
-      (opts.loadCallbackCalls || loadCallbackCalls)(),
-      (opts.loadDroppedFollowUps || loadDroppedFollowUps)(),
-      (opts.loadUnansweredThreads || loadUnansweredThreads)(),
+      (opts.loadCallbackCalls || loadCallbackCalls)(windowCutoff),
+      (opts.loadDroppedFollowUps || loadDroppedFollowUps)(windowCutoff),
+      (opts.loadUnansweredThreads || loadUnansweredThreads)(windowCutoff),
     ]);
     sections = { callbacks, followUps, unanswered };
   } catch (err) {

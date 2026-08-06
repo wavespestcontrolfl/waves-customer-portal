@@ -90,7 +90,7 @@ const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|differe
 // Move-verbs need an APPOINTMENT object or an explicit temporal target —
 // "change the date on my invoice" / "move the card payment" must not flag
 // (codex #3232 r4).
-const MOVE_VERB_RE = /\b(?:mov(?:e|ing)|push(?:ed|ing)?|bump(?:ed|ing)?|chang(?:e|ing))\b(?:[^.!?\n]{0,40}\b(?:appointment|appt|service|visit)\b|[^.!?\n]{0,40}\b(?:till|until|to)\s+(?:next\s+(?:week|month)|tomorrow|late[r]?\s+\w+|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|(?:october|november|december|january|february|march|april|may|june|july|august|september)|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}:\d{2})\b)/i;
+const MOVE_VERB_RE = /\b(?:mov(?:e|ing)|push(?:ed|ing)?|bump(?:ed|ing)?|chang(?:e|ing))\b(?:[^.!?\n]{0,40}\b(?:appointment|appt|service|visit)\b|[^.!?\n]{0,40}\b(?:till|until|to)\s+(?:next\s+(?:week|month)|tomorrow|late[r]?\s+\w+|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|(?:october|november|december|january|february|march|april|may|june|july|august|september)|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}:\d{2})\b|[^.!?\n]{0,40}\b(?:an?\s+hour|half\s+an?\s+hour|(?:one|two|three|four|five|\d+)\s+(?:hours?|min(?:ute)?s?))\b)/i;
 const CANCEL_RE = /\bcancel\w*\b/i;
 // cancel* alone is unusable — "did you cancel autopay?" / "don't cancel"
 // are not reschedule asks (codex #3232 r3): require appointment context,

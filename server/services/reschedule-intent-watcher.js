@@ -33,7 +33,10 @@ const LOOKBACK_DAYS = 4;
 // Canonical human-reply types only (sms-suggest-mode) — estimate_sent is
 // excluded here: an unrelated estimate is not an answer to a reschedule
 // request (codex r5).
-const HUMAN_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised', 'appointment_rescheduled', 'reschedule_series_confirmation'];
+// Human-typed/approved ONLY (codex r7): reschedule confirmations are
+// automated post-change sends — the slot-changed branch detects the
+// change itself.
+const HUMAN_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised'];
 const MAX_ROWS = 12;
 
 function esc(value) {
@@ -85,13 +88,13 @@ async function loadUnactionedFlags() {
     );
 }
 
-function snapshotExcerpt(snapshot) {
-  if (!snapshot) return '';
+function parseSnapshot(snapshot) {
+  if (!snapshot) return { excerpt: '', ambiguous: false };
   try {
     const parsed = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
-    return String(parsed.body_excerpt || '');
+    return { excerpt: String(parsed.body_excerpt || ''), ambiguous: parsed.ambiguous === true };
   } catch {
-    return '';
+    return { excerpt: '', ambiguous: false };
   }
 }
 
@@ -105,8 +108,10 @@ function composeRescheduleIntentDigest(rows) {
     const asked = etDateString(new Date(row.created_at));
     const visit = row.scheduled_date
       ? `visit ${String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date).slice(0, 10)}${row.window_start ? ` ${String(row.window_start).slice(0, 5)}` : ''}${row.service_type ? ` (${row.service_type})` : ''} STILL ARMED`
-      : 'no upcoming visit on the books';
-    const excerpt = snapshotExcerpt(row.input_snapshot).slice(0, 140);
+      : (parseSnapshot(row.input_snapshot).ambiguous
+        ? 'multiple upcoming visits — check which one they mean'
+        : 'no upcoming visit on the books');
+    const excerpt = parseSnapshot(row.input_snapshot).excerpt.slice(0, 140);
     return { name, asked, visit, excerpt, customerId: row.customer_id };
   });
 
