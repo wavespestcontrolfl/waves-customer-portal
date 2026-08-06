@@ -574,6 +574,17 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
       floorBreachAcknowledged: opAdj.floorBreachAcknowledged === true,
     };
   }
+  // Admin-editor discounts never round-trip as an assembled manualDiscount
+  // object (the editor posts the raw form), so a save-path replay repriced
+  // the quote undiscounted while the stored summary still showed the
+  // discount. Reconstruct from the stored summary — same mechanism as the
+  // operatorPriceAdjustment branch above, shared with the public replay
+  // (estimate-public extractEngineInputs).
+  if (!v1Input.manualDiscount) {
+    const storedManual = require('./estimate-manual-discount-replay')
+      .storedManualDiscountForReplay(estimateData);
+    if (storedManual) v1Input.manualDiscount = storedManual;
+  }
 
   try {
     if (typeof needsSync === 'function' && needsSync() && typeof syncConstantsFromDB === 'function') {
