@@ -78,8 +78,11 @@ async function loadCallbackCalls(cutoff = new Date()) {
            COUNT(*) OVER () AS total_count
     FROM call_log c
     LEFT JOIN customers cu ON cu.id = c.customer_id
-    WHERE c.created_at >= ${ET_DAY_START_SQL}
-      AND c.created_at <= :cutoff
+    -- Windowed by disposition time (updated_at — stamped when the async
+    -- pipeline assigns the disposition), not ring time: a call dispositioned
+    -- after the cutoff belongs to the NEXT digest (codex r10).
+    WHERE c.updated_at >= ${ET_DAY_START_SQL}
+      AND c.updated_at <= :cutoff
       AND c.disposition = 'callback_task_created'
       -- Already returned: a later outbound CALL to the same number, or a
       -- later human-typed text, clears the item (codex #3232 r1).
@@ -89,7 +92,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
       AND NOT EXISTS (
         SELECT 1 FROM call_log oc
         WHERE oc.direction = 'outbound'
-          AND oc.created_at > c.created_at
+          AND oc.created_at > c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
           -- Heuristic: the stored duration is the PARENT leg (admin
           -- answer), so a short pickup-and-abandon still counts positive;
           -- >= 60s approximates a real customer conversation (leg-level
@@ -134,6 +137,18 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
        -- a 25h window re-reported yesterday's expiries (codex r2).
        OR (t.status = 'expired' AND t.action_verified = false
            AND t.deadline > ${ET_DAY_START_SQL} AND t.deadline <= :cutoff)
+       -- 'verified' can be bogus (the verifier accepts ANY later outbound,
+       -- codex r10): re-surface verified tasks with no HUMAN outbound.
+       OR (t.status = 'verified'
+           AND t.deadline > ${ET_DAY_START_SQL} AND t.deadline <= :cutoff
+           AND NOT EXISTS (
+             SELECT 1 FROM sms_log vs
+             WHERE vs.customer_id = t.customer_id
+               AND vs.direction = 'outbound'
+               AND vs.message_type IN ${HUMAN_REPLY_TYPES}
+               AND vs.status IN ('queued', 'sent', 'delivered')
+               AND vs.created_at > t.created_at
+           ))
     -- Newest-first (codex r8): oldest-first returned the same stuck 12
     -- forever and newer tasks never surfaced with details; yesterday's
     -- rows were already reported and live on in the overflow count.
@@ -242,10 +257,10 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   }
   if (b.length) {
     sectionText.push('Follow-up tasks overdue or silently expired today:');
-    sectionText.push(...b.map((r) => `- ${r.customer_name || 'Unknown'} [${r.task_type || 'task'}${r.status === 'expired' ? ', auto-expired' : ''}]${r.recommended_action ? ` — ${String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120)}` : ''}`));
+    sectionText.push(...b.map((r) => `- ${r.customer_name || 'Unknown'} [${r.task_type || 'task'}${r.status === 'expired' ? ', auto-expired' : r.status === 'verified' ? ', auto-verified by a non-human send' : ''}]${r.recommended_action ? ` — ${String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120)}` : ''}`));
     sectionText.push(...moreLine(b.length, bTotal));
     sectionText.push('');
-    sectionHtml.push(`<p><strong>Follow-up tasks overdue or silently expired today:</strong></p><ul style="margin:0 0 12px 18px;padding:0;">${b.map((r) => `<li style="margin:0 0 6px 0;">${esc(r.customer_name || 'Unknown')} [${esc(r.task_type || 'task')}${r.status === 'expired' ? ', auto-expired' : ''}]${r.recommended_action ? ` — ${esc(String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120))}` : ''}</li>`).join('')}</ul>${bTotal > b.length ? `<p>…and ${bTotal - b.length} more not shown</p>` : ''}`);
+    sectionHtml.push(`<p><strong>Follow-up tasks overdue or silently expired today:</strong></p><ul style="margin:0 0 12px 18px;padding:0;">${b.map((r) => `<li style="margin:0 0 6px 0;">${esc(r.customer_name || 'Unknown')} [${esc(r.task_type || 'task')}${r.status === 'expired' ? ', auto-expired' : r.status === 'verified' ? ', auto-verified by a non-human send' : ''}]${r.recommended_action ? ` — ${esc(String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120))}` : ''}</li>`).join('')}</ul>${bTotal > b.length ? `<p>…and ${bTotal - b.length} more not shown</p>` : ''}`);
   }
   if (c.length) {
     sectionText.push('Texts still waiting on a reply (thread ends inbound):');

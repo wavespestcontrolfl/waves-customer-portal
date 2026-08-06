@@ -52,28 +52,33 @@ function esc(value) {
 // Review surfaces and this digest agree; completion is NOT resolution.
 async function resolveActionedFlags() {
   try {
-    await db('agent_decisions as ad')
-      .leftJoin('scheduled_services as ss', 'ad.entity_id', 'ss.id')
-      .where('ad.workflow', 'comms_guards')
-      .where('ad.detected_intent', 'reschedule_or_away_needs_review')
-      .where('ad.status', 'pending_review')
+    // Correlated EXISTS, not a join — Knex does not carry joins into a
+    // PostgreSQL UPDATE (codex r10).
+    await db('agent_decisions')
+      .where('workflow', 'comms_guards')
+      .where('detected_intent', 'reschedule_or_away_needs_review')
+      .where('status', 'pending_review')
       .where(function proven() {
         this.whereExists(function humanReply() {
           this.select(1).from('sms_log as sl')
-            .whereRaw('sl.customer_id = ad.customer_id')
+            .whereRaw('sl.customer_id = agent_decisions.customer_id')
             .where('sl.direction', 'outbound')
             .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             .whereIn('sl.status', ['queued', 'sent', 'delivered'])
-            .whereRaw('sl.created_at > ad.created_at');
-        }).orWhere(function slotMovedOrCancelled() {
-          this.whereNotNull('ad.entity_id').where(function changed() {
-            this.where('ss.status', 'cancelled')
-              .orWhereRaw("LEFT(ad.input_snapshot#>>'{visit,scheduled_date}', 10) <> ss.scheduled_date::text")
-              .orWhereRaw("COALESCE(ad.input_snapshot#>>'{visit,window_start}', '') <> COALESCE(ss.window_start::text, '')");
-          });
+            .whereRaw('sl.created_at > agent_decisions.created_at');
+        }).orWhereExists(function slotMovedOrCancelled() {
+          this.select(1).from('scheduled_services as ss')
+            .whereRaw('ss.id = agent_decisions.entity_id')
+            .where(function changed() {
+              // 'rescheduled' resolves even when the slot is unchanged —
+              // the reschedule path can flip status only (codex r10).
+              this.whereIn('ss.status', ['cancelled', 'rescheduled'])
+                .orWhereRaw("LEFT(agent_decisions.input_snapshot#>>'{visit,scheduled_date}', 10) <> ss.scheduled_date::text")
+                .orWhereRaw("COALESCE(agent_decisions.input_snapshot#>>'{visit,window_start}', '') <> COALESCE(ss.window_start::text, '')");
+            });
         });
       })
-      .update({ status: db.raw("'auto_resolved'"), updated_at: new Date() });
+      .update({ status: 'auto_resolved', updated_at: new Date() });
   } catch (err) {
     logger.warn(`[reschedule-intent-watcher] resolve pass failed: ${err.message}`);
   }

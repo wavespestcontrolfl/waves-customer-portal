@@ -159,6 +159,10 @@ router.post('/sms', async (req, res) => {
     const { From, To, Body, MessageSid } = req.body;
     const smsReaction = isSmsReaction(Body);
     const schedulingIntent = hasSchedulingIntent(Body);
+    // NOT a subset of schedulingIntent (codex #3232 r10): away phrases
+    // ("I won't be home") carry no scheduling keyword — the AI auto-reply
+    // gates must stand down for these too.
+    const rescheduleAsk = Body ? hasRescheduleOrAwayIntent(Body) : false;
 
     // ── Idempotency claim (must run before spam-block + all side-effects) ──
     // Twilio can redeliver the same MessageSid (edge retry, a slow handler
@@ -581,7 +585,7 @@ router.post('/sms', async (req, res) => {
     // invoicing on schedule). Detect-and-surface only; never mutates the
     // appointment. Fire-and-forget: the flagger is fail-soft internally.
     let rescheduleFlagged = false;
-    if (customer && Body && !smsReaction && hasRescheduleOrAwayIntent(Body)) {
+    if (customer && Body && !smsReaction && rescheduleAsk) {
       // Awaited (we are post-ack): when the urgent reschedule bell fires,
       // the generic sms_reply bell below is suppressed — one text must not
       // produce two bells + two pushes (codex #3232 r2). The flagger is
@@ -711,7 +715,7 @@ router.post('/sms', async (req, res) => {
     // through to Virginia's inbox.
     const legacyAiDraftsEnabled = isEnabled('legacyAiDrafts');
 
-    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !smsReaction) {
+    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction) {
       try {
         const WavesAssistant = require('../services/ai-assistant/assistant');
         const aiResult = await WavesAssistant.processMessage({
@@ -792,7 +796,7 @@ router.post('/sms', async (req, res) => {
 
         logger.info(`AI Assistant processed: ${From} escalated=${aiResult.escalated} conv=${aiResult.conversationId}`);
       } catch (e) { logger.error(`AI Assistant failed: ${e.message}`); }
-    } else if (schedulingIntent && aiAutoReplyOn) {
+    } else if ((schedulingIntent || rescheduleAsk) && aiAutoReplyOn) {
       // Log the intentional skip so we can audit the gate and see volume.
       logger.info('[sms-intent] scheduling-intent detected; skipping auto-reply, routing to human inbox');
     } else if (smsReaction && aiAutoReplyOn) {
@@ -800,7 +804,7 @@ router.post('/sms', async (req, res) => {
     }
 
     // LEGACY AI DRAFT — still create drafts for admin review alongside the AI assistant
-    if (customer && numberConfig.type === 'location' && Body && legacyAiDraftsEnabled && !schedulingIntent && !smsReaction) {
+    if (customer && numberConfig.type === 'location' && Body && legacyAiDraftsEnabled && !schedulingIntent && !rescheduleAsk && !smsReaction) {
       try {
         const ContextAggregator = require('../services/context-aggregator');
         const ResponseDrafter = require('../services/response-drafter');
@@ -881,7 +885,7 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`AI draft pipeline failed: ${e.message}`); }
     } else if (customer && numberConfig.type === 'location' && Body && !legacyAiDraftsEnabled) {
       logger.info('[sms-intent] legacy AI draft gate disabled; skipping draft creation');
-    } else if (customer && numberConfig.type === 'location' && Body && schedulingIntent) {
+    } else if (customer && numberConfig.type === 'location' && Body && (schedulingIntent || rescheduleAsk)) {
       logger.info('[sms-intent] scheduling-intent detected; skipping legacy AI draft');
     } else if (customer && numberConfig.type === 'location' && Body && smsReaction) {
       logger.info('[sms-intent] SMS reaction detected; skipping legacy AI draft');
