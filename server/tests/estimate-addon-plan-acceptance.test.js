@@ -447,6 +447,68 @@ describe('family-scoped existing-appointment adoption', () => {
     )).toBe(true);
   });
 
+  test('Bora-Care never adopts a trenching visit (codex r13)', () => {
+    const boraData = {
+      result: {
+        oneTime: {
+          items: [{ name: 'Bora-Care Termite Treatment', service: 'termite_treatment', price: 1200 }],
+        },
+      },
+    };
+    const boraKeys = estimateFamilyKeysForAdoption({}, boraData, { serviceMode: 'one_time' });
+    expect([...boraKeys]).toEqual(['bora_care']);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Liquid Termite Trenching Treatment' },
+      boraKeys,
+    )).toBe(false);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Bora-Care Termite Treatment' },
+      boraKeys,
+    )).toBe(true);
+  });
+
+  test('one-time slug families stay stable across key and label (codex r13)', () => {
+    const fleaData = {
+      result: {
+        oneTime: {
+          items: [{ service: 'flea_package', name: 'Flea Treatment Package', price: 249 }],
+        },
+      },
+    };
+    const fleaKeys = estimateFamilyKeysForAdoption({}, fleaData, { serviceMode: 'one_time' });
+    // The row's label-derived identity must be reachable — concatenating
+    // key + name minted a synthetic family no row could reproduce.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Flea Treatment Package' },
+      fleaKeys,
+    )).toBe(true);
+  });
+
+  test('multi-service one-time accepts adopt only under the PRIMARY service (codex r13)', () => {
+    const pestPlusBora = {
+      result: {
+        oneTime: {
+          items: [
+            { name: 'One-Time Pest Control', service: 'one_time_pest', price: 150 },
+            { name: 'Bora-Care Termite Treatment', service: 'termite_treatment', price: 1200 },
+          ],
+        },
+      },
+    };
+    const keys = estimateFamilyKeysForAdoption({}, pestPlusBora, { serviceMode: 'one_time' });
+    expect([...keys]).toEqual(['pest_control']);
+    // The standalone add-on visit must NOT be restamped — the primary pest
+    // work would never reach dispatch.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Bora-Care Termite Treatment' },
+      keys,
+    )).toBe(false);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'One-Time Pest Control' },
+      keys,
+    )).toBe(true);
+  });
+
   test('foam spot treatments never adopt a trenching visit (codex r12)', () => {
     const foamData = {
       result: {

@@ -469,70 +469,124 @@ function shapeLinkedAppointment(row) {
 // unclassifiable labels match each other would adopt an arbitrary row.
 const SERVICE_FAMILY_FALLBACK_KEY = 'service';
 
+function classifyServiceFamilyText(text) {
+  // Separators normalize to spaces BEFORE any word-boundary test (codex
+  // #3228 r7): combined catalog keys like pest_termite_bait_quarterly
+  // otherwise defeat \b rules — the underscore glues "pest" to the next
+  // token, the pest-primary combined rule misses, and serviceKeyFor's
+  // termite branch claims an intentionally pest-primary series.
+  const raw = String(text || '').toLowerCase().replace(/[_-]+/g, ' ').trim();
+  if (!raw) return null;
+  // Palm precedence (codex #3228 r3): serviceKeyFor checks the tree token
+  // before its palm branch, so "Palm Tree Injections" buckets as
+  // tree_shrub there — fine for its cadence defaults, but adoption must
+  // never let a tree & shrub estimate swallow a palm visit. Same palm
+  // rule as detectServiceLine / toQualifyingKeys: \bpalms?\b never
+  // matches "palmetto", so palmetto-bug pest names fall through.
+  if (/\bpalms?\b/.test(raw)) return 'palm_injection';
+  // Commercial stays a DISTINCT family (codex #3228 r5): the seeder's
+  // generic lawn/tree branches run before any commercial distinction, so
+  // "Commercial Lawn" would collapse into residential lawn_care and a
+  // residential visit could suppress the commercial manual-scheduling
+  // path (or vice versa). recurringServiceKey keeps commercial_* keys
+  // separate — delegate commercial names to it.
+  if (raw.includes('commercial')) {
+    return recurringServiceKey({ name: raw }) || null;
+  }
+  // Bora-Care is a borate wood treatment, never trenching (codex #3228
+  // r13): recurringServiceKey's generic termite+treatment rule would map
+  // "Bora-Care Termite Treatment" to termite_trenching and let it adopt a
+  // liquid-trenching visit. Same rule as isBoraCareOneTimeItem.
+  if (/\bbora\s*care\b/.test(raw) || raw.includes('borate')) return 'bora_care';
+  // Foam spot treatments are NOT trenching (codex #3228 r12):
+  // recurringServiceKey's termidor/treatment tokens would claim
+  // "Termidor Foam Spot Treatment" for termite_trenching and let a foam
+  // accept adopt a liquid-trenching visit. Mirror
+  // isTermiteFoamOneTimeItem's foam split — the RECURRING foam program
+  // stays the seeder's foam_recurring family (delegated below).
+  const isRecurringFoam = /foam\s*recurring|recurring\s*foam/.test(raw);
+  if (!isRecurringFoam && raw.includes('foam')) return 'termite_foam';
+  // Termite work keeps its specialty split (codex #3228 r11): serviceKeyFor's
+  // generic termite branch buckets liquid / trenching WITH the bait
+  // program, so a one-time specialty treatment could adopt (and restamp) a
+  // termite-bait visit. recurringServiceKey already splits termite_bait /
+  // termite_trenching / pre_slab_termiticide — delegate termite names to
+  // it. Its pest-first ordering also keeps combined pest+termite rows
+  // pest-primary.
+  if (raw.includes('termite')) {
+    return recurringServiceKey({ name: raw }) || null;
+  }
+  // The CANONICAL scheduled-row classifier (recurring-appointment-seeder),
+  // on BOTH the estimate's services and the candidate rows — the
+  // duplicate-series guard and follow-up seeding bucket by the same
+  // function, so "may this row stand in" and "would seeding treat these
+  // as one family" can never disagree (codex #3228 r1). Its palm branch
+  // is substring-based ("Palmetto Bug Pest Control" would bucket palm);
+  // real palms were consumed above, so strip the palmetto token.
+  const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
+  const key = serviceKeyFor({ name: raw.replace(/palmetto/g, ' ') });
+  return key && key !== SERVICE_FAMILY_FALLBACK_KEY ? key : null;
+}
+
+// STAGED per-field classification — first field that resolves wins. Fields
+// are never concatenated: joining a service key with its display name minted
+// synthetic slug families no scheduled row could reproduce (codex #3228
+// r13, `flea_package` + "Flea Treatment Package"), and mixing service_type
+// into catalog identity would let a stale label override it (r5 guarantee).
 function serviceFamilyKeyForAdoption(value) {
-  const classify = (text) => {
-    // Separators normalize to spaces BEFORE any word-boundary test (codex
-    // #3228 r7): combined catalog keys like pest_termite_bait_quarterly
-    // otherwise defeat \b rules — the underscore glues "pest" to the next
-    // token, the pest-primary combined rule misses, and serviceKeyFor's
-    // termite branch claims an intentionally pest-primary series.
-    const raw = String(text || '').toLowerCase().replace(/[_-]+/g, ' ').trim();
-    if (!raw) return null;
-    // Palm precedence (codex #3228 r3): serviceKeyFor checks the tree token
-    // before its palm branch, so "Palm Tree Injections" buckets as
-    // tree_shrub there — fine for its cadence defaults, but adoption must
-    // never let a tree & shrub estimate swallow a palm visit. Same palm
-    // rule as detectServiceLine / toQualifyingKeys: \bpalms?\b never
-    // matches "palmetto", so palmetto-bug pest names fall through.
-    if (/\bpalms?\b/.test(raw)) return 'palm_injection';
-    // Commercial stays a DISTINCT family (codex #3228 r5): the seeder's
-    // generic lawn/tree branches run before any commercial distinction, so
-    // "Commercial Lawn" would collapse into residential lawn_care and a
-    // residential visit could suppress the commercial manual-scheduling
-    // path (or vice versa). recurringServiceKey keeps commercial_* keys
-    // separate — delegate commercial names to it.
-    if (raw.includes('commercial')) {
-      return recurringServiceKey({ name: raw }) || null;
-    }
-    // Foam spot treatments are NOT trenching (codex #3228 r12):
-    // recurringServiceKey's termidor/treatment tokens would claim
-    // "Termidor Foam Spot Treatment" for termite_trenching and let a foam
-    // accept adopt a liquid-trenching visit. Mirror
-    // isTermiteFoamOneTimeItem's foam split — the RECURRING foam program
-    // stays the seeder's foam_recurring family (delegated below).
-    const isRecurringFoam = /foam\s*recurring|recurring\s*foam/.test(raw);
-    if (!isRecurringFoam && raw.includes('foam')) return 'termite_foam';
-    // Termite work keeps its specialty split (codex #3228 r11): serviceKeyFor's
-    // generic termite branch buckets Bora-Care / liquid / trenching WITH the
-    // bait program, so a one-time specialty treatment could adopt (and
-    // restamp) a termite-bait visit. recurringServiceKey already splits
-    // termite_bait / termite_trenching / pre_slab_termiticide — delegate
-    // termite names to it. Its pest-first ordering also keeps combined
-    // pest+termite rows pest-primary.
-    if (raw.includes('termite')) {
-      return recurringServiceKey({ name: raw }) || null;
-    }
-    // The CANONICAL scheduled-row classifier (recurring-appointment-seeder),
-    // on BOTH the estimate's services and the candidate rows — the
-    // duplicate-series guard and follow-up seeding bucket by the same
-    // function, so "may this row stand in" and "would seeding treat these
-    // as one family" can never disagree (codex #3228 r1). Its palm branch
-    // is substring-based ("Palmetto Bug Pest Control" would bucket palm);
-    // real palms were consumed above, so strip the palmetto token.
-    const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
-    const key = serviceKeyFor({ name: raw.replace(/palmetto/g, ' ') });
-    return key && key !== SERVICE_FAMILY_FALLBACK_KEY ? key : null;
-  };
-  // Catalog identity (key + name + labels) classifies as ONE text so a
-  // combined catalog key and its display name reinforce each other (codex
-  // #3228 r7); the row's service_type text is a separate FALLBACK stage —
-  // never mixed in, or a stale label could override the catalog identity
-  // (the r5 stale-label guarantee).
-  const catalogAndLabelText = [
+  const fields = [
     value?.service, value?.service_key, value?.key, value?.kind,
-    value?.name, value?.label, value?.displayName,
-  ].filter(Boolean).join(' ');
-  return classify(catalogAndLabelText) || classify(value?.service_type);
+    value?.name, value?.label, value?.displayName, value?.service_type,
+  ];
+  for (const field of fields) {
+    const key = classifyServiceFamilyText(field);
+    if (key) return key;
+  }
+  return null;
+}
+
+// Vocabulary bridge: serviceCategoryForOneTimeItem speaks category keys; the
+// scheduled-row side speaks the seeder/route family keys. Identical except
+// rodent, where the seeder buckets every rodent row as rodent_bait.
+const ONE_TIME_CATEGORY_FAMILIES = { rodent: ['rodent', 'rodent_bait'] };
+
+// Family keys a ONE-TIME item may adopt under (codex #3228 r13):
+//   1. non-service rows (setup fees, discounts) adopt nothing;
+//   2. Bora-Care/foam keep their specialty precedence (r11/r12 — the
+//      category classifier's generic termite heuristics run after these);
+//   3. the canonical serviceCategoryForOneTimeItem identity, bridged to the
+//      row vocabulary;
+//   4. otherwise a per-field classification UNION — a single field's stable
+//      slug can match the row's label-derived slug (flea packages), which
+//      concatenation broke.
+function oneTimeItemFamilyKeys(item = {}) {
+  if (isNonServiceOneTimeItem(item)) return [];
+  if (isBoraCareOneTimeItem(item)) return ['bora_care'];
+  const joined = [
+    item?.service, item?.service_key, item?.key, item?.kind,
+    item?.name, item?.label, item?.displayName,
+  ].filter(Boolean).join(' ').toLowerCase().replace(/[_-]+/g, ' ');
+  if (!/foam\s*recurring|recurring\s*foam/.test(joined) && joined.includes('foam')) {
+    return ['termite_foam'];
+  }
+  // Canonical category AND per-field keys merge: the category supplies the
+  // semantic family (a flea package is pest_control specialty) while a
+  // single field's stable slug still matches a row whose label is the only
+  // identity it has — the category alone can't reach a label-slug row, and
+  // the slugs alone miss the semantic family (codex #3228 r13).
+  const keys = new Set();
+  const category = serviceCategoryForOneTimeItem(item);
+  if (category) {
+    for (const key of (ONE_TIME_CATEGORY_FAMILIES[category] || [category])) keys.add(key);
+  }
+  for (const field of [
+    item?.service, item?.service_key, item?.key, item?.kind,
+    item?.name, item?.label, item?.displayName,
+  ]) {
+    const key = classifyServiceFamilyText(field);
+    if (key) keys.add(key);
+  }
+  return [...keys];
 }
 
 // Service families this estimate actually covers — the only families whose
@@ -582,9 +636,20 @@ function estimateFamilyKeysForAdoption(estimate, estData, { serviceMode, service
     ? serviceModes
     : [serviceMode || 'recurring'];
   const keySets = modes.map((mode) => {
-    const list = mode === 'one_time' ? effectiveOneTimeList : recurringSvcList;
+    if (mode === 'one_time') {
+      // PRIMARY service only (codex #3228 r13): a multi-service one-time
+      // accept (pest + Bora-Care) books ONE appointment under the primary
+      // service — the first bookable list item, same as the accept's
+      // booking-service resolution. Letting an ADD-ON family adopt would
+      // restamp a standalone add-on visit while the primary work never
+      // reaches dispatch.
+      const primary = (effectiveOneTimeList || [])
+        .map((item) => oneTimeItemFamilyKeys(item))
+        .find((keys) => keys.length > 0);
+      return new Set(primary || []);
+    }
     return new Set(
-      (list || [])
+      (recurringSvcList || [])
         .map((svc) => serviceFamilyKeyForAdoption(svc))
         .filter(Boolean),
     );
