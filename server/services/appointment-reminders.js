@@ -827,8 +827,12 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
   // the boolean return alone collapses that distinction (codex #3233 r6).
   if (sendOutcome && typeof sendOutcome === 'object') {
     // Sticky-true across a multi-contact loop (codex r7): one retryable
-    // failure must survive a later contact's deterministic block.
-    sendOutcome.retryable = sendOutcome.retryable === true || result.retryable === true;
+    // failure must survive a later contact's deterministic block. A
+    // THROWING preDispatchCheck surfaces as a blocked result with code
+    // PRE_DISPATCH_CHECK_FAILED — that's transient infra (our fence's DB
+    // read failed), retryable, not a deterministic block (codex r25).
+    sendOutcome.retryable = sendOutcome.retryable === true || result.retryable === true
+      || result.code === 'PRE_DISPATCH_CHECK_FAILED';
     sendOutcome.blockedCode = result.code || null;
   }
   if (result.blocked || result.sent === false) {
@@ -2349,6 +2353,9 @@ const AppointmentReminders = {
         noticeToken = require('./job-status').nextClaimTs();
         claimed = await db('appointment_reminders')
           .where({ id: record.id })
+          // Still-cancelled guard (codex r25): a restoration after the
+          // guarded close must not be stamped suppressed.
+          .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
           .where(function claimable() {
             this.whereNull('cancellation_notice_at')
               .orWhere(function singletonPending() {
@@ -2784,6 +2791,26 @@ const AppointmentReminders = {
   // still none → terminal silent suppression. Fenced by the reclaim token.
   async sweepStaleCancellationClaims() {
     try {
+      // Late-claim fallback (codex r25): a cancel whose in-trx claim AND
+      // in-memory fallback were both lost (savepoint failure + crash)
+      // leaves a recent cancelled visit with NO claim. Claim it here,
+      // backdated to its cancel time so this same run can settle it.
+      // Residual: a suppress-intent cancel hitting that double failure
+      // may get a (truthful) notice — accepted, evidence-gated anyway.
+      await db('appointment_reminders')
+        .whereNull('cancellation_notice_at')
+        .whereRaw(`EXISTS (
+          SELECT 1 FROM scheduled_services ss
+          WHERE ss.id = appointment_reminders.scheduled_service_id
+            AND ss.status = 'cancelled'
+        )`)
+        .whereRaw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled') > now() - interval '25 minutes'`)
+        .update({
+          cancellation_notice_at: db.raw("(SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')"),
+          cancellation_notice_state: 'pending',
+          updated_at: new Date(),
+        });
+
       // Repair pass (codex r22): a restoration whose in-trx marker clear
       // failed leaves a stale terminal marker on a LIVE visit — shed it
       // here so a later real cancellation notices normally.
@@ -3137,7 +3164,9 @@ const AppointmentReminders = {
             // double-text. Own at least one target AND no foreign claims.
             const own = await db('appointment_reminders')
               .whereIn('scheduled_service_id', ids)
-              .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+              // Includes our own pre-dispatch 'sent' stamps so contact
+              // fanout continues (codex r25).
+              .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
               .where('cancellation_notice_at', seriesToken)
               .first('id');
             const foreign = await db('appointment_reminders')
