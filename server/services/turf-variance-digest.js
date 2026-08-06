@@ -82,19 +82,20 @@ function jsonField(value, key) {
 
 // Durable weekly-send guard (codex #3230 P1): the advisory lock only
 // serializes CONCURRENT ticks — during a deploy overlap the second instance
-// can enter after the first released the lock and double-send. The marker is
-// a synthetic job_health row (generic one-row-per-name ledger, no new
-// table): last_success_at stamps only when an email actually left. Read
-// failure sends anyway (availability over dedupe — a rare double beats a
-// silently skipped week); write failure risks one duplicate next tick and
-// is logged.
-const SEND_MARKER_JOB = 'turf-variance-digest-send';
+// can enter after the first released the lock and double-send. Marker rows
+// live in ops_email_send_state (migration 20260806001000), NOT job_health —
+// the Intelligence Bar classifies every job_health row as a scheduled job
+// and would flag a quiet-week marker as permanently stale (codex r2). The
+// marker stamps only when an email actually left. Read failure sends anyway
+// (availability over dedupe — a rare double beats a silently skipped week);
+// write failure risks one duplicate next tick and is logged.
+const SEND_MARKER_KEY = 'turf-variance-digest';
 const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
 
 async function sentRecently() {
   try {
-    const row = await db('job_health').where({ job_name: SEND_MARKER_JOB }).first('last_success_at');
-    return Boolean(row?.last_success_at && (Date.now() - new Date(row.last_success_at).getTime()) < SIX_DAYS_MS);
+    const row = await db('ops_email_send_state').where({ email_key: SEND_MARKER_KEY }).first('last_sent_at');
+    return Boolean(row?.last_sent_at && (Date.now() - new Date(row.last_sent_at).getTime()) < SIX_DAYS_MS);
   } catch (err) {
     logger.warn(`[turf-variance] send-marker read failed (${err.message}) — proceeding without the guard`);
     return false;
@@ -104,10 +105,10 @@ async function sentRecently() {
 async function stampSendMarker() {
   try {
     const now = new Date();
-    await db('job_health')
-      .insert({ job_name: SEND_MARKER_JOB, last_started_at: now, last_finished_at: now, last_success_at: now, last_status: 'success', updated_at: now })
-      .onConflict('job_name')
-      .merge({ last_finished_at: now, last_success_at: now, last_status: 'success', updated_at: now });
+    await db('ops_email_send_state')
+      .insert({ email_key: SEND_MARKER_KEY, last_sent_at: now, updated_at: now })
+      .onConflict('email_key')
+      .merge({ last_sent_at: now, updated_at: now });
   } catch (err) {
     logger.warn(`[turf-variance] send-marker write failed (${err.message}) — next tick may re-send`);
   }

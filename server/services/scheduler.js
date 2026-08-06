@@ -819,10 +819,14 @@ function initScheduledJobs() {
         const { runTurfVarianceDigest } = require('./turf-variance-digest');
         const result = await runTurfVarianceDigest();
         logger.info(`[turf-variance] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, avg: result.avgDeltaPct ?? null, samples: result.samples ?? null })}`);
-        // A swallowed query/send failure must still read as a FAILED run in
-        // job_health (codex #3230 P2) — rethrow so runExclusive records it
-        // and the outer handler logs the failure.
-        if (result?.skipped === 'query_failed' || result?.error) {
+        // A swallowed failure must still read as a FAILED run in job_health
+        // (codex #3230 P2, both rounds) — rethrow so runExclusive records it
+        // and the outer handler logs it. Delivery-BLOCKING skips count as
+        // failures (unconfigured mailer, non-internal recipient: drift was
+        // found but the ACT email cannot leave); expected skips
+        // (within_threshold / disabled / recent_send) stay healthy.
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
           throw new Error(`turf variance digest did not complete (${result.skipped || 'send_failed'})`);
         }
       });
