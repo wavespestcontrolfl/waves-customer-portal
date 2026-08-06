@@ -25,6 +25,7 @@ const {
 } = require('./new-recurring-welcome-sms');
 const { etDateString } = require('../utils/datetime-et');
 const { normalizeGrassType } = require('./lawn-grass-context');
+const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
 
 // Find the first grassType/grass_type string anywhere in the estimate data
 // (confirmed primary path is inputs.grassType, but estimate shapes vary).
@@ -449,14 +450,56 @@ function serviceCountsTowardWaveGuardTier(svc = {}) {
   return WAVEGUARD.qualifyingServices.includes(recurringServiceKey(svc));
 }
 
-function countTierQualifyingRecurringServices(services = []) {
+function tierQualifyingRecurringServiceKeys(services = []) {
   const seen = new Set();
   for (const svc of services) {
     if (!serviceCountsTowardWaveGuardTier(svc)) continue;
     const key = recurringServiceKey(svc);
     if (key) seen.add(key);
   }
-  return seen.size;
+  return [...seen];
+}
+
+function countTierQualifyingRecurringServices(services = []) {
+  return tierQualifyingRecurringServiceKeys(services).length;
+}
+
+// Rank order for upgrade detection ONLY (notification gating) — non-member
+// sentinels (none/One-Time/Commercial/null) rank below every membership tier
+// so a first real membership tier counts as an upgrade.
+const WAVEGUARD_TIER_RANK = { bronze: 1, silver: 2, gold: 3, platinum: 4 };
+
+function isMembershipTierUpgrade(previousTier, nextTier) {
+  const prev = WAVEGUARD_TIER_RANK[String(previousTier || '').trim().toLowerCase()] || 0;
+  const next = WAVEGUARD_TIER_RANK[String(nextTier || '').trim().toLowerCase()] || 0;
+  return next > prev;
+}
+
+// Frozen prior qualifying families from the estimate's membership snapshot
+// (codex #3228 r6): the quote deliberately freezes existingServiceKeys at
+// save time, and the customer accepts the tier that snapshot priced — a live
+// lookup at accept time can diverge when qualifying visits are added,
+// completed, or cancelled between save and accept (a saved Silver add-on
+// quote must not activate Bronze because its prior visit completed). Returns
+// null when the estimate has no snapshot (legacy) — callers fall back to the
+// live lookup. An EMPTY snapshot array is meaningful ("no priors at quote
+// time") and is honored as-is.
+function priorQualifyingKeysFromSnapshot(estimateData) {
+  const keys = estimateData?.membershipSnapshot?.existingServiceKeys;
+  if (!Array.isArray(keys)) return null;
+  return keys.filter((k) => WAVEGUARD.qualifyingServices.includes(k));
+}
+
+// Distinct qualifying-family count across the customer's EXISTING plans plus
+// this estimate's additions — the number the combined membership tier is
+// determined from. Same union the quote side advertises (estimate-membership-
+// context feeds determineWaveGuardTier([...existingKeys, ...addedKeys]) from
+// the shared waveguard-existing-services keys), so the ACTIVATED tier can
+// never disagree with the QUOTED tier. Both sides emit the same key
+// vocabulary (pest_control / lawn_care / tree_shrub / mosquito /
+// termite_bait), so a plain set-union dedups overlap.
+function combinedTierQualifyingCount(estimateKeys = [], priorKeys = []) {
+  return new Set([...estimateKeys, ...priorKeys]).size;
 }
 
 function hasWaveGuardSetupService(services = []) {
@@ -1760,7 +1803,42 @@ const EstimateConverter = {
       err.statusCode = 422;
       throw err;
     }
-    const serviceCount = countTierQualifyingRecurringServices(recurringServicesForConversion);
+    const estimateQualifyingKeys = tierQualifyingRecurringServiceKeys(recurringServicesForConversion);
+    const serviceCount = estimateQualifyingKeys.length;
+    // Combined-tier activation (owner case 2026-08-05): the QUOTE prices and
+    // advertises an add-on estimate at the COMBINED tier — the customer's
+    // existing qualifying plans plus this estimate's additions — but
+    // activation counted only THIS estimate's lines, so an existing
+    // quarterly-pest customer accepting a tree & shrub add-on activated
+    // Bronze/0% instead of the quoted Silver/10%. Load the same shared prior
+    // keys the quote side uses. Fail-soft to the estimate-only count: a
+    // lookup error must not block the acceptance — it just reverts to the
+    // old (under-counting) tier for this accept. Savepoint-confined (codex
+    // #3228 r1): `database` is the caller's acceptance transaction on the
+    // public/manual accept paths, and a failed SQL statement would leave
+    // that transaction aborted — the JS catch alone couldn't deliver the
+    // advertised fallback because every later conversion query would fail.
+    // The nested transaction rolls back only the savepoint.
+    let priorQualifyingKeys = [];
+    if (!suppressRecurringConversion && serviceCount > 0) {
+      // The FROZEN snapshot wins (codex r6) — activation must match what the
+      // quote priced and displayed; the live lookup covers only legacy
+      // estimates saved before snapshots existed.
+      const snapshotKeys = priorQualifyingKeysFromSnapshot(estimateData);
+      if (snapshotKeys) {
+        priorQualifyingKeys = snapshotKeys;
+      } else {
+        try {
+          priorQualifyingKeys = await database.transaction(
+            (sp) => loadExistingQualifyingServiceKeys(sp, customerId),
+          );
+        } catch (priorErr) {
+          logger.warn(`[estimate-converter] prior qualifying-services lookup failed for customer ${customerId} (tier falls back to estimate-only count): ${priorErr.message}`);
+          priorQualifyingKeys = [];
+        }
+      }
+    }
+    const combinedServiceCount = combinedTierQualifyingCount(estimateQualifyingKeys, priorQualifyingKeys);
     // Commercial auto-priced programs are FLAT and never a WaveGuard membership.
     // Used both to flag manual scheduling (the follow-up seeder doesn't support
     // their cadence) and to keep them off the Bronze tier fallback.
@@ -1784,7 +1862,7 @@ const EstimateConverter = {
       ? { tier: 'One-Time', discount: 0 }
       : commercialOnlyRecurring
         ? { tier: 'none', discount: 0 } // written as the non-member 'Commercial' sentinel below
-        : determineTier(serviceCount, recurringServicesForConversion.length > 0);
+        : determineTier(combinedServiceCount, recurringServicesForConversion.length > 0);
     const inferredFrequencyKey = estimateData.customerSelection?.frequency
       || inferFrequencyKeyFromEstimateData(estimateData);
     // Combined routing only trusts the customer's REAL accepted selection —
@@ -2700,9 +2778,14 @@ const EstimateConverter = {
     await database('activity_log').insert({
       customer_id: customerId,
       action: 'estimate_converted',
-      description: `Estimate #${estimateId} converted: ${customer.first_name} ${customer.last_name} → WaveGuard ${tier} at $${monthlyRate.toFixed(2)}/mo (${serviceCount} services, ${scheduledCount} scheduled)`,
+      // Combined count in the operator-visible line (codex #3228 r2): the
+      // tier is activated from prior + added families, and the timeline
+      // reads this description without the metadata — an estimate-only
+      // count beside a combined tier reads as a contradiction.
+      description: `Estimate #${estimateId} converted: ${customer.first_name} ${customer.last_name} → WaveGuard ${tier} at $${monthlyRate.toFixed(2)}/mo (${combinedServiceCount} combined qualifying services, ${serviceCount} from this estimate, ${scheduledCount} scheduled)`,
       metadata: JSON.stringify({
         estimateId, tier, discount, monthlyRate, serviceCount, scheduledCount, firstScheduledServiceId,
+        priorQualifyingKeys, combinedServiceCount,
       }),
     });
 
@@ -3281,6 +3364,55 @@ const EstimateConverter = {
       }
     }
 
+    // Combined-tier upgrade review (owner case 2026-08-05): when this
+    // accept RAISED the customer's membership tier by combining with existing
+    // plans, staff must decide whether the new tier's discount also extends
+    // to the EXISTING series' contracted per-visit rates. The quote card
+    // promises the combined tier "discounts additions without repricing
+    // current service", so nothing here reprices automatically — the owner
+    // rules per customer. Same deferral contract as the commercial-schedule
+    // notification: in-transaction callers dispatch post-commit so a
+    // rolled-back accept can't page staff.
+    let tierUpgradeNotification = null;
+    // Upgrade = the activated tier outranks the customer's PERSISTED tier
+    // (codex #3228 r2) — not the tier the prior rows alone would derive. A
+    // stale-stamped Gold customer whose rows only support Silver is a
+    // downgrade (no "upgrade" alert), while a Bronze-stamped legacy customer
+    // whose existing rows already supported Silver gets the review alert the
+    // moment an accept actually moves the stored tier up.
+    if (!suppressRecurringConversion && !commercialOnlyRecurring
+      && priorQualifyingKeys.length > 0
+      && tier && tier !== 'none'
+      && isMembershipTierUpgrade(customer.waveguard_tier, tier)) {
+      const discountPct = Math.round((discount || 0) * 100);
+      const tierReviewPayload = {
+        type: 'estimate_converted',
+        title: `WaveGuard ${tier} activated: review existing plan rates`,
+        body: `${customer.first_name} ${customer.last_name} reached WaveGuard ${tier} (${discountPct}% tier) by adding ${estimateQualifyingKeys.join(', ') || 'a plan'} to existing ${priorQualifyingKeys.join(', ')}. Existing series keep their contracted per-visit prices — review whether to extend the ${discountPct}% tier discount to them.`,
+        options: {
+          icon: '⭐',
+          link: `/admin/customers?customerId=${customerId}`,
+          bell: true,
+          metadata: { estimateId, customerId, tier, priorQualifyingKeys, combinedServiceCount },
+        },
+      };
+      if (opts.deferCommercialScheduleNotification === true) {
+        tierUpgradeNotification = tierReviewPayload;
+      } else {
+        try {
+          const NotificationService = require('./notification-service');
+          void NotificationService.notifyAdmin(
+            tierReviewPayload.type,
+            tierReviewPayload.title,
+            tierReviewPayload.body,
+            tierReviewPayload.options,
+          ).catch((err) => logger.warn(`[estimate-converter] tier-upgrade admin notify failed: ${err.message}`));
+        } catch (err) {
+          logger.warn(`[estimate-converter] tier-upgrade admin notify setup failed: ${err.message}`);
+        }
+      }
+    }
+
     // Welcome SMS for new recurring signups — unified across every accept
     // path (public self-accept, manual Mark Won, annual prepay). Previously
     // this text only fired when an admin scheduled the recurring appointment,
@@ -3338,6 +3470,8 @@ const EstimateConverter = {
       // it (dispatched inline otherwise) — so callers can dispatch whatever
       // comes back without double-send risk.
       commercialScheduleNotification,
+      // Same deferral contract as commercialScheduleNotification.
+      tierUpgradeNotification,
       deferredFollowUpReminderRows,
       serviceMode: suppressRecurringConversion ? 'one_time' : 'recurring',
       recurringConversionSkipped: suppressRecurringConversion,
@@ -3350,6 +3484,10 @@ module.exports.findGrassTypeDeep = findGrassTypeDeep;
 module.exports.grassTypeToPersist = grassTypeToPersist;
 module.exports.calculateAnnualPrepayAmount = calculateAnnualPrepayAmount;
 module.exports.countTierQualifyingRecurringServices = countTierQualifyingRecurringServices;
+module.exports.tierQualifyingRecurringServiceKeys = tierQualifyingRecurringServiceKeys;
+module.exports.combinedTierQualifyingCount = combinedTierQualifyingCount;
+module.exports.priorQualifyingKeysFromSnapshot = priorQualifyingKeysFromSnapshot;
+module.exports.isMembershipTierUpgrade = isMembershipTierUpgrade;
 module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;

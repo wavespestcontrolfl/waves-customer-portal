@@ -464,6 +464,340 @@ function shapeLinkedAppointment(row) {
   };
 }
 
+// serviceKeyFor's fallback for names that resolve to no known family. Both
+// sides of the adoption match must treat it as "no family": letting two
+// unclassifiable labels match each other would adopt an arbitrary row.
+const SERVICE_FAMILY_FALLBACK_KEY = 'service';
+
+function classifyServiceFamilyText(text) {
+  // Separators normalize to spaces BEFORE any word-boundary test (codex
+  // #3228 r7): combined catalog keys like pest_termite_bait_quarterly
+  // otherwise defeat \b rules — the underscore glues "pest" to the next
+  // token, the pest-primary combined rule misses, and serviceKeyFor's
+  // termite branch claims an intentionally pest-primary series.
+  const raw = String(text || '').toLowerCase().replace(/[_-]+/g, ' ').trim();
+  if (!raw) return null;
+  // Generic catch-all placeholders have NO family (codex #3228 r21): the
+  // general_appointment catalog row is explicitly an anything-row whose
+  // proper service is still unassigned — serviceKeyFor's "general" token
+  // would file it under pest and let it swallow a pest estimate's booking.
+  // Same names the call-booking generic-row predicate treats as anything-rows.
+  if (/^general appointment$|^waves pest control appointment service$|^waves assessment$|^waves appointment$/.test(raw)) {
+    return null;
+  }
+  // Palm precedence (codex #3228 r3): serviceKeyFor checks the tree token
+  // before its palm branch, so "Palm Tree Injections" buckets as
+  // tree_shrub there — fine for its cadence defaults, but adoption must
+  // never let a tree & shrub estimate swallow a palm visit. Same palm
+  // rule as detectServiceLine / toQualifyingKeys: \bpalms?\b never
+  // matches "palmetto", so palmetto-bug pest names fall through.
+  if (/\bpalms?\b/.test(raw)) return 'palm_injection';
+  // Commercial stays a DISTINCT family (codex #3228 r5): the seeder's
+  // generic lawn/tree branches run before any commercial distinction, so
+  // "Commercial Lawn" would collapse into residential lawn_care and a
+  // residential visit could suppress the commercial manual-scheduling
+  // path (or vice versa). recurringServiceKey keeps commercial_* keys
+  // separate — delegate commercial names to it.
+  if (raw.includes('commercial')) {
+    return recurringServiceKey({ name: raw }) || null;
+  }
+  // Bora-Care is a borate wood treatment, never trenching (codex #3228
+  // r13): recurringServiceKey's generic termite+treatment rule would map
+  // "Bora-Care Termite Treatment" to termite_trenching and let it adopt a
+  // liquid-trenching visit. Same rule as isBoraCareOneTimeItem.
+  if (/\bbora\s*care\b/.test(raw) || raw.includes('borate')) return 'bora_care';
+  // Foam spot treatments are NOT trenching (codex #3228 r12):
+  // recurringServiceKey's termidor/treatment tokens would claim
+  // "Termidor Foam Spot Treatment" for termite_trenching and let a foam
+  // accept adopt a liquid-trenching visit. Mirror
+  // isTermiteFoamOneTimeItem's foam split — the RECURRING foam program
+  // stays the seeder's foam_recurring family (delegated below).
+  const isRecurringFoam = /foam\s*recurring|recurring\s*foam/.test(raw);
+  if (!isRecurringFoam && raw.includes('foam')) return 'termite_foam';
+  // Termite work keeps its specialty split (codex #3228 r11): serviceKeyFor's
+  // generic termite branch buckets liquid / trenching WITH the bait
+  // program, so a one-time specialty treatment could adopt (and restamp) a
+  // termite-bait visit. recurringServiceKey already splits termite_bait /
+  // termite_trenching / pre_slab_termiticide — delegate termite names to
+  // it. Its pest-first ordering also keeps combined pest+termite rows
+  // pest-primary.
+  if (raw.includes('termite')) {
+    return recurringServiceKey({ name: raw }) || null;
+  }
+  // Roach work shares ONE identity across vocabularies (codex #3228 r23):
+  // engine german_roach / "German Roach Cleanout" vs the catalog booking
+  // row cockroach_control / "Cockroach Treatment" — independent slugs never
+  // intersect and a valid upcoming cockroach visit would be rejected into a
+  // duplicate. \b keeps "approach"-style words out.
+  if (/\b(?:cock)?roach(?:es)?\b/.test(raw)) return 'cockroach_control';
+  // Rodent work keeps the slot profile's split (codex #3228 r18): the
+  // seeder buckets EVERY rodent row as rodent_bait, but slot-reservation's
+  // serviceKeyForLabel deliberately distinguishes trapping / exclusion /
+  // sanitation from bait — sold exclusion or trapping work must never adopt
+  // (and restamp) a bait-station monitoring visit. Same regexes as
+  // slot-reservation.
+  if (/rodent.*trap|trap.*rodent/.test(raw)) return 'rodent_trapping';
+  // Wire-mesh/seal wording is exclusion work (codex r19: the supported
+  // rodent_wire_mesh catalog key carries no "exclusion" token).
+  // Guarantee combos include full exclusion work (codex r22:
+  // rodent_guarantee_combo / "Rodent Guarantee") — classify under the
+  // exclusion identity, never bait.
+  if (/rodent.*(?:exclusion|wire\s*mesh|seal|bird\s*box|guarantee)|(?:exclusion|wire\s*mesh|seal|bird\s*box|guarantee).*rodent/.test(raw)) return 'rodent_exclusion';
+  if (/rodent.*sanitation|sanitation.*rodent/.test(raw)) return 'rodent_sanitation';
+  // Diagnostic inspections are their own identity too (codex r20:
+  // priceRodentInspection's standalone rodent_inspection item). \b after
+  // inspect(ion) keeps "inspector" out — "the home inspector found rats"
+  // names a person, not the service (same rule as the call-booking matcher).
+  if (/rodent.*\binspect(?:ion)?s?\b|\binspect(?:ion)?s?\b.*rodent/.test(raw)) return 'rodent_inspection';
+  // Stinging-insect work shares ONE identity across vocabularies (codex
+  // r22): engine keys say stinging_insect*, the catalog row says
+  // bee_wasp_removal — independently generated slugs never intersect and a
+  // valid existing visit would be rejected into a duplicate booking.
+  if (/stinging|\bwasps?\b|\bhornets?\b|\bbees?\b|yellow\s*jacket/.test(raw)) return 'stinging_insect';
+  // The CANONICAL scheduled-row classifier (recurring-appointment-seeder),
+  // on BOTH the estimate's services and the candidate rows — the
+  // duplicate-series guard and follow-up seeding bucket by the same
+  // function, so "may this row stand in" and "would seeding treat these
+  // as one family" can never disagree (codex #3228 r1). Its palm branch
+  // is substring-based ("Palmetto Bug Pest Control" would bucket palm);
+  // real palms were consumed above, so strip the palmetto token.
+  const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
+  const key = serviceKeyFor({ name: raw.replace(/palmetto/g, ' ') });
+  return key && key !== SERVICE_FAMILY_FALLBACK_KEY ? key : null;
+}
+
+// STAGED per-field classification — first field that resolves wins. Fields
+// are never concatenated: joining a service key with its display name minted
+// synthetic slug families no scheduled row could reproduce (codex #3228
+// r13, `flea_package` + "Flea Treatment Package"), and mixing service_type
+// into catalog identity would let a stale label override it (r5 guarantee).
+function serviceFamilyKeyForAdoption(value) {
+  const fields = [
+    value?.service, value?.service_key, value?.key, value?.kind,
+    value?.name, value?.label, value?.displayName, value?.service_type,
+  ];
+  for (const field of fields) {
+    const key = classifyServiceFamilyText(field);
+    if (key) return key;
+  }
+  return null;
+}
+
+// Vocabulary bridge: serviceCategoryForOneTimeItem speaks category keys; the
+// scheduled-row side speaks the seeder/route family keys. Identical except
+// rodent, where the seeder buckets every rodent row as rodent_bait.
+const ONE_TIME_CATEGORY_FAMILIES = { rodent: ['rodent', 'rodent_bait'] };
+
+// Family keys a ONE-TIME item may adopt under (codex #3228 r13):
+//   1. non-service rows (setup fees, discounts) adopt nothing;
+//   2. Bora-Care/foam keep their specialty precedence (r11/r12 — the
+//      category classifier's generic termite heuristics run after these);
+//   3. the canonical serviceCategoryForOneTimeItem identity, bridged to the
+//      row vocabulary;
+//   4. otherwise a per-field classification UNION — a single field's stable
+//      slug can match the row's label-derived slug (flea packages), which
+//      concatenation broke.
+function oneTimeItemFamilyKeys(item = {}) {
+  if (isNonServiceOneTimeItem(item)) return [];
+  if (isBoraCareOneTimeItem(item)) return ['bora_care'];
+  const joined = [
+    item?.service, item?.service_key, item?.key, item?.kind,
+    item?.name, item?.label, item?.displayName,
+  ].filter(Boolean).join(' ').toLowerCase().replace(/[_-]+/g, ' ');
+  if (!/foam\s*recurring|recurring\s*foam/.test(joined) && joined.includes('foam')) {
+    return ['termite_foam'];
+  }
+  const fields = [
+    item?.service, item?.service_key, item?.key, item?.kind,
+    item?.name, item?.label, item?.displayName,
+  ];
+  const category = serviceCategoryForOneTimeItem(item);
+  // A SPECIALTY in a broad category must never make an ordinary visit of
+  // that category adoptable (codex #3228 r16/r17): acceptance restamps the
+  // adopted row's source and price without changing its service identity,
+  // so the specialty work (flea package, roach treatment, top dressing,
+  // dethatching, plugging) never reaches dispatch. Generic pest = the
+  // derived one-time pest choice or a plainly pest-named line.
+  const genericPest = isOneTimePestChoiceItem(item)
+    || String(item?.service || '').toLowerCase() === 'one_time_pest'
+    || isPestServiceName(item?.name || item?.label || '');
+  const specialtyText = fields.filter(Boolean).join(' ').toLowerCase();
+  const lawnSpecialty = /top[ -_]?dress|dethatch|\bplugging\b/.test(specialtyText);
+  if ((category === 'pest_control' && !genericPest) || lawnSpecialty) {
+    // Specific identities ONLY — no BROAD families, whose pest/roach and
+    // lawn tokens would re-add them through the field union (codex r17).
+    // Specific (non-broad) classifier families still participate (codex
+    // r22): the stinging_insect identity is how an engine-keyed specialty
+    // meets its catalog-keyed row. Anything else goes to the slot picker
+    // (fail-safe).
+    const slugKeys = new Set();
+    for (const field of fields) {
+      const slug = String(field || '').toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      if (slug && !BROAD_ADOPTION_FAMILY_KEYS.has(slug)) slugKeys.add(slug);
+      const famKey = classifyServiceFamilyText(field);
+      if (famKey && !BROAD_ADOPTION_FAMILY_KEYS.has(famKey)) slugKeys.add(famKey);
+    }
+    return [...slugKeys];
+  }
+  // Canonical category AND per-field keys merge for generic items: the
+  // category supplies the semantic family while a single field's stable
+  // slug still matches a row whose label is the only identity it has
+  // (codex #3228 r13).
+  const keys = new Set();
+  for (const field of fields) {
+    const key = classifyServiceFamilyText(field);
+    if (key) keys.add(key);
+  }
+  // Specific rodent identities EXCLUDE the bait family entirely (codex
+  // #3228 r18/r19): when any field resolves trapping / exclusion /
+  // sanitation, a bait key contributed by ANOTHER field of the same item
+  // (rodent_wire_mesh's service key has no exclusion token) must be
+  // removed too — suppressing only the category bridge left it in place
+  // and a bait-station monitoring visit stayed adoptable.
+  const hasSpecificRodent = [...keys].some(
+    (k) => k === 'rodent_trapping' || k === 'rodent_exclusion'
+      || k === 'rodent_sanitation' || k === 'rodent_inspection',
+  );
+  if (hasSpecificRodent) {
+    keys.delete('rodent_bait');
+    keys.delete('rodent');
+  }
+  if (category) {
+    if (!(category === 'rodent' && hasSpecificRodent)) {
+      for (const key of (ONE_TIME_CATEGORY_FAMILIES[category] || [category])) keys.add(key);
+    }
+  }
+  return [...keys];
+}
+
+// Family keys the specialty slug path must never emit — a specialty item
+// whose field happens to BE a family key (service: 'pest_control' on a
+// mislabeled row) must not become broad-adoptable through the slug door.
+const BROAD_ADOPTION_FAMILY_KEYS = new Set([
+  'pest_control', 'lawn_care', 'tree_shrub', 'mosquito', 'palm_injection',
+  'termite_bait', 'termite_trenching', 'pre_slab_termiticide', 'termite_foam',
+  'foam_recurring', 'bora_care', 'rodent', 'rodent_bait',
+]);
+
+// Service families this estimate actually covers — the only families whose
+// existing appointment may stand in for the estimate's first visit (see the
+// customer-wide fallback in findLinkedUpcomingAppointment). Derived from the
+// same acceptance lists the accept handler schedules from, so "what we'd
+// book" and "what an existing row may replace" can never disagree.
+function estimateFamilyKeysForAdoption(estimate, estData, { serviceMode, serviceModes } = {}) {
+  // Input-only estimates (engineInputs persisted, no stored result) replay
+  // through the SAME supplement path acceptance and the converter use (codex
+  // #3228 r10) — raw data would derive no recurring family, skip the
+  // adoption fallback, and let the customer book a duplicate visit. The
+  // replay only fires when no stored services exist; normal shapes pass
+  // through untouched.
+  let effectiveData = estData || {};
+  try {
+    effectiveData = withSupplementedRecurringServices(effectiveData);
+  } catch { /* raw data stands */ }
+  const { recurringSvcList, oneTimeList } = acceptanceServiceLists(effectiveData);
+  // The ONE-TIME family comes from the same effective-choice mechanism the
+  // accept uses (codex #3228 r9): when show_one_time_option derives a pest
+  // offer from recurring pricing, the STORED one-time rows may hold only the
+  // WaveGuard setup fee — classifying those would empty the contract-time
+  // intersection and reject a valid same-family appointment. Acceptance
+  // swaps in the one_time_pest choice via acceptedOneTimeChoiceListForEstimate,
+  // so family derivation must read the same list. Fail-soft to the stored
+  // rows — a derivation error must not break the matcher.
+  let effectiveOneTimeList = oneTimeList;
+  try {
+    const choiceList = acceptedOneTimeChoiceListForEstimate(estimate || {}, effectiveData);
+    if (Array.isArray(choiceList) && choiceList.length > 0) effectiveOneTimeList = choiceList;
+  } catch { /* stored rows stand */ }
+  // Scoped to the accepted service mode (codex #3228 r4): a mixed estimate
+  // (recurring pest + one-time Bora-Care) must not let a one-time-family
+  // appointment stand in for the RECURRING plan's first visit — acceptance
+  // would treat the adopted row as the recurring reservation and stamp the
+  // recurring first-application price onto it.
+  //
+  // MULTIPLE modes intersect (codex #3228 r5 P1): the /data contract is
+  // built once, but a mixed estimate lets the customer toggle modes AFTER
+  // the contract rendered — an existing_appointment contract valid only
+  // under the default mode dead-ends the alternate mode client-side (the
+  // accept 409s while the picker stays hidden). Contract sites therefore
+  // pass every mode the customer can select and only a row adoptable under
+  // ALL of them is offered; the accept path passes the single selected mode.
+  const modes = (Array.isArray(serviceModes) && serviceModes.length > 0)
+    ? serviceModes
+    : [serviceMode || 'recurring'];
+  const keySets = modes.map((mode) => {
+    if (mode === 'one_time') {
+      // PRIMARY service only (codex #3228 r13): a multi-service one-time
+      // accept (pest + Bora-Care) books ONE appointment under the primary
+      // service — the first bookable list item, same as the accept's
+      // booking-service resolution. Letting an ADD-ON family adopt would
+      // restamp a standalone add-on visit while the primary work never
+      // reaches dispatch.
+      const primary = (effectiveOneTimeList || [])
+        .map((item) => oneTimeItemFamilyKeys(item))
+        .find((keys) => keys.length > 0);
+      return new Set(primary || []);
+    }
+    // PRIMARY service here too (codex #3228 r14): a multi-service recurring
+    // accept books its reserved row under the primary line — the converter's
+    // reserved-row path deliberately does NOT schedule ordinary remaining
+    // services — so letting an add-on family adopt (pest-plus-tree plan
+    // adopting a tree & shrub visit) restamps the add-on row while the
+    // primary pest work is never scheduled. Primary selection mirrors the
+    // reservation writer (slot-reservation canonicalServiceTypeForProfile,
+    // codex r15): pest_control ANYWHERE in the profile is the primary — a
+    // tree-first, pest-second list still reserves a pest visit — otherwise
+    // the first classifiable line.
+    const recurringKeys = (recurringSvcList || [])
+      .map((svc) => serviceFamilyKeyForAdoption(svc))
+      .filter(Boolean);
+    const primaryRecurring = recurringKeys.includes('pest_control')
+      ? 'pest_control'
+      : recurringKeys[0];
+    return new Set(primaryRecurring ? [primaryRecurring] : []);
+  });
+  return keySets.reduce((acc, set) => new Set([...acc].filter((k) => set.has(k))));
+}
+
+// Whether an existing scheduled_services row belongs to one of the estimate's
+// service families. Rows whose service_type doesn't resolve to a family key
+// (generic assessment shells, blank types) never match — adopting them would
+// re-create the cross-family clobber this guard exists to prevent.
+function appointmentMatchesEstimateFamily(row = {}, familyKeys = new Set()) {
+  // Catalog identity first (codex #3228 r5): a stale service_type label
+  // ("Tree & Shrub Care" on a row whose service_id links palm_injection)
+  // must classify by what the row actually IS — the same catalog-first rule
+  // waveguard-existing-services applies. service_type remains the fallback
+  // for unlinked legacy rows.
+  const key = serviceFamilyKeyForAdoption({
+    service: row.catalog_service_key || null,
+    name: row.catalog_service_name || null,
+    service_type: row.service_type,
+  });
+  if (key && familyKeys.has(key)) return true;
+  // Symmetric specialty slugs (codex #3228 r18): specialty items emit
+  // slug-only identities, but the row's broad classification (a roach row
+  // buckets pest_control) could never meet them — an appointment labeled
+  // exactly "Cockroach Treatment" was rejected and the customer sent to
+  // book a duplicate. The row's own field slugs may satisfy a specialty
+  // key; broad family-key slugs stay excluded so this door never widens
+  // generic adoption. Catalog authority holds here too (codex r19): when
+  // the row is catalog-linked, only the catalog fields may supply slugs —
+  // a stale service_type snapshot ("Cockroach Treatment" on an ordinary
+  // pest catalog row) must not resurrect the match the catalog family
+  // check just rejected.
+  const slugFields = (row.catalog_service_key || row.catalog_service_name)
+    ? [row.catalog_service_key, row.catalog_service_name]
+    : [row.service_type];
+  for (const field of slugFields) {
+    const slug = String(field || '').toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (slug && !BROAD_ADOPTION_FAMILY_KEYS.has(slug) && familyKeys.has(slug)) return true;
+  }
+  return false;
+}
+
 async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts = {}) {
   const conn = opts.database || db;
   const requestedId = opts.appointmentId ? String(opts.appointmentId) : '';
@@ -472,48 +806,129 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   const today = etDateString();
   if (!linkedId && !estimate.id) return null;
 
+  // Column refs are table-qualified: the customer-wide fallback left-joins
+  // `services` for catalog identity (codex #3228 r5), and unqualified `id`
+  // in ORDER BY would be ambiguous on that query.
   const baseQuery = () => conn('scheduled_services')
-    .whereIn('status', ['pending', 'confirmed'])
-    .where('scheduled_date', '>=', today)
+    .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+    .where('scheduled_services.scheduled_date', '>=', today)
     .where((builder) => {
       if (estimate.customer_id) {
-        builder.whereNull('customer_id').orWhere('customer_id', estimate.customer_id);
+        builder.whereNull('scheduled_services.customer_id')
+          .orWhere('scheduled_services.customer_id', estimate.customer_id);
       } else {
-        builder.whereNull('customer_id');
+        builder.whereNull('scheduled_services.customer_id');
       }
     })
     .andWhere((builder) => {
-      builder.whereNull('reservation_expires_at')
-        .orWhereRaw('reservation_expires_at > NOW()');
+      builder.whereNull('scheduled_services.reservation_expires_at')
+        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
     })
-    .orderBy('scheduled_date', 'asc')
-    .orderBy('window_start', 'asc');
+    // Callback visits are NEVER adoption candidates (codex #3228 r21):
+    // is_callback=true intentionally makes completion treat the visit as
+    // FREE (the covered re-service contract), so adopting one would reprice
+    // a free callback while the sold billable first application is never
+    // represented by a normal appointment.
+    .andWhere((builder) => {
+      builder.whereNull('scheduled_services.is_callback')
+        .orWhere('scheduled_services.is_callback', false);
+    })
+    .orderBy('scheduled_services.scheduled_date', 'asc')
+    .orderBy('scheduled_services.window_start', 'asc')
+    // Unique final key: scheduled_date + window_start is not a total order
+    // (bundled/multi-property visits tie), and the fallback below paginates —
+    // without a stable tiebreaker LIMIT/OFFSET pages can repeat or skip tied
+    // rows and miss a same-family appointment (codex #3228 r2).
+    .orderBy('scheduled_services.id', 'asc');
 
   const q = baseQuery()
+    // Catalog identity travels with the linked row too (codex #3228 r8) —
+    // its family gate below must classify the same catalog-first way the
+    // customer-wide fallback does.
+    .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+    .select(
+      'scheduled_services.*',
+      'services.service_key as catalog_service_key',
+      'services.name as catalog_service_name',
+    )
     .where((builder) => {
-      if (linkedId) builder.where('id', linkedId);
-      if (estimate.id) builder.orWhere('source_estimate_id', estimate.id);
+      if (linkedId) builder.where('scheduled_services.id', linkedId);
+      if (estimate.id) builder.orWhere('scheduled_services.source_estimate_id', estimate.id);
     });
 
-  if (requestedId) q.where('id', requestedId);
+  if (requestedId) q.where('scheduled_services.id', requestedId);
   let row = await q.first();
 
-  // Customer-wide fallback (gated): a customer who already has ANY upcoming
-  // appointment shouldn't be pushed through the slot picker again — the
-  // acceptance contract swaps the scheduler for payment options instead.
-  // Estimate-linked rows always take precedence (query above). Restricted to
-  // rows this customer owns that no other estimate has claimed
-  // (source_estimate_id null) and that aren't an in-flight reservation hold,
-  // so an offered row can't 409 at accept time — the accept-path UPDATE
-  // requires these same conditions.
+  // The family/mode gate applies to ESTIMATE-LINKED rows too (codex #3228
+  // r8 P1): a mixed estimate whose linked row is a recurring-family visit
+  // must not adopt it when the customer selects a cross-family one-time
+  // option — acceptance would commit the linked row, overwrite its
+  // estimated_price, and the selected one-time service would get no booking.
+  // The gate is scoped by the same serviceMode(s) the caller passed. Legacy
+  // exemption: when the estimate has NO derivable service families under ANY
+  // mode (guarantee-only / invoice-only shapes with no service lists), the
+  // explicit link keeps its historical precedence.
+  const anyModeFamilyKeys = new Set([
+    ...estimateFamilyKeysForAdoption(estimate, data, { serviceMode: 'recurring' }),
+    ...estimateFamilyKeysForAdoption(estimate, data, { serviceMode: 'one_time' }),
+  ]);
+  const familyKeys = estimateFamilyKeysForAdoption(estimate, data, {
+    serviceMode: opts.serviceMode,
+    serviceModes: opts.serviceModes,
+  });
+  if (row && anyModeFamilyKeys.size > 0 && !appointmentMatchesEstimateFamily(row, familyKeys)) {
+    row = null;
+  }
+
+  // Customer-wide fallback (gated): a customer who already has an upcoming
+  // appointment for the SAME service family shouldn't be pushed through the
+  // slot picker again — the acceptance contract swaps the scheduler for
+  // payment options instead. Estimate-linked rows always take precedence
+  // (query above). Restricted to rows this customer owns that no other
+  // estimate has claimed (source_estimate_id null) and that aren't an
+  // in-flight reservation hold, so an offered row can't 409 at accept time —
+  // the accept-path UPDATE requires these same conditions.
+  //
+  // FAMILY-SCOPED (owner case 2026-08-05): this fallback used to offer ANY
+  // upcoming appointment, so an existing quarterly-pest customer accepting a
+  // tree & shrub ADD-ON plan had the pest visit adopted as the add-on's
+  // first visit — the slot picker never rendered, the accept stamped the
+  // add-on's per-visit price over the pest visit's price, and the
+  // duplicate-series guard then matched the (pest) reserved row's family so
+  // no tree & shrub series was ever seeded. Only a row whose service family
+  // this estimate actually covers may stand in for its first visit;
+  // cross-family accepts fall through to the standard slot pick.
   if (!row && estimate.customer_id
     && featureGates.isEnabled('estimateExistingApptCustomerWide')) {
-    const cw = baseQuery()
-      .where('customer_id', estimate.customer_id)
-      .whereNull('source_estimate_id')
-      .whereNull('reservation_expires_at');
-    if (requestedId) cw.where('id', requestedId);
-    row = await cw.first();
+    if (familyKeys.size > 0) {
+      // Page through the candidate list until a same-family row appears — a
+      // fixed pre-filter LIMIT would hide a valid later appointment behind a
+      // wall of seeded cross-family visits (codex #3228 r1). The family
+      // filter can't move into SQL without a second, divergent copy of the
+      // service classifier, so pagination does the bounding instead.
+      const CANDIDATE_PAGE_SIZE = 50;
+      for (let offset = 0; !row; offset += CANDIDATE_PAGE_SIZE) {
+        const cw = baseQuery()
+          .where('customer_id', estimate.customer_id)
+          .whereNull('source_estimate_id')
+          .whereNull('reservation_expires_at')
+          // Candidate rows carry their catalog identity so classification
+          // survives stale service_type labels (codex #3228 r5).
+          .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+          .select(
+            'scheduled_services.*',
+            'services.service_key as catalog_service_key',
+            'services.name as catalog_service_name',
+          );
+        if (requestedId) cw.where('scheduled_services.id', requestedId);
+        const candidates = await cw.limit(CANDIDATE_PAGE_SIZE).offset(offset);
+        if (!Array.isArray(candidates) || candidates.length === 0) break;
+        row = candidates.find(
+          (cand) => appointmentMatchesEstimateFamily(cand, familyKeys),
+        ) || null;
+        if (candidates.length < CANDIDATE_PAGE_SIZE) break;
+      }
+    }
   }
 
   if (!row) return null;
@@ -7535,7 +7950,9 @@ async function handleEstimateView(req, res, next) {
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
-    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData);
+    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
+      serviceModes: adoptionServiceModesForContract(estimate, estData),
+    });
     // Resolved ONCE for this request and handed to every consumer below (the
     // bundle's flags, the hero fork) — a second lookup could answer
     // differently and put contradictory billing units on the same page
@@ -7870,7 +8287,10 @@ router.put('/:token/accept', async (req, res, next) => {
       return res.status(409).json({ error: 'No appointment is needed for this renewal — accept without selecting a slot.' });
     }
     const existingAppointmentRow = existingAppointmentId
-      ? await findLinkedUpcomingAppointment(estimate, estData, { appointmentId: existingAppointmentId })
+      ? await findLinkedUpcomingAppointment(estimate, estData, {
+        appointmentId: existingAppointmentId,
+        serviceMode,
+      })
       : null;
     if (existingAppointmentId && !existingAppointmentRow) {
       return res.status(409).json({ error: 'existing appointment is not linked to this active estimate' });
@@ -9056,6 +9476,34 @@ router.put('/:token/accept', async (req, res, next) => {
             throw commitErr;
           }
         } else {
+          // Revalidate the adopted row UNDER LOCK (codex #3228 r23): the
+          // preflight family/callback checks ran outside this transaction,
+          // and staff can relabel or re-link the appointment (or a callback
+          // flow can claim it) in between — the update below rechecks
+          // status/date/ownership/claim but not the service identity. The
+          // FOR UPDATE reload serializes against such writes; a row that
+          // has become cross-family or a free callback aborts the adopt
+          // with the same re-pick 409 as a lost claim.
+          const lockedAdoptRow = await trx('scheduled_services')
+            .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+            .select(
+              'scheduled_services.*',
+              'services.service_key as catalog_service_key',
+              'services.name as catalog_service_name',
+            )
+            .where('scheduled_services.id', existingAppointmentRow.id)
+            .forUpdate('scheduled_services')
+            .first();
+          const lockedAnyModeKeys = new Set([
+            ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'recurring' }),
+            ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'one_time' }),
+          ]);
+          const lockedFamilyKeys = estimateFamilyKeysForAdoption(estimate, estData, { serviceMode });
+          const lockedFamilyOk = lockedAnyModeKeys.size === 0
+            || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys);
+          if (!lockedAdoptRow || lockedAdoptRow.is_callback === true || !lockedFamilyOk) {
+            assertExistingAppointmentUpdateApplied(0);
+          }
           const updates = {
             source_estimate_id: estimate.id,
             customer_id: existingAppointmentRow.customer_id || customerId,
@@ -9908,6 +10356,22 @@ router.put('/:token/accept', async (req, res, next) => {
         ).catch((e) => logger.error(`[estimate-accept] commercial-schedule admin notify failed: ${e.message}`));
       } catch (e) {
         logger.error(`[estimate-accept] commercial-schedule admin notify setup failed: ${e.message}`);
+      }
+    }
+    // Deferred combined-tier upgrade review notification — same post-commit
+    // contract as the commercial-schedule notify above.
+    if (acceptConversion?.tierUpgradeNotification) {
+      const tierNotify = acceptConversion.tierUpgradeNotification;
+      try {
+        const NotificationService = require('../services/notification-service');
+        void NotificationService.notifyAdmin(
+          tierNotify.type,
+          tierNotify.title,
+          tierNotify.body,
+          tierNotify.options,
+        ).catch((e) => logger.error(`[estimate-accept] tier-upgrade admin notify failed: ${e.message}`));
+      } catch (e) {
+        logger.error(`[estimate-accept] tier-upgrade admin notify setup failed: ${e.message}`);
       }
     }
     // The standard conversion runs in-transaction with skipMembershipEmail,
@@ -12622,6 +13086,31 @@ function resolveEstimateInvoiceMode(estimate = {}, estData = null) {
 
 function defaultServiceModeForEstimate(estData, estimate = {}) {
   return isStructuralOneTimeOnlyEstimate(estData, estimate) ? 'one_time' : 'recurring';
+}
+
+// Every service mode the customer can select on the public estimate page.
+// The /data acceptance contract is built ONCE, so an existing-appointment
+// offer must hold under all of them — a contract valid only under the
+// default mode dead-ends the alternate mode client-side (codex #3228 r5:
+// the accept 409s while the slot picker stays hidden).
+function adoptionServiceModesForContract(estimate = {}, estData = null) {
+  const def = defaultServiceModeForEstimate(estData, estimate);
+  // The one_time mode joins the intersection only when the customer can
+  // ACTUALLY select it (codex #3228 r10): the SSR page hides the toggle and
+  // the accept handler rejects requestedOneTime when the resolved
+  // alternative price is zero — including an unselectable mode (whose
+  // family set may be empty or setup-fee-only) would empty the intersection
+  // and push a valid same-family recurring adoption to the slot picker.
+  // Same resolved-availability condition as the accept handler.
+  let canToggleOneTime = !!(estimate.show_one_time_option || estimate.showOneTimeOption);
+  if (canToggleOneTime) {
+    try {
+      canToggleOneTime = Number(resolveAcceptOneTimeTotal(estimate, null)) > 0;
+    } catch {
+      canToggleOneTime = false;
+    }
+  }
+  return def === 'recurring' && canToggleOneTime ? ['recurring', 'one_time'] : [def];
 }
 
 function shouldPersistPestOnlyRecurringChoice(estimate = {}, estData = {}) {
@@ -18900,7 +19389,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
     const trenchingReviewBeforeBooking = !quoteRequirement.quoteRequired
       && estimateTrenchingReviewRequired(estimateDataForIntelligence);
-    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence);
+    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence, {
+      serviceModes: adoptionServiceModesForContract(estimate, estimateDataForIntelligence),
+    });
     // Narrow low-confidence commercial recurring estimate (the population whose
     // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
     // its accept, whatever the billing mode — invoice-mode holds the first-
@@ -19428,6 +19919,9 @@ module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
 // Test hooks (audit 2026-07-28): curve resolution for unstamped pest replays
 // and the mirrored-section label rule.
 module.exports.extractEngineInputs = extractEngineInputs;
+module.exports.estimateFamilyKeysForAdoption = estimateFamilyKeysForAdoption;
+module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFamily;
+module.exports.adoptionServiceModesForContract = adoptionServiceModesForContract;
 module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
