@@ -28,9 +28,15 @@ exports.up = async (knex) => {
   await knex.raw(
     'CREATE INDEX IF NOT EXISTS idx_messaging_audit_appointment_id ON messaging_audit_log (appointment_id) WHERE appointment_id IS NOT NULL',
   );
+  // The 15-minute stale-claim sweep filters/orders by (state, at) — without
+  // this partial index it would scan the whole reminders table every tick.
+  await knex.raw(
+    "CREATE INDEX IF NOT EXISTS idx_appt_reminders_cancel_pending ON appointment_reminders (cancellation_notice_at) WHERE cancellation_notice_state = 'pending'",
+  );
 };
 
 exports.down = async (knex) => {
+  await knex.raw('DROP INDEX IF EXISTS idx_appt_reminders_cancel_pending');
   await knex.raw('DROP INDEX IF EXISTS idx_messaging_audit_appointment_id');
   await knex.schema.alterTable('appointment_reminders', (t) => {
     t.dropColumn('cancellation_notice_at');

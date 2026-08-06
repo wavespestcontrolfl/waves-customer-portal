@@ -658,7 +658,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
           entity_type: 'scheduled_service',
           entity_id: serviceId,
         });
-      }, 'appointment_rescheduled', 'appointment_confirmation', {}, {
+      }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: serviceId }, {
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.

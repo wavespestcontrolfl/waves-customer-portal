@@ -759,7 +759,7 @@ async function isLandline(customerId, phone) {
 
 // ── Send SMS with landline guard ──
 
-async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}, preDispatchCheck = null) {
+async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}, preDispatchCheck = null, sendOutcome = null) {
   if (!body) {
     logger.warn(`[appt-remind] Empty SMS body for customer ${customerId}, skipping ${messageType}`);
     return false;
@@ -792,6 +792,14 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // the appointment moved or went terminal while validators ran.
     ...(typeof preDispatchCheck === 'function' ? { preDispatchCheck } : {}),
   });
+  // Callers that must distinguish transient provider failures (Twilio
+  // 429/5xx/timeouts — sendCustomerMessage returns { sent:false,
+  // retryable:true }) from deterministic non-delivery pass an out-param:
+  // the boolean return alone collapses that distinction (codex #3233 r6).
+  if (sendOutcome && typeof sendOutcome === 'object') {
+    sendOutcome.retryable = result.retryable === true;
+    sendOutcome.blockedCode = result.code || null;
+  }
   if (result.blocked || result.sent === false) {
     logger.warn(`[appt-remind] SMS blocked for customer ${customerId}: ${result.code || 'unknown'} ${result.reason || ''}`);
     return false;
@@ -836,7 +844,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     const identityTrustLevel = isServiceContactRole(contact.role)
       ? 'service_contact_authorized'
       : 'phone_matches_customer';
-    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra, sendOptions.preDispatchCheck || null);
+    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra, sendOptions.preDispatchCheck || null, sendOptions.sendOutcome || null);
     sentAny = sentAny || sent;
   }
   return sentAny;
@@ -2374,6 +2382,7 @@ const AppointmentReminders = {
           const date = formatDate(apptTime);
 
           const serviceLabel = smsServiceLabelStored(record.service_type);
+          const sendOutcome = {};
           const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
             return renderRequiredTemplate('appointment_cancelled', {
@@ -2386,13 +2395,32 @@ const AppointmentReminders = {
               entity_type: 'scheduled_service',
               entity_id: scheduledServiceId,
             });
-          }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId });
+          }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId }, {
+            sendOutcome,
+            // Lease-ownership recheck AT the provider handoff (codex r6):
+            // customer lookup, prefs, rendering, and the line lookup all
+            // run between the claim check and dispatch — a worker paused
+            // past the 15-minute lease must not send after a sweep
+            // reclaim.
+            preDispatchCheck: async () => {
+              const own = await db('appointment_reminders')
+                .where({ id: record.id, cancellation_notice_state: 'pending' })
+                .where('cancellation_notice_at', noticeToken)
+                .first('id');
+              return own
+                ? { ok: true }
+                : { ok: false, code: 'notice_claim_lost', reason: 'cancellation-notice lease was reclaimed' };
+            },
+          });
           if (noticeSent) {
             logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id}`);
             await finalizeClaim(true);
           } else {
-            // Release for retry unless a recipient was already accepted.
-            await finalizeClaim(false);
+            // Transient provider failure keeps the pending lease for the
+            // sweep; deterministic non-delivery releases (codex r6 — the
+            // provider layer catches 429/5xx/timeouts, so they arrive
+            // here as sent:false + retryable, never as a throw).
+            await finalizeClaim(false, { retryable: sendOutcome.retryable === true });
           }
           reportOutcome(noticeSent, noticeSent
             ? null
@@ -2556,43 +2584,74 @@ const AppointmentReminders = {
         .where('ss.status', 'cancelled')
         .orderBy('ar.cancellation_notice_at', 'asc')
         .limit(20)
-        .select('ar.id as reminder_id', 'ar.scheduled_service_id');
-      let settled = 0;
+        .select('ar.id as reminder_id', 'ar.scheduled_service_id', 'ar.customer_id',
+          'ar.cancellation_notice_at as claim_at');
+      // Group by (customer, original claim timestamp): a series
+      // cancellation claims every target with ONE shared token, so rows
+      // sharing both are one obligation. Recovering them independently
+      // would send N per-visit texts where the customer was owed one
+      // combined notice (codex #3233 r6) — instead the group settles as a
+      // unit: one representative message (or silent close), siblings
+      // finalized as suppressed. Single visits form groups of one and
+      // behave exactly as before.
+      const groups = new Map();
       for (const row of stale) {
+        const key = `${row.customer_id || 'none'}|${new Date(row.claim_at).toISOString()}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(row);
+      }
+      let settled = 0;
+      for (const group of groups.values()) {
         const token = new Date();
+        const reminderIds = group.map((g) => g.reminder_id);
+        const serviceIds = group.map((g) => String(g.scheduled_service_id));
         const reclaimed = await db('appointment_reminders')
-          .where({ id: row.reminder_id, cancellation_notice_state: 'pending' })
+          .whereIn('id', reminderIds)
+          .where({ cancellation_notice_state: 'pending' })
           .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
           .update({ cancellation_notice_at: token, updated_at: token });
         if (!reclaimed) continue;
         // A stale lease can already carry an ACCEPTED cancellation send
         // (provider acceptance is audited before the claim finalizes — a
         // crash or failed marker update in that window leaves pending +
-        // accepted). Finalize as sent WITHOUT redispatching (codex r5).
+        // accepted; series sends stamp their representative visit).
+        // Finalize WITHOUT redispatching (codex r5).
         const alreadyAccepted = Boolean(await db('messaging_audit_log')
-          .where({ appointment_id: String(row.scheduled_service_id), purpose: 'appointment_cancellation' })
+          .whereIn('appointment_id', serviceIds)
+          .where({ purpose: 'appointment_cancellation' })
           .whereNotNull('sent_at')
           .whereRaw("provider_message_id ~ '^(SM|MM)'")
           .first('id'));
         if (alreadyAccepted) {
           await db('appointment_reminders')
-            .where({ id: row.reminder_id, cancellation_notice_state: 'pending' })
+            .whereIn('id', reminderIds)
+            .where({ cancellation_notice_state: 'pending' })
             .where('cancellation_notice_at', token)
             .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
-          settled += 1;
+          settled += group.length;
           continue;
         }
         const delivered = Boolean(await db('messaging_audit_log')
-          .where({ appointment_id: String(row.scheduled_service_id) })
+          .whereIn('appointment_id', serviceIds)
           .whereIn('purpose', ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'])
           .whereNotNull('sent_at')
           .whereRaw("provider_message_id ~ '^(SM|MM)'")
           .first('id'));
-        await this.handleCancellation(row.scheduled_service_id, {
+        const [representative, ...siblings] = group;
+        if (siblings.length) {
+          // Fenced: consolidate the group onto the representative — the
+          // one message (or silent close) below covers all of them.
+          await db('appointment_reminders')
+            .whereIn('id', siblings.map((g) => g.reminder_id))
+            .where({ cancellation_notice_state: 'pending' })
+            .where('cancellation_notice_at', token)
+            .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
+        }
+        await this.handleCancellation(representative.scheduled_service_id, {
           sendNotification: delivered,
           claimToken: token,
         });
-        settled += 1;
+        settled += group.length;
       }
       if (settled) logger.info(`[appt-remind] cancellation-claim sweep settled ${settled} stale lease(s)`);
       return { swept: settled };
@@ -2694,7 +2753,10 @@ const AppointmentReminders = {
             { first_name: firstName, service_type: serviceLabel, scope: scopeText },
             { workflow: 'appointment_series_cancelled', entity_type: 'scheduled_service', entity_id: representativeScheduledServiceId || record.scheduled_service_id },
           );
-        }, 'appointment_series_cancelled', 'appointment_cancellation');
+        }, 'appointment_series_cancelled', 'appointment_cancellation',
+        // Representative-visit linkage: the sweep's accepted-cancellation
+        // check recognizes the combined send through this audit row.
+        { scheduled_service_id: representativeScheduledServiceId || record.scheduled_service_id });
         if (noticeSent) {
           logger.info(`[appt-remind] Series cancellation notice sent for customer ${record.customer_id} - ${ids.length} appointment(s)`);
         }
