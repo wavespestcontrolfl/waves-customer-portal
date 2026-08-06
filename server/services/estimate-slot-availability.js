@@ -1843,6 +1843,8 @@ module.exports = {
   invalidateEstimate,
   invalidateAllEstimates,
   resolveEstimateSlotProfile,
+  // Shared with slot-reservation so holds can be geo-stamped as route anchors.
+  resolveEstimateCoords,
   seasonalSelectionProfile,
   inMosquitoSeason,
   nextSeasonStartFrom,
