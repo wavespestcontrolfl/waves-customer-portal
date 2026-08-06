@@ -561,7 +561,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
           delivered = Boolean(await db('appointment_reminders')
             .where({ scheduled_service_id: jobId })
             // Self-calibrating epoch (codex r27) — see the sweep's leg.
-            .whereRaw("created_at < (SELECT COALESCE(MIN(created_at), 'infinity') FROM messaging_audit_log WHERE appointment_id IS NOT NULL)")
+            .whereRaw("created_at < (SELECT COALESCE(MIN(created_at), 'infinity') FROM messaging_audit_log WHERE appointment_id IS NOT NULL AND purpose IN ('appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'))")
             .where(function announced() {
               this.where('reminder_72h_sent', true)
                 .orWhere('reminder_24h_sent', true)

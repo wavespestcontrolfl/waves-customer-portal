@@ -2955,7 +2955,7 @@ const AppointmentReminders = {
             // Self-calibrating epoch (codex r27): "legacy" = created
             // before the first appointment-linked audit row ever written,
             // so a late deploy or rolling old pod cannot misclassify.
-            .whereRaw("created_at < (SELECT COALESCE(MIN(created_at), 'infinity') FROM messaging_audit_log WHERE appointment_id IS NOT NULL)")
+            .whereRaw("created_at < (SELECT COALESCE(MIN(created_at), 'infinity') FROM messaging_audit_log WHERE appointment_id IS NOT NULL AND purpose IN ('appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'))")
             .where(function announced() {
               this.where('reminder_72h_sent', true)
                 .orWhere('reminder_24h_sent', true)
