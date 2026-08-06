@@ -537,3 +537,18 @@ describe('no-need stand-downs and per-clause permission (codex r49)', () => {
     expect(hasRescheduleOrAwayIntent("I won't be home tomorrow but you can use the gate code")).toBe(false);
   });
 });
+
+describe('follow-up asks, conjunction clauses, availability rejections (codex r50)', () => {
+  test('missed yesterday plus can-we-reschedule flags', () => {
+    expect(hasRescheduleOrAwayIntent("I missed yesterday's appointment. Can we reschedule for Friday?")).toBe(true);
+  });
+  test('permission but away-next-week flags', () => {
+    expect(hasRescheduleOrAwayIntent("Please use the gate code for today's service but I won't be home next week")).toBe(true);
+  });
+  test('tomorrow doesnt work flags', () => {
+    expect(hasRescheduleOrAwayIntent("Tomorrow doesn't work for us")).toBe(true);
+  });
+  test('friday wont work flags', () => {
+    expect(hasRescheduleOrAwayIntent("Friday won't work")).toBe(true);
+  });
+});

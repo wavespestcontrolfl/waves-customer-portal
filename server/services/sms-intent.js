@@ -84,7 +84,7 @@ function isSmsReaction(body) {
 // a false positive costs one owner bell, a false negative is the 2026-08-05
 // incident class where a 12:30am "can we reschedule?" text was followed by
 // the visit running (and invoicing) on schedule.
-const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|(?:miss(?:ing)?|delay(?:ing)?)\b\s+(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service)\b|(?:put|hold)\s+off\s+(?:on\s+)?(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service|treatment)s?\b|different\s+(?:day|date|time)|another\s+(?:day|date|time)|(?:can|could)\s+we\s+(?:do|move|push|change)\s+(?:it|this|that|the\s+\w+)?\s*(?:to|till|until|for)\s+(?:next|another|a\s+different|later|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day)|skip\s+(?:(?:this|the|my|that|our)\s+)?(?:\w+\s+)?(?:one|visit|service|treatment|month|week|appointment|appt)|skip\s+(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+week)|(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+(?:week|month)|(?:this\s+)?(?:morning|afternoon|evening))\s+instead)\b/i;
+const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|(?:miss(?:ing)?|delay(?:ing)?)\b\s+(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service)\b|(?:put|hold)\s+off\s+(?:on\s+)?(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service|treatment)s?\b|different\s+(?:day|date|time)|another\s+(?:day|date|time)|(?:can|could)\s+we\s+(?:do|move|push|change)\s+(?:it|this|that|the\s+\w+)?\s*(?:to|till|until|for)\s+(?:next|another|a\s+different|later|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day)|skip\s+(?:(?:this|the|my|that|our)\s+)?(?:\w+\s+)?(?:one|visit|service|treatment|month|week|appointment|appt)|skip\s+(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+week)|(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+(?:week|month)|(?:this\s+)?(?:morning|afternoon|evening))\s+instead|(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+week|that\s+(?:day|date|time))\b[^.!?]{0,10}\b(?:doesn'?t|does\s+not|won'?t|will\s+not)\s+work)\b/i;
 // Move-verbs only count with a displacement preposition or an appointment
 // noun nearby — bare "moving" ("we're moving the couch") must not fire.
 // Move-verbs need an APPOINTMENT object or an explicit temporal target —
@@ -136,7 +136,7 @@ function hasRescheduleOrAwayIntent(body) {
   // A fresh cancel ask outranks the past-report veto ("Thanks for
   // canceling last week. I need to cancel Friday too") — same override
   // the done-forms clause uses (codex r22/r44).
-  const freshCancel = /\b(?:need|want|like|have)\s+to\s+cancel|\bplease\s+cancel|\bcancel\w*(?:\s+\w+){0,2}\s+again\b/i.test(text);
+  const freshCancel = /\b(?:need|want|like|have)\s+to\s+cancel|\bplease\s+cancel|\b(?:can|could)\s+(?:we|you|i)\s+(?:please\s+)?cancel|\bcancel\w*(?:\s+\w+){0,2}\s+again\b/i.test(text);
   const cancelAsk = CANCEL_RE.test(text) && CANCEL_CONTEXT_RE.test(text)
     && !(pastReport && !freshCancel)
     && (freshCancelAppt || (!CANCEL_NEGATION_RE.test(text) && !CANCEL_NONAPPT_RE.test(text)))
@@ -163,6 +163,7 @@ function hasRescheduleOrAwayIntent(body) {
   // forward with the treatment" is not.
   const GUARDED_MOVE = "(?:mov(?:e|ing)|skip|re-?book|chang(?:e|ing))\\b[^.!?]{0,25}\\b(?:appointment|appt|visit|service|us|me|today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\\s+(?:week|month)|this\\s+week)\\b";
   const freshAsk = needAsk
+    || /\b(?:can|could)\s+(?:we|you|i)\s+(?:please\s+)?(?:re-?schedul|postpon)/i.test(text)
     || /\bplease\s+(?:re-?schedul|postpon)|\bactually\b[^.!?]{0,30}\b(?:please|can|could|need|want)\b[^.!?]{0,20}\b(?:re-?schedul|postpon)|\b(?:re-?schedul|postpon)\w*(?:\s+\w+){0,2}\s+again\b/i.test(text)
     || new RegExp(`\\bplease\\s+${GUARDED_MOVE}|\\bactually\\b[^.!?]{0,30}\\b(?:please|can|could|need|want)\\b[^.!?]{0,20}\\b${GUARDED_MOVE}`, 'i').test(text);
   // A fresh ask whose OBJECT is explicitly the appointment (codex r41):
@@ -208,7 +209,28 @@ function hasRescheduleOrAwayIntent(body) {
   // won't be home next week" carries a fresh, unpermissioned absence.
   if (pastAway) return false;
   const clauses = text.split(/[.!?;\n]+/);
-  return clauses.some((clause) => AWAY_RE.test(clause) && !AWAY_PERMISSION_RE.test(clause));
+  return clauses.some((clause) => {
+    const awayMatch = AWAY_RE.exec(clause);
+    if (!awayMatch) return false;
+    const permMatch = AWAY_PERMISSION_RE.exec(clause);
+    if (!permMatch) return true;
+    // Both in one clause: permission governs the away statement only when
+    // they share a temporal target (codex r50) — "use the gate code for
+    // TODAY's service but I won't be home NEXT WEEK" is a fresh,
+    // unpermissioned absence.
+    const TEMPORAL = /(today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+week|this\s+week|next\s+month)/i;
+    const nearTemporal = (idx) => {
+      // The governing time usually FOLLOWS the phrase — search forward
+      // first, backward as fallback.
+      const fwd = clause.slice(idx, idx + 70).match(TEMPORAL);
+      if (fwd) return fwd[1].toLowerCase().replace(/\s+/g, ' ');
+      const back = clause.slice(Math.max(0, idx - 40), idx).match(TEMPORAL);
+      return back ? back[1].toLowerCase().replace(/\s+/g, ' ') : null;
+    };
+    const awayT = nearTemporal(awayMatch.index);
+    const permT = nearTemporal(permMatch.index);
+    return Boolean(awayT && permT && awayT !== permT);
+  });
 }
 
 function escapeRe(s) {
