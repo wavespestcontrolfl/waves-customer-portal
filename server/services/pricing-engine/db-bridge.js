@@ -787,8 +787,14 @@ async function syncPreSlabContainerCostsFromCatalog(db) {
   }
 }
 
+let _syncInFlight = false;
+function isSyncInFlight() {
+  return _syncInFlight;
+}
+
 async function syncConstantsFromDB(dbInstance) {
   const db = dbInstance || require('../../models/db');
+  _syncInFlight = true;
   let constantsSnapshot = null;
 
   try {
@@ -1787,10 +1793,12 @@ async function syncConstantsFromDB(dbInstance) {
     assertValidPestPricingConfig(constants);
 
     _lastSync = Date.now();
+    _syncInFlight = false;
     console.log(`[pricing-engine] Synced ${Object.keys(config).length} pricing configs from DB`);
     return true;
   } catch (err) {
     restorePricingConstants(constantsSnapshot);
+    _syncInFlight = false;
     console.error('[pricing-engine] DB sync failed, using defaults:', err.message);
     return false;
   }
@@ -1813,6 +1821,7 @@ function invalidatePricingConfigCache() {
 
 module.exports = {
   getLastSyncAt,
+  isSyncInFlight,
   syncConstantsFromDB,
   needsSync,
   invalidatePricingConfigCache,

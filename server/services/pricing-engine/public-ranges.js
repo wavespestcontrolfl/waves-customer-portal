@@ -131,7 +131,12 @@ function buildRows() {
     }
   };
   const b = constants.RODENT.bundles || {};
-  const rodentBundleTerms = `Package discounts (live terms): trapping+exclusion ${Math.round(((b.trapExclusion || {}).discount || 0) * 100)}% (floor $${Math.round((b.trapExclusion || {}).floor || 0)}), trapping+sanitation ${Math.round(((b.trapSanitation || {}).discount || 0) * 100)}% (floor $${Math.round((b.trapSanitation || {}).floor || 0)}), full remediation ${Math.round(((b.fullRemediation || {}).discount || 0) * 100)}% (tiered floors from $${Math.round(((b.fullRemediation || {}).floors || {}).light || 0)}).`;
+  // NOTE: only trapping+sanitation is advertised — the live bundle selector
+  // matches service === 'exclusion', which the active V2 exclusion pricer
+  // ('rodent_exclusion') never emits, so exclusion-inclusive bundle
+  // discounts do not currently apply on exact quotes (engine defect flagged
+  // to the owner; widen this note only after the selector is fixed).
+  const rodentBundleTerms = `Package discount (live terms): trapping+sanitation ${Math.round(((b.trapSanitation || {}).discount || 0) * 100)}% (floor $${Math.round((b.trapSanitation || {}).floor || 0)}); other combinations are quoted at booking.`;
   const maxWaveGuardPct = Math.round(
     Math.max(...Object.values(constants.WAVEGUARD.tiers).map((t) => t.discount || 0)) * 100);
   let bundleMemo = null;
@@ -437,11 +442,11 @@ function buildRows() {
         { advancedWireMeshPoints: 10, meshConcreteLF: 50 },
         { standardWireMeshPoints: 10, advancedWireMeshPoints: 10, standardBirdBoxes: 2, tileHighBirdBoxes: 2, customBirdBoxes: 2, meshSoftLF: 30, meshConcreteLF: 30 },
         // Larger recorded scopes stay directly priced (no quote boundary).
-        { advancedWireMeshPoints: 40 },
+        { advancedWireMeshPoints: 50 },
       ],
       (opts) => sp.priceRodentExclusionV2(opts),
       (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : (r.total ?? r.price))),
-    notes: `Scope set by inspection findings. The low end reflects small jobs with the inspection fee waived (service opt-in or qualifying totals); otherwise the rodent inspection fee is included. ${rodentBundleTerms}`,
+    notes: `Scope set by inspection findings; components price per unit (standard point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.standard)}, advanced/roof point $${Math.round(constants.RODENT.exclusionV2.wireMeshPoints.advancedRoofHigh)}, soft mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.softRatePerLF)}/LF, concrete mesh $${Math.round(constants.RODENT.exclusionV2.linearMesh.hardRatePerLF)}/LF), so larger scopes extend beyond this range at those rates. The low end reflects small jobs with the inspection fee waived (service opt-in or qualifying totals); otherwise the rodent inspection fee is included. ${rodentBundleTerms}`,
   }));
 
   // Simple and complex-perimeter/structural profiles — the exact path
@@ -797,6 +802,7 @@ function buildRows() {
 
   add('trap_only_retainer', () => rangeRow({
     key: 'trap_only_retainer',
+    oneTimePerkKey: 'trap_only_retainer',
     name: 'Trap-Only Rodent Monitoring Retainer',
     unit: 'per month',
     // Both billing modes, annual prepay normalized to per-month.
@@ -870,7 +876,7 @@ function buildRows() {
 // route's, or an admin pricing-proposal approval — invalidates it) plus the
 // purchase-gate signature (gate flips change the row set). `refresh: true`
 // remains as an explicit override for tests/tools.
-const { getLastSyncAt } = require('./db-bridge');
+const { getLastSyncAt, isSyncInFlight } = require('./db-bridge');
 let cached = null;
 let cachedKey = null;
 
@@ -887,10 +893,14 @@ function computePublicPricingRanges({ refresh = false } = {}) {
   // sync stamp is unchanged across the sweep (bounded retries).
   let rows;
   let errors;
+  let sawInFlight = false;
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    const inFlightBefore = isSyncInFlight();
     ({ rows, errors } = buildRows());
+    const inFlightAfter = isSyncInFlight();
+    sawInFlight = sawInFlight || inFlightBefore || inFlightAfter;
     const after = gateSignature();
-    if (after === sig) break;
+    if (after === sig && !inFlightBefore && !inFlightAfter) break;
     sig = after;
   }
   cached = {
@@ -900,6 +910,15 @@ function computePublicPricingRanges({ refresh = false } = {}) {
     services: rows,
     errors,
   };
+  // A sweep that overlapped an in-flight sync may mix pre/post-edit
+  // constants (db-bridge mutates before stamping) — serve it, but don't
+  // cache it; the next request rebuilds from settled constants.
+  if (sawInFlight) {
+    const uncachedPayload = cached;
+    cached = null;
+    cachedKey = null;
+    return uncachedPayload;
+  }
   cachedKey = sig;
   return cached;
 }
