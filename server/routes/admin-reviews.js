@@ -824,8 +824,22 @@ router.post('/outreach/start-sequence', requireAdmin, async (req, res, next) => 
         // Take the SAME per-customer lock as /send-request so a Send + Cadence
         // double-click (or a batch overlapping a manual send) can't both read
         // the cap/cooldown before either Twilio log lands and double-ask.
-        const r = await runExclusive(`review-send:${customerId}`, () =>
-          ReviewService.startReviewSequence({ customerId, plan, startedBy: req.technicianId }),
+        const r = await runExclusive(`review-send:${customerId}`, async () => {
+          // No explicit plan from the operator → the same per-type
+          // classification as post-service enrollment (codex #3235 r19 P1):
+          // a recurring customer gets the one-touch plan here too. An
+          // explicit plan in the request body still wins.
+          let effectivePlan = plan;
+          let seriesFinal = false;
+          if (!effectivePlan) {
+            const resolved = await ReviewService.resolveSequencePlanForEnrollment({ customerId });
+            if (resolved.error) return { started: false, reason: 'plan_resolution_failed' };
+            if (resolved.skip) return { started: false, reason: resolved.skip };
+            effectivePlan = resolved.plan;
+            seriesFinal = resolved.seriesFinal === true;
+          }
+          return ReviewService.startReviewSequence({ customerId, plan: effectivePlan, seriesFinal, startedBy: req.technicianId });
+        },
         { recordHealth: false }); // per-customer lock, not a scheduled job
         if (r && r.skipped) {
           results.push({ customerId, started: false, reason: 'send_in_progress' });
