@@ -2961,7 +2961,11 @@ const AppointmentReminders = {
           // merged-slot survivor downgrades the outbox intent to the
           // evidence-gated default rather than texting against a live
           // visit.
-          cancellation_notice_state: db.raw("CASE WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') AND NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id) THEN 'pending_notify' ELSE 'pending' END"),
+          // Survivor rows are TERMINALLY suppressed (codex r13), matching
+          // the in-trx and post-commit classifications — a plain pending
+          // could still send on prior-reminder evidence (or ride a shared
+          // group's callerNotify) despite the live sibling visit.
+          cancellation_notice_state: db.raw("CASE WHEN NOT (NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id)) THEN 'suppressed' WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') THEN 'pending_notify' ELSE 'pending' END"),
           updated_at: new Date(),
         });
       // Apply outstanding caller intent to plain 'pending' markers first
