@@ -288,7 +288,7 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *           the two payloads broadcast (or, with an outer trx, the
  *           payloads that will broadcast on commit)
  */
-async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer }) {
+async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer, cancelNoticeToken }) {
   if (!jobId || !toStatus || fromStatus == null) {
     throw new Error(
       'transitionJobStatus: jobId, fromStatus, and toStatus are required'
@@ -404,7 +404,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // Savepoint-confined best-effort: a claim hiccup must never block the
     // cancellation itself (an error inside a Postgres trx aborts every
     // later statement, so the try/catch needs its own savepoint).
-    if (['pending', 'confirmed', 'en_route', 'on_site'].includes(String(toStatus || ''))) {
+    if (['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'].includes(String(toStatus || ''))) {
       // A visit transitioned BACK to a live status (compensated cancel,
       // re-arm) sheds any cancellation-notice marker — a stale terminal
       // 'suppressed'/'sent' would otherwise block the notice for a later
@@ -425,7 +425,10 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
         const { isEnabled } = require('../config/feature-gates');
         if (isEnabled('cancelNoticeHook')) {
           await t.transaction(async (sp) => {
-            const claimTs = new Date();
+            // Series routes pass ONE shared token for every target so the
+            // sweep sees a single group even if the process dies before
+            // the post-commit series handler coalesces them (codex r10).
+            const claimTs = cancelNoticeToken instanceof Date ? cancelNoticeToken : new Date();
             // 'caller_suppress' = the route will suppress (operator chose
             // no-text / consolidated comms): finalize terminally NOW so a
             // crash before the route's own call cannot let the sweep text

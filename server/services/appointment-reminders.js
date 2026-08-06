@@ -2336,7 +2336,7 @@ const AppointmentReminders = {
         .whereNotNull('sent_at')
         .whereRaw("provider_message_id ~ '^(SM|MM)'")
         .whereRaw(
-          "sent_at >= (SELECT COALESCE(MAX(h.created_at), '-infinity') FROM job_status_history h WHERE h.job_id = ? AND h.to_status = 'cancelled')",
+          "sent_at >= (SELECT COALESCE(MAX(h.transitioned_at), '-infinity') FROM job_status_history h WHERE h.job_id = ? AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')",
           [scheduledServiceId],
         )
         .first('id'));
@@ -2446,9 +2446,15 @@ const AppointmentReminders = {
                 .where({ id: record.id, cancellation_notice_state: 'pending' })
                 .where('cancellation_notice_at', noticeToken)
                 .first('id');
-              return own
+              if (!own) return { ok: false, code: 'notice_claim_lost', reason: 'cancellation-notice lease was reclaimed' };
+              // A restore during the post-commit gap means this notice is
+              // stale — the visit is live again (codex r10).
+              const svc = await db('scheduled_services')
+                .where({ id: scheduledServiceId })
+                .first('status');
+              return String(svc?.status) === 'cancelled'
                 ? { ok: true }
-                : { ok: false, code: 'notice_claim_lost', reason: 'cancellation-notice lease was reclaimed' };
+                : { ok: false, code: 'appointment_restored', reason: `appointment is now ${svc?.status || 'missing'}` };
             },
           });
           if (noticeSent) {
@@ -2677,7 +2683,7 @@ const AppointmentReminders = {
           // Current cancellation cycle only (codex r9) — see
           // acceptedCancellationAudit.
           .whereRaw(
-            "sent_at >= (SELECT COALESCE(MAX(h.created_at), '-infinity') FROM job_status_history h WHERE h.job_id = messaging_audit_log.appointment_id::uuid AND h.to_status = 'cancelled')",
+            "sent_at >= (SELECT COALESCE(MAX(h.transitioned_at), '-infinity') FROM job_status_history h WHERE h.job_id = messaging_audit_log.appointment_id::uuid AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')",
           )
           .first('id'));
         if (alreadyAccepted) {

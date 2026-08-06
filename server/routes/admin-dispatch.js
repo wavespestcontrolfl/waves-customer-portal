@@ -3367,6 +3367,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
           .select('id', 'status', 'customer_id', 'service_type');
         if (!targets.length) return; // nothing written — 409 after commit
 
+        const seriesClaimToken = new Date();
         for (const target of targets) {
           await transitionJobStatus({
             jobId: target.id,
@@ -3382,6 +3383,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
             // request flag) plus one combined notice — the hook must stand
             // down entirely, not race those claims.
             notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
+            cancelNoticeToken: seriesClaimToken,
           });
         }
 
