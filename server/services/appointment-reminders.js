@@ -2950,21 +2950,22 @@ const AppointmentReminders = {
             AND ss.status = 'cancelled'
         )`)
         .update({
-          cancellation_notice_at: db.raw("(SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')"),
+          cancellation_notice_at: db.raw("COALESCE((SELECT ok2.last_sent_at FROM ops_email_send_state ok2 WHERE ok2.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok2.last_sent_at >= now() - interval '72 hours'), (SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled'))"),
           // A durable caller-intent outbox row (written in the cancel's
           // own transaction when the in-trx claim savepoint failed —
-          // codex #3238 r7) upgrades the late claim to pending_notify so
-          // the operator's requested notice is not evidence-gated away.
-          cancellation_notice_state: db.raw("CASE WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cancel-notice-caller-intent-' || appointment_reminders.scheduled_service_id::text) THEN 'pending_notify' ELSE 'pending' END"),
+          // codex #3238 r7/r8) upgrades the late claim to pending_notify
+          // AND restores the shared group token stored as its value, so
+          // partial series failures rejoin their siblings' group. Only
+          // FRESH rows (within the 72h horizon) are honored.
+          cancellation_notice_state: db.raw("CASE WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') THEN 'pending_notify' ELSE 'pending' END"),
           updated_at: new Date(),
         });
-      // Consumed/stale caller-intent outbox keys age out with the same
-      // 72h horizon as the claims they can influence.
-      await db('ops_email_send_state')
-        .where('email_key', 'like', 'cancel-notice-caller-intent-%')
-        .where('last_sent_at', '<', db.raw("now() - interval '72 hours'"))
-        .del()
-        .catch(() => {});
+      // Consume outbox rows whose claim has been minted (codex r8) — a
+      // stale key must not upgrade a LATER cancellation cycle's claim —
+      // and age out anything past the 72h horizon.
+      await db.raw(
+        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND (ok.last_sent_at < now() - interval '72 hours' OR EXISTS (SELECT 1 FROM appointment_reminders ar WHERE 'cn-ci-' || ar.scheduled_service_id::text = ok.email_key AND ar.cancellation_notice_at IS NOT NULL))",
+      ).catch(() => {});
       }
 
       // Repair pass (codex r22): a restoration whose in-trx marker clear

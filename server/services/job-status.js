@@ -503,9 +503,14 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
         // must never roll back the transition.
         if (notifyCustomer === 'caller') {
           try {
+            // Key stays under email_key's varchar(60): 'cn-ci-' + UUID =
+            // 42 chars (codex r8). The VALUE is the shared claim token so
+            // partial series failures regroup with their successfully
+            // claimed siblings instead of splitting into two notices.
+            const outboxTs = cancelNoticeToken instanceof Date ? cancelNoticeToken : nextClaimTs();
             await t.transaction(async (osp) => {
               await osp('ops_email_send_state')
-                .insert({ email_key: `cancel-notice-caller-intent-${jobId}`, last_sent_at: osp.fn.now(), updated_at: osp.fn.now() })
+                .insert({ email_key: `cn-ci-${jobId}`, last_sent_at: outboxTs, updated_at: osp.fn.now() })
                 .onConflict('email_key')
                 .merge(['last_sent_at', 'updated_at']);
             });
@@ -615,7 +620,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             })
             .update({ cancellation_notice_at: callerTs, cancellation_notice_state: repairState, updated_at: callerTs });
           await db('ops_email_send_state')
-            .where({ email_key: `cancel-notice-caller-intent-${jobId}` })
+            .where({ email_key: `cn-ci-${jobId}` })
             .del()
             .catch(() => {});
           return;
