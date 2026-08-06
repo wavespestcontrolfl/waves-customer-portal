@@ -181,3 +181,43 @@ describe('estimator adapter forwards commercialPestCadence', () => {
     expect(input.isCommercial).toBe(false);
   });
 });
+
+// Public estimate page: solo commercial pest has no residential pestTiers, so
+// the pricing bundle used to fall back to the first V1 frequency entry —
+// always "Quarterly" — regardless of the sold cadence (codex #3240 r2 P1).
+describe('public frequency entry tracks the commercial pest cadence', () => {
+  const { commercialPestFrequenciesFromV1Services } = require('../routes/estimate-public');
+  const row = (visitsPerYear) => ({
+    service: 'commercial_pest',
+    name: 'Commercial Pest Control',
+    visitsPerYear,
+    monthly: 100,
+    annual: 1200,
+    perApp: Math.round((1200 / visitsPerYear) * 100) / 100,
+  });
+
+  test('maps 4/6/12 visits to quarterly/bimonthly/monthly entries', () => {
+    expect(commercialPestFrequenciesFromV1Services([row(4)])[0]).toMatchObject({ key: 'quarterly', label: 'Quarterly', visitsPerYear: 4 });
+    expect(commercialPestFrequenciesFromV1Services([row(6)])[0]).toMatchObject({ key: 'bimonthly', label: 'Bimonthly', visitsPerYear: 6 });
+    expect(commercialPestFrequenciesFromV1Services([row(12)])[0]).toMatchObject({ key: 'monthly', label: 'Monthly', visitsPerYear: 12 });
+  });
+
+  test('carries the sold annual/monthly/per-visit and stays non-discountable', () => {
+    const [freq] = commercialPestFrequenciesFromV1Services([row(6)]);
+    expect(freq.annual).toBe(1200);
+    expect(freq.monthly).toBe(100);
+    expect(freq.perTreatment).toBe(200);
+    expect(freq.manualDiscount).toBe(null);
+    expect(freq.perServiceTreatments[0].waveGuardDiscountEligible).toBe(false);
+  });
+
+  test('no visit count defaults to the commercial program monthly (12), not quarterly', () => {
+    const bare = { service: 'commercial_pest', name: 'Commercial Pest Control', monthly: 100, annual: 1200 };
+    expect(commercialPestFrequenciesFromV1Services([bare])[0]).toMatchObject({ key: 'monthly', visitsPerYear: 12 });
+  });
+
+  test('no commercial pest row → empty (other services unaffected)', () => {
+    expect(commercialPestFrequenciesFromV1Services([{ service: 'pest_control', visitsPerYear: 4 }])).toEqual([]);
+    expect(commercialPestFrequenciesFromV1Services([])).toEqual([]);
+  });
+});

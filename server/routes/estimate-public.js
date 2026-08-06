@@ -15331,6 +15331,76 @@ function foamFrequenciesFromV1Services(services = []) {
   }];
 }
 
+// Solo commercial pest has no residential pestTiers, so the v1 build would fall
+// back to the first V1 frequency entry — always "Quarterly" — while the service
+// row prices 6 or 12 visits/yr (codex #3240 P1: the estimator's pest-cadence
+// override made the mismatch rep-chosen). Shape a single entry from the
+// commercial_pest service line so the public key/label track the sold cadence.
+function commercialPestFrequenciesFromV1Services(services = []) {
+  const row = (Array.isArray(services) ? services : [])
+    .find((svc) => recurringServiceKey(svc) === 'commercial_pest');
+  if (!row) return [];
+  const VISITS_TO_CADENCE = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
+  const LABELS = { quarterly: 'Quarterly', bimonthly: 'Bimonthly', monthly: 'Monthly' };
+  const rawVisits = finiteNumberOrNull(row.visitsPerYear ?? row.visits ?? row.frequency);
+  // Commercial pest cadence is a visit count (risk bucket / override / program
+  // default 12) — grade off it like commercialCadenceLabel: ≥12 monthly,
+  // ≥6 bimonthly, else quarterly.
+  const cadence = rawVisits != null
+    ? (VISITS_TO_CADENCE[rawVisits]
+      || (rawVisits >= 12 ? 'monthly' : rawVisits >= 6 ? 'bimonthly' : 'quarterly'))
+    : 'monthly'; // commercial pest program default is 12/yr, not quarterly
+  const visits = rawVisits != null ? rawVisits : 12;
+  const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
+  const perTreatmentBase = finiteNumberOrNull(row.perTreatment ?? row.perVisit ?? row.perApp ?? row.pv);
+  const annualBase = finiteNumberOrNull(row.annual ?? row.ann);
+  const annual = annualBase != null
+    ? annualBase
+    : (monthlyBase != null
+      ? roundMonthly(monthlyBase * 12)
+      : (perTreatmentBase != null && visits ? roundMonthly(perTreatmentBase * visits) : null));
+  const monthly = monthlyBase != null
+    ? monthlyBase
+    : (annual != null ? roundMonthly(annual / 12) : null);
+  const perTreatment = perTreatmentBase != null
+    ? perTreatmentBase
+    : (annual != null && visits ? roundMonthly(annual / visits) : null);
+  const estimatedDurationMinutes = finiteNumberOrNull(row.estimatedDurationMinutes ?? row.estimated_duration_minutes);
+  const label = LABELS[cadence];
+  return [{
+    key: cadence,
+    label,
+    serviceCategory: 'commercial_pest',
+    serviceTierKey: cadence,
+    monthlyBase,
+    monthly,
+    annual,
+    perTreatment,
+    visitsPerYear: visits,
+    billingFrequencyKey: 'monthly',
+    ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
+    estimatedDurationMinutes,
+    // Commercial pest is FLAT — never WaveGuard/percent-discountable.
+    manualDiscount: null,
+    included: [{
+      key: `commercial_pest_${cadence}`,
+      label: `${label} commercial pest program`,
+      detail: visits ? `${Math.round(visits)} visits per year` : null,
+      includedAtThisFrequency: true,
+    }],
+    addOns: [],
+    perServiceTreatments: [{
+      service: 'commercial_pest',
+      label: 'Commercial Pest Control',
+      perTreatment,
+      displayPrice: perTreatment,
+      visitsPerYear: visits,
+      estimatedDurationMinutes,
+      waveGuardDiscountEligible: false,
+    }],
+  }];
+}
+
 // Engine-invocation path: build the foam frequency from the live engine result's
 // foam_recurring line item (carries cadence/visitsPerYear/monthly/perVisit), so
 // an engineInputs/engineResult foam quote isn't exposed as the default quarterly
@@ -18498,12 +18568,16 @@ async function buildPricingBundleInner(estimate) {
     const foamFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'foam_recurring'
       ? foamFrequenciesFromV1Services(v1.services)
       : [];
+    const commercialPestFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'commercial_pest'
+      ? commercialPestFrequenciesFromV1Services(v1.services)
+      : [];
     const finalFreqs = hasPest
       ? frequencies
       : (treeShrubFreqs.length ? treeShrubFreqs
         : (mosquitoFreqs.length ? mosquitoFreqs
           : (lawnFreqs.length ? lawnFreqs
-            : (foamFreqs.length ? foamFreqs : frequencies.slice(0, 1)))));
+            : (foamFreqs.length ? foamFreqs
+              : (commercialPestFreqs.length ? commercialPestFreqs : frequencies.slice(0, 1))))));
     const annualPrepayEligible = annualPrepayEligibleForEstimateData(estData);
 
     // First-visit fees stack — non-recurring charges shown to the customer
@@ -19923,6 +19997,7 @@ module.exports.estimateFamilyKeysForAdoption = estimateFamilyKeysForAdoption;
 module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFamily;
 module.exports.adoptionServiceModesForContract = adoptionServiceModesForContract;
 module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
+module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
 module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscountSlices;
