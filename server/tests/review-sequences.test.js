@@ -1753,3 +1753,26 @@ describe('codex #3235 r13 — orphaned pipeline sends', () => {
     expect(result.reason).toBe('manual_ask_recent');
   });
 });
+
+describe('codex #3235 r15 — review-scoped orphan correspondence', () => {
+  test('an unrelated outbound text near an orphaned review send does not legitimize it', async () => {
+    mockGates.reviewSequences = true;
+    const base = Date.now() - 2 * 86400000;
+    const mock = makeMock({
+      customers: [{ id: 'ur-1', first_name: 'Bea', last_name: 'H', phone: '+19410000079', nearest_location_id: 'bradenton' }],
+      sms_log: [
+        // An invoice text 30s after the orphaned review send — NOT review-looking.
+        { id: 'sms-inv', customer_id: 'ur-1', direction: 'outbound', status: 'sent', message_body: 'Your Waves invoice is ready: https://portal.test/pay/xyz', created_at: new Date(base + 30000) },
+        // The owner's manual ask 5 minutes later.
+        { id: 'sms-man', customer_id: 'ur-1', direction: 'outbound', status: 'sent', message_body: 'Bea, review us here: https://g.page/r/waves/review', created_at: new Date(base + 5 * 60000) },
+      ],
+      review_requests: [{ id: 'rr-ur', customer_id: 'ur-1', template_key: 'friendly_ask', channel: 'sms', status: 'sent', sms_sent_at: new Date(base), sent_at: new Date(base) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ur-1', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('manual_ask_recent');
+  });
+});

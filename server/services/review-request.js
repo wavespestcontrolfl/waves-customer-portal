@@ -455,11 +455,14 @@ const ReviewService = {
       // later is not.
       const TEN_MIN = 10 * 60 * 1000;
       const CORRESPONDENCE_MS = 90 * 1000;
-      const outboundTimes = outbound
+      // Correspondence counts REVIEW-LOOKING rows only (codex #3235 r15 P2):
+      // an unrelated invoice/report text logged near an orphaned review send
+      // must not legitimize its timestamp.
+      const candidateTimes = candidates
         .map((r) => new Date(r.created_at).getTime())
         .filter((t) => Number.isFinite(t));
       const unused = sentTimes.filter((sT) =>
-        outboundTimes.some((oT) => Math.abs(oT - sT) <= CORRESPONDENCE_MS));
+        candidateTimes.some((cT) => Math.abs(cT - sT) <= CORRESPONDENCE_MS));
       return candidates.some((c) => {
         const t = new Date(c.created_at).getTime();
         let best = -1;

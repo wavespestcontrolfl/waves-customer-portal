@@ -301,3 +301,11 @@ describe('hyphenated fixed-time expressions are rejected (codex #3235 r14)', () 
     expect(Drafter.verifyDraftBody('Hi Aaron, 30-minute wait then enjoy: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
   });
 });
+
+describe('time-unit words are banned outright (codex #3235 r15 — closes the interval enumeration class)', () => {
+  test('quarter-hour and any other unit mention rejects', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, keep pets inside for a quarter-hour. Reply if anything is off.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyEmailIntro('Hi Aaron, give it a few hours. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyDraftBody('Hi Aaron, back in an hour: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
+  });
+});
