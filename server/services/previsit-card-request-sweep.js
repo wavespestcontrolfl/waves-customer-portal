@@ -9,10 +9,12 @@
  * appointment is top of mind right after the call). This sweep exists for
  * the visits that moment MISSES:
  *
- *   - a call whose comms were held (review card, consent hold) — the
- *     booking landed but neither the confirmation nor the card link went;
  *   - a booking converted to a plan AFTER it was made (phone one-time →
  *     quarterly, admin-created plans) — no trigger looks again;
+ *   - a phone booking whose card send failed transiently while its
+ *     confirmation DID send (the sent confirmation is the durable proof of
+ *     the call's SMS clearance — codex r2: a call whose SMS leg was
+ *     deliberately withheld stays withheld here too, office-only);
  *   - any historical visit that predates the booking-time triggers.
  *
  * Selection is deliberately conservative — this is an INTRODUCTION, not a
@@ -99,6 +101,35 @@ async function runSweep(dbh = db) {
     .whereNot('s.service_type', 'ilike', '%re-service%')
     .where((qb) => qb.whereNull('s.source_action').orWhereNot('s.source_action', OUTBOUND_REVIEW_SOURCE_ACTION))
     .whereNotNull('s.customer_id')
+    // Call-level TCPA holds survive into the sweep (codex r2 P1): a
+    // phone-booked visit whose confirmation SMS never sent may have been
+    // withheld by a call-level consent/routing decision the sweep cannot
+    // reconstruct — fail closed and leave it to the office (the admin
+    // send button re-runs the funnel with a human in the loop). A sent
+    // confirmation is the durable proof the call's SMS clearance was
+    // affirmed and used.
+    .where((qb) => qb
+      .whereRaw("s.booking_source IS DISTINCT FROM 'phone_call'")
+      .orWhereNotNull('s.confirmation_sms_sent_at'))
+    // Freshly created visits are excluded for one run (codex r2 P2): the
+    // realistic cross-path double-invite is a booking-time trigger still in
+    // flight for a visit created moments before the 10:26 sweep touches the
+    // same customer. A 15-minute creation cool-off closes that window
+    // deterministically (booking triggers fire within their own flow,
+    // never 15+ minutes later); the advisory lock below still serializes
+    // sweep-vs-sweep, including across replicas.
+    .where('s.created_at', '<', dbh.raw("now() - interval '15 minutes'"))
+    // First-time customers only, IN the query (codex r2 P1): the funnel
+    // skips established customers anyway (owner rule 2026-07-30 —
+    // completed history means an established payment relationship), but a
+    // post-attempt skip burns the batch cap; mirror the funnel's predicate
+    // here so established customers never consume allowance.
+    .whereNotExists(function priorCompleted() {
+      this.select(dbh.raw('1'))
+        .from('scheduled_services as done')
+        .whereRaw('done.customer_id = s.customer_id')
+        .where('done.status', 'completed');
+    })
     // Never-invited is part of the QUERY (codex r1 P2): applying it after a
     // LIMIT let already-invited customers' visits starve eligible first-time
     // customers out of the window entirely.
