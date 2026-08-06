@@ -1776,3 +1776,19 @@ describe('codex #3235 r15 — review-scoped orphan correspondence', () => {
     expect(result.reason).toBe('manual_ask_recent');
   });
 });
+
+describe('codex #3235 r18 — Maps links count as manual asks', () => {
+  test('a hand-sent maps.app.goo.gl review link triggers the standdown', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'mp-1', first_name: 'Dot', last_name: 'I', phone: '+19410000080', nearest_location_id: 'bradenton' }],
+      sms_log: [{ id: 'sms-mp', customer_id: 'mp-1', direction: 'outbound', status: 'sent', message_body: 'Please share your feedback: https://maps.app.goo.gl/AbC123', created_at: new Date(Date.now() - 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'mp-1', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('manual_ask_recent');
+  });
+});

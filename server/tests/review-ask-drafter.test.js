@@ -334,3 +334,11 @@ describe('deadline and access-instruction frames are banned (codex #3235 r17 —
     expect(Drafter.verifyEmailIntro('Hi Aaron, hope the pups are enjoying the yard again. If anything looks off, just reply to this email.', { firstName: 'Aaron' })).toBeNull();
   });
 });
+
+describe('till/til variants reject (codex #3235 r18)', () => {
+  test('each deadline connective form is banned in both verifiers', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, avoid the lawn till tomorrow. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyEmailIntro('Hi Aaron, wait til tomorrow. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyDraftBody('Hi Aaron, wait until tomorrow: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
+  });
+});

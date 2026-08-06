@@ -410,7 +410,7 @@ const ReviewService = {
    * post-service enrollment.
    */
   async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null } = {}) {
-    const MANUAL_ASK_RE = /g\.page\/|writereview|\/rate\/[A-Za-z0-9]|\bgoogle\s+review\b/i;
+    const MANUAL_ASK_RE = /g\.page\/|writereview|\/rate\/[A-Za-z0-9]|\bgoogle\s+review\b|maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i;
     // A forwarded copy of one of our own (now shorter) templates says just
     // "review" with a branded /l/ short link (codex #3235 r4 P1) — /l/ alone
     // is any portal short link (reports, appointments), so require BOTH the

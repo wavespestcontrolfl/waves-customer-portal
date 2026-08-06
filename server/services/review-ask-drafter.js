@@ -96,7 +96,7 @@ const BANNED_RE = new RegExp(
     "\\b\\d{1,2}(?::\\d{2})?\\s*[ap]\\.?m\\.?\\b",
     "\\bo'?clock\\b",
     "\\b(?:noon|midnight)\\b",
-    "\\bun?till?\\b", // until / till / til — the deadline connective itself
+    "\\b(?:until|till|til)\\b", // the deadline connective itself, all variants
     "\\bkeep\\s+(?:your\\s+|the\\s+)?(?:pets?|dogs?|cats?|kids?|children|animals?|everyone)\\b",
     "\\bstay\\s+(?:off|out|inside|away)\\b",
     "\\b(?:let|letting)\\s+(?:your\\s+|the\\s+)?(?:pets?|dogs?|cats?|kids?|children|animals?)\\s+(?:back\\s+)?(?:out|in|outside|inside)\\b",
