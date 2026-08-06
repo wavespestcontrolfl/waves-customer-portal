@@ -130,6 +130,8 @@ function buildRows() {
       errors.push({ key, message: err.message });
     }
   };
+  const b = constants.RODENT.bundles || {};
+  const rodentBundleTerms = `Package discounts (live terms): trapping+exclusion ${Math.round(((b.trapExclusion || {}).discount || 0) * 100)}% (floor $${Math.round((b.trapExclusion || {}).floor || 0)}), trapping+sanitation ${Math.round(((b.trapSanitation || {}).discount || 0) * 100)}% (floor $${Math.round((b.trapSanitation || {}).floor || 0)}), full remediation ${Math.round(((b.fullRemediation || {}).discount || 0) * 100)}% (tiered floors from $${Math.round(((b.fullRemediation || {}).floors || {}).light || 0)}).`;
   const maxWaveGuardPct = Math.round(
     Math.max(...Object.values(constants.WAVEGUARD.tiers).map((t) => t.discount || 0)) * 100);
   let bundleMemo = null;
@@ -388,7 +390,7 @@ function buildRows() {
       ],
       (opts) => sp.priceRodentTrapping({}, opts),
       (r) => r.price),
-    notes: `Standard (setup + ${Number(constants.RODENT.trapping.includedFollowUps) || 2} included callbacks) or unlimited-callback plan; additional callbacks beyond the range $${Math.round(Number(constants.RODENT.trapping.additionalFollowUpRate) || 125)} each; existing Standard customers can upgrade to unlimited mid-program for $${Math.round(sp.priceRodentTrapping({}, { plan: 'standard', upgradeToUnlimited: true }).price)}. Emergency same-day service carries a surcharge quoted at booking.`,
+    notes: `Standard (setup + ${Number(constants.RODENT.trapping.includedFollowUps) || 2} included callbacks) or unlimited-callback plan; additional callbacks beyond the range $${Math.round(Number(constants.RODENT.trapping.additionalFollowUpRate) || 125)} each; existing Standard customers can upgrade to unlimited mid-program for $${Math.round(sp.priceRodentTrapping({}, { plan: 'standard', upgradeToUnlimited: true }).price)}. Emergency same-day service carries a surcharge quoted at booking. ${rodentBundleTerms}`,
   }));
 
   add('rodent_sanitation', () => rangeRow({
@@ -410,7 +412,7 @@ function buildRows() {
       // customQuoteRecommended is routing-only; the numeric line is retained
       // by the estimate path — publish it.
       (r) => r.price),
-    notes: 'Priced by affected area, debris removal volume (per cu ft beyond the included allowance), and access; larger scopes extend beyond this range at the same per-unit rates.',
+    notes: `Priced by affected area, debris removal volume (per cu ft beyond the included allowance), and access; larger scopes extend beyond this range at the same per-unit rates. ${rodentBundleTerms}`,
   }));
 
   add('rodent_exclusion', () => rangeRow({
@@ -439,7 +441,7 @@ function buildRows() {
       ],
       (opts) => sp.priceRodentExclusionV2(opts),
       (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : (r.total ?? r.price))),
-    notes: 'Scope set by inspection findings. The low end reflects small jobs with the inspection fee waived (service opt-in or qualifying totals); otherwise the rodent inspection fee is included.',
+    notes: `Scope set by inspection findings. The low end reflects small jobs with the inspection fee waived (service opt-in or qualifying totals); otherwise the rodent inspection fee is included. ${rodentBundleTerms}`,
   }));
 
   // Simple and complex-perimeter/structural profiles — the exact path
@@ -644,12 +646,12 @@ function buildRows() {
     values: sweepValues(
       [2000, 4000, 6000, 9000].flatMap((sq) =>
         ['bermuda', 'zoysia'].flatMap((grassType) =>
-          ['none', 'light', 'moderate'].flatMap((cleanupLevel) =>
+          ['none', 'light', 'moderate', 'heavy'].flatMap((cleanupLevel) =>
             ['easy', 'moderate'].map((access) => ({ sq, grassType, cleanupLevel, access }))))),
       ({ sq, grassType, cleanupLevel, access }) =>
         sp.priceDethatching(sq, { grassType, cleanupLevel, thatchDepthInches: 1, access }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.estimatedPrice))),
-    notes: 'Bermuda and Zoysia lawns; St. Augustine and heavy-debris jobs are quoted after inspection.',
+    notes: 'Bermuda and Zoysia lawns (heavy cleanup priced directly on smaller lawns); St. Augustine and large heavy-debris jobs are quoted after inspection.',
   }));
 
   add('one_time_mosquito', () => rangeRow({
@@ -877,9 +879,20 @@ function gateSignature() {
 }
 
 function computePublicPricingRanges({ refresh = false } = {}) {
-  const sig = gateSignature();
+  let sig = gateSignature();
   if (!refresh && cached && cachedKey === sig) return cached;
-  const { rows, errors } = buildRows();
+  // Admin routes call syncConstantsFromDB directly and mutate the shared
+  // constants object before stamping _lastSync — if a sync lands while we
+  // sweep, the payload could mix pre/post-edit values. Rebuild until the
+  // sync stamp is unchanged across the sweep (bounded retries).
+  let rows;
+  let errors;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    ({ rows, errors } = buildRows());
+    const after = gateSignature();
+    if (after === sig) break;
+    sig = after;
+  }
   cached = {
     generatedAt: new Date().toISOString(),
     currency: 'USD',
