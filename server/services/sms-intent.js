@@ -89,6 +89,12 @@ const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|differe
 // noun nearby — bare "moving" ("we're moving the couch") must not fire.
 const MOVE_VERB_RE = /\b(?:mov(?:e|ing)|push(?:ed|ing)?|bump(?:ed|ing)?|chang(?:e|ing))\b[^.!?\n]{0,40}\b(?:till|until|to|out|back|up|later|appointment|appt|service|visit|date|day|time|week|month|october|november|december|january|february|march|april|may|june|july|august|september)\b/i;
 const CANCEL_RE = /\bcancel\w*\b/i;
+// cancel* alone is unusable — "did you cancel autopay?" / "don't cancel"
+// are not reschedule asks (codex #3232 r3): require appointment context,
+// exclude negations and non-appointment objects.
+const CANCEL_CONTEXT_RE = /\b(?:appointment|appt|visit|service|today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day)\b/i;
+const CANCEL_NEGATION_RE = /\b(?:don'?t|do\s+not|not|never|no\s+need\s+to)\s+(?:want\s+to\s+|need\s+to\s+|going\s+to\s+)?cancel/i;
+const CANCEL_NONAPPT_RE = /\bcancel\w*\s+(?:the\s+|my\s+|that\s+)?(?:invoice|autopay|payment|card|subscription|estimate|quote)\b/i;
 const AWAY_RE = /\b(?:out\s+of\s+town|on\s+vacation|leav(?:e|ing)\s+for\s+vacation|going\s+out\s+of\s+town|(?:won'?t|will\s+not|not\s+going\s+to)\s+be\s+(?:home|here|there|in\s+town)|away\s+(?:until|till|through|for)|travel(?:ing|ling)\s+(?:until|till|through|next|this)|back\s+(?:in\s+town\s+)?(?:on|until|till)\b|not\s+(?:be\s+)?back\s+(?:till|until))\b/i;
 // Away + permission = a heads-up, not a reschedule ask ("won't be home but
 // here's the gate code" / "exterior only is fine"). Permission only
@@ -101,7 +107,9 @@ function hasRescheduleOrAwayIntent(body) {
   // Phone keyboards produce typographic apostrophes — "won\u2019t" must match
   // the same patterns as "won't".
   const text = body.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
-  if (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text) || CANCEL_RE.test(text)) return true;
+  const cancelAsk = CANCEL_RE.test(text) && CANCEL_CONTEXT_RE.test(text)
+    && !CANCEL_NEGATION_RE.test(text) && !CANCEL_NONAPPT_RE.test(text);
+  if (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text) || cancelAsk) return true;
   return AWAY_RE.test(text) && !AWAY_PERMISSION_RE.test(text);
 }
 

@@ -51,19 +51,19 @@ async function loadUnactionedFlags() {
     // decisions surface) leave the digest immediately (codex r2).
     .where('ad.status', 'pending_review')
     .where('ad.created_at', '>=', db.raw(`now() - interval '${LOOKBACK_DAYS} days'`))
+    // A HUMAN reply that actually left (accepted carrier statuses) clears
+    // ANY flag — linked or not: staff can resolve a request without moving
+    // the slot ("exterior is fine, no need to be home") (codex r3).
+    .whereNotExists(function humanReply() {
+      this.select(1).from('sms_log as sl')
+        .whereRaw('sl.customer_id = ad.customer_id')
+        .where('sl.direction', 'outbound')
+        .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
+        .whereIn('sl.status', ['queued', 'sent', 'delivered'])
+        .whereRaw('sl.created_at > ad.created_at');
+    })
     .where(function stillUnactioned() {
-      this.where(function noVisitStillUnanswered() {
-        // No linked visit: the customer is waiting on a REPLY — the flag
-        // drops once any human-initiated outbound went to them after it
-        // (codex r1: it otherwise recurs every morning for the lookback).
-        this.whereNull('ad.entity_id').whereNotExists(function humanReply() {
-          this.select(1).from('sms_log as sl')
-            .whereRaw('sl.customer_id = ad.customer_id')
-            .where('sl.direction', 'outbound')
-            .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
-            .whereRaw('sl.created_at > ad.created_at');
-        });
-      }).orWhere(function visitUnchanged() {
+      this.whereNull('ad.entity_id').orWhere(function visitUnchanged() {
         // Linked visit: unactioned = still upcoming AND still on the
         // flagged slot, judged against the flag's own snapshot — NOT
         // updated_at, which the public rebooker does not bump (codex r1).

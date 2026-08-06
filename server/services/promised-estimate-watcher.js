@@ -58,7 +58,8 @@ function maskPhone(phone) {
 async function loadUnkeptPromises() {
   const { rows } = await db.raw(
     `
-    SELECT c.id, c.created_at, c.customer_id, c.disposition,
+    SELECT COUNT(*) OVER () AS total_count,
+           c.id, c.created_at, c.customer_id, c.disposition,
            CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END AS from_phone,
            c.duration_seconds,
            COALESCE(NULLIF(TRIM(cu.first_name || ' ' || COALESCE(cu.last_name, '')), ''), NULL) AS customer_name,
@@ -70,7 +71,7 @@ async function loadUnkeptPromises() {
       -- The PROMISE signal is required: decideDisposition maps a mere
       -- quote_requested to estimate_send too, and a caller who only asked
       -- for pricing is not a broken promise (codex r2).
-      AND (c.ai_extraction::text ILIKE '%"quote_promised": true%'
+      AND (c.ai_extraction::text ~ '"quote_promised"\s*:\s*true'
            OR c.ai_extraction_enriched #>> '{service_request,quote_promised}' = 'true')
       AND (c.disposition IS NULL
            OR c.disposition NOT IN ('spam_discarded', 'wrong_number_closed'))
@@ -113,7 +114,8 @@ function composePromisedEstimateDigest(rows) {
   if (!promises.length) return null;
 
   const oldest = Math.max(...promises.map((r) => ageDays(r.created_at)));
-  const subject = `ACT: ${promises.length} promised quote${promises.length === 1 ? '' : 's'} never went out — oldest ${oldest}d`;
+  const total = Number(promises[0]?.total_count) > 0 ? Number(promises[0].total_count) : promises.length;
+  const subject = `ACT: ${total} promised quote${total === 1 ? '' : 's'} never went out — oldest ${oldest}d`;
 
   const lines = promises.map((r) => {
     const day = etDateString(new Date(r.created_at));
@@ -127,6 +129,7 @@ function composePromisedEstimateDigest(rows) {
     `${promises.length} call${promises.length === 1 ? '' : 's'} where a quote was promised and no estimate has been sent since. Oldest is ${oldest} day${oldest === 1 ? '' : 's'} old.`,
     '',
     ...lines.map((l) => `- ${l.day} (${l.age}d ago) ${l.who} — ${l.mins}${l.summary ? `: ${l.summary}` : ''}`),
+    ...(total > lines.length ? [`…and ${total - lines.length} more not shown`] : []),
     '',
     `Calls: ${adminPortalUrl()}/admin/communications?tab=calls`,
   ].join('\n');
@@ -138,7 +141,7 @@ function composePromisedEstimateDigest(rows) {
     `<p><a href="${esc(adminPortalUrl())}/admin/communications?tab=calls">Open call log</a></p>`,
   ].join('\n');
 
-  return { subject, text, html, count: promises.length, oldestDays: oldest };
+  return { subject, text, html, count: total, oldestDays: oldest };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js.

@@ -598,7 +598,10 @@ router.post('/sms', async (req, res) => {
           logger.warn(`[reschedule-intent] flag rejected: ${err.message}`);
           return null;
         });
-      rescheduleFlagged = flagResult?.flagged === true;
+      // Suppress the generic alert only when the urgent one actually
+      // LANDED (bell/push/deliberate suppression) — a flag row alone must
+      // not silence every notification for the message (codex r3).
+      rescheduleFlagged = flagResult?.alerted === true;
     }
 
     // In-app + push notification for inbound SMS from known customers.

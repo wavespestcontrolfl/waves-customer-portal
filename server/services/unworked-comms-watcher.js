@@ -39,11 +39,13 @@ const MAX_PER_SECTION = 12;
 // customer from the digest (codex #3232 r1).
 const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised', 'estimate_sent', 'invoice', 'voicemail_quote_link', 'appointment_rescheduled', 'reschedule_series_confirmation')";
 
-// Scan window: the last 24 hours, half-open — the digest runs daily at
-// 6:15pm ET, so consecutive windows tile with no gap and no overlap. An
-// ET-day anchor left 6:15pm-to-midnight comms unreachable by ANY digest
-// (codex r2).
-const ET_DAY_START_SQL = `(now() - interval '24 hours')`;
+// Scan window: since the previous SUCCESSFUL send (the ops_email_send_state
+// marker), bounded to 7 days — windows tile exactly run-to-run, including
+// across ET DST transitions where fixed 24h windows gap or overlap
+// (codex r3). Marker missing (first run / quiet stretch) → 25h fallback.
+const ET_DAY_START_SQL = `(GREATEST(
+  COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'unworked-comms-eod'), now() - interval '25 hours'),
+  now() - interval '7 days'))`;
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -92,6 +94,7 @@ async function loadCallbackCalls() {
         SELECT 1 FROM sms_log os
         WHERE os.direction = 'outbound'
           AND os.message_type IN ${HUMAN_REPLY_TYPES}
+          AND os.status IN ('queued', 'sent', 'delivered')
           AND os.created_at > c.created_at
           AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10)
             = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, ''), '\\D', '', 'g'), 10)
@@ -155,9 +158,16 @@ async function loadUnansweredThreads() {
            COUNT(*) OVER () AS total_count
     FROM last_inbound l
     LEFT JOIN LATERAL (
-      SELECT id, first_name, last_name FROM customers
-      WHERE deleted_at IS NULL
-        AND RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g'), 10) = l.peer
+      -- Single-match only (mirrors the webhook rule): two customers on one
+      -- number must not link the thread to an arbitrary record (codex r3).
+      SELECT c2.id, c2.first_name, c2.last_name FROM customers c2
+      WHERE c2.deleted_at IS NULL
+        AND RIGHT(REGEXP_REPLACE(COALESCE(c2.phone, ''), '\\D', '', 'g'), 10) = l.peer
+        AND NOT EXISTS (
+          SELECT 1 FROM customers c3
+          WHERE c3.deleted_at IS NULL AND c3.id <> c2.id
+            AND RIGHT(REGEXP_REPLACE(COALESCE(c3.phone, ''), '\\D', '', 'g'), 10) = l.peer
+        )
       LIMIT 1
     ) cu ON true
     -- Answered = a HUMAN outbound after the last inbound. Automated
@@ -167,6 +177,7 @@ async function loadUnansweredThreads() {
       SELECT 1 FROM sms_log os
       WHERE os.direction = 'outbound'
         AND os.message_type IN ${HUMAN_REPLY_TYPES}
+        AND os.status IN ('queued', 'sent', 'delivered')
         AND os.created_at > l.created_at
         AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10) = l.peer
     )

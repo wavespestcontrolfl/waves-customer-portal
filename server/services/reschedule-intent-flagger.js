@@ -111,20 +111,23 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
     });
     if (!inserted) return { flagged: false, reason: 'recent_flag' };
 
+    let alerted = false;
     try {
       const { triggerNotification } = require('./notification-triggers');
-      await triggerNotification('appointment_reschedule_intent', {
+      const stats = await triggerNotification('appointment_reschedule_intent', {
         name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') || 'Customer',
         customerId: customer.id,
         message: body,
         visitDate: visit ? String(visit.scheduled_date).slice(0, 10) : null,
         visitService: visit?.service_type || null,
       });
+      alerted = Boolean(stats && !stats.error
+        && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
     } catch (e) {
       logger.warn(`[reschedule-intent] bell failed: ${e.message}`);
     }
 
-    return { flagged: true, visitId: visit?.id || null };
+    return { flagged: true, alerted, visitId: visit?.id || null };
   } catch (err) {
     logger.warn(`[reschedule-intent] flag failed: ${err.message}`);
     return { flagged: false, reason: 'error' };
