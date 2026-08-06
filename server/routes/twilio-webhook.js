@@ -580,14 +580,25 @@ router.post('/sms', async (req, res) => {
     // 12:30am "can we reschedule?" was followed by the visit running and
     // invoicing on schedule). Detect-and-surface only; never mutates the
     // appointment. Fire-and-forget: the flagger is fail-soft internally.
+    let rescheduleFlagged = false;
     if (customer && Body && !smsReaction && hasRescheduleOrAwayIntent(Body)) {
-      void require('../services/reschedule-intent-flagger')
+      // Awaited (we are post-ack): when the urgent reschedule bell fires,
+      // the generic sms_reply bell below is suppressed — one text must not
+      // produce two bells + two pushes (codex #3232 r2). The flagger is
+      // fail-soft internally; the catch is the required last-resort
+      // rejection handler for its own error paths.
+      const flagResult = await require('../services/reschedule-intent-flagger')
         .flagInboundRescheduleIntent({
           customer,
           body: Body,
           smsLogId: smsLogEntry?.id || null,
           messageSid: MessageSid || null,
+        })
+        .catch((err) => {
+          logger.warn(`[reschedule-intent] flag rejected: ${err.message}`);
+          return null;
         });
+      rescheduleFlagged = flagResult?.flagged === true;
     }
 
     // In-app + push notification for inbound SMS from known customers.
@@ -595,7 +606,7 @@ router.post('/sms', async (req, res) => {
     // landed — when it did, the legacy owner-SMS forward below is suppressed
     // so a single inbound message can't raise two admin notifications.
     let knownInboundNotified = false;
-    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction) {
+    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !rescheduleFlagged) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
         const stats = await triggerNotification('sms_reply', {

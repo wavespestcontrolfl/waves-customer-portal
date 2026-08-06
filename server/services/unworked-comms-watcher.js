@@ -37,11 +37,13 @@ const MAX_PER_SECTION = 12;
 // Outbound types that count as a human answer — automated broadcasts
 // (reminders, en-route, receipts, review asks) must not clear a waiting
 // customer from the digest (codex #3232 r1).
-const HUMAN_REPLY_TYPES = "('manual', 'estimate_sent', 'invoice', 'voicemail_quote_link', 'appointment_rescheduled', 'confirmation', 'reschedule_series_confirmation')";
+const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised', 'estimate_sent', 'invoice', 'voicemail_quote_link', 'appointment_rescheduled', 'reschedule_series_confirmation')";
 
-// Start of the current ET day as a timestamptz — anchor every "today" scan
-// here, never in JS Date math (UTC-vs-ET off-by-a-day).
-const ET_DAY_START_SQL = `((now() at time zone 'America/New_York')::date::timestamp AT TIME ZONE 'America/New_York')`;
+// Scan window: the last 24 hours, half-open — the digest runs daily at
+// 6:15pm ET, so consecutive windows tile with no gap and no overlap. An
+// ET-day anchor left 6:15pm-to-midnight comms unreachable by ANY digest
+// (codex r2).
+const ET_DAY_START_SQL = `(now() - interval '24 hours')`;
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -64,7 +66,8 @@ function etTime(value) {
 async function loadCallbackCalls() {
   const { rows } = await db.raw(
     `
-    SELECT c.id, c.created_at, c.from_phone, c.duration_seconds,
+    SELECT c.id, c.created_at, c.duration_seconds,
+           CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END AS from_phone,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
            LEFT(COALESCE(c.call_summary, c.lead_synopsis, ''), 160) AS summary,
            COUNT(*) OVER () AS total_count
@@ -74,12 +77,16 @@ async function loadCallbackCalls() {
       AND c.disposition = 'callback_task_created'
       -- Already returned: a later outbound CALL to the same number, or a
       -- later human-typed text, clears the item (codex #3232 r1).
+      -- Cleared only by a CONNECTED callback: the admin callback route
+      -- inserts the outbound row at status 'initiated' before anyone
+      -- answers — duration > 0 is the connected proxy (codex r2).
       AND NOT EXISTS (
         SELECT 1 FROM call_log oc
         WHERE oc.direction = 'outbound'
           AND oc.created_at > c.created_at
+          AND COALESCE(oc.duration_seconds, 0) > 0
           AND RIGHT(REGEXP_REPLACE(COALESCE(oc.to_phone, ''), '\\D', '', 'g'), 10)
-            = RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone, ''), '\\D', '', 'g'), 10)
+            = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, ''), '\\D', '', 'g'), 10)
       )
       AND NOT EXISTS (
         SELECT 1 FROM sms_log os
@@ -87,7 +94,7 @@ async function loadCallbackCalls() {
           AND os.message_type IN ${HUMAN_REPLY_TYPES}
           AND os.created_at > c.created_at
           AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10)
-            = RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone, ''), '\\D', '', 'g'), 10)
+            = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, ''), '\\D', '', 'g'), 10)
       )
     ORDER BY c.created_at ASC
     LIMIT :cap
@@ -112,8 +119,10 @@ async function loadDroppedFollowUps() {
        -- verifier's UPDATE does not bump updated_at (no pg auto-touch;
        -- codex #3232 r1), so a deadline inside the last ~25h means the
        -- expiry happened today.
+       -- Half-open 24h window tiles exactly with the daily 6:15pm run —
+       -- a 25h window re-reported yesterday's expiries (codex r2).
        OR (t.status = 'expired' AND t.action_verified = false
-           AND t.deadline >= now() - interval '25 hours' AND t.deadline <= now())
+           AND t.deadline > now() - interval '24 hours' AND t.deadline <= now())
     ORDER BY t.deadline ASC NULLS LAST
     LIMIT :cap
     `,

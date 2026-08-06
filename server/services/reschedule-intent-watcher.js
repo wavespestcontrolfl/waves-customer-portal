@@ -18,6 +18,7 @@ const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
+const { etDateString } = require('../utils/datetime-et');
 
 const watcherDisabled = () => ['1', 'true', 'on']
   .includes(String(process.env.RESCHEDULE_INTENT_WATCHER_DISABLED || '').toLowerCase());
@@ -29,7 +30,7 @@ const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wa
 const LOOKBACK_DAYS = 4;
 // Outbound types that count as a human answer to a waiting customer —
 // automated broadcasts (reminders, receipts, review asks) do not.
-const HUMAN_REPLY_TYPES = ['manual', 'estimate_sent', 'invoice', 'voicemail_quote_link', 'appointment_rescheduled', 'confirmation', 'reschedule_series_confirmation'];
+const HUMAN_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised', 'estimate_sent', 'invoice', 'voicemail_quote_link', 'appointment_rescheduled', 'reschedule_series_confirmation'];
 const MAX_ROWS = 12;
 
 function esc(value) {
@@ -46,6 +47,9 @@ async function loadUnactionedFlags() {
     .leftJoin('customers as cu', 'ad.customer_id', 'cu.id')
     .where('ad.workflow', 'comms_guards')
     .where('ad.detected_intent', 'reschedule_or_away_needs_review')
+    // Staff-resolved decisions (accepted/corrected/dismissed via the agent
+    // decisions surface) leave the digest immediately (codex r2).
+    .where('ad.status', 'pending_review')
     .where('ad.created_at', '>=', db.raw(`now() - interval '${LOOKBACK_DAYS} days'`))
     .where(function stillUnactioned() {
       this.where(function noVisitStillUnanswered() {
@@ -71,6 +75,7 @@ async function loadUnactionedFlags() {
     .orderBy('ad.created_at', 'asc')
     .limit(MAX_ROWS)
     .select(
+      db.raw('COUNT(*) OVER () AS total_count'),
       'ad.id', 'ad.created_at', 'ad.input_snapshot', 'ad.customer_id',
       'cu.first_name', 'cu.last_name',
       'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.status as visit_status',
@@ -94,7 +99,7 @@ function composeRescheduleIntentDigest(rows) {
 
   const lines = flags.map((row) => {
     const name = [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Unknown customer';
-    const asked = String(row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at).slice(0, 10);
+    const asked = etDateString(new Date(row.created_at));
     const visit = row.scheduled_date
       ? `visit ${String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date).slice(0, 10)}${row.window_start ? ` ${String(row.window_start).slice(0, 5)}` : ''}${row.service_type ? ` (${row.service_type})` : ''} STILL ARMED`
       : 'no upcoming visit on the books';
@@ -102,11 +107,13 @@ function composeRescheduleIntentDigest(rows) {
     return { name, asked, visit, excerpt, customerId: row.customer_id };
   });
 
-  const subject = `ACT: ${flags.length} reschedule request${flags.length === 1 ? '' : 's'} by text with no schedule change`;
+  const total = Number(flags[0]?.total_count) > 0 ? Number(flags[0].total_count) : flags.length;
+  const subject = `ACT: ${total} reschedule request${total === 1 ? '' : 's'} by text with no schedule change`;
   const text = [
     `${flags.length} customer text${flags.length === 1 ? ' reads' : 's read'} as a reschedule/away request and the linked visit has not moved. Reply or reschedule each — the automation will otherwise run these visits as booked.`,
     '',
     ...lines.map((l) => `- ${l.asked} ${l.name}: "${l.excerpt}" — ${l.visit}`),
+    ...(total > lines.length ? [`…and ${total - lines.length} more not shown`] : []),
     '',
     `Threads: ${adminPortalUrl()}/admin/communications`,
   ].join('\n');
@@ -118,7 +125,7 @@ function composeRescheduleIntentDigest(rows) {
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
   ].join('\n');
 
-  return { subject, text, html, count: flags.length };
+  return { subject, text, html, count: total };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js:

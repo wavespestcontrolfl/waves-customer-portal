@@ -26,6 +26,7 @@ const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
+const { etDateString } = require('../utils/datetime-et');
 
 const watcherDisabled = () => ['1', 'true', 'on']
   .includes(String(process.env.PROMISED_ESTIMATE_WATCHER_DISABLED || '').toLowerCase());
@@ -66,13 +67,13 @@ async function loadUnkeptPromises() {
     LEFT JOIN customers cu ON cu.id = c.customer_id
     WHERE c.created_at >= now() - (:lookbackHours * interval '1 hour')
       AND c.created_at <  now() - (:graceHours * interval '1 hour')
-      AND (
-            c.disposition = 'estimate_send'
-         OR ((c.ai_extraction::text ILIKE '%"quote_promised": true%'
-              OR c.ai_extraction_enriched #>> '{service_request,quote_promised}' = 'true')
-             AND (c.disposition IS NULL
-                  OR c.disposition NOT IN ('spam_discarded', 'wrong_number_closed')))
-      )
+      -- The PROMISE signal is required: decideDisposition maps a mere
+      -- quote_requested to estimate_send too, and a caller who only asked
+      -- for pricing is not a broken promise (codex r2).
+      AND (c.ai_extraction::text ILIKE '%"quote_promised": true%'
+           OR c.ai_extraction_enriched #>> '{service_request,quote_promised}' = 'true')
+      AND (c.disposition IS NULL
+           OR c.disposition NOT IN ('spam_discarded', 'wrong_number_closed'))
       AND NOT EXISTS (
         SELECT 1
         FROM estimates e
@@ -85,8 +86,10 @@ async function loadUnkeptPromises() {
                  WHERE l.twilio_call_sid = c.twilio_call_sid
                    AND (l.estimate_id = e.id OR e.estimate_data ->> 'lead_id' = l.id::text)
                )
-            OR (c.customer_id IS NOT NULL AND e.customer_id = c.customer_id)
+            OR (c.customer_id IS NOT NULL AND e.customer_id = c.customer_id
+                AND e.created_at >= c.created_at - interval '1 hour')
             OR (e.customer_phone IS NOT NULL
+                AND e.created_at >= c.created_at - interval '1 hour'
                 AND RIGHT(REGEXP_REPLACE(e.customer_phone, '\\D', '', 'g'), 10)
                   = RIGHT(REGEXP_REPLACE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, '\\D', '', 'g'), 10))
           )
@@ -113,7 +116,7 @@ function composePromisedEstimateDigest(rows) {
   const subject = `ACT: ${promises.length} promised quote${promises.length === 1 ? '' : 's'} never went out — oldest ${oldest}d`;
 
   const lines = promises.map((r) => {
-    const day = String(r.created_at instanceof Date ? r.created_at.toISOString() : r.created_at).slice(0, 10);
+    const day = etDateString(new Date(r.created_at));
     const who = r.customer_name || maskPhone(r.from_phone);
     const mins = r.duration_seconds ? `${Math.round(r.duration_seconds / 60)}min call` : 'call';
     const summary = String(r.summary || '').replace(/\s+/g, ' ').trim().slice(0, 120);

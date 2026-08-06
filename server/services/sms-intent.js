@@ -84,7 +84,7 @@ function isSmsReaction(body) {
 // a false positive costs one owner bell, a false negative is the 2026-08-05
 // incident class where a 12:30am "can we reschedule?" text was followed by
 // the visit running (and invoicing) on schedule.
-const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|different\s+(?:day|date|time)|another\s+(?:day|date|time)|(?:can|could)\s+we\s+(?:do|move|push|change)|skip\s+(?:this|the|my|that)\s+(?:one|visit|service|month|week|appointment|appt))\b/i;
+const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|different\s+(?:day|date|time)|another\s+(?:day|date|time)|(?:can|could)\s+we\s+(?:do|move|push|change)\s+(?:it|this|that|the\s+\w+)?\s*(?:to|till|until|for)\s+(?:next|another|a\s+different|later|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day)|skip\s+(?:this|the|my|that)\s+(?:one|visit|service|month|week|appointment|appt))\b/i;
 // Move-verbs only count with a displacement preposition or an appointment
 // noun nearby — bare "moving" ("we're moving the couch") must not fire.
 const MOVE_VERB_RE = /\b(?:mov(?:e|ing)|push(?:ed|ing)?|bump(?:ed|ing)?|chang(?:e|ing))\b[^.!?\n]{0,40}\b(?:till|until|to|out|back|up|later|appointment|appt|service|visit|date|day|time|week|month|october|november|december|january|february|march|april|may|june|july|august|september)\b/i;

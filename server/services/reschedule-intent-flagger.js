@@ -49,24 +49,6 @@ async function nextUpcomingVisit(customerId) {
     .first('id', 'scheduled_date', 'window_start', 'service_type', 'status');
 }
 
-async function alreadyFlaggedRecently(customerId, visitId) {
-  // Dedupe only a repeat of the SAME unresolved request (codex #3232 r1):
-  // an earlier flag for a different visit, or one already
-  // reviewed/dismissed, must not swallow a fresh "actually, about my other
-  // appointment" text.
-  const query = db('agent_decisions')
-    .where({
-      customer_id: customerId,
-      workflow: WORKFLOW,
-      detected_intent: DETECTED_INTENT,
-      status: 'pending_review',
-    })
-    .where('created_at', '>=', db.raw(`now() - interval '${DEDUPE_HOURS} hours'`));
-  if (visitId) query.where('entity_id', visitId);
-  else query.whereNull('entity_id');
-  const row = await query.first('id');
-  return Boolean(row);
-}
 
 /**
  * Flag an inbound SMS that reads as a reschedule/away request.
@@ -78,12 +60,27 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
     if (!customer?.id || !body) return { flagged: false, reason: 'no_customer_or_body' };
 
     const visit = await nextUpcomingVisit(customer.id);
-    if (await alreadyFlaggedRecently(customer.id, visit?.id || null)) {
-      return { flagged: false, reason: 'recent_flag' };
-    }
+    // Atomic dedupe (codex r2): the check and insert share a transaction
+    // serialized by a per-customer advisory lock — two texts processed
+    // concurrently cannot both pass the check and double-bell.
+    let inserted = false;
+    await db.transaction(async (trx) => {
+      await trx.raw("SELECT pg_advisory_xact_lock(hashtext('reschedule-flag:' || ?::text))", [customer.id]);
+      const dupe = trx('agent_decisions')
+        .where({
+          customer_id: customer.id,
+          workflow: WORKFLOW,
+          detected_intent: DETECTED_INTENT,
+          status: 'pending_review',
+        })
+        .where('created_at', '>=', trx.raw(`now() - interval '${DEDUPE_HOURS} hours'`));
+      if (visit?.id) dupe.where('entity_id', visit.id);
+      else dupe.whereNull('entity_id');
+      if (await dupe.first('id')) return;
+      inserted = true;
 
-    await db('agent_decisions').insert({
-      workflow: WORKFLOW,
+      await trx('agent_decisions').insert({
+        workflow: WORKFLOW,
       agent_name: 'reschedule-intent-flagger',
       decision_version: 'v1',
       mode: 'shadow',
@@ -110,7 +107,9 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
       reasoning_summary: visit
         ? `Inbound SMS reads as a reschedule/away request with a visit on ${String(visit.scheduled_date).slice(0, 10)} still armed.`
         : 'Inbound SMS reads as a reschedule/away request; no upcoming visit inside the horizon.',
+      });
     });
+    if (!inserted) return { flagged: false, reason: 'recent_flag' };
 
     try {
       const { triggerNotification } = require('./notification-triggers');
