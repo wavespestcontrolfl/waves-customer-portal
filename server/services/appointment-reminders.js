@@ -2975,13 +2975,15 @@ const AppointmentReminders = {
       // Consume outbox rows only once their intent is APPLIED — marker
       // present and no longer plain 'pending' (codex r8/r9) — and age out
       // anything past the 72h horizon.
-      // 'sent' can be the IN-FLIGHT pre-dispatch fence, which a retryable
-      // failure reverts to plain pending (codex r11) — consume only on
-      // states that durably carry or settle the intent. Genuinely
-      // finalized 'sent' rows keep their key until the 72h age-out;
-      // harmless, since claims on a terminal marker are blocked anyway.
+      // Consume only TERMINALLY SUPPRESSED intent (codex r11/r12): even a
+      // 'pending_notify' marker can be mid-flight — an active sender that
+      // cached plain 'pending' before the upgrade would revert to that
+      // cached state on a retryable failure, and a consumed outbox could
+      // not re-upgrade it. Keys for notify/sent cycles are removed by the
+      // restoration transaction, the live-visit void, or the 72h age-out;
+      // the upgrade pass is idempotent in the meantime.
       await db.raw(
-        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND (ok.last_sent_at < now() - interval '72 hours' OR EXISTS (SELECT 1 FROM appointment_reminders ar WHERE 'cn-ci-' || ar.scheduled_service_id::text = ok.email_key AND ar.cancellation_notice_state IN ('pending_notify', 'suppressed')))",
+        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND (ok.last_sent_at < now() - interval '72 hours' OR EXISTS (SELECT 1 FROM appointment_reminders ar WHERE 'cn-ci-' || ar.scheduled_service_id::text = ok.email_key AND ar.cancellation_notice_state = 'suppressed'))",
       ).catch(() => {});
       }
 

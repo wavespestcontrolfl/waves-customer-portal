@@ -429,6 +429,13 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             .where({ scheduled_service_id: jobId })
             .whereNotNull('cancellation_notice_state')
             .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+          // The restoration also voids any caller-intent outbox row IN
+          // THIS TRANSACTION (codex #3238 r12): waiting for the sweep's
+          // live-visit void leaves a window where a re-cancel inherits
+          // the previous cycle's notify intent.
+          await sp('ops_email_send_state')
+            .where({ email_key: `cn-ci-${jobId}` })
+            .del();
         });
       } catch (clearErr) {
         logger.warn(`[job-status] cancellation-marker clear failed for ${jobId}: ${clearErr.message}`);
