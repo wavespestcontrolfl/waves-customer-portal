@@ -43,8 +43,12 @@ async function swapIntroParagraph(knex, fromContent, toContent, { addVariable })
 
   let dirty = false;
   if (!blocks.some((b) => String(b?.content || '').includes(toContent))) {
-    let target = blocks.findIndex((b) => b?.type === 'paragraph' && String(b.content || '').trim() === fromContent);
-    if (target === -1) target = blocks.findIndex((b) => b?.type === 'paragraph');
+    // Exact seeded-copy match ONLY (codex #3235 r1 P2): an operator-edited
+    // opening paragraph is preserved untouched — the email then simply keeps
+    // the operator's copy and the payload's intro_paragraph goes unused
+    // (verified 2026-08-06: prod's active version matches the seeded copy
+    // verbatim, so the real deploy takes the replace branch).
+    const target = blocks.findIndex((b) => b?.type === 'paragraph' && String(b.content || '').trim() === fromContent);
     if (target !== -1) {
       blocks[target] = { ...blocks[target], content: toContent };
       dirty = true;
