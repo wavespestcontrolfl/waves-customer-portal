@@ -130,8 +130,13 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
   };
   const recurringFamilies = new Set();
   for (const line of recurringServicesFromEstimateData(estimateData)) {
-    const family = addLine(line);
-    if (family) recurringFamilies.add(family);
+    // Record EVERY classifiable recurring family before price filtering
+    // (codex #3245 r7): a zero-comped line must still block its
+    // supplemental-scalar twin, or the supplement re-adds the family
+    // positive instead of the comp deleting it.
+    const family = boundedFamilyKey(serviceFamilyKeyForAdoption(line) || UNATTRIBUTED);
+    if (family !== UNATTRIBUTED) recurringFamilies.add(family);
+    addLine(line);
   }
   // Supplemental companions dedupe by FAMILY against the recurring rows
   // (codex #3245 r1, mirroring combineRecurringServicesForScheduling's
@@ -290,7 +295,12 @@ async function applyAcceptToLedger(database, {
     }
   }
   for (const family of positiveFamilies) {
-    const amount = roundMoney(slices[family]);
+    // A PARKED legacy blob that survived quarantine (proven-disjoint
+    // add-on) and an accepted UNCLASSIFIABLE slice share the same key —
+    // merge, never replace (codex #3245 r7): overwriting the parked $90
+    // with a $10 slice would drop $90 from the ledger-derived bill.
+    const parked = family === UNATTRIBUTED ? (components.get(UNATTRIBUTED) || 0) : 0;
+    const amount = roundMoney(parked + roundMoney(slices[family]));
     components.set(family, amount);
     await upsertComponent(database, {
       customerId, familyKey: family, monthlyRate: amount, estimateId, source: 'estimate_accept',
@@ -304,18 +314,32 @@ async function applyAcceptToLedger(database, {
         .del();
     }
   }
-  // Termite rider variants are mutually exclusive billing arrangements
-  // (station rental vs purchased stations, bond terms) that a NEW termite
-  // accept supersedes wholesale (codex #3245 r4): an accepted
-  // purchased-stations quote must not leave a termite_station_rental
-  // component billing beside it. When this accept carries ANY termite
-  // family, every termite-prefixed component it did not re-quote is
-  // removed — and flagged for review, since a rider the owner intended to
-  // keep (an active bond beside a bait-only re-quote) needs one eyeball.
-  const acceptTouchesTermite = sliceFamilies.some((f) => String(f).startsWith('termite'));
-  if (acceptTouchesTermite) {
+  // Termite rider variants are mutually exclusive WITHIN their variant
+  // group only (codex #3245 r4 + r7): bond terms supersede bond terms
+  // (termite_bond_1yr → termite_bond_5yr) and station arrangements
+  // supersede station arrangements (rental → purchased), but a bait-only
+  // re-quote must NOT delete an independent active bond — a bond rides an
+  // accepted quote only when that quote includes it. Superseded variants
+  // are flagged for review.
+  const termiteVariantGroup = (family) => {
+    const key = String(family);
+    if (!key.startsWith('termite')) return null;
+    // Bond TERMS supersede each other but nothing else — a bond is
+    // independent coverage that rides an accepted quote only when the
+    // quote includes it (codex r7).
+    if (key.startsWith('termite_bond')) return 'termite_bond';
+    // Station arrangements (rental vs purchased) are variants OF the bait
+    // program — a new bait plan supersedes them (codex r4).
+    if (key.includes('station') || key.includes('rental') || key === 'termite_bait') {
+      return 'termite_bait_program';
+    }
+    return key; // other base plans supersede via their own exact key upsert
+  };
+  const sliceVariantGroups = new Set(sliceFamilies.map(termiteVariantGroup).filter(Boolean));
+  if (sliceVariantGroups.size > 0) {
     for (const family of [...components.keys()]) {
-      if (String(family).startsWith('termite') && !sliceFamilies.includes(family)) {
+      const group = termiteVariantGroup(family);
+      if (group && sliceVariantGroups.has(group) && !sliceFamilies.includes(family)) {
         components.delete(family);
         await database('customer_plan_rates')
           .where({ customer_id: customerId, family_key: family })
@@ -353,6 +377,40 @@ async function clearLedger(database, customerId, { source = 'offboarding' } = {}
   logger.info(`[plan-rate-ledger] cleared components for customer ${customerId} (${source})`);
 }
 
+// Seed the ledger with KNOWN per-family components in one shot (the
+// self-booking plan-sync rate backfill knows each detected plan's rate —
+// codex #3245 r7: a rate minted AFTER the one-time backfill without
+// components would hand the customer's first re-quote the empty-ledger
+// whole-scalar replace). Replaces any existing rows; same gate-aware
+// error policy as syncScalarWriteToLedger.
+async function seedLedgerComponents(database, customerId, components = {}, { source = 'plan_sync' } = {}) {
+  try {
+    await database.transaction(async (sp) => {
+      if (!(await ledgerTableExists(sp))) return;
+      await sp('customer_plan_rates').where({ customer_id: customerId }).del();
+      for (const [family, rate] of Object.entries(components)) {
+        const amount = roundMoney(rate);
+        if (amount > 0) {
+          await sp('customer_plan_rates').insert({
+            customer_id: customerId,
+            family_key: boundedFamilyKey(family),
+            monthly_rate: amount,
+            source,
+            effective_at: new Date(),
+            updated_at: new Date(),
+          });
+        }
+      }
+    });
+  } catch (seedErr) {
+    if (planRateLedgerEnabled()) {
+      logger.error(`[plan-rate-ledger] authoritative component seed failed for customer ${customerId} (${source}) — failing the write: ${seedErr.message}`);
+      throw seedErr;
+    }
+    logger.warn(`[plan-rate-ledger] advisory component seed failed for customer ${customerId} (${source}): ${seedErr.message}`);
+  }
+}
+
 // The ONE way for blind scalar writers (admin rate edits, IB customer
 // tools, offboarding's rate clear) to keep the ledger consistent with the
 // scalar they just wrote. Savepoint/transaction-confined, with the
@@ -384,4 +442,5 @@ module.exports = {
   resetLedgerToScalar,
   clearLedger,
   syncScalarWriteToLedger,
+  seedLedgerComponents,
 };

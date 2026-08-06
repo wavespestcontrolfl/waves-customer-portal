@@ -349,6 +349,75 @@ describe('applyAcceptToLedger', () => {
   });
 });
 
+describe('codex r7 hardening', () => {
+  test('a parked unattributed blob MERGES with an accepted unattributed slice on a proven add-on', async () => {
+    const db = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: UNATTRIBUTED, monthly_rate: 90 },
+    ]);
+    const out = await applyAcceptToLedger(db, {
+      customerId: 'cust-1',
+      estimateId: 'est-1',
+      slices: { mosquito: 30, [UNATTRIBUTED]: 10 },
+      previousScalar: 90,
+      addOnBase: 90,
+    });
+    expect(out.scalar).toBe(130); // 90 parked + 30 mosquito + 10 slice — never 40
+    expect(db.store.find((r) => r.family_key === UNATTRIBUTED).monthly_rate).toBe(100);
+  });
+
+  test('a zero-comped recurring line still blocks its supplemental-scalar twin', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control', mo: 40 },
+              { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 24, manualFinalAnnual: 0 },
+            ],
+            rodentBaitMo: 24,
+          },
+        },
+      },
+      monthlyRate: 40,
+    });
+    // The comp wins: rodent slices to ZERO (deletes its component), the
+    // supplement must not resurrect it positive.
+    expect(slices.rodent_bait).toBe(0);
+    expect(slices.pest_control).toBe(40);
+  });
+
+  test('termite supersession is scoped to the variant group', async () => {
+    // Bait-only re-quote keeps an independent bond.
+    const bondKept = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: 'termite_bait', monthly_rate: 30 },
+      { customer_id: 'cust-1', family_key: 'termite_bond_5yr', monthly_rate: 12 },
+    ]);
+    const baitOut = await applyAcceptToLedger(bondKept, {
+      customerId: 'cust-1',
+      estimateId: 'est-1',
+      slices: { termite_bait: 35 },
+      previousScalar: 42,
+      addOnBase: 0,
+    });
+    expect(baitOut.scalar).toBe(47); // 35 new bait + 12 bond kept
+    expect(bondKept.store.some((r) => r.family_key === 'termite_bond_5yr')).toBe(true);
+    // A new bond TERM supersedes the old one.
+    const bondSwap = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: 'termite_bond_5yr', monthly_rate: 12 },
+    ]);
+    const swapOut = await applyAcceptToLedger(bondSwap, {
+      customerId: 'cust-1',
+      estimateId: 'est-1',
+      slices: { termite_bond_1yr: 15 },
+      previousScalar: 12,
+      addOnBase: 0,
+    });
+    expect(swapOut.scalar).toBe(15);
+    expect(bondSwap.store.some((r) => r.family_key === 'termite_bond_5yr')).toBe(false);
+    expect(swapOut.reviewNeeded).toBe(true);
+  });
+});
+
 describe('codex r6 hardening', () => {
   test('oversized classifier slugs map to a stable bounded key that fits varchar(64)', () => {
     const { boundedFamilyKey } = require('../services/plan-rate-ledger');
