@@ -192,7 +192,7 @@ async function loadUnactionedFlags() {
         .orWhere(function liveAmbiguous() {
           this.whereNull('ad.entity_id')
             .whereNotNull('ad.customer_id')
-            .whereRaw("EXISTS (SELECT 1 FROM scheduled_services live WHERE live.customer_id = ad.customer_id AND live.scheduled_date >= (now() at time zone 'America/New_York')::date AND live.status IN ('pending', 'confirmed', 'en_route', 'on_site'))");
+            .whereRaw("EXISTS (SELECT 1 FROM scheduled_services live WHERE live.customer_id = ad.customer_id AND ((live.scheduled_date >= (now() at time zone 'America/New_York')::date AND live.status IN ('pending', 'confirmed', 'en_route', 'on_site')) OR (live.status = 'completed' AND live.scheduled_date >= (now() at time zone 'America/New_York')::date - 1)))");
         })
         // Unlinked shared-phone flags (customer AND entity null) are
         // retained while ANY phone-matched customer's visit is still
@@ -200,7 +200,7 @@ async function loadUnactionedFlags() {
         .orWhere(function livePhoneMatched() {
           this.whereNull('ad.customer_id')
             .whereRaw("COALESCE(ad.input_snapshot->>'phone_tail', '') <> ''")
-            .whereRaw("EXISTS (SELECT 1 FROM customers pc JOIN scheduled_services pss ON pss.customer_id = pc.id WHERE pc.deleted_at IS NULL AND RIGHT(regexp_replace(COALESCE(pc.phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail' AND pss.scheduled_date >= (now() at time zone 'America/New_York')::date AND pss.status IN ('pending', 'confirmed', 'en_route', 'on_site'))");
+            .whereRaw("EXISTS (SELECT 1 FROM customers pc JOIN scheduled_services pss ON pss.customer_id = pc.id WHERE pc.deleted_at IS NULL AND RIGHT(regexp_replace(COALESCE(pc.phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail' AND ((pss.scheduled_date >= (now() at time zone 'America/New_York')::date AND pss.status IN ('pending', 'confirmed', 'en_route', 'on_site')) OR (pss.status = 'completed' AND pss.scheduled_date >= (now() at time zone 'America/New_York')::date - 1)))");
         });
     })
     // A HUMAN reply that actually left (accepted carrier statuses) clears

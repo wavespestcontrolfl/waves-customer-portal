@@ -339,3 +339,21 @@ describe('not-available and cannot-attend forms (codex r35)', () => {
     expect(hasRescheduleOrAwayIntent("I cannot attend tomorrow's appointment")).toBe(true);
   });
 });
+
+describe('miss/delay/put-off asks (codex r36)', () => {
+  test('have to miss appointment flags', () => {
+    expect(hasRescheduleOrAwayIntent("I have to miss tomorrow's appointment")).toBe(true);
+  });
+  test('need to delay appointment flags', () => {
+    expect(hasRescheduleOrAwayIntent("I need to delay tomorrow's appointment")).toBe(true);
+  });
+  test('put off service flags', () => {
+    expect(hasRescheduleOrAwayIntent("Can we put off tomorrow's service?")).toBe(true);
+  });
+  test('dont delay my appointment stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("Please don't delay my appointment")).toBe(false);
+  });
+  test('missed your call stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent('Sorry I missed your call earlier')).toBe(false);
+  });
+});

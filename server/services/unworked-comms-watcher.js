@@ -144,7 +144,10 @@ async function loadCallbackCalls(cutoff = new Date()) {
       AND NOT EXISTS (
         SELECT 1 FROM sms_log os
         WHERE os.direction = 'outbound'
-          AND os.message_type IN ${HUMAN_REPLY_TYPES}
+          -- Human-AUTHORED only (codex r36): the callback obligation is a
+          -- human's to return — the AI Assistant's automatic conversational
+          -- reply (ai_assistant/ai_assistant_reply) must not clear it.
+          AND os.message_type IN ('manual', 'ai_approved', 'ai_revised')
           -- A human-APPROVED PROACTIVE draft (click-followup, lead nudge —
           -- any draft with no inbound sms_log anchor) is not a reply to
           -- this item (codex r24/r28); finalize stamps sent_at at send.
@@ -201,6 +204,16 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
           AND COALESCE(cs.metadata->>'callSid', '') <> ''
           AND fsms.direction = 'outbound'
           AND fsms.message_type IN ${HUMAN_REPLY_TYPES}
+          -- Same proactive-draft exclusion as every other reply leg
+          -- (codex r36): an approved lead nudge is not the requested
+          -- outreach.
+          AND NOT EXISTS (
+            SELECT 1 FROM message_drafts mdx
+            WHERE mdx.sms_log_id IS NULL
+              AND (mdx.customer_id = fsms.customer_id OR (mdx.customer_id IS NULL AND fsms.customer_id IS NULL))
+              AND mdx.sent_at BETWEEN fsms.created_at - interval '2 minutes'
+                                  AND fsms.created_at + interval '2 minutes'
+          )
           AND fsms.status IN ('queued', 'sent', 'delivered')
           AND fsms.created_at > t.created_at
           AND RIGHT(REGEXP_REPLACE(COALESCE(fsms.to_phone, ''), '\\D', '', 'g'), 10)
