@@ -2983,6 +2983,7 @@ const ReviewService = {
       // terminator, the depth cap is only a runaway guard.
       const seen = new Set([visit.id]);
       let sourceIds = [];
+      const ancestorRows = [];
       let cursor = visit;
       for (let depth = 0; depth < 50; depth += 1) {
         const next = cursor.parent_service_id || cursor.followup_source_service_id;
@@ -2991,69 +2992,63 @@ const ReviewService = {
         sourceIds.push(next);
         cursor = await db("scheduled_services")
           .where({ id: next })
-          .select("id", "parent_service_id", "followup_source_service_id", "service_id")
+          .select("id", "parent_service_id", "followup_source_service_id", "service_id", "scheduled_date", "property_id")
           .first();
         if (!cursor) break;
+        ancestorRows.push(cursor);
       }
-      if (!sourceIds.length && visit.service_id) {
+      // Trapping merges family history INTO linked ancestry (codex #3243 r4
+      // P1) rather than falling back either/or: a final linked only to the
+      // middle visit made sourceIds nonempty, so the unlinked opener's
+      // first_treatment_ask stayed unexempted and the cooldown rejected the
+      // intended final cadence.
+      if (visit.service_id && TRAPPING_MULTI_TREATMENT_KEYS.has(visit.service_key)) {
+        // Breadth-first opener trace (r3 P2 + r4 P1): every discovered
+        // visit anchors its own window — adjacent checks chain past one
+        // window's span (days 0/20/40) — and the seeds are the visit PLUS
+        // its linked ancestors: linkage bridges date gaps the walk can't
+        // cross, the walk reaches unlinked visits linkage can't. The
+        // seen-set terminates; the hop cap is a runaway guard.
+        const intervalDays = Number(visit.follow_up_interval_days) > 0 ? Number(visit.follow_up_interval_days) : 15;
+        const windowDays = Math.min(60, Math.max(30, intervalDays * 2));
+        const seriesKeys = trappingSeriesKeysFor(visit.service_key);
+        const inPremise = await trappingPremiseMatcher(customerId, visit.property_id);
+        const collected = new Set(sourceIds);
+        const queue = [visit, ...ancestorRows.filter((r) => r.scheduled_date != null)];
+        for (let hops = 0; queue.length && hops < 16; hops += 1) {
+          const c = queue.shift();
+          const w = etDayWindow(c.scheduled_date, windowDays);
+          const rows = await db("scheduled_services as ps")
+            .leftJoin("services as psv", "ps.service_id", "psv.id")
+            .where("ps.customer_id", customerId)
+            .where("ps.status", "completed")
+            .where("ps.scheduled_date", "<", w.anchorStr)
+            .where("ps.scheduled_date", ">=", w.floorStr)
+            .whereIn("psv.service_key", seriesKeys)
+            .select("ps.id", "ps.scheduled_date", "ps.property_id");
+          rows
+            .filter((r) => r.id !== visit.id && !collected.has(r.id) && inPremise(r.property_id))
+            .forEach((r) => {
+              collected.add(r.id);
+              queue.push(r);
+            });
+        }
+        sourceIds = [...collected];
+      } else if (!sourceIds.length && visit.service_id) {
         // Same anchoring as the plan resolver (codex #3235 r10 P1): the
         // series' earlier visits, relative to THIS visit's date — never a
         // now-relative window that payment-deferred enrollment would skew.
-        const isTrappingSeries = TRAPPING_MULTI_TREATMENT_KEYS.has(visit.service_key);
+        // Packages stay same-service, 2x-interval.
         const intervalDays = Number(visit.follow_up_interval_days) > 0 ? Number(visit.follow_up_interval_days) : 15;
-        // Same line-window rules as the plan resolver: trapping matches its
-        // service line's key set (the rodent return check has its own
-        // catalog row) with a 30-day floor, premise-scoped JS-side;
-        // packages stay same-service, 2x-interval.
-        const windowDays = isTrappingSeries
-          ? Math.min(60, Math.max(30, intervalDays * 2))
-          : Math.min(60, intervalDays * 2);
-        if (isTrappingSeries) {
-          // Hop-by-hop opener trace (codex #3243 r3 P2): a program's total
-          // span can exceed one window while ADJACENT checks stay inside it
-          // (visits on days 0/20/40) — one final-relative window would never
-          // reach the opener's first_treatment_ask sequence, leaving it
-          // counted against the cap. Each hop re-anchors on the earliest
-          // visit found; the seen-set terminates, the hop cap is a runaway
-          // guard.
-          const seriesKeys = trappingSeriesKeysFor(visit.service_key);
-          const inPremise = await trappingPremiseMatcher(customerId, visit.property_id);
-          const collected = new Set();
-          let cursor = visit;
-          for (let hop = 0; hop < 12 && cursor; hop += 1) {
-            const w = etDayWindow(cursor.scheduled_date, windowDays);
-            const rows = await db("scheduled_services as ps")
-              .leftJoin("services as psv", "ps.service_id", "psv.id")
-              .where("ps.customer_id", customerId)
-              .where("ps.status", "completed")
-              .where("ps.scheduled_date", "<", w.anchorStr)
-              .where("ps.scheduled_date", ">=", w.floorStr)
-              .whereIn("psv.service_key", seriesKeys)
-              .select("ps.id", "ps.scheduled_date", "ps.property_id");
-            const fresh = rows.filter(
-              (r) => r.id !== visit.id && !collected.has(r.id) && inPremise(r.property_id),
-            );
-            if (!fresh.length) break;
-            let earliest = fresh[0];
-            fresh.forEach((r) => {
-              collected.add(r.id);
-              if (etDayWindow(r.scheduled_date, 0).anchorStr < etDayWindow(earliest.scheduled_date, 0).anchorStr) {
-                earliest = r;
-              }
-            });
-            cursor = earliest;
-          }
-          sourceIds = [...collected];
-        } else {
-          const w = etDayWindow(visit.scheduled_date, windowDays);
-          const priors = await db("scheduled_services")
-            .where({ customer_id: customerId, service_id: visit.service_id, status: "completed" })
-            .where("id", "!=", visit.id)
-            .where("scheduled_date", "<", w.anchorStr)
-            .where("scheduled_date", ">=", w.floorStr)
-            .select("id");
-          sourceIds = priors.map((r) => r.id);
-        }
+        const windowDays = Math.min(60, intervalDays * 2);
+        const w = etDayWindow(visit.scheduled_date, windowDays);
+        const priors = await db("scheduled_services")
+          .where({ customer_id: customerId, service_id: visit.service_id, status: "completed" })
+          .where("id", "!=", visit.id)
+          .where("scheduled_date", "<", w.anchorStr)
+          .where("scheduled_date", ">=", w.floorStr)
+          .select("id");
+        sourceIds = priors.map((r) => r.id);
       }
       if (!sourceIds.length) return [];
       // Two lookups (codex #3235 r8 P1): a first-visit sequence enrolled

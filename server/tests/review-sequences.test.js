@@ -991,6 +991,21 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     db.mockImplementation(mock);
     const exempt = await ReviewService._seriesExemptSequenceIds('op', { scheduledServiceId: 'op-3' });
     expect(exempt).toContain('seq-opener');
+
+    // Family history MERGES with linked ancestry (codex #3243 r4): the final
+    // links only to the middle visit, the opener is unlinked — its sequence
+    // must still be exempted, not dropped because linked ancestry was found.
+    mock = makeMock({
+      scheduled_services: [
+        { id: 'mg-1', customer_id: 'mg', service_id: 'svc-trap', status: 'completed', scheduled_date: d(20), service_key: 'rodent_trapping' },
+        { id: 'mg-2', customer_id: 'mg', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping_followup' },
+        { id: 'mg-3', customer_id: 'mg', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', parent_service_id: 'mg-2', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [{ id: 'seq-mg-opener', customer_id: 'mg', scheduled_service_id: 'mg-1', status: 'completed' }],
+    });
+    db.mockImplementation(mock);
+    const merged = await ReviewService._seriesExemptSequenceIds('mg', { scheduledServiceId: 'mg-3' });
+    expect(merged).toContain('seq-mg-opener');
   });
 
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
