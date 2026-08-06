@@ -1055,6 +1055,13 @@ async function updateCustomer(customerId, updates) {
         // needs only this lock: its claim probe runs under the same key.
       }
       await trx('customers').where('id', customerId).update(clean);
+      if (clean.monthly_rate !== undefined) {
+        // Blind rate writes invalidate per-family attribution — reset the
+        // plan-rate ledger to match the new scalar (codex #3245 r2;
+        // gate-aware error policy lives in the helper).
+        await require('../plan-rate-ledger')
+          .syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_update' });
+      }
       if (addressSubmitted) {
         await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
         // Open leads/estimates snapshot the address at creation and never
@@ -1180,6 +1187,15 @@ async function bulkUpdateCustomers(customerIds, updates) {
   const emailSubmitted = clean.email !== undefined;
   if (!addressSubmitted && !emailSubmitted) {
     const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
+    if (clean.monthly_rate !== undefined) {
+      // Blind rate writes invalidate per-family attribution — reset each
+      // customer's plan-rate ledger to match the new scalar (codex #3245
+      // r2; gate-aware error policy lives in the helper).
+      const PlanRateLedger = require('../plan-rate-ledger');
+      for (const cid of customerIds) {
+        await PlanRateLedger.syncScalarWriteToLedger(db, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
+      }
+    }
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     return {
       success: true,
@@ -1226,6 +1242,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
           // updateCustomer.
         }
         await trx('customers').where('id', customerId).update({ ...clean, ...stageStamp });
+        if (clean.monthly_rate !== undefined) {
+          // Same ledger sync as the non-address bulk branch (codex #3245 r2).
+          await require('../plan-rate-ledger')
+            .syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_bulk_update' });
+        }
         if (addressSubmitted) {
           await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
           await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);

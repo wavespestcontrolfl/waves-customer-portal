@@ -65,6 +65,13 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
     supplementalCompanionLines,
   } = require('./estimate-converter');
   const raw = {};
+  // A family whose accepted price is EXPLICITLY zero (a comped line —
+  // manualFinalAnnual/annualAfterDiscount stamped 0) must still appear in
+  // the slices at 0 so applyAcceptToLedger replaces/deletes its existing
+  // component (codex #3245 r2: a bundle comping Pest while keeping Lawn
+  // must stop billing the Pest slice). Lines with NO price provenance at
+  // all stay skipped — absence is not a zero.
+  const zeroFamilies = new Set();
   const addLine = (line) => {
     const family = serviceFamilyKeyForAdoption(line) || UNATTRIBUTED;
     const manualFinal = Number(line?.manualFinalAnnual);
@@ -74,7 +81,11 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
       : (Number.isFinite(annualAfter) && annualAfter >= 0
         ? annualAfter / 12
         : Number(line?.monthly ?? line?.mo));
-    if (!Number.isFinite(monthly) || monthly <= 0) return null;
+    if (!Number.isFinite(monthly) || monthly < 0) return null;
+    if (monthly === 0) {
+      if (family !== UNATTRIBUTED) zeroFamilies.add(family);
+      return null;
+    }
     raw[family] = (raw[family] || 0) + monthly;
     return family;
   };
@@ -95,9 +106,15 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
     addLine(line);
   }
   const families = Object.keys(raw);
-  if (!families.length) return { [UNATTRIBUTED]: billedMonthly };
+  const withZeroFamilies = (slices) => {
+    for (const family of zeroFamilies) {
+      if (slices[family] === undefined) slices[family] = 0;
+    }
+    return slices;
+  };
+  if (!families.length) return withZeroFamilies({ [UNATTRIBUTED]: billedMonthly });
   const rawTotal = families.reduce((sum, f) => sum + raw[f], 0);
-  if (!(rawTotal > 0)) return { [UNATTRIBUTED]: billedMonthly };
+  if (!(rawTotal > 0)) return withZeroFamilies({ [UNATTRIBUTED]: billedMonthly });
   const slices = {};
   for (const f of families) {
     slices[f] = roundMoney((raw[f] / rawTotal) * billedMonthly);
@@ -109,7 +126,7 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
     const largest = families.reduce((a, b) => (slices[a] >= slices[b] ? a : b));
     slices[largest] = roundMoney(slices[largest] + residue);
   }
-  return slices;
+  return withZeroFamilies(slices);
 }
 
 async function loadComponents(database, customerId) {
@@ -172,7 +189,13 @@ async function applyAcceptToLedger(database, {
   customerId, estimateId, slices = {}, previousScalar = 0, addOnBase = 0,
   hadOtherLiveFamilies = false,
 } = {}) {
-  const sliceFamilies = Object.keys(slices).filter((f) => roundMoney(slices[f]) > 0);
+  // Zero-valued slices are accepted families whose price was explicitly
+  // comped — they participate as DELETES so the prior component stops
+  // billing (codex #3245 r2). Families with no entry at all are untouched.
+  const sliceFamilies = Object.keys(slices)
+    .filter((f) => Number.isFinite(Number(slices[f])) && Number(slices[f]) >= 0);
+  const positiveFamilies = sliceFamilies.filter((f) => roundMoney(slices[f]) > 0);
+  const zeroSliceFamilies = sliceFamilies.filter((f) => roundMoney(slices[f]) === 0);
   if (!sliceFamilies.length) return { scalar: null, components: null, reviewNeeded: false };
   if (!(await ledgerTableExists(database))) {
     return { scalar: null, components: null, reviewNeeded: false };
@@ -217,12 +240,20 @@ async function applyAcceptToLedger(database, {
       reviewNeeded = hadOtherLiveFamilies === true;
     }
   }
-  for (const family of sliceFamilies) {
+  for (const family of positiveFamilies) {
     const amount = roundMoney(slices[family]);
     components.set(family, amount);
     await upsertComponent(database, {
       customerId, familyKey: family, monthlyRate: amount, estimateId, source: 'estimate_accept',
     });
+  }
+  for (const family of zeroSliceFamilies) {
+    if (components.has(family)) {
+      components.delete(family);
+      await database('customer_plan_rates')
+        .where({ customer_id: customerId, family_key: family })
+        .del();
+    }
   }
   const scalar = roundMoney([...components.values()].reduce((sum, v) => sum + v, 0));
   return { scalar, components: Object.fromEntries(components), reviewNeeded };
@@ -253,6 +284,27 @@ async function clearLedger(database, customerId, { source = 'offboarding' } = {}
   logger.info(`[plan-rate-ledger] cleared components for customer ${customerId} (${source})`);
 }
 
+// The ONE way for blind scalar writers (admin rate edits, IB customer
+// tools, offboarding's rate clear) to keep the ledger consistent with the
+// scalar they just wrote. Savepoint/transaction-confined, with the
+// gate-aware error policy (codex #3245 r2): while the ledger is ADVISORY
+// (gate off) a failure is swallowed with a warning — nothing reads the
+// components; once the ledger has SCALAR AUTHORITY (gate on) a failed sync
+// throws, failing the caller's write, because committing a new scalar over
+// stale authoritative components lets the next accept resurrect the old
+// sum. Pass rate null/0 to clear (offboarding).
+async function syncScalarWriteToLedger(database, customerId, rate, { source = 'scalar_write' } = {}) {
+  try {
+    await database.transaction((sp) => resetLedgerToScalar(sp, customerId, rate, { source }));
+  } catch (syncErr) {
+    if (planRateLedgerEnabled()) {
+      logger.error(`[plan-rate-ledger] authoritative sync failed for customer ${customerId} (${source}) — failing the write: ${syncErr.message}`);
+      throw syncErr;
+    }
+    logger.warn(`[plan-rate-ledger] advisory sync failed for customer ${customerId} (${source}): ${syncErr.message}`);
+  }
+}
+
 module.exports = {
   UNATTRIBUTED,
   planRateLedgerEnabled,
@@ -261,4 +313,5 @@ module.exports = {
   applyAcceptToLedger,
   resetLedgerToScalar,
   clearLedger,
+  syncScalarWriteToLedger,
 };

@@ -3009,14 +3009,13 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // A blind admin rate edit invalidates any finer per-family
             // attribution — reset the plan-rate ledger to a single
             // unattributed component matching the new scalar (cleared when
-            // the rate is zeroed). Savepoint-confined + fail-soft: a ledger
-            // hiccup must never block the customer save.
-            try {
-              await trx.transaction((sp) => require('../services/plan-rate-ledger')
-                .resetLedgerToScalar(sp, req.params.id, updates.monthly_rate, { source: 'admin_edit' }));
-            } catch (ledgerErr) {
-              logger.warn(`[admin-customers] plan-rate ledger reset failed for customer ${req.params.id}: ${ledgerErr.message}`);
-            }
+            // the rate is zeroed). Gate-aware error policy lives in the
+            // helper (codex #3245 r2): advisory failures warn; failures
+            // while the ledger has scalar authority FAIL the edit, because
+            // committing a new scalar over stale authoritative components
+            // would let the next accept resurrect the old sum.
+            await require('../services/plan-rate-ledger')
+              .syncScalarWriteToLedger(trx, req.params.id, updates.monthly_rate, { source: 'admin_edit' });
           }
           if (addressChanged) {
             await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);

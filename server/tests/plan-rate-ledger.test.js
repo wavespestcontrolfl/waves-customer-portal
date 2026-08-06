@@ -10,6 +10,7 @@ const {
   estimateFamilySlices,
   applyAcceptToLedger,
   resetLedgerToScalar,
+  syncScalarWriteToLedger,
 } = require('../services/plan-rate-ledger');
 const { classifyAddOnAcceptContext } = require('../services/estimate-converter');
 
@@ -311,6 +312,88 @@ describe('applyAcceptToLedger', () => {
     await expect(applyAcceptToLedger(makeLedgerDb([]), {
       customerId: CUST, slices: {}, previousScalar: 40,
     })).resolves.toEqual({ scalar: null, components: null, reviewNeeded: false });
+  });
+});
+
+describe('zero-priced accepted families (codex r2)', () => {
+  test('an explicitly comped line yields a ZERO slice', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control', mo: 40, manualFinalAnnual: 0 },
+              { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', mo: 50 },
+            ],
+          },
+        },
+      },
+      monthlyRate: 50,
+    });
+    expect(slices.pest_control).toBe(0);
+    expect(slices.lawn_care).toBe(50);
+  });
+
+  test('a zero slice DELETES the family component so the comped plan stops billing', async () => {
+    const db = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 40 },
+      { customer_id: 'cust-1', family_key: 'lawn_care', monthly_rate: 50 },
+    ]);
+    const out = await applyAcceptToLedger(db, {
+      customerId: 'cust-1',
+      estimateId: 'est-1',
+      slices: { pest_control: 0, lawn_care: 50 },
+      previousScalar: 90,
+      addOnBase: 0,
+    });
+    expect(out.scalar).toBe(50);
+    expect(db.store.some((r) => r.family_key === 'pest_control')).toBe(false);
+  });
+
+  test('a line with NO price provenance is untouched, not zeroed', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control' },
+              { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', mo: 50 },
+            ],
+          },
+        },
+      },
+      monthlyRate: 50,
+    });
+    expect(slices.pest_control).toBeUndefined();
+    expect(slices.lawn_care).toBe(50);
+  });
+});
+
+describe('syncScalarWriteToLedger (codex r2)', () => {
+  test('advisory (gate off): failures are swallowed', async () => {
+    const db = makeLedgerDb([], { hasTable: true });
+    db.transaction = async () => { throw new Error('savepoint boom'); };
+    await expect(syncScalarWriteToLedger(db, 'cust-1', 50, { source: 'admin_edit' }))
+      .resolves.toBeUndefined();
+  });
+
+  test('authoritative (gate on): failures throw and fail the caller write', async () => {
+    featureGates.isEnabled.mockReturnValue(true);
+    const db = makeLedgerDb([], { hasTable: true });
+    db.transaction = async () => { throw new Error('savepoint boom'); };
+    await expect(syncScalarWriteToLedger(db, 'cust-1', 50, { source: 'admin_edit' }))
+      .rejects.toThrow('savepoint boom');
+    featureGates.isEnabled.mockReturnValue(false);
+  });
+
+  test('resets through a transaction to a single unattributed component', async () => {
+    const db = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 40 },
+    ]);
+    db.transaction = async (fn) => fn(db);
+    await syncScalarWriteToLedger(db, 'cust-1', 75, { source: 'ib_update' });
+    expect(db.store).toHaveLength(1);
+    expect(db.store[0]).toMatchObject({ family_key: UNATTRIBUTED, monthly_rate: 75 });
   });
 });
 

@@ -506,13 +506,13 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     });
   result.tierCleared = tierCleared > 0;
   // The rate is cleared — clear its per-family attribution with it so a
-  // re-signup can never inherit stale components. Fail-soft: offboarding
-  // must not break on a ledger hiccup.
-  try {
-    await require('./plan-rate-ledger').clearLedger(db, customerId, { source: 'offboarding' });
-  } catch (ledgerErr) {
-    logger.warn?.(`[customer-offboarding] plan-rate ledger clear failed for customer ${customerId}: ${ledgerErr.message}`);
-  }
+  // re-signup can never inherit stale components and sum cancelled plan
+  // charges back in. Gate-aware error policy lives in the helper (codex
+  // #3245 r2): advisory failures warn; while the ledger has scalar
+  // authority a failed clear THROWS and aborts the offboarding rather than
+  // leave authoritative components behind a nulled rate.
+  await require('./plan-rate-ledger')
+    .syncScalarWriteToLedger(db, customerId, null, { source: 'offboarding' });
 
   // 4. Refund the deposit remainder — but only past a CLEAN sweep. A visit
   // left uncancelled or an invoice the best-effort void skipped (in-flight
