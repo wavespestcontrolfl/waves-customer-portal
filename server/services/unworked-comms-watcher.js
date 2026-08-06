@@ -148,6 +148,14 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                AND vs.message_type IN ${HUMAN_REPLY_TYPES}
                AND vs.status IN ('queued', 'sent', 'delivered')
                AND vs.created_at > t.created_at
+           )
+           -- A logged outbound call / call / note IS a human action
+           -- (codex r11) — those verifications stand.
+           AND NOT EXISTS (
+             SELECT 1 FROM customer_interactions ci
+             WHERE ci.customer_id = t.customer_id
+               AND ci.type IN ('call_outbound', 'call', 'note')
+               AND ci.created_at > t.created_at
            ))
     -- Newest-first (codex r8): oldest-first returned the same stuck 12
     -- forever and newer tasks never surfaced with details; yesterday's

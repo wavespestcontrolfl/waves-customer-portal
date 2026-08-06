@@ -91,15 +91,15 @@ async function loadUnkeptPromises() {
                  WHERE l.twilio_call_sid = c.twilio_call_sid
                    AND (l.estimate_id = e.id OR e.estimate_data ->> 'lead_id' = l.id::text)
                )
-            OR (c.customer_id IS NOT NULL AND e.customer_id = c.customer_id
-                AND e.created_at >= c.created_at - interval '1 hour')
+            OR (c.customer_id IS NOT NULL AND e.customer_id = c.customer_id)
             OR (e.customer_phone IS NOT NULL
-                AND e.created_at >= c.created_at - interval '1 hour'
                 AND RIGHT(REGEXP_REPLACE(e.customer_phone, '\\D', '', 'g'), 10)
                   = RIGHT(REGEXP_REPLACE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, '\\D', '', 'g'), 10))
           )
       )
-    ORDER BY c.created_at ASC
+    -- Newest-first (codex r11): oldest-first pinned the same backlog ten
+    -- forever while newer broken promises hid in the overflow count.
+    ORDER BY c.created_at DESC
     LIMIT :maxRows
     `,
     { lookbackHours: LOOKBACK_HOURS, graceHours: GRACE_HOURS, maxRows: MAX_ROWS },
