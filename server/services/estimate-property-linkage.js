@@ -97,10 +97,31 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
     let parts = null;
     if (!propertyId) {
       parts = parseEstimateAddress(estimate.address);
-      // A partial parse still identifies the property (the address_key
-      // normalizer sees the same free-text the customers mirror carries),
-      // but only a street is non-negotiable.
       if (!parts || !String(parts.address_line1 || '').trim()) return null;
+      // A partial parse (street-only / legacy snapshot) carries no city/zip,
+      // so addressKey can never match the customer's backfilled structured
+      // primary — inserting it would mint a FALSE second property and
+      // permanently flip has_multi_home + discount eligibility (codex #3244
+      // r1). Reconcile partials by normalized street against the existing
+      // rows; no confident match → skip linkage rather than invent one.
+      if (parts.partial) {
+        const normalizeStreet = (v) => String(v || '')
+          .toLowerCase()
+          .replace(/[^a-z0-9 ]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const street = normalizeStreet(parts.address_line1);
+        if (!street) return null;
+        const rows = await database('customer_properties').where({ customer_id: customerId, active: true });
+        const matched = rows.find((p) => normalizeStreet(p.address_line1) === street);
+        if (!matched) {
+          logger.info(`[estimate-property-linkage] estimate ${estimateId}: partial address didn't match an existing property — linkage skipped`);
+          return null;
+        }
+        propertyId = matched.id;
+      }
+    }
+    if (!propertyId && parts) {
       const created = await recordCallProperty({
         customerId,
         address_line1: parts.address_line1,

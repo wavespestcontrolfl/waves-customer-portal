@@ -2896,9 +2896,13 @@ export function DraftPreviewBanner() {
 // and the server-side handoff covers a full load.
 function PropertyGroupSwitcher({ group }) {
   if (!Array.isArray(group) || group.length < 2) return null;
+  // Pricing-copy contract: estimate surfaces show per-application pricing,
+  // never combined monthly/annual plan totals (codex #3244 r1). The switcher
+  // therefore names one-time totals (a real single charge) but shows no
+  // aggregate for recurring plans — the per-application breakdown is on each
+  // property's own page, one tap away.
   const priceLabel = (p) => {
-    if (p.monthlyTotal > 0) return `$${Number(p.monthlyTotal).toFixed(2)}/mo`;
-    if (p.onetimeTotal > 0) return `$${Number(p.onetimeTotal).toFixed(2)} one-time`;
+    if (p.onetimeTotal > 0 && !(p.monthlyTotal > 0)) return `$${Number(p.onetimeTotal).toFixed(2)} one-time`;
     return null;
   };
   const statusLabel = (p) => {

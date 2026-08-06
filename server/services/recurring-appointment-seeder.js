@@ -549,6 +549,15 @@ async function findActiveRecurringSeries(conn, {
   serviceId = null,
   serviceType = null,
   excludeParentId = null,
+  // Per-property scope (codex #3244 r1): a multi-property group's second
+  // estimate resolves to the SAME customer, so a customer+family match alone
+  // reads the first property's series as a duplicate and skips seeding the
+  // second property's schedule entirely. When set ({ estimateStreet,
+  // customerPrimaryStreet }, both normalized), a parent series only counts as
+  // a duplicate when its service address (stamped service_address_line1, or
+  // the customer's primary street for unstamped/legacy rows) matches the
+  // accepting estimate's street. Null → exact legacy behavior.
+  serviceAddressScope = null,
 } = {}) {
   if (!conn || !customerId || (serviceId == null && !serviceType)) return [];
   const columns = await scheduledServiceColumns(conn);
@@ -559,6 +568,7 @@ async function findActiveRecurringSeries(conn, {
     .whereNotIn('status', ['cancelled', 'rescheduled'])
     .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
   if (columns.service_id) query.select('service_id');
+  if (columns.service_address_line1) query.select('service_address_line1');
   // Which estimate created the existing series — lets the duplicate-conflict
   // payload prove to a retrying client that the series IS the one its
   // partial save already created (codex r21 P0).
@@ -574,6 +584,13 @@ async function findActiveRecurringSeries(conn, {
     const keyMatch = targetKey != null && parent.service_type
       && serviceKeyFor({ service_type: parent.service_type }) === targetKey;
     if (!idMatch && !keyMatch) continue;
+    if (serviceAddressScope && columns.service_address_line1 && serviceAddressScope.estimateStreet) {
+      const normalizeStreet = (v) => String(v || '')
+        .toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+      const parentStreet = normalizeStreet(parent.service_address_line1)
+        || String(serviceAddressScope.customerPrimaryStreet || '');
+      if (parentStreet && parentStreet !== serviceAddressScope.estimateStreet) continue;
+    }
     const upcoming = await conn('scheduled_services')
       .where(function () {
         this.where({ recurring_parent_id: parent.id }).orWhere({ id: parent.id });

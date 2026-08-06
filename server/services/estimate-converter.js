@@ -2069,6 +2069,23 @@ const EstimateConverter = {
     let termStartDate = null;
     let firstScheduledServiceId = null;
     const deferredFollowUpReminderRows = [];
+    // Per-property duplicate-series scope (codex #3244 r1): a grouped
+    // estimate's accept resolves to the same customer as its siblings, so the
+    // customer+family guard alone would read the FIRST property's series as a
+    // duplicate and skip seeding the second property's schedule. Scoped to
+    // grouped estimates only — ungrouped accepts keep the exact legacy guard.
+    let seriesAddressScope = null;
+    if (estimate?.estimate_group_id && estimate.address) {
+      const normalizeStreet = (v) => String(v || '')
+        .toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+      const estimateStreet = normalizeStreet(String(estimate.address).split(',')[0]);
+      let customerPrimaryStreet = '';
+      try {
+        const custRow = await database('customers').where({ id: customerId }).first('address_line1');
+        customerPrimaryStreet = normalizeStreet(custRow?.address_line1);
+      } catch { /* scope falls back to stamped addresses only */ }
+      if (estimateStreet) seriesAddressScope = { estimateStreet, customerPrimaryStreet };
+    }
     // Series-seeding transaction wrapper (P0: check-then-insert race). Every
     // converter path that can CREATE a recurring series runs its duplicate-
     // series re-check (checkActiveSeriesLocked — advisory lock per
@@ -2377,6 +2394,7 @@ const EstimateConverter = {
                 customerId,
                 serviceId: standaloneRow.service_id || null,
                 serviceType: standaloneRow.service_type,
+                serviceAddressScope: seriesAddressScope,
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
               if (matches.length > 0) return { kept: matches[0] };
@@ -2538,6 +2556,7 @@ const EstimateConverter = {
                 serviceId: reservedStart.service_id || null,
                 serviceType: reservedStart.service_type || null,
                 excludeParentId: reservedStart.id,
+                serviceAddressScope: seriesAddressScope,
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
               if (matches.length > 0) return { kept: matches[0] };
@@ -2698,6 +2717,7 @@ const EstimateConverter = {
                 customerId,
                 serviceId: combinedServiceId,
                 serviceType: serviceName,
+                serviceAddressScope: seriesAddressScope,
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
               if (matches.length > 0) return { kept: matches[0] };
@@ -2912,21 +2932,6 @@ const EstimateConverter = {
           // that amount, or the whole accept rolls back — never an accepted
           // prepay beside an unconsumed deposit row.
           let appliedPrepayDepositCredit = 0;
-          // Multi-property group accept: the caller already minted ONE
-          // combined prepay invoice covering every property in the group (on
-          // the caller's transaction) — this estimate's leg must NOT mint its
-          // own. The term below anchors to the shared invoice, and the
-          // term's prepayAmount records THIS property's net share
-          // (annualAmount), never the combined invoice total — renewal
-          // quoting and covered-visit pricing read it per property. Deposit
-          // credit is the group service's concern (one ledger per invoice —
-          // billing invariant), so this leg consumes none. Caller-trx only:
-          // rollback covers the shared invoice, so no void path is needed.
-          if (opts.prepaySharedInvoiceId && usingCallerDatabase) {
-            draftInvoiceId = opts.prepaySharedInvoiceId;
-            draftInvoiceAmount = annualAmount;
-            draftInvoicePayUrl = null;
-          } else {
           const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
           let prepayDepositCredit;
           try {
@@ -2990,7 +2995,6 @@ const EstimateConverter = {
           // inv.total === annualAmount, so this is a no-op there.
           draftInvoiceAmount = inv?.total != null ? Number(inv.total) : annualAmount;
           draftInvoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
-          }
 
           // Coverage config so the paid-invoice → webhook → refreshTermSnapshot
           // pipeline STAMPS the recurring visits prepaid (prevents the completion

@@ -737,11 +737,35 @@ async function resolveEstimatePropertyLinkage(database, body) {
 // Ensure the anchor estimate of a group has an estimate_group_id, minting one
 // on first use. Locks the anchor row so two concurrent "add another property"
 // saves against the same anchor converge on a single group id.
-async function ensureEstimateGroupId(trx, anchorEstimateId, randomUUID = crypto.randomUUID) {
+//
+// Same-customer guard (codex #3244 r1): a group is ONE customer's properties —
+// the group publishes under one bearer link that exposes every sibling's
+// token, address, and totals, and acceptance can reuse a sibling's customer
+// account. If the operator switched customers after "Add another property",
+// refuse the group rather than silently linking strangers. Identity =
+// customer_id when both sides have one; otherwise a matching normalized
+// phone OR email (the builder clones contact info, so a legitimate sibling
+// always matches).
+async function ensureEstimateGroupId(trx, anchorEstimateId, sibling = {}, randomUUID = crypto.randomUUID) {
   const anchorId = String(anchorEstimateId);
   if (!UUID_RE.test(anchorId)) throw errorWithStatus('groupWithEstimateId must be a UUID', 400);
   const anchor = await firstForUpdate(trx('estimates').where({ id: anchorId }));
   if (!anchor) throw errorWithStatus('Estimate to group with not found', 404);
+  const normPhone = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const normEmail = (v) => String(v || '').trim().toLowerCase();
+  const anchorCustomerId = anchor.customer_id ? String(anchor.customer_id) : null;
+  const siblingCustomerId = sibling.customer_id ? String(sibling.customer_id) : null;
+  const sameCustomer = anchorCustomerId || siblingCustomerId
+    ? anchorCustomerId === siblingCustomerId
+    : (
+      (normPhone(anchor.customer_phone).length === 10
+        && normPhone(anchor.customer_phone) === normPhone(sibling.customer_phone))
+      || (normEmail(anchor.customer_email)
+        && normEmail(anchor.customer_email) === normEmail(sibling.customer_email))
+    );
+  if (!sameCustomer) {
+    throw errorWithStatus('Grouped estimates must belong to the same customer as the anchor estimate', 400);
+  }
   if (anchor.estimate_group_id) return anchor.estimate_group_id;
   const groupId = randomUUID();
   await trx('estimates').where({ id: anchorId }).update({ estimate_group_id: groupId });
@@ -1060,11 +1084,20 @@ async function resolveEstimateWritePayload({
   // Fail-closed to false: a lookup miss/error charges as a non-member, never
   // silently grants the perk — same posture as isActivePlanCustomer itself.
   let recurringCustomer = false;
+  // Per-property tier scoping (codex #3244 r1; owner ruling 2026-08-06: each
+  // property is its OWN WaveGuard plan at its OWN service-count tier — no
+  // combined-account bump). A grouped estimate quotes a different property on
+  // the same customer, so the account's existing services must not feed its
+  // tier context; it prices standalone. The recurring-customer 15% one-time
+  // perk below stays account-level — the person IS a recurring customer.
+  const groupedEstimate = !!(body.groupWithEstimateId || body.estimateGroupId);
   if (body.customerId) {
-    try {
-      priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId);
-    } catch (err) {
-      logger.warn(`[admin-estimate] prior qualifying services lookup skipped: ${err.message}`);
+    if (!groupedEstimate) {
+      try {
+        priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId);
+      } catch (err) {
+        logger.warn(`[admin-estimate] prior qualifying services lookup skipped: ${err.message}`);
+      }
     }
     try {
       recurringCustomer = await isActivePlanCustomer(database, body.customerId);
@@ -1208,7 +1241,7 @@ async function createOrReuseAdminEstimate({
     // transaction so the anchor's minted group id and the sibling's insert
     // commit together.
     if (body.groupWithEstimateId) {
-      writeFields.estimate_group_id = await ensureEstimateGroupId(trx, body.groupWithEstimateId);
+      writeFields.estimate_group_id = await ensureEstimateGroupId(trx, body.groupWithEstimateId, writeFields);
     }
 
     if (linkedLeadId) {

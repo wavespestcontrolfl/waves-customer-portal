@@ -713,6 +713,64 @@ router.post('/:id/send', async (req, res, next) => {
 });
 
 // Shared send logic — used by both immediate send and scheduled cron
+// Multi-property group pre-flight (codex #3244 r1). Publishing the group makes
+// every sibling token publicly acceptable, so BEFORE any channel delivery:
+// (a) every publishable sibling must clear the same send gate as the anchor —
+// a quote-required / unapproved / zero-amount sibling aborts the WHOLE send
+// rather than partially publishing the group; (b) siblings are claimed to
+// 'sending' one row at a time (claim = update WHERE id+current status, so a
+// row a concurrent send already claimed is never stolen or released by this
+// one) — two concurrent sends of different group members serialize, the loser
+// aborts pre-delivery. Returns the claimed rows for later publish/release.
+async function claimGroupSiblingsForPublish(estimate, { engineReviewAcknowledged } = {}) {
+  const siblings = await db('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id })
+    .whereNot({ id: estimate.id })
+    .whereNull('archived_at')
+    .whereNull('price_locked_at')
+    .whereIn('status', ['draft', 'scheduled', 'send_failed']);
+  if (!siblings.length) return [];
+  for (const sibling of siblings) {
+    try {
+      assertEstimateSendable(sibling, { engineReviewAcknowledged });
+    } catch (e) {
+      const err = new Error(`Grouped property "${sibling.address || sibling.id}" is not sendable: ${e.message}`);
+      err.statusCode = e.statusCode || 422;
+      throw err;
+    }
+  }
+  const claimed = [];
+  for (const sibling of siblings) {
+    const won = await db('estimates')
+      .where({ id: sibling.id, status: sibling.status })
+      .whereNull('price_locked_at')
+      .update({ status: 'sending', updated_at: db.fn.now() });
+    if (won) claimed.push(sibling);
+  }
+  if (claimed.length !== siblings.length) {
+    await releaseGroupSiblingClaims(claimed);
+    const err = new Error('Another send is publishing this multi-property group — wait a moment and retry.');
+    err.statusCode = 409;
+    throw err;
+  }
+  return claimed;
+}
+
+// Hand claimed siblings back to their pre-claim status. Scoped to rows still
+// 'sending' so a sibling a concurrent accept moved off the claim keeps its
+// terminal state.
+async function releaseGroupSiblingClaims(claimedSiblings = []) {
+  for (const sibling of claimedSiblings) {
+    try {
+      await db('estimates')
+        .where({ id: sibling.id, status: 'sending' })
+        .update({ status: sibling.status, updated_at: db.fn.now() });
+    } catch (e) {
+      logger.warn(`[admin-estimates] failed to release group sibling claim ${sibling.id}: ${e.message}`);
+    }
+  }
+}
+
 async function sendEstimateNow(estimate, sendMethod, options = {}) {
   if (!['sms', 'email', 'both'].includes(sendMethod)) {
     const err = new Error('Invalid sendMethod');
@@ -722,10 +780,19 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // A row in 'scheduled'/'sending' already cleared the request-time gate
   // (the operator acknowledged the engine review when scheduling/clicking) —
   // the cron leg must not bounce it at execution time.
+  const engineReviewAcknowledgedResolved = options.engineReviewAcknowledged === true
+    || ['scheduled', 'sending'].includes(String(estimate.status || ''));
   assertEstimateSendable(estimate, {
-    engineReviewAcknowledged: options.engineReviewAcknowledged === true
-      || ['scheduled', 'sending'].includes(String(estimate.status || '')),
+    engineReviewAcknowledged: engineReviewAcknowledgedResolved,
   });
+
+  // Group pre-flight runs before ANY channel delivery (see helper above).
+  let claimedGroupSiblings = [];
+  if (estimate.estimate_group_id) {
+    claimedGroupSiblings = await claimGroupSiblingsForPublish(estimate, {
+      engineReviewAcknowledged: engineReviewAcknowledgedResolved,
+    });
+  }
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   const nextExpiresAt = estimateExpiresAt(now);
@@ -924,6 +991,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   const sent = sentChannels.length > 0;
 
   if (!sent) {
+    await releaseGroupSiblingClaims(claimedGroupSiblings);
     return {
       sent: false,
       channels,
@@ -1030,6 +1098,11 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
         logger.warn(`[admin-estimates] superseded-send first-response stamp failed: ${e.message}`);
       }
     }
+    // Superseded anchor: a concurrent accept/decline won the anchor row while
+    // channels were in flight. Hand claimed siblings back rather than publish
+    // a group whose anchor is no longer in a sent state — the operator can
+    // re-send from a sibling if the group should still go out.
+    await releaseGroupSiblingClaims(claimedGroupSiblings);
     return {
       sent: true,
       superseded: true,
@@ -1047,13 +1120,14 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // engagement sweeps key on the same flags): the customer got one message for
   // the whole group, so only the anchor may ever drive follow-up comms —
   // sibling rows must never re-message the same person about the same link.
-  if (estimate.estimate_group_id) {
+  // Publishes ONLY the rows this send claimed pre-delivery (validated
+  // sendable + moved to 'sending' by claimGroupSiblingsForPublish) — a row
+  // that lost the claim, or was accepted mid-flight, keeps its own state.
+  if (estimate.estimate_group_id && claimedGroupSiblings.length) {
     try {
       const publishedSiblings = await db('estimates')
-        .where({ estimate_group_id: estimate.estimate_group_id })
-        .whereNot({ id: estimate.id })
-        .whereIn('status', ['draft', 'scheduled', 'send_failed'])
-        .whereNull('archived_at')
+        .whereIn('id', claimedGroupSiblings.map((s) => s.id))
+        .where({ status: 'sending' })
         .whereNull('price_locked_at')
         .update({
           status: 'sent',

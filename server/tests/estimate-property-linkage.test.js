@@ -138,9 +138,12 @@ describe('ensureEstimateGroupId', () => {
     return { trx, updates };
   }
 
+  const CUSTOMER_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const SAME_CUSTOMER_SIBLING = { customer_id: CUSTOMER_ID };
+
   test('mints and persists a group id for an ungrouped anchor', async () => {
-    const { trx, updates } = makeTrx({ id: ANCHOR_ID, estimate_group_id: null });
-    await expect(ensureEstimateGroupId(trx, ANCHOR_ID, () => MINTED)).resolves.toBe(MINTED);
+    const { trx, updates } = makeTrx({ id: ANCHOR_ID, estimate_group_id: null, customer_id: CUSTOMER_ID });
+    await expect(ensureEstimateGroupId(trx, ANCHOR_ID, SAME_CUSTOMER_SIBLING, () => MINTED)).resolves.toBe(MINTED);
     expect(updates).toEqual([
       { table: 'estimates', clause: { id: ANCHOR_ID }, patch: { estimate_group_id: MINTED } },
     ]);
@@ -148,8 +151,8 @@ describe('ensureEstimateGroupId', () => {
 
   test('returns the existing group id without writing', async () => {
     const existing = '12121212-3434-5656-7878-909090909090';
-    const { trx, updates } = makeTrx({ id: ANCHOR_ID, estimate_group_id: existing });
-    await expect(ensureEstimateGroupId(trx, ANCHOR_ID, () => MINTED)).resolves.toBe(existing);
+    const { trx, updates } = makeTrx({ id: ANCHOR_ID, estimate_group_id: existing, customer_id: CUSTOMER_ID });
+    await expect(ensureEstimateGroupId(trx, ANCHOR_ID, SAME_CUSTOMER_SIBLING, () => MINTED)).resolves.toBe(existing);
     expect(updates).toEqual([]);
   });
 
@@ -157,5 +160,34 @@ describe('ensureEstimateGroupId', () => {
     const { trx } = makeTrx(null);
     await expect(ensureEstimateGroupId(trx, ANCHOR_ID)).rejects.toMatchObject({ statusCode: 404 });
     await expect(ensureEstimateGroupId(trx, 'nope')).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  // Same-customer guard (codex #3244 r1): the group publishes under one
+  // bearer link, so grouping estimates from different customers would leak
+  // sibling tokens/addresses and cross-accept accounts.
+  test('rejects a sibling with a different customer_id (400)', async () => {
+    const { trx, updates } = makeTrx({ id: ANCHOR_ID, estimate_group_id: null, customer_id: CUSTOMER_ID });
+    await expect(
+      ensureEstimateGroupId(trx, ANCHOR_ID, { customer_id: '99999999-0000-1111-2222-333333333333' }, () => MINTED),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    expect(updates).toEqual([]);
+  });
+
+  test('lead-only estimates group on matching contact, reject on mismatch', async () => {
+    const anchor = {
+      id: ANCHOR_ID,
+      estimate_group_id: null,
+      customer_id: null,
+      customer_phone: '(941) 555-0100',
+      customer_email: 'lead@example.com',
+    };
+    const { trx } = makeTrx(anchor);
+    await expect(
+      ensureEstimateGroupId(trx, ANCHOR_ID, { customer_id: null, customer_phone: '9415550100' }, () => MINTED),
+    ).resolves.toBe(MINTED);
+    const { trx: trx2 } = makeTrx({ ...anchor });
+    await expect(
+      ensureEstimateGroupId(trx2, ANCHOR_ID, { customer_id: null, customer_phone: '9415559999', customer_email: 'other@example.com' }, () => MINTED),
+    ).rejects.toMatchObject({ statusCode: 400 });
   });
 });

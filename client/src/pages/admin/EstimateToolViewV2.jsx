@@ -5177,9 +5177,10 @@ export default function EstimateToolViewV2({
               )}
             </div>
             <div className="text-12 text-ink-secondary mt-2">
-              The 10% Multi-Home Discount applies to every property in the
-              group — it is pre-selected on new drafts here; use Edit to add
-              it to an estimate saved without it.
+              The 10% Multi-Home Discount applies to ADDED properties only —
+              it is pre-selected on each new draft here. The first property
+              stays full price (owner ruling 2026-08-06); do not add the
+              discount to the anchor estimate.
             </div>
           </Card>
         )}
