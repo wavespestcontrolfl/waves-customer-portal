@@ -540,6 +540,9 @@ class GoogleBusinessService {
       review_created_at: normalized.review_created_at,
       customer_id: customerId || existing?.customer_id || null,
       synced_at: db.fn.now(),
+      // A review present in the feed is not missing — clears the stamp when
+      // a previously-removed review reappears (e.g. Google reinstated it).
+      missing_since: null,
       ...replyFields,
     };
     let result;
@@ -729,6 +732,8 @@ class GoogleBusinessService {
         });
 
         let usedGbp = false;
+        let gbpFailure = null;
+        const locSyncStart = new Date();
         if (loc.googleLocationResourceName && await this._getClient(loc.id)) {
           try {
             const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id, 100);
@@ -741,10 +746,16 @@ class GoogleBusinessService {
             sources[loc.id] = 'gbp';
             usedGbp = true;
             logger.info(`[gbp] Synced ${reviews.length} reviews for ${loc.name} via GBP Reviews API`);
+            // Authoritative full pull succeeded → anything we synced before
+            // that Google no longer returns has been removed/filtered.
+            await this._reconcileMissingReviews(loc, locSyncStart);
           } catch (gbpErr) {
+            gbpFailure = gbpErr.message;
             errors.push({ location: loc.name, error: gbpErr.message, source: 'gbp' });
             logger.warn(`[gbp] GBP Reviews sync failed for ${loc.name}; using Places fallback: ${gbpErr.message}`);
           }
+        } else if (loc.googleLocationResourceName) {
+          gbpFailure = 'no_client';
         }
 
         if (!usedGbp) {
@@ -753,6 +764,11 @@ class GoogleBusinessService {
           totalNew += sample.new;
           sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
           logger.info(`[gbp] Synced ${sample.synced} review sample rows for ${loc.name} via Places API fallback`);
+          if (loc.googleLocationResourceName) {
+            // Running blind on the ~5-review Places sample — removals and
+            // most new reviews are invisible until the GBP token works.
+            await this._notifyDegradedSync(loc, gbpFailure || 'no_client');
+          }
         }
       } catch (err) {
         logger.error(`Review sync failed for ${loc.name}: ${err.message}`);
@@ -770,6 +786,87 @@ class GoogleBusinessService {
     }
 
     return { synced: totalSynced, new: totalNew, errors, sources };
+  }
+
+  /**
+   * After a successful FULL GBP Reviews API pull for a location, stamp
+   * missing_since on previously-synced rows the feed no longer returned —
+   * Google removed or filtered them (Aug 2026: a sweep wiped EVERY review
+   * on the Venice profile and nothing noticed for months). Runs ONLY on
+   * the authoritative GBP path: the Places fallback is a ~5-review sample
+   * and a failed fetch proves nothing, so both fail closed (no stamping).
+   * Rows are never deleted, and a review that reappears clears its stamp
+   * via the upsert. Notifies once per NULL→stamped transition batch, so
+   * repeat hourly syncs don't re-notify. Best-effort — never throws into
+   * the sync loop (a reconcile failure must not trigger the Places
+   * fallback for a location whose GBP pull succeeded).
+   */
+  async _reconcileMissingReviews(loc, syncStart) {
+    try {
+      const gone = await db('google_reviews')
+        .where({ location_id: loc.id })
+        .where('reviewer_name', '!=', '_stats')
+        .whereNull('missing_since')
+        .where('synced_at', '<', syncStart)
+        .select('id', 'reviewer_name', 'star_rating', 'review_created_at');
+      if (gone.length === 0) return;
+
+      await db('google_reviews').whereIn('id', gone.map(r => r.id)).update({ missing_since: db.fn.now() });
+
+      const names = gone.slice(0, 5)
+        .map(r => `${r.reviewer_name || 'Anonymous'} (${Number(r.star_rating) || 0}-star)`)
+        .join(', ');
+      const suffix = gone.length > 5 ? ` and ${gone.length - 5} more` : '';
+      await NotificationService.notifyAdmin(
+        'review',
+        `${gone.length} Google review${gone.length === 1 ? '' : 's'} removed at ${loc.name}`,
+        `Google no longer returns these reviews for ${loc.name}: ${names}${suffix}. The full text is kept in the portal. If they are legitimate customer reviews caught in a spam sweep, file a missing-reviews case with Google Business Profile support and escalate by replying in-thread.`,
+        {
+          link: '/admin/reviews',
+          metadata: { locationId: loc.id, reason: 'reviews_missing', count: gone.length, reviewIds: gone.map(r => r.id) },
+        },
+      );
+      // Count only — reviewer display names are PII and ride in the admin
+      // notification, not the plaintext log.
+      logger.warn(`[gbp] ${gone.length} review(s) at ${loc.name} disappeared from the GBP feed — stamped missing_since, admin notified`);
+    } catch (err) {
+      logger.warn(`[gbp] Missing-review reconcile failed for ${loc.name}: ${err.message}`);
+    }
+  }
+
+  /**
+   * A location configured for GBP that could not complete an authoritative
+   * Reviews API pull is running blind: removals are undetectable and the
+   * Places sample misses most reviews. This is exactly how the Venice
+   * review wipe went unnoticed — its refresh token was never provisioned,
+   * the sync silently fell back, and zero rows were ever stored. Alerts at
+   * most once per 24h per location (dedupe on the notification title).
+   * Best-effort — never throws into the sync loop.
+   */
+  async _notifyDegradedSync(loc, cause) {
+    try {
+      const title = `Google review sync degraded for ${loc.name}`;
+      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const recent = await db('notifications')
+        .where({ recipient_type: 'admin', title })
+        .where('created_at', '>', dayAgo)
+        .first();
+      if (recent) return;
+
+      const tokenEnv = loc.googleRefreshTokenEnv || 'GBP refresh token';
+      const detail = cause === 'no_client'
+        ? (process.env[loc.googleRefreshTokenEnv] ? `the GBP client could not be initialized (${tokenEnv} may be invalid)` : `${tokenEnv} is not set`)
+        : `the GBP Reviews API pull failed: ${cause}`;
+      await NotificationService.notifyAdmin(
+        'review',
+        title,
+        `Review tracking for ${loc.name} fell back to the ~5-review Places sample because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP token works. Re-authorize the token to restore full tracking.`,
+        { link: '/admin/reviews', metadata: { locationId: loc.id, reason: 'gbp_sync_degraded', cause } },
+      );
+      logger.warn(`[gbp] Review sync degraded for ${loc.name} (${cause === 'no_client' ? 'no client' : 'pull failed'}) — admin notified`);
+    } catch (err) {
+      logger.warn(`[gbp] Degraded-sync notify failed for ${loc.name}: ${err.message}`);
+    }
   }
 
   /**

@@ -103,6 +103,9 @@ function createDbMock(initialRows = {}) {
           const op = value;
           const compareValue = arguments[2];
           if (op === '!=') this._whereNot = { ...(this._whereNot || {}), [arg]: compareValue };
+          else if (op === '<') this._rawFilters.push(row => row[arg] != null && new Date(row[arg]) < new Date(compareValue));
+          else if (op === '>') this._rawFilters.push(row => row[arg] != null && new Date(row[arg]) > new Date(compareValue));
+          else if (op === '>=') this._rawFilters.push(row => row[arg] != null && new Date(row[arg]) >= new Date(compareValue));
           else this._where[arg] = compareValue;
         } else if (typeof arg === 'string' && arguments.length >= 2) {
           this._where[arg] = value;
@@ -116,6 +119,7 @@ function createDbMock(initialRows = {}) {
       },
       whereNull(column) { this._whereNull = column; return this; },
       whereNotNull(column) { this._rawFilters.push(row => row[column] != null); return this; },
+      whereIn(column, values) { this._rawFilters.push(row => values.includes(row[column])); return this; },
       whereNot() { return this; },
       select() { return this; },
       limit(n) { this._limit = n; return this; },
@@ -128,7 +132,9 @@ function createDbMock(initialRows = {}) {
           .find(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value)) || null;
       },
       insert(record) {
-        const row = { id: record.id || `${table}-${state.inserts.length + 1}`, ...record };
+        // created_at mirrors the DB column default — the degraded-sync
+        // dedupe reads it back.
+        const row = { id: record.id || `${table}-${state.inserts.length + 1}`, created_at: new Date(), ...record };
         state.rows[table] = state.rows[table] || [];
         state.rows[table].push(row);
         state.inserts.push({ table, row });
@@ -144,12 +150,16 @@ function createDbMock(initialRows = {}) {
         };
       },
       async update(record) {
-        const rows = state.rows[this._table] || [];
-        rows.filter(row => matchesWhere(row, this._where)).forEach(row => {
+        const rows = (state.rows[this._table] || [])
+          .filter(row => matchesWhere(row, this._where))
+          .filter(row => this._rawFilters.every(fn => fn(row)))
+          .filter(row => !this._whereNull || row[this._whereNull] == null)
+          .filter(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value));
+        rows.forEach(row => {
           Object.assign(row, record);
           state.updates.push({ table, id: row.id, record });
         });
-        return 1;
+        return rows.length;
       },
       then(resolve, reject) {
         const rows = (state.rows[this._table] || [])
@@ -164,7 +174,9 @@ function createDbMock(initialRows = {}) {
   }
 
   const db = jest.fn(makeQuery);
-  db.fn = { now: jest.fn(() => 'NOW') };
+  // Real Date, not a sentinel string — the missing-review reconcile compares
+  // synced_at against the sync start time.
+  db.fn = { now: jest.fn(() => new Date()) };
   db.__state = state;
   return db;
 }
@@ -752,5 +764,139 @@ describe('Google Business review sync', () => {
     const alert = (db.__state.rows.notifications || []).find(n => n.category === 'review');
     expect(alert).toBeTruthy();
     expect(alert.title).toContain('John Doe');
+  });
+
+  // ==========================================================================
+  // Missing-review watchdog (Aug 2026: the Venice profile lost ALL its
+  // reviews in a Google sweep and nothing noticed — these guard the alarm).
+  // ==========================================================================
+
+  function seedSyncedReview(overrides = {}) {
+    const past = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const row = {
+      google_review_id: 'accounts/1/locations/2/reviews/rev-keep',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-keep',
+      location_id: 'bradenton',
+      reviewer_name: 'John Doe',
+      star_rating: 5,
+      review_text: 'Great work',
+      review_created_at: '2026-05-25T12:00:00Z',
+      review_reply: null,
+      customer_id: null,
+      synced_at: past,
+      missing_since: null,
+      ...overrides,
+    };
+    db.__state.rows.google_reviews.push(row);
+    return row;
+  }
+
+  function gbpFeed(reviews) {
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews });
+    });
+  }
+
+  test('stamps missing_since and alerts admin when a previously-synced review disappears from the GBP feed', async () => {
+    seedSyncedReview({ id: 'keep-1' });
+    seedSyncedReview({
+      id: 'gone-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-gone',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone',
+      reviewer_name: 'Vanished Vera',
+      review_created_at: '2026-04-01T12:00:00Z',
+    });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    const rows = db.__state.rows.google_reviews;
+    expect(rows.find(r => r.id === 'gone-1').missing_since).toBeTruthy();
+    expect(rows.find(r => r.id === 'keep-1').missing_since).toBeNull();
+    const alert = (db.__state.rows.notifications || []).find(n => n.title.includes('removed at'));
+    expect(alert).toBeTruthy();
+    expect(alert.title).toContain('1 Google review removed at Lakewood Ranch');
+    expect(alert.body).toContain('Vanished Vera');
+    expect(alert.link).toBe('/admin/reviews');
+  });
+
+  test('does not re-alert on later syncs for a review already stamped missing', async () => {
+    seedSyncedReview({
+      id: 'gone-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-gone',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone',
+      reviewer_name: 'Vanished Vera',
+      missing_since: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+    });
+    gbpFeed([]);
+
+    await service.syncAllReviews();
+
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(0);
+  });
+
+  test('clears missing_since when a removed review reappears in the feed (reinstated)', async () => {
+    seedSyncedReview({
+      id: 'back-1',
+      missing_since: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+    });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'back-1').missing_since).toBeNull();
+  });
+
+  test('fails closed: no missing stamps on the Places fallback, and the degraded-sync alert fires once per 24h', async () => {
+    seedSyncedReview({ id: 'stale-1' });
+    service._getClient = jest.fn(async () => null); // token missing → Places fallback
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+    });
+
+    await service.syncAllReviews();
+    await service.syncAllReviews(); // second hourly run inside the dedupe window
+
+    // The stale row is NOT stamped — a 5-review sample proves nothing.
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'stale-1').missing_since).toBeNull();
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(0);
+    // One degraded alert across both runs (24h title dedupe).
+    const degraded = (db.__state.rows.notifications || []).filter(n => n.title.includes('sync degraded'));
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0].body).toContain('Places sample');
+  });
+
+  test('fails closed when the GBP pull itself errors (no stamps, degraded alert instead)', async () => {
+    seedSyncedReview({ id: 'stale-1' });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return { ok: false, status: 500, headers: { get: () => 'text/plain' }, text: async () => 'boom' };
+    });
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'stale-1').missing_since).toBeNull();
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(0);
+    expect((db.__state.rows.notifications || []).some(n => n.title.includes('sync degraded'))).toBe(true);
   });
 });
