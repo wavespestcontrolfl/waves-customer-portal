@@ -13,7 +13,11 @@ jest.mock('../config/feature-gates', () => ({
 // Personalized-ask drafter (own suite: review-ask-drafter.test.js). Default
 // null = template path, matching the gate-off production posture.
 const mockDraftAskBody = jest.fn(async () => null);
-jest.mock('../services/review-ask-drafter', () => ({ draftAskBody: (...a) => mockDraftAskBody(...a) }));
+const mockDraftEmailIntro = jest.fn(async () => null);
+jest.mock('../services/review-ask-drafter', () => ({
+  draftAskBody: (...a) => mockDraftAskBody(...a),
+  draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
@@ -21,9 +25,13 @@ jest.mock('../services/short-url', () => ({ shortenOrPassthrough: async (url) =>
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.test' }));
 jest.mock('../services/customer-contact', () => ({
   // Honor explicit null/'' so tests can model a customer missing a channel.
+  // service_contact_email models a service contact who is NOT the account
+  // holder (email-intro identity-guard tests) — same pattern as the phone.
   getServiceContact: (c) => ({
     phone: c.phone !== undefined ? c.phone : '+19410000000',
-    email: c.email !== undefined ? c.email : 'x@y.com',
+    email: c.service_contact_email !== undefined
+      ? c.service_contact_email
+      : (c.email !== undefined ? c.email : 'x@y.com'),
     name: c.first_name || 'Stan',
   }),
   // The SMS resolver mirrors getServiceContact in these fixtures (no
@@ -55,6 +63,7 @@ function makeMock(initial = {}, opts = {}) {
     rows = rows.filter((r) => q.notNull.every((k) => valueFor(r, k) != null));
     rows = rows.filter((r) => q.nulls.every((k) => valueFor(r, k) == null));
     rows = rows.filter((r) => q.ins.every(([k, vs]) => vs.includes(valueFor(r, k))));
+    rows = rows.filter((r) => q.notIns.every(([k, vs]) => !vs.includes(valueFor(r, k))));
     rows = rows.filter((r) => q.ops.every(([k, op, v]) => {
       const l = valueFor(r, k); if (l == null) return false;
       return op === '>=' ? l >= v : op === '<=' ? l <= v : op === '>' ? l > v : op === '<' ? l < v : l === v;
@@ -65,7 +74,7 @@ function makeMock(initial = {}, opts = {}) {
   function make(tbl) {
     const t = String(tbl).split(/\s+as\s+/i)[0];
     const q = {
-      table: t, equals: [], notEquals: [], notNull: [], nulls: [], ops: [], ins: [], order: null, limitValue: null,
+      table: t, equals: [], notEquals: [], notNull: [], nulls: [], ops: [], ins: [], notIns: [], order: null, limitValue: null,
       where(a, op, v) {
         if (typeof a === 'function') { a(this); return this; }
         if (a && typeof a === 'object') { Object.entries(a).forEach(([k, val]) => this.equals.push([k, val])); return this; }
@@ -76,6 +85,7 @@ function makeMock(initial = {}, opts = {}) {
       whereRaw() { return this; },
       whereNot(c, v) { this.notEquals.push([c, v]); return this; },
       whereIn(c, vs) { this.ins.push([c, vs]); return this; },
+      whereNotIn(c, vs) { this.notIns.push([c, vs]); return this; },
       whereNotNull(c) { this.notNull.push(c); return this; },
       whereNull(c) { this.nulls.push(c); return this; },
       leftJoin() { return this; }, select() { return this; },
@@ -106,6 +116,7 @@ beforeEach(() => {
   mockGates.reviewSequences = false;
   mockGates.reviewDirectLink = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
+  mockDraftEmailIntro.mockReset().mockResolvedValue(null);
 });
 
 describe('review sequences — cadence engine', () => {
@@ -256,7 +267,7 @@ describe('review sequences — cadence engine', () => {
     expect(out.ok).toBe(true);
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
     // Body is the friendly-ask copy, not an empty/no_template failure.
-    expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/great customer/i);
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/quick Google review/i);
     expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
   });
 
@@ -281,12 +292,14 @@ describe('review sequences — cadence engine', () => {
   test('start is blocked when the customer is at the 3-ask cap (counts both channels)', async () => {
     const mock = makeMock({
       customers: [{ id: 'm3', first_name: 'Cap', last_name: 'T', phone: '+19410000003', nearest_location_id: 'parrish' }],
-      // 2 SMS asks + 1 email ask, all delivered — the cap counts review_requests
-      // across channels, not just sms_log.
+      // 2 SMS asks + 1 email ask, all delivered INSIDE the rolling 180-day
+      // window (the count is window-scoped in JS now, so the fixture must be
+      // recent) — the cap counts review_requests across channels, not just
+      // sms_log.
       review_requests: [
-        { customer_id: 'm3', channel: 'sms', sms_sent_at: new Date('2026-01-01') },
-        { customer_id: 'm3', channel: 'sms', sms_sent_at: new Date('2026-01-02') },
-        { customer_id: 'm3', channel: 'email', sent_at: new Date('2026-01-03') },
+        { customer_id: 'm3', channel: 'sms', sms_sent_at: new Date(Date.now() - 90 * 86400000) },
+        { customer_id: 'm3', channel: 'sms', sms_sent_at: new Date(Date.now() - 60 * 86400000) },
+        { customer_id: 'm3', channel: 'email', sent_at: new Date(Date.now() - 45 * 86400000) },
       ],
     });
     db.mockImplementation(mock);
@@ -327,6 +340,76 @@ describe('review sequences — cadence engine', () => {
     expect(out.ok).toBe(true);
     expect(out.channel).toBe('email');
     expect(mockEmailSendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a cadence email touch uses the personalized intro when the drafter verifies one', async () => {
+    const intro = 'Hi Deb, hope the ants along the lanai have finally packed up since our visit. If anything still looks off, just reply here. Otherwise, a quick review would mean the world to our little crew.';
+    mockDraftEmailIntro.mockResolvedValue(intro);
+    const mock = makeMock({
+      email_templates: [{ id: 'tpl-rre', template_key: 'review_request_email', active_version_id: 'ver-rre' }],
+      email_template_versions: [{ id: 'ver-rre', blocks: '[{"type":"paragraph","content":"{{intro_paragraph}}"}]' }],
+      customers: [{ id: 'pe-1', first_name: 'Deb', last_name: 'D', phone: '+19410000013', email: 'x@y.com', nearest_location_id: 'sarasota' }],
+      notification_prefs: [{ customer_id: 'pe-1', review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'sms' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0],
+      channel: 'email', templateId: 'final_nudge',
+      sequenceId: 'seq-pe', sequenceStep: 2, manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(true);
+    expect(mockDraftEmailIntro).toHaveBeenCalledTimes(1);
+    const payload = mockEmailSendTemplate.mock.calls[0][0].payload;
+    expect(payload.intro_paragraph).toBe(intro);
+    const row = mock.__state.rows.review_requests[0];
+    expect(row.template_key).toBe('review_request_email_personalized');
+    expect(row.custom_body).toBe(intro); // persisted for retry reuse
+  });
+
+  test('a cadence email touch falls back to the generic intro when the drafter declines', async () => {
+    const mock = makeMock({
+      email_templates: [{ id: 'tpl-rre', template_key: 'review_request_email', active_version_id: 'ver-rre' }],
+      email_template_versions: [{ id: 'ver-rre', blocks: '[{"type":"paragraph","content":"{{intro_paragraph}}"}]' }],
+      customers: [{ id: 'pe-2', first_name: 'Gil', last_name: 'E', phone: '+19410000014', email: 'x@y.com', nearest_location_id: 'sarasota' }],
+      notification_prefs: [{ customer_id: 'pe-2', review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'sms' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0],
+      channel: 'email', templateId: 'final_nudge',
+      sequenceId: 'seq-pe2', sequenceStep: 2, manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(true);
+    const payload = mockEmailSendTemplate.mock.calls[0][0].payload;
+    expect(payload.intro_paragraph).toMatch(/small, family-owned/);
+    expect(mock.__state.rows.review_requests[0].template_key).toBe('review_request_email');
+  });
+
+  test('the email intro is NOT drafted for a recipient who is not the account holder', async () => {
+    mockDraftEmailIntro.mockResolvedValue('should never send');
+    const mock = makeMock({
+      // The resolved service contact is a different person than the account holder.
+      email_templates: [{ id: 'tpl-rre', template_key: 'review_request_email', active_version_id: 'ver-rre' }],
+      email_template_versions: [{ id: 'ver-rre', blocks: '[{"type":"paragraph","content":"{{intro_paragraph}}"}]' }],
+      customers: [{ id: 'pe-3', first_name: 'Ana', last_name: 'F', phone: '+19410000015', email: 'owner@elsewhere.com', service_contact_email: 'tenant@rental.com', nearest_location_id: 'sarasota' }],
+      notification_prefs: [{ customer_id: 'pe-3', review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'sms' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0],
+      channel: 'email', templateId: 'final_nudge',
+      sequenceId: 'seq-pe3', sequenceStep: 2, manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(true);
+    expect(mockDraftEmailIntro).not.toHaveBeenCalled();
+    const payload = mockEmailSendTemplate.mock.calls[0][0].payload;
+    expect(payload.intro_paragraph).toMatch(/small, family-owned/);
   });
 
   test('a no-link template is recorded with followup_sent=true (no legacy Day-3 ask)', async () => {
@@ -602,6 +685,245 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mock.__state.rows.review_sequences).toHaveLength(0);
   });
 
+  test('a recurring-plan visit enrolls the single-ask plan (owner spec 2026-08-05)', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'rc-1', first_name: 'Sue', last_name: 'H', phone: '+19410000040', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-rc', customer_id: 'rc-1', scheduled_service_id: 'ss-rc', service_type: 'Quarterly Pest Control Service' }],
+      scheduled_services: [{ id: 'ss-rc', customer_id: 'rc-1', is_recurring: true, status: 'completed', scheduled_date: '2026-08-01' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'rc-1', serviceRecordId: 'sr-rc', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0]).toMatchObject({ day: 0, channel: 'sms' });
+  });
+
+  test('a customer with live recurring coverage gets the single ask even off an unlinked completion', async () => {
+    mockGates.reviewSequences = true;
+    const future = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'rc-2', first_name: 'Ted', last_name: 'L', phone: '+19410000041', nearest_location_id: 'venice' }],
+      scheduled_services: [{ id: 'ss-fut', customer_id: 'rc-2', is_recurring: true, status: 'confirmed', scheduled_date: future }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'rc-2', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    expect(JSON.parse(mock.__state.rows.review_sequences[0].plan)).toHaveLength(1);
+  });
+
+  test('multi-treatment series: first visit sends the one cap-exempt ask, middle sends nothing, final runs the full cadence', async () => {
+    mockGates.reviewSequences = true;
+    const future = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+
+    // FIRST visit: a follow-up child is on the books.
+    let mock = makeMock({
+      customers: [{ id: 'mt-1', first_name: 'Ivy', last_name: 'R', phone: '+19410000042', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-mt1', customer_id: 'mt-1', scheduled_service_id: 'ss-first' }],
+      scheduled_services: [
+        { id: 'ss-first', customer_id: 'mt-1', status: 'completed', scheduled_date: '2026-08-01' },
+        { id: 'ss-child', customer_id: 'mt-1', parent_service_id: 'ss-first', status: 'confirmed', scheduled_date: future },
+      ],
+    });
+    db.mockImplementation(mock);
+    let result = await ReviewService.enrollPostService({ customerId: 'mt-1', serviceRecordId: 'sr-mt1', completedAt: new Date() });
+    expect(result.started).toBe(true);
+    let plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+
+    // MIDDLE visit: itself a child AND another child scheduled → nothing.
+    mock = makeMock({
+      customers: [{ id: 'mt-2', first_name: 'Ken', last_name: 'D', phone: '+19410000043', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-mt2', customer_id: 'mt-2', scheduled_service_id: 'ss-mid' }],
+      scheduled_services: [
+        { id: 'ss-mid', customer_id: 'mt-2', parent_service_id: 'ss-root', status: 'completed', scheduled_date: '2026-08-01' },
+        { id: 'ss-next', customer_id: 'mt-2', parent_service_id: 'ss-mid', status: 'confirmed', scheduled_date: future },
+      ],
+    });
+    db.mockImplementation(mock);
+    result = await ReviewService.enrollPostService({ customerId: 'mt-2', serviceRecordId: 'sr-mt2', completedAt: new Date() });
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('multi_treatment_middle');
+    expect(mock.__state.rows.review_sequences).toHaveLength(0);
+
+    // FINAL visit: a child with nothing further scheduled → full cadence.
+    mock = makeMock({
+      customers: [{ id: 'mt-3', first_name: 'Ora', last_name: 'P', phone: '+19410000044', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-mt3', customer_id: 'mt-3', scheduled_service_id: 'ss-final' }],
+      scheduled_services: [
+        { id: 'ss-final', customer_id: 'mt-3', parent_service_id: 'ss-root2', status: 'completed', scheduled_date: '2026-08-01' },
+      ],
+    });
+    db.mockImplementation(mock);
+    result = await ReviewService.enrollPostService({ customerId: 'mt-3', serviceRecordId: 'sr-mt3', completedAt: new Date() });
+    expect(result.started).toBe(true);
+    plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(3);
+    expect(plan.map((s) => s.day)).toEqual([0, 4, 6]);
+  });
+
+  test('an owner-named multi-treatment service (roach/bed bug) works without child linkage: first visit = one ask, repeat visit inside 60d = full cadence', async () => {
+    mockGates.reviewSequences = true;
+    const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
+
+    // First roach visit — no prior same-service completion → single ask.
+    // (The mock's leftJoin is a no-op, so the catalog key rides the visit row.)
+    let mock = makeMock({
+      customers: [{ id: 'mt-4', first_name: 'Ada', last_name: 'Q', phone: '+19410000045', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-mt4', customer_id: 'mt-4', scheduled_service_id: 'ss-roach1' }],
+      scheduled_services: [{ id: 'ss-roach1', customer_id: 'mt-4', service_id: 'svc-roach', status: 'completed', scheduled_date: recent, service_key: 'cockroach_control' }],
+    });
+    db.mockImplementation(mock);
+    let result = await ReviewService.enrollPostService({ customerId: 'mt-4', serviceRecordId: 'sr-mt4', completedAt: new Date() });
+    expect(result.started).toBe(true);
+    let plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+
+    // Second roach visit 10 days later — prior completion exists → full cadence.
+    const today = new Date().toISOString().slice(0, 10);
+    mock = makeMock({
+      customers: [{ id: 'mt-5', first_name: 'Eli', last_name: 'S', phone: '+19410000048', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-mt5', customer_id: 'mt-5', scheduled_service_id: 'ss-roach3' }],
+      scheduled_services: [
+        { id: 'ss-roach2', customer_id: 'mt-5', service_id: 'svc-roach', status: 'completed', scheduled_date: recent, service_key: 'cockroach_control' },
+        { id: 'ss-roach3', customer_id: 'mt-5', service_id: 'svc-roach', status: 'completed', scheduled_date: today, service_key: 'cockroach_control' },
+      ],
+    });
+    db.mockImplementation(mock);
+    result = await ReviewService.enrollPostService({ customerId: 'mt-5', serviceRecordId: 'sr-mt5', completedAt: new Date() });
+    expect(result.started).toBe(true);
+    plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(3);
+    // The series-final flag is persisted for the step runner's cap check.
+    expect(mock.__state.rows.review_sequences[0].series_final).toBe(true);
+  });
+
+  test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
+    mockGates.reviewSequences = true;
+    const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
+    const today = new Date().toISOString().slice(0, 10);
+    // Final roach visit → seriesFinal:true rides the plan resolution.
+    const mock = makeMock({
+      service_records: [{ id: 'sr-sf', customer_id: 'sf-1', scheduled_service_id: 'ss-r2' }],
+      scheduled_services: [
+        { id: 'ss-r1', customer_id: 'sf-1', service_id: 'svc-roach', status: 'completed', scheduled_date: recent, service_key: 'cockroach_control' },
+        { id: 'ss-r2', customer_id: 'sf-1', service_id: 'svc-roach', status: 'completed', scheduled_date: today, service_key: 'cockroach_control' },
+      ],
+    });
+    db.mockImplementation(mock);
+    const finalVisit = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'sf-1', serviceRecordId: 'sr-sf' });
+    expect(finalVisit.seriesFinal).toBe(true);
+    expect(finalVisit.plan).toHaveLength(3);
+
+    // Direct visit identity (no service_records row yet) resolves the same.
+    const direct = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'sf-1', scheduledServiceId: 'ss-r2' });
+    expect(direct.seriesFinal).toBe(true);
+
+    // An unlinked one-time completion resolves WITHOUT the exemption flag —
+    // its enrollment counts the first-treatment ask for cap/cooldown.
+    const mock2 = makeMock({});
+    db.mockImplementation(mock2);
+    const unrelated = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'sf-2' });
+    expect(unrelated.seriesFinal).not.toBe(true);
+  });
+
+  test('an OVERDUE but still-live follow-up child keeps the series classification (status-only liveness)', async () => {
+    mockGates.reviewSequences = true;
+    const pastDue = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'od-1', first_name: 'Ben', last_name: 'N', phone: '+19410000054', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-od', customer_id: 'od-1', scheduled_service_id: 'ss-od-src' }],
+      scheduled_services: [
+        { id: 'ss-od-src', customer_id: 'od-1', status: 'completed', scheduled_date: pastDue },
+        // Follow-up was scheduled for 5 days ago and never worked — still live.
+        { id: 'ss-od-child', customer_id: 'od-1', followup_source_service_id: 'ss-od-src', status: 'confirmed', scheduled_date: pastDue },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'od-1', serviceRecordId: 'sr-od', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+  });
+
+  test('a forwarded short-template ask (review wording + /l/ short link) triggers the standdown', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'ma-5', first_name: 'Ivy', last_name: 'P', phone: '+19410000055', nearest_location_id: 'bradenton' }],
+      sms_log: [{ id: 'sms-5', customer_id: 'ma-5', direction: 'outbound', status: 'sent', message_body: 'Hi Ivy! Just a quick nudge from Waves - that review link one more time: https://portal.wavespestcontrol.com/l/ab12c', created_at: new Date(Date.now() - 2 * 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ma-5', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('manual_ask_recent');
+  });
+
+  test('a second enrollment for the SAME service record is rejected even after the first sequence completed (cap-exempt dedupe)', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'dd-1', first_name: 'Kim', last_name: 'J', phone: '+19410000053', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-dd', customer_id: 'dd-1', scheduled_service_id: 'ss-dd' }],
+      scheduled_services: [{ id: 'ss-dd', customer_id: 'dd-1', service_id: 'svc-roach', status: 'completed', scheduled_date: '2026-08-01', service_key: 'cockroach_control' }],
+      // The visit-1 one-step sequence already ran to completion — its
+      // cap-exempt ask is invisible to cap/cooldown, so only the per-record
+      // dedupe stands between the paid-invoice re-enrollment and a
+      // duplicate first-treatment text.
+      review_sequences: [{ id: 'seq-dd', customer_id: 'dd-1', service_record_id: 'sr-dd', status: 'completed', stop_reason: 'completed', current_step: 1, touches_sent: 1, plan: '[]', started_at: new Date(Date.now() - 3600000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'dd-1', serviceRecordId: 'sr-dd', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('service_record_enrolled');
+    expect(mock.__state.rows.review_sequences).toHaveLength(1);
+  });
+
+  test('a hand-sent review ask in the last 30 days stands the cadence down (manual_ask_recent)', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'ma-1', first_name: 'Cat', last_name: 'F', phone: '+19410000046', nearest_location_id: 'bradenton' }],
+      sms_log: [{ id: 'sms-1', customer_id: 'ma-1', direction: 'outbound', message_body: 'Loved seeing you today! A quick review here would mean a lot: https://g.page/r/waves-brdn/review', created_at: new Date(Date.now() - 2 * 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ma-1', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('manual_ask_recent');
+    expect(mock.__state.rows.review_sequences).toHaveLength(0);
+  });
+
+  test('the pipeline\'s own review SMS does not trigger the manual-ask standdown (time-correlated to a review_requests send)', async () => {
+    mockGates.reviewSequences = true;
+    const sentAt = new Date(Date.now() - 5 * 86400000); // 5 days ago
+    const mock = makeMock({
+      customers: [{ id: 'ma-2', first_name: 'Ben', last_name: 'G', phone: '+19410000047', nearest_location_id: 'bradenton' }],
+      sms_log: [{ id: 'sms-2', customer_id: 'ma-2', direction: 'outbound', message_body: 'Hi Ben! A quick Google review would help us: https://portal.test/l/abc', created_at: sentAt }],
+      review_requests: [{ id: 'rr-corr', customer_id: 'ma-2', template_key: 'friendly_ask', status: 'sent', sms_sent_at: new Date(sentAt.getTime() + 60000), sent_at: new Date(sentAt.getTime() + 60000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ma-2', completedAt: new Date() });
+
+    // The correlated pipeline send must NOT read as a hand-sent ask — it falls
+    // through to the normal 30-day cooldown instead of manual_ask_recent.
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('cooldown');
+  });
+
   test('an explicit operator delay wins over the smart send window in cadence mode', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({
@@ -811,7 +1133,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(touch.custom_body == null).toBe(true);
     expect(touch.template_key).toBe('friendly_ask');
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
-    expect(sentBody).toContain('Waves Pest Control'); // friendly_ask template copy
+    expect(sentBody).toContain('quick Google review would mean the world'); // friendly_ask template copy
   });
 
   test('a one-off send (no sequence) NEVER drafts — the operator template is exactly what sends', async () => {
@@ -882,7 +1204,81 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(retry.custom_body == null).toBe(true);
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(sentBody).not.toContain('hope the ants stayed gone');
-    expect(sentBody).toContain('Waves Pest Control'); // friendly_ask template
+    expect(sentBody).toContain('quick Google review would mean the world'); // friendly_ask template
+  });
+
+  test('a scheduled-but-never-sent review-looking SMS does not trigger the manual-ask standdown', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'ma-3', first_name: 'Joy', last_name: 'H', phone: '+19410000049', nearest_location_id: 'bradenton' }],
+      sms_log: [{ id: 'sms-3', customer_id: 'ma-3', direction: 'outbound', status: 'scheduled', message_body: 'review us: https://g.page/r/waves/review', created_at: new Date(Date.now() - 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ma-3', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+  });
+
+  test('a manual ask sent AFTER enrollment stops the cadence at the next touch (manual_ask_recent)', async () => {
+    const startedAt = new Date(Date.now() - 3 * 86400000);
+    const mock = makeMock({
+      customers: [{ id: 'ma-4', first_name: 'Ana', last_name: 'K', phone: '+19410000050', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-ma', customer_id: 'ma-4', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true }]),
+        started_at: startedAt, next_run_at: new Date(Date.now() - 60000),
+      }],
+      // Owner hand-sent an ask a day after enrollment — no correlated
+      // review_requests send within ±10 min.
+      sms_log: [{ id: 'sms-4', customer_id: 'ma-4', direction: 'outbound', status: 'sent', message_body: 'Hey Ana, would love a Google review: https://g.page/r/waves/review', created_at: new Date(startedAt.getTime() + 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('manual_ask_recent');
+  });
+
+  test('a booked follow-up child via followup_source_service_id drives the multi-treatment plans (canonical CTA linkage)', async () => {
+    mockGates.reviewSequences = true;
+    const future = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'fs-1', first_name: 'Max', last_name: 'V', phone: '+19410000051', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-fs1', customer_id: 'fs-1', scheduled_service_id: 'ss-src' }],
+      scheduled_services: [
+        { id: 'ss-src', customer_id: 'fs-1', status: 'completed', scheduled_date: '2026-08-01' },
+        { id: 'ss-inc', customer_id: 'fs-1', followup_source_service_id: 'ss-src', status: 'confirmed', scheduled_date: future },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'fs-1', serviceRecordId: 'sr-fs1', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+  });
+
+  test('an email-resolved first-treatment ask keeps its cap-exempt provenance (first_treatment_ask_email)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'fe-1', first_name: 'Lea', last_name: 'B', phone: '+19410000052', email: 'x@y.com', nearest_location_id: 'bradenton' }],
+      notification_prefs: [{ customer_id: 'fe-1', review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'email' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0],
+      channel: 'sms', templateId: 'first_treatment_ask',
+      sequenceId: 'seq-fe', sequenceStep: 0, manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(true);
+    expect(out.channel).toBe('email');
+    expect(mock.__state.rows.review_requests[0].template_key).toBe('first_treatment_ask_email');
   });
 
   test('a cadence stops with reason "clicked" once a touch was redirected to Google (direct-link engagement)', async () => {
@@ -902,5 +1298,519 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(out.stopped).toBe(1);
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('clicked');
+  });
+});
+
+describe('codex #3235 r6 — series correlation + personalization gating', () => {
+  test('another series\' first-treatment ask still counts: cross-series final enrollment inside 30d is cooldown-blocked', async () => {
+    mockGates.reviewSequences = true;
+    const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+    const recent = new Date(Date.now() - 12 * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'xs-1', first_name: 'Amy', last_name: 'T', phone: '+19410000060', nearest_location_id: 'bradenton' }],
+      // Series A (bed bug) delivered its cap-exempt first ask 10 days ago.
+      review_sequences: [{ id: 'seq-A', customer_id: 'xs-1', service_record_id: 'sr-A1', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: tenDaysAgo }],
+      review_requests: [{ id: 'rr-A', customer_id: 'xs-1', sequence_id: 'seq-A', template_key: 'first_treatment_ask', channel: 'sms', status: 'sent', sms_sent_at: tenDaysAgo, sent_at: tenDaysAgo }],
+      // Series B (roach) is now completing its FINAL visit.
+      service_records: [
+        { id: 'sr-A1', customer_id: 'xs-1', scheduled_service_id: 'ss-A1' },
+        { id: 'sr-B2', customer_id: 'xs-1', scheduled_service_id: 'ss-B2' },
+      ],
+      scheduled_services: [
+        { id: 'ss-A1', customer_id: 'xs-1', service_id: 'svc-bedbug', status: 'completed', scheduled_date: recent, service_key: 'bed_bug_treatment' },
+        { id: 'ss-B1', customer_id: 'xs-1', service_id: 'svc-roach', status: 'completed', scheduled_date: recent, service_key: 'cockroach_control' },
+        { id: 'ss-B2', customer_id: 'xs-1', service_id: 'svc-roach', status: 'completed', scheduled_date: new Date().toISOString().slice(0, 10), service_key: 'cockroach_control', parent_service_id: 'ss-B1' },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'xs-1', serviceRecordId: 'sr-B2', completedAt: new Date() });
+
+    // Series B's final-visit exemption covers only series B's own sequences —
+    // series A's ask 10 days ago keeps the cooldown in force.
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('cooldown');
+  });
+
+  test('the SAME series\' first-treatment ask is exempt: final-visit enrollment proceeds', async () => {
+    mockGates.reviewSequences = true;
+    const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+    const recent = new Date(Date.now() - 12 * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'xs-2', first_name: 'Leo', last_name: 'U', phone: '+19410000061', nearest_location_id: 'bradenton' }],
+      review_sequences: [{ id: 'seq-C1', customer_id: 'xs-2', service_record_id: 'sr-C1', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: tenDaysAgo }],
+      review_requests: [{ id: 'rr-C', customer_id: 'xs-2', sequence_id: 'seq-C1', template_key: 'first_treatment_ask', channel: 'sms', status: 'sent', sms_sent_at: tenDaysAgo, sent_at: tenDaysAgo }],
+      service_records: [
+        { id: 'sr-C1', customer_id: 'xs-2', scheduled_service_id: 'ss-C1' },
+        { id: 'sr-C2', customer_id: 'xs-2', scheduled_service_id: 'ss-C2' },
+      ],
+      scheduled_services: [
+        { id: 'ss-C1', customer_id: 'xs-2', service_id: 'svc-roach', status: 'completed', scheduled_date: recent, service_key: 'cockroach_control' },
+        { id: 'ss-C2', customer_id: 'xs-2', service_id: 'svc-roach', status: 'completed', scheduled_date: new Date().toISOString().slice(0, 10), service_key: 'cockroach_control', parent_service_id: 'ss-C1' },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'xs-2', serviceRecordId: 'sr-C2', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    expect(JSON.parse(mock.__state.rows.review_sequences.find((r) => r.id !== 'seq-C1').plan)).toHaveLength(3);
+  });
+
+  test('email personalization is skipped when the active template lacks {{intro_paragraph}}', async () => {
+    mockDraftEmailIntro.mockResolvedValue('should never be requested');
+    const mock = makeMock({
+      email_templates: [{ id: 'tpl-x', template_key: 'review_request_email', active_version_id: 'ver-x' }],
+      // Operator republished without the variable — drafting must not run.
+      email_template_versions: [{ id: 'ver-x', blocks: '[{"type":"paragraph","content":"Operator copy"}]' }],
+      customers: [{ id: 'pg-1', first_name: 'Deb', last_name: 'Z', phone: '+19410000062', email: 'x@y.com', nearest_location_id: 'sarasota' }],
+      notification_prefs: [{ customer_id: 'pg-1', review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'sms' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0],
+      channel: 'email', templateId: 'final_nudge',
+      sequenceId: 'seq-pg', sequenceStep: 2, manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(true);
+    expect(mockDraftEmailIntro).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_requests[0].template_key).toBe('review_request_email');
+  });
+});
+
+describe('codex #3235 r7 — lineage walk + visit-context exemption', () => {
+  test('a 3-visit chain: the final visit exempts the FIRST visit\'s ask through the middle hop', async () => {
+    mockGates.reviewSequences = true;
+    const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'ch-1', first_name: 'Rob', last_name: 'W', phone: '+19410000063', nearest_location_id: 'bradenton' }],
+      review_sequences: [{ id: 'seq-v1', customer_id: 'ch-1', service_record_id: 'sr-v1', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: tenDaysAgo }],
+      review_requests: [{ id: 'rr-v1', customer_id: 'ch-1', sequence_id: 'seq-v1', template_key: 'first_treatment_ask', channel: 'sms', status: 'sent', sms_sent_at: tenDaysAgo, sent_at: tenDaysAgo }],
+      service_records: [
+        { id: 'sr-v1', customer_id: 'ch-1', scheduled_service_id: 'ss-v1' },
+        { id: 'sr-v3', customer_id: 'ch-1', scheduled_service_id: 'ss-v3' },
+      ],
+      scheduled_services: [
+        { id: 'ss-v1', customer_id: 'ch-1', status: 'completed', scheduled_date: d(14) },
+        { id: 'ss-v2', customer_id: 'ch-1', parent_service_id: 'ss-v1', status: 'completed', scheduled_date: d(7) },
+        { id: 'ss-v3', customer_id: 'ch-1', parent_service_id: 'ss-v2', status: 'completed', scheduled_date: d(0) },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ch-1', serviceRecordId: 'sr-v3', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const seq = mock.__state.rows.review_sequences.find((r) => r.id !== 'seq-v1');
+    expect(JSON.parse(seq.plan)).toHaveLength(3);
+  });
+
+  test('a final visit completed with only a scheduled_services id (no record row) still exempts its series ask', async () => {
+    mockGates.reviewSequences = true;
+    const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'nv-1', first_name: 'Mia', last_name: 'X', phone: '+19410000064', nearest_location_id: 'bradenton' }],
+      review_sequences: [{ id: 'seq-n1', customer_id: 'nv-1', service_record_id: 'sr-n1', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: tenDaysAgo }],
+      review_requests: [{ id: 'rr-n1', customer_id: 'nv-1', sequence_id: 'seq-n1', template_key: 'first_treatment_ask', channel: 'sms', status: 'sent', sms_sent_at: tenDaysAgo, sent_at: tenDaysAgo }],
+      service_records: [{ id: 'sr-n1', customer_id: 'nv-1', scheduled_service_id: 'ss-n1' }],
+      scheduled_services: [
+        { id: 'ss-n1', customer_id: 'nv-1', status: 'completed', scheduled_date: d(10) },
+        { id: 'ss-n2', customer_id: 'nv-1', followup_source_service_id: 'ss-n1', status: 'completed', scheduled_date: d(0) },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    // No service_records row for the final visit — only the visit id.
+    const result = await ReviewService.enrollPostService({ customerId: 'nv-1', scheduledServiceId: 'ss-n2', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const seq = mock.__state.rows.review_sequences.find((r) => r.id !== 'seq-n1');
+    expect(JSON.parse(seq.plan)).toHaveLength(3);
+    // The visit identity is persisted for the runner's own lineage walk.
+    expect(seq.scheduled_service_id).toBe('ss-n2');
+  });
+});
+
+describe('codex #3235 r8 — record-less sequence corners', () => {
+  test('a record-less first-visit sequence (scheduled_service_id only) is still exempt at the final visit', async () => {
+    mockGates.reviewSequences = true;
+    const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'rl-1', first_name: 'Sam', last_name: 'Y', phone: '+19410000065', nearest_location_id: 'bradenton' }],
+      // Visit-1 sequence enrolled BEFORE its service_records row existed:
+      // service_record_id NULL, only the persisted visit id.
+      review_sequences: [{ id: 'seq-rl1', customer_id: 'rl-1', service_record_id: null, scheduled_service_id: 'ss-rl1', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: tenDaysAgo }],
+      review_requests: [{ id: 'rr-rl1', customer_id: 'rl-1', sequence_id: 'seq-rl1', template_key: 'first_treatment_ask', channel: 'sms', status: 'sent', sms_sent_at: tenDaysAgo, sent_at: tenDaysAgo }],
+      service_records: [{ id: 'sr-rl2', customer_id: 'rl-1', scheduled_service_id: 'ss-rl2' }],
+      scheduled_services: [
+        { id: 'ss-rl1', customer_id: 'rl-1', status: 'completed', scheduled_date: d(10) },
+        { id: 'ss-rl2', customer_id: 'rl-1', parent_service_id: 'ss-rl1', status: 'completed', scheduled_date: d(0) },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'rl-1', serviceRecordId: 'sr-rl2', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const seq = mock.__state.rows.review_sequences.find((r) => r.id !== 'seq-rl1');
+    expect(JSON.parse(seq.plan)).toHaveLength(3);
+  });
+
+  test('a touch on a record-less sequence recovers date/tech from the persisted visit id', async () => {
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'rl-2', first_name: 'Kay', last_name: 'V', phone: '+19410000066', nearest_location_id: 'bradenton' }],
+      scheduled_services: [{ id: 'ss-rl3', customer_id: 'rl-2', status: 'completed', scheduled_date: d(1), service_type: 'Bed Bug Treatment', technician_id: 'tech-9' }],
+      technicians: [{ id: 'tech-9', name: 'Adam Benetti' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0],
+      channel: 'sms', templateId: 'first_treatment_ask',
+      scheduledServiceId: 'ss-rl3',
+      sequenceId: 'seq-rl3', sequenceStep: 0, manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(true);
+    const row = mock.__state.rows.review_requests[0];
+    // Visit context recovered from the scheduled_services row (the mock's
+    // leftJoin is a no-op, so tech name resolution stays best-effort here —
+    // date + type + technician_id are the load-bearing recoveries).
+    expect(row.service_type).toBe('Bed Bug Treatment');
+    expect(row.service_date).toBe(d(1));
+    expect(row.technician_id).toBe('tech-9');
+  });
+});
+
+describe('codex #3235 r9 — canonical liveness + late-booked follow-up', () => {
+  test('a RESCHEDULED follow-up child still marks the source visit first-in-series', async () => {
+    mockGates.reviewSequences = true;
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const future = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'rs-1', first_name: 'Joe', last_name: 'M', phone: '+19410000067', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-rs1', customer_id: 'rs-1', scheduled_service_id: 'ss-rs1' }],
+      scheduled_services: [
+        { id: 'ss-rs1', customer_id: 'rs-1', status: 'completed', scheduled_date: d(0) },
+        // The booked follow-up is mid-reschedule — the obligation lane treats
+        // it as live (only cancelled/skipped/no_show are dead).
+        { id: 'ss-rs2', customer_id: 'rs-1', followup_source_service_id: 'ss-rs1', status: 'rescheduled', scheduled_date: future },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'rs-1', serviceRecordId: 'sr-rs1', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+  });
+
+  test('a follow-up booked AFTER enrollment reclassifies the still-unsent sequence at first send', async () => {
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const future = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10);
+    const threeTouch = JSON.stringify([
+      { day: 0, channel: 'sms', templateKey: 'friendly_ask' },
+      { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true },
+      { day: 6, channel: 'email', templateKey: 'final_nudge' },
+    ]);
+    const mock = makeMock({
+      customers: [{ id: 'lb-1', first_name: 'Ann', last_name: 'O', phone: '+19410000068', nearest_location_id: 'bradenton' }],
+      // Enrolled as one-time at completion…
+      review_sequences: [{ id: 'seq-lb', customer_id: 'lb-1', service_record_id: 'sr-lb1', status: 'active', current_step: 0, touches_sent: 0, started_by: 'post_service', plan: threeTouch, started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000) }],
+      service_records: [{ id: 'sr-lb1', customer_id: 'lb-1', scheduled_service_id: 'ss-lb1' }],
+      scheduled_services: [
+        { id: 'ss-lb1', customer_id: 'lb-1', status: 'completed', scheduled_date: d(0) },
+        // …then staff booked the follow-up minutes later.
+        { id: 'ss-lb2', customer_id: 'lb-1', followup_source_service_id: 'ss-lb1', status: 'confirmed', scheduled_date: future },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(out.sent).toBe(1);
+    const seq = mock.__state.rows.review_sequences[0];
+    expect(JSON.parse(seq.plan)).toHaveLength(1);
+    expect(JSON.parse(seq.plan)[0].templateKey).toBe('first_treatment_ask');
+    const body = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(body).toMatch(/Treatment 1 done/);
+  });
+});
+
+describe('codex #3235 r10 — failure propagation, record-less dedupe, history anchoring', () => {
+  test('a plan-resolution failure skips enrollment instead of defaulting to the 3-touch cadence', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'pf-1', first_name: 'Ida', last_name: 'R', phone: '+19410000069', nearest_location_id: 'bradenton' }],
+    });
+    db.mockImplementation(mock);
+    const spy = jest.spyOn(ReviewService, 'resolveSequencePlanForEnrollment').mockResolvedValue({ error: true });
+    try {
+      const result = await ReviewService.enrollPostService({ customerId: 'pf-1', completedAt: new Date() });
+      expect(result.started).toBe(false);
+      expect(result.reason).toBe('plan_resolution_failed');
+      expect(mock.__state.rows.review_sequences).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('a record-less enrollment dedupes by the persisted scheduled visit id', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'vd-1', first_name: 'Ora', last_name: 'S', phone: '+19410000070', nearest_location_id: 'bradenton' }],
+      scheduled_services: [{ id: 'ss-vd', customer_id: 'vd-1', status: 'completed', scheduled_date: new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 10) }],
+      review_sequences: [{ id: 'seq-vd', customer_id: 'vd-1', service_record_id: null, scheduled_service_id: 'ss-vd', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: new Date(Date.now() - 40 * 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'vd-1', scheduledServiceId: 'ss-vd', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('service_record_enrolled');
+    expect(mock.__state.rows.review_sequences).toHaveLength(1);
+  });
+
+  test('a later completed treatment cannot make an earlier visit look final (history anchored to the visit)', async () => {
+    mockGates.reviewSequences = true;
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'ha-1', first_name: 'Zed', last_name: 'Q', phone: '+19410000071', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-ha1', customer_id: 'ha-1', scheduled_service_id: 'ss-ha1' }],
+      scheduled_services: [
+        // Visit 1 (enrolling late, e.g. via a delayed invoice payment)…
+        { id: 'ss-ha1', customer_id: 'ha-1', service_id: 'svc-roach', status: 'completed', scheduled_date: d(20), service_key: 'cockroach_control' },
+        // …while visit 2 has ALREADY happened. It is LATER than visit 1, so
+        // it must not count as visit 1's "prior" treatment.
+        { id: 'ss-ha2', customer_id: 'ha-1', service_id: 'svc-roach', status: 'completed', scheduled_date: d(6), service_key: 'cockroach_control' },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ha-1', serviceRecordId: 'sr-ha1', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+  });
+});
+
+describe('codex #3235 r11 — completed descendants, package separation, long chains', () => {
+  const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+
+  test('a late-paid middle visit whose child already COMPLETED is not classified final (series_completed)', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'cd-1', first_name: 'Tia', last_name: 'A', phone: '+19410000072', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-cd2', customer_id: 'cd-1', scheduled_service_id: 'ss-cd2' }],
+      scheduled_services: [
+        { id: 'ss-cd1', customer_id: 'cd-1', status: 'completed', scheduled_date: d(20) },
+        { id: 'ss-cd2', customer_id: 'cd-1', parent_service_id: 'ss-cd1', status: 'completed', scheduled_date: d(12) },
+        { id: 'ss-cd3', customer_id: 'cd-1', parent_service_id: 'ss-cd2', status: 'completed', scheduled_date: d(4) },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'cd-1', serviceRecordId: 'sr-cd2', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('series_completed');
+  });
+
+  test('a new package starting outside 2x the follow-up interval is a FIRST visit, not the old package\'s final', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'np-1', first_name: 'Gus', last_name: 'B', phone: '+19410000073', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-np2', customer_id: 'np-1', scheduled_service_id: 'ss-np2' }],
+      scheduled_services: [
+        // Previous package's visit 45 days ago; catalog interval 14d → window 28d.
+        { id: 'ss-np1', customer_id: 'np-1', service_id: 'svc-roach', status: 'completed', scheduled_date: d(45), service_key: 'cockroach_control', follow_up_interval_days: 14 },
+        { id: 'ss-np2', customer_id: 'np-1', service_id: 'svc-roach', status: 'completed', scheduled_date: d(0), service_key: 'cockroach_control', follow_up_interval_days: 14 },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'np-1', serviceRecordId: 'sr-np2', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+  });
+
+  test('a 9-visit linked chain still reaches the root sequence for the exemption', async () => {
+    mockGates.reviewSequences = true;
+    const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+    const visits = [];
+    for (let i = 1; i <= 9; i += 1) {
+      visits.push({
+        id: `ss-l${i}`, customer_id: 'lc-1', status: 'completed',
+        scheduled_date: d(30 - i * 3),
+        ...(i > 1 ? { parent_service_id: `ss-l${i - 1}` } : {}),
+      });
+    }
+    const mock = makeMock({
+      customers: [{ id: 'lc-1', first_name: 'Roy', last_name: 'C', phone: '+19410000074', nearest_location_id: 'bradenton' }],
+      review_sequences: [{ id: 'seq-root', customer_id: 'lc-1', service_record_id: null, scheduled_service_id: 'ss-l1', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: tenDaysAgo }],
+      review_requests: [{ id: 'rr-root', customer_id: 'lc-1', sequence_id: 'seq-root', template_key: 'first_treatment_ask', channel: 'sms', status: 'sent', sms_sent_at: tenDaysAgo, sent_at: tenDaysAgo }],
+      service_records: [{ id: 'sr-l9', customer_id: 'lc-1', scheduled_service_id: 'ss-l9' }],
+      scheduled_services: visits,
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'lc-1', serviceRecordId: 'sr-l9', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const seq = mock.__state.rows.review_sequences.find((r) => r.id !== 'seq-root');
+    expect(JSON.parse(seq.plan)).toHaveLength(3);
+  });
+});
+
+describe('codex #3235 r12 — ET dates, 1:1 correlation, manual cap-exempt sends', () => {
+  test('a pg UTC-midnight Date anchor stays on its ET calendar day (window boundaries hold)', async () => {
+    mockGates.reviewSequences = true;
+    const dayStr = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'et-9', first_name: 'Ned', last_name: 'D', phone: '+19410000075', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-et2', customer_id: 'et-9', scheduled_service_id: 'ss-et2' }],
+      scheduled_services: [
+        { id: 'ss-et1', customer_id: 'et-9', service_id: 'svc-roach', status: 'completed', scheduled_date: dayStr(14), service_key: 'cockroach_control', follow_up_interval_days: 14 },
+        // Anchor arrives as a pg-style UTC-midnight Date — 8 PM ET the night
+        // before; a naive ET conversion would shift the window a day back.
+        { id: 'ss-et2', customer_id: 'et-9', service_id: 'svc-roach', status: 'completed', scheduled_date: new Date(`${dayStr(0)}T00:00:00.000Z`), service_key: 'cockroach_control', follow_up_interval_days: 14 },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'et-9', serviceRecordId: 'sr-et2', completedAt: new Date() });
+
+    // Visit 14 days earlier sits INSIDE the 28-day window → final visit.
+    expect(result.started).toBe(true);
+    expect(JSON.parse(mock.__state.rows.review_sequences[0].plan)).toHaveLength(3);
+  });
+
+  test('a hand-sent ask minutes after an automated one is still detected (1:1 correlation)', async () => {
+    mockGates.reviewSequences = true;
+    const base = Date.now() - 2 * 86400000;
+    const mock = makeMock({
+      customers: [{ id: 'oo-1', first_name: 'Pia', last_name: 'E', phone: '+19410000076', nearest_location_id: 'bradenton' }],
+      sms_log: [
+        // The automated pipeline ask…
+        { id: 'sms-a', customer_id: 'oo-1', direction: 'outbound', status: 'sent', message_body: 'Hi Pia! A quick Google review would mean the world: https://portal.test/l/aaa', created_at: new Date(base) },
+        // …and the owner's hand-sent ask 4 minutes later.
+        { id: 'sms-b', customer_id: 'oo-1', direction: 'outbound', status: 'sent', message_body: 'Pia it was great seeing you, review us here: https://g.page/r/waves/review', created_at: new Date(base + 4 * 60000) },
+      ],
+      review_requests: [{ id: 'rr-oo', customer_id: 'oo-1', template_key: 'friendly_ask', channel: 'sms', status: 'sent', sms_sent_at: new Date(base), sent_at: new Date(base) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'oo-1', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('manual_ask_recent');
+  });
+
+  test('a manual (sequence-less) send of a cap-exempt template never triggers the legacy follow-up', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'mx-1', first_name: 'Ugo', last_name: 'F', phone: '+19410000077', nearest_location_id: 'bradenton' }],
+    });
+    db.mockImplementation(mock);
+
+    await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'first_treatment_ask', manageRetryVia: 'cron' });
+
+    expect(mock.__state.rows.review_requests[0].followup_sent).toBe(true);
+  });
+});
+
+describe('codex #3235 r13 — orphaned pipeline sends', () => {
+  test('a pipeline send with no sms_log row of its own cannot excuse a manual ask', async () => {
+    mockGates.reviewSequences = true;
+    const base = Date.now() - 2 * 86400000;
+    const mock = makeMock({
+      customers: [{ id: 'or-1', first_name: 'Lil', last_name: 'G', phone: '+19410000078', nearest_location_id: 'bradenton' }],
+      // ONLY the manual text exists in sms_log — the automated send's log
+      // insert failed (twilio.js swallows that error), leaving an orphaned
+      // review_requests timestamp 4 minutes earlier.
+      sms_log: [
+        { id: 'sms-m', customer_id: 'or-1', direction: 'outbound', status: 'sent', message_body: 'Lil, review us here: https://g.page/r/waves/review', created_at: new Date(base + 4 * 60000) },
+      ],
+      review_requests: [{ id: 'rr-or', customer_id: 'or-1', template_key: 'friendly_ask', channel: 'sms', status: 'sent', sms_sent_at: new Date(base), sent_at: new Date(base) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'or-1', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('manual_ask_recent');
+  });
+});
+
+describe('codex #3235 r15 — review-scoped orphan correspondence', () => {
+  test('an unrelated outbound text near an orphaned review send does not legitimize it', async () => {
+    mockGates.reviewSequences = true;
+    const base = Date.now() - 2 * 86400000;
+    const mock = makeMock({
+      customers: [{ id: 'ur-1', first_name: 'Bea', last_name: 'H', phone: '+19410000079', nearest_location_id: 'bradenton' }],
+      sms_log: [
+        // An invoice text 30s after the orphaned review send — NOT review-looking.
+        { id: 'sms-inv', customer_id: 'ur-1', direction: 'outbound', status: 'sent', message_body: 'Your Waves invoice is ready: https://portal.test/pay/xyz', created_at: new Date(base + 30000) },
+        // The owner's manual ask 5 minutes later.
+        { id: 'sms-man', customer_id: 'ur-1', direction: 'outbound', status: 'sent', message_body: 'Bea, review us here: https://g.page/r/waves/review', created_at: new Date(base + 5 * 60000) },
+      ],
+      review_requests: [{ id: 'rr-ur', customer_id: 'ur-1', template_key: 'friendly_ask', channel: 'sms', status: 'sent', sms_sent_at: new Date(base), sent_at: new Date(base) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ur-1', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('manual_ask_recent');
+  });
+});
+
+describe('codex #3235 r18 — Maps links count as manual asks', () => {
+  test('a hand-sent maps.app.goo.gl review link triggers the standdown', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'mp-1', first_name: 'Dot', last_name: 'I', phone: '+19410000080', nearest_location_id: 'bradenton' }],
+      sms_log: [{ id: 'sms-mp', customer_id: 'mp-1', direction: 'outbound', status: 'sent', message_body: 'Please share your feedback: https://maps.app.goo.gl/AbC123', created_at: new Date(Date.now() - 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'mp-1', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('manual_ask_recent');
+  });
+});
+
+describe('codex #3235 r19 — first-send re-resolution failure defers', () => {
+  test('a failed re-resolution defers the touch instead of sending the stale plan', async () => {
+    const threeTouch = JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]);
+    const mock = makeMock({
+      customers: [{ id: 'df-1', first_name: 'Hal', last_name: 'J', phone: '+19410000081', nearest_location_id: 'bradenton' }],
+      review_sequences: [{ id: 'seq-df', customer_id: 'df-1', service_record_id: 'sr-df', status: 'active', current_step: 0, touches_sent: 0, started_by: 'post_service', plan: threeTouch, started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000) }],
+    });
+    db.mockImplementation(mock);
+    const spy = jest.spyOn(ReviewService, 'resolveSequencePlanForEnrollment').mockResolvedValue({ error: true });
+    try {
+      const out = await ReviewService.processReviewSequences();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(out.sent).toBe(0);
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(seq.status).toBe('active');
+      expect(new Date(seq.next_run_at).getTime()).toBeGreaterThan(Date.now());
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

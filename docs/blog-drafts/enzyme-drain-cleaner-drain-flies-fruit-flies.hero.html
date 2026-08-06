@@ -1,0 +1,81 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root{--blue:#009CDE;--gold:#FFD700;--ink:#0b2233}
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:1536px;height:1024px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .stage{position:relative;width:1536px;height:1024px;overflow:hidden;
+    background:
+      radial-gradient(1100px 640px at 22% 22%, rgba(255,255,255,.30), rgba(255,255,255,0) 60%),
+      linear-gradient(155deg,#0a3d5c 0%, #0f6ea3 44%, #009CDE 100%);}
+  .sun{position:absolute;top:-180px;left:-140px;width:620px;height:620px;border-radius:50%;
+    background:radial-gradient(circle, rgba(255,215,0,.50), rgba(255,215,0,0) 62%);filter:blur(6px)}
+  .glow{position:absolute;right:-160px;bottom:-160px;width:680px;height:680px;border-radius:50%;
+    background:radial-gradient(circle, rgba(255,255,255,.16), rgba(255,255,255,0) 62%)}
+  .counter-plane{position:absolute;left:0;right:0;bottom:0;height:360px;
+    background:linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.02));
+    border-top:2px solid rgba(255,255,255,.18)}
+  .scene{position:absolute;left:50%;top:50%;transform:translate(-50%,-52%);
+    width:760px;height:600px;border-radius:44px;
+    background:linear-gradient(150deg,#ffffff,#e7f4fc);
+    box-shadow:0 50px 110px rgba(4,28,48,.48), inset 0 0 0 1px rgba(255,255,255,.6)}
+  .counter{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:600px;height:470px}
+  .basin{position:absolute;left:50%;top:56%;transform:translate(-50%,-50%);
+    width:470px;height:330px;border-radius:40px;
+    background:linear-gradient(160deg,#c9d6de,#9fb2bf 55%,#7c93a3);
+    box-shadow:inset 0 20px 46px rgba(0,0,0,.28), inset 0 -12px 26px rgba(255,255,255,.35), 0 22px 44px rgba(10,61,92,.25)}
+  .basin:before{content:"";position:absolute;inset:30px;border-radius:30px;
+    background:linear-gradient(160deg,#aebecb,#8399a8 60%,#6a8090);
+    box-shadow:inset 0 26px 54px rgba(0,0,0,.35)}
+  .water{position:absolute;left:50%;top:60%;transform:translate(-50%,-50%);
+    width:150px;height:8px;border-radius:8px;background:linear-gradient(90deg,rgba(255,255,255,0),rgba(0,156,222,.8),rgba(255,255,255,0));
+    filter:blur(1px);opacity:.7}
+  .drain{position:absolute;left:50%;top:66%;transform:translate(-50%,-50%);
+    width:138px;height:138px;border-radius:50%;
+    background:radial-gradient(circle at 50% 40%, #2b3b47, #0e171d 70%);
+    box-shadow:inset 0 10px 22px rgba(0,0,0,.7), 0 4px 10px rgba(0,0,0,.35);border:11px solid #b8c6d0}
+  .drain:after{content:"";position:absolute;inset:24px;border-radius:50%;
+    background:repeating-radial-gradient(circle, #3a4a56 0 6px, #16222b 6px 12px)}
+  .faucet{position:absolute;left:50%;top:2%;transform:translateX(-50%);width:30px;height:150px;border-radius:15px;
+    background:linear-gradient(90deg,#7c93a3,#c9d6de 40%,#eef4f8 55%,#9fb2bf);box-shadow:0 6px 16px rgba(10,61,92,.3)}
+  .faucet:before{content:"";position:absolute;top:-6px;left:-70px;width:170px;height:30px;border-radius:15px;
+    background:linear-gradient(180deg,#eef4f8,#9fb2bf);box-shadow:0 6px 14px rgba(10,61,92,.28)}
+  .faucet:after{content:"";position:absolute;top:16px;right:-2px;width:30px;height:80px;border-radius:15px;
+    background:linear-gradient(90deg,#7c93a3,#c9d6de 50%,#9fb2bf)}
+  .fly{position:absolute;width:17px;height:11px;border-radius:50%;
+    background:radial-gradient(circle at 40% 40%, #3a3a3a, #111);opacity:.92;z-index:5}
+  .fly:before,.fly:after{content:"";position:absolute;top:-3px;width:13px;height:11px;border-radius:50%;background:rgba(220,235,245,.55)}
+  .fly:before{left:-7px;transform:rotate(-24deg)} .fly:after{right:-7px;transform:rotate(24deg)}
+  .f1{left:815px;top:300px} .f2{left:880px;top:230px;transform:scale(.82)}
+  .f3{left:770px;top:210px;transform:scale(.7)} .f4{left:930px;top:300px;transform:scale(.72)}
+  .f5{left:855px;top:150px;transform:scale(.6)} .f6{left:700px;top:150px;transform:scale(.55)}
+  .waves{position:absolute;left:0;right:0;bottom:0;height:300px;opacity:.5}
+  .waves svg{width:100%;height:100%}
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="sun"></div>
+    <div class="glow"></div>
+    <div class="counter-plane"></div>
+    <div class="scene">
+      <div class="counter">
+        <div class="faucet"></div>
+        <div class="basin"></div>
+        <div class="water"></div>
+        <div class="drain"></div>
+      </div>
+    </div>
+    <div class="fly f1"></div><div class="fly f2"></div><div class="fly f3"></div>
+    <div class="fly f4"></div><div class="fly f5"></div><div class="fly f6"></div>
+    <div class="waves">
+      <svg viewBox="0 0 1536 300" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0,170 C300,110 500,230 780,170 C1050,110 1250,230 1536,160 L1536,300 L0,300 Z" fill="rgba(255,255,255,.16)"/>
+        <path d="M0,220 C320,170 520,280 820,220 C1120,165 1300,270 1536,210 L1536,300 L0,300 Z" fill="rgba(255,255,255,.20)"/>
+      </svg>
+    </div>
+  </div>
+</body>
+</html>

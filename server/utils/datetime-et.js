@@ -225,8 +225,27 @@ function deriveWindowEnd(start, durationMin) {
   return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
 }
 
+// A DATE-ONLY value read literally as its ET calendar day. pg date columns
+// deserialize as 'YYYY-MM-DD' strings or UTC-midnight Dates; running those
+// through etDateString would shift them to the PREVIOUS Eastern day (UTC
+// midnight = 7-8 PM ET the night before). Only real timestamps convert
+// through the ET wall clock. Canonical home of the helper the review
+// drafter pioneered (codex #3105 r2; promoted here on #3235 r12).
+function etCalendarDayOf(value) {
+  if (typeof value === 'string') {
+    const m = value.match(/^(\d{4}-\d{2}-\d{2})(?:$|T00:00:00(?:\.0+)?(?:Z)?$)/);
+    if (m) return m[1];
+  }
+  if (value instanceof Date
+    && value.getUTCHours() === 0 && value.getUTCMinutes() === 0
+    && value.getUTCSeconds() === 0 && value.getUTCMilliseconds() === 0) {
+    return value.toISOString().slice(0, 10);
+  }
+  return etDateString(value instanceof Date ? value : new Date(value));
+}
+
 module.exports = {
-  TZ, parseETDateTime, formatETDay, formatETDate, formatETTime,
+  TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
   etParts, etDateString, addETDays, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,

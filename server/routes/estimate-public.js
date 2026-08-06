@@ -15292,17 +15292,35 @@ function mosquitoFrequenciesFromResultStats(estData = {}) {
 // service row's cadence/visitsPerYear/monthly. Without this, a non-quarterly
 // foam quote falls back to frequencies.slice(0,1) and is presented/billed as
 // quarterly. Billed monthly (annual/12); serviced at the cadence's visitsPerYear.
-function foamFrequenciesFromV1Services(services = []) {
-  const row = (Array.isArray(services) ? services : [])
-    .find((svc) => recurringServiceKey(svc) === 'foam_recurring');
-  if (!row) return [];
+// Shared shaper for solo single-cadence services (recurring foam, commercial
+// pest): they have no residential pest ladder, so their public frequency entry
+// is built from the sold service row itself. One implementation keeps cadence
+// normalization, the annual/monthly/per-treatment fallback math, billing flags,
+// and the treatment-row shape from diverging per service (codex #3240 r3).
+//
+// Cadence chain — compact engine-backed rows (quote wizard / lead automation)
+// persist name + frequency but drop `cadence`, so derive it: explicit field →
+// exact visit count → the cadence baked into the line name → optional
+// visit-count grading (≥12 monthly, ≥6 bimonthly — commercial pest cadence is
+// a bare visit count from risk bucket/override) → the service's own default.
+// (Check bi-monthly before monthly — "bimonthly" contains "monthly".)
+function singleCadenceFrequencyFromRow(row, {
+  serviceKey,
+  serviceLabel,
+  includedProgramLabel,
+  defaultCadence,
+  gradeUnmappedVisits = false,
+  // Emit the V1-ladder key style ('bi_monthly'/'Bi-monthly') instead of the
+  // foam-style 'bimonthly'. The public page's pest-cadence normalization and
+  // the accept handler's exact key match both speak the V1 form, so a
+  // commercial-pest entry keyed 'bimonthly' 400s on acceptance (codex #3240
+  // r5). Foam keeps its historical 'bimonthly' key — its accept flow posts
+  // the entry's own key back, so changing it would break sold foam plans.
+  canonicalV1Keys = false,
+}) {
   const VISITS = { quarterly: 4, bimonthly: 6, monthly: 12 };
   const VISITS_TO_CADENCE = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
   const LABELS = { quarterly: 'Quarterly', bimonthly: 'Bimonthly', monthly: 'Monthly' };
-  // Compact engine-backed rows (quote wizard / lead automation) persist name +
-  // frequency but drop `cadence`, so derive it: explicit field → visit count →
-  // the cadence baked into the line name, before defaulting to quarterly. (Check
-  // bi-monthly before monthly — "bimonthly" contains "monthly".)
   const rawVisits = finiteNumberOrNull(row.visitsPerYear ?? row.visits ?? row.frequency);
   const nameLc = String(row.name ?? row.displayName ?? row.label ?? '').toLowerCase();
   const cadenceFromName = /bi-?monthly/.test(nameLc) ? 'bimonthly'
@@ -15310,7 +15328,7 @@ function foamFrequenciesFromV1Services(services = []) {
     : /quarterly/.test(nameLc) ? 'quarterly'
     : null;
   // Normalize aliases (bi_monthly → bimonthly) so an explicit row.cadence in the
-  // alias form doesn't short-circuit the chain into the quarterly fallback.
+  // alias form doesn't short-circuit the chain into the default fallback.
   const CADENCE_ALIASES = { bi_monthly: 'bimonthly', 'bi-monthly': 'bimonthly', bimonth: 'bimonthly' };
   const normCadence = (c) => {
     const key = String(c || '').toLowerCase();
@@ -15319,11 +15337,14 @@ function foamFrequenciesFromV1Services(services = []) {
   const cadenceCandidate = normCadence(row.cadence)
     || normCadence(row.frequencyKey)
     || (rawVisits != null ? VISITS_TO_CADENCE[rawVisits] : null)
-    || cadenceFromName;
-  const cadence = ['quarterly', 'bimonthly', 'monthly'].includes(cadenceCandidate) ? cadenceCandidate : 'quarterly';
+    || cadenceFromName
+    || (gradeUnmappedVisits && rawVisits != null
+      ? (rawVisits >= 12 ? 'monthly' : rawVisits >= 6 ? 'bimonthly' : 'quarterly')
+      : null);
+  const cadence = ['quarterly', 'bimonthly', 'monthly'].includes(cadenceCandidate) ? cadenceCandidate : defaultCadence;
   const visits = rawVisits || VISITS[cadence];
   const monthlyBase = finiteNumberOrNull(row.mo ?? row.monthly);
-  const perTreatmentBase = finiteNumberOrNull(row.perTreatment ?? row.perVisit ?? row.pv);
+  const perTreatmentBase = finiteNumberOrNull(row.perTreatment ?? row.perVisit ?? row.perApp ?? row.pv);
   // Prefer the authoritative sold annual (e.g. engine persists annual:1108,
   // monthly:92.33) so accept/invoice lock the engine price, not 92.33×12=1107.96.
   const annualBase = finiteNumberOrNull(row.annual ?? row.ann);
@@ -15338,16 +15359,17 @@ function foamFrequenciesFromV1Services(services = []) {
   const perTreatment = perTreatmentBase != null
     ? perTreatmentBase
     : (annual != null && visits ? roundMonthly(annual / visits) : null);
-  // Tier labor duration (priceRecurringFoam → 60/90/120/180) drives slot sizing.
-  // The slot profile reads frequencies[].perServiceTreatments first, so carry it
-  // both on the frequency and on a per-service treatment row.
+  // Tier labor duration (e.g. priceRecurringFoam → 60/90/120/180) drives slot
+  // sizing. The slot profile reads frequencies[].perServiceTreatments first, so
+  // carry it both on the frequency and on a per-service treatment row.
   const estimatedDurationMinutes = finiteNumberOrNull(row.estimatedDurationMinutes ?? row.estimated_duration_minutes);
-  const label = LABELS[cadence];
-  return [{
-    key: cadence,
+  const freqKey = canonicalV1Keys && cadence === 'bimonthly' ? 'bi_monthly' : cadence;
+  const label = canonicalV1Keys && cadence === 'bimonthly' ? 'Bi-monthly' : LABELS[cadence];
+  return {
+    key: freqKey,
     label,
-    serviceCategory: 'foam_recurring',
-    serviceTierKey: cadence,
+    serviceCategory: serviceKey,
+    serviceTierKey: freqKey,
     monthlyBase,
     monthly,
     annual,
@@ -15359,26 +15381,59 @@ function foamFrequenciesFromV1Services(services = []) {
     // 2026-07-23: billing is always per application).
     ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
     estimatedDurationMinutes,
-    // foam_recurring is non-discountable (cadence multiplier is its only
-    // discount), so no manual-discount shaping here.
+    // Both callers are flat/non-discountable services (foam's cadence
+    // multiplier is its only discount; commercial pest is never
+    // WaveGuard/percent-discountable), so no manual-discount shaping here.
     manualDiscount: null,
     included: [{
-      key: `foam_recurring_${cadence}`,
-      label: `${label} foam treatment program`,
+      key: `${serviceKey}_${freqKey}`,
+      label: includedProgramLabel(label),
       detail: visits ? `${Math.round(visits)} visits per year` : null,
       includedAtThisFrequency: true,
     }],
     addOns: [],
     perServiceTreatments: [{
-      service: 'foam_recurring',
-      label: 'Recurring Foam Treatment',
+      service: serviceKey,
+      label: serviceLabel,
       perTreatment,
       displayPrice: perTreatment,
       visitsPerYear: visits,
       estimatedDurationMinutes,
       waveGuardDiscountEligible: false,
     }],
-  }];
+  };
+}
+
+function foamFrequenciesFromV1Services(services = []) {
+  const row = (Array.isArray(services) ? services : [])
+    .find((svc) => recurringServiceKey(svc) === 'foam_recurring');
+  if (!row) return [];
+  return [singleCadenceFrequencyFromRow(row, {
+    serviceKey: 'foam_recurring',
+    serviceLabel: 'Recurring Foam Treatment',
+    includedProgramLabel: (label) => `${label} foam treatment program`,
+    defaultCadence: 'quarterly',
+  })];
+}
+
+// Solo commercial pest has no residential pestTiers, so the v1 build would fall
+// back to the first V1 frequency entry — always "Quarterly" — while the service
+// row prices 6 or 12 visits/yr (codex #3240 P1: the estimator's pest-cadence
+// override made the mismatch rep-chosen). Same single-cadence shape as foam,
+// with visit-count grading (the cadence arrives as a bare visit count from the
+// risk bucket / override) and the commercial program's monthly default.
+function commercialPestFrequenciesFromV1Services(services = []) {
+  const row = (Array.isArray(services) ? services : [])
+    .find((svc) => recurringServiceKey(svc) === 'commercial_pest');
+  if (!row) return [];
+  return [singleCadenceFrequencyFromRow(row, {
+    serviceKey: 'commercial_pest',
+    serviceLabel: 'Commercial Pest Control',
+    includedProgramLabel: (label) => `${label} commercial pest program`,
+    defaultCadence: 'monthly', // commercial pest program default is 12/yr, not quarterly
+    gradeUnmappedVisits: true,
+    canonicalV1Keys: true,
+  })];
 }
 
 // Engine-invocation path: build the foam frequency from the live engine result's
@@ -16662,11 +16717,21 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
         const ownLadder = (key !== 'pest_control' && hasRecurringPestSection && hasServiceCadenceCombos)
           ? bundleSectionLadderForService(key, estData, recurringService, recurringDiscount)
           : null;
-        const sectionFrequencies = (ownLadder && ownLadder.length)
-          ? ownLadder
-          : sectionFrequenciesForRecurringService(key, recurringService, frequencies, recurringDiscount, {
-            preserveSelectableKeys: !hasRecurringPestSection || hasSelectableLadder,
-          });
+        // Commercial pest sells ONE cadence (risk bucket / estimator override)
+        // and has no residential ladder — in a mixed commercial bundle the
+        // generic frequencies mirror the pest-shaped Quarterly key onto it, so
+        // a bi-monthly/monthly program would read "Quarterly" (codex #3240 r4).
+        // Shape its section from its own stored row, like the solo path.
+        const commercialPestFrequencies = key === 'commercial_pest'
+          ? commercialPestFrequenciesFromV1Services([recurringService])
+          : [];
+        const sectionFrequencies = commercialPestFrequencies.length
+          ? commercialPestFrequencies
+          : (ownLadder && ownLadder.length)
+            ? ownLadder
+            : sectionFrequenciesForRecurringService(key, recurringService, frequencies, recurringDiscount, {
+              preserveSelectableKeys: !hasRecurringPestSection || hasSelectableLadder,
+            });
         if (!sectionFrequencies.length && payload.quoteRequired !== true) return null;
         return buildServiceSection({
           key,
@@ -18548,12 +18613,35 @@ async function buildPricingBundleInner(estimate) {
     const foamFreqs = !hasPest && recurringKeys.length === 1 && recurringKeys[0] === 'foam_recurring'
       ? foamFrequenciesFromV1Services(v1.services)
       : [];
+    // Solo commercial pest replaces the generic entry outright. A MIXED bundle
+    // keeps the generic entry's bundle totals + per-service treatment rows but
+    // re-keys it to the sold pest cadence: the accept handler exact-matches the
+    // posted cadence key against these frequencies, so a Quarterly-only list
+    // 400s a bi-monthly/monthly commercial acceptance (codex #3240 r5) — and
+    // the split sections already display per-service cadences.
+    const commercialPestShaped = !hasPest && recurringKeys.includes('commercial_pest')
+      ? commercialPestFrequenciesFromV1Services(v1.services)
+      : [];
+    const commercialPestFreqs = !commercialPestShaped.length
+      ? []
+      : recurringKeys.length === 1
+        ? commercialPestShaped
+        : frequencies.length
+          ? [{
+            ...frequencies[0],
+            key: commercialPestShaped[0].key,
+            label: commercialPestShaped[0].label,
+            serviceTierKey: commercialPestShaped[0].serviceTierKey,
+            visitsPerYear: commercialPestShaped[0].visitsPerYear,
+          }]
+          : [];
     const finalFreqs = hasPest
       ? frequencies
       : (treeShrubFreqs.length ? treeShrubFreqs
         : (mosquitoFreqs.length ? mosquitoFreqs
           : (lawnFreqs.length ? lawnFreqs
-            : (foamFreqs.length ? foamFreqs : frequencies.slice(0, 1)))));
+            : (foamFreqs.length ? foamFreqs
+              : (commercialPestFreqs.length ? commercialPestFreqs : frequencies.slice(0, 1))))));
     const annualPrepayEligible = annualPrepayEligibleForEstimateData(estData);
 
     // First-visit fees stack — non-recurring charges shown to the customer
@@ -20004,6 +20092,8 @@ module.exports.estimateFamilyKeysForAdoption = estimateFamilyKeysForAdoption;
 module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFamily;
 module.exports.adoptionServiceModesForContract = adoptionServiceModesForContract;
 module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
+module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
+module.exports.buildPricingServices = buildPricingServices;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
 module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscountSlices;

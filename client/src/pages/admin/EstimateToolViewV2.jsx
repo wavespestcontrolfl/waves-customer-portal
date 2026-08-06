@@ -392,6 +392,7 @@ function buildTurfRequestProfile(baseProfile, form) {
   profile.isCommercial = formIsCommercial;
   profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
   profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
+  profile.commercialPestCadence = formIsCommercial ? form.commercialPestCadence || null : null;
   profile.treeShrubDensity = formIsCommercial ? form.treeShrubDensity || null : null;
   profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
   return profile;
@@ -1156,6 +1157,27 @@ function fallbackCadenceForPreview(E) {
       intervalMonths: 3,
       period: "/quarter",
     };
+  }
+  // SOLO commercial pest sells one cadence (risk bucket / estimator override)
+  // and has no residential pest tiers, so without this the preview takes the
+  // monthly path and shows annual/12 as "$X/mo" even for a 4x/6x program.
+  // monthlyTotal × intervalMonths lands on the per-application amount
+  // (annual/12 × 3 = annual/4 for quarterly). Solo ONLY: in a mixed bundle the
+  // preview total spans services with their own cadences, so converting the
+  // combined monthly by the pest cadence would invent a bundle price — mixed
+  // stays on the monthly path (codex #3240 r6).
+  const commercialPest = services.length === 1 && services.find((s) => {
+    const label = String(s?.service || s?.name || s?.label || s?.displayName || "").toLowerCase();
+    return label.includes("commercial") && label.includes("pest");
+  });
+  if (commercialPest) {
+    const visits = Number(commercialPest.visitsPerYear ?? commercialPest.visits ?? commercialPest.frequency) || 12;
+    if (visits < 6) {
+      return { key: "quarterly", label: "Quarterly", intervalMonths: 3, period: "/quarter" };
+    }
+    if (visits < 12) {
+      return { key: "bi_monthly", label: "Bi-monthly", intervalMonths: 2, period: "/2 months" };
+    }
   }
   return {
     key: "monthly",
@@ -2112,6 +2134,7 @@ export default function EstimateToolViewV2({
     isCommercial: "NO",
     commercialSubtype: "",
     commercialRiskType: "",
+    commercialPestCadence: "",
     treeShrubDensity: "",
     mosquitoPressure: "",
     commercialPricingMode: "manual_quote",
@@ -3046,6 +3069,7 @@ export default function EstimateToolViewV2({
     form.isCommercial,
     form.commercialSubtype,
     form.commercialRiskType,
+    form.commercialPestCadence,
     form.treeShrubDensity,
     form.mosquitoPressure,
     form.hasPool,
@@ -4000,6 +4024,7 @@ export default function EstimateToolViewV2({
         commercialPricingMode: form.commercialPricingMode || "manual_quote",
         commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",
         commercialRiskType: formIsCommercial ? form.commercialRiskType || "" : "",
+        commercialPestCadence: formIsCommercial ? form.commercialPestCadence || "" : "",
         treeShrubDensity: formIsCommercial ? form.treeShrubDensity || "" : "",
         mosquitoPressure: formIsCommercial ? form.mosquitoPressure || "" : "",
         fleaOfferKey: form.fleaOfferKey || "flea_elimination_two_visit",
@@ -4527,6 +4552,7 @@ export default function EstimateToolViewV2({
       isCommercial: "NO",
       commercialSubtype: "",
       commercialRiskType: "",
+      commercialPestCadence: "",
       treeShrubDensity: "",
       mosquitoPressure: "",
       commercialPricingMode: "manual_quote",
@@ -5318,6 +5344,7 @@ export default function EstimateToolViewV2({
                       isCommercial: "NO",
                       commercialSubtype: "",
                       commercialRiskType: "",
+                      commercialPestCadence: "",
                       treeShrubDensity: "",
                       mosquitoPressure: "",
                       commercialPricingMode: "manual_quote",
@@ -5679,6 +5706,19 @@ export default function EstimateToolViewV2({
                       { value: "healthcare_childcare", label: "Healthcare / childcare" },
                       { value: "hotel_resort", label: "Hotel / resort" },
                       { value: "multifamily", label: "Multifamily" },
+                    ]}
+                  />
+                </FieldV2>
+              )}
+              {(commercialDetected || form.commercialPestCadence) && (
+                <FieldV2 label="Pest cadence override">
+                  <SelectV2
+                    k="commercialPestCadence"
+                    options={[
+                      { value: "", label: "Program default (by business type)" },
+                      { value: "quarterly", label: "Quarterly (4x/yr)" },
+                      { value: "bimonthly", label: "Bi-monthly (6x/yr)" },
+                      { value: "monthly", label: "Monthly (12x/yr)" },
                     ]}
                   />
                 </FieldV2>

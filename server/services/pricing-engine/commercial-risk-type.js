@@ -53,10 +53,31 @@ function resolveCommercialCadence(riskType) {
     : { pestVisits: null, rodentVisits: null };
 }
 
+// Admin PEST-cadence override (owner request 2026-08-06): the estimator's
+// "Pest cadence override" select sells a commercial pest program at a direct
+// quarterly/bi-monthly/monthly cadence when the risk-type bucket's cadence
+// isn't what the deal needs. PEST only — rodent cadence stays owner-locked to
+// the bucket (a warehouse rodent program must stay monthly regardless of the
+// pest cadence sold). Unset/unrecognized → null, so callers fall back to the
+// risk-type bucket, then the pricer's program default.
+const COMMERCIAL_PEST_CADENCE_VISITS = {
+  quarterly: 4,
+  bimonthly: 6,
+  bi_monthly: 6, // billing/estimate-stack alias for the two-month cadence
+  monthly: 12,
+};
+
+function resolveCommercialPestCadenceOverride(cadence) {
+  const key = String(cadence || '').trim().toLowerCase();
+  return COMMERCIAL_PEST_CADENCE_VISITS[key] || null;
+}
+
 module.exports = {
   COMMERCIAL_RISK_TYPES,
   COMMERCIAL_RISK_TYPE_CADENCE,
   COMMERCIAL_RISK_TYPE_VALUES,
+  COMMERCIAL_PEST_CADENCE_VISITS,
   isCommercialRiskType,
   resolveCommercialCadence,
+  resolveCommercialPestCadenceOverride,
 };

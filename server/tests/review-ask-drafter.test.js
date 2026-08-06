@@ -19,7 +19,9 @@ const db = require('../models/db');
 const Drafter = require('../services/review-ask-drafter');
 
 const CUSTOMER = { id: 'cust-1', first_name: 'Aaron', last_name: 'Boss' };
-const CLEAN_BODY = 'Hi Aaron, Adam here with Waves. Hope the centipedes are backing off at the entryway. If we earned it, a quick review means a lot: {review_url}. Anything off, just reply here.';
+// One-segment budget (owner spec 2026-08-06): pre-render ≤145 chars, and the
+// rendered preview (43-char link) must fit a single GSM segment.
+const CLEAN_BODY = 'Hi Aaron, Adam here - centipedes backing off? Quick review: {review_url} Reply if anything is off.';
 
 function mockDb(smsRows = []) {
   db.mockImplementation(() => ({
@@ -86,12 +88,12 @@ describe('verifyDraftBody — the auto-send safety net', () => {
     expect(verify('Hi Aaron, check wavespestcontrol.com then {review_url}')).toBe('raw_url');
   });
 
-  test('rejects a rendered body over the 2-segment policy cap', () => {
-    // 278 chars pre-render passes the char ceiling, but with the ~43-char
-    // rendered link it exceeds two GSM segments (306 chars) — reject.
-    const filler = 'We really appreciate you welcoming our crew and trusting the process from day one. '.repeat(4);
-    const body = `Hi Aaron, ${filler.slice(0, 255)} {review_url}`;
-    expect(body.length).toBeLessThanOrEqual(280);
+  test('rejects a rendered body over the 1-segment cadence cap (owner spec 2026-08-06)', () => {
+    // 130 chars pre-render passes the char ceiling, but with the ~43-char
+    // rendered link it exceeds one GSM segment (160 chars) — reject.
+    const filler = 'We really appreciate you welcoming our crew and trusting the process. '.repeat(2);
+    const body = `Hi Aaron, ${filler.slice(0, 107)} {review_url}`;
+    expect(body.length).toBeLessThanOrEqual(145);
     expect(verify(body)).toBe('too_many_segments');
   });
 
@@ -102,7 +104,7 @@ describe('verifyDraftBody — the auto-send safety net', () => {
   });
 
   test('"feel free to reply" is NOT an incentive', () => {
-    expect(verify('Hi Aaron, feel free to reply here — {review_url}')).toBeNull();
+    expect(verify('Hi Aaron, feel free to reply here - {review_url}')).toBeNull();
   });
 
   test('rejects unrendered placeholders other than the link', () => {
@@ -190,5 +192,153 @@ describe('draftAskBody — gating + fallback contract', () => {
   test('an unexpected error inside drafting → null, never a throw', async () => {
     mockGetRecentCalls.mockRejectedValue(new Error('pg down'));
     expect(await Drafter.draftAskBody({ customer: CUSTOMER })).toBeNull();
+  });
+});
+
+describe('verifyEmailIntro — the email opener safety net', () => {
+  const verify = (body) => Drafter.verifyEmailIntro(body, { firstName: 'Aaron' });
+  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. If anything still looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+
+  test('a clean grounded intro passes', () => {
+    expect(verify(CLEAN_INTRO)).toBeNull();
+  });
+
+  test('rejects empty and over-length intros', () => {
+    expect(verify('')).toBe('empty');
+    expect(verify(`Aaron ${'x'.repeat(460)}`)).toBe('too_long');
+  });
+
+  test('rejects ANY link or placeholder — the CTA button owns the review link', () => {
+    expect(verify('Aaron, review us at https://g.page/waves')).toBe('raw_url');
+    expect(verify('Aaron, review us at waves.com')).toBe('raw_url');
+    expect(verify('Aaron, click {review_url} below')).toBe('stray_placeholder');
+    expect(verify('Aaron, click {{intro_paragraph}} below')).toBe('stray_placeholder');
+  });
+
+  test('shares the SMS banned list (incentives, compliance words, star coaching)', () => {
+    expect(verify('Aaron, leave a review for a free treatment')).toBe('banned_phrase');
+    expect(verify('Aaron, our products are safe for pets')).toBe('banned_phrase');
+    expect(verify('Aaron, give us 5 stars')).toBe('banned_phrase');
+  });
+
+  test('requires the customer first name and rejects emoji', () => {
+    expect(verify('Hope the ants are gone, quick review below?')).toBe('missing_name');
+    expect(verify('Aaron, thanks! \u{1F41C}')).toBe('emoji');
+  });
+});
+
+describe('draftEmailIntro — gating + fallback contract', () => {
+  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. If anything looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+
+  test('gate off → null, and no model call is made', async () => {
+    mockGates.reviewAskPersonalized = false;
+    expect(await Drafter.draftEmailIntro({ customer: CUSTOMER })).toBeNull();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('gate on → verified intro comes back; rules ride SYSTEM, history rides text', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: CLEAN_INTRO });
+    const out = await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron', serviceType: 'Pest Control', techName: 'Adam' });
+    expect(out).toBe(CLEAN_INTRO);
+    const args = mockDispatch.mock.calls[0][1];
+    expect(args.system).toMatch(/do NOT include any link/i);
+    expect(args.text).toMatch(/^CUSTOMER HISTORY/);
+    expect(args.timeoutMs).toBeGreaterThan(0);
+  });
+
+  test('line breaks in the model output collapse to one paragraph', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron, thanks for having us out.\n\nA quick review below would mean a lot. Reply here if anything is off.' });
+    const out = await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron' });
+    expect(out).not.toMatch(/\n/);
+  });
+
+  test('an intro that fails verification falls back to null (template copy sends)', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: 'Aaron, here is a free re-treat if you review us' });
+    expect(await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron' })).toBeNull();
+  });
+
+  test('both providers down → null, never a throw', async () => {
+    mockDispatch.mockResolvedValue({ ok: false });
+    expect(await Drafter.draftEmailIntro({ customer: CUSTOMER })).toBeNull();
+  });
+});
+
+describe('draftEmailIntro — step-aware instruction (codex #3235 r1)', () => {
+  const CLEAN_INTRO = 'Hi Aaron, thanks for having us out. If anything looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+
+  test('a Day-0 step (email fallback) is prompted as a right-after-the-visit email, not a follow-up', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: CLEAN_INTRO });
+    const today = new Date().toISOString().slice(0, 10);
+    await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron', sequenceStep: 0, serviceDate: today });
+    const system = mockDispatch.mock.calls[0][1].system;
+    expect(system).toMatch(/right after the visit/);
+    expect(system).not.toMatch(/final follow-up/);
+  });
+
+  test('a later step keeps the final-follow-up instruction', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: CLEAN_INTRO });
+    await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron', sequenceStep: 2 });
+    expect(mockDispatch.mock.calls[0][1].system).toMatch(/final follow-up email/);
+  });
+});
+
+describe('name matching is word-bounded (codex #3235 r7)', () => {
+  test('a short name inside another word does not satisfy the name check', () => {
+    expect(Drafter.verifyDraftBody('Hi there, all the ants are gone: {review_url}', { firstName: 'Al' })).toBe('missing_name');
+    expect(Drafter.verifyEmailIntro('We always appreciate you. Reply if anything is off.', { firstName: 'Al' })).toBe('missing_name');
+  });
+
+  test('the name as its own word passes', () => {
+    expect(Drafter.verifyDraftBody('Hi Al, ants gone? Quick review: {review_url} Reply if off.', { firstName: 'Al' })).toBeNull();
+    expect(Drafter.verifyEmailIntro('Hi Al, thanks for having us out. Reply if anything is off.', { firstName: 'Al' })).toBeNull();
+  });
+});
+
+describe('hyphenated fixed-time expressions are rejected (codex #3235 r14)', () => {
+  test('digit and word-number hyphen forms are banned in both verifiers', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, keep pets out for a 30-minute wait. Reply if anything is off.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyEmailIntro('Hi Aaron, after thirty-minutes you are all set. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyDraftBody('Hi Aaron, 30-minute wait then enjoy: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
+  });
+});
+
+describe('time-unit words are banned outright (codex #3235 r15 — closes the interval enumeration class)', () => {
+  test('quarter-hour and any other unit mention rejects', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, keep pets inside for a quarter-hour. Reply if anything is off.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyEmailIntro('Hi Aaron, give it a few hours. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyDraftBody('Hi Aaron, back in an hour: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
+  });
+});
+
+describe('scheme-less URLs detected generically (codex #3235 r16 — closes the TLD enumeration class)', () => {
+  test('any dotted host with a path rejects, regardless of TLD', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, see example.ai/review for details. Reply anytime.', { firstName: 'Aaron' })).toBe('raw_url');
+    expect(Drafter.verifyEmailIntro('Hi Aaron, feedback.xyz/r/123 has it. Reply anytime.', { firstName: 'Aaron' })).toBe('raw_url');
+    expect(Drafter.verifyDraftBody('Hi Aaron, maps.app.goo.gl/abc then {review_url}', { firstName: 'Aaron' })).toBe('raw_url');
+  });
+
+  test('ordinary prose with abbreviations still passes', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, thanks for having us out, e.g. the lanai work. If anything looks off, just reply to this email and we will make it right.', { firstName: 'Aaron' })).toBeNull();
+  });
+});
+
+describe('deadline and access-instruction frames are banned (codex #3235 r17 — closes the timing-instruction class)', () => {
+  test('clock times, until-deadlines, and pet-exclusion frames all reject', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, keep pets inside until 3 PM. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyEmailIntro('Hi Aaron, wait until tomorrow then all set. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyDraftBody('Hi Aaron, stay off the lawn today: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyDraftBody('Hi Aaron, before letting the dogs out check with us: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
+  });
+
+  test('mentioning pets warmly (no instruction frame) still passes', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, hope the pups are enjoying the yard again. If anything looks off, just reply to this email.', { firstName: 'Aaron' })).toBeNull();
+  });
+});
+
+describe('till/til variants reject (codex #3235 r18)', () => {
+  test('each deadline connective form is banned in both verifiers', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, avoid the lawn till tomorrow. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyEmailIntro('Hi Aaron, wait til tomorrow. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyDraftBody('Hi Aaron, wait until tomorrow: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
   });
 });
