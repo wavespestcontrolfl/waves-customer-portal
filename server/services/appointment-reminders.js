@@ -2281,7 +2281,7 @@ const AppointmentReminders = {
       if (claimToken) {
         noticeToken = claimToken;
         claimed = await db('appointment_reminders')
-          .where({ id: record.id, cancellation_notice_state: 'pending' })
+          .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
           .where('cancellation_notice_at', claimToken)
           .update({ updated_at: new Date() });
       } else if (!sendNotification) {
@@ -2294,7 +2294,7 @@ const AppointmentReminders = {
           .where({ id: record.id })
           .where(function claimable() {
             this.whereNull('cancellation_notice_at')
-              .orWhere('cancellation_notice_state', 'pending');
+              .orWhereIn('cancellation_notice_state', ['pending', 'pending_notify']);
           })
           .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'suppressed', updated_at: noticeToken });
       } else {
@@ -2310,7 +2310,7 @@ const AppointmentReminders = {
           .where({ id: record.id })
           .where(function claimable() {
             this.whereNull('cancellation_notice_at')
-              .orWhere('cancellation_notice_state', 'pending');
+              .orWhereIn('cancellation_notice_state', ['pending', 'pending_notify']);
           })
           .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'pending', updated_at: noticeToken });
       }
@@ -2319,7 +2319,7 @@ const AppointmentReminders = {
         if (claimToken && claimed) {
           // Fenced: only the claim owner may finalize as suppressed.
           await db('appointment_reminders')
-            .where({ id: record.id, cancellation_notice_state: 'pending' })
+            .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
             .where('cancellation_notice_at', noticeToken)
             .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
         }
@@ -2353,7 +2353,7 @@ const AppointmentReminders = {
       // of re-texting the customer.
       if (await acceptedCancellationAudit()) {
         await db('appointment_reminders')
-          .where({ id: record.id, cancellation_notice_state: 'pending' })
+          .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
           .where('cancellation_notice_at', noticeToken)
           .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
         // The customer DID get the text (prior attempt, provider-accepted)
@@ -2399,7 +2399,7 @@ const AppointmentReminders = {
             if (isEnabled('cancelNoticeHook')) return false;
           }
           await db('appointment_reminders')
-            .where({ id: record.id, cancellation_notice_state: 'pending' })
+            .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
             .where('cancellation_notice_at', noticeToken)
             .update(accepted
               ? { cancellation_notice_state: 'sent', updated_at: new Date() }
@@ -2443,7 +2443,7 @@ const AppointmentReminders = {
             // reclaim.
             preDispatchCheck: async () => {
               const own = await db('appointment_reminders')
-                .where({ id: record.id, cancellation_notice_state: 'pending' })
+                .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
                 .where('cancellation_notice_at', noticeToken)
                 .first('id');
               if (!own) return { ok: false, code: 'notice_claim_lost', reason: 'cancellation-notice lease was reclaimed' };
@@ -2624,12 +2624,13 @@ const AppointmentReminders = {
       if (!isEnabled('cancelNoticeHook')) return { swept: 0 };
       const stale = await db('appointment_reminders as ar')
         .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
-        .where('ar.cancellation_notice_state', 'pending')
+        .whereIn('ar.cancellation_notice_state', ['pending', 'pending_notify'])
         .where('ar.cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
         .where('ss.status', 'cancelled')
         .orderBy('ar.cancellation_notice_at', 'asc')
         .limit(20)
         .select('ar.id as reminder_id', 'ar.scheduled_service_id', 'ar.customer_id',
+          'ar.cancellation_notice_state as claim_state',
           'ar.cancellation_notice_at as claim_at');
       // Group by (customer, original claim timestamp): a series
       // cancellation claims every target with ONE shared token, so rows
@@ -2652,21 +2653,25 @@ const AppointmentReminders = {
         // accepted-send check needs (codex r7). Groups are settled whole.
         const group = await db('appointment_reminders as ar')
           .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
-          .where('ar.cancellation_notice_state', 'pending')
+          .whereIn('ar.cancellation_notice_state', ['pending', 'pending_notify'])
           .where('ar.cancellation_notice_at', seed.claim_at)
           .where('ss.status', 'cancelled')
           .modify((q) => {
             if (seed.customer_id) q.where('ar.customer_id', seed.customer_id);
             else q.whereNull('ar.customer_id');
           })
-          .select('ar.id as reminder_id', 'ar.scheduled_service_id');
+          .select('ar.id as reminder_id', 'ar.scheduled_service_id', 'ar.cancellation_notice_state as claim_state');
         if (!group.length) continue;
+        // A caller-owned notify claim (route crashed before its awaited
+        // handler) sends on recovery regardless of prior reminder
+        // evidence — the operator explicitly asked for the text (r11).
+        const callerNotify = group.some((g) => g.claim_state === 'pending_notify');
         const token = new Date();
         const reminderIds = group.map((g) => g.reminder_id);
         const serviceIds = group.map((g) => String(g.scheduled_service_id));
         const reclaimed = await db('appointment_reminders')
           .whereIn('id', reminderIds)
-          .where({ cancellation_notice_state: 'pending' })
+          .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
           .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
           .update({ cancellation_notice_at: token, updated_at: token });
         if (!reclaimed) continue;
@@ -2689,7 +2694,7 @@ const AppointmentReminders = {
         if (alreadyAccepted) {
           await db('appointment_reminders')
             .whereIn('id', reminderIds)
-            .where({ cancellation_notice_state: 'pending' })
+            .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
             .where('cancellation_notice_at', token)
             .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
           settled += group.length;
@@ -2710,7 +2715,7 @@ const AppointmentReminders = {
           await this.handleSeriesCancellation(
             group.map((g) => g.scheduled_service_id),
             group[0].scheduled_service_id,
-            { sendNotification: delivered, scope: 'series' },
+            { sendNotification: delivered || callerNotify, scope: 'series' },
           );
           settled += group.length;
           continue;
@@ -2721,12 +2726,12 @@ const AppointmentReminders = {
           // one message (or silent close) below covers all of them.
           await db('appointment_reminders')
             .whereIn('id', siblings.map((g) => g.reminder_id))
-            .where({ cancellation_notice_state: 'pending' })
+            .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
             .where('cancellation_notice_at', token)
             .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
         }
         await this.handleCancellation(representative.scheduled_service_id, {
-          sendNotification: delivered,
+          sendNotification: delivered || callerNotify,
           claimToken: token,
         });
         settled += group.length;
@@ -2776,7 +2781,7 @@ const AppointmentReminders = {
         .whereIn('scheduled_service_id', ids)
         .where(function claimable() {
           this.whereNull('cancellation_notice_at')
-            .orWhere('cancellation_notice_state', 'pending');
+            .orWhereIn('cancellation_notice_state', ['pending', 'pending_notify']);
         })
         .update({
           cancellation_notice_at: seriesToken,
@@ -2798,7 +2803,7 @@ const AppointmentReminders = {
           }
           await db('appointment_reminders')
             .whereIn('scheduled_service_id', ids)
-            .where({ cancellation_notice_state: 'pending' })
+            .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
             .where('cancellation_notice_at', seriesToken)
             .update(accepted
               ? { cancellation_notice_state: 'sent', updated_at: new Date() }
@@ -2859,7 +2864,7 @@ const AppointmentReminders = {
             // double-text. Own at least one target AND no foreign claims.
             const own = await db('appointment_reminders')
               .whereIn('scheduled_service_id', ids)
-              .where({ cancellation_notice_state: 'pending' })
+              .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
               .where('cancellation_notice_at', seriesToken)
               .first('id');
             const foreign = await db('appointment_reminders')
@@ -2870,7 +2875,7 @@ const AppointmentReminders = {
                 // row stamped after our claim = an adopter that already
                 // texted (codex r9). Either way the combined send would
                 // double-text.
-                this.where('cancellation_notice_state', 'pending')
+                this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
                   .orWhere(function freshSent() {
                     this.where('cancellation_notice_state', 'sent')
                       .where('updated_at', '>=', seriesToken);

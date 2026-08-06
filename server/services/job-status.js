@@ -439,12 +439,14 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             // crashes in its post-commit window, the sweep settles instead
             // — the obligation can no longer vanish. Only an explicit
             // suppress intent finalizes terminally here.
-            const targetState = (notifyCustomer === false || notifyCustomer === 'caller_suppress') ? 'suppressed' : 'pending';
+            const targetState = (notifyCustomer === false || notifyCustomer === 'caller_suppress')
+              ? 'suppressed'
+              : (notifyCustomer === 'caller' ? 'pending_notify' : 'pending');
             const claimedRows = await sp('appointment_reminders')
               .where({ scheduled_service_id: jobId })
               .where(function claimable() {
                 this.whereNull('cancellation_notice_at').orWhere(function staleLease() {
-                  this.where('cancellation_notice_state', 'pending')
+                  this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
                     .where('cancellation_notice_at', '<', sp.raw("now() - interval '15 minutes'"));
                 });
               })

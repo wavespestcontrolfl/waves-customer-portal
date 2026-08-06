@@ -10,7 +10,9 @@
 //
 // Two-part claim:
 //   cancellation_notice_at    — claim timestamp, taken atomically
-//   cancellation_notice_state — 'pending' | 'sent' | 'suppressed'
+//   cancellation_notice_state — 'pending' | 'pending_notify' | 'sent' | 'suppressed'
+//   ('pending_notify' = caller-owned claim whose route INTENDS a text —
+//    crash recovery sends regardless of prior delivery evidence)
 // A claim is taken WHERE at IS NULL, or WHERE state='pending' and the
 // claim is stale (>15 min) — a process crash between claim and provider
 // acceptance must not permanently look like a completed notice (r3).
@@ -23,7 +25,7 @@
 exports.up = async (knex) => {
   await knex.schema.alterTable('appointment_reminders', (t) => {
     t.timestamp('cancellation_notice_at', { useTz: true }).nullable();
-    t.string('cancellation_notice_state', 12).nullable();
+    t.string('cancellation_notice_state', 16).nullable();
   });
   await knex.raw(
     'CREATE INDEX IF NOT EXISTS idx_messaging_audit_appointment_id ON messaging_audit_log (appointment_id) WHERE appointment_id IS NOT NULL',
@@ -31,7 +33,7 @@ exports.up = async (knex) => {
   // The 15-minute stale-claim sweep filters/orders by (state, at) — without
   // this partial index it would scan the whole reminders table every tick.
   await knex.raw(
-    "CREATE INDEX IF NOT EXISTS idx_appt_reminders_cancel_pending ON appointment_reminders (cancellation_notice_at) WHERE cancellation_notice_state = 'pending'",
+    "CREATE INDEX IF NOT EXISTS idx_appt_reminders_cancel_pending ON appointment_reminders (cancellation_notice_at) WHERE cancellation_notice_state IN ('pending', 'pending_notify')",
   );
 };
 
