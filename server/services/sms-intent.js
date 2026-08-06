@@ -130,7 +130,7 @@ function hasRescheduleOrAwayIntent(body) {
     || (!freshAsk && /\b(?:thanks?\s+for|thank\s+you\s+for|already|were|was|got)\s+(?:being\s+)?re-?schedul/i.test(text))
     // Non-appointment reschedule objects (codex r16): "reschedule my
     // autopay/payment" is billing, not an appointment change.
-    || /\bre-?schedul\w*\s+(?:[\w'’]+\s+){0,2}?(?:autopay|payment|invoice|card|subscription)s?\b/i.test(text);
+    || /\b(?:re-?schedul\w*|postpon\w*|mov(?:e|ing)|push(?:ing|ed)?|defer(?:ring)?|delay(?:ing)?|chang(?:e|ing))\s+(?:[\w'’]+\s+){0,2}?(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b/i.test(text);
   if (!negated && (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text))) return true;
   if (cancelAsk) return true;
   // Past absences are history, not a request (codex r17): "we were out

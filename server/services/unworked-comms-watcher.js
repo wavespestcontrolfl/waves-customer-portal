@@ -40,7 +40,10 @@ const MAX_PER_SECTION = 12;
 // Canonical human-authored types ONLY (codex r8): estimate_sent can be
 // an automated lane send for a SEPARATE matter — treating it as an
 // answer advanced the marker and lost the waiting item permanently.
-const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised')";
+// ai_assistant = the conversational AI's own successful answer — a real
+// reply for thread-clearing purposes (codex r20). The reschedule watcher
+// keeps its stricter list (the AI stands down on reschedule intent).
+const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised', 'ai_assistant')";
 
 // Scan window: since the previous SUCCESSFUL send (the ops_email_send_state
 // marker), bounded to 7 days — windows tile exactly run-to-run, including
@@ -141,9 +144,11 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
     `
     SELECT t.id, t.task_type, t.deadline, t.status, t.recommended_action,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
+           LEFT(COALESCE(cs.call_summary, ''), 120) AS call_context,
            COUNT(*) OVER () AS total_count
     FROM ai_follow_up_tasks t
     LEFT JOIN customers cu ON cu.id = t.customer_id
+    LEFT JOIN csr_call_scores cs ON cs.id = t.call_score_id
     -- A sent estimate fulfills a send_estimate task (codex r19).
     WHERE NOT (t.task_type = 'send_estimate' AND EXISTS (
         SELECT 1 FROM estimates fe
@@ -318,10 +323,10 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   }
   if (b.length) {
     sectionText.push('Follow-up tasks overdue or silently expired today:');
-    sectionText.push(...b.map((r) => `- ${r.customer_name || 'Unknown'} [${r.task_type || 'task'}${r.status === 'expired' ? ', auto-expired' : r.status === 'verified' ? ', auto-verified by a non-human send' : ''}]${r.recommended_action ? ` — ${String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120)}` : ''}`));
+    sectionText.push(...b.map((r) => `- ${r.customer_name || (r.call_context ? `Unlinked caller — ${String(r.call_context).replace(/\s+/g, ' ').trim()}` : 'Unknown')} [${r.task_type || 'task'}${r.status === 'expired' ? ', auto-expired' : r.status === 'verified' ? ', auto-verified by a non-human send' : ''}]${r.recommended_action ? ` — ${String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120)}` : ''}`));
     sectionText.push(...moreLine(b.length, bTotal));
     sectionText.push('');
-    sectionHtml.push(`<p><strong>Follow-up tasks overdue or silently expired today:</strong></p><ul style="margin:0 0 12px 18px;padding:0;">${b.map((r) => `<li style="margin:0 0 6px 0;">${esc(r.customer_name || 'Unknown')} [${esc(r.task_type || 'task')}${r.status === 'expired' ? ', auto-expired' : r.status === 'verified' ? ', auto-verified by a non-human send' : ''}]${r.recommended_action ? ` — ${esc(String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120))}` : ''}</li>`).join('')}</ul>${bTotal > b.length ? `<p>…and ${bTotal - b.length} more not shown</p>` : ''}`);
+    sectionHtml.push(`<p><strong>Follow-up tasks overdue or silently expired today:</strong></p><ul style="margin:0 0 12px 18px;padding:0;">${b.map((r) => `<li style="margin:0 0 6px 0;">${esc(r.customer_name || (r.call_context ? `Unlinked caller — ${String(r.call_context).replace(/\s+/g, ' ').trim()}` : 'Unknown'))} [${esc(r.task_type || 'task')}${r.status === 'expired' ? ', auto-expired' : r.status === 'verified' ? ', auto-verified by a non-human send' : ''}]${r.recommended_action ? ` — ${esc(String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120))}` : ''}</li>`).join('')}</ul>${bTotal > b.length ? `<p>…and ${bTotal - b.length} more not shown</p>` : ''}`);
   }
   if (c.length) {
     sectionText.push('Texts still waiting on a reply (thread ends inbound):');
@@ -335,11 +340,13 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     `End-of-day check: ${total} item${total === 1 ? '' : 's'} from today never got worked. Tomorrow morning these are a day old.`,
     '',
     ...sectionText,
+    ...(a.length ? [`Calls: ${adminPortalUrl()}/admin/communications#tab=calls`] : []),
     `Communications: ${adminPortalUrl()}/admin/communications`,
   ].join('\n');
   const html = [
     `<p>End-of-day check: <strong>${total}</strong> item${total === 1 ? '' : 's'} from today never got worked. Tomorrow morning these are a day old.</p>`,
     ...sectionHtml,
+    ...(a.length ? [`<p><a href="${esc(adminPortalUrl())}/admin/communications#tab=calls">Open the Calls tab</a></p>`] : []),
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
   ].join('\n');
 

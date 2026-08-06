@@ -3403,6 +3403,10 @@ function initScheduledJobs() {
         await CSRCoach.verifyFollowUps();
       });
       if (verifyLock && verifyLock.skipped && verifyLock.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('csr-follow-up-verify').catch(() => {});
+        await recordJobEnd('csr-follow-up-verify', t0, new Error(`tick skipped: ${verifyLock.reason || 'no_connection'}`)).catch(() => {});
         throw new Error(`follow-up verification tick skipped: ${verifyLock.reason || 'no_connection'}`);
       }
     } catch (err) {

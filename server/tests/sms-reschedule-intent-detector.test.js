@@ -137,3 +137,10 @@ describe('r19 regression cases (active cancel auxiliaries)', () => {
     expect(hasRescheduleOrAwayIntent('I was hoping to cancel my appointment')).toBe(true);
   });
 });
+
+describe('r20 regression cases (billing synonyms)', () => {
+  test('billing postpone/move do not flag', () => {
+    expect(hasRescheduleOrAwayIntent('Can I postpone my payment until Friday?')).toBe(false);
+    expect(hasRescheduleOrAwayIntent('Please move my bill to next month')).toBe(false);
+  });
+});
