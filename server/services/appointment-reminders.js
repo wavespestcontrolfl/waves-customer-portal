@@ -13,6 +13,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+// Boundary-rotation generation guard (codex #3233 r37).
+const PROCESS_BOOT_AT = new Date();
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { readCachedLineType, cacheLineType } = require('./messaging/validators/line-type');
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
@@ -2841,8 +2843,13 @@ const AppointmentReminders = {
         // Segment the enable boundary (codex r36): while the gate is off,
         // keep the boundary cleared so re-enabling stamps a fresh one and
         // gate-off cancellations never backfill late claims.
+        // Generation guard (codex r37): only clear a marker stamped
+        // BEFORE this process booted — during an off→on rolling deploy a
+        // draining gate-off pod must not delete the boundary the new
+        // gate-on pod just stamped.
         await db('ops_email_send_state')
           .where({ email_key: 'cancel-notice-hook-enabled-at' })
+          .where('last_sent_at', '<', PROCESS_BOOT_AT)
           .del()
           .catch(() => {});
       }
