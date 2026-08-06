@@ -131,6 +131,16 @@ async function loadCallbackCalls(cutoff = new Date()) {
         SELECT 1 FROM sms_log os
         WHERE os.direction = 'outbound'
           AND os.message_type IN ${HUMAN_REPLY_TYPES}
+          -- A human-APPROVED click-followup nudge is proactive marketing,
+          -- not a reply to this item (codex r24): its draft intent is
+          -- 'click_followup' and finalize stamps sent_at at send time.
+          AND NOT EXISTS (
+            SELECT 1 FROM message_drafts mdx
+            WHERE mdx.intent = 'click_followup'
+              AND mdx.customer_id = os.customer_id
+              AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
+                                  AND os.created_at + interval '2 minutes'
+          )
           AND os.status IN ('queued', 'sent', 'delivered')
           AND os.created_at > c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
           AND (c.customer_id IS NULL OR os.customer_id IS NULL OR os.customer_id = c.customer_id)
@@ -178,6 +188,16 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
              SELECT 1 FROM sms_log ps
              WHERE ps.customer_id = t.customer_id AND ps.direction = 'outbound'
                AND ps.message_type IN ${HUMAN_REPLY_TYPES}
+               -- A human-APPROVED click-followup nudge is proactive marketing,
+               -- not a reply to this item (codex r24): its draft intent is
+               -- 'click_followup' and finalize stamps sent_at at send time.
+               AND NOT EXISTS (
+                 SELECT 1 FROM message_drafts mdx
+                 WHERE mdx.intent = 'click_followup'
+                   AND mdx.customer_id = ps.customer_id
+                   AND mdx.sent_at BETWEEN ps.created_at - interval '2 minutes'
+                                       AND ps.created_at + interval '2 minutes'
+               )
                AND ps.status IN ('queued', 'sent', 'delivered')
                AND ps.created_at > t.created_at
            )
@@ -200,6 +220,16 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
              SELECT 1 FROM sms_log es
              WHERE es.customer_id = t.customer_id AND es.direction = 'outbound'
                AND es.message_type IN ${HUMAN_REPLY_TYPES}
+               -- A human-APPROVED click-followup nudge is proactive marketing,
+               -- not a reply to this item (codex r24): its draft intent is
+               -- 'click_followup' and finalize stamps sent_at at send time.
+               AND NOT EXISTS (
+                 SELECT 1 FROM message_drafts mdx
+                 WHERE mdx.intent = 'click_followup'
+                   AND mdx.customer_id = es.customer_id
+                   AND mdx.sent_at BETWEEN es.created_at - interval '2 minutes'
+                                       AND es.created_at + interval '2 minutes'
+               )
                AND es.status IN ('queued', 'sent', 'delivered')
                AND es.created_at > t.created_at
            )
@@ -218,6 +248,16 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
              WHERE vs.customer_id = t.customer_id
                AND vs.direction = 'outbound'
                AND vs.message_type IN ${HUMAN_REPLY_TYPES}
+               -- A human-APPROVED click-followup nudge is proactive marketing,
+               -- not a reply to this item (codex r24): its draft intent is
+               -- 'click_followup' and finalize stamps sent_at at send time.
+               AND NOT EXISTS (
+                 SELECT 1 FROM message_drafts mdx
+                 WHERE mdx.intent = 'click_followup'
+                   AND mdx.customer_id = vs.customer_id
+                   AND mdx.sent_at BETWEEN vs.created_at - interval '2 minutes'
+                                       AND vs.created_at + interval '2 minutes'
+               )
                AND vs.status IN ('queued', 'sent', 'delivered')
                AND vs.created_at > t.created_at
            )
@@ -287,6 +327,16 @@ async function loadUnansweredThreads(cutoff = new Date()) {
       SELECT 1 FROM sms_log os
       WHERE os.direction = 'outbound'
         AND os.message_type IN ${HUMAN_REPLY_TYPES}
+        -- A human-APPROVED click-followup nudge is proactive marketing,
+        -- not a reply to this item (codex r24): its draft intent is
+        -- 'click_followup' and finalize stamps sent_at at send time.
+        AND NOT EXISTS (
+          SELECT 1 FROM message_drafts mdx
+          WHERE mdx.intent = 'click_followup'
+            AND mdx.customer_id = os.customer_id
+            AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
+                                AND os.created_at + interval '2 minutes'
+        )
         AND os.status IN ('queued', 'sent', 'delivered')
         AND os.created_at > l.created_at
         AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10) = l.peer

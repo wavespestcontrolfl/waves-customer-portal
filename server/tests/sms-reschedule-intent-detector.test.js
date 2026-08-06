@@ -159,3 +159,21 @@ describe('r23 regression cases', () => {
     expect(hasRescheduleOrAwayIntent('Can I make my payment a different day?')).toBe(false);
   });
 });
+
+describe('corrected asks override same-message negations (codex r24)', () => {
+  test('negation then correction flags', () => {
+    expect(hasRescheduleOrAwayIntent("Don't reschedule Tuesday. Actually, please reschedule my appointment for Friday.")).toBe(true);
+  });
+  test('plain please-reschedule ask flags', () => {
+    expect(hasRescheduleOrAwayIntent('Please reschedule my appointment for next week')).toBe(true);
+  });
+  test('pure negation still suppresses', () => {
+    expect(hasRescheduleOrAwayIntent("Don't reschedule us, you can still come Tuesday")).toBe(false);
+  });
+  test('please do NOT reschedule stays suppressed', () => {
+    expect(hasRescheduleOrAwayIntent("Please don't reschedule my appointment")).toBe(false);
+  });
+  test('past acknowledgment with actually-status is not a fresh ask', () => {
+    expect(hasRescheduleOrAwayIntent('Actually they already rescheduled it, thanks')).toBe(false);
+  });
+});

@@ -64,6 +64,9 @@ async function resolveActionedFlags() {
             .whereRaw('sl.customer_id = agent_decisions.customer_id')
             .where('sl.direction', 'outbound')
             .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
+            // Approved click-followup nudges are proactive, not replies
+            // (codex r24) — matched by draft intent + finalize sent_at.
+            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.intent = 'click_followup' AND mdx.customer_id = sl.customer_id AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
             .whereIn('sl.status', ['queued', 'sent', 'delivered'])
             .whereRaw('sl.created_at > agent_decisions.created_at');
         }).orWhere(function ambiguousRescheduled() {
@@ -156,7 +159,16 @@ async function loadUnactionedFlags() {
     // Staff-resolved decisions (accepted/corrected/dismissed via the agent
     // decisions surface) leave the digest immediately (codex r2).
     .where('ad.status', 'pending_review')
-    .where('ad.created_at', '>=', db.raw(`now() - interval '${LOOKBACK_DAYS} days'`))
+    .where(function windowOrLiveVisit() {
+      // The flagger links visits up to 14 days out; a pending flag must
+      // stay visible through its linked visit's date, not age out at the
+      // 4-day lookback while the visit is still upcoming (codex r24).
+      this.where('ad.created_at', '>=', db.raw(`now() - interval '${LOOKBACK_DAYS} days'`))
+        .orWhere(function liveLinkedVisit() {
+          this.whereNotNull('ad.entity_id')
+            .whereRaw("ss.scheduled_date >= (now() at time zone 'America/New_York')::date");
+        });
+    })
     // A HUMAN reply that actually left (accepted carrier statuses) clears
     // ANY flag — linked or not: staff can resolve a request without moving
     // the slot ("exterior is fine, no need to be home") (codex r3).
@@ -165,6 +177,9 @@ async function loadUnactionedFlags() {
         .whereRaw('sl.customer_id = ad.customer_id')
         .where('sl.direction', 'outbound')
         .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
+            // Approved click-followup nudges are proactive, not replies
+            // (codex r24) — matched by draft intent + finalize sent_at.
+            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.intent = 'click_followup' AND mdx.customer_id = sl.customer_id AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
         .whereIn('sl.status', ['queued', 'sent', 'delivered'])
         .whereRaw('sl.created_at > ad.created_at');
     })

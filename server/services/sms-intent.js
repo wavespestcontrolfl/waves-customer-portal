@@ -124,8 +124,11 @@ function hasRescheduleOrAwayIntent(body) {
   // reschedule ask (codex r5).
   // A FRESH request anywhere overrides status/acknowledgment clauses
   // (codex r15/r16): "…been rescheduled, but I need to reschedule again."
-  const freshAsk = /\b(?:need|want|like|have)\s+to\s+re-?schedul|\bre-?schedul\w*(?:\s+\w+){0,2}\s+again\b/i.test(text);
-  const negated = /\b(?:don'?t|do\s+not|no\s+need\s+to|not\s+necessary\s+to|never)\s+(?:\w+\s+){0,2}?(?:reschedul|re-?book|move|change)/i.test(text)
+  const freshAsk = /\b(?:need|want|like|have)\s+to\s+re-?schedul|\bplease\s+re-?schedul|\bactually\b[^.!?]{0,30}\b(?:please|can|could|need|want)\b[^.!?]{0,20}\bre-?schedul|\bre-?schedul\w*(?:\s+\w+){0,2}\s+again\b/i.test(text);
+  // A self-correction ("Don't reschedule Tuesday. Actually, please
+  // reschedule for Friday.") is a live ask — the fresh ask outranks the
+  // whole-message negation scan (codex r24).
+  const negated = (!freshAsk && /\b(?:don'?t|do\s+not|no\s+need\s+to|not\s+necessary\s+to|never)\s+(?:\w+\s+){0,2}?(?:reschedul|re-?book|move|change)/i.test(text))
     // Present-perfect confirmations / status questions (codex r13) and
     // past acknowledgments (codex r9) — both yield to a fresh ask.
     || (!freshAsk && /\b(?:has|have|had|is|was)\b[^.!?]{0,30}\bbeen\s+re-?schedul/i.test(text))
