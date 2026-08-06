@@ -15,6 +15,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 const {
   estimateFamilyKeysForAdoption,
   appointmentMatchesEstimateFamily,
+  adoptionServiceModesForContract,
 } = require('../routes/estimate-public');
 const {
   tierQualifyingRecurringServiceKeys,
@@ -416,5 +417,39 @@ describe('family-scoped existing-appointment adoption', () => {
   test('an estimate with no resolvable services offers no adoption at all', () => {
     expect(estimateFamilyKeysForAdoption({}, null).size).toBe(0);
     expect(estimateFamilyKeysForAdoption({}, {}).size).toBe(0);
+  });
+
+  test('an unselectable one-time toggle never joins the contract intersection (codex r10)', () => {
+    const pestRecurringData = {
+      result: {
+        recurring: {
+          services: [{
+            name: 'Quarterly Pest Control Service',
+            service: 'pest_control',
+            frequency: 'quarterly',
+            monthly: 39,
+            perVisit: 117,
+            visitsPerYear: 4,
+            selected: true,
+            isSelected: true,
+          }],
+        },
+      },
+    };
+    // Toggle flag set but the resolved alternative price is zero (no
+    // estimate_data to derive one from): the SSR page hides the toggle and
+    // accept rejects the mode — the contract intersection must not include
+    // it, or a valid recurring adoption gets pushed to the picker.
+    expect(adoptionServiceModesForContract(
+      { show_one_time_option: true },
+      pestRecurringData,
+    )).toEqual(['recurring']);
+    // A billable one-time alternative keeps both modes in the intersection.
+    expect(adoptionServiceModesForContract(
+      { show_one_time_option: true, estimate_data: JSON.stringify(pestRecurringData) },
+      pestRecurringData,
+    )).toEqual(['recurring', 'one_time']);
+    // No toggle at all → single default mode.
+    expect(adoptionServiceModesForContract({}, pestRecurringData)).toEqual(['recurring']);
   });
 });

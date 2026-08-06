@@ -523,7 +523,17 @@ function serviceFamilyKeyForAdoption(value) {
 // same acceptance lists the accept handler schedules from, so "what we'd
 // book" and "what an existing row may replace" can never disagree.
 function estimateFamilyKeysForAdoption(estimate, estData, { serviceMode, serviceModes } = {}) {
-  const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData || {});
+  // Input-only estimates (engineInputs persisted, no stored result) replay
+  // through the SAME supplement path acceptance and the converter use (codex
+  // #3228 r10) — raw data would derive no recurring family, skip the
+  // adoption fallback, and let the customer book a duplicate visit. The
+  // replay only fires when no stored services exist; normal shapes pass
+  // through untouched.
+  let effectiveData = estData || {};
+  try {
+    effectiveData = withSupplementedRecurringServices(effectiveData);
+  } catch { /* raw data stands */ }
+  const { recurringSvcList, oneTimeList } = acceptanceServiceLists(effectiveData);
   // The ONE-TIME family comes from the same effective-choice mechanism the
   // accept uses (codex #3228 r9): when show_one_time_option derives a pest
   // offer from recurring pricing, the STORED one-time rows may hold only the
@@ -534,7 +544,7 @@ function estimateFamilyKeysForAdoption(estimate, estData, { serviceMode, service
   // rows — a derivation error must not break the matcher.
   let effectiveOneTimeList = oneTimeList;
   try {
-    const choiceList = acceptedOneTimeChoiceListForEstimate(estimate || {}, estData || {});
+    const choiceList = acceptedOneTimeChoiceListForEstimate(estimate || {}, effectiveData);
     if (Array.isArray(choiceList) && choiceList.length > 0) effectiveOneTimeList = choiceList;
   } catch { /* stored rows stand */ }
   // Scoped to the accepted service mode (codex #3228 r4): a mixed estimate
@@ -12842,7 +12852,21 @@ function defaultServiceModeForEstimate(estData, estimate = {}) {
 // the accept 409s while the slot picker stays hidden).
 function adoptionServiceModesForContract(estimate = {}, estData = null) {
   const def = defaultServiceModeForEstimate(estData, estimate);
-  const canToggleOneTime = !!(estimate.show_one_time_option || estimate.showOneTimeOption);
+  // The one_time mode joins the intersection only when the customer can
+  // ACTUALLY select it (codex #3228 r10): the SSR page hides the toggle and
+  // the accept handler rejects requestedOneTime when the resolved
+  // alternative price is zero — including an unselectable mode (whose
+  // family set may be empty or setup-fee-only) would empty the intersection
+  // and push a valid same-family recurring adoption to the slot picker.
+  // Same resolved-availability condition as the accept handler.
+  let canToggleOneTime = !!(estimate.show_one_time_option || estimate.showOneTimeOption);
+  if (canToggleOneTime) {
+    try {
+      canToggleOneTime = Number(resolveAcceptOneTimeTotal(estimate, null)) > 0;
+    } catch {
+      canToggleOneTime = false;
+    }
+  }
   return def === 'recurring' && canToggleOneTime ? ['recurring', 'one_time'] : [def];
 }
 
@@ -19654,6 +19678,7 @@ module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
 module.exports.extractEngineInputs = extractEngineInputs;
 module.exports.estimateFamilyKeysForAdoption = estimateFamilyKeysForAdoption;
 module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFamily;
+module.exports.adoptionServiceModesForContract = adoptionServiceModesForContract;
 module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
