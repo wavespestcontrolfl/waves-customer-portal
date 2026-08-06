@@ -536,10 +536,19 @@ const ReviewService = {
           // the series comes from history: a completed same-service visit in
           // the prior 60 days makes THIS the follow-up treatment (owner spec:
           // "the 3 after 2nd treatment"); none makes it the first.
+          // Anchored to the COMPLETED VISIT's date, earlier visits only
+          // (codex #3235 r10 P1): a payment-deferred enrollment runs at
+          // payment time, so a now-relative window let a LATER treatment
+          // make an earlier visit look final (and a late-paid final visit
+          // look first).
+          const anchorMs = svc.scheduled_date ? new Date(svc.scheduled_date).getTime() : Date.now();
+          const windowFloor = etDateString(new Date(anchorMs - 60 * 86400000));
+          const anchorStr = etDateString(new Date(anchorMs));
           const prior = await db("scheduled_services")
             .where({ customer_id: customerId, service_id: svc.service_id, status: "completed" })
             .where("id", "!=", svc.id)
-            .where("scheduled_date", ">=", etDateString(new Date(Date.now() - 60 * 86400000)))
+            .where("scheduled_date", "<", anchorStr)
+            .where("scheduled_date", ">=", windowFloor)
             .first();
           return prior
             ? { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true }
@@ -568,8 +577,15 @@ const ReviewService = {
 
       return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN };
     } catch (err) {
-      logger.warn(`[review] plan resolution failed (customerId=${customerId}): ${err.message} — using default plan`);
-      return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN };
+      // Explicit failure (codex #3235 r10 P1): defaulting here made a
+      // transient lookup error indistinguishable from a real one-time
+      // classification — dropping seriesFinal at final-treatment enrollment
+      // (cooldown rejection) or overwriting a correct persisted plan at the
+      // first-send re-resolve. Callers decide: enrollment skips (the
+      // invoice-paid trigger naturally retries), the runner keeps the
+      // enrolled plan.
+      logger.warn(`[review] plan resolution failed (customerId=${customerId}): ${err.message}`);
+      return { error: true };
     }
   },
 
@@ -641,6 +657,13 @@ const ReviewService = {
       // one-time = full cadence, multi-treatment = one after the first visit
       // then the cadence after the final one (middle visits send nothing).
       const resolved = await this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId, scheduledServiceId });
+      if (resolved.error) {
+        // Fail toward FEWER sends: enrolling on a guessed plan risks a
+        // 3-touch cadence where one ask (or none) was owed. The payment/
+        // completion triggers re-attempt enrollment naturally.
+        logger.warn(`[review] Post-service cadence skipped (customerId=${customerId} reason=plan_resolution_failed)`);
+        return { started: false, reason: "plan_resolution_failed" };
+      }
       if (resolved.skip) {
         logger.info(`[review] Post-service cadence skipped (customerId=${customerId} reason=${resolved.skip})`);
         return { started: false, reason: resolved.skip };
@@ -2246,6 +2269,19 @@ const ReviewService = {
         return { started: false, reason: "service_record_enrolled", sequence: priorForRecord };
       }
     }
+    // Record-less enrollments dedupe by the persisted visit id (codex #3235
+    // r10 P2): the admin-schedule path can complete a visit before its
+    // service_records row exists, and a completion retry after the cooldown
+    // would otherwise re-send the identical one-step ask for the same visit.
+    if (scheduledServiceId) {
+      const priorForVisit = await db("review_sequences")
+        .where({ scheduled_service_id: scheduledServiceId })
+        .whereRaw("stop_reason IS DISTINCT FROM 'start_failed'")
+        .first();
+      if (priorForVisit) {
+        return { started: false, reason: "service_record_enrolled", sequence: priorForVisit };
+      }
+    }
 
     // The first touch is an immediate ask, so enforce the same lifetime cap +
     // 30-day cooldown as a one-off send (the candidate list already filters on
@@ -2385,6 +2421,7 @@ const ReviewService = {
           serviceRecordId: seq.service_record_id,
           scheduledServiceId: seq.scheduled_service_id,
         });
+        if (re.error) throw new Error("plan re-resolution unavailable"); // caught below: enrolled plan stands
         if (re.skip) {
           await db("review_sequences").where({ id: seq.id }).update({
             status: "stopped",
@@ -2725,7 +2762,7 @@ const ReviewService = {
       if (!visitId) return [];
       const visit = await db("scheduled_services")
         .where({ id: visitId })
-        .select("id", "parent_service_id", "followup_source_service_id", "service_id")
+        .select("id", "parent_service_id", "followup_source_service_id", "service_id", "scheduled_date")
         .first();
       if (!visit) return [];
       // Walk the FULL ancestor chain (codex #3235 r7 P1): in a 3+ visit
@@ -2747,10 +2784,15 @@ const ReviewService = {
         if (!cursor) break;
       }
       if (!sourceIds.length && visit.service_id) {
+        // Same anchoring as the plan resolver (codex #3235 r10 P1): the
+        // series' earlier visits, relative to THIS visit's date — never a
+        // now-relative window that payment-deferred enrollment would skew.
+        const anchorMs = visit.scheduled_date ? new Date(visit.scheduled_date).getTime() : Date.now();
         const priors = await db("scheduled_services")
           .where({ customer_id: customerId, service_id: visit.service_id, status: "completed" })
           .where("id", "!=", visit.id)
-          .where("scheduled_date", ">=", etDateString(new Date(Date.now() - 60 * 86400000)))
+          .where("scheduled_date", "<", etDateString(new Date(anchorMs)))
+          .where("scheduled_date", ">=", etDateString(new Date(anchorMs - 60 * 86400000)))
           .select("id");
         sourceIds = priors.map((r) => r.id);
       }

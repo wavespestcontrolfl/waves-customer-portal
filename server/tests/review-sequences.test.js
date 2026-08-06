@@ -1544,3 +1544,62 @@ describe('codex #3235 r9 — canonical liveness + late-booked follow-up', () => 
     expect(body).toMatch(/Treatment 1 done/);
   });
 });
+
+describe('codex #3235 r10 — failure propagation, record-less dedupe, history anchoring', () => {
+  test('a plan-resolution failure skips enrollment instead of defaulting to the 3-touch cadence', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'pf-1', first_name: 'Ida', last_name: 'R', phone: '+19410000069', nearest_location_id: 'bradenton' }],
+    });
+    db.mockImplementation(mock);
+    const spy = jest.spyOn(ReviewService, 'resolveSequencePlanForEnrollment').mockResolvedValue({ error: true });
+    try {
+      const result = await ReviewService.enrollPostService({ customerId: 'pf-1', completedAt: new Date() });
+      expect(result.started).toBe(false);
+      expect(result.reason).toBe('plan_resolution_failed');
+      expect(mock.__state.rows.review_sequences).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('a record-less enrollment dedupes by the persisted scheduled visit id', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'vd-1', first_name: 'Ora', last_name: 'S', phone: '+19410000070', nearest_location_id: 'bradenton' }],
+      scheduled_services: [{ id: 'ss-vd', customer_id: 'vd-1', status: 'completed', scheduled_date: new Date(Date.now() - 40 * 86400000).toISOString().slice(0, 10) }],
+      review_sequences: [{ id: 'seq-vd', customer_id: 'vd-1', service_record_id: null, scheduled_service_id: 'ss-vd', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: new Date(Date.now() - 40 * 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'vd-1', scheduledServiceId: 'ss-vd', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('service_record_enrolled');
+    expect(mock.__state.rows.review_sequences).toHaveLength(1);
+  });
+
+  test('a later completed treatment cannot make an earlier visit look final (history anchored to the visit)', async () => {
+    mockGates.reviewSequences = true;
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'ha-1', first_name: 'Zed', last_name: 'Q', phone: '+19410000071', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-ha1', customer_id: 'ha-1', scheduled_service_id: 'ss-ha1' }],
+      scheduled_services: [
+        // Visit 1 (enrolling late, e.g. via a delayed invoice payment)…
+        { id: 'ss-ha1', customer_id: 'ha-1', service_id: 'svc-roach', status: 'completed', scheduled_date: d(20), service_key: 'cockroach_control' },
+        // …while visit 2 has ALREADY happened. It is LATER than visit 1, so
+        // it must not count as visit 1's "prior" treatment.
+        { id: 'ss-ha2', customer_id: 'ha-1', service_id: 'svc-roach', status: 'completed', scheduled_date: d(6), service_key: 'cockroach_control' },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ha-1', serviceRecordId: 'sr-ha1', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+  });
+});
