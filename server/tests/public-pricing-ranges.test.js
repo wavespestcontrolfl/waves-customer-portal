@@ -22,6 +22,7 @@ const EXPECTED_KEYS = [
   'wdo_inspection',
   'lawn_care_program',
   'one_time_lawn',
+  'lawn_pest_knockdown',
   'one_time_pest',
   'one_time_mosquito',
   'bora_care',

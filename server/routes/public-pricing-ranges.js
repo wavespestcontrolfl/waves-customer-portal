@@ -64,7 +64,11 @@ router.get('/', async (req, res, next) => {
       res.set('Cache-Control', 'no-store');
       return res.status(503).json({ error: 'pricing ranges temporarily unavailable' });
     }
-    res.set('Cache-Control', 'public, max-age=3600');
+    // 5-minute freshness: bounds how long a downstream cache can serve a
+    // pre-edit payload after an admin pricing change (the in-process memo
+    // invalidates immediately, but a shared cache only revalidates on
+    // expiry).
+    res.set('Cache-Control', 'public, max-age=300');
     res.json(payload);
   } catch (err) {
     next(err);
