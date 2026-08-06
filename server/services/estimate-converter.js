@@ -523,7 +523,17 @@ function hasWaveGuardSetupService(services = []) {
 // re-signup's stale rate must never be summed back in.
 async function addOnPreservedMonthlyRateBase({
   database, estimateId, estimate, estimateData, customer,
+  adoptedExistingAppointment = false,
 } = {}) {
+  // A genuine adoption accept (the route adopted a PRE-EXISTING appointment
+  // — not a reservation hold) is a same-family re-quote by definition: the
+  // #3228 adoption gate only offers same-family rows. Replace semantics,
+  // always (codex #3241 r4 P1) — without this, adopting the customer's ONLY
+  // row of that plan removes it from the other-plans query below (it now
+  // carries this estimate's source_estimate_id) and the accept would read
+  // as disjoint and SUM the old rate — double-counting the very plan being
+  // re-priced.
+  if (adoptedExistingAppointment === true) return 0;
   const existingMonthlyRate = Number(customer?.monthly_rate);
   if (!['active_customer', 'won', 'at_risk'].includes(customer?.pipeline_stage)
     || !Number.isFinite(existingMonthlyRate) || !(existingMonthlyRate > 0)) {
@@ -543,8 +553,15 @@ async function addOnPreservedMonthlyRateBase({
       serviceFamilyKeyForAdoption,
       appointmentMatchesEstimateFamily,
     } = require('../routes/estimate-public');
+    // Supplemental companion lines ride OUTSIDE recurring.services on some
+    // server-priced shapes (rodent bait as recurring.rodentBaitMo — codex
+    // #3241 r4 P1): they are accepted recurring services all the same, so
+    // the overlap union must see their families too.
     const familyKeys = new Set(
-      recurringServicesFromEstimateData(estimateData)
+      [
+        ...recurringServicesFromEstimateData(estimateData),
+        ...supplementalCompanionLines(estimateData),
+      ]
         .map((svc) => serviceFamilyKeyForAdoption(svc))
         .filter(Boolean),
     );
@@ -2032,6 +2049,7 @@ const EstimateConverter = {
       ? 0
       : await addOnPreservedMonthlyRateBase({
         database, estimateId, estimate, estimateData, customer,
+        adoptedExistingAppointment: opts.adoptedExistingAppointment === true,
       });
     // Provisional figure for the audit outputs below — the WRITE itself is
     // an atomic in-database increment (see customerUpdates), and the actual

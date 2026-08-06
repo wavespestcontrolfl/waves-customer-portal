@@ -9765,6 +9765,11 @@ router.put('/:token/accept', async (req, res, next) => {
           autoSendInvoice: false,
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
+          // Genuine adoption (a PRE-EXISTING appointment, not a reservation
+          // hold) = same-family re-quote — the converter's add-on rate sum
+          // must not run (codex #3241 r4).
+          adoptedExistingAppointment: !!(existingAppointmentRow
+            && !isReservationHeldAppointment(existingAppointmentRow)),
         });
         if (!annualPrepayConversionResult?.draftInvoiceId) {
           throw new Error('Annual prepay invoice was not created');
@@ -9814,6 +9819,13 @@ router.put('/:token/accept', async (req, res, next) => {
           skipMembershipEmail: true,
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
+          // Genuine adoption (a PRE-EXISTING appointment, not a reservation
+          // hold) = same-family re-quote — the converter's add-on rate sum
+          // must not run (codex #3241 r4: adopting the customer's ONLY row
+          // of that plan hides it from the other-plans query and the accept
+          // would double-count the plan being re-priced).
+          adoptedExistingAppointment: !!(existingAppointmentRow
+            && !isReservationHeldAppointment(existingAppointmentRow)),
         });
         // Mint the standard setup/first-application invoice on THIS
         // transaction — the same invoice the converter's standard branch
@@ -18133,9 +18145,20 @@ function estimateTotalsReflectManualDiscount(estData = {}, estimate = {}) {
 function pricingBundleLacksManualDiscountNetting(bundle = {}, estData = {}, estimate = {}) {
   const manual = normalizeManualDiscountSummary(estData);
   if (!manual) return false;
-  if (estimateTotalsReflectManualDiscount(estData, estimate) !== false) return false;
   const frequencies = Array.isArray(bundle.frequencies) ? bundle.frequencies : [];
-  return frequencies.length > 0;
+  if (!frequencies.length) return false;
+  const reflect = estimateTotalsReflectManualDiscount(estData, estimate);
+  if (reflect === false) return true;
+  // Zero-total trivial match (codex #3241 r4 P0): a fully discounted
+  // estimate persists annual_total = 0, and pricingBundleMatchesEstimateTotals
+  // passes a 0-vs-0 comparison without inspecting a single frequency — so a
+  // legacy positive, metadata-only snapshot would be "reflecting" while its
+  // rows still sell the undiscounted figure. Positive rows contradicting
+  // the zero totals recompute; rows genuinely netted to zero pass.
+  if (reflect === true && Number(estimate?.annual_total) === 0) {
+    return frequencies.some((f) => Number(f?.monthly) > 0 || Number(f?.annual) > 0);
+  }
+  return false;
 }
 
 function pricingBundleHasStaleTermiteRow(bundle = {}) {

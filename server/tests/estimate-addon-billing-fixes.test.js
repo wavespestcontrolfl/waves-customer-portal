@@ -290,6 +290,25 @@ describe('pricingBundleLacksManualDiscountNetting', () => {
     )).toBe(false);
   });
 
+  test('zero-total trivial match: positive rows against zero persisted totals recompute (codex r4 P0)', () => {
+    const fullDiscountEstData = {
+      summary: { manualDiscount: { ...STORED_PERCENT_DISCOUNT } },
+      result: { totals: { year2: 0 } },
+    };
+    // Legacy positive metadata-only snapshot on a fully discounted estimate.
+    expect(pricingBundleLacksManualDiscountNetting(
+      { frequencies: [{ key: 'monthly', monthly: 32.87, manualDiscount: { amount: 62.64 } }] },
+      fullDiscountEstData,
+      { annual_total: 0 },
+    )).toBe(true);
+    // Rows genuinely netted to zero pass.
+    expect(pricingBundleLacksManualDiscountNetting(
+      { frequencies: [{ key: 'monthly', monthly: 0, annual: 0, manualDiscount: { amount: 417.6 } }] },
+      fullDiscountEstData,
+      { annual_total: 0 },
+    )).toBe(false);
+  });
+
   test('false for undiscounted estimates and empty bundles', () => {
     expect(pricingBundleLacksManualDiscountNetting(
       { frequencies: [{ key: 'monthly', monthly: 32.87 }] },
