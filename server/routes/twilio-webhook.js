@@ -279,22 +279,47 @@ router.post('/sms', async (req, res) => {
       // (The alert is internal to the owner, unaffected by the SMS opt-out.)
       fireEventRescore('sms_opt_out');
 
-      // Opt-out COMBINED with an appointment ask (codex #3232 r45):
-      // "Please don't text me anymore, and cancel tomorrow's service" —
-      // the durable reschedule flag and its INTERNAL bell still persist;
-      // only customer-facing SMS is suppressed by the opt-out.
-      if (customer && Body && rescheduleAsk) {
-        const flagResult = await require('../services/reschedule-intent-flagger')
-          .flagInboundRescheduleIntent({
-            customer,
-            phone: From,
-            body: Body,
-            smsLogId: null,
-            messageSid: MessageSid || null,
-          })
-          .catch(() => null);
-        if (flagResult?.flagged === true && typeof flagResult.fireBell === 'function') {
-          setImmediate(() => { flagResult.fireBell().catch(() => {}); });
+      // Opt-out COMBINED with an appointment ask (codex #3232 r45/r46):
+      // "STOP, and cancel tomorrow's service" — the durable reschedule
+      // flag and its INTERNAL bell still persist; only customer-facing
+      // SMS is suppressed by the opt-out. Service contacts resolve via
+      // the same all-slots unique lookup as the main flag path.
+      if (Body && rescheduleAsk) {
+        let optFlagCustomer = customer;
+        let optFlagEligible = Boolean(customer);
+        if (!customer) {
+          const key = phoneLookupKey(From);
+          if (key) {
+            const matches = await db('customers')
+              .whereNull('deleted_at')
+              .where(function anyPhoneSlot() {
+                for (const col of ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
+                  this.orWhereRaw(`RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`, [key]);
+                }
+              })
+              .limit(2)
+              .catch(() => []);
+            if (matches.length === 1) {
+              optFlagCustomer = matches[0];
+              optFlagEligible = true;
+            } else {
+              optFlagEligible = matches.length > 1;
+            }
+          }
+        }
+        if (optFlagEligible) {
+          const flagResult = await require('../services/reschedule-intent-flagger')
+            .flagInboundRescheduleIntent({
+              customer: optFlagCustomer,
+              phone: From,
+              body: Body,
+              smsLogId: null,
+              messageSid: MessageSid || null,
+            })
+            .catch(() => null);
+          if (flagResult?.flagged === true && typeof flagResult.fireBell === 'function') {
+            setImmediate(() => { flagResult.fireBell().catch(() => {}); });
+          }
         }
       }
 

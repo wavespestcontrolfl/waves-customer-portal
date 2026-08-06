@@ -297,7 +297,10 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
            -- task means it was worked even if the verifier hasn't run.
            AND NOT EXISTS (
              SELECT 1 FROM sms_log ps
-             WHERE ps.customer_id = t.customer_id AND ps.direction = 'outbound'
+             -- A text never completes a send_estimate obligation (codex
+             -- r46) — only the estimate-specific checks clear those.
+             WHERE t.task_type <> 'send_estimate'
+               AND ps.customer_id = t.customer_id AND ps.direction = 'outbound'
                -- Human-authored subset (codex r39): the AI Assistant's
                -- automatic reply is not staff working the task.
                AND ps.message_type IN ('manual', 'ai_approved', 'ai_revised')
@@ -335,7 +338,10 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
            -- Staff completing AFTER auto-expiry counts (codex r16).
            AND NOT EXISTS (
              SELECT 1 FROM sms_log es
-             WHERE es.customer_id = t.customer_id AND es.direction = 'outbound'
+             -- A text never completes a send_estimate obligation (codex
+             -- r46) — only the estimate-specific checks clear those.
+             WHERE t.task_type <> 'send_estimate'
+               AND es.customer_id = t.customer_id AND es.direction = 'outbound'
                -- Human-authored subset (codex r39): the AI Assistant's
                -- automatic reply is not staff working the task.
                AND es.message_type IN ('manual', 'ai_approved', 'ai_revised')
@@ -368,7 +374,10 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
            AND t.deadline > now() - interval '30 days' AND t.deadline <= :cutoff
            AND NOT EXISTS (
              SELECT 1 FROM sms_log vs
-             WHERE vs.customer_id = t.customer_id
+             -- A text never completes a send_estimate obligation (codex
+             -- r46) — only the estimate-specific checks clear those.
+             WHERE t.task_type <> 'send_estimate'
+               AND vs.customer_id = t.customer_id
                AND vs.direction = 'outbound'
                -- Human-authored subset (codex r39): the AI Assistant's
                -- automatic reply is not staff working the task.
@@ -434,10 +443,6 @@ async function loadUnansweredThreads(cutoff = new Date()) {
           -- whose confirmation goes out BEFORE the inbound row is
           -- persisted — they are never 'unanswered' (codex r29).
           AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply')
-          -- Standalone courtesy closers ("Thanks!", "Got it", "Perfect")
-          -- end a conversation, they don't await one (codex r34) —
-          -- deterministic pattern, no LLM verdict involved.
-          AND TRIM(COALESCE(message_body, '')) !~* '^(thanks?( you| u)?|thank you( so much| very much)?|ty|tysm|got it|perfect|great|awesome|ok(ay)?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
       ) inbound
       WHERE peer <> ''
       ORDER BY peer, endpoint, created_at DESC
@@ -460,10 +465,15 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         )
       LIMIT 1
     ) cu ON true
+    -- Standalone courtesy closers ("Thanks!", "Got it") END a thread.
+    -- Applied AFTER the latest-row selection (codex r34/r46): a closing
+    -- "Thanks!" retires the conversation instead of being filtered
+    -- pre-DISTINCT and resurfacing the older substantive message.
+    WHERE TRIM(COALESCE(l.message_body, '')) !~* '^(thanks?( you| u)?|thank you( so much| very much)?|ty|tysm|got it|perfect|great|awesome|ok(ay)?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
     -- Answered = a HUMAN outbound after the last inbound. Automated
     -- broadcasts (reminders, receipts, review asks) must not clear a
     -- waiting customer (codex #3232 r1).
-    WHERE NOT EXISTS (
+    AND NOT EXISTS (
       SELECT 1 FROM sms_log os
       WHERE os.direction = 'outbound'
         AND os.message_type IN ${HUMAN_REPLY_TYPES}
