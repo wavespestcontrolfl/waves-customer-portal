@@ -2085,7 +2085,10 @@ async function planInternalLinksForTarget(target = {}) {
   const { queueInternalLinkTaskForDryRun } = require('../content/autonomous-runner')._internals;
   const taskIds = [];
   for (const task of tasks) {
-    const queued = await queueInternalLinkTaskForDryRun(task, target.opportunity_id || null).catch(() => null);
+    // No catch: a DB error (e.g. unapplied migration) must reach the outer
+    // planning rejection handler — swallowing it reported queued=0 as a
+    // successful plan and silently lost every task.
+    const queued = await queueInternalLinkTaskForDryRun(task, target.opportunity_id || null);
     if (queued?.id) taskIds.push(queued.id);
   }
   let candidates = 0;

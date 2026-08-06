@@ -378,8 +378,12 @@ function relocateByContext(body, phrase, contextSnippet, targetKeyword) {
     fromIndex = occ.index + occ.length;
   }
   if (!occurrences.length) return null;
-  const contextTokens = snippetTokens(contextSnippet);
-  const keywordTokens = snippetTokens(targetKeyword);
+  // The policy scorer's OWN tokenizer — a parallel token definition here
+  // counted stopwords the relevance gate strips, letting an edited old
+  // paragraph tie on "with"/"of" noise and then win on context overlap.
+  const { meaningfulTokens } = policy._internals;
+  const contextTokens = meaningfulTokens(contextSnippet);
+  const keywordTokens = meaningfulTokens(targetKeyword);
   if (!contextTokens.size && !keywordTokens.size) return occurrences[0];
   // Rank by the TARGET's topical terms first (a relevance proxy available
   // to every call site from the task row alone — an edited old paragraph
@@ -390,7 +394,7 @@ function relocateByContext(body, phrase, contextSnippet, targetKeyword) {
   let bestKeywordOverlap = -1;
   let bestContextOverlap = -1;
   for (const occ of occurrences) {
-    const paragraphTokens = snippetTokens(occ.paragraph);
+    const paragraphTokens = meaningfulTokens(occ.paragraph);
     let keywordOverlap = 0;
     for (const token of keywordTokens) {
       if (paragraphTokens.has(token)) keywordOverlap++;
@@ -425,14 +429,6 @@ function envMinTopicalRelevance() {
   return Number.isFinite(value) ? value : 0.75;
 }
 
-function snippetTokens(value) {
-  return new Set(
-    String(value || '')
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((token) => token.length > 2)
-  );
-}
 
 function snippetAround(text, start, length, padding = 50) {
   const s = Math.max(0, start - padding);
