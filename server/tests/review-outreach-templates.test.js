@@ -1,6 +1,12 @@
 const {
   OUTREACH_TEMPLATES,
   DEFAULT_SEQUENCE_PLAN,
+  RECURRING_SEQUENCE_PLAN,
+  MULTI_TREATMENT_FIRST_PLAN,
+  NO_LINK_TEMPLATE_KEYS,
+  CAP_EXEMPT_TEMPLATE_KEYS,
+  ASK_TOUCH_SQL,
+  CAP_TOUCH_SQL,
   getOutreachTemplate,
   renderOutreachBody,
 } = require('../services/review-outreach-templates');
@@ -22,13 +28,38 @@ describe('review outreach templates', () => {
     expect(getOutreachTemplate('nope')).toBeNull();
   });
 
-  test('the default cadence is Day 0/3/4 ending on email, Day-3 SMS weekdays-only', () => {
-    expect(DEFAULT_SEQUENCE_PLAN.map((s) => s.day)).toEqual([0, 3, 4]);
+  test('the one-time cadence is Day 0/4/6 ending on email, reminder SMS weekdays-only (owner spec 2026-08-05: touch 2 lands 3-5 days after treatment, touch 3 lands 5-7)', () => {
+    expect(DEFAULT_SEQUENCE_PLAN.map((s) => s.day)).toEqual([0, 4, 6]);
     expect(DEFAULT_SEQUENCE_PLAN.map((s) => s.channel)).toEqual(['sms', 'sms', 'email']);
     expect(DEFAULT_SEQUENCE_PLAN[1].weekdaysOnly).toBe(true);
     // Every step references a real template.
     for (const step of DEFAULT_SEQUENCE_PLAN) {
       expect(getOutreachTemplate(step.templateKey)).not.toBeNull();
+    }
+  });
+
+  test('recurring customers get exactly one Day-0 ask', () => {
+    expect(RECURRING_SEQUENCE_PLAN).toHaveLength(1);
+    expect(RECURRING_SEQUENCE_PLAN[0]).toMatchObject({ day: 0, channel: 'sms' });
+    expect(getOutreachTemplate(RECURRING_SEQUENCE_PLAN[0].templateKey)).not.toBeNull();
+  });
+
+  test('the multi-treatment first-visit plan is one cap-exempt ask that still carries the link', () => {
+    expect(MULTI_TREATMENT_FIRST_PLAN).toHaveLength(1);
+    expect(MULTI_TREATMENT_FIRST_PLAN[0]).toMatchObject({ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' });
+    const tpl = getOutreachTemplate('first_treatment_ask');
+    expect(tpl.body).toContain('{review_url}'); // it IS an ask, just cap-exempt
+    expect(NO_LINK_TEMPLATE_KEYS).not.toContain('first_treatment_ask');
+    expect(CAP_EXEMPT_TEMPLATE_KEYS).toContain('first_treatment_ask');
+    // The personalized funnel-attribution variant must be exempt too, or a
+    // personalized first ask would cooldown-block the final-visit cadence.
+    expect(CAP_EXEMPT_TEMPLATE_KEYS).toContain('first_treatment_ask_personalized');
+    // Funnel/supersede SQL still counts it as an ask; only the cap ignores it.
+    expect(ASK_TOUCH_SQL).not.toContain('first_treatment_ask');
+    expect(CAP_TOUCH_SQL).toContain("'first_treatment_ask'");
+    expect(CAP_TOUCH_SQL).toContain("'first_treatment_ask_personalized'");
+    for (const key of NO_LINK_TEMPLATE_KEYS) {
+      expect(CAP_EXEMPT_TEMPLATE_KEYS).toContain(key);
     }
   });
 

@@ -14,6 +14,7 @@ const { firstNameFrom } = require("./customer-contact");
 const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
+const CAP_TOUCH_SQL = OUTREACH.CAP_TOUCH_SQL;
 const { toE164 } = require("../utils/phone");
 const { runExclusive } = require("../utils/cron-lock");
 
@@ -54,6 +55,12 @@ function generateToken() {
 // Rolling window for the 3-delivered-asks cap (owner policy 2026-07-30:
 // a never-engaging customer may get a fresh cadence at most every ~6 months).
 const ASK_CAP_WINDOW_DAYS = 180;
+
+// Canonical opening paragraph for the cadence email — the template's
+// {{intro_paragraph}} default when no personalized draft verified. Keep in
+// lockstep with the seed copy in
+// migrations/20260806000001_review_email_intro_paragraph.js.
+const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. If your recent service hit the mark, would you take 15 seconds to share a quick review?";
 
 /**
  * Build the (shortened) review link for an ask. Behind GATE_REVIEW_DIRECT_LINK
@@ -374,6 +381,150 @@ const ReviewService = {
   },
 
   /**
+   * A review ask the OWNER already sent by hand (portal manual messaging with
+   * a Google/rate link pasted in) — the cadence must not pile an automated
+   * ask on top of it (2026-08-05: Adam texted a personal ask, the Day-0
+   * cadence SMS landed the next morning). Detection: an outbound sms_log row
+   * in the last 30 days whose body carries a review link/ask, with NO
+   * review_requests send within ±10 minutes of it — the pipeline's own
+   * touches always have a matching review_requests row, so time correlation
+   * separates "Adam asked personally" from "the cadence asked".
+   * Fail-open on lookup errors (enroll anyway, warn): the cap/cooldown still
+   * bound total volume, and an sms_log blip must not silently kill every
+   * post-service enrollment.
+   */
+  async manualReviewAskSentRecently(customerId, { windowDays = 30 } = {}) {
+    const MANUAL_ASK_RE = /g\.page\/|writereview|\/rate\/[A-Za-z0-9]|\bgoogle\s+review\b/i;
+    try {
+      const since = new Date(Date.now() - windowDays * 86400000);
+      const outbound = await db("sms_log")
+        .where({ customer_id: customerId, direction: "outbound" })
+        .where("created_at", ">=", since)
+        .orderBy("created_at", "desc")
+        .limit(200)
+        .select("message_body", "created_at");
+      const candidates = outbound.filter((r) => MANUAL_ASK_RE.test(String(r.message_body || "")));
+      if (!candidates.length) return false;
+      const sends = await db("review_requests")
+        .where({ customer_id: customerId })
+        .select("sms_sent_at", "sent_at");
+      const sentTimes = sends
+        .map((r) => new Date(r.sms_sent_at || r.sent_at).getTime())
+        .filter((t) => Number.isFinite(t));
+      const TEN_MIN = 10 * 60 * 1000;
+      return candidates.some((c) => {
+        const t = new Date(c.created_at).getTime();
+        return !sentTimes.some((s) => Math.abs(s - t) <= TEN_MIN);
+      });
+    } catch (err) {
+      logger.warn(`[review] manual-ask lookup failed (customerId=${customerId}): ${err.message} — enrolling anyway`);
+      return false;
+    }
+  },
+
+  /**
+   * Which cadence plan this completion should enroll (owner spec 2026-08-05):
+   *   - Multi-treatment series:
+   *       first visit  → single cap-exempt first_treatment_ask;
+   *       middle visit → nothing (skip);
+   *       final visit  → the full one-time cadence (the cap-exempt first ask
+   *       doesn't cooldown-block it).
+   *   - Recurring plan visit / customer with live recurring coverage → ONE
+   *     Day-0 ask per eligible visit.
+   *   - Everything else (true one-time work) → the full 3-touch cadence.
+   * A "multi-treatment series" is: a booked follow-up child visit
+   * (scheduled_services.parent_service_id — structural, any service) OR one
+   * of the owner-named multi-treatment services below. The catalog's
+   * requires_follow_up flag is deliberately NOT a signal — prod carries it on
+   * One-Time Pest Control (a courtesy re-check, same 14-day interval as the
+   * roach/bed-bug rows), and the owner explicitly ruled one-time pest gets
+   * the full cadence right after treatment. Fail-open to the default plan on
+   * lookup errors: a wrong-but-bounded cadence beats no ask.
+   */
+  async resolveSequencePlanForEnrollment({ customerId, serviceRecordId = null }) {
+    // Owner-named multi-treatment jobs (2026-08-05: "we should treat
+    // cockroach different than one time pest, as we should bed bug") — the
+    // follow-up visit IS a treatment, so the review ask waits for it. Other
+    // multi-visit work joins this flow structurally once its follow-up is
+    // actually booked as a child visit.
+    const MULTI_TREATMENT_SERVICE_KEYS = new Set(["cockroach_control", "bed_bug_treatment"]);
+    try {
+      let svc = null;
+      if (serviceRecordId) {
+        const sr = await db("service_records")
+          .where({ id: serviceRecordId })
+          .select("scheduled_service_id")
+          .first();
+        if (sr?.scheduled_service_id) {
+          svc = await db("scheduled_services as s")
+            .leftJoin("services as sv", "s.service_id", "sv.id")
+            .where("s.id", sr.scheduled_service_id)
+            .select("s.id", "s.parent_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "sv.service_key")
+            .first();
+        }
+      }
+
+      if (svc) {
+        const { TERMINAL_STATUSES } = require("./waveguard-existing-services");
+        const futureChild = await db("scheduled_services")
+          .where({ parent_service_id: svc.id })
+          .whereNotIn("status", TERMINAL_STATUSES)
+          .where("scheduled_date", ">=", etDateString())
+          .first();
+        if (futureChild) {
+          // Another treatment in this series is already on the books.
+          return svc.parent_service_id
+            ? { skip: "multi_treatment_middle" }
+            : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
+        }
+        if (svc.parent_service_id) {
+          // This IS the follow-up visit and nothing further is scheduled —
+          // the series is done; run the full cadence.
+          return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN };
+        }
+        if (MULTI_TREATMENT_SERVICE_KEYS.has(svc.service_key)) {
+          // Named multi-treatment service with no child linkage — position in
+          // the series comes from history: a completed same-service visit in
+          // the prior 60 days makes THIS the follow-up treatment (owner spec:
+          // "the 3 after 2nd treatment"); none makes it the first.
+          const prior = await db("scheduled_services")
+            .where({ customer_id: customerId, service_id: svc.service_id, status: "completed" })
+            .where("id", "!=", svc.id)
+            .where("scheduled_date", ">=", etDateString(new Date(Date.now() - 60 * 86400000)))
+            .first();
+          return prior
+            ? { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN }
+            : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
+        }
+        if (svc.is_recurring === true) {
+          return { plan: OUTREACH.RECURRING_SEQUENCE_PLAN };
+        }
+      }
+
+      // No visit link (or a non-recurring visit): a customer with LIVE
+      // recurring coverage still gets the single-ask treatment — the
+      // relationship is ongoing, so asks spread across visits instead of
+      // bursting (same live-coverage shape as reserviceLanesForCustomer,
+      // but family-agnostic: mosquito/termite plans are recurring too).
+      const { TERMINAL_STATUSES } = require("./waveguard-existing-services");
+      const liveRecurring = await db("scheduled_services")
+        .where({ customer_id: customerId, is_recurring: true })
+        // IS DISTINCT FROM, not != — legacy rows carry NULL is_callback and
+        // `whereNot(col, true)` would drop them with it.
+        .whereRaw("is_callback IS DISTINCT FROM true")
+        .whereNotIn("status", TERMINAL_STATUSES)
+        .where("scheduled_date", ">=", etDateString())
+        .first();
+      if (liveRecurring) return { plan: OUTREACH.RECURRING_SEQUENCE_PLAN };
+
+      return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN };
+    } catch (err) {
+      logger.warn(`[review] plan resolution failed (customerId=${customerId}): ${err.message} — using default plan`);
+      return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN };
+    }
+  },
+
+  /**
    * Post-service enrollment — the single entry point every "service is done,
    * ask for a review" trigger (dispatch completion, schedule completion,
    * invoice send/paid, Stripe paid webhook) funnels through.
@@ -431,6 +582,19 @@ const ReviewService = {
         svcType = svcType || sr?.service_type || null;
         tName = tName || sr?.tech_name || null;
       }
+      // Owner already asked this customer by hand → the cadence stands down.
+      if (await this.manualReviewAskSentRecently(customerId)) {
+        logger.info(`[review] Post-service cadence skipped (customerId=${customerId} reason=manual_ask_recent)`);
+        return { started: false, reason: "manual_ask_recent" };
+      }
+      // Per-type cadence plan (owner spec 2026-08-05): recurring = one ask,
+      // one-time = full cadence, multi-treatment = one after the first visit
+      // then the cadence after the final one (middle visits send nothing).
+      const resolved = await this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId });
+      if (resolved.skip) {
+        logger.info(`[review] Post-service cadence skipped (customerId=${customerId} reason=${resolved.skip})`);
+        return { started: false, reason: resolved.skip };
+      }
       // An explicit timing choice (completion panel "Now"/"Tomorrow 8 AM"/
       // custom, invoice scheduled minutes) wins over the smart send window —
       // the operator's selection must not be silently ignored in cadence
@@ -449,6 +613,7 @@ const ReviewService = {
         techName: tName,
         startedBy: "post_service",
         firstTouchAt,
+        plan: resolved.plan,
       });
       if (result?.started) {
         logger.info(
@@ -1667,6 +1832,41 @@ const ReviewService = {
       }
     }
 
+    // Personalized EMAIL intro (same gate; owner 2026-08-05 — the email is
+    // the touch that actually converted, so it gets the grounded opener too).
+    // Cadence touches only, and only when the resolved email recipient IS the
+    // account holder (same identity guard as SMS: the account's history must
+    // not leak into a tenant/realtor's inbox). The drafted paragraph is
+    // persisted on custom_body for retry reuse; the CTA button still carries
+    // the tokenized link — the paragraph never does.
+    if (actualChannel === "email" && !persistedBody && sequenceId != null) {
+      const recipientIsAccountHolder = !!(emailContact?.email && customer.email
+        && String(emailContact.email).trim().toLowerCase() === String(customer.email).trim().toLowerCase());
+      if (recipientIsAccountHolder) {
+        try {
+          const prior = await db("review_requests")
+            .where({ sequence_id: sequenceId, sequence_step: sequenceStep })
+            .whereNotNull("custom_body")
+            .orderBy("created_at", "desc")
+            .first();
+          if (prior?.custom_body) persistedBody = prior.custom_body;
+        } catch { /* reuse is best-effort; a fresh draft is still verified */ }
+        if (!persistedBody) {
+          const drafted = await require("./review-ask-drafter").draftEmailIntro({
+            customer,
+            recipientFirstName: firstNameFrom(emailContact.name) || customer.first_name || "",
+            serviceType,
+            techName,
+            serviceDate,
+          });
+          if (drafted) persistedBody = drafted;
+        }
+        if (persistedBody) {
+          recordedTemplateKey = "review_request_email_personalized";
+        }
+      }
+    }
+
     // A no-link template (resolution_check / satisfaction_confirm) is a PRIVATE
     // check-in, not a review ask — so it must NOT trigger the legacy Day-3
     // straight-to-Google follow-up (processFollowups), which would turn the
@@ -1708,7 +1908,7 @@ const ReviewService = {
     };
 
     if (actualChannel === "email") {
-      return this._sendOutreachEmail({ request, customer, contact: emailContact, reviewUrl, techName, manageRetryVia });
+      return this._sendOutreachEmail({ request, customer, contact: emailContact, reviewUrl, techName, manageRetryVia, introParagraph: persistedBody });
     }
     return this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody: persistedBody ?? customBody, manageRetryVia });
   },
@@ -1829,7 +2029,7 @@ const ReviewService = {
     return { ok: false, retryable: true, channel, requestId: request.id, code: result?.code };
   },
 
-  async _sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia }) {
+  async _sendOutreachEmail({ request, customer, contact, reviewUrl, techName, manageRetryVia, introParagraph = null }) {
     // Same split as SMS (audit P1): only the SEND is in the retry-on-throw path.
     let result;
     try {
@@ -1841,6 +2041,11 @@ const ReviewService = {
           first_name: firstNameFrom(contact.name) || customer.first_name || "",
           review_url: reviewUrl,
           tech_name: techName || "Adam",
+          // The template's opening paragraph is {{intro_paragraph}} — the
+          // personalized draft when one verified, else the canonical generic
+          // copy. Always supplied: a missing variable renders an empty
+          // paragraph, never literal braces, but the email would read bare.
+          intro_paragraph: introParagraph || GENERIC_EMAIL_INTRO,
         },
         recipientType: "customer",
         recipientId: customer.id,
@@ -2271,17 +2476,21 @@ const ReviewService = {
     // eligible for a fresh cadence every ~6 months. `lastAt` (the 30-day
     // cooldown input) is still all-time.
     const windowStart = new Date(Date.now() - ASK_CAP_WINDOW_DAYS * 86400000);
+    // CAP_TOUCH_SQL, not ASK_TOUCH_SQL: the multi-treatment first-visit ask is
+    // exempt from the cap AND the cooldown (owner spec 2026-08-05 — it must
+    // not block the full cadence after the series' final visit), while it
+    // still counts as an ask everywhere else (funnel, supersede guard).
     const countRow = await db("review_requests")
       .where({ customer_id: customerId })
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
       .whereRaw("COALESCE(sms_sent_at, sent_at) >= ?", [windowStart])
-      .whereRaw(ASK_TOUCH_SQL)
+      .whereRaw(CAP_TOUCH_SQL)
       .count("* as count")
       .first();
     const recent = await db("review_requests")
       .where({ customer_id: customerId })
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
-      .whereRaw(ASK_TOUCH_SQL)
+      .whereRaw(CAP_TOUCH_SQL)
       .orderByRaw("COALESCE(sms_sent_at, sent_at) DESC")
       .first();
     return {
@@ -2299,7 +2508,7 @@ const ReviewService = {
     const rows = await db("review_requests")
       .whereIn("customer_id", ids)
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
-      .whereRaw(ASK_TOUCH_SQL)
+      .whereRaw(CAP_TOUCH_SQL)
       .groupBy("customer_id")
       .select(
         "customer_id",

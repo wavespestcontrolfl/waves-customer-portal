@@ -27,13 +27,13 @@ const OUTREACH_TEMPLATES = [
   },
   {
     id: 'soft_reminder',
-    name: 'Soft Reminder (Day 3)',
+    name: 'Soft Reminder',
     sentiment: 'happy',
     body: "Hi {first}! Just a quick follow-up from Waves. If you had a chance to leave us a review, we'd really appreciate it — helps other families find us.\n\n{review_url}\n\nThanks so much!",
   },
   {
     id: 'final_nudge',
-    name: 'Final Nudge (Day 4 email)',
+    name: 'Final Nudge (email)',
     sentiment: 'happy',
     body: "Hey {first} — last one from us, promise! If you've been happy with Waves, a 15-second Google review would mean a lot to our crew.\n\n{review_url}\n\nEither way, thank you for trusting us with your home!",
   },
@@ -92,6 +92,17 @@ const OUTREACH_TEMPLATES = [
     sentiment: 'happy',
     body: "Hey {first}! Great seeing you today. Here's that review link one more time in case you didn't get a chance:\n\n{review_url}\n\nThanks for supporting Waves!",
   },
+  {
+    id: 'first_treatment_ask',
+    name: 'Multi-Treatment: First Visit',
+    sentiment: 'happy',
+    // Sent after the FIRST visit of a multi-treatment series (roach clean-out,
+    // bed bug, any catalog service with requires_follow_up) — the full cadence
+    // waits for the FINAL visit. No "today": the smart send window can defer
+    // past midnight. Cap/cooldown-exempt (CAP_EXEMPT_TEMPLATE_KEYS) so the
+    // owner-spec'd 1-after-first + 3-after-final flow fits inside one series.
+    body: "Hi {first}! {tech} with Waves here. Thanks for having us out for your first treatment — we'll see you at the follow-up visit.\n\nIf you're happy so far, a quick Google review would mean a lot to our small family business:\n\n{review_url}\n\nThank you!",
+  },
 ];
 
 const TEMPLATES_BY_ID = Object.fromEntries(OUTREACH_TEMPLATES.map((t) => [t.id, t]));
@@ -121,18 +132,49 @@ const ASK_TOUCH_SQL =
     ? `(template_key IS NULL OR template_key NOT IN (${NO_LINK_TEMPLATE_KEYS.map((k) => `'${k}'`).join(",")}))`
     : "(1=1)";
 
+// Touches EXEMPT from the 3-ask/180d cap and the 30-day cooldown: the no-link
+// private check-ins, plus the multi-treatment FIRST-visit ask (owner spec
+// 2026-08-05: one ask after the first treatment, the full cadence after the
+// final one — counting the first ask would cooldown-block the final-visit
+// cadence a week or two later and burn the cap to 4). The `_personalized`
+// variant key must be listed too — sendOutreachTouch records personalized
+// touches under `<template>_personalized` for funnel attribution.
+// ASK_TOUCH_SQL (funnel + queued-ask supersede) intentionally still counts
+// first_treatment_ask — it IS a review ask; it's only the cap that ignores it.
+const CAP_EXEMPT_TEMPLATE_KEYS = [
+  ...NO_LINK_TEMPLATE_KEYS,
+  'first_treatment_ask',
+  'first_treatment_ask_personalized',
+];
+const CAP_TOUCH_SQL = `(template_key IS NULL OR template_key NOT IN (${CAP_EXEMPT_TEMPLATE_KEYS.map((k) => `'${k}'`).join(",")}))`;
+
 /**
- * Default multi-touch cadence (owner spec 2026-07-30): Day 0 SMS right after
- * service → Day 3 SMS on WEEKDAYS ONLY → Day 4 email. The day offsets are
- * measured from the sequence start. Channel is the *intent*; the sender
- * downgrades/swaps based on what contact info + opt-ins the customer actually
- * has. `weekdaysOnly` steps that land on a Sat/Sun ET are shifted to the next
- * Monday morning by the sequence scheduler (review-request.js).
+ * Cadence plans (owner spec 2026-08-05, revising 2026-07-30):
+ *   - ONE-TIME services (DEFAULT_SEQUENCE_PLAN): Day 0 SMS right after
+ *     service → SMS 3-5 days after treatment (Day 4, weekdays only) → email
+ *     5-7 days after treatment (Day 6).
+ *   - RECURRING plan customers: ONE ask per eligible visit (Day 0 SMS only) —
+ *     the ongoing relationship spreads asks across visits instead of a
+ *     3-touch burst that burns the 180d cap in one week.
+ *   - MULTI-TREATMENT series (requires_follow_up catalog services): the
+ *     FIRST visit sends one cap-exempt ask; the FINAL visit runs the full
+ *     one-time cadence. Middle visits send nothing.
+ * Day offsets are measured from the sequence start. Channel is the *intent*;
+ * the sender downgrades/swaps based on what contact info + opt-ins the
+ * customer actually has. `weekdaysOnly` steps that land on a Sat/Sun ET are
+ * shifted to the next Monday morning by the sequence scheduler
+ * (review-request.js).
  */
 const DEFAULT_SEQUENCE_PLAN = [
   { day: 0, channel: 'sms', templateKey: 'friendly_ask' },
-  { day: 3, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true },
-  { day: 4, channel: 'email', templateKey: 'final_nudge' },
+  { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true },
+  { day: 6, channel: 'email', templateKey: 'final_nudge' },
+];
+const RECURRING_SEQUENCE_PLAN = [
+  { day: 0, channel: 'sms', templateKey: 'friendly_ask' },
+];
+const MULTI_TREATMENT_FIRST_PLAN = [
+  { day: 0, channel: 'sms', templateKey: 'first_treatment_ask' },
 ];
 
 function getOutreachTemplate(id) {
@@ -179,8 +221,12 @@ module.exports = {
   OUTREACH_TEMPLATES,
   TEMPLATES_BY_ID,
   DEFAULT_SEQUENCE_PLAN,
+  RECURRING_SEQUENCE_PLAN,
+  MULTI_TREATMENT_FIRST_PLAN,
   NO_LINK_TEMPLATE_KEYS,
+  CAP_EXEMPT_TEMPLATE_KEYS,
   ASK_TOUCH_SQL,
+  CAP_TOUCH_SQL,
   isAskTemplate,
   getOutreachTemplate,
   renderOutreachBody,

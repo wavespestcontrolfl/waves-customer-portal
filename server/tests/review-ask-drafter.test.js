@@ -192,3 +192,71 @@ describe('draftAskBody — gating + fallback contract', () => {
     expect(await Drafter.draftAskBody({ customer: CUSTOMER })).toBeNull();
   });
 });
+
+describe('verifyEmailIntro — the email opener safety net', () => {
+  const verify = (body) => Drafter.verifyEmailIntro(body, { firstName: 'Aaron' });
+  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. If anything still looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+
+  test('a clean grounded intro passes', () => {
+    expect(verify(CLEAN_INTRO)).toBeNull();
+  });
+
+  test('rejects empty and over-length intros', () => {
+    expect(verify('')).toBe('empty');
+    expect(verify(`Aaron ${'x'.repeat(460)}`)).toBe('too_long');
+  });
+
+  test('rejects ANY link or placeholder — the CTA button owns the review link', () => {
+    expect(verify('Aaron, review us at https://g.page/waves')).toBe('raw_url');
+    expect(verify('Aaron, review us at waves.com')).toBe('raw_url');
+    expect(verify('Aaron, click {review_url} below')).toBe('stray_placeholder');
+    expect(verify('Aaron, click {{intro_paragraph}} below')).toBe('stray_placeholder');
+  });
+
+  test('shares the SMS banned list (incentives, compliance words, star coaching)', () => {
+    expect(verify('Aaron, leave a review for a free treatment')).toBe('banned_phrase');
+    expect(verify('Aaron, our products are safe for pets')).toBe('banned_phrase');
+    expect(verify('Aaron, give us 5 stars')).toBe('banned_phrase');
+  });
+
+  test('requires the customer first name and rejects emoji', () => {
+    expect(verify('Hope the ants are gone, quick review below?')).toBe('missing_name');
+    expect(verify('Aaron, thanks! \u{1F41C}')).toBe('emoji');
+  });
+});
+
+describe('draftEmailIntro — gating + fallback contract', () => {
+  const CLEAN_INTRO = 'Hi Aaron, hope the centipedes are finally backing off at the entryway since our visit. If anything looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+
+  test('gate off → null, and no model call is made', async () => {
+    mockGates.reviewAskPersonalized = false;
+    expect(await Drafter.draftEmailIntro({ customer: CUSTOMER })).toBeNull();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('gate on → verified intro comes back; rules ride SYSTEM, history rides text', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: CLEAN_INTRO });
+    const out = await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron', serviceType: 'Pest Control', techName: 'Adam' });
+    expect(out).toBe(CLEAN_INTRO);
+    const args = mockDispatch.mock.calls[0][1];
+    expect(args.system).toMatch(/do NOT include any link/i);
+    expect(args.text).toMatch(/^CUSTOMER HISTORY/);
+    expect(args.timeoutMs).toBeGreaterThan(0);
+  });
+
+  test('line breaks in the model output collapse to one paragraph', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: 'Hi Aaron, thanks for having us out.\n\nA quick review below would mean a lot. Reply here if anything is off.' });
+    const out = await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron' });
+    expect(out).not.toMatch(/\n/);
+  });
+
+  test('an intro that fails verification falls back to null (template copy sends)', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: 'Aaron, here is a free re-treat if you review us' });
+    expect(await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron' })).toBeNull();
+  });
+
+  test('both providers down → null, never a throw', async () => {
+    mockDispatch.mockResolvedValue({ ok: false });
+    expect(await Drafter.draftEmailIntro({ customer: CUSTOMER })).toBeNull();
+  });
+});
