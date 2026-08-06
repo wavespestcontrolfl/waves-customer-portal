@@ -399,6 +399,14 @@ const ReviewService = {
    */
   async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null } = {}) {
     const MANUAL_ASK_RE = /g\.page\/|writereview|\/rate\/[A-Za-z0-9]|\bgoogle\s+review\b/i;
+    // A forwarded copy of one of our own (now shorter) templates says just
+    // "review" with a branded /l/ short link (codex #3235 r4 P1) — /l/ alone
+    // is any portal short link (reports, appointments), so require BOTH the
+    // short-link shape and review wording before treating it as an ask.
+    const SHORT_LINK_RE = /\/l\/[A-Za-z0-9]{3,}\b/;
+    const REVIEW_WORD_RE = /\breview/i;
+    const looksLikeAsk = (body) => MANUAL_ASK_RE.test(body)
+      || (SHORT_LINK_RE.test(body) && REVIEW_WORD_RE.test(body));
     try {
       const sinceAt = since ? new Date(since) : new Date(Date.now() - windowDays * 86400000);
       const outbound = await db("sms_log")
@@ -406,13 +414,14 @@ const ReviewService = {
         .where("created_at", ">=", sinceAt)
         // Rows that never reached the customer are not asks: scheduled rows
         // are inserted pre-delivery (and stay on cancel), failed/undelivered
-        // never landed, and the scheduled-SMS executor stamps 'blocked' on
-        // pre-delivery rejections (codex #3235 r1 P2 + r3 P2).
-        .whereNotIn("status", ["scheduled", "canceled", "cancelled", "failed", "undelivered", "blocked"])
+        // never landed, the scheduled-SMS executor stamps 'blocked' on
+        // pre-delivery rejections and holds 'sending' during the in-flight
+        // claim window (codex #3235 r1 P2 + r3 P2 + r4 P2).
+        .whereNotIn("status", ["scheduled", "sending", "canceled", "cancelled", "failed", "undelivered", "blocked"])
         .orderBy("created_at", "desc")
         .limit(200)
         .select("message_body", "created_at");
-      const candidates = outbound.filter((r) => MANUAL_ASK_RE.test(String(r.message_body || "")));
+      const candidates = outbound.filter((r) => looksLikeAsk(String(r.message_body || "")));
       if (!candidates.length) return false;
       const sends = await db("review_requests")
         .where({ customer_id: customerId })
@@ -483,10 +492,13 @@ const ReviewService = {
         // mechanism) or parent_service_id (call-booked linked visits).
         // Two lookups, not an OR (codex #3235 r2 P1: the first cut only
         // checked parent_service_id and missed every CTA-booked child).
+        // Liveness is STATUS-ONLY (codex r4 P1): an overdue pending/confirmed
+        // child is still a coming treatment (same liveness the follow-up
+        // obligation lane uses) — a date floor would misread the source
+        // visit as series-final when payment-deferred enrollment runs late.
         const childQuery = (col) => db("scheduled_services")
           .where({ [col]: svc.id })
           .whereNotIn("status", TERMINAL_STATUSES)
-          .where("scheduled_date", ">=", etDateString())
           .first();
         const futureChild = (await childQuery("followup_source_service_id")) || (await childQuery("parent_service_id"));
         const isFollowUpChild = !!(svc.parent_service_id || svc.followup_source_service_id);
@@ -498,8 +510,9 @@ const ReviewService = {
         }
         if (isFollowUpChild) {
           // This IS the follow-up visit and nothing further is scheduled —
-          // the series is done; run the full cadence.
-          return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN };
+          // the series is done; run the full cadence with the series-final
+          // cap/cooldown exemption.
+          return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true };
         }
         if (TWO_TREATMENT_PACKAGE_KEYS.has(svc.service_key)) {
           // Named multi-treatment service with no child linkage — position in
@@ -512,7 +525,7 @@ const ReviewService = {
             .where("scheduled_date", ">=", etDateString(new Date(Date.now() - 60 * 86400000)))
             .first();
           return prior
-            ? { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN }
+            ? { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true }
             : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
         }
         if (svc.is_recurring === true) {
@@ -633,6 +646,7 @@ const ReviewService = {
         startedBy: "post_service",
         firstTouchAt,
         plan: resolved.plan,
+        seriesFinal: resolved.seriesFinal === true,
       });
       if (result?.started) {
         logger.info(
@@ -2156,7 +2170,7 @@ const ReviewService = {
    * with an active sequence returns that one instead of starting a second
    * (also enforced by the partial unique index). Fires step 0 immediately.
    */
-  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, firstTouchAt = null }) {
+  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, firstTouchAt = null, seriesFinal = false }) {
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     if (customer.deleted_at) throw new Error("Customer is archived");
@@ -2189,7 +2203,9 @@ const ReviewService = {
     // let an at-cap / in-cooldown customer through (no .catch → it throws and
     // the route records the customer as not-started). Day 3/4 still bypass cooldown.
     const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
-    const stats = await this.getDeliveredAskStats(customerId);
+    // seriesFinal scopes the first-treatment exemption to the final visit of
+    // the ask's own series (codex #3235 r4 P1) — see getDeliveredAskStats.
+    const stats = await this.getDeliveredAskStats(customerId, { forSeriesFinal: seriesFinal });
     if (stats.count >= 3) return { started: false, reason: "at_cap" };
     if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo.getTime()) {
       return { started: false, reason: "cooldown" };
@@ -2359,7 +2375,11 @@ const ReviewService = {
     // (incl. this cadence's own) are counted, so the sequence stops once 3 is hit.
     let askStats;
     try {
-      askStats = await this.getDeliveredAskStats(seq.customer_id);
+      // forSeriesFinal: the only way an active cadence coexists with a <30d
+      // first-treatment ask is the series-final enrollment (every other
+      // enrollment counted that ask and was cooldown-blocked), and the final
+      // cadence must deliver its full 3 touches (owner spec: 1 + 3).
+      askStats = await this.getDeliveredAskStats(seq.customer_id, { forSeriesFinal: true });
     } catch {
       // Fail CLOSED: sendOutreachTouch does NOT enforce the lifetime cap, so a
       // stats blip must defer the step (retry next tick), not send a 4th ask.
@@ -2557,27 +2577,31 @@ const ReviewService = {
    * sms_log-only count missed email asks, so a customer could exceed the cap /
    * dodge the cooldown via email). Used by the cap + 30-day cooldown guards.
    */
-  async getDeliveredAskStats(customerId) {
+  async getDeliveredAskStats(customerId, { forSeriesFinal = false } = {}) {
     // Cap window (owner policy 2026-07-30): the 3-ask cap is a ROLLING
     // 180-day window, not lifetime — a customer who never engages becomes
     // eligible for a fresh cadence every ~6 months. `lastAt` (the 30-day
     // cooldown input) is still all-time.
+    //
+    // Exemption scope (codex #3235 r4 P1): the multi-treatment first-visit
+    // ask is invisible to cap/cooldown ONLY when enrolling the final visit
+    // of its own series (forSeriesFinal — owner spec 2026-08-05: 1 after the
+    // first treatment + 3 after the final one). Every other enrollment
+    // counts it like any delivered ask, so an unrelated service completing
+    // days later can't slip past the cooldown into a duplicate ask.
+    const askFilter = forSeriesFinal ? CAP_TOUCH_SQL : ASK_TOUCH_SQL;
     const windowStart = new Date(Date.now() - ASK_CAP_WINDOW_DAYS * 86400000);
-    // CAP_TOUCH_SQL, not ASK_TOUCH_SQL: the multi-treatment first-visit ask is
-    // exempt from the cap AND the cooldown (owner spec 2026-08-05 — it must
-    // not block the full cadence after the series' final visit), while it
-    // still counts as an ask everywhere else (funnel, supersede guard).
     const countRow = await db("review_requests")
       .where({ customer_id: customerId })
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
       .whereRaw("COALESCE(sms_sent_at, sent_at) >= ?", [windowStart])
-      .whereRaw(CAP_TOUCH_SQL)
+      .whereRaw(askFilter)
       .count("* as count")
       .first();
     const recent = await db("review_requests")
       .where({ customer_id: customerId })
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
-      .whereRaw(CAP_TOUCH_SQL)
+      .whereRaw(askFilter)
       .orderByRaw("COALESCE(sms_sent_at, sent_at) DESC")
       .first();
     return {
@@ -2592,10 +2616,12 @@ const ReviewService = {
     // Same rolling 180-day cap window as getDeliveredAskStats; last_at stays
     // all-time (cooldown input).
     const windowStart = new Date(Date.now() - ASK_CAP_WINDOW_DAYS * 86400000);
+    // ASK_TOUCH: the outreach candidate list has no series context, so it
+    // counts every delivered ask including first-treatment ones (codex r4).
     const rows = await db("review_requests")
       .whereIn("customer_id", ids)
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
-      .whereRaw(CAP_TOUCH_SQL)
+      .whereRaw(ASK_TOUCH_SQL)
       .groupBy("customer_id")
       .select(
         "customer_id",

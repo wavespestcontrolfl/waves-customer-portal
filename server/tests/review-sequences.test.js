@@ -795,6 +795,67 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan).toHaveLength(3);
   });
 
+  test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
+    mockGates.reviewSequences = true;
+    const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
+    const today = new Date().toISOString().slice(0, 10);
+    // Final roach visit → seriesFinal:true rides the plan resolution.
+    const mock = makeMock({
+      service_records: [{ id: 'sr-sf', customer_id: 'sf-1', scheduled_service_id: 'ss-r2' }],
+      scheduled_services: [
+        { id: 'ss-r1', customer_id: 'sf-1', service_id: 'svc-roach', status: 'completed', scheduled_date: recent, service_key: 'cockroach_control' },
+        { id: 'ss-r2', customer_id: 'sf-1', service_id: 'svc-roach', status: 'completed', scheduled_date: today, service_key: 'cockroach_control' },
+      ],
+    });
+    db.mockImplementation(mock);
+    const finalVisit = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'sf-1', serviceRecordId: 'sr-sf' });
+    expect(finalVisit.seriesFinal).toBe(true);
+    expect(finalVisit.plan).toHaveLength(3);
+
+    // An unlinked one-time completion resolves WITHOUT the exemption flag —
+    // its enrollment counts the first-treatment ask for cap/cooldown.
+    const mock2 = makeMock({});
+    db.mockImplementation(mock2);
+    const unrelated = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'sf-2' });
+    expect(unrelated.seriesFinal).not.toBe(true);
+  });
+
+  test('an OVERDUE but still-live follow-up child keeps the series classification (status-only liveness)', async () => {
+    mockGates.reviewSequences = true;
+    const pastDue = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'od-1', first_name: 'Ben', last_name: 'N', phone: '+19410000054', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-od', customer_id: 'od-1', scheduled_service_id: 'ss-od-src' }],
+      scheduled_services: [
+        { id: 'ss-od-src', customer_id: 'od-1', status: 'completed', scheduled_date: pastDue },
+        // Follow-up was scheduled for 5 days ago and never worked — still live.
+        { id: 'ss-od-child', customer_id: 'od-1', followup_source_service_id: 'ss-od-src', status: 'confirmed', scheduled_date: pastDue },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'od-1', serviceRecordId: 'sr-od', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+  });
+
+  test('a forwarded short-template ask (review wording + /l/ short link) triggers the standdown', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'ma-5', first_name: 'Ivy', last_name: 'P', phone: '+19410000055', nearest_location_id: 'bradenton' }],
+      sms_log: [{ id: 'sms-5', customer_id: 'ma-5', direction: 'outbound', status: 'sent', message_body: 'Hi Ivy! Just a quick nudge from Waves - that review link one more time: https://portal.wavespestcontrol.com/l/ab12c', created_at: new Date(Date.now() - 2 * 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ma-5', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('manual_ask_recent');
+  });
+
   test('a second enrollment for the SAME service record is rejected even after the first sequence completed (cap-exempt dedupe)', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({
