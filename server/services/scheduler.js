@@ -405,11 +405,6 @@ function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
   logGateStatus();
 
-  if (!isEnabled('cronJobs')) {
-    logger.info('[feature-gates] Cron jobs DISABLED — skipping all scheduled tasks');
-    return;
-  }
-
   // Cancel-notice late-claim rollout boundary (codex #3233 r35): stamped
   // at BOOT when the hook gate is on, so the boundary necessarily
   // predates every gated cancellation this deploy processes — a cancel
@@ -437,6 +432,13 @@ function initScheduledJobs() {
       .where('last_sent_at', '<', PROCESS_BOOT_AT)
       .del()
       .catch((err) => logger.warn(`[scheduler] cancel-notice boundary clear failed: ${err.message}`));
+  }
+
+  // Boundary maintenance runs BEFORE this early return (codex r40):
+  // disabling scheduled tasks must not preserve a stale feature interval.
+  if (!isEnabled('cronJobs')) {
+    logger.info('[feature-gates] Cron jobs DISABLED — skipping all scheduled tasks');
+    return;
   }
 
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the

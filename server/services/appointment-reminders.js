@@ -2574,6 +2574,11 @@ const AppointmentReminders = {
             // definite provider failure reverts it (codex r21).
             .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
             .where('cancellation_notice_at', noticeToken)
+            // Still-cancelled (codex r40): a restoration committing after
+            // the handoff stamp (with its marker clear swallowed) must
+            // not receive a REASSERTED terminal marker — leave the stale
+            // stamp for the restoration repair to clear.
+            .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
             .update(accepted
               ? { cancellation_notice_state: 'sent', updated_at: new Date() }
               // Deterministic non-delivery is TERMINAL (codex r39): a
@@ -3239,6 +3244,8 @@ const AppointmentReminders = {
             // definite failure reverts it (codex r21).
             .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
             .where('cancellation_notice_at', seriesToken)
+            // Still-cancelled (codex r40), same as the singleton finalize.
+            .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
             .update(accepted
               ? { cancellation_notice_state: 'sent', updated_at: new Date() }
               // Terminal, same as the singleton finalize (codex r39) —
