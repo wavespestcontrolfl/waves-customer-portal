@@ -505,13 +505,17 @@ const ReviewService = {
         // mechanism) or parent_service_id (call-booked linked visits).
         // Two lookups, not an OR (codex #3235 r2 P1: the first cut only
         // checked parent_service_id and missed every CTA-booked child).
-        // Liveness is STATUS-ONLY (codex r4 P1): an overdue pending/confirmed
-        // child is still a coming treatment (same liveness the follow-up
-        // obligation lane uses) — a date floor would misread the source
-        // visit as series-final when payment-deferred enrollment runs late.
+        // Liveness is STATUS-ONLY (codex r4 P1) and uses the follow-up
+        // obligation lane's OWN predicate (codex r9 P1): only cancelled /
+        // skipped / no_show children are dead — a 'rescheduled' child is
+        // still an outstanding treatment there, and the WaveGuard coverage
+        // TERMINAL list wrongly discarded it. 'completed' is excluded here
+        // too: a finished child means nothing further is coming.
+        const { FOLLOWUP_CHILD_INACTIVE_STATUSES } = require("./typed-followup-obligation");
+        const deadChildStatuses = [...FOLLOWUP_CHILD_INACTIVE_STATUSES, "completed"];
         const childQuery = (col) => db("scheduled_services")
           .where({ [col]: svc.id })
-          .whereNotIn("status", TERMINAL_STATUSES)
+          .whereNotIn("status", deadChildStatuses)
           .first();
         const futureChild = (await childQuery("followup_source_service_id")) || (await childQuery("parent_service_id"));
         const isFollowUpChild = !!(svc.parent_service_id || svc.followup_source_service_id);
@@ -2364,8 +2368,44 @@ const ReviewService = {
   async _runSequenceStep(sequenceId) {
     const seq = await db("review_sequences").where({ id: sequenceId }).first();
     if (!seq || seq.status !== "active") return { ran: false, reason: "not_active" };
-    const plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
+    let plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
     const customer = await db("customers").where({ id: seq.customer_id }).first();
+
+    // Late-arriving series context (codex #3235 r9 P1): completion enrolls
+    // BEFORE staff book the follow-up from the completion CTA, so the plan
+    // persisted at enrollment can be stale by the first send. Re-resolve
+    // once, while NOTHING has been sent, for auto enrollments only — an
+    // operator-started sequence keeps its explicit plan. A re-resolve that
+    // says skip (now a middle visit) stops the sequence; a changed plan and
+    // series flags are persisted before any guard reads them.
+    if (seq.started_by === "post_service" && (seq.touches_sent || 0) === 0 && (seq.current_step || 0) === 0) {
+      try {
+        const re = await this.resolveSequencePlanForEnrollment({
+          customerId: seq.customer_id,
+          serviceRecordId: seq.service_record_id,
+          scheduledServiceId: seq.scheduled_service_id,
+        });
+        if (re.skip) {
+          await db("review_sequences").where({ id: seq.id }).update({
+            status: "stopped",
+            stop_reason: re.skip,
+            next_run_at: null,
+            completed_at: new Date(),
+            updated_at: new Date(),
+          });
+          return { ran: false, stopped: true, reason: re.skip };
+        }
+        if (re.plan && JSON.stringify(re.plan) !== JSON.stringify(plan)) {
+          await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+            plan: JSON.stringify(re.plan),
+            series_final: re.seriesFinal === true,
+            updated_at: new Date(),
+          });
+          plan = re.plan;
+          seq.series_final = re.seriesFinal === true;
+        }
+      } catch { /* keep the enrolled plan */ }
+    }
 
     const stop = async (reason) => {
       await db("review_sequences").where({ id: seq.id }).update({

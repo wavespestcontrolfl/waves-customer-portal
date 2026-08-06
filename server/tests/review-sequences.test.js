@@ -1487,3 +1487,60 @@ describe('codex #3235 r8 — record-less sequence corners', () => {
     expect(row.technician_id).toBe('tech-9');
   });
 });
+
+describe('codex #3235 r9 — canonical liveness + late-booked follow-up', () => {
+  test('a RESCHEDULED follow-up child still marks the source visit first-in-series', async () => {
+    mockGates.reviewSequences = true;
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const future = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'rs-1', first_name: 'Joe', last_name: 'M', phone: '+19410000067', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-rs1', customer_id: 'rs-1', scheduled_service_id: 'ss-rs1' }],
+      scheduled_services: [
+        { id: 'ss-rs1', customer_id: 'rs-1', status: 'completed', scheduled_date: d(0) },
+        // The booked follow-up is mid-reschedule — the obligation lane treats
+        // it as live (only cancelled/skipped/no_show are dead).
+        { id: 'ss-rs2', customer_id: 'rs-1', followup_source_service_id: 'ss-rs1', status: 'rescheduled', scheduled_date: future },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'rs-1', serviceRecordId: 'sr-rs1', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+  });
+
+  test('a follow-up booked AFTER enrollment reclassifies the still-unsent sequence at first send', async () => {
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const future = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10);
+    const threeTouch = JSON.stringify([
+      { day: 0, channel: 'sms', templateKey: 'friendly_ask' },
+      { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true },
+      { day: 6, channel: 'email', templateKey: 'final_nudge' },
+    ]);
+    const mock = makeMock({
+      customers: [{ id: 'lb-1', first_name: 'Ann', last_name: 'O', phone: '+19410000068', nearest_location_id: 'bradenton' }],
+      // Enrolled as one-time at completion…
+      review_sequences: [{ id: 'seq-lb', customer_id: 'lb-1', service_record_id: 'sr-lb1', status: 'active', current_step: 0, touches_sent: 0, started_by: 'post_service', plan: threeTouch, started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000) }],
+      service_records: [{ id: 'sr-lb1', customer_id: 'lb-1', scheduled_service_id: 'ss-lb1' }],
+      scheduled_services: [
+        { id: 'ss-lb1', customer_id: 'lb-1', status: 'completed', scheduled_date: d(0) },
+        // …then staff booked the follow-up minutes later.
+        { id: 'ss-lb2', customer_id: 'lb-1', followup_source_service_id: 'ss-lb1', status: 'confirmed', scheduled_date: future },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(out.sent).toBe(1);
+    const seq = mock.__state.rows.review_sequences[0];
+    expect(JSON.parse(seq.plan)).toHaveLength(1);
+    expect(JSON.parse(seq.plan)[0].templateKey).toBe('first_treatment_ask');
+    const body = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(body).toMatch(/Treatment 1 done/);
+  });
+});
