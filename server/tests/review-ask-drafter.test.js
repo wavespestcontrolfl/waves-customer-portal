@@ -293,3 +293,11 @@ describe('name matching is word-bounded (codex #3235 r7)', () => {
     expect(Drafter.verifyEmailIntro('Hi Al, thanks for having us out. Reply if anything is off.', { firstName: 'Al' })).toBeNull();
   });
 });
+
+describe('hyphenated fixed-time expressions are rejected (codex #3235 r14)', () => {
+  test('digit and word-number hyphen forms are banned in both verifiers', () => {
+    expect(Drafter.verifyEmailIntro('Hi Aaron, keep pets out for a 30-minute wait. Reply if anything is off.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyEmailIntro('Hi Aaron, after thirty-minutes you are all set. Reply anytime.', { firstName: 'Aaron' })).toBe('banned_phrase');
+    expect(Drafter.verifyDraftBody('Hi Aaron, 30-minute wait then enjoy: {review_url}', { firstName: 'Aaron' })).toBe('banned_phrase');
+  });
+});

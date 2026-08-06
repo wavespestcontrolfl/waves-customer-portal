@@ -84,10 +84,10 @@ const BANNED_RE = new RegExp(
     "\\bepa\\b",
     "\\bre-?ent(?:ry|er)\\w*\\b",
     "\\bdr(?:y|ies|ied|ying)\\b",
-    "\\b\\d+\\s*(?:minutes?|mins?|hours?|hrs?)\\b", // any fixed time interval
+    "\\b\\d+[\\s-]*(?:minutes?|mins?|hours?|hrs?)\\b", // any fixed time interval (incl. \"30-minute\")
     // …including spelled-out intervals (codex #3235 r12 P1): "wait thirty
     // minutes" is the same compliance violation as "wait 30 minutes".
-    "\\b(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|forty[- ]five|sixty|ninety|half|couple(?:\\s+of)?|few|several)\\s+(?:more\\s+)?(?:minutes?|mins?|hours?|hrs?)\\b",
+    "\\b(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|forty[- ]five|sixty|ninety|half|couple(?:\\s+of)?|few|several)[\\s-]+(?:more\\s+)?(?:minutes?|mins?|hours?|hrs?)\\b",
     "\\bguarantee[ds]?\\b", // no invented promises; specifics live on the estimate
   ].join("|"),
   "i",
