@@ -1,0 +1,103 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root{
+    --blue:#009CDE;
+    --blue-deep:#0a3d5c;
+    --gold:#FFD700;
+    --ink:#0b2233;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:1536px;height:1024px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .stage{
+    position:relative;width:1536px;height:1024px;
+    background:
+      radial-gradient(1200px 700px at 78% 18%, rgba(255,255,255,.35), rgba(255,255,255,0) 60%),
+      linear-gradient(160deg,#0a3d5c 0%, #0f6ea3 42%, #009CDE 100%);
+    overflow:hidden;
+  }
+  /* soft sun glow */
+  .sun{position:absolute;top:-160px;right:-120px;width:640px;height:640px;border-radius:50%;
+    background:radial-gradient(circle at 50% 50%, rgba(255,215,0,.55), rgba(255,215,0,0) 62%);filter:blur(6px)}
+  /* subtle water ripples bottom */
+  .waves{position:absolute;left:0;right:0;bottom:0;height:320px;opacity:.5}
+  .waves svg{width:100%;height:100%}
+  /* the sink card */
+  .scene{position:absolute;right:96px;top:50%;transform:translateY(-50%);
+    width:600px;height:600px;border-radius:36px;
+    background:linear-gradient(150deg,#ffffff, #eaf6fd);
+    box-shadow:0 40px 90px rgba(4,28,48,.45), inset 0 0 0 1px rgba(255,255,255,.6);
+    display:flex;align-items:center;justify-content:center}
+  .counter{position:relative;width:520px;height:520px}
+  /* stainless basin */
+  .basin{position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);
+    width:400px;height:300px;border-radius:36px;
+    background:linear-gradient(160deg,#c9d6de,#9fb2bf 55%,#7c93a3);
+    box-shadow:inset 0 18px 40px rgba(0,0,0,.28), inset 0 -10px 24px rgba(255,255,255,.35), 0 20px 40px rgba(10,61,92,.25)}
+  .basin:before{content:"";position:absolute;inset:26px;border-radius:26px;
+    background:linear-gradient(160deg,#aebecb,#8399a8 60%,#6a8090);
+    box-shadow:inset 0 24px 50px rgba(0,0,0,.35)}
+  /* drain */
+  .drain{position:absolute;left:50%;top:62%;transform:translate(-50%,-50%);
+    width:120px;height:120px;border-radius:50%;
+    background:radial-gradient(circle at 50% 40%, #2b3b47, #0e171d 70%);
+    box-shadow:inset 0 8px 20px rgba(0,0,0,.7), 0 4px 10px rgba(0,0,0,.35);border:10px solid #b8c6d0}
+  .drain:after{content:"";position:absolute;inset:22px;border-radius:50%;
+    background:repeating-radial-gradient(circle, #3a4a56 0 6px, #16222b 6px 12px)}
+  /* faucet */
+  .faucet{position:absolute;left:50%;top:6%;transform:translateX(-50%);width:26px;height:150px;border-radius:14px;
+    background:linear-gradient(90deg,#7c93a3,#c9d6de 40%,#eef4f8 55%,#9fb2bf);box-shadow:0 6px 16px rgba(10,61,92,.3)}
+  .faucet:before{content:"";position:absolute;top:-6px;left:-58px;width:150px;height:26px;border-radius:14px;
+    background:linear-gradient(180deg,#eef4f8,#9fb2bf);box-shadow:0 6px 14px rgba(10,61,92,.28)}
+  .faucet:after{content:"";position:absolute;top:14px;right:-2px;width:26px;height:70px;border-radius:14px;
+    background:linear-gradient(90deg,#7c93a3,#c9d6de 50%,#9fb2bf)}
+  /* little flies */
+  .fly{position:absolute;width:16px;height:10px;border-radius:50%;
+    background:radial-gradient(circle at 40% 40%, #3a3a3a, #111);opacity:.9}
+  .fly:before,.fly:after{content:"";position:absolute;top:-3px;width:12px;height:10px;border-radius:50%;
+    background:rgba(220,235,245,.55)}
+  .fly:before{left:-6px;transform:rotate(-24deg)}
+  .fly:after{right:-6px;transform:rotate(24deg)}
+  .f1{left:150px;top:70px} .f2{left:210px;top:140px;transform:scale(.8)}
+  .f3{left:95px;top:180px;transform:scale(.7)} .f4{left:250px;top:60px;transform:scale(.75)}
+  .f5{left:170px;top:220px;transform:scale(.65)}
+  /* text block */
+  .copy{position:absolute;left:96px;top:50%;transform:translateY(-50%);width:640px;color:#fff}
+  .kicker{display:inline-block;font-size:22px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--ink);background:var(--gold);padding:12px 20px;border-radius:999px;box-shadow:0 10px 24px rgba(0,0,0,.2)}
+  h1{margin-top:30px;font-size:74px;line-height:1.02;font-weight:850;letter-spacing:-.02em;
+    text-shadow:0 6px 24px rgba(4,28,48,.4)}
+  h1 .accent{color:var(--gold)}
+  .sub{margin-top:26px;font-size:29px;line-height:1.35;font-weight:500;color:rgba(255,255,255,.92);max-width:560px}
+  .rule{margin-top:34px;width:120px;height:8px;border-radius:8px;background:var(--gold)}
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="sun"></div>
+    <div class="copy">
+      <span class="kicker">Waves Pest Control · SW Florida</span>
+      <h1>Drain Flies &amp; <span class="accent">Fruit Flies</span></h1>
+      <div class="sub">What actually clears the little cloud over your sink — and what only pretends to.</div>
+      <div class="rule"></div>
+    </div>
+    <div class="scene">
+      <div class="counter">
+        <div class="faucet"></div>
+        <div class="basin"></div>
+        <div class="drain"></div>
+        <div class="fly f1"></div><div class="fly f2"></div><div class="fly f3"></div>
+        <div class="fly f4"></div><div class="fly f5"></div>
+      </div>
+    </div>
+    <div class="waves">
+      <svg viewBox="0 0 1536 320" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M0,180 C300,120 500,240 780,180 C1050,120 1250,240 1536,170 L1536,320 L0,320 Z" fill="rgba(255,255,255,.18)"/>
+        <path d="M0,230 C320,180 520,290 820,230 C1120,175 1300,280 1536,220 L1536,320 L0,320 Z" fill="rgba(255,255,255,.22)"/>
+      </svg>
+    </div>
+  </div>
+</body>
+</html>

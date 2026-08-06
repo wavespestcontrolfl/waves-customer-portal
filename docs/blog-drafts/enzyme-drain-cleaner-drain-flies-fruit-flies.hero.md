@@ -21,3 +21,17 @@ reproducible and matches the frontmatter already in the `.mdx`.
 the publisher may overwrite with the vision-derived alt after generation):
 
 > Bright Southwest Florida kitchen sink and drain, illustrating enzyme drain cleaner treatment for fruit flies and drain flies.
+
+## Included rendered hero (branded, non-AI)
+
+Since the photorealistic AI generation step needs the OpenAI/Gemini keys that
+only exist on Railway, this folder ALSO ships a ready-to-use branded hero
+rendered here with headless Chromium (source: `*.hero.html`, rendered via
+`playwright` + `sharp`):
+
+- `*.hero.webp` — 1536×1024, 3:2, WebP (~38KB) — drop-in usable as the hero.
+- `*.hero.png` — same image, lossless PNG, if you want to edit it.
+- `*.hero.html` — the editable source; re-render at any size.
+
+Use whichever you prefer: the branded WebP as-is, or run the prompt above
+through an image model for a photorealistic version.
