@@ -390,3 +390,15 @@ describe('explicit stand-down asks (codex r39)', () => {
     expect(hasRescheduleOrAwayIntent("Please don't come to the front door, use the side gate")).toBe(false);
   });
 });
+
+describe('alternative-date instead asks (codex r40)', () => {
+  test('can we do Friday instead flags', () => {
+    expect(hasRescheduleOrAwayIntent('Can we do Friday instead?')).toBe(true);
+  });
+  test('can you come tomorrow instead flags', () => {
+    expect(hasRescheduleOrAwayIntent('Can you come tomorrow instead?')).toBe(true);
+  });
+  test('rather email instead stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("I'd rather you email me instead")).toBe(false);
+  });
+});
