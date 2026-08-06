@@ -1090,6 +1090,59 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(exempt).toContain('seq-lc-opener');
   });
 
+  test('unit-level premises, fail-closed premise errors, and opener supersession by the series final (codex #3243 r7)', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // Two units at one street are different premises (streetKey is
+    // unit-stripped; the unit leg must separate them).
+    let mock = makeMock({
+      scheduled_services: [
+        { id: 'un-1', customer_id: 'un', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null, service_address_line1: '100 Main St', service_address_line2: 'Apt 4', service_address_zip: '34205' },
+        { id: 'un-2', customer_id: 'un', service_id: 'svc-trap', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping', follow_up_interval_days: 3, property_id: null, service_address_line1: '100 Main St', service_address_line2: 'Apt 9', service_address_zip: '34205' },
+      ],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'un', scheduledServiceId: 'un-2' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+
+    // A premise-lookup failure suppresses the enrollment (plan_resolution_failed
+    // path) instead of falling open to customer-wide history.
+    const base = makeMock({
+      scheduled_services: [
+        { id: 'fc-1', customer_id: 'fc', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping' },
+        { id: 'fc-2', customer_id: 'fc', service_id: 'svc-trap', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping', follow_up_interval_days: 3 },
+      ],
+    });
+    const throwingConn = jest.fn((tbl) => {
+      if (String(tbl).startsWith('customers')) throw new Error('pg blip');
+      return base(tbl);
+    });
+    throwingConn.__state = base.__state;
+    db.mockImplementation(throwingConn);
+    const failed = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'fc', scheduledServiceId: 'fc-2' });
+    expect(failed.error).toBe(true);
+
+    // A zero-sent opener sequence yields to its own series' final: the final
+    // enrolls and the opener stops as superseded_by_series_final.
+    mock = makeMock({
+      customers: [{ id: 'os', first_name: 'Ray', last_name: 'W', phone: '+19410000064', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-os', customer_id: 'os', scheduled_service_id: 'os-2' }],
+      scheduled_services: [
+        { id: 'os-1', customer_id: 'os', service_id: 'svc-wt', status: 'completed', scheduled_date: d(2), service_key: 'wildlife_trapping' },
+        { id: 'os-2', customer_id: 'os', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+      ],
+      review_sequences: [{ id: 'seq-opener-live', customer_id: 'os', scheduled_service_id: 'os-1', status: 'active', current_step: 0, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]) }],
+    });
+    db.mockImplementation(mock);
+    const result = await ReviewService.enrollPostService({ customerId: 'os', serviceRecordId: 'sr-os', completedAt: new Date() });
+    expect(result.started).toBe(true);
+    const opener = mock.__state.rows.review_sequences.find((r) => r.id === 'seq-opener-live');
+    expect(opener.status).toBe('stopped');
+    expect(opener.stop_reason).toBe('superseded_by_series_final');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);

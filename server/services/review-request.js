@@ -46,14 +46,24 @@ function trappingSeriesKeysFor(serviceKey) {
 // formats into different premises). Each leg requires BOTH sides present —
 // a missing value is unknown, not different.
 function premiseStampConflicts(a, b) {
-  const { streetKey, normalizeZip } = require("./customer-properties");
+  const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require("./customer-properties");
   const sa = streetKey(a?.service_address_line1);
   const sb = streetKey(b?.service_address_line1);
   if (!sa || !sb) return false;
   if (sa !== sb) return true;
+  // Unit leg (codex #3243 r7 P2): streetKey is deliberately unit-stripped,
+  // so two units at one street key identically — compare the unit identity
+  // (explicit line2, else embedded in line1) when both sides carry one.
+  const ua = unitKey(a?.service_address_line2) || streetEmbeddedUnitKey(a?.service_address_line1);
+  const ub = unitKey(b?.service_address_line2) || streetEmbeddedUnitKey(b?.service_address_line1);
+  if (ua && ub && ua !== ub) return true;
   const za = normalizeZip(a?.service_address_zip);
   const zb = normalizeZip(b?.service_address_zip);
-  return !!(za && zb && za !== zb);
+  if (za && zb && za !== zb) return true;
+  const cityNorm = (v) => String(v == null ? "" : v).trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  const ca = cityNorm(a?.service_address_city);
+  const cb = cityNorm(b?.service_address_city);
+  return !!(ca && cb && ca !== cb);
 }
 // Premise predicate for trapping history (codex #3243 r2+r3+r5 P2): a linked
 // NON-primary property (rental, second home) is strict; the primary premise
@@ -69,40 +79,46 @@ function premiseStampConflicts(a, b) {
 // JS-side. Fail-open to customer-wide matching — scoping is a refinement,
 // not a guarantee.
 async function trappingPremiseMatcher(customerId, visit) {
-  try {
-    if (visit.property_id) {
-      const prop = await db("customer_properties").where({ id: visit.property_id }).select("id", "is_primary").first();
-      if (prop && !prop.is_primary) return (row) => row.property_id === visit.property_id;
-    }
-    // Primary-or-NULL visit. NULL is ambiguous — legacy primary OR an
-    // unmatched caller-stated address (codex #3243 r6 P2; the linkage
-    // migration adds the stamp columns WITHOUT backfilling legacy rows) —
-    // so a lone stamp is judged against the customer's on-file primary
-    // address before the NULL fallback applies.
-    const cust = await db("customers").where({ id: customerId }).select("address_line1", "zip").first();
-    const primaryStamp = { service_address_line1: cust?.address_line1, service_address_zip: cust?.zip };
-    const primary = await db("customer_properties").where({ customer_id: customerId, is_primary: true }).select("id").first();
-    const primaryId = primary?.id || null;
-    if (premiseStampConflicts(visit, primaryStamp)) {
-      // The visit is a stamped UNMATCHED premise (a rental the property
-      // table doesn't know): only rows stamped with the SAME address are
-      // the same series — unstamped legacy rows are the primary, not it.
-      return (row) => {
-        const { streetKey } = require("./customer-properties");
-        return !!streetKey(row?.service_address_line1) && !premiseStampConflicts(row, visit);
-      };
-    }
-    // The visit IS the primary premise: legacy NULL rows and rows carrying
-    // the backfilled primary id match; a row stamped with a DIFFERENT
-    // address than the primary does not, whatever its property_id.
-    return (row) => !premiseStampConflicts(row, primaryStamp)
-      && !premiseStampConflicts(row, visit)
-      && (row.property_id == null
-        || row.property_id === visit.property_id
-        || (primaryId != null && row.property_id === primaryId));
-  } catch {
-    return () => true;
+  // FAIL CLOSED (codex #3243 r7 P2): a lookup error here must propagate —
+  // resolveSequencePlanForEnrollment's retry/plan_resolution_failed path
+  // suppresses the uncertain enrollment, and the exemption walk's own catch
+  // degrades to NO exemption (fewer sends). A customer-wide fallback would
+  // instead let another property's visit rewrite this one's cadence.
+  if (visit.property_id) {
+    const prop = await db("customer_properties").where({ id: visit.property_id }).select("id", "is_primary").first();
+    if (prop && !prop.is_primary) return (row) => row.property_id === visit.property_id;
   }
+  // Primary-or-NULL visit. NULL is ambiguous — legacy primary OR an
+  // unmatched caller-stated address (codex #3243 r6 P2; the linkage
+  // migration adds the stamp columns WITHOUT backfilling legacy rows) —
+  // so a lone stamp is judged against the customer's on-file primary
+  // address before the NULL fallback applies.
+  const cust = await db("customers").where({ id: customerId }).select("address_line1", "address_line2", "city", "zip").first();
+  const primaryStamp = {
+    service_address_line1: cust?.address_line1,
+    service_address_line2: cust?.address_line2,
+    service_address_city: cust?.city,
+    service_address_zip: cust?.zip,
+  };
+  const primary = await db("customer_properties").where({ customer_id: customerId, is_primary: true }).select("id").first();
+  const primaryId = primary?.id || null;
+  if (premiseStampConflicts(visit, primaryStamp)) {
+    // The visit is a stamped UNMATCHED premise (a rental the property
+    // table doesn't know): only rows stamped with the SAME address are
+    // the same series — unstamped legacy rows are the primary, not it.
+    return (row) => {
+      const { streetKey } = require("./customer-properties");
+      return !!streetKey(row?.service_address_line1) && !premiseStampConflicts(row, visit);
+    };
+  }
+  // The visit IS the primary premise: legacy NULL rows and rows carrying
+  // the backfilled primary id match; a row stamped with a DIFFERENT
+  // address than the primary does not, whatever its property_id.
+  return (row) => !premiseStampConflicts(row, primaryStamp)
+    && !premiseStampConflicts(row, visit)
+    && (row.property_id == null
+      || row.property_id === visit.property_id
+      || (primaryId != null && row.property_id === primaryId));
 }
 // Order two visits sharing a scheduled_date (codex #3243 r5 P2: trap setup
 // and same-day capture/removal). window_start is a time-of-day string and
@@ -635,7 +651,7 @@ const ReviewService = {
           svc = await db("scheduled_services as s")
             .leftJoin("services as sv", "s.service_id", "sv.id")
             .where("s.id", visitId)
-            .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "s.property_id", "s.service_address_line1", "s.service_address_zip", "s.window_start", "s.created_at", "sv.service_key", "sv.follow_up_interval_days")
+            .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "s.property_id", "s.service_address_line1", "s.service_address_line2", "s.service_address_city", "s.service_address_zip", "s.window_start", "s.created_at", "sv.service_key", "sv.follow_up_interval_days")
             .first();
         }
       }
@@ -703,7 +719,7 @@ const ReviewService = {
             .where("ps.scheduled_date", "<", anchorStr)
             .where("ps.scheduled_date", ">=", windowFloor)
             .whereIn("psv.service_key", seriesKeys)
-            .select("ps.id", "ps.property_id", "ps.service_address_line1", "ps.service_address_zip");
+            .select("ps.id", "ps.property_id", "ps.service_address_line1", "ps.service_address_line2", "ps.service_address_city", "ps.service_address_zip");
           trapPrior = priorRows.find((r) => inPremise(r)) || null;
           const laterRows = await db("scheduled_services as fs")
             .leftJoin("services as fsv", "fs.service_id", "fsv.id")
@@ -712,7 +728,7 @@ const ReviewService = {
             .where("fs.scheduled_date", ">", anchorStr)
             .where("fs.scheduled_date", "<=", ceilStr)
             .whereIn("fsv.service_key", seriesKeys)
-            .select("fs.id", "fs.status", "fs.property_id", "fs.service_address_line1", "fs.service_address_zip");
+            .select("fs.id", "fs.status", "fs.property_id", "fs.service_address_line1", "fs.service_address_line2", "fs.service_address_city", "fs.service_address_zip");
           // Same-day siblings (codex #3243 r5 P2: trap setup + same-day
           // capture/removal) are invisible to the date-only comparisons —
           // order them by appointment window (then created_at); an
@@ -723,7 +739,7 @@ const ReviewService = {
             .where("ds.id", "!=", svc.id)
             .where("ds.scheduled_date", anchorStr)
             .whereIn("dsv.service_key", seriesKeys)
-            .select("ds.id", "ds.status", "ds.property_id", "ds.service_address_line1", "ds.service_address_zip", "ds.window_start", "ds.created_at");
+            .select("ds.id", "ds.status", "ds.property_id", "ds.service_address_line1", "ds.service_address_line2", "ds.service_address_city", "ds.service_address_zip", "ds.window_start", "ds.created_at");
           const sameDayInPremise = sameDayRows.filter((r) => inPremise(r));
           if (!trapPrior) {
             trapPrior = sameDayInPremise.find(
@@ -2519,7 +2535,36 @@ const ReviewService = {
     if (customer.has_left_google_review) return { started: false, reason: "already_reviewed" };
 
     const active = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-    if (active) return { started: false, reason: "already_active", sequence: active };
+    if (active) {
+      // A zero-sent series opener yields to its own series' FINAL enrollment
+      // (codex #3243 r7 P1): daily trapping checks can complete the final
+      // before the opener's smart-window ask ever sends — rejecting here
+      // left the opener to stop itself as series_completed at send time, so
+      // NEITHER ask went out and nothing re-enrolled the final. Supersede
+      // ONLY when the active sequence provably belongs to this enrollment's
+      // series (the exemption walk) and has delivered nothing; any error
+      // falls back to the reject (never risks a duplicate ask).
+      let superseded = false;
+      if (seriesFinal) {
+        try {
+          const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId });
+          if (seriesIds.includes(active.id)) {
+            const delivered = await db("review_requests")
+              .where({ sequence_id: active.id, status: "sent" })
+              .first();
+            if (!delivered) {
+              const stopped = await db("review_sequences")
+                .where({ id: active.id, status: "active" })
+                .update({ status: "stopped", stop_reason: "superseded_by_series_final", next_run_at: null, completed_at: new Date(), updated_at: new Date() });
+              superseded = stopped > 0;
+            }
+          }
+        } catch (err) {
+          logger.warn(`[review] opener-supersede check failed (customerId=${customerId}): ${err.message} — keeping already_active`);
+        }
+      }
+      if (!superseded) return { started: false, reason: "already_active", sequence: active };
+    }
 
     // One cadence per SERVICE RECORD, ever (codex #3235 r3 P1): the legacy
     // create() deduped by service_record_id, and the cadence path used to be
@@ -3048,7 +3093,7 @@ const ReviewService = {
       const visit = await db("scheduled_services as s")
         .leftJoin("services as sv", "s.service_id", "sv.id")
         .where("s.id", visitId)
-        .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "s.property_id", "s.service_address_line1", "s.service_address_zip", "s.window_start", "s.created_at", "sv.service_key", "sv.follow_up_interval_days")
+        .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "s.property_id", "s.service_address_line1", "s.service_address_line2", "s.service_address_city", "s.service_address_zip", "s.window_start", "s.created_at", "sv.service_key", "sv.follow_up_interval_days")
         .first();
       if (!visit) return [];
       // Walk the FULL ancestor chain (codex #3235 r7 P1): in a 3+ visit
@@ -3069,7 +3114,7 @@ const ReviewService = {
         sourceIds.push(next);
         cursor = await db("scheduled_services")
           .where({ id: next })
-          .select("id", "parent_service_id", "followup_source_service_id", "service_id", "scheduled_date", "property_id", "service_address_line1", "service_address_zip", "window_start", "created_at")
+          .select("id", "parent_service_id", "followup_source_service_id", "service_id", "scheduled_date", "property_id", "service_address_line1", "service_address_line2", "service_address_city", "service_address_zip", "window_start", "created_at")
           .first();
         if (!cursor) break;
         ancestorRows.push(cursor);
@@ -3092,7 +3137,7 @@ const ReviewService = {
         const inPremise = await trappingPremiseMatcher(customerId, visit);
         const collected = new Set(sourceIds);
         const queue = [visit, ...ancestorRows.filter((r) => r.scheduled_date != null)];
-        const walkSelect = ["ps.id", "ps.scheduled_date", "ps.property_id", "ps.service_address_line1", "ps.service_address_zip", "ps.window_start", "ps.created_at"];
+        const walkSelect = ["ps.id", "ps.scheduled_date", "ps.property_id", "ps.service_address_line1", "ps.service_address_line2", "ps.service_address_city", "ps.service_address_zip", "ps.window_start", "ps.created_at"];
         // Exhaust the queue (codex #3243 r6 P2): a dequeue cap truncated
         // long chains — each cursor can enqueue several same-window
         // siblings, starving the path to the opener. Termination is the
