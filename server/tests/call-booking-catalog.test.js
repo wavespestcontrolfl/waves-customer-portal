@@ -693,6 +693,10 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     expect(hasCallReServiceIntent({ call_summary: 'revisit ants' })).toBe(true);
     expect(hasCallReServiceIntent({ call_summary: 'revisit the lanai for wasps' })).toBe(true);
     expect(hasCallReServiceIntent({ call_summary: 'revisit next week for the ants' })).toBe(true);
+    // Terminal scheduling expressions count too (codex #3231 r4).
+    expect(hasCallReServiceIntent({ call_summary: 'please revisit on Friday' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit next friday' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit at 9 am' })).toBe(true);
     // A temporal modifier alone never launders an administrative object
     // (codex #3231 r3).
     expect(hasCallReServiceIntent({ call_summary: "revisit next month's pricing and book the regular quarterly visit" })).toBe(false);
