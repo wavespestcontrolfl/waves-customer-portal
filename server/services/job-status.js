@@ -495,6 +495,24 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
         // The transition still commits; the post-commit worker attempts a
         // LATE claim so the obligation isn't lost (codex r20).
         cancelNoticeLateClaim = notifyCustomer === undefined || notifyCustomer === true;
+        // Durable caller-intent OUTBOX in the committing transaction
+        // (codex #3238 r7): the fire-and-forget repair below can die with
+        // the process — this row survives the commit, and the sweep's
+        // late-claim mints pending_notify instead of evidence-gated
+        // plain pending when it finds it. Own savepoint: its failure
+        // must never roll back the transition.
+        if (notifyCustomer === 'caller') {
+          try {
+            await t.transaction(async (osp) => {
+              await osp('ops_email_send_state')
+                .insert({ email_key: `cancel-notice-caller-intent-${jobId}`, last_sent_at: osp.fn.now(), updated_at: osp.fn.now() })
+                .onConflict('email_key')
+                .merge(['last_sent_at', 'updated_at']);
+            });
+          } catch (obErr) {
+            logger.warn(`[job-status] caller-intent outbox write failed for ${jobId}: ${obErr.message}`);
+          }
+        }
         // Caller-owned transitions repair their claim too (codex r45+):
         // the route may die before handleCancellation, and the sweep's
         // late-claim would recreate the row as evidence-gated plain
@@ -542,6 +560,12 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
           // owner to handleSeriesCancellation's adoption fence and block
           // the combined notice.
           const callerTs = cancelNoticeToken instanceof Date ? cancelNoticeToken : nextClaimTs();
+          // Era fence applies to the caller repair too (codex #3238 r7).
+          const eraOpen = await db('ops_email_send_state')
+            .whereRaw("COALESCE((SELECT es.last_sent_at FROM ops_email_send_state es WHERE es.email_key = 'cancel-notice-hook-enabled-at'), '-infinity'::timestamptz) > COALESCE((SELECT ds.last_sent_at FROM ops_email_send_state ds WHERE ds.email_key = 'cancel-notice-hook-disabled-at'), '-infinity'::timestamptz)")
+            .first(db.raw('1'))
+            .catch(() => null);
+          if (!eraOpen) return;
           // Merged-slot survivor check, same as the in-trx claim (codex
           // #3238 r2): if the customer still has a live visit at this
           // slot, the repaired claim must be terminal 'suppressed' — a
@@ -590,6 +614,10 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
               }
             })
             .update({ cancellation_notice_at: callerTs, cancellation_notice_state: repairState, updated_at: callerTs });
+          await db('ops_email_send_state')
+            .where({ email_key: `cancel-notice-caller-intent-${jobId}` })
+            .del()
+            .catch(() => {});
           return;
         }
         if (!cancelNoticeClaimTs && cancelNoticeLateClaim) {
@@ -597,6 +625,10 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
           const lateTs = nextClaimTs();
           const won = await db('appointment_reminders')
             .where({ scheduled_service_id: jobId })
+            // Era fence (codex #3238 r7): a draining gate-on pod must not
+            // late-claim after a newer disable was stamped — same guard
+            // as the sweep's late-claim.
+            .whereRaw("COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-enabled-at'), '-infinity'::timestamptz) > COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-disabled-at'), '-infinity'::timestamptz)")
             .where(function claimable() {
               this.whereNull('cancellation_notice_at')
                 .orWhere(function stale() {

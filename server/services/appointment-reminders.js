@@ -2951,9 +2951,20 @@ const AppointmentReminders = {
         )`)
         .update({
           cancellation_notice_at: db.raw("(SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')"),
-          cancellation_notice_state: 'pending',
+          // A durable caller-intent outbox row (written in the cancel's
+          // own transaction when the in-trx claim savepoint failed —
+          // codex #3238 r7) upgrades the late claim to pending_notify so
+          // the operator's requested notice is not evidence-gated away.
+          cancellation_notice_state: db.raw("CASE WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cancel-notice-caller-intent-' || appointment_reminders.scheduled_service_id::text) THEN 'pending_notify' ELSE 'pending' END"),
           updated_at: new Date(),
         });
+      // Consumed/stale caller-intent outbox keys age out with the same
+      // 72h horizon as the claims they can influence.
+      await db('ops_email_send_state')
+        .where('email_key', 'like', 'cancel-notice-caller-intent-%')
+        .where('last_sent_at', '<', db.raw("now() - interval '72 hours'"))
+        .del()
+        .catch(() => {});
       }
 
       // Repair pass (codex r22): a restoration whose in-trx marker clear
