@@ -96,7 +96,14 @@ async function loadCallbackCalls(cutoff = new Date()) {
     -- Horizon on IMMUTABLE created_at (codex r27): reprocessing months-old
     -- calls restamps updated_at and would resurrect them; the updated_at
     -- cutoff below still admits rows only once processing settled.
-    WHERE c.created_at >= now() - interval '30 days'
+    -- Retention keyed to the AGREED time for explicitly scheduled
+    -- callbacks (codex r38): a callback agreed 35 days out must surface
+    -- when due, not fall off the created_at horizon before it. Unscheduled
+    -- callbacks keep the created_at horizon.
+    WHERE ((COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') = ''
+            AND c.created_at >= now() - interval '30 days')
+        OR (COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') <> ''
+            AND (c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}')::timestamptz >= now() - interval '30 days'))
       AND c.updated_at <= :cutoff
       AND c.disposition = 'callback_task_created'
       -- Not yet due (codex r37): an explicitly agreed future callback
@@ -208,7 +215,10 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
         WHERE src.twilio_call_sid = cs.metadata->>'callSid'
           AND COALESCE(cs.metadata->>'callSid', '') <> ''
           AND fsms.direction = 'outbound'
-          AND fsms.message_type IN ${HUMAN_REPLY_TYPES}
+          -- Human-authored subset (codex r38), same as the callback
+          -- predicate — the AI Assistant's automatic reply is not the
+          -- requested outreach.
+          AND fsms.message_type IN ('manual', 'ai_approved', 'ai_revised')
           -- Same proactive-draft exclusion as every other reply leg
           -- (codex r36): an approved lead nudge is not the requested
           -- outreach.

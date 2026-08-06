@@ -369,3 +369,12 @@ describe('gate-code affirmative and past-inability vetoes (codex r37)', () => {
     expect(hasRescheduleOrAwayIntent("I was unable to attend yesterday's appointment")).toBe(false);
   });
 });
+
+describe('unavailable adjective (codex r38)', () => {
+  test('I am unavailable tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent('I am unavailable tomorrow')).toBe(true);
+  });
+  test('we are unavailable for tomorrows appointment flags', () => {
+    expect(hasRescheduleOrAwayIntent("We are unavailable for tomorrow's appointment")).toBe(true);
+  });
+});
