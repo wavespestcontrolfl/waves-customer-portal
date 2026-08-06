@@ -2566,7 +2566,20 @@ const AppointmentReminders = {
             // sweep-owned retryable claims are retained regardless of the
             // gate (codex r32).
             const { isEnabled } = require('../config/feature-gates');
-            if (claimToken || isEnabled('cancelNoticeHook')) return false;
+            // A retryable lease is retained ONLY when a worker is actually
+            // scheduled to settle it (codex r42): with cronJobs disabled
+            // the sweep never runs, so retention would strand the claim
+            // indefinitely. Released NULL markers are recovered by the
+            // late-claim fallback once cron returns (72h window).
+            if (isEnabled('cronJobs') && (claimToken || isEnabled('cancelNoticeHook'))) return false;
+            // Explicit RELEASE — falling through would hit the terminal
+            // 'suppressed' write reserved for deterministic non-delivery.
+            await db('appointment_reminders')
+              .where({ id: record.id })
+              .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+              .where('cancellation_notice_at', noticeToken)
+              .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+            return false;
           }
           await db('appointment_reminders')
             .where({ id: record.id })
@@ -2866,6 +2879,14 @@ const AppointmentReminders = {
           .where('last_sent_at', '<', PROCESS_BOOT_AT)
           .del()
           .catch(() => {});
+        // Durable record of the newest observed DISABLE (codex r42): even
+        // if a draining gate-on pod recreates the enable boundary after
+        // our one-shot clear, the next enable sees enabled < disabled and
+        // replaces the stale value instead of ignoring it.
+        await db.raw(
+          "INSERT INTO ops_email_send_state (email_key, last_sent_at, updated_at) VALUES ('cancel-notice-hook-disabled-at', ?, now()) ON CONFLICT (email_key) DO UPDATE SET last_sent_at = GREATEST(ops_email_send_state.last_sent_at, EXCLUDED.last_sent_at), updated_at = now()",
+          [PROCESS_BOOT_AT],
+        ).catch(() => {});
       }
       if (gateEnabled('cancelNoticeHook')) {
       // (codex r25): a cancel whose in-trx claim AND
@@ -2886,6 +2907,15 @@ const AppointmentReminders = {
         .onConflict('email_key')
         .ignore()
         .catch(() => {});
+      // A surviving boundary OLDER than the newest observed disable
+      // belongs to a previous enable interval (codex r42) — replace it
+      // with this generation's boot instead of ignoring it. A boundary
+      // from an uninterrupted enable interval is newer than any disable
+      // and is preserved.
+      await db.raw(
+        "UPDATE ops_email_send_state SET last_sent_at = ?, updated_at = now() WHERE email_key = 'cancel-notice-hook-enabled-at' AND last_sent_at < COALESCE((SELECT ds.last_sent_at FROM ops_email_send_state ds WHERE ds.email_key = 'cancel-notice-hook-disabled-at'), '-infinity'::timestamptz)",
+        [PROCESS_BOOT_AT],
+      ).catch(() => {});
       // Driven from the (indexed) recent cancellation history, not a scan
       // of every unclaimed reminder row (codex r34). Bounded by the 72h
       // age-out horizon: a claim older than that would be suppressed
@@ -3231,11 +3261,20 @@ const AppointmentReminders = {
                 .where('cancellation_notice_at', seriesToken)
                 .update({ cancellation_notice_state: 'pending_notify', updated_at: new Date() });
             }
-            // Keep the leases REGARDLESS of the gate (r14): a series has
-            // no manual retry (the route's target query excludes
-            // already-cancelled rows), so releasing strands the
-            // obligation. The sweep's pre-gate 72h age-out still settles
-            // permanently-failing groups even while the gate is off.
+            // Keep the leases REGARDLESS of the hook gate (r14): a series
+            // has no manual retry, so the sweep's ungated settlement is
+            // the only recovery. But with cronJobs disabled NO sweep will
+            // ever run (codex r42) — release to NULL instead so the
+            // late-claim fallback recovers the obligation once cron
+            // returns, rather than stranding pending leases forever.
+            const { isEnabled: cronGate } = require('../config/feature-gates');
+            if (!cronGate('cronJobs')) {
+              await db('appointment_reminders')
+                .whereIn('scheduled_service_id', ids)
+                .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                .where('cancellation_notice_at', seriesToken)
+                .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+            }
             return;
           }
           await db('appointment_reminders')

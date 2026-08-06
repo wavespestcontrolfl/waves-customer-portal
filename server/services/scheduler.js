@@ -421,6 +421,12 @@ function initScheduledJobs() {
       .onConflict('email_key')
       .ignore()
       .catch((err) => logger.warn(`[scheduler] cancel-notice boundary stamp failed: ${err.message}`));
+    // Replace a boundary from a PREVIOUS enable interval (older than the
+    // newest observed disable) instead of ignoring it (codex r42).
+    db.raw(
+      "UPDATE ops_email_send_state SET last_sent_at = ?, updated_at = now() WHERE email_key = 'cancel-notice-hook-enabled-at' AND last_sent_at < COALESCE((SELECT ds.last_sent_at FROM ops_email_send_state ds WHERE ds.email_key = 'cancel-notice-hook-disabled-at'), '-infinity'::timestamptz)",
+      [PROCESS_BOOT_AT],
+    ).catch((err) => logger.warn(`[scheduler] cancel-notice boundary refresh failed: ${err.message}`));
   } else {
     // Gate OFF: clear the boundary so a later re-enable stamps a FRESH
     // one (codex #3233 r36) — cancellations made while the gate was off
@@ -435,6 +441,12 @@ function initScheduledJobs() {
       .where('last_sent_at', '<', PROCESS_BOOT_AT)
       .del()
       .catch((err) => logger.warn(`[scheduler] cancel-notice boundary clear failed: ${err.message}`));
+    // Durable disable record (codex r42) — survives a draining gate-on
+    // pod recreating the boundary after this one-shot clear.
+    db.raw(
+      "INSERT INTO ops_email_send_state (email_key, last_sent_at, updated_at) VALUES ('cancel-notice-hook-disabled-at', ?, now()) ON CONFLICT (email_key) DO UPDATE SET last_sent_at = GREATEST(ops_email_send_state.last_sent_at, EXCLUDED.last_sent_at), updated_at = now()",
+      [PROCESS_BOOT_AT],
+    ).catch((err) => logger.warn(`[scheduler] cancel-notice disable stamp failed: ${err.message}`));
   }
 
   // Boundary maintenance runs BEFORE this early return (codex r40):
