@@ -77,7 +77,36 @@ async function refreshHasMultiHome(customerId, database = db) {
  */
 async function linkAcceptedEstimateProperty({ estimateId, customerId, database = db }) {
   try {
-    if (!customerPropertiesGateOn() || !estimateId || !customerId) return null;
+    if (!estimateId || !customerId) return null;
+    if (!customerPropertiesGateOn()) {
+      // Gate OFF: no customer_properties writes — but a GROUPED accept still
+      // stamps its booked visits' service address. service_address_* are
+      // plain scheduled_services columns (not part of the gated relational
+      // model), and dispatch resolves unstamped rows to the customer's
+      // PRIMARY address — a technician would be routed to the wrong property
+      // (codex #3244 r3). property_id / customer_properties / has_multi_home
+      // stay dark until the gate flips.
+      const grouped = await database('estimates')
+        .where({ id: estimateId })
+        .first('estimate_group_id', 'address');
+      if (!grouped?.estimate_group_id) return null;
+      const gparts = parseEstimateAddress(grouped.address);
+      if (!gparts || !String(gparts.address_line1 || '').trim()) return null;
+      await database('scheduled_services')
+        .where({ source_estimate_id: estimateId })
+        .whereNull('property_id')
+        .whereNull('service_address_line1')
+        .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
+        .update({
+          service_address_line1: gparts.address_line1,
+          service_address_line2: null,
+          service_address_city: gparts.city || null,
+          service_address_state: gparts.state || 'FL',
+          service_address_zip: gparts.zip || null,
+        });
+      logger.info(`[estimate-property-linkage] estimate ${estimateId}: grouped visit addresses stamped (gate off — no property row)`);
+      return null;
+    }
     const estimate = await database('estimates').where({ id: estimateId }).first();
     if (!estimate) return null;
 

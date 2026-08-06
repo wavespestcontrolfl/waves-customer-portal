@@ -1437,6 +1437,11 @@ async function reviseAdminEstimate({
     body: {
       ...body,
       customerId: body.customerId || estimate.customer_id || null,
+      // The V2 revision payload sends no grouping fields — derive them from
+      // the row so a revision of a grouped estimate keeps its per-property
+      // tier scoping instead of repricing at the combined account tier
+      // (codex #3244 r3).
+      estimateGroupId: body.estimateGroupId ?? (estimate.estimate_group_id || undefined),
       satelliteUrl: body.satelliteUrl || (sameAddress ? estimate.satellite_url : null) || null,
     },
     technicianId,

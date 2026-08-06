@@ -321,10 +321,20 @@ async function claimDueScheduledEstimates(now) {
                PARTITION BY COALESCE(estimate_group_id::text, id::text)
                ORDER BY scheduled_at ASC, created_at ASC
              ) AS rn
-      FROM estimates
+      FROM estimates AS c
       WHERE status = 'scheduled'
         AND scheduled_at IS NOT NULL
         AND scheduled_at <= ?
+        -- Cross-process guard (codex #3244 r3): once any member of a group is
+        -- mid-send (another pod's batch), the whole group is spoken for — its
+        -- send publishes the rest. Claiming a second member here would only
+        -- burn attempts against the pre-flight 409.
+        AND NOT EXISTS (
+          SELECT 1 FROM estimates s
+          WHERE c.estimate_group_id IS NOT NULL
+            AND s.estimate_group_id = c.estimate_group_id
+            AND s.status = 'sending'
+        )
     ), due AS (
       SELECT e.id
       FROM estimates e

@@ -2685,7 +2685,11 @@ export default function EstimateToolViewV2({
   const activeLeadId = form.leadId || initialLeadId || "";
   useEffect(() => {
     if (!activeLeadId) {
-      setLeadAdditionalProperties([]);
+      // Mid-group chaining drops form.leadId (the sibling draft must not
+      // re-link the lead), but the extracted address list must survive so a
+      // 3+ property call can keep chaining (codex #3244 r3). Only a true
+      // context reset (no group in progress) clears it.
+      if (!groupAnchorId) setLeadAdditionalProperties([]);
       return undefined;
     }
     let cancelled = false;
@@ -4528,10 +4532,18 @@ export default function EstimateToolViewV2({
               ? "Email sent"
               : `Email failed: ${d.channels.email.error}`,
           );
+        if (d.groupPublicationFailures > 0) {
+          parts.push(
+            `${d.groupPublicationFailures} grouped propert${d.groupPublicationFailures === 1 ? "y" : "ies"} could NOT be published — they were returned to unsent; re-send them so the customer's link shows every property`,
+          );
+        }
         const anyFail =
           (d.channels.sms && !d.channels.sms.ok) ||
-          (d.channels.email && !d.channels.email.ok);
+          (d.channels.email && !d.channels.email.ok) ||
+          d.groupPublicationFailures > 0;
         alert((anyFail ? "Send had issues: " : "Sent: ") + parts.join(" / "));
+      } else if (d.groupPublicationFailures > 0) {
+        alert(`Estimate sent via ${label}, but ${d.groupPublicationFailures} grouped propert${d.groupPublicationFailures === 1 ? "y" : "ies"} could NOT be published — re-send them so the customer's link shows every property.`);
       } else {
         alert(`Estimate sent via ${label}!`);
       }

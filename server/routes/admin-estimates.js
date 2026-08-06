@@ -1164,7 +1164,11 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
             .where({ id: sibling.id, status: 'sending' })
             .whereNull('price_locked_at')
             .update({
-              status: 'sent',
+              // A customer can open the anchor link instantly and view this
+              // sibling while it's still under the pre-delivery claim — the
+              // view stamps viewed_at without touching 'sending'. Same
+              // viewed-aware finalization as the anchor (codex #3244 r3).
+              status: db.raw("CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END"),
               sent_at: db.fn.now(),
               expires_at: nextExpiresAt,
               scheduled_at: null,

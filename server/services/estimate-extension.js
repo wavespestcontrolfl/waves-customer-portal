@@ -154,6 +154,33 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
     throw err;
   }
 
+  // Multi-property group: the ONE link renders every sibling, and the public
+  // viewability filter drops expired rows per-estimate — extending only this
+  // row would revive one property and hide the rest (codex #3244 r3). Extend
+  // every live sibling to the same deadline, reviving expired/send_failed
+  // ones with the viewed-aware status; accepted/declined/archived siblings
+  // keep their terminal state. Best-effort and SILENT — only the extended
+  // estimate drives customer comms (one thread per group).
+  if (estimate.estimate_group_id) {
+    try {
+      await db('estimates')
+        .where({ estimate_group_id: estimate.estimate_group_id })
+        .whereNot({ id: estimate.id })
+        .whereNull('archived_at')
+        .whereNull('price_locked_at')
+        .whereIn('status', ['sent', 'viewed', 'expired', 'send_failed'])
+        .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', newExpiry))
+        .update({
+          expires_at: newExpiry,
+          followup_expiring_sent: false,
+          status: db.raw("CASE WHEN status IN ('expired','send_failed') THEN (CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END) ELSE status END"),
+          updated_at: db.fn.now(),
+        });
+    } catch (siblingErr) {
+      logger.warn(`[estimate-extension] group sibling extension failed for estimate ${estimate.id}: ${siblingErr.message}`);
+    }
+  }
+
   // Re-arm the ENGAGEMENT ENGINE's expiring lifecycle for the new deadline
   // too (codex 2736 r9): the engine's one-lifecycle enqueue guard and the
   // expiring sends-group budget would otherwise suppress expiring_* forever
