@@ -537,7 +537,11 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
           // (ownable singleton) and the sweep settles it without
           // re-deriving delivery evidence if the route died. Never
           // worker-sends: caller-owned notices are the route's to send.
-          const callerTs = nextClaimTs();
+          // Reuse the route's SHARED series token when supplied (codex
+          // #3238 r1): an independent timestamp would read as a foreign
+          // owner to handleSeriesCancellation's adoption fence and block
+          // the combined notice.
+          const callerTs = cancelNoticeToken instanceof Date ? cancelNoticeToken : nextClaimTs();
           await db('appointment_reminders')
             .where({ scheduled_service_id: jobId })
             .where(function claimable() {
