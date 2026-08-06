@@ -75,11 +75,14 @@ describe('public pricing ranges', () => {
     expect(new Set(keys).size).toBe(keys.length);
   });
 
-  test('every range is a positive low <= high pair', () => {
+  test('every range is a non-negative low <= high pair', () => {
     for (const s of payload.services) {
       expect(Number.isFinite(s.low)).toBe(true);
       expect(Number.isFinite(s.high)).toBe(true);
-      expect(s.low).toBeGreaterThan(0);
+      // wasp_hornet_removal legitimately floors at $0 (bundled inclusion
+      // with a recurring plan); everything else must price above zero.
+      if (s.key === 'wasp_hornet_removal') expect(s.low).toBeGreaterThanOrEqual(0);
+      else expect(s.low).toBeGreaterThan(0);
       expect(s.high).toBeGreaterThanOrEqual(s.low);
     }
   });
@@ -121,11 +124,23 @@ describe('public pricing ranges', () => {
   });
 
   test('cache serves between syncs and refreshes when a sync applied', () => {
-    const again = computePublicPricingRanges();
-    expect(again).toBe(payload); // no sync since — cached payload is current
-    const refreshed = computePublicPricingRanges({ refresh: true });
-    expect(refreshed).not.toBe(payload);
-    expect(refreshed.services.map((s) => s.key)).toEqual(payload.services.map((s) => s.key));
+    // Run the identity assertion in the same gate-disabled context used for
+    // the baseline, so an ambient gate value can't change the cache key.
+    const priorBond = process.env.GATE_TERMITE_BOND_OPTION;
+    const priorRental = process.env.GATE_TERMITE_STATION_RENTAL;
+    delete process.env.GATE_TERMITE_BOND_OPTION;
+    delete process.env.GATE_TERMITE_STATION_RENTAL;
+    try {
+      const a = computePublicPricingRanges();
+      const b = computePublicPricingRanges();
+      expect(b).toBe(a); // no sync between calls — cached payload is current
+      const refreshed = computePublicPricingRanges({ refresh: true });
+      expect(refreshed).not.toBe(a);
+      expect(refreshed.services.map((s) => s.key)).toEqual(a.services.map((s) => s.key));
+    } finally {
+      if (priorBond !== undefined) process.env.GATE_TERMITE_BOND_OPTION = priorBond;
+      if (priorRental !== undefined) process.env.GATE_TERMITE_STATION_RENTAL = priorRental;
+    }
   });
 
   // Gate tests must not depend on the ambient environment: explicitly unset

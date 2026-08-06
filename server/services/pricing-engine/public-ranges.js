@@ -50,8 +50,13 @@ function oneTimePerkRate(engineServiceKey) {
 function rangeRow({ key, name, unit, values, notes = null, decimals = 0, oneTimePerkKey = null }) {
   if (oneTimePerkKey) {
     const rate = oneTimePerkRate(oneTimePerkKey);
-    if (rate) values = values.concat(values.map((v) => v * (1 - rate)));
+    // Perk floors: only pricers WITHOUT internal recurring-customer handling
+    // carry a perk key — their lines are discounted at the estimate level
+    // with no floor re-check, so the plain multiplication matches the
+    // engine-charged amount.
+    if (rate) values = values.concat(values.filter((v) => v > 0).map((v) => v * (1 - rate)));
   }
+  values = values.filter((v) => Number.isFinite(v) && v >= 0);
   if (!values.length) throw new Error(`No priced values for ${key}`);
   // Round outward (floor the low, ceil the high) so a valid exact engine
   // quote with cents can never fall outside the advertised range.
@@ -174,15 +179,17 @@ function buildRows() {
 
   add('one_time_pest', () => rangeRow({
     key: 'one_time_pest',
-    oneTimePerkKey: 'one_time_pest',
     name: 'One-Time Pest Treatment',
     unit: 'per treatment',
     // Derives from the quarterly baseline, so it sweeps the same profiles.
     values: sweepValues(
       FOOTPRINTS_SQFT.flatMap((f) =>
         PEST_PROFILES.flatMap((p) =>
-          Object.keys(constants.PROPERTY_TYPE_ADJ).map((propertyType) => ({ f, p, propertyType })))),
-      ({ f, p, propertyType }) => sp.priceOneTimePest({ footprint: f, propertyType, ...p.property }, { ...p.options }),
+          Object.keys(constants.PROPERTY_TYPE_ADJ).flatMap((propertyType) =>
+            // The pricer applies the recurring-customer perk INTERNALLY and
+            // then reapplies its floor/clamp — never multiply externally.
+            [false, true].map((isRecurringCustomer) => ({ f, p, propertyType, isRecurringCustomer }))))),
+      ({ f, p, propertyType, isRecurringCustomer }) => sp.priceOneTimePest({ footprint: f, propertyType, ...p.property }, { ...p.options, isRecurringCustomer }),
       (r) => r.price),
     notes: 'Single knockdown visit; recurring plans price lower per application.',
   }));
@@ -207,7 +214,7 @@ function buildRows() {
     // Footprint and story count carry ordinary size/story multipliers on
     // auto-priced homes — not custom-quote territory — so both are swept.
     values: sweepValues(
-      [1500, 2200, 3000, 4000].flatMap((footprint) =>
+      [1500, 2200, 3000, 4000, 6000, 10000].flatMap((footprint) =>
         [1, 2, 3].flatMap((stories) =>
           [1, 2, 4, 7, 10].flatMap((rooms) =>
             ['light', 'moderate', 'heavy'].flatMap((severity) =>
@@ -277,8 +284,11 @@ function buildRows() {
               { aggressive: 'EXTREME', height: 'HIGH', confined: 'YES' },
             ].map((mods) => ({ species, tier, removal, ...mods }))))),
       (opts) => sp.priceStingingInsect(opts),
-      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
-    notes: 'Priced by species, nest difficulty, removal scope, aggressiveness, height, and access; free with an active recurring pest plan where eligible.',
+      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price))
+      // Bundled inclusion: tier-1 paper-wasp/mud-dauber nests with an active
+      // recurring pest plan price at $0 — publish that floor explicitly.
+      .concat(sp.priceStingingInsect({ species: 'PAPER_WASP', tier: 1, removal: 'NONE', hasRecurringPest: true }).price === 0 ? [0] : []),
+    notes: 'Priced by species, nest difficulty, removal scope, aggressiveness, height, and access. Tier-1 paper wasp and mud dauber nests are included at $0 with an active recurring pest plan.',
   }));
 
   // Base, worst-case (heavy infestation, dense landscaping, priced exterior
@@ -300,14 +310,14 @@ function buildRows() {
       fleaExteriorAreaSqFt: 20000,
     },
     // Selectable single-visit knockdown offer (lower entry price).
-    // (No isRecurringCustomer profile here: that pricer discounts
-    // internally, and the row's oneTimePerkKey already publishes the
-    // floor — both together would double-discount.)
     { fleaOfferKey: 'flea_knockdown_single' },
+    // The pricer applies the recurring-customer perk INTERNALLY (respecting
+    // its package floor) — swept via the flag, never multiplied externally.
+    { isRecurringCustomer: true },
+    { fleaOfferKey: 'flea_knockdown_single', isRecurringCustomer: true },
   ];
   add('flea_elimination', () => rangeRow({
     key: 'flea_elimination',
-    oneTimePerkKey: 'flea_package',
     name: 'Flea Treatment',
     unit: 'per program',
     values: sweepValues(
@@ -393,6 +403,8 @@ function buildRows() {
         { standardWireMeshPoints: 20, meshSoftLF: 50 },
         { advancedWireMeshPoints: 10, meshConcreteLF: 50 },
         { standardWireMeshPoints: 10, advancedWireMeshPoints: 10, standardBirdBoxes: 2, tileHighBirdBoxes: 2, customBirdBoxes: 2, meshSoftLF: 30, meshConcreteLF: 30 },
+        // Larger recorded scopes stay directly priced (no quote boundary).
+        { advancedWireMeshPoints: 40 },
       ],
       (opts) => sp.priceRodentExclusionV2(opts),
       (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : (r.total ?? r.price))),
@@ -558,7 +570,6 @@ function buildRows() {
 
   add('one_time_lawn', () => rangeRow({
     key: 'one_time_lawn',
-    oneTimePerkKey: 'one_time_lawn',
     name: 'One-Time Lawn Treatment',
     unit: 'per treatment',
     // Track and tier feed the recurring baseline this pricer derives from,
@@ -567,15 +578,15 @@ function buildRows() {
       LAWNS_SQFT.flatMap((sq) =>
         ['weed', 'fungicide', 'pest', 'fert'].flatMap((treatmentType) =>
           Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
-            ['standard', 'enhanced', 'premium'].map((tier) => ({ sq, treatmentType, track, tier }))))),
-      ({ sq, treatmentType, track, tier }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType, track, tier }),
+            ['standard', 'enhanced', 'premium'].flatMap((tier) =>
+              [false, true].map((isRecurringCustomer) => ({ sq, treatmentType, track, tier, isRecurringCustomer })))))),
+      ({ sq, treatmentType, track, tier, isRecurringCustomer }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType, track, tier, isRecurringCustomer }),
       (r) => r.price),
     notes: 'Priced by treatment type, grass type, and turf area.',
   }));
 
   add('lawn_pest_knockdown', () => rangeRow({
     key: 'lawn_pest_knockdown',
-    oneTimePerkKey: 'one_time_lawn',
     name: 'Lawn Pest Knockdown',
     unit: 'per treatment',
     // The canonical lawnPestControl service: a standalone one-time
@@ -584,8 +595,9 @@ function buildRows() {
     values: sweepValues(
       LAWNS_SQFT.flatMap((sq) =>
         Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
-          ['standard', 'enhanced', 'premium'].map((tier) => ({ sq, track, tier })))),
-      ({ sq, track, tier }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType: 'pest', track, tier }),
+          ['standard', 'enhanced', 'premium'].flatMap((tier) =>
+            [false, true].map((isRecurringCustomer) => ({ sq, track, tier, isRecurringCustomer }))))),
+      ({ sq, track, tier, isRecurringCustomer }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType: 'pest', track, tier, isRecurringCustomer }),
       (r) => r.price),
     notes: 'Standalone turf-pest treatment (chinch bugs, sod webworms, armyworms, grubs); can be combined with a weed treatment.',
   }));
@@ -611,7 +623,6 @@ function buildRows() {
 
   add('one_time_mosquito', () => rangeRow({
     key: 'one_time_mosquito',
-    oneTimePerkKey: 'one_time_mosquito',
     name: 'One-Time Mosquito Treatment',
     unit: 'per treatment',
     // Station/dunk add-ons raise the high; the recurring-customer discount
@@ -622,7 +633,7 @@ function buildRows() {
       // Over-acre treatable areas stay numerically priced (review is
       // routing only) — sweep through 60,000 treatable sq ft.
       [...LOTS_SQFT, 45560, 62000].flatMap((lotSqFt) =>
-        [{}, { stationCount: 5, dunkCount: 9 }].map((opts) => ({ lotSqFt, opts }))),
+        [{}, { stationCount: 5, dunkCount: 9 }, { isRecurringCustomer: true }].map((opts) => ({ lotSqFt, opts }))),
       ({ lotSqFt, opts }) => sp.priceOneTimeMosquito({ footprint: 2000, lotSqFt }, opts),
       (r) => (r.quoteRequired ? NaN : r.price)),
     notes: 'Priced by treatable area; station and dunk add-ons available.',
