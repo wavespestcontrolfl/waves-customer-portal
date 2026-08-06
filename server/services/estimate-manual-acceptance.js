@@ -675,6 +675,21 @@ async function markEstimateManuallyAccepted({
   const warnings = [];
 
   if (shouldRunDownstream) {
+    // Multi-property linkage (post-commit, best-effort, gated on
+    // GATE_CUSTOMER_PROPERTIES) — same hook as the public accept route:
+    // resolve/create the customer_properties row for the accepted address,
+    // link estimates.property_id, stamp the booked visits, refresh
+    // has_multi_home. The helper never throws.
+    {
+      const linkageCustomerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
+      if (linkageCustomerId) {
+        await require('./estimate-property-linkage').linkAcceptedEstimateProperty({
+          estimateId: acceptedEstimate.id,
+          customerId: linkageCustomerId,
+        });
+      }
+    }
+
     try {
       await leadLinkService.markLinkedLeadEstimateAccepted({
         estimateId: acceptedEstimate.id,

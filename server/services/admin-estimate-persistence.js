@@ -699,6 +699,55 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   return { totals: clientPreview, audit };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Multi-property linkage (migration 20260806200000): resolve the OPTIONAL
+// property_id / estimate_group_id write fields. Keys are only present in the
+// returned object when the caller explicitly sent them — revise spreads these
+// fields over the existing row, so a save from a caller that never loaded the
+// linkage must leave the stored values untouched rather than null them.
+async function resolveEstimatePropertyLinkage(database, body) {
+  const fields = {};
+  if (body.propertyId !== undefined) {
+    if (body.propertyId === null || body.propertyId === '') {
+      fields.property_id = null;
+    } else {
+      const propertyId = String(body.propertyId);
+      if (!UUID_RE.test(propertyId)) throw errorWithStatus('propertyId must be a UUID', 400);
+      const property = await database('customer_properties').where({ id: propertyId }).first();
+      if (!property || property.active === false) throw errorWithStatus('Property not found', 404);
+      if (body.customerId && String(property.customer_id) !== String(body.customerId)) {
+        throw errorWithStatus('Property belongs to a different customer', 400);
+      }
+      fields.property_id = propertyId;
+    }
+  }
+  if (body.estimateGroupId !== undefined) {
+    if (body.estimateGroupId === null || body.estimateGroupId === '') {
+      fields.estimate_group_id = null;
+    } else {
+      const groupId = String(body.estimateGroupId);
+      if (!UUID_RE.test(groupId)) throw errorWithStatus('estimateGroupId must be a UUID', 400);
+      fields.estimate_group_id = groupId;
+    }
+  }
+  return fields;
+}
+
+// Ensure the anchor estimate of a group has an estimate_group_id, minting one
+// on first use. Locks the anchor row so two concurrent "add another property"
+// saves against the same anchor converge on a single group id.
+async function ensureEstimateGroupId(trx, anchorEstimateId, randomUUID = crypto.randomUUID) {
+  const anchorId = String(anchorEstimateId);
+  if (!UUID_RE.test(anchorId)) throw errorWithStatus('groupWithEstimateId must be a UUID', 400);
+  const anchor = await firstForUpdate(trx('estimates').where({ id: anchorId }));
+  if (!anchor) throw errorWithStatus('Estimate to group with not found', 404);
+  if (anchor.estimate_group_id) return anchor.estimate_group_id;
+  const groupId = randomUUID();
+  await trx('estimates').where({ id: anchorId }).update({ estimate_group_id: groupId });
+  return groupId;
+}
+
 function buildEstimatePersistenceFields(body, context = {}) {
   const estimateData = normalizeEstimateDethatchingManagerApproval(body.estimateData, context);
   const quoteRequired = estimateDataHasQuoteRequirement(estimateData) ||
@@ -1126,6 +1175,7 @@ async function resolveEstimateWritePayload({
       { ...body, waveguardTier: resolvedWaveguardTier, estimateData: trustedEstimateData },
       { technician, technicianId, now, pricingAuthority: pricing.audit?.pricing_authority },
     ),
+    ...(await resolveEstimatePropertyLinkage(database, body)),
     ...pricing.audit,
   };
 }
@@ -1152,6 +1202,14 @@ async function createOrReuseAdminEstimate({
 
   return database.transaction(async (trx) => {
     let canReplaceLinkedEstimate = false;
+
+    // "Add another property": the builder passes the FIRST estimate's id and
+    // the new sibling joins (or starts) its group. Resolved inside the
+    // transaction so the anchor's minted group id and the sibling's insert
+    // commit together.
+    if (body.groupWithEstimateId) {
+      writeFields.estimate_group_id = await ensureEstimateGroupId(trx, body.groupWithEstimateId);
+    }
 
     if (linkedLeadId) {
       const lead = await firstForUpdate(trx('leads').where({ id: linkedLeadId }).whereNull('deleted_at'));
@@ -1514,6 +1572,8 @@ module.exports = {
   assertLiveTermiteRentalRates,
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
+  ensureEstimateGroupId,
+  resolveEstimatePropertyLinkage,
   estimateExpiresAt,
   ESTIMATE_SEND_EXPIRY_DAYS,
   estimateViewUrl,

@@ -571,8 +571,43 @@ router.get('/:id/edit-source', async (req, res, next) => {
       showOneTimeOption: !!estimate.show_one_time_option,
       billByInvoice: !!estimate.bill_by_invoice,
       satelliteUrl: estimate.satellite_url,
+      propertyId: estimate.property_id || null,
+      estimateGroupId: estimate.estimate_group_id || null,
       inputs,
       engineProfile,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/estimates/:id/group — the multi-property group this estimate
+// belongs to: every sibling (including the requested one) with the summary the
+// builder's group strip renders. Ungrouped estimates return just themselves so
+// the client needs no special case.
+router.get('/:id/group', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const siblings = estimate.estimate_group_id
+      ? await db('estimates')
+        .where({ estimate_group_id: estimate.estimate_group_id })
+        .whereNull('archived_at')
+        .orderBy('created_at', 'asc')
+      : [estimate];
+    res.json({
+      estimateGroupId: estimate.estimate_group_id || null,
+      estimates: siblings.map((e) => ({
+        id: e.id,
+        status: e.status,
+        address: e.address,
+        propertyId: e.property_id || null,
+        customerId: e.customer_id || null,
+        customerName: e.customer_name,
+        monthlyTotal: e.monthly_total != null ? Number(e.monthly_total) : null,
+        annualTotal: e.annual_total != null ? Number(e.annual_total) : null,
+        onetimeTotal: e.onetime_total != null ? Number(e.onetime_total) : null,
+        waveguardTier: e.waveguard_tier || null,
+        isCurrent: e.id === estimate.id,
+      })),
     });
   } catch (err) { next(err); }
 });
@@ -1003,6 +1038,45 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
       sentChannels,
       failedChannels,
     };
+  }
+
+  // Multi-property group publication: sending the anchor publishes its sibling
+  // estimates too — the customer's ONE link renders every property, and each
+  // sibling's own token must be acceptable, which requires sent status. Expiry
+  // aligns to this send. Follow-up state is PRE-BURNED (booleans true, and the
+  // engagement sweeps key on the same flags): the customer got one message for
+  // the whole group, so only the anchor may ever drive follow-up comms —
+  // sibling rows must never re-message the same person about the same link.
+  if (estimate.estimate_group_id) {
+    try {
+      const publishedSiblings = await db('estimates')
+        .where({ estimate_group_id: estimate.estimate_group_id })
+        .whereNot({ id: estimate.id })
+        .whereIn('status', ['draft', 'scheduled', 'send_failed'])
+        .whereNull('archived_at')
+        .whereNull('price_locked_at')
+        .update({
+          status: 'sent',
+          sent_at: db.fn.now(),
+          expires_at: nextExpiresAt,
+          scheduled_at: null,
+          send_method: null,
+          followup_unviewed_sent: true,
+          followup_viewed_sent: true,
+          followup_final_sent: true,
+          followup_expiring_sent: true,
+          estimate_data: db.raw(
+            "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({ groupPublishedByEstimateId: estimate.id })],
+          ),
+          updated_at: db.fn.now(),
+        });
+      if (publishedSiblings) {
+        logger.info(`[admin-estimates] group ${estimate.estimate_group_id}: published ${publishedSiblings} sibling estimate(s) with anchor ${estimate.id}`);
+      }
+    } catch (e) {
+      logger.error(`[admin-estimates] group sibling publication failed for estimate ${estimate.id}: ${e.message}`);
+    }
   }
 
   try {
