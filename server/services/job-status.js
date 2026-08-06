@@ -315,6 +315,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   // cancellation-notice obligation; read by the post-commit worker.
   let cancelNoticeClaimTs = null;
   let cancelNoticeLateClaim = false;
+  let cancelNoticeCallerClaim = false;
 
   async function doWrites(t) {
     // A pending outbound-callback booking (AI call pipeline, held for office
@@ -494,6 +495,11 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
         // The transition still commits; the post-commit worker attempts a
         // LATE claim so the obligation isn't lost (codex r20).
         cancelNoticeLateClaim = notifyCustomer === undefined || notifyCustomer === true;
+        // Caller-owned transitions repair their claim too (codex r45+):
+        // the route may die before handleCancellation, and the sweep's
+        // late-claim would recreate the row as evidence-gated plain
+        // 'pending', silently dropping the operator's notify intent.
+        cancelNoticeCallerClaim = notifyCustomer === 'caller';
         logger.warn(`[job-status] cancellation-notice claim failed for ${jobId}: ${claimErr.message}`);
       }
     }
@@ -522,9 +528,30 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // Evidence = THIS visit's messaging_audit_log rows (sms_log never
     // stores the visit id) with provider acceptance and a genuine Twilio
     // SID; sends predating the linkage close silently via the sweep.
-    if (!cancelNoticeClaimTs && !cancelNoticeLateClaim) return;
+    if (!cancelNoticeClaimTs && !cancelNoticeLateClaim && !cancelNoticeCallerClaim) return;
     void (async () => {
       try {
+        if (!cancelNoticeClaimTs && cancelNoticeCallerClaim) {
+          // CLAIM-ONLY repair preserving the caller's notify intent as
+          // durable 'pending_notify' — the route adopts it immediately
+          // (ownable singleton) and the sweep settles it without
+          // re-deriving delivery evidence if the route died. Never
+          // worker-sends: caller-owned notices are the route's to send.
+          const callerTs = nextClaimTs();
+          await db('appointment_reminders')
+            .where({ scheduled_service_id: jobId })
+            .where(function claimable() {
+              this.whereNull('cancellation_notice_at')
+                .orWhere(function stale() {
+                  this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                    .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
+                    .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
+                });
+            })
+            .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
+            .update({ cancellation_notice_at: callerTs, cancellation_notice_state: 'pending_notify', updated_at: callerTs });
+          return;
+        }
         if (!cancelNoticeClaimTs && cancelNoticeLateClaim) {
           // In-trx claim failed (r20): take it now, outside the trx.
           const lateTs = nextClaimTs();
