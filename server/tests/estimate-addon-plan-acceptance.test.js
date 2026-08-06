@@ -121,7 +121,7 @@ describe('tier-upgrade review gating (persisted-tier comparison, codex r2)', () 
 
 describe('family-scoped existing-appointment adoption', () => {
   test("a tree & shrub estimate's family keys never match an upcoming pest visit", () => {
-    const familyKeys = estimateFamilyKeysForAdoption(treeShrubEstimateData);
+    const familyKeys = estimateFamilyKeysForAdoption({}, treeShrubEstimateData);
     expect([...familyKeys]).toEqual(['tree_shrub']);
     expect(appointmentMatchesEstimateFamily(
       { service_type: 'Quarterly Pest Control Service' },
@@ -134,7 +134,7 @@ describe('family-scoped existing-appointment adoption', () => {
   });
 
   test('palm visits never stand in for a tree & shrub estimate (codex r3)', () => {
-    const familyKeys = estimateFamilyKeysForAdoption(treeShrubEstimateData);
+    const familyKeys = estimateFamilyKeysForAdoption({}, treeShrubEstimateData);
     // "Palm Tree Injections" contains the tree token, but palm precedence
     // keeps it a palm-family row — a T&S accept must go to the slot picker.
     expect(appointmentMatchesEstimateFamily(
@@ -154,7 +154,7 @@ describe('family-scoped existing-appointment adoption', () => {
         },
       },
     };
-    const palmKeys = estimateFamilyKeysForAdoption(palmData);
+    const palmKeys = estimateFamilyKeysForAdoption({}, palmData);
     expect(appointmentMatchesEstimateFamily(
       { service_type: 'Palm Tree Injections' },
       palmKeys,
@@ -168,7 +168,7 @@ describe('family-scoped existing-appointment adoption', () => {
   });
 
   test('rows without a resolvable service family never stand in for a first visit', () => {
-    const familyKeys = estimateFamilyKeysForAdoption(treeShrubEstimateData);
+    const familyKeys = estimateFamilyKeysForAdoption({}, treeShrubEstimateData);
     expect(appointmentMatchesEstimateFamily({ service_type: '' }, familyKeys)).toBe(false);
     expect(appointmentMatchesEstimateFamily({}, familyKeys)).toBe(false);
   });
@@ -187,7 +187,7 @@ describe('family-scoped existing-appointment adoption', () => {
         },
       },
     };
-    const familyKeys = estimateFamilyKeysForAdoption(pestData);
+    const familyKeys = estimateFamilyKeysForAdoption({}, pestData);
     // The seeder's serviceKeyFor treats a pest-led combined label as
     // pest_control; the route-side name parser used to call it rodent and
     // reject a genuinely adoptable visit.
@@ -216,7 +216,7 @@ describe('family-scoped existing-appointment adoption', () => {
         },
       },
     };
-    const familyKeys = estimateFamilyKeysForAdoption(pestData);
+    const familyKeys = estimateFamilyKeysForAdoption({}, pestData);
     expect(appointmentMatchesEstimateFamily(
       { service_type: 'Quarterly Pest Control Service' },
       familyKeys,
@@ -247,7 +247,7 @@ describe('family-scoped existing-appointment adoption', () => {
         },
       },
     };
-    const recurringKeys = estimateFamilyKeysForAdoption(mixedData, { serviceMode: 'recurring' });
+    const recurringKeys = estimateFamilyKeysForAdoption({}, mixedData, { serviceMode: 'recurring' });
     expect([...recurringKeys]).toEqual(['pest_control']);
     expect(appointmentMatchesEstimateFamily(
       { service_type: 'Bora-Care Termite Treatment' },
@@ -258,7 +258,7 @@ describe('family-scoped existing-appointment adoption', () => {
       recurringKeys,
     )).toBe(true);
 
-    const oneTimeKeys = estimateFamilyKeysForAdoption(mixedData, { serviceMode: 'one_time' });
+    const oneTimeKeys = estimateFamilyKeysForAdoption({}, mixedData, { serviceMode: 'one_time' });
     expect(appointmentMatchesEstimateFamily(
       { service_type: 'Quarterly Pest Control Service' },
       oneTimeKeys,
@@ -290,7 +290,7 @@ describe('family-scoped existing-appointment adoption', () => {
   });
 
   test('stale service_type labels classify by catalog identity (codex r5)', () => {
-    const familyKeys = estimateFamilyKeysForAdoption(treeShrubEstimateData);
+    const familyKeys = estimateFamilyKeysForAdoption({}, treeShrubEstimateData);
     // Row labeled "Tree & Shrub Care" but actually a palm program per its
     // catalog link — must NOT be adopted by a T&S estimate.
     expect(appointmentMatchesEstimateFamily({
@@ -324,7 +324,7 @@ describe('family-scoped existing-appointment adoption', () => {
         },
       },
     };
-    const commercialKeys = estimateFamilyKeysForAdoption(commercialData);
+    const commercialKeys = estimateFamilyKeysForAdoption({}, commercialData);
     expect(appointmentMatchesEstimateFamily(
       { service_type: 'Commercial Lawn Treatment Program' },
       commercialKeys,
@@ -354,7 +354,7 @@ describe('family-scoped existing-appointment adoption', () => {
     };
     // Cross-family modes: nothing is adoptable under BOTH → contract falls
     // to the slot picker, which works for either mode.
-    expect(estimateFamilyKeysForAdoption(mixedData, {
+    expect(estimateFamilyKeysForAdoption({}, mixedData, {
       serviceModes: ['recurring', 'one_time'],
     }).size).toBe(0);
     // Same-family modes (pest plan with a pest one-time choice) still adopt.
@@ -373,13 +373,48 @@ describe('family-scoped existing-appointment adoption', () => {
         },
       },
     };
-    expect([...estimateFamilyKeysForAdoption(pestBothModes, {
+    expect([...estimateFamilyKeysForAdoption({}, pestBothModes, {
       serviceModes: ['recurring', 'one_time'],
     })]).toEqual(['pest_control']);
   });
 
+  test('a derived one-time pest choice supplies the one-time family (codex r9)', () => {
+    // show_one_time_option derives a pest offer from recurring pricing while
+    // the STORED one-time rows carry only the WaveGuard setup fee — the
+    // effective-choice mechanism (one_time_pest) must supply the family, or
+    // the contract-time intersection empties and rejects a valid pest visit.
+    const estimate = { show_one_time_option: true };
+    const derivedChoiceData = {
+      result: {
+        recurring: {
+          services: [{
+            name: 'Quarterly Pest Control Service',
+            service: 'pest_control',
+            frequency: 'quarterly',
+            monthly: 39,
+            perVisit: 117,
+            visitsPerYear: 4,
+            selected: true,
+            isSelected: true,
+          }],
+        },
+        oneTime: {
+          items: [{ name: 'WaveGuard Membership Setup', service: 'waveguard_setup', price: 99 }],
+        },
+      },
+    };
+    const bothModes = estimateFamilyKeysForAdoption(estimate, derivedChoiceData, {
+      serviceModes: ['recurring', 'one_time'],
+    });
+    expect([...bothModes]).toEqual(['pest_control']);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Quarterly Pest Control Service' },
+      bothModes,
+    )).toBe(true);
+  });
+
   test('an estimate with no resolvable services offers no adoption at all', () => {
-    expect(estimateFamilyKeysForAdoption(null).size).toBe(0);
-    expect(estimateFamilyKeysForAdoption({}).size).toBe(0);
+    expect(estimateFamilyKeysForAdoption({}, null).size).toBe(0);
+    expect(estimateFamilyKeysForAdoption({}, {}).size).toBe(0);
   });
 });

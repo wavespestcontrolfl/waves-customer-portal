@@ -522,8 +522,21 @@ function serviceFamilyKeyForAdoption(value) {
 // customer-wide fallback in findLinkedUpcomingAppointment). Derived from the
 // same acceptance lists the accept handler schedules from, so "what we'd
 // book" and "what an existing row may replace" can never disagree.
-function estimateFamilyKeysForAdoption(estData, { serviceMode, serviceModes } = {}) {
+function estimateFamilyKeysForAdoption(estimate, estData, { serviceMode, serviceModes } = {}) {
   const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData || {});
+  // The ONE-TIME family comes from the same effective-choice mechanism the
+  // accept uses (codex #3228 r9): when show_one_time_option derives a pest
+  // offer from recurring pricing, the STORED one-time rows may hold only the
+  // WaveGuard setup fee — classifying those would empty the contract-time
+  // intersection and reject a valid same-family appointment. Acceptance
+  // swaps in the one_time_pest choice via acceptedOneTimeChoiceListForEstimate,
+  // so family derivation must read the same list. Fail-soft to the stored
+  // rows — a derivation error must not break the matcher.
+  let effectiveOneTimeList = oneTimeList;
+  try {
+    const choiceList = acceptedOneTimeChoiceListForEstimate(estimate || {}, estData || {});
+    if (Array.isArray(choiceList) && choiceList.length > 0) effectiveOneTimeList = choiceList;
+  } catch { /* stored rows stand */ }
   // Scoped to the accepted service mode (codex #3228 r4): a mixed estimate
   // (recurring pest + one-time Bora-Care) must not let a one-time-family
   // appointment stand in for the RECURRING plan's first visit — acceptance
@@ -541,7 +554,7 @@ function estimateFamilyKeysForAdoption(estData, { serviceMode, serviceModes } = 
     ? serviceModes
     : [serviceMode || 'recurring'];
   const keySets = modes.map((mode) => {
-    const list = mode === 'one_time' ? oneTimeList : recurringSvcList;
+    const list = mode === 'one_time' ? effectiveOneTimeList : recurringSvcList;
     return new Set(
       (list || [])
         .map((svc) => serviceFamilyKeyForAdoption(svc))
@@ -631,10 +644,10 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // mode (guarantee-only / invoice-only shapes with no service lists), the
   // explicit link keeps its historical precedence.
   const anyModeFamilyKeys = new Set([
-    ...estimateFamilyKeysForAdoption(data, { serviceMode: 'recurring' }),
-    ...estimateFamilyKeysForAdoption(data, { serviceMode: 'one_time' }),
+    ...estimateFamilyKeysForAdoption(estimate, data, { serviceMode: 'recurring' }),
+    ...estimateFamilyKeysForAdoption(estimate, data, { serviceMode: 'one_time' }),
   ]);
-  const familyKeys = estimateFamilyKeysForAdoption(data, {
+  const familyKeys = estimateFamilyKeysForAdoption(estimate, data, {
     serviceMode: opts.serviceMode,
     serviceModes: opts.serviceModes,
   });
