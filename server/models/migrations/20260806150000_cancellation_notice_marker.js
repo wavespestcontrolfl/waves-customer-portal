@@ -36,13 +36,15 @@ exports.up = async (knex) => {
     "CREATE INDEX IF NOT EXISTS idx_appt_reminders_cancel_pending ON appointment_reminders (cancellation_notice_at) WHERE cancellation_notice_state IN ('pending', 'pending_notify')",
   );
 
-  // Record THIS deploy as the reminder-linkage epoch (codex r30): other
-  // senders wrote appointment-linked audits long before this change, so
-  // no data-derived cutoff is trustworthy — the migration timestamp is.
-  // Rows created before this instant are 'legacy' for the cancellation
-  // hook's announcement evidence.
+  // Seed the reminder-linkage epoch UNSTAMPED (codex r30/r32): this
+  // migration runs as preDeployCommand while the OLD instance still owns
+  // sending, so the migration timestamp would misclassify rows the old
+  // code creates during the deploy overlap as post-linkage. A NULL
+  // last_sent_at reads as 'infinity' in the evidence checks (everything
+  // legacy — the safe pre-linkage behavior); the first stale-claim sweep
+  // tick on a linkage-capable instance stamps the real epoch.
   await knex.raw(
-    "INSERT INTO ops_email_send_state (email_key, last_sent_at, updated_at) VALUES ('cancel-notice-linkage-epoch', now(), now()) ON CONFLICT (email_key) DO NOTHING",
+    "INSERT INTO ops_email_send_state (email_key, last_sent_at, updated_at) VALUES ('cancel-notice-linkage-epoch', NULL, now()) ON CONFLICT (email_key) DO NOTHING",
   );
 };
 

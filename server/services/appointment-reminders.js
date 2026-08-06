@@ -2537,12 +2537,18 @@ const AppointmentReminders = {
               .where({ id: record.id, cancellation_notice_state: 'sent' })
               .where('cancellation_notice_at', noticeToken)
               .update({ cancellation_notice_state: preStampState === 'pending_notify' ? 'pending_notify' : 'pending', updated_at: new Date() });
-            // Keep the pending lease ONLY while the sweep runs to settle
-            // it — with the gate off there is no sweep, so parking would
-            // strand the claim and block an immediate route retry for the
-            // lease duration (codex r7). Gate off → release for retry.
+            // Keep the pending lease ONLY when something will settle it.
+            // With the gate ON the 15-minute sweep re-attempts; parking a
+            // ROUTE claim with the gate off would strand it and block an
+            // immediate route retry for the lease duration (codex r7).
+            // But a caller-supplied claimToken means the SWEEP or hook
+            // already owns this obligation (existing-claim settlement runs
+            // UNGATED while late-claim creation is gated) — releasing it
+            // with the gate off would drop the owed notice forever, so
+            // sweep-owned retryable claims are retained regardless of the
+            // gate (codex r32).
             const { isEnabled } = require('../config/feature-gates');
-            if (isEnabled('cancelNoticeHook')) return false;
+            if (claimToken || isEnabled('cancelNoticeHook')) return false;
           }
           await db('appointment_reminders')
             .where({ id: record.id })
@@ -2793,6 +2799,18 @@ const AppointmentReminders = {
   // still none → terminal silent suppression. Fenced by the reclaim token.
   async sweepStaleCancellationClaims() {
     try {
+      // Stamp the linkage epoch on the FIRST sweep tick of a
+      // linkage-capable instance (codex r32): the migration seeds the row
+      // with NULL (everything legacy) because it runs preDeploy while the
+      // old instance still owns sending. By the first tick here, this
+      // deploy owns sending, so now() is a true capability boundary.
+      // Idempotent — only ever fills NULL.
+      await db('ops_email_send_state')
+        .where({ email_key: 'cancel-notice-linkage-epoch' })
+        .whereNull('last_sent_at')
+        .update({ last_sent_at: db.fn.now(), updated_at: db.fn.now() })
+        .catch(() => {});
+
       // Late-claim fallback (codex r25) — claim CREATION is gated like
       // every other creation path (codex r26): a dark feature must not
       // mint new obligations; settlement of existing ones stays ungated.
