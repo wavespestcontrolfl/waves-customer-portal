@@ -317,5 +317,6 @@ async function runRescheduleIntentWatcher(opts = {}) {
 
 module.exports = {
   runRescheduleIntentWatcher,
+  replayPendingBells,
   _private: { composeRescheduleIntentDigest },
 };

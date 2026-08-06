@@ -3401,6 +3401,8 @@ function initScheduledJobs() {
       const verifyLock = await runExclusive('csr-follow-up-verify', async () => {
         const CSRCoach = require('./csr/csr-coach');
         await CSRCoach.verifyFollowUps();
+        // Hourly bell replay (codex #3232 r21).
+        await require('./reschedule-intent-watcher').replayPendingBells();
       });
       if (verifyLock && verifyLock.skipped && verifyLock.reason !== 'lease_held') {
         const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
