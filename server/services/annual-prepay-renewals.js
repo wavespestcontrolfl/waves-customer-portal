@@ -622,7 +622,21 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   if (cols.estimated_price && term?.prepay_invoice_id) {
     try {
       const inv = await conn('invoices').where({ id: term.prepay_invoice_id }).first('subtotal', 'total');
-      const base = Number(inv?.subtotal) > 0 ? Number(inv.subtotal) : Number(inv?.total) || 0;
+      let base = Number(inv?.subtotal) > 0 ? Number(inv.subtotal) : Number(inv?.total) || 0;
+      // A multi-property group prepay shares ONE invoice across several terms
+      // — its subtotal covers EVERY property, so dividing it by this term's
+      // visit count would inflate the fallback price. When siblings share the
+      // invoice, this term's own prepay_amount (its per-property share) is
+      // the right base. Guarded overlay: any failure here keeps the classic
+      // single-term base above.
+      try {
+        const [{ count: termCount } = {}] = await conn('annual_prepay_terms')
+          .where({ prepay_invoice_id: term.prepay_invoice_id })
+          .count('id as count');
+        if (Number(termCount) > 1 && Number(term?.prepay_amount) > 0) {
+          base = Number(term.prepay_amount);
+        }
+      } catch { /* shared-invoice overlay is best-effort */ }
       if (base > 0) seededVisitPrice = Math.round((base / coverageVisitCount) * 100) / 100;
     } catch (err) {
       logger.warn(`[annual-prepay] seeded visit price lookup skipped: ${err.message}`);

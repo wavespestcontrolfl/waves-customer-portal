@@ -2911,6 +2911,22 @@ const EstimateConverter = {
           // accept): the credit line exists IFF the ledger consumed exactly
           // that amount, or the whole accept rolls back — never an accepted
           // prepay beside an unconsumed deposit row.
+          let appliedPrepayDepositCredit = 0;
+          // Multi-property group accept: the caller already minted ONE
+          // combined prepay invoice covering every property in the group (on
+          // the caller's transaction) — this estimate's leg must NOT mint its
+          // own. The term below anchors to the shared invoice, and the
+          // term's prepayAmount records THIS property's net share
+          // (annualAmount), never the combined invoice total — renewal
+          // quoting and covered-visit pricing read it per property. Deposit
+          // credit is the group service's concern (one ledger per invoice —
+          // billing invariant), so this leg consumes none. Caller-trx only:
+          // rollback covers the shared invoice, so no void path is needed.
+          if (opts.prepaySharedInvoiceId && usingCallerDatabase) {
+            draftInvoiceId = opts.prepaySharedInvoiceId;
+            draftInvoiceAmount = annualAmount;
+            draftInvoicePayUrl = null;
+          } else {
           const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
           let prepayDepositCredit;
           try {
@@ -2956,7 +2972,7 @@ const EstimateConverter = {
           // void the just-created invoice on a no-caller-transaction run
           // (accept-path runs ride the caller trx and roll back wholesale).
           draftInvoiceId = inv?.id || null;
-          const appliedPrepayDepositCredit = Number(inv?.applied_deposit_credit) || 0;
+          appliedPrepayDepositCredit = Number(inv?.applied_deposit_credit) || 0;
           if (inv?.id && appliedPrepayDepositCredit > 0) {
             const allocated = await consumeDepositCredit({
               estimateId,
@@ -2974,6 +2990,7 @@ const EstimateConverter = {
           // inv.total === annualAmount, so this is a no-op there.
           draftInvoiceAmount = inv?.total != null ? Number(inv.total) : annualAmount;
           draftInvoicePayUrl = inv?.token ? `/pay/${inv.token}` : null;
+          }
 
           // Coverage config so the paid-invoice → webhook → refreshTermSnapshot
           // pipeline STAMPS the recurring visits prepaid (prevents the completion
