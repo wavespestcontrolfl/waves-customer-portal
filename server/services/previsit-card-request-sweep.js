@@ -50,6 +50,7 @@ const LIVE_VISIT_STATUSES = ['pending', 'confirmed'];
 // Mirror of CALL_OUTBOUND_REVIEW_SOURCE_ACTION (call-booking-source-actions)
 // — required at module top to avoid a cycle with call-recording-processor.
 const OUTBOUND_REVIEW_SOURCE_ACTION = require('./call-booking-source-actions').CALL_OUTBOUND_REVIEW_SOURCE_ACTION;
+const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS, isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const BATCH_CAP = 25;
 
 function sweepGateEnabled() {
@@ -100,14 +101,37 @@ async function runSweep(dbh = db) {
     .whereIn('s.status', LIVE_VISIT_STATUSES)
     .whereBetween('s.scheduled_date', [todayEt, horizonEt])
     .whereNull('s.card_link_sent_at')
-    // Payer-billed visits resolve by PRECEDENCE (payer.js: per-job
-    // payer_id ?? customers.payer_id unless the visit pins self-pay) — the
-    // funnel would skip them as payer_billed AFTER the attempt burned the
-    // cap (codex r4), so mirror the resolution here.
-    .whereNull('s.payer_id')
-    .where((qb) => qb.whereNull('c.payer_id').orWhere('s.self_pay_override', true))
+    // Payer-billed visits resolve by the CANONICAL precedence (payer.js
+    // resolveForInvoice: per-job payer_id ?? customers.payer_id unless the
+    // visit pins self-pay; an INACTIVE payer link falls back to self-pay,
+    // codex r5) — mirrored here so payer-billed visits never burn the cap
+    // while deactivated-payer customers are still invited.
+    .leftJoin('payers as pj', 'pj.id', 's.payer_id')
+    .leftJoin('payers as pa', 'pa.id', 'c.payer_id')
+    .where((qb) => qb
+      // per-job link present but INACTIVE → canonical self-pay (never falls
+      // through to the account payer)
+      .where((jobInactive) => jobInactive
+        .whereNotNull('s.payer_id')
+        .whereRaw('pj.active IS DISTINCT FROM TRUE'))
+      // no per-job link, visit pinned self-pay
+      .orWhere((pinned) => pinned
+        .whereNull('s.payer_id')
+        .where('s.self_pay_override', true))
+      // no per-job link, account payer absent or inactive
+      .orWhere((acct) => acct
+        .whereNull('s.payer_id')
+        .where((a2) => a2.whereNull('c.payer_id').orWhereRaw('pa.active IS DISTINCT FROM TRUE'))))
     .where((qb) => qb.where('s.is_callback', false).orWhereNull('s.is_callback'))
-    .whereNot('s.service_type', 'ilike', '%re-service%')
+    // EVERY canonical always-free label is excluded (codex r5: an
+    // Estimate/Follow-up/Re-Visit row with a stale positive price would get
+    // a card + cancellation-fee ask for work completion never invoices) —
+    // the shared no-cost-visit-types patterns, not a parallel list.
+    .where((qb) => {
+      for (const pattern of ALWAYS_FREE_SERVICE_TYPE_PATTERNS) {
+        qb.whereRaw("COALESCE(s.service_type, '') NOT ILIKE ?", [`%${pattern}%`]);
+      }
+    })
     .whereNotNull('s.customer_id')
     // Funnel positive-price predicate mirrored (codex r3 P1: the funnel
     // skips unpriced/zero-price visits by owner rule 2026-07-30, and
@@ -195,7 +219,7 @@ async function runSweep(dbh = db) {
     const verdict = previsitCardInviteEligible({
       status: visit.status,
       isCallback: visit.is_callback === true,
-      reServiceLabel: /re-?service/i.test(String(visit.service_type || '')),
+      reServiceLabel: isAlwaysFreeServiceType(visit.service_type),
       outboundReviewPending: visit.source_action === OUTBOUND_REVIEW_SOURCE_ACTION && visit.status !== 'confirmed',
       cardLinkSentAt: visit.card_link_sent_at,
       customerEverInvited: false, // query-level NOT EXISTS owns the fast path; the locked recheck below owns the race
@@ -212,7 +236,7 @@ async function runSweep(dbh = db) {
     try {
       await dbh.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['previsit-card-invite', String(visit.customer_id)]);
-        const [reqRow, stampRow] = await Promise.all([
+        const [reqRow, stampRow, liveCustomer] = await Promise.all([
           trx('appointment_card_requests as r')
             .join('scheduled_services as v', 'r.scheduled_service_id', 'v.id')
             .where('v.customer_id', visit.customer_id)
@@ -221,8 +245,15 @@ async function runSweep(dbh = db) {
             .where({ customer_id: visit.customer_id })
             .whereNotNull('card_link_sent_at')
             .first('id'),
+          // Archive race (codex r5): an admin archiving the customer between
+          // the candidate query and this send must win — recheck under the
+          // lock, fail toward not texting.
+          trx('customers')
+            .where({ id: visit.customer_id })
+            .whereNull('deleted_at')
+            .first('id'),
         ]);
-        if (reqRow || stampRow) { skipped += 1; return; }
+        if (reqRow || stampRow || !liveCustomer) { skipped += 1; return; }
         const result = await requestCardForAppointment({
           scheduledServiceId: visit.id,
           trigger: 'previsit_backstop',
