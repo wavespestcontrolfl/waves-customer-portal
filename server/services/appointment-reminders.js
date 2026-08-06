@@ -2251,19 +2251,32 @@ const AppointmentReminders = {
         .where({ id: record.id })
         .update({ cancelled: true, updated_at: new Date() });
 
-      // Send-once via the dedicated atomic marker. `cancelled` is NOT
+      // Send-once via the dedicated atomic claim. `cancelled` is NOT
       // usable as evidence — the status-sync trigger (20260720000000) sets
       // it during the cancel transition itself, before any caller runs
-      // (codex #3233 r1). Whoever flips the NULL marker owns the notice; a
+      // (codex #3233 r1). Whoever takes the claim owns the notice; a
       // sendNotification:false caller claims too, because suppression is a
-      // decision that must block a later auto-send by the shared-writer
-      // hook regardless of call ordering.
+      // decision that must block a later auto-send regardless of ordering.
+      // A stale 'pending' claim (>15 min, i.e. a crash between claim and
+      // provider acceptance) is reclaimable so the crash window cannot
+      // recreate the silent-cancellation failure (r3); 'suppressed' and
+      // 'sent' are terminal and never reclaimed.
       const claimed = await db('appointment_reminders')
         .where({ id: record.id })
-        .whereNull('cancellation_notice_at')
-        .update({ cancellation_notice_at: new Date(), updated_at: new Date() });
+        .where(function claimable() {
+          this.whereNull('cancellation_notice_at').orWhere(function staleLease() {
+            this.where('cancellation_notice_state', 'pending')
+              .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"));
+          });
+        })
+        .update({ cancellation_notice_at: new Date(), cancellation_notice_state: 'pending', updated_at: new Date() });
 
       if (!sendNotification) {
+        if (claimed) {
+          await db('appointment_reminders')
+            .where({ id: record.id })
+            .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
+        }
         logger.info(`[appt-remind] Cancellation notice suppressed for ${scheduledServiceId}`);
         return record;
       }
@@ -2274,17 +2287,32 @@ const AppointmentReminders = {
         return record;
       }
 
-      // Claim-release on failed attempts (codex r2 P2): the marker must
-      // only survive a successful send or a deliberate suppression — a
-      // failed attempt (lookup / render / provider) releases it so the
-      // routes' existing retry behavior can re-attempt the notice.
-      const releaseClaim = async () => {
+      // Claim finalization (codex r2 P2 + r3 P2): the claim survives only a
+      // successful send or deliberate suppression. On a failed attempt the
+      // claim is released for retry — UNLESS a recipient was already
+      // accepted by the provider (multi-contact partial failure: the audit
+      // row for THIS visit's cancellation carries a genuine Twilio SID), in
+      // which case releasing would let a retry double-text the accepted
+      // recipient; the claim finalizes as 'sent' instead.
+      const finalizeClaim = async (sentOk) => {
         try {
+          let accepted = Boolean(sentOk);
+          if (!accepted) {
+            accepted = Boolean(await db('messaging_audit_log')
+              .where({ appointment_id: String(scheduledServiceId), purpose: 'appointment_cancellation' })
+              .whereNotNull('sent_at')
+              .whereRaw("provider_message_id ~ '^(SM|MM)'")
+              .first('id'));
+          }
           await db('appointment_reminders')
             .where({ id: record.id })
-            .update({ cancellation_notice_at: null, updated_at: new Date() });
-        } catch (releaseErr) {
-          logger.warn(`[appt-remind] notice-claim release failed for ${scheduledServiceId}: ${releaseErr.message}`);
+            .update(accepted
+              ? { cancellation_notice_state: 'sent', updated_at: new Date() }
+              : { cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+          return accepted;
+        } catch (finalizeErr) {
+          logger.warn(`[appt-remind] notice-claim finalize failed for ${scheduledServiceId}: ${finalizeErr.message}`);
+          return Boolean(sentOk);
         }
       };
 
@@ -2313,19 +2341,20 @@ const AppointmentReminders = {
           }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId });
           if (noticeSent) {
             logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id}`);
+            await finalizeClaim(true);
           } else {
-            // No provider acceptance — release so a retry can re-attempt.
-            await releaseClaim();
+            // Release for retry unless a recipient was already accepted.
+            await finalizeClaim(false);
           }
           reportOutcome(noticeSent, noticeSent
             ? null
             : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)');
         } else {
-          await releaseClaim();
+          await finalizeClaim(false);
           reportOutcome(false, 'Customer not found');
         }
       } catch (sendErr) {
-        await releaseClaim();
+        await finalizeClaim(false);
         throw sendErr;
       }
 

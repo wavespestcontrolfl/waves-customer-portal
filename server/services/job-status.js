@@ -439,9 +439,8 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       try {
         const row = await db('appointment_reminders')
           .where({ scheduled_service_id: jobId })
-          .first('cancellation_notice_at', 'suppressed_by_sibling', 'customer_id',
-            'reminder_72h_sent', 'reminder_24h_sent');
-        if (!row || row.cancellation_notice_at) return;
+          .first('cancellation_notice_at', 'cancellation_notice_state', 'suppressed_by_sibling');
+        if (!row || row.cancellation_notice_state === 'sent' || row.cancellation_notice_state === 'suppressed') return;
         const AppointmentReminders = require('./appointment-reminders');
         if (notifyCustomer === false || row.suppressed_by_sibling) {
           await AppointmentReminders.handleCancellation(jobId, { sendNotification: false });
@@ -449,26 +448,18 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
         }
         // Delivery evidence lives in messaging_audit_log — sms_log never
         // stores the visit id (the provider forwards a metadata allowlist).
-        // Primary: audit rows linked by appointment_id (populated by
-        // safeSend as of this PR) with provider acceptance and a genuine
-        // Twilio SID (suppressed/sentinel sends fail the regex). Fallback
-        // for sends predating the linkage: the pipeline's this-visit sent
-        // flag PLUS a customer-level real appointment send — strictly
-        // stronger than the flags alone (which pref-disable and
-        // booked-<72h closures also set without any send).
-        const APPT_PURPOSES = ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'];
-        const realSend = (q) => q
-          .whereIn('purpose', APPT_PURPOSES)
+        // THIS-visit evidence only (codex r3): audit rows linked by
+        // appointment_id (populated by safeSend as of this PR) with
+        // provider acceptance and a genuine Twilio SID (suppressed and
+        // sentinel sends fail the regex). Sends predating the linkage
+        // yield no evidence and close silently — a customer-level
+        // fallback would text about visits that were never announced.
+        const delivered = Boolean(await db('messaging_audit_log')
+          .where({ appointment_id: String(jobId) })
+          .whereIn('purpose', ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'])
           .whereNotNull('sent_at')
-          .whereRaw("provider_message_id ~ '^(SM|MM)'");
-        let delivered = Boolean(await realSend(
-          db('messaging_audit_log').where({ appointment_id: String(jobId) }),
-        ).first('id'));
-        if (!delivered && (row.reminder_72h_sent || row.reminder_24h_sent) && row.customer_id) {
-          delivered = Boolean(await realSend(
-            db('messaging_audit_log').where({ customer_id: row.customer_id }),
-          ).first('id'));
-        }
+          .whereRaw("provider_message_id ~ '^(SM|MM)'")
+          .first('id'));
         await AppointmentReminders.handleCancellation(jobId, { sendNotification: delivered });
       } catch (e) {
         logger.warn(`[job-status] cancellation-notice hook failed for ${jobId}: ${e.message}`);

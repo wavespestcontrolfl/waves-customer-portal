@@ -3377,9 +3377,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
             lng,
             notes,
             trx,
-            // Series operations send ONE combined notice below — the
-            // shared-writer notice hook must not also text per visit.
-            notifyCustomer: false,
+            // Caller-owned: the series branch below runs its own awaited
+            // per-visit handleCancellation (notify-or-suppress per the
+            // request flag) plus one combined notice — the hook must stand
+            // down entirely, not race those claims.
+            notifyCustomer: 'caller',
           });
         }
 

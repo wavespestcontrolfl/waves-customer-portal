@@ -278,9 +278,11 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
       transitionedBy: actorId || null,
       notes: 'Signup cancellation',
       trx,
-      // Offboarding deliberately suppresses per-visit messages — the
-      // shared-writer notice hook must not text.
-      notifyCustomer: false,
+      // Caller-owned: offboarding suppresses via its OWN awaited
+      // handleCancellation after its post-flip compensation check — a
+      // fire-and-forget hook claim could land after a compensating revert
+      // (codex r3).
+      notifyCustomer: 'caller',
     });
   });
   // The flip's atomic guard covers only `status` — a tech can tap En route
