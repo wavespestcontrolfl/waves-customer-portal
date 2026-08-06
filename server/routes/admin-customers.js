@@ -3005,6 +3005,19 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // customer's mailbox; an operator can.
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          if (updates.monthly_rate !== undefined) {
+            // A blind admin rate edit invalidates any finer per-family
+            // attribution — reset the plan-rate ledger to a single
+            // unattributed component matching the new scalar (cleared when
+            // the rate is zeroed). Savepoint-confined + fail-soft: a ledger
+            // hiccup must never block the customer save.
+            try {
+              await trx.transaction((sp) => require('../services/plan-rate-ledger')
+                .resetLedgerToScalar(sp, req.params.id, updates.monthly_rate, { source: 'admin_edit' }));
+            } catch (ledgerErr) {
+              logger.warn(`[admin-customers] plan-rate ledger reset failed for customer ${req.params.id}: ${ledgerErr.message}`);
+            }
+          }
           if (addressChanged) {
             await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);
             // Open leads/estimates snapshot the address at creation and never

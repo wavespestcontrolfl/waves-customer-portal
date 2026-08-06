@@ -521,14 +521,26 @@ function hasWaveGuardSetupService(services = []) {
 // 0 in every other case (fail-safe: any classification doubt → replace,
 // the pre-existing behavior). Live pipeline stages only — a churned/dormant
 // re-signup's stale rate must never be summed back in.
-async function addOnPreservedMonthlyRateBase({
+async function addOnPreservedMonthlyRateBase(args = {}) {
+  const context = await classifyAddOnAcceptContext(args);
+  return context.addOnBase;
+}
+
+// Full classification context for an accept against the customer's existing
+// billed plans. addOnBase carries the #3241 sum semantics (existing rate for
+// a proven-disjoint add-on, else 0); hadOtherLiveFamilies feeds the
+// plan-rate ledger's review signal (a legacy multi-plan customer whose
+// un-splittable scalar is being replaced — the owner hand-fix case, now
+// surfaced instead of silent).
+async function classifyAddOnAcceptContext({
   database, estimateId, estimate, estimateData, customer,
   adoptedExistingAppointmentId = null,
 } = {}) {
+  const none = { addOnBase: 0, hadOtherLiveFamilies: false };
   const existingMonthlyRate = Number(customer?.monthly_rate);
   if (!['active_customer', 'won', 'at_risk'].includes(customer?.pipeline_stage)
     || !Number.isFinite(existingMonthlyRate) || !(existingMonthlyRate > 0)) {
-    return 0;
+    return none;
   }
   try {
     // Lazy require — estimate-public requires this module inline only, so a
@@ -556,7 +568,7 @@ async function addOnPreservedMonthlyRateBase({
         .map((svc) => serviceFamilyKeyForAdoption(svc))
         .filter(Boolean),
     );
-    if (familyKeys.size === 0) return 0;
+    if (familyKeys.size === 0) return none;
     // The customer's BILLED plan rows: live recurring rows, using the SAME
     // coverage semantics as loadActiveRecurringServiceRows (waveguard-
     // existing-services): NOT IN TERMINAL_STATUSES and NO future-only date
@@ -600,24 +612,30 @@ async function addOnPreservedMonthlyRateBase({
       }));
     const planRows = (Array.isArray(otherPlanRows) ? otherPlanRows : [])
       .filter((row) => row && row.is_callback !== true);
-    if (planRows.length === 0) return 0;
+    if (planRows.length === 0) return none;
     // Fail CLOSED on unclassifiable plan rows (codex #3241 r3): a legacy/
     // generic row that resolves to NO family can't prove it's a different
     // family — treating it as disjoint would sum the old rate onto an
-    // estimate that may re-price that very plan. Unknown → replace.
-    const everyRowClassifiable = planRows.every((row) => serviceFamilyKeyForAdoption({
+    // estimate that may re-price that very plan. Unknown → replace (and it
+    // still counts as other-live-family evidence for the review signal —
+    // a row we can't classify may well be another plan).
+    const rowFamilies = planRows.map((row) => serviceFamilyKeyForAdoption({
       service: row.catalog_service_key || null,
       name: row.catalog_service_name || null,
       service_type: row.service_type,
     }));
-    if (!everyRowClassifiable) return 0;
-    if (!planRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
-      return existingMonthlyRate;
+    const hadOtherLiveFamilies = rowFamilies.some((family, i) => !family
+      || !appointmentMatchesEstimateFamily(planRows[i], familyKeys));
+    if (rowFamilies.some((family) => !family)) {
+      return { addOnBase: 0, hadOtherLiveFamilies };
     }
-    return 0;
+    if (!planRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
+      return { addOnBase: existingMonthlyRate, hadOtherLiveFamilies };
+    }
+    return { addOnBase: 0, hadOtherLiveFamilies };
   } catch (addOnErr) {
     logger.warn(`[estimate-converter] add-on rate classification failed for customer ${customer?.id} (monthly_rate keeps replace semantics): ${addOnErr.message}`);
-    return 0;
+    return none;
   }
 }
 
@@ -2048,18 +2066,61 @@ const EstimateConverter = {
     // source_estimate_id on the adopted row before conversion runs) keeps
     // the replace semantic: the new quote IS that plan's new price.
     // Fail-safe: any classification doubt → 0 → replace (status quo).
-    const addOnPreservedRateBase = suppressRecurringConversion
-      ? 0
-      : await addOnPreservedMonthlyRateBase({
+    const addOnContext = suppressRecurringConversion
+      ? { addOnBase: 0, hadOtherLiveFamilies: false }
+      : await classifyAddOnAcceptContext({
         database, estimateId, estimate, estimateData, customer,
         adoptedExistingAppointmentId: opts.adoptedExistingAppointmentId || null,
       });
+    const addOnPreservedRateBase = addOnContext.addOnBase;
+    // Plan-rate ledger (owner ruling 2026-08-06, GATE_PLAN_RATE_LEDGER):
+    // per-family slices of this accept. With the gate ON and a seeded
+    // ledger, the scalar becomes the LEDGER SUM — a same-family re-quote
+    // replaces only its own family's slice and every other plan's slice
+    // survives (the multi-plan fix). Gate OFF (or any ledger failure): the
+    // legacy #3241 scalar semantics below stand byte-for-byte and the
+    // ledger only dual-writes advisorily. Savepoint-confined + fail-soft:
+    // a ledger defect must never block an acceptance.
+    let ledgerScalar = null;
+    let planRateReviewNeeded = false;
+    if (!suppressRecurringConversion) {
+      try {
+        const PlanRateLedger = require('./plan-rate-ledger');
+        const slices = PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate });
+        // Serialize concurrent accepts on the customer row when the ledger
+        // has scalar authority — the read-modify-write over components is
+        // only safe if two accepts can't interleave (the legacy add-on path
+        // used an atomic SQL increment for the same reason). Locks taken in
+        // a savepoint persist to the end of the OUTER transaction.
+        if (database.isTransaction && PlanRateLedger.planRateLedgerEnabled()) {
+          await database('customers').where({ id: customerId }).forUpdate().first('id');
+        }
+        const ledgerOutcome = await database.transaction((sp) => PlanRateLedger.applyAcceptToLedger(sp, {
+          customerId,
+          estimateId,
+          slices,
+          previousScalar: Number(customer.monthly_rate) || 0,
+          addOnBase: addOnPreservedRateBase,
+          hadOtherLiveFamilies: addOnContext.hadOtherLiveFamilies,
+        }));
+        if (PlanRateLedger.planRateLedgerEnabled() && ledgerOutcome && Number(ledgerOutcome.scalar) > 0) {
+          ledgerScalar = Math.round(Number(ledgerOutcome.scalar) * 100) / 100;
+          planRateReviewNeeded = ledgerOutcome.reviewNeeded === true;
+        }
+      } catch (ledgerErr) {
+        logger.error(`[estimate-converter] plan-rate ledger apply failed for customer ${customerId} (scalar keeps legacy semantics): ${ledgerErr.message}`);
+        ledgerScalar = null;
+      }
+    }
     // Provisional figure for the audit outputs below — the WRITE itself is
-    // an atomic in-database increment (see customerUpdates), and the actual
-    // post-update value is re-read after the update for logs/email/return.
-    let convertedMonthlyRate = addOnPreservedRateBase > 0
-      ? Math.round((addOnPreservedRateBase + monthlyRate) * 100) / 100
-      : monthlyRate;
+    // ledger-derived (gate on) or an atomic in-database increment (legacy
+    // add-on path), and the actual post-update value is re-read after the
+    // update for logs/email/return.
+    let convertedMonthlyRate = ledgerScalar != null
+      ? ledgerScalar
+      : (addOnPreservedRateBase > 0
+        ? Math.round((addOnPreservedRateBase + monthlyRate) * 100) / 100
+        : monthlyRate);
     // Pre-migration compatibility (Codex round-8): billing_mode +
     // per_application_fee ship in migration 20260709000010 — on a database
     // that hasn't run it (preview env, deploy window) the update keys would
@@ -2101,16 +2162,18 @@ const EstimateConverter = {
           // Without this the customer reads residential and tax is forced to $0.
           // Only SET it for commercial; never downgrade a residential customer.
           ...(hasCommercialRecurring ? { property_type: 'commercial' } : {}),
-          // Add-on accepts SUM onto the existing rate; everything else
-          // (new signups, re-signups, same-family re-quotes) replaces. The
-          // sum is an atomic in-database increment (codex #3241 r2 P1): two
-          // concurrent add-on accepts each computing old + own slice in JS
-          // would lose one increment (last customer write wins even though
-          // both service sets commit); the SQL increment serializes on the
-          // row, so concurrent add-ons stack correctly.
-          monthly_rate: addOnPreservedRateBase > 0
-            ? database.raw('COALESCE(monthly_rate, 0) + ?', [monthlyRate])
-            : convertedMonthlyRate,
+          // Ledger authority (gate on + seeded): the scalar is the ledger
+          // SUM — a same-family re-quote touches only its own family's
+          // slice (the customer row lock above serializes concurrent
+          // accepts). Legacy path: add-on accepts SUM via an atomic
+          // in-database increment (codex #3241 r2 P1 — two concurrent
+          // add-on accepts each computing old + own slice in JS would lose
+          // one increment); everything else replaces.
+          monthly_rate: ledgerScalar != null
+            ? ledgerScalar
+            : (addOnPreservedRateBase > 0
+              ? database.raw('COALESCE(monthly_rate, 0) + ?', [monthlyRate])
+              : convertedMonthlyRate),
           // Estimate-flow recurring customers bill PER VISIT (owner ruling
           // 2026-07-09), never as a monthly membership subscription: the
           // monthly billing cron skips non-membership modes and completion
@@ -2187,7 +2250,10 @@ const EstimateConverter = {
     const customerUpdateResult = await database('customers')
       .where({ id: customerId })
       .update(customerUpdates, ['monthly_rate']);
-    if (addOnPreservedRateBase > 0 && Array.isArray(customerUpdateResult)) {
+    // Ledger-authority writes are plain values (row-lock serialized), so
+    // RETURNING reconciliation is only needed on the legacy atomic-increment
+    // path.
+    if (ledgerScalar == null && addOnPreservedRateBase > 0 && Array.isArray(customerUpdateResult)) {
       const returnedRate = Number(customerUpdateResult[0]?.monthly_rate);
       if (Number.isFinite(returnedRate) && returnedRate > 0) {
         convertedMonthlyRate = Math.round(returnedRate * 100) / 100;
@@ -3583,6 +3649,44 @@ const EstimateConverter = {
       }
     }
 
+    // Plan-rate review alert (owner ruling 2026-08-06): a legacy multi-plan
+    // customer's re-quote landed on the un-splittable path — their scalar
+    // was REPLACED with this accept's slices while other live plan families
+    // exist, and the pre-ledger amounts could not be attributed. This is
+    // the exact case the owner previously discovered by hand; the ledger
+    // records this accept's slices so the NEXT re-quote splits correctly,
+    // and this alert asks the owner to eyeball the rate once. Same deferred
+    // post-commit mechanics as the tier alert above.
+    let planRateReviewNotification = null;
+    if (planRateReviewNeeded) {
+      const planReviewPayload = {
+        type: 'estimate_converted',
+        title: 'Multi-plan rate needs review after re-quote',
+        body: `${customer.first_name} ${customer.last_name} accepted a re-quote at $${convertedMonthlyRate.toFixed(2)}/mo, but they carry other live plans whose pre-ledger amounts could not be attributed — verify their total monthly rate (previous: $${(Number(customer.monthly_rate) || 0).toFixed(2)}/mo).`,
+        options: {
+          icon: '💵',
+          link: `/admin/customers?customerId=${customerId}`,
+          bell: true,
+          metadata: { estimateId, customerId, convertedMonthlyRate },
+        },
+      };
+      if (opts.deferCommercialScheduleNotification === true) {
+        planRateReviewNotification = planReviewPayload;
+      } else {
+        try {
+          const NotificationService = require('./notification-service');
+          void NotificationService.notifyAdmin(
+            planReviewPayload.type,
+            planReviewPayload.title,
+            planReviewPayload.body,
+            planReviewPayload.options,
+          ).catch((err) => logger.warn(`[estimate-converter] plan-rate review notify failed: ${err.message}`));
+        } catch (err) {
+          logger.warn(`[estimate-converter] plan-rate review notify setup failed: ${err.message}`);
+        }
+      }
+    }
+
     // Welcome SMS for new recurring signups — unified across every accept
     // path (public self-accept, manual Mark Won, annual prepay). Previously
     // this text only fired when an admin scheduled the recurring appointment,
@@ -3645,6 +3749,7 @@ const EstimateConverter = {
       commercialScheduleNotification,
       // Same deferral contract as commercialScheduleNotification.
       tierUpgradeNotification,
+      planRateReviewNotification,
       deferredFollowUpReminderRows,
       serviceMode: suppressRecurringConversion ? 'one_time' : 'recurring',
       recurringConversionSkipped: suppressRecurringConversion,
@@ -3724,3 +3829,4 @@ module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern
 module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
 module.exports.addOnPreservedMonthlyRateBase = addOnPreservedMonthlyRateBase;
+module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;

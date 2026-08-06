@@ -10391,6 +10391,23 @@ router.put('/:token/accept', async (req, res, next) => {
         logger.error(`[estimate-accept] tier-upgrade admin notify setup failed: ${e.message}`);
       }
     }
+    // Plan-rate review alert — same deferred post-commit contract as the
+    // tier alert above (multi-plan legacy customer's un-splittable scalar
+    // was replaced; owner eyeballs the rate once).
+    if (acceptConversion?.planRateReviewNotification) {
+      const planNotify = acceptConversion.planRateReviewNotification;
+      try {
+        const NotificationService = require('../services/notification-service');
+        void NotificationService.notifyAdmin(
+          planNotify.type,
+          planNotify.title,
+          planNotify.body,
+          planNotify.options,
+        ).catch((e) => logger.error(`[estimate-accept] plan-rate review notify failed: ${e.message}`));
+      } catch (e) {
+        logger.error(`[estimate-accept] plan-rate review notify setup failed: ${e.message}`);
+      }
+    }
     // The standard conversion runs in-transaction with skipMembershipEmail,
     // so the membership.started email fires here post-commit (mirrors
     // estimate-manual-acceptance). Annual prepay intentionally sends none —
