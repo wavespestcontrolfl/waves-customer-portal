@@ -703,6 +703,10 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     expect(hasCallReServiceIntent({ call_summary: 'revisit: payment terms and book the regular quarterly visit' })).toBe(false);
     expect(hasCallReServiceIntent({ call_summary: 'revisit, the ants are back inside' })).toBe(true);
     expect(hasCallReServiceIntent({ call_summary: 'customer asked for a revisit. Payment discussed separately.' })).toBe(true);
+    // Non-terminator symbols cannot launder either (codex #3231 r6) — and
+    // two-digit clock times still count in plain word position.
+    expect(hasCallReServiceIntent({ call_summary: 'revisit $100 pricing and book the regular quarterly visit' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit at 10' })).toBe(true);
     // A temporal modifier alone never launders an administrative object
     // (codex #3231 r3).
     expect(hasCallReServiceIntent({ call_summary: "revisit next month's pricing and book the regular quarterly visit" })).toBe(false);
