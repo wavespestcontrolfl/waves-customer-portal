@@ -111,7 +111,11 @@ function hasRescheduleOrAwayIntent(body) {
   // the same patterns as "won't".
   const text = body.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
   const cancelAsk = CANCEL_RE.test(text) && CANCEL_CONTEXT_RE.test(text)
-    && !CANCEL_NEGATION_RE.test(text) && !CANCEL_NONAPPT_RE.test(text);
+    && !CANCEL_NEGATION_RE.test(text) && !CANCEL_NONAPPT_RE.test(text)
+    // Acknowledgments / status questions about a DONE cancellation are
+    // not requests (codex r18): "Has my appointment been canceled?",
+    // "Did you cancel…?", "Thanks for canceling."
+    && !/\b(?:has|have|had|was|were|did)\b[^.!?]{0,30}\bcancel|\bthanks?\s+(?:you\s+)?for\s+cancel/i.test(text);
   // "don't reschedule us, you can still come" is the opposite of a
   // reschedule ask (codex r5).
   // A FRESH request anywhere overrides status/acknowledgment clauses

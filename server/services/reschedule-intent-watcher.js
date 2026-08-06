@@ -260,8 +260,10 @@ async function runRescheduleIntentWatcher(opts = {}) {
 
   let rows;
   try {
-    await (opts.replayPendingBells || replayPendingBells)();
+    // Resolution FIRST (codex r18): a flag staff already actioned must
+    // not get its bell replayed.
     await (opts.resolveActionedFlags || resolveActionedFlags)();
+    await (opts.replayPendingBells || replayPendingBells)();
     rows = await (opts.loadRows || loadUnactionedFlags)();
   } catch (err) {
     logger.error(`[reschedule-intent-watcher] query failed: ${err.message}`);

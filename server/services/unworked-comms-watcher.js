@@ -107,6 +107,10 @@ async function loadCallbackCalls(cutoff = new Date()) {
           -- >= 60s approximates a real customer conversation (leg-level
           -- connect state is not recorded) (codex r5).
           AND COALESCE(oc.duration_seconds, 0) >= 60
+          -- Same-customer when both sides are linked (codex r18): a
+          -- shared household number must not let B's call clear A's
+          -- callback.
+          AND (c.customer_id IS NULL OR oc.customer_id IS NULL OR oc.customer_id = c.customer_id)
           AND RIGHT(REGEXP_REPLACE(COALESCE(oc.to_phone, ''), '\\D', '', 'g'), 10)
             = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, ''), '\\D', '', 'g'), 10)
       )
@@ -116,6 +120,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
           AND os.message_type IN ${HUMAN_REPLY_TYPES}
           AND os.status IN ('queued', 'sent', 'delivered')
           AND os.created_at > c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
+          AND (c.customer_id IS NULL OR os.customer_id IS NULL OR os.customer_id = c.customer_id)
           AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10)
             = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, ''), '\\D', '', 'g'), 10)
       )

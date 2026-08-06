@@ -860,7 +860,9 @@ function initScheduledJobs() {
       });
       // A pool-exhausted tick returns {skipped} instead of throwing —
       // surface it so job_health records the missed daily run (codex r16).
-      if (lockRes && lockRes.skipped) {
+      if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
+        // lease_held = another instance is running this watcher (deploy
+        // overlap) — that IS the daily run, not a miss (codex r18).
         // job_health must record the missed daily run (codex r17) — the
         // skip path returns before runExclusive's own bookkeeping.
         const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
@@ -889,7 +891,9 @@ function initScheduledJobs() {
       });
       // A pool-exhausted tick returns {skipped} instead of throwing —
       // surface it so job_health records the missed daily run (codex r16).
-      if (lockRes && lockRes.skipped) {
+      if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
+        // lease_held = another instance is running this watcher (deploy
+        // overlap) — that IS the daily run, not a miss (codex r18).
         // job_health must record the missed daily run (codex r17) — the
         // skip path returns before runExclusive's own bookkeeping.
         const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
@@ -919,7 +923,9 @@ function initScheduledJobs() {
       });
       // A pool-exhausted tick returns {skipped} instead of throwing —
       // surface it so job_health records the missed daily run (codex r16).
-      if (lockRes && lockRes.skipped) {
+      if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
+        // lease_held = another instance is running this watcher (deploy
+        // overlap) — that IS the daily run, not a miss (codex r18).
         // job_health must record the missed daily run (codex r17) — the
         // skip path returns before runExclusive's own bookkeeping.
         const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');

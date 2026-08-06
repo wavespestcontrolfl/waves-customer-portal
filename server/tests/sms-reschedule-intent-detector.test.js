@@ -122,3 +122,11 @@ describe('r17 regression cases', () => {
     expect(hasRescheduleOrAwayIntent('I was on vacation last week')).toBe(false);
   });
 });
+
+describe('r18 regression cases (cancel acknowledgments)', () => {
+  test('cancellation acknowledgments and status questions do not flag', () => {
+    expect(hasRescheduleOrAwayIntent('Has my appointment been canceled?')).toBe(false);
+    expect(hasRescheduleOrAwayIntent('Did you cancel my appointment?')).toBe(false);
+    expect(hasRescheduleOrAwayIntent('Thanks for canceling my appointment')).toBe(false);
+  });
+});
