@@ -189,7 +189,10 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
           AND COALESCE(fc.duration_seconds, 0) >= 60
           AND fc.created_at > t.created_at
       ))
-      AND ((t.status IN ('pending', 'in_progress') AND t.deadline <= :cutoff
+      AND ((t.status IN ('pending', 'in_progress')
+           -- Same rolling 30-day horizon as every other leg (codex r30):
+           -- a task stuck pending for months is moot, not daily ACT news.
+           AND t.deadline > now() - interval '30 days' AND t.deadline <= :cutoff
            -- Revalidated (codex r17): a human send/interaction after the
            -- task means it was worked even if the verifier hasn't run.
            AND NOT EXISTS (
@@ -249,6 +252,10 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
              SELECT 1 FROM customer_interactions ei
              WHERE ei.customer_id = t.customer_id
                AND ei.interaction_type IN ('call_outbound', 'call', 'note')
+               -- Admin-authored only, same as the adjacent branches
+               -- (codex r29/r30): inbound-call logs and automated
+               -- pipeline notes are not staff outreach.
+               AND (ei.interaction_type = 'call_outbound' OR ei.admin_user_id IS NOT NULL)
                AND ei.created_at > t.created_at
            ))
        -- 'verified' can be bogus (the verifier accepts ANY later outbound,

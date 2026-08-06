@@ -270,3 +270,12 @@ describe('skip-with-adjective and gone/away forms (codex r29)', () => {
     expect(hasRescheduleOrAwayIntent('Great news, the ants are gone')).toBe(false);
   });
 });
+
+describe('determiner-less skip asks (codex r30)', () => {
+  test('please skip next appointment flags', () => {
+    expect(hasRescheduleOrAwayIntent('Please skip next appointment')).toBe(true);
+  });
+  test('could you skip upcoming appointment flags', () => {
+    expect(hasRescheduleOrAwayIntent('Could you skip upcoming appointment?')).toBe(true);
+  });
+});
