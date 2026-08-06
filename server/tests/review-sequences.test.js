@@ -1730,3 +1730,26 @@ describe('codex #3235 r12 — ET dates, 1:1 correlation, manual cap-exempt sends
     expect(mock.__state.rows.review_requests[0].followup_sent).toBe(true);
   });
 });
+
+describe('codex #3235 r13 — orphaned pipeline sends', () => {
+  test('a pipeline send with no sms_log row of its own cannot excuse a manual ask', async () => {
+    mockGates.reviewSequences = true;
+    const base = Date.now() - 2 * 86400000;
+    const mock = makeMock({
+      customers: [{ id: 'or-1', first_name: 'Lil', last_name: 'G', phone: '+19410000078', nearest_location_id: 'bradenton' }],
+      // ONLY the manual text exists in sms_log — the automated send's log
+      // insert failed (twilio.js swallows that error), leaving an orphaned
+      // review_requests timestamp 4 minutes earlier.
+      sms_log: [
+        { id: 'sms-m', customer_id: 'or-1', direction: 'outbound', status: 'sent', message_body: 'Lil, review us here: https://g.page/r/waves/review', created_at: new Date(base + 4 * 60000) },
+      ],
+      review_requests: [{ id: 'rr-or', customer_id: 'or-1', template_key: 'friendly_ask', channel: 'sms', status: 'sent', sms_sent_at: new Date(base), sent_at: new Date(base) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'or-1', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('manual_ask_recent');
+  });
+});

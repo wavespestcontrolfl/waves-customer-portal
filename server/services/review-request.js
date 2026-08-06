@@ -448,8 +448,18 @@ const ReviewService = {
       // One pipeline send excuses ONE sms_log row (codex #3235 r12 P2): a
       // hand-sent ask minutes after an automated one must not share the
       // automated send's timestamp alibi. Greedy nearest-match consumption.
+      // And a send whose own sms_log insert failed (twilio.js swallows the
+      // post-send log error) is an ORPHAN — with no row of its own within
+      // ±90s it may not excuse anything (codex r13 P2): the pipeline logs
+      // at send time, so its row is seconds away; a manual text minutes
+      // later is not.
       const TEN_MIN = 10 * 60 * 1000;
-      const unused = [...sentTimes];
+      const CORRESPONDENCE_MS = 90 * 1000;
+      const outboundTimes = outbound
+        .map((r) => new Date(r.created_at).getTime())
+        .filter((t) => Number.isFinite(t));
+      const unused = sentTimes.filter((sT) =>
+        outboundTimes.some((oT) => Math.abs(oT - sT) <= CORRESPONDENCE_MS));
       return candidates.some((c) => {
         const t = new Date(c.created_at).getTime();
         let best = -1;
