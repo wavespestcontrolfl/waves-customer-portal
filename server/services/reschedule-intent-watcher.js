@@ -101,9 +101,10 @@ async function replayPendingBells() {
     for (const row of stale) {
       let snap = {};
       try { snap = typeof row.input_snapshot === 'string' ? JSON.parse(row.input_snapshot) : (row.input_snapshot || {}); } catch { snap = {}; }
+      let landed = false;
       try {
         const { triggerNotification } = require('./notification-triggers');
-        await triggerNotification('appointment_reschedule_intent', {
+        const stats = await triggerNotification('appointment_reschedule_intent', {
           name: [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Customer',
           customerId: row.customer_id,
           message: snap.body_excerpt || '',
@@ -112,10 +113,15 @@ async function replayPendingBells() {
           ambiguousVisits: snap.ambiguous === true,
           decisionId: row.id,
         });
+        landed = Boolean(stats && !stats.error
+          && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
       } catch (bellErr) {
         logger.warn(`[reschedule-intent-watcher] bell replay failed for ${row.id}: ${bellErr.message}`);
         continue;
       }
+      // Only a LANDED alert clears the marker (codex r17) — a resolved
+      // {error} result must leave the replay pending for the next run.
+      if (!landed) continue;
       await db('agent_decisions')
         .where({ id: row.id })
         .update({ input_snapshot: db.raw("jsonb_set(COALESCE(input_snapshot, '{}'::jsonb), '{bell_pending}', 'false'::jsonb)"), updated_at: new Date() })

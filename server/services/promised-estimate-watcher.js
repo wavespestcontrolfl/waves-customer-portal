@@ -97,7 +97,7 @@ async function loadUnkeptPromises() {
                 -- Unlinked (or same-customer) estimates only (codex r12):
                 -- a shared household number must not let customer B's
                 -- estimate clear customer A's promise.
-                AND (e.customer_id IS NULL OR e.customer_id = c.customer_id)
+                AND (e.customer_id IS NULL OR c.customer_id IS NULL OR e.customer_id = c.customer_id)
                 AND RIGHT(REGEXP_REPLACE(e.customer_phone, '\\D', '', 'g'), 10)
                   = RIGHT(REGEXP_REPLACE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, '\\D', '', 'g'), 10))
           )

@@ -190,4 +190,4 @@ async function isLocked(jobName) {
   }
 }
 
-module.exports = { runExclusive, isLocked };
+module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd };

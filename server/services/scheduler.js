@@ -860,7 +860,15 @@ function initScheduledJobs() {
       });
       // A pool-exhausted tick returns {skipped} instead of throwing —
       // surface it so job_health records the missed daily run (codex r16).
-      if (lockRes && lockRes.skipped) throw new Error(`reschedule-intent watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
+      if (lockRes && lockRes.skipped) {
+        // job_health must record the missed daily run (codex r17) — the
+        // skip path returns before runExclusive's own bookkeeping.
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('reschedule-intent-watcher').catch(() => {});
+        await recordJobEnd('reschedule-intent-watcher', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`reschedule-intent watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
     } catch (err) {
       logger.error(`Reschedule-intent watcher failed: ${err.message}`);
     }
@@ -881,7 +889,15 @@ function initScheduledJobs() {
       });
       // A pool-exhausted tick returns {skipped} instead of throwing —
       // surface it so job_health records the missed daily run (codex r16).
-      if (lockRes && lockRes.skipped) throw new Error(`promised-estimate watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
+      if (lockRes && lockRes.skipped) {
+        // job_health must record the missed daily run (codex r17) — the
+        // skip path returns before runExclusive's own bookkeeping.
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('promised-estimate-watcher').catch(() => {});
+        await recordJobEnd('promised-estimate-watcher', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`promised-estimate watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
     } catch (err) {
       logger.error(`Promised-estimate watcher failed: ${err.message}`);
     }
@@ -903,7 +919,15 @@ function initScheduledJobs() {
       });
       // A pool-exhausted tick returns {skipped} instead of throwing —
       // surface it so job_health records the missed daily run (codex r16).
-      if (lockRes && lockRes.skipped) throw new Error(`unworked-comms watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
+      if (lockRes && lockRes.skipped) {
+        // job_health must record the missed daily run (codex r17) — the
+        // skip path returns before runExclusive's own bookkeeping.
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('unworked-comms-eod').catch(() => {});
+        await recordJobEnd('unworked-comms-eod', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`unworked-comms watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
     } catch (err) {
       logger.error(`Unworked-comms watcher failed: ${err.message}`);
     }

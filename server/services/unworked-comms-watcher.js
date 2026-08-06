@@ -119,7 +119,9 @@ async function loadCallbackCalls(cutoff = new Date()) {
           AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10)
             = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, ''), '\\D', '', 'g'), 10)
       )
-    ORDER BY c.created_at ASC
+    -- Newest-first (codex r17): a stuck oldest-12 must not starve fresh
+    -- requests; older rows persist in the overflow count.
+    ORDER BY c.created_at DESC
     LIMIT :cap
     `,
     { cap: MAX_PER_SECTION, cutoff },
@@ -137,7 +139,22 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
            COUNT(*) OVER () AS total_count
     FROM ai_follow_up_tasks t
     LEFT JOIN customers cu ON cu.id = t.customer_id
-    WHERE (t.status IN ('pending', 'in_progress') AND t.deadline <= :cutoff)
+    WHERE (t.status IN ('pending', 'in_progress') AND t.deadline <= :cutoff
+           -- Revalidated (codex r17): a human send/interaction after the
+           -- task means it was worked even if the verifier hasn't run.
+           AND NOT EXISTS (
+             SELECT 1 FROM sms_log ps
+             WHERE ps.customer_id = t.customer_id AND ps.direction = 'outbound'
+               AND ps.message_type IN ${HUMAN_REPLY_TYPES}
+               AND ps.status IN ('queued', 'sent', 'delivered')
+               AND ps.created_at > t.created_at
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM customer_interactions pi
+             WHERE pi.customer_id = t.customer_id
+               AND pi.interaction_type IN ('call_outbound', 'call', 'note')
+               AND pi.created_at > t.created_at
+           ))
        -- "Expired today": judged by the DEADLINE window — the hourly
        -- verifier's UPDATE does not bump updated_at (no pg auto-touch;
        -- codex #3232 r1), so a deadline inside the last ~25h means the
@@ -251,7 +268,7 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         AND oo.created_at > l.created_at
         AND RIGHT(REGEXP_REPLACE(COALESCE(oo.from_phone, ''), '\\D', '', 'g'), 10) = l.peer
     )
-    ORDER BY l.created_at ASC
+    ORDER BY l.created_at DESC
     LIMIT :cap
     `,
     { cap: MAX_PER_SECTION, cutoff },

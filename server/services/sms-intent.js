@@ -127,7 +127,10 @@ function hasRescheduleOrAwayIntent(body) {
     || /\bre-?schedul\w*\s+(?:[\w'’]+\s+){0,2}?(?:autopay|payment|invoice|card|subscription)s?\b/i.test(text);
   if (!negated && (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text))) return true;
   if (cancelAsk) return true;
-  return AWAY_RE.test(text) && !AWAY_PERMISSION_RE.test(text);
+  // Past absences are history, not a request (codex r17): "we were out
+  // of town last week".
+  const pastAway = /\b(?:were|was|got\s+back|just\s+got\s+back|returned)\b[^.!?]{0,25}\b(?:out\s+of\s+town|on\s+vacation|away)\b|\b(?:out\s+of\s+town|on\s+vacation|away)\b[^.!?]{0,15}\blast\s+(?:week|month|weekend)\b/i.test(text);
+  return AWAY_RE.test(text) && !AWAY_PERMISSION_RE.test(text) && !pastAway;
 }
 
 function escapeRe(s) {

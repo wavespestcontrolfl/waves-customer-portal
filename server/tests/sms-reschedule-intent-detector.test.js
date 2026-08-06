@@ -115,3 +115,10 @@ describe('r16 regression cases', () => {
     expect(hasRescheduleOrAwayIntent('I need to reschedule my payment')).toBe(false);
   });
 });
+
+describe('r17 regression cases', () => {
+  test('past absences do not flag', () => {
+    expect(hasRescheduleOrAwayIntent('We were out of town last week')).toBe(false);
+    expect(hasRescheduleOrAwayIntent('I was on vacation last week')).toBe(false);
+  });
+});
