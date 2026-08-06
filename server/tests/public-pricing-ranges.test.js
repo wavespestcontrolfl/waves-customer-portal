@@ -122,6 +122,21 @@ describe('public pricing ranges', () => {
     }
   });
 
+  test('termite station rental publishes only while its purchase gate is on', () => {
+    expect(payload.services.find((s) => s.key === 'termite_station_rental')).toBeUndefined();
+
+    process.env.GATE_TERMITE_STATION_RENTAL = 'true';
+    try {
+      const gated = computePublicPricingRanges();
+      const rental = gated.services.find((s) => s.key === 'termite_station_rental');
+      expect(rental).toBeDefined();
+      expect(rental.unit).toBe('per application');
+      expect(gated.errors).toEqual([]);
+    } finally {
+      delete process.env.GATE_TERMITE_STATION_RENTAL;
+    }
+  });
+
   test('buildRows exposes sweep errors instead of throwing', () => {
     const { rows, errors } = _internals.buildRows();
     expect(Array.isArray(rows)).toBe(true);

@@ -52,6 +52,16 @@ function buildRows() {
     }
   };
 
+  // Bare and complex residential profiles — the pest pricer adds charges for
+  // heavy shrubs/trees, complex landscaping, indoor treatment, pool cages,
+  // attached garages, and home-age adjustments, all valid auto-priced inputs.
+  const PEST_PROFILES = [
+    { property: {}, options: {} },
+    {
+      property: { features: { shrubs: 'heavy', trees: 'heavy', complexity: 'complex', indoor: true, poolCage: true, poolCageSize: 'large' } },
+      options: { modifiers: { pestAgeAdj: 10 } },
+    },
+  ];
   add('general_pest_quarterly', () => rangeRow({
     key: 'general_pest_quarterly',
     name: 'General Pest Control (WaveGuard recurring)',
@@ -59,10 +69,11 @@ function buildRows() {
     // Sweep every supported cadence via the engine's tiers array — monthly
     // per-application prices sit below quarterly, so quarterly-only would
     // overstate the low end of an advertised option.
-    values: sweepValues(FOOTPRINTS_SQFT,
-      (f) => sp.pricePestControl({ footprint: f }, { frequency: 'quarterly' }),
+    values: sweepValues(
+      FOOTPRINTS_SQFT.flatMap((f) => PEST_PROFILES.map((p) => ({ f, p }))),
+      ({ f, p }) => sp.pricePestControl({ footprint: f, ...p.property }, { frequency: 'quarterly', ...p.options }),
       (r) => (r.tiers || []).map((t) => t.perApp)),
-    notes: `Quarterly, bi-monthly, or monthly cadence. One-time initial service fee $${Math.round(constants.PEST.initialFee)}.`,
+    notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features. One-time initial service fee $${Math.round(constants.PEST.initialFee)}.`,
   }));
 
   add('cockroach_treatment', () => rangeRow({
@@ -73,6 +84,18 @@ function buildRows() {
       (f) => sp.pricePestInitialRoach({ footprint: f }, { roachType: 'regular', standalone: true }),
       (r) => r.price),
     notes: 'Standalone treatment for SWFL native roaches; German roach infestations use the cleanout program.',
+  }));
+
+  add('one_time_pest', () => rangeRow({
+    key: 'one_time_pest',
+    name: 'One-Time Pest Treatment',
+    unit: 'per treatment',
+    // Derives from the quarterly baseline, so it sweeps the same profiles.
+    values: sweepValues(
+      FOOTPRINTS_SQFT.flatMap((f) => PEST_PROFILES.map((p) => ({ f, p }))),
+      ({ f, p }) => sp.priceOneTimePest({ footprint: f, ...p.property }, { ...p.options }),
+      (r) => r.price),
+    notes: 'Single knockdown visit; recurring plans price lower per application.',
   }));
 
   add('german_roach_cleanout', () => rangeRow({
@@ -90,31 +113,41 @@ function buildRows() {
     key: 'bed_bug_treatment',
     name: 'Bed Bug Treatment (chemical)',
     unit: 'per treatment program',
+    // Footprint and story count carry ordinary size/story multipliers on
+    // auto-priced homes — not custom-quote territory — so both are swept.
     values: sweepValues(
-      [1, 2, 3, 4].flatMap((rooms) =>
-        ['light', 'moderate', 'heavy'].flatMap((severity) =>
-          Object.keys(constants.BED_BUG.prepStatus).map((prepStatus) => ({ rooms, severity, prepStatus })))),
-      ({ rooms, severity, prepStatus }) => sp.priceBedBugTreatment(
-        { footprint: 2000, stories: 1 },
+      [1500, 2200, 3000, 4000].flatMap((footprint) =>
+        [1, 2, 3].flatMap((stories) =>
+          [1, 2, 3, 4].flatMap((rooms) =>
+            ['light', 'moderate', 'heavy'].flatMap((severity) =>
+              Object.keys(constants.BED_BUG.prepStatus).map((prepStatus) => ({ footprint, stories, rooms, severity, prepStatus })))))),
+      ({ footprint, stories, rooms, severity, prepStatus }) => sp.priceBedBugTreatment(
+        { footprint, stories },
         { rooms, method: 'CHEMICAL', severity, prepStatus, occupancyType: 'singleFamily' }),
-      (r) => r.total ?? r.price),
-    notes: '1-4 rooms. Heat and hybrid treatments are custom-quoted after inspection.',
+      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.total ?? r.price))),
+    notes: '1-4 rooms; priced by rooms, severity, home size, and stories. Heat and hybrid treatments are custom-quoted after inspection.',
   }));
 
   // Low- and high-pressure residential feature sets — the pricer's pressure
   // multiplier (trees, landscaping complexity, pool, nearby water,
   // irrigation) raises per-application prices well above a bare-lot sweep.
-  const MOSQUITO_FEATURE_SETS = [
-    {},
-    { trees: 'heavy', complexity: 'complex', pool: true, nearWater: true, irrigation: true },
+  const MOSQUITO_PROFILES = [
+    { features: {}, options: {} },
+    // Waterfront worst case: binary features plus the graduated water
+    // modifier the live estimate path forwards — reaches the pricer's
+    // pressure cap, which a feature-only profile cannot.
+    {
+      features: { trees: 'heavy', complexity: 'complex', pool: true, nearWater: true, irrigation: true },
+      options: { modifiers: { mosquitoWaterMult: 2.0 } },
+    },
   ];
   add('mosquito_program', () => rangeRow({
     key: 'mosquito_program',
     name: 'Mosquito Program',
     unit: 'per application',
     values: sweepValues(
-      LOTS_SQFT.flatMap((lotSqFt) => MOSQUITO_FEATURE_SETS.map((features) => ({ lotSqFt, features }))),
-      ({ lotSqFt, features }) => sp.priceMosquito({ footprint: 2000, lotSqFt, features }, {}),
+      LOTS_SQFT.flatMap((lotSqFt) => MOSQUITO_PROFILES.map((p) => ({ lotSqFt, p }))),
+      ({ lotSqFt, p }) => sp.priceMosquito({ footprint: 2000, lotSqFt, features: p.features }, p.options),
       (r) => (r.tiers || []).map((t) => t.perVisit)),
     notes: 'Seasonal (9 applications/yr) or monthly (12 applications/yr) program; priced by treatable area and mosquito pressure.',
   }));
@@ -130,11 +163,28 @@ function buildRows() {
     notes: 'Height, aggressiveness, and confined-space add-ons priced separately. Free with an active recurring pest plan where eligible.',
   }));
 
+  // Base, worst-case (heavy infestation, dense landscaping, priced exterior
+  // add-on), and recurring-customer (discounted low) flea profiles — all
+  // auto-priced by the live estimate path.
+  const FLEA_PROFILES = [
+    {},
+    {
+      infestationComplexity: 'heavy',
+      features: { trees: 'heavy', complexity: 'complex' },
+      fleaExterior: true,
+      fleaExteriorAreaSqFt: 4000,
+    },
+    { isRecurringCustomer: true },
+  ];
   add('flea_elimination', () => rangeRow({
     key: 'flea_elimination',
     name: 'Flea Elimination (2-visit package)',
     unit: 'per package',
-    values: sweepValues(FOOTPRINTS_SQFT, (f) => sp.priceFlea({ footprint: f }), (r) => r.total),
+    values: sweepValues(
+      FOOTPRINTS_SQFT.flatMap((f) => FLEA_PROFILES.map((p) => ({ f, p }))),
+      ({ f, p }) => sp.priceFlea({ footprint: f, ...p }),
+      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.total)),
+    notes: 'Priced by home size, infestation severity, and optional exterior treatment area.',
   }));
 
   add('rodent_bait_program', () => rangeRow({
@@ -160,22 +210,39 @@ function buildRows() {
     key: 'rodent_sanitation',
     name: 'Rodent Sanitation',
     unit: 'per job',
+    // Affected area × debris removal × access type — the live path passes
+    // insulationRemovalCuFt and heavy-tier crawlspace/tight access, all
+    // directly priced.
     values: sweepValues(
       Object.keys(constants.RODENT.sanitation)
         .filter((tier) => constants.RODENT.sanitation[tier] && typeof constants.RODENT.sanitation[tier] === 'object' && 'base' in constants.RODENT.sanitation[tier])
-        .flatMap((tier) => [250, 500, 1000, 1500].map((affectedSqFt) => ({ tier, affectedSqFt }))),
-      ({ tier, affectedSqFt }) => sp.priceSanitation({ tier, affectedSqFt }),
-      (r) => r.price),
+        .flatMap((tier) => [250, 500, 1000, 1500].flatMap((affectedSqFt) =>
+          [0, 50].flatMap((insulationRemovalCuFt) =>
+            ['normal', 'crawlspace', 'tight'].map((accessType) => ({ tier, affectedSqFt, insulationRemovalCuFt, accessType }))))),
+      ({ tier, affectedSqFt, insulationRemovalCuFt, accessType }) =>
+        sp.priceSanitation({ tier, affectedSqFt, insulationRemovalCuFt, accessType }),
+      (r) => (r.customQuoteRecommended ? NaN : r.price)),
+    notes: 'Priced by affected area, debris removal volume, and access.',
   }));
 
   add('rodent_exclusion', () => rangeRow({
     key: 'rodent_exclusion',
     name: 'Rodent Exclusion',
     unit: 'per job',
+    // Every component type the exact estimate path forwards: standard and
+    // advanced wire-mesh points, bird boxes (incl. tile-high), soft and
+    // concrete linear mesh.
     values: sweepValues(
-      [0, 5, 10, 20].flatMap((pts) => [0, 20, 50].map((lf) => ({ pts, lf }))),
-      ({ pts, lf }) => sp.priceRodentExclusionV2({ standardWireMeshPoints: pts, meshSoftLF: lf }),
-      (r) => r.total ?? r.price),
+      [
+        { standardWireMeshPoints: 0 },
+        { standardWireMeshPoints: 5, meshSoftLF: 20 },
+        { standardWireMeshPoints: 10, meshSoftLF: 50 },
+        { standardWireMeshPoints: 20, meshSoftLF: 50 },
+        { advancedWireMeshPoints: 10, meshConcreteLF: 50 },
+        { standardWireMeshPoints: 10, advancedWireMeshPoints: 10, standardBirdBoxes: 2, tileHighBirdBoxes: 2, meshSoftLF: 30, meshConcreteLF: 30 },
+      ],
+      (opts) => sp.priceRodentExclusionV2(opts),
+      (r) => (r.customRecommended || r.requiresCustomQuote ? NaN : (r.total ?? r.price))),
     notes: 'Includes the rodent inspection fee. Scope set by inspection findings.',
   }));
 
@@ -193,6 +260,23 @@ function buildRows() {
     values: sweepValues(FOOTPRINTS_SQFT, (f) => sp.priceTermiteBait({ footprint: f }, {}), (r) => r.perApp),
     notes: 'Quarterly station-check applications.',
   }));
+
+  // Station rental publishes only while its purchase gate is on — the
+  // estimate flow's GATE_TERMITE_STATION_RENTAL is the choke point
+  // (predicate mirrors estimate-engine.js). Rental rides the install price,
+  // so the sweep derives per-application rental from the bait installs.
+  const rentalGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
+  if (rentalGateOn) {
+    add('termite_station_rental', () => rangeRow({
+      key: 'termite_station_rental',
+      name: 'Termite Bait Station Rental',
+      unit: 'per application',
+      values: sweepValues(FOOTPRINTS_SQFT,
+        (f) => sp.priceTermiteStationRental(sp.priceTermiteBait({ footprint: f }, {}).installation?.price),
+        (r) => r && r.perApp),
+      notes: 'Rented-station alternative to the upfront installation; rides quarterly applications.',
+    }));
+  }
 
   // Bond pricing publishes only while the purchase path exists: the estimate
   // flow's GATE_TERMITE_BOND_OPTION is the single choke point (predicate
@@ -237,10 +321,12 @@ function buildRows() {
     key: 'pre_slab_termiticide',
     name: 'Pre-Slab Termiticide Treatment',
     unit: 'per job',
-    values: sweepValues([500, 1000, 2000, 3000, 4000],
+    // Through the full auto-priced residential span — the public quote route
+    // accepts slab measurements well past 4,000 sq ft with no quote boundary.
+    values: sweepValues([500, 1000, 2000, 4000, 6000, 8000, 12000, 20000],
       (slabSqFt) => sp.pricePreSlabTermiticide({ slabSqFt }, { labelConfirmed: true }),
-      (r) => r.price ?? r.treatmentPrice),
-    notes: 'New-construction slab pre-treatment; volume discounts available.',
+      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.treatmentPrice))),
+    notes: 'New-construction slab pre-treatment; priced by slab area, volume discounts available.',
   }));
 
   add('wdo_inspection', () => rangeRow({
@@ -268,24 +354,22 @@ function buildRows() {
     key: 'one_time_lawn',
     name: 'One-Time Lawn Treatment',
     unit: 'per treatment',
+    // Track and tier feed the recurring baseline this pricer derives from,
+    // so both are swept alongside treatment type.
     values: sweepValues(
-      LAWNS_SQFT.flatMap((sq) => ['weed', 'fungicide', 'pest', 'fert'].map((treatmentType) => ({ sq, treatmentType }))),
-      ({ sq, treatmentType }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType }),
+      LAWNS_SQFT.flatMap((sq) =>
+        ['weed', 'fungicide', 'pest', 'fert'].flatMap((treatmentType) =>
+          Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
+            ['standard', 'enhanced', 'premium'].map((tier) => ({ sq, treatmentType, track, tier }))))),
+      ({ sq, treatmentType, track, tier }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType, track, tier }),
       (r) => r.price),
+    notes: 'Priced by treatment type, grass type, and turf area.',
   }));
 
   // Dethatching is deliberately NOT published: priceDethatching returns
   // quoteRequired/manual-review for every residential input, so the engine
   // refuses to auto-quote it — publishing a range would contradict the
   // authoritative quote path. It stays in the custom-quoted bucket.
-
-  add('one_time_pest', () => rangeRow({
-    key: 'one_time_pest',
-    name: 'One-Time Pest Treatment',
-    unit: 'per treatment',
-    values: sweepValues(FOOTPRINTS_SQFT, (f) => sp.priceOneTimePest({ footprint: f }, {}), (r) => r.price),
-    notes: 'Single knockdown visit; recurring plans price lower per application.',
-  }));
 
   add('one_time_mosquito', () => rangeRow({
     key: 'one_time_mosquito',

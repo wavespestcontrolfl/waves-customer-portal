@@ -27,6 +27,14 @@ router.get('/', async (req, res, next) => {
     }
     const { computePublicPricingRanges } = require('../services/pricing-engine/public-ranges');
     const payload = computePublicPricingRanges();
+    // A partial payload is a contract violation, not a degraded success: if
+    // any service sweep failed (engine change, bad config), consumers would
+    // cache and publish an incomplete price list for an hour. Fail closed.
+    if (payload.errors.length > 0) {
+      console.error('[pricing-ranges] sweep errors:', JSON.stringify(payload.errors));
+      res.set('Cache-Control', 'no-store');
+      return res.status(503).json({ error: 'pricing ranges temporarily unavailable' });
+    }
     res.set('Cache-Control', 'public, max-age=3600');
     res.json(payload);
   } catch (err) {
