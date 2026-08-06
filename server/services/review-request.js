@@ -2557,6 +2557,7 @@ const ReviewService = {
     if (customer.deleted_at) throw new Error("Customer is archived");
     if (customer.has_left_google_review) return { started: false, reason: "already_reviewed" };
 
+    let supersedeOpenerId = null;
     const active = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
     if (active) {
       // A zero-sent series opener yields to its own series' FINAL enrollment
@@ -2567,7 +2568,10 @@ const ReviewService = {
       // ONLY when the active sequence provably belongs to this enrollment's
       // series (the exemption walk) and has delivered nothing; any error
       // falls back to the reject (never risks a duplicate ask).
-      let superseded = false;
+      // Proof only here — the actual stop commits atomically WITH the
+      // replacement insert below (codex #3243 r9 P2): stopping up front let
+      // any later enrollment failure strand the customer with the opener
+      // dead and no final cadence.
       if (seriesFinal) {
         try {
           const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId });
@@ -2575,18 +2579,13 @@ const ReviewService = {
             const delivered = await db("review_requests")
               .where({ sequence_id: active.id, status: "sent" })
               .first();
-            if (!delivered) {
-              const stopped = await db("review_sequences")
-                .where({ id: active.id, status: "active" })
-                .update({ status: "stopped", stop_reason: "superseded_by_series_final", next_run_at: null, completed_at: new Date(), updated_at: new Date() });
-              superseded = stopped > 0;
-            }
+            if (!delivered) supersedeOpenerId = active.id;
           }
         } catch (err) {
           logger.warn(`[review] opener-supersede check failed (customerId=${customerId}): ${err.message} — keeping already_active`);
         }
       }
-      if (!superseded) return { started: false, reason: "already_active", sequence: active };
+      if (!supersedeOpenerId) return { started: false, reason: "already_active", sequence: active };
     }
 
     // One cadence per SERVICE RECORD, ever (codex #3235 r3 P1): the legacy
@@ -2666,8 +2665,24 @@ const ReviewService = {
 
     let sequence;
     try {
-      [sequence] = await db("review_sequences")
-        .insert({
+      [sequence] = await db.transaction(async (trx) => {
+        // The opener stop commits WITH the replacement insert (codex #3243
+        // r9 P2) — and the one-active partial index means the stop cannot
+        // simply be deferred outside the insert's transaction. A concurrent
+        // state change on the opener aborts into the already_active
+        // recovery below, exactly like an index collision.
+        if (supersedeOpenerId) {
+          const stopped = await trx("review_sequences")
+            .where({ id: supersedeOpenerId, status: "active" })
+            .update({ status: "stopped", stop_reason: "superseded_by_series_final", next_run_at: null, completed_at: new Date(), updated_at: new Date() });
+          if (!stopped) {
+            const raceErr = new Error("opener changed state mid-enrollment");
+            raceErr.code = "OPENER_SUPERSEDE_RACE";
+            throw raceErr;
+          }
+        }
+        return trx("review_sequences")
+          .insert({
           customer_id: customerId,
           location_id: locId,
           status: "active",
@@ -2696,9 +2711,10 @@ const ReviewService = {
           started_by: startedBy || null,
           started_at: new Date(),
         })
-        .returning("*");
+          .returning("*");
+      });
     } catch (err) {
-      if (err?.code === "23505") {
+      if (err?.code === "23505" || err?.code === "OPENER_SUPERSEDE_RACE") {
         const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
         return { started: false, reason: "already_active", sequence: existing };
       }

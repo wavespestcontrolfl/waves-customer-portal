@@ -49,6 +49,10 @@ jest.mock('../services/customer-contact', () => ({
 }));
 
 const db = require('../models/db');
+// Passthrough transaction: the callback gets the db fn itself, which routes
+// to whichever mock is currently installed (no rollback semantics — tests
+// assert outcomes, not isolation).
+db.transaction = async (fn) => fn(db);
 const ReviewService = require('../services/review-request');
 
 function valueFor(row, column) { return row[String(column).split('.').pop()]; }
