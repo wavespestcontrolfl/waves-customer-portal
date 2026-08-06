@@ -18,20 +18,18 @@ router.get('/', async (req, res, next) => {
     // they were authoritative would violate the contract, so fail closed
     // with an uncacheable 503 instead.
     const { needsSync, syncConstantsFromDB } = require('../services/pricing-engine');
-    let ranSync = false;
     if (needsSync()) {
       const synced = await syncConstantsFromDB(db);
       if (!synced) {
         res.set('Cache-Control', 'no-store');
         return res.status(503).json({ error: 'pricing configuration temporarily unavailable' });
       }
-      ranSync = true;
     }
     const { computePublicPricingRanges } = require('../services/pricing-engine/public-ranges');
-    // refresh only after a sync actually applied — the one moment constants
-    // can change — so bots can't force per-request sweeps, and a pricing
-    // edit still lands on the next post-sync request.
-    const payload = computePublicPricingRanges({ refresh: ranSync });
+    // The payload cache keys itself to db-bridge's last-sync timestamp, so
+    // any sync — this route's or an admin pricing-proposal approval —
+    // invalidates it; bots can't force per-request sweeps.
+    const payload = computePublicPricingRanges();
     // A partial payload is a contract violation, not a degraded success: if
     // any service sweep failed (engine change, bad config), consumers would
     // cache and publish an incomplete price list for an hour. Fail closed.

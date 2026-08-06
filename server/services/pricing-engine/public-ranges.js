@@ -96,10 +96,16 @@ function buildRows() {
     key: 'cockroach_treatment',
     name: 'Cockroach Treatment (native / palmetto)',
     unit: 'per treatment',
-    values: sweepValues(FOOTPRINTS_SQFT,
-      (f) => sp.pricePestInitialRoach({ footprint: f }, { roachType: 'regular', standalone: true }),
+    // Standalone and recurring-plan-attached knockdowns, regular and German
+    // scales — the estimate path adds the non-standalone charge when a
+    // recurring plan carries a roach type.
+    values: sweepValues(
+      FOOTPRINTS_SQFT.flatMap((f) =>
+        ['regular', 'german'].flatMap((roachType) =>
+          [true, false].map((standalone) => ({ f, roachType, standalone })))),
+      ({ f, roachType, standalone }) => sp.pricePestInitialRoach({ footprint: f }, { roachType, standalone }),
       (r) => r.price),
-    notes: 'Standalone treatment for SWFL native roaches; German roach infestations use the cleanout program.',
+    notes: 'Standalone treatment, or added to a recurring plan at a lower rate; multi-visit German infestation cleanouts use the cleanout program.',
   }));
 
   add('one_time_pest', () => rangeRow({
@@ -411,7 +417,7 @@ function buildRows() {
       [150, 250, 400].flatMap((perimeterLF) =>
         Object.keys(constants.SPECIALTY.trenching.products).flatMap((productKey) =>
           ['standard', 'high'].flatMap((applicationRate) =>
-            [0.5, 1].flatMap((trenchDepthFt) =>
+            [0.5, 1, 1.5].flatMap((trenchDepthFt) =>
               ['none', 'one_year_retreat', 'five_year_repair_retreat'].flatMap((warrantyTier) =>
                 [0.2, 0.5].map((concretePct) => ({ perimeterLF, productKey, applicationRate, trenchDepthFt, warrantyTier, concretePct }))))))),
       (opts) => sp.priceTrenching({ footprint: 2500 }, { ...opts, labelConfirmed: true }),
@@ -435,7 +441,7 @@ function buildRows() {
         Object.keys(constants.SPECIALTY.preSlabTermiticide.products).flatMap((productKey) =>
           ['standalone', 'builderBatch', 'sameTripAddOn'].flatMap((jobContext) =>
             ['none', '5plus', '10plus'].flatMap((volumeDiscount) =>
-              [false, true].map((warrantyExtendedSelected) => ({ slabSqFt, productKey, jobContext, volumeDiscount, warrantyExtendedSelected })))))),
+              [false, true].map((includeWarrantyExtended) => ({ slabSqFt, productKey, jobContext, volumeDiscount, includeWarrantyExtended })))))),
       ({ slabSqFt, ...opts }) => sp.pricePreSlabTermiticide({ slabSqFt }, { ...opts, labelConfirmed: true }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.treatmentPrice))),
     notes: 'New-construction slab pre-treatment; priced by slab area, volume discounts available.',
@@ -684,20 +690,22 @@ function buildRows() {
 
 // Sync-keyed cache: the sweep is thousands of pricing calls (~100ms), so an
 // unauthenticated bot ignoring Cache-Control must not be able to burn CPU per
-// request — but a memo must never outlive a pricing edit either. The route
-// passes refresh=true exactly when it just APPLIED a DB sync, which is the
-// only moment engine constants can change; between syncs the cached payload
-// is provably current. Gate flips also invalidate (they change the row set).
+// request — but a memo must never outlive a pricing edit either. The cache
+// key is db-bridge's last-successful-sync timestamp (so ANY sync — this
+// route's, or an admin pricing-proposal approval — invalidates it) plus the
+// purchase-gate signature (gate flips change the row set). `refresh: true`
+// remains as an explicit override for tests/tools.
+const { getLastSyncAt } = require('./db-bridge');
 let cached = null;
-let cachedGateSignature = null;
+let cachedKey = null;
 
 function gateSignature() {
-  return `${process.env.GATE_TERMITE_BOND_OPTION || ''}|${process.env.GATE_TERMITE_STATION_RENTAL || ''}`;
+  return `${getLastSyncAt()}|${process.env.GATE_TERMITE_BOND_OPTION || ''}|${process.env.GATE_TERMITE_STATION_RENTAL || ''}`;
 }
 
 function computePublicPricingRanges({ refresh = false } = {}) {
   const sig = gateSignature();
-  if (!refresh && cached && cachedGateSignature === sig) return cached;
+  if (!refresh && cached && cachedKey === sig) return cached;
   const { rows, errors } = buildRows();
   cached = {
     generatedAt: new Date().toISOString(),
@@ -706,7 +714,7 @@ function computePublicPricingRanges({ refresh = false } = {}) {
     services: rows,
     errors,
   };
-  cachedGateSignature = sig;
+  cachedKey = sig;
   return cached;
 }
 

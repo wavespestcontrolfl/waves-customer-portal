@@ -1796,6 +1796,13 @@ async function syncConstantsFromDB(dbInstance) {
   }
 }
 
+// Exposes when constants last successfully synced — public-ranges keys its
+// payload cache to this so ANY sync (route-triggered or admin proposal
+// approval) invalidates it, never only this module's own callers.
+function getLastSyncAt() {
+  return _lastSync;
+}
+
 function needsSync() {
   return Date.now() - _lastSync > SYNC_INTERVAL;
 }
@@ -1805,6 +1812,7 @@ function invalidatePricingConfigCache() {
 }
 
 module.exports = {
+  getLastSyncAt,
   syncConstantsFromDB,
   needsSync,
   invalidatePricingConfigCache,
