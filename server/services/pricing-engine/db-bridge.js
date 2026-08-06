@@ -800,6 +800,8 @@ async function syncConstantsFromDB(dbInstance) {
   _syncsInFlight += 1;
   let constantsSnapshot = null;
 
+  // The finally below is the ONLY decrement — early returns (missing table,
+  // empty config) and throws all pass through it, so the counter can't leak.
   try {
     const hasTable = await db.schema.hasTable('pricing_config');
     if (!hasTable) return false;
@@ -1796,14 +1798,14 @@ async function syncConstantsFromDB(dbInstance) {
     assertValidPestPricingConfig(constants);
 
     _lastSync = Date.now();
-    _syncsInFlight = Math.max(0, _syncsInFlight - 1);
     console.log(`[pricing-engine] Synced ${Object.keys(config).length} pricing configs from DB`);
     return true;
   } catch (err) {
     restorePricingConstants(constantsSnapshot);
-    _syncsInFlight = Math.max(0, _syncsInFlight - 1);
     console.error('[pricing-engine] DB sync failed, using defaults:', err.message);
     return false;
+  } finally {
+    _syncsInFlight = Math.max(0, _syncsInFlight - 1);
   }
 }
 

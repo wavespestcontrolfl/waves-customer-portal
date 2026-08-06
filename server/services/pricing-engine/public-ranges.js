@@ -130,6 +130,9 @@ function buildRows() {
       errors.push({ key, message: err.message });
     }
   };
+  const lawnCadenceText = Object.values(constants.LAWN_TIERS || {})
+    .map((t) => `${t.freq}x`).join(', ')
+    .replace(/, ([^,]*)$/, ', or $1');
   const b = constants.RODENT.bundles || {};
   // NOTE: only trapping+sanitation is advertised — the live bundle selector
   // matches service === 'exclusion', which the active V2 exclusion pricer
@@ -533,10 +536,11 @@ function buildRows() {
         // provenance, not a quote refusal) — sweep through them.
         { atticSqFt: 8000, surfaceLinearFt: 200, surfaceHeightFt: 4 },
         { atticSqFt: 12000, surfaceLinearFt: 200, surfaceHeightFt: 4 },
+        { atticSqFt: 20000, surfaceLinearFt: 300, surfaceHeightFt: 4 },
       ],
       (opts) => sp.priceBoraCare({ footprint: 2500 }, opts),
       (r) => (r.quoteRequired ? NaN : r.price)),
-    notes: 'Borate treatment for exposed wood; priced by treated attic or surface area.',
+    notes: 'Borate treatment for exposed wood; priced by treated attic and surface area — larger areas extend beyond this range at the same per-area rates.',
   }));
 
   add('termite_trenching', () => rangeRow({
@@ -603,7 +607,7 @@ function buildRows() {
           ['standard', 'enhanced', 'premium'].map((tier) => ({ sq, track, tier })))),
       ({ sq, track, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track, tier }),
       (r) => r.perApp).concat(bundle('lawn')),
-    notes: `6x, 9x, or 12x applications per year by tier; priced by grass type and treatable turf area; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
+    notes: `${lawnCadenceText} applications per year by tier; priced by grass type and treatable turf area; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
   }));
 
   add('one_time_lawn', () => rangeRow({
@@ -747,13 +751,13 @@ function buildRows() {
     name: 'Rodent Wire Mesh Exclusion',
     unit: 'per job',
     values: sweepValues(
-      [0, 30, 60, 120, 200].flatMap((meshLinearFeet) =>
+      [0, 30, 60, 120, 200, 400].flatMap((meshLinearFeet) =>
         Object.keys(constants.RODENT.wireMesh.substrates).map((meshSubstrate) => ({ meshLinearFeet, meshSubstrate }))),
       (opts) => sp.priceRodentWireMesh(opts),
       // customQuoteRecommended only adds a review warning; the priced line
       // is retained by the estimate path — publish it.
       (r) => (r ? r.price : NaN)),
-    notes: 'Priced per linear foot by substrate, with a job minimum.',
+    notes: 'Priced per linear foot by substrate, with a job minimum; longer measured runs extend beyond this range at the same per-LF rates.',
   }));
 
   add('rodent_bird_boxes', () => rangeRow({
