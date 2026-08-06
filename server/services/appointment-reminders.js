@@ -2960,11 +2960,19 @@ const AppointmentReminders = {
           cancellation_notice_state: db.raw("CASE WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') THEN 'pending_notify' ELSE 'pending' END"),
           updated_at: new Date(),
         });
-      // Consume outbox rows whose claim has been minted (codex r8) — a
-      // stale key must not upgrade a LATER cancellation cycle's claim —
-      // and age out anything past the 72h horizon.
+      // Apply outstanding caller intent to plain 'pending' markers first
+      // (codex r9): the route's own tokenless claim writes plain pending —
+      // if the route then dies, the outbox is the only record of the
+      // operator's notify intent and must upgrade the marker, not be
+      // consumed past it.
       await db.raw(
-        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND (ok.last_sent_at < now() - interval '72 hours' OR EXISTS (SELECT 1 FROM appointment_reminders ar WHERE 'cn-ci-' || ar.scheduled_service_id::text = ok.email_key AND ar.cancellation_notice_at IS NOT NULL))",
+        "UPDATE appointment_reminders SET cancellation_notice_state = 'pending_notify', updated_at = now() WHERE cancellation_notice_state = 'pending' AND EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours')",
+      ).catch(() => {});
+      // Consume outbox rows only once their intent is APPLIED — marker
+      // present and no longer plain 'pending' (codex r8/r9) — and age out
+      // anything past the 72h horizon.
+      await db.raw(
+        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND (ok.last_sent_at < now() - interval '72 hours' OR EXISTS (SELECT 1 FROM appointment_reminders ar WHERE 'cn-ci-' || ar.scheduled_service_id::text = ok.email_key AND ar.cancellation_notice_at IS NOT NULL AND ar.cancellation_notice_state IS DISTINCT FROM 'pending'))",
       ).catch(() => {});
       }
 
