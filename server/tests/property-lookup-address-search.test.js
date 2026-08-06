@@ -48,3 +48,21 @@ describe('searchSarasotaParcel searchOnly mode', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('COUNTY_PROVIDERS registry parity', () => {
+  test('every provider row carries lookup + search + eligibility gate together', () => {
+    const rows = _private.COUNTY_PROVIDERS;
+    expect(rows.length).toBeGreaterThanOrEqual(4);
+    for (const row of rows) {
+      expect(typeof row.county).toBe('string');
+      expect(typeof row.lookup).toBe('function');
+      expect(typeof row.search).toBe('function');
+      expect(typeof row.shouldQuery).toBe('function');
+    }
+    // The canary's golden counties all dispatch through the registry.
+    const counties = rows.map((r) => r.county);
+    for (const county of ['MANATEE', 'SARASOTA', 'CHARLOTTE', 'HILLSBOROUGH']) {
+      expect(counties).toContain(county);
+    }
+  });
+});

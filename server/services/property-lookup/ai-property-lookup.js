@@ -741,16 +741,30 @@ async function fetchHillsboroughParcelDetails(search, address, timeoutMs, t0 = D
   return record;
 }
 
+// ONE registry row per county provider: the full by-address lookup, the
+// search-only half (canary probe), and the address/zip eligibility gate
+// live together so adding/renaming a county updates every path at once —
+// a separate searcher map drifted-by-design and could leave a county's
+// address-search path without canary coverage (codex #3230 r3). Function
+// declarations hoist, so the references here bind at module load.
+const COUNTY_PROVIDERS = [
+  { county: 'MANATEE', lookup: lookupPropertyFromManateePAO, search: (address, timeoutMs) => searchManateeParcel(address, timeoutMs), shouldQuery: shouldQueryManateePAO },
+  // Sarasota's search follows up with a detail-page fetch in production;
+  // the canary probe stops at the validated search match (searchOnly).
+  { county: 'SARASOTA', lookup: lookupPropertyFromSarasotaPAO, search: (address, timeoutMs) => searchSarasotaParcel(address, timeoutMs, Date.now(), { searchOnly: true }), shouldQuery: shouldQuerySarasotaPAO },
+  { county: 'CHARLOTTE', lookup: lookupPropertyFromCharlottePAO, search: (address, timeoutMs) => searchCharlotteParcel(address, timeoutMs), shouldQuery: shouldQueryCharlottePAO },
+  { county: 'HILLSBOROUGH', lookup: lookupPropertyFromHillsboroughPAO, search: (address, timeoutMs) => searchHillsboroughParcel(address, timeoutMs), shouldQuery: shouldQueryHillsboroughPAO },
+];
+
 async function lookupPropertyFromCountyRecords(address, options = {}) {
   const timeoutMs = positiveInt(options.timeoutMs || process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
   const geoContext = options.geoContext || null;
   const t0 = Date.now();
-  const providers = [
-    { county: 'MANATEE', lookup: lookupPropertyFromManateePAO, rawEligible: shouldQueryManateePAO(address) },
-    { county: 'SARASOTA', lookup: lookupPropertyFromSarasotaPAO, rawEligible: shouldQuerySarasotaPAO(address) },
-    { county: 'CHARLOTTE', lookup: lookupPropertyFromCharlottePAO, rawEligible: shouldQueryCharlottePAO(address) },
-    { county: 'HILLSBOROUGH', lookup: lookupPropertyFromHillsboroughPAO, rawEligible: shouldQueryHillsboroughPAO(address) },
-  ];
+  const providers = COUNTY_PROVIDERS.map((provider) => ({
+    county: provider.county,
+    lookup: provider.lookup,
+    rawEligible: provider.shouldQuery(address),
+  }));
 
   // Try the geocoded county first so the shared time budget is spent on the
   // provider most likely to hit; the others still run as fallbacks (stable
@@ -2153,20 +2167,16 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
 // models (the politest probe available — the by-parcel golden checks already
 // exercise the detail half). This is exactly the half a real estimate-time
 // lookup enters through, and the half that failed silently on 2026-08-05
-// (vision-only pricing with zero flags). Unknown county → null, like the
-// per-county gates.
-const COUNTY_ADDRESS_SEARCHERS = {
-  Manatee: (address, timeoutMs) => searchManateeParcel(address, timeoutMs),
-  Sarasota: (address, timeoutMs) => searchSarasotaParcel(address, timeoutMs, Date.now(), { searchOnly: true }),
-  Charlotte: (address, timeoutMs) => searchCharlotteParcel(address, timeoutMs),
-  Hillsborough: (address, timeoutMs) => searchHillsboroughParcel(address, timeoutMs),
-};
-
+// (vision-only pricing with zero flags). Dispatches through the SAME
+// COUNTY_PROVIDERS registry as the full lookup (codex #3230 r3) so a new
+// county can't ship with one path and no canary coverage. Unknown county →
+// null, like the per-county gates.
 async function searchCountyParcelByAddress(county, address, options = {}) {
-  const searcher = COUNTY_ADDRESS_SEARCHERS[county];
-  if (!searcher) return null;
+  const wanted = String(county || '').toUpperCase();
+  const provider = COUNTY_PROVIDERS.find((p) => p.county === wanted);
+  if (!provider) return null;
   const timeoutMs = positiveInt(options.timeoutMs || process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
-  return searcher(address, timeoutMs);
+  return provider.search(address, timeoutMs);
 }
 
 async function searchManateeParcel(address, timeoutMs, startedAt = Date.now()) {
@@ -5029,6 +5039,7 @@ module.exports = {
     fetchManateeParcelDetails,
     fetchSarasotaParcelDetails,
     searchSarasotaParcel,
+    COUNTY_PROVIDERS,
     fetchCharlotteParcelDetails,
     fetchHillsboroughParcelDetails,
     geoOpensCountyGate,
