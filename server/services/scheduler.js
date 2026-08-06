@@ -847,7 +847,7 @@ function initScheduledJobs() {
   // RESCHEDULE_INTENT_WATCHER_DISABLED=1) — daily 6:53am ET.
   cron.schedule('30 53 6 * * *', async () => {
     try {
-      await runExclusive('reschedule-intent-watcher', async () => {
+      const lockRes = await runExclusive('reschedule-intent-watcher', async () => {
         const { runRescheduleIntentWatcher } = require('./reschedule-intent-watcher');
         const result = await runRescheduleIntentWatcher();
         logger.info(`[reschedule-intent-watcher] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0 })}`);
@@ -858,6 +858,9 @@ function initScheduledJobs() {
           throw new Error(`reschedule-intent watcher did not complete (${result.skipped || 'send_failed'})`);
         }
       });
+      // A pool-exhausted tick returns {skipped} instead of throwing —
+      // surface it so job_health records the missed daily run (codex r16).
+      if (lockRes && lockRes.skipped) throw new Error(`reschedule-intent watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
     } catch (err) {
       logger.error(`Reschedule-intent watcher failed: ${err.message}`);
     }
@@ -867,7 +870,7 @@ function initScheduledJobs() {
   // PROMISED_ESTIMATE_WATCHER_DISABLED=1) — daily 7:11am ET.
   cron.schedule('30 11 7 * * *', async () => {
     try {
-      await runExclusive('promised-estimate-watcher', async () => {
+      const lockRes = await runExclusive('promised-estimate-watcher', async () => {
         const { runPromisedEstimateWatcher } = require('./promised-estimate-watcher');
         const result = await runPromisedEstimateWatcher();
         logger.info(`[promised-estimate-watcher] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0 })}`);
@@ -876,6 +879,9 @@ function initScheduledJobs() {
           throw new Error(`promised-estimate watcher did not complete (${result.skipped || 'send_failed'})`);
         }
       });
+      // A pool-exhausted tick returns {skipped} instead of throwing —
+      // surface it so job_health records the missed daily run (codex r16).
+      if (lockRes && lockRes.skipped) throw new Error(`promised-estimate watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
     } catch (err) {
       logger.error(`Promised-estimate watcher failed: ${err.message}`);
     }
@@ -886,7 +892,7 @@ function initScheduledJobs() {
   // missed-appointment check and before the 6:40pm stale-visit sweep.
   cron.schedule('30 17 18 * * *', async () => {
     try {
-      await runExclusive('unworked-comms-eod', async () => {
+      const lockRes = await runExclusive('unworked-comms-eod', async () => {
         const { runUnworkedCommsWatcher } = require('./unworked-comms-watcher');
         const result = await runUnworkedCommsWatcher();
         logger.info(`[unworked-comms] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, total: result.total || 0 })}`);
@@ -895,6 +901,9 @@ function initScheduledJobs() {
           throw new Error(`unworked-comms watcher did not complete (${result.skipped || 'send_failed'})`);
         }
       });
+      // A pool-exhausted tick returns {skipped} instead of throwing —
+      // surface it so job_health records the missed daily run (codex r16).
+      if (lockRes && lockRes.skipped) throw new Error(`unworked-comms watcher tick skipped: ${lockRes.reason || 'no_connection'}`);
     } catch (err) {
       logger.error(`Unworked-comms watcher failed: ${err.message}`);
     }

@@ -105,3 +105,13 @@ describe('r14 regression cases', () => {
     expect(hasRescheduleOrAwayIntent("I'm not home tomorrow")).toBe(true);
   });
 });
+
+describe('r16 regression cases', () => {
+  test('present-perfect + fresh request still flags', () => {
+    expect(hasRescheduleOrAwayIntent('I have been rescheduled to Friday, but I need to reschedule again')).toBe(true);
+  });
+  test('billing reschedules do not flag', () => {
+    expect(hasRescheduleOrAwayIntent('Can I reschedule my autopay?')).toBe(false);
+    expect(hasRescheduleOrAwayIntent('I need to reschedule my payment')).toBe(false);
+  });
+});

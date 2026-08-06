@@ -114,16 +114,17 @@ function hasRescheduleOrAwayIntent(body) {
     && !CANCEL_NEGATION_RE.test(text) && !CANCEL_NONAPPT_RE.test(text);
   // "don't reschedule us, you can still come" is the opposite of a
   // reschedule ask (codex r5).
+  // A FRESH request anywhere overrides status/acknowledgment clauses
+  // (codex r15/r16): "…been rescheduled, but I need to reschedule again."
+  const freshAsk = /\b(?:need|want|like|have)\s+to\s+re-?schedul|\bre-?schedul\w*(?:\s+\w+){0,2}\s+again\b/i.test(text);
   const negated = /\b(?:don'?t|do\s+not|no\s+need\s+to|not\s+necessary\s+to|never)\s+(?:\w+\s+){0,2}?(?:reschedul|re-?book|move|change)/i.test(text)
-    // Present-perfect confirmations and status questions (codex r13):
-    // "Has my appointment been rescheduled?"
-    || /\b(?:has|have|had|is|was)\b[^.!?]{0,30}\bbeen\s+re-?schedul/i.test(text)
-    // Past/acknowledged changes are not requests: "thanks for
-    // rescheduling us", "what day were we rescheduled to?" (codex r9).
-    || (/\b(?:thanks?\s+for|thank\s+you\s+for|already|were|was|got)\s+(?:being\s+)?re-?schedul/i.test(text)
-      // …unless a FRESH request follows the status clause (codex r15):
-      // "I was rescheduled to Friday, but I need to reschedule again."
-      && !/\b(?:need|want|like|have)\s+to\s+re-?schedul|\bre-?schedul\w*(?:\s+\w+){0,2}\s+again\b/i.test(text));
+    // Present-perfect confirmations / status questions (codex r13) and
+    // past acknowledgments (codex r9) — both yield to a fresh ask.
+    || (!freshAsk && /\b(?:has|have|had|is|was)\b[^.!?]{0,30}\bbeen\s+re-?schedul/i.test(text))
+    || (!freshAsk && /\b(?:thanks?\s+for|thank\s+you\s+for|already|were|was|got)\s+(?:being\s+)?re-?schedul/i.test(text))
+    // Non-appointment reschedule objects (codex r16): "reschedule my
+    // autopay/payment" is billing, not an appointment change.
+    || /\bre-?schedul\w*\s+(?:[\w'’]+\s+){0,2}?(?:autopay|payment|invoice|card|subscription)s?\b/i.test(text);
   if (!negated && (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text))) return true;
   if (cancelAsk) return true;
   return AWAY_RE.test(text) && !AWAY_PERMISSION_RE.test(text);

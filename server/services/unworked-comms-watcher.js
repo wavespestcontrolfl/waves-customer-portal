@@ -145,7 +145,21 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
        -- Half-open 24h window tiles exactly with the daily 6:15pm run —
        -- a 25h window re-reported yesterday's expiries (codex r2).
        OR (t.status = 'expired' AND t.action_verified = false
-           AND t.deadline > ${ET_DAY_START_SQL} AND t.deadline <= :cutoff)
+           AND t.deadline > ${ET_DAY_START_SQL} AND t.deadline <= :cutoff
+           -- Staff completing AFTER auto-expiry counts (codex r16).
+           AND NOT EXISTS (
+             SELECT 1 FROM sms_log es
+             WHERE es.customer_id = t.customer_id AND es.direction = 'outbound'
+               AND es.message_type IN ${HUMAN_REPLY_TYPES}
+               AND es.status IN ('queued', 'sent', 'delivered')
+               AND es.created_at > t.created_at
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM customer_interactions ei
+             WHERE ei.customer_id = t.customer_id
+               AND ei.interaction_type IN ('call_outbound', 'call', 'note')
+               AND ei.created_at > t.created_at
+           ))
        -- 'verified' can be bogus (the verifier accepts ANY later outbound,
        -- codex r10): re-surface verified tasks with no HUMAN outbound.
        OR (t.status = 'verified'

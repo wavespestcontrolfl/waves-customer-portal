@@ -133,6 +133,7 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
       input_snapshot: JSON.stringify({
         body_excerpt: String(body).slice(0, 240),
         ambiguous: ambiguous === true,
+        bell_pending: true,
         visit: visit ? {
           id: visit.id,
           scheduled_date: visit.scheduled_date,
@@ -168,6 +169,15 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
         && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
       } catch (e) {
         logger.warn(`[reschedule-intent] bell failed: ${e.message}`);
+      }
+      if (alerted && insertedId) {
+        // Clear the replay marker (codex r16): the daily watcher replays
+        // bells for flags whose pre-ack insert committed but whose
+        // post-ack fireBell never ran.
+        await db('agent_decisions')
+          .where({ id: insertedId })
+          .update({ input_snapshot: db.raw("jsonb_set(COALESCE(input_snapshot, '{}'::jsonb), '{bell_pending}', 'false'::jsonb)"), updated_at: new Date() })
+          .catch(() => {});
       }
       return alerted;
     };

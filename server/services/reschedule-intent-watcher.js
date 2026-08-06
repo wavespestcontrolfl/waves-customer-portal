@@ -84,6 +84,48 @@ async function resolveActionedFlags() {
   }
 }
 
+// Replay bells whose post-ack fire never ran (codex r16): the pre-ack
+// insert is durable, the bell is not — flags still marked bell_pending
+// after 10 minutes get their urgent notification here.
+async function replayPendingBells() {
+  try {
+    const stale = await db('agent_decisions as ad')
+      .leftJoin('customers as cu', 'ad.customer_id', 'cu.id')
+      .where('ad.workflow', 'comms_guards')
+      .where('ad.detected_intent', 'reschedule_or_away_needs_review')
+      .where('ad.status', 'pending_review')
+      .whereRaw("ad.input_snapshot->>'bell_pending' = 'true'")
+      .where('ad.created_at', '<', db.raw("now() - interval '10 minutes'"))
+      .limit(10)
+      .select('ad.id', 'ad.customer_id', 'ad.input_snapshot', 'cu.first_name', 'cu.last_name');
+    for (const row of stale) {
+      let snap = {};
+      try { snap = typeof row.input_snapshot === 'string' ? JSON.parse(row.input_snapshot) : (row.input_snapshot || {}); } catch { snap = {}; }
+      try {
+        const { triggerNotification } = require('./notification-triggers');
+        await triggerNotification('appointment_reschedule_intent', {
+          name: [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Customer',
+          customerId: row.customer_id,
+          message: snap.body_excerpt || '',
+          visitDate: snap.visit ? String(snap.visit.scheduled_date || '').slice(0, 10) : null,
+          visitService: snap.visit?.service_type || null,
+          ambiguousVisits: snap.ambiguous === true,
+          decisionId: row.id,
+        });
+      } catch (bellErr) {
+        logger.warn(`[reschedule-intent-watcher] bell replay failed for ${row.id}: ${bellErr.message}`);
+        continue;
+      }
+      await db('agent_decisions')
+        .where({ id: row.id })
+        .update({ input_snapshot: db.raw("jsonb_set(COALESCE(input_snapshot, '{}'::jsonb), '{bell_pending}', 'false'::jsonb)"), updated_at: new Date() })
+        .catch(() => {});
+    }
+  } catch (err) {
+    logger.warn(`[reschedule-intent-watcher] bell replay pass failed: ${err.message}`);
+  }
+}
+
 async function loadUnactionedFlags() {
   return db('agent_decisions as ad')
     .leftJoin('scheduled_services as ss', 'ad.entity_id', 'ss.id')
@@ -212,6 +254,7 @@ async function runRescheduleIntentWatcher(opts = {}) {
 
   let rows;
   try {
+    await (opts.replayPendingBells || replayPendingBells)();
     await (opts.resolveActionedFlags || resolveActionedFlags)();
     rows = await (opts.loadRows || loadUnactionedFlags)();
   } catch (err) {
