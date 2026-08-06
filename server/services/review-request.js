@@ -957,8 +957,19 @@ const ReviewService = {
               .where("lp.scheduled_date", "<", w180.anchorStr)
               .where("lp.scheduled_date", ">=", w180.floorStr)
               .whereIn("lpv.service_key", trapSeriesKeys)
-              .select("lp.id", "lp.property_id", "lp.service_address_line1", "lp.service_address_line2", "lp.service_address_city", "lp.service_address_zip");
-            const lineageIds = lineageRows.filter((r) => trapInPremise(r)).map((r) => r.id);
+              .select("lp.id", "lp.scheduled_date", "lp.property_id", "lp.service_address_line1", "lp.service_address_line2", "lp.service_address_city", "lp.service_address_zip");
+            // Bounded at the nearest declared initial (codex #3243 r16 P2):
+            // an OLDER program's engagement must not suppress the current
+            // program's cadence — walk newest-first, stop at (and include)
+            // the first declared opener.
+            const lineageSorted = lineageRows
+              .filter((r) => trapInPremise(r))
+              .sort((a, b) => (etDayWindow(b.scheduled_date, 0).anchorStr < etDayWindow(a.scheduled_date, 0).anchorStr ? -1 : 1));
+            const lineageIds = [];
+            for (const r of lineageSorted) {
+              lineageIds.push(r.id);
+              if ((await this._declaredTrapVisitType({ scheduledServiceId: r.id })) === "initial") break;
+            }
             if (lineageIds.length) {
               const records = await db("service_records").whereIn("scheduled_service_id", lineageIds).select("id");
               const byRecord = records.length
@@ -2829,7 +2840,7 @@ const ReviewService = {
         if (supersedeOpenerId) {
           const stopped = await trx("review_sequences")
             .where({ id: supersedeOpenerId, status: "active" })
-            .update({ status: "stopped", stop_reason: "superseded_by_series_final", next_run_at: null, completed_at: new Date(), updated_at: new Date() });
+            .update({ status: "stopped", stop_reason: "superseded_by_final", next_run_at: null, completed_at: new Date(), updated_at: new Date() });
           if (!stopped) {
             const raceErr = new Error("opener changed state mid-enrollment");
             raceErr.code = "OPENER_SUPERSEDE_RACE";
@@ -3335,12 +3346,20 @@ const ReviewService = {
         // Wildlife reports carry no trap_visit_type (codex #3243 r15 P2) —
         // derive the boundary from trap_actions: a pure install opens a
         // series; check/capture actions without an install are follow-ups.
-        // Mixed or absent actions stay undeclared.
-        const actions = Array.isArray(snap?.values?.trap_actions) ? snap.values.trap_actions.map(String) : [];
+        // Mixed or absent actions stay undeclared. The chips control
+        // persists the value as a COMMA-JOINED STRING (codex #3243 r16 P2)
+        // — accept both forms.
+        const rawActions = snap?.values?.trap_actions;
+        const actions = Array.isArray(rawActions)
+          ? rawActions.map(String)
+          : String(rawActions || "").split(",").map((a) => a.trim()).filter(Boolean);
         if (actions.length) {
           const installed = actions.includes("Trap installed") || actions.includes("One-way door installed");
+          // 'Bait/lure refreshed' is deliberately NOT a check signal — new
+          // traps get baited at setup too, and counting it made every real
+          // install read as mixed/undeclared.
           const checked = actions.some((a) => [
-            "Trap checked", "Capture removed", "Traps reset", "Bait/lure refreshed", "Trap removed", "No activity at traps",
+            "Trap checked", "Capture removed", "Traps reset", "Trap removed", "No activity at traps",
           ].includes(a));
           if (installed && !checked) return "initial";
           if (checked && !installed) return "followup";

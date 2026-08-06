@@ -1129,7 +1129,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(failed.error).toBe(true);
 
     // A zero-sent opener sequence yields to its own series' final: the final
-    // enrolls and the opener stops as superseded_by_series_final.
+    // enrolls and the opener stops as superseded_by_final.
     mock = makeMock({
       customers: [{ id: 'os', first_name: 'Ray', last_name: 'W', phone: '+19410000064', nearest_location_id: 'bradenton' }],
       service_records: [{ id: 'sr-os', customer_id: 'os', scheduled_service_id: 'os-2' }],
@@ -1144,7 +1144,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(result.started).toBe(true);
     const opener = mock.__state.rows.review_sequences.find((r) => r.id === 'seq-opener-live');
     expect(opener.status).toBe('stopped');
-    expect(opener.stop_reason).toBe('superseded_by_series_final');
+    expect(opener.stop_reason).toBe('superseded_by_final');
   });
 
   test('a re-linked rental matches its pre-linkage stamped visits, never unstamped legacy rows (codex #3243 r8)', async () => {
@@ -1563,6 +1563,45 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     db.mockImplementation(mock);
     plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'ui', scheduledServiceId: 'ui-2' });
     expect(plan.seriesFinal).toBe(true);
+  });
+
+  test('r16: comma-joined trap_actions parse, and old-program engagement does not cross a declared opener', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // ② The chips control persists trap_actions as a comma-joined STRING —
+    // a normal wildlife setup declaration must still parse.
+    let mock = makeMock({
+      service_records: [{ id: 'sr-ws', customer_id: 'ws', scheduled_service_id: 'ws-2', service_data: JSON.stringify({ typedReportSnapshot: { type: 'wildlife_trapping', values: { trap_actions: 'Trap installed, Bait/lure refreshed' } } }) }],
+      scheduled_services: [
+        { id: 'ws-1', customer_id: 'ws', service_id: 'svc-wt', status: 'completed', scheduled_date: d(12), service_key: 'wildlife_trapping' },
+        { id: 'ws-2', customer_id: 'ws', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+      ],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'ws', serviceRecordId: 'sr-ws' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+
+    // ③ A rated ask from an OLDER program (behind the current program's
+    // declared opener) does not suppress the current final cadence.
+    mock = makeMock({
+      service_records: [
+        { id: 'sr-cb1', customer_id: 'cb', scheduled_service_id: 'cb-init', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Initial setup' } } }) },
+        { id: 'sr-cb2', customer_id: 'cb', scheduled_service_id: 'cb-fin', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Follow-up check' } } }) },
+      ],
+      scheduled_services: [
+        { id: 'cb-old', customer_id: 'cb', service_id: 'svc-trap', status: 'completed', scheduled_date: d(100), service_key: 'rodent_trapping' },
+        { id: 'cb-init', customer_id: 'cb', service_id: 'svc-trap', status: 'completed', scheduled_date: d(45), service_key: 'rodent_trapping' },
+        { id: 'cb-fin', customer_id: 'cb', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [{ id: 'seq-cb-old', customer_id: 'cb', scheduled_service_id: 'cb-old', status: 'completed' }],
+      review_requests: [{ id: 'req-cb-old', customer_id: 'cb', sequence_id: 'seq-cb-old', status: 'rated' }],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'cb', serviceRecordId: 'sr-cb2' });
+    expect(plan.seriesFinal).toBe(true);
+    expect(plan.plan).toHaveLength(3);
   });
 
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
