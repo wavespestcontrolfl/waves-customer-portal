@@ -475,6 +475,21 @@ function isMembershipTierUpgrade(previousTier, nextTier) {
   return next > prev;
 }
 
+// Frozen prior qualifying families from the estimate's membership snapshot
+// (codex #3228 r6): the quote deliberately freezes existingServiceKeys at
+// save time, and the customer accepts the tier that snapshot priced — a live
+// lookup at accept time can diverge when qualifying visits are added,
+// completed, or cancelled between save and accept (a saved Silver add-on
+// quote must not activate Bronze because its prior visit completed). Returns
+// null when the estimate has no snapshot (legacy) — callers fall back to the
+// live lookup. An EMPTY snapshot array is meaningful ("no priors at quote
+// time") and is honored as-is.
+function priorQualifyingKeysFromSnapshot(estimateData) {
+  const keys = estimateData?.membershipSnapshot?.existingServiceKeys;
+  if (!Array.isArray(keys)) return null;
+  return keys.filter((k) => WAVEGUARD.qualifyingServices.includes(k));
+}
+
 // Distinct qualifying-family count across the customer's EXISTING plans plus
 // this estimate's additions — the number the combined membership tier is
 // determined from. Same union the quote side advertises (estimate-membership-
@@ -1806,13 +1821,21 @@ const EstimateConverter = {
     // The nested transaction rolls back only the savepoint.
     let priorQualifyingKeys = [];
     if (!suppressRecurringConversion && serviceCount > 0) {
-      try {
-        priorQualifyingKeys = await database.transaction(
-          (sp) => loadExistingQualifyingServiceKeys(sp, customerId),
-        );
-      } catch (priorErr) {
-        logger.warn(`[estimate-converter] prior qualifying-services lookup failed for customer ${customerId} (tier falls back to estimate-only count): ${priorErr.message}`);
-        priorQualifyingKeys = [];
+      // The FROZEN snapshot wins (codex r6) — activation must match what the
+      // quote priced and displayed; the live lookup covers only legacy
+      // estimates saved before snapshots existed.
+      const snapshotKeys = priorQualifyingKeysFromSnapshot(estimateData);
+      if (snapshotKeys) {
+        priorQualifyingKeys = snapshotKeys;
+      } else {
+        try {
+          priorQualifyingKeys = await database.transaction(
+            (sp) => loadExistingQualifyingServiceKeys(sp, customerId),
+          );
+        } catch (priorErr) {
+          logger.warn(`[estimate-converter] prior qualifying-services lookup failed for customer ${customerId} (tier falls back to estimate-only count): ${priorErr.message}`);
+          priorQualifyingKeys = [];
+        }
       }
     }
     const combinedServiceCount = combinedTierQualifyingCount(estimateQualifyingKeys, priorQualifyingKeys);
@@ -3463,6 +3486,7 @@ module.exports.calculateAnnualPrepayAmount = calculateAnnualPrepayAmount;
 module.exports.countTierQualifyingRecurringServices = countTierQualifyingRecurringServices;
 module.exports.tierQualifyingRecurringServiceKeys = tierQualifyingRecurringServiceKeys;
 module.exports.combinedTierQualifyingCount = combinedTierQualifyingCount;
+module.exports.priorQualifyingKeysFromSnapshot = priorQualifyingKeysFromSnapshot;
 module.exports.isMembershipTierUpgrade = isMembershipTierUpgrade;
 module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;

@@ -21,6 +21,7 @@ const {
   combinedTierQualifyingCount,
   determineTier,
   isMembershipTierUpgrade,
+  priorQualifyingKeysFromSnapshot,
 } = require('../services/estimate-converter');
 
 const treeShrubEstimateData = {
@@ -69,6 +70,32 @@ describe('combined membership tier on add-on accepts', () => {
       { name: 'Palm Tree Injections', service: 'palm_injection', selected: true },
       { name: 'Rodent Bait Stations', service: 'rodent_bait', selected: true },
     ])).toEqual([]);
+  });
+});
+
+describe('frozen-snapshot prior keys (codex r6)', () => {
+  test('the saved snapshot wins over any live state', () => {
+    expect(priorQualifyingKeysFromSnapshot({
+      membershipSnapshot: { existingServiceKeys: ['pest_control'] },
+    })).toEqual(['pest_control']);
+  });
+
+  test('an EMPTY snapshot is honored — no fallback to a live lookup', () => {
+    expect(priorQualifyingKeysFromSnapshot({
+      membershipSnapshot: { existingServiceKeys: [] },
+    })).toEqual([]);
+  });
+
+  test('legacy estimates without a snapshot return null (caller uses the live lookup)', () => {
+    expect(priorQualifyingKeysFromSnapshot({})).toBe(null);
+    expect(priorQualifyingKeysFromSnapshot(null)).toBe(null);
+    expect(priorQualifyingKeysFromSnapshot({ membershipSnapshot: {} })).toBe(null);
+  });
+
+  test('non-qualifying keys in a snapshot never raise the tier', () => {
+    expect(priorQualifyingKeysFromSnapshot({
+      membershipSnapshot: { existingServiceKeys: ['pest_control', 'palm_injection', 'rodent_bait'] },
+    })).toEqual(['pest_control']);
   });
 });
 
