@@ -406,8 +406,9 @@ const ReviewService = {
         .where("created_at", ">=", sinceAt)
         // Rows that never reached the customer are not asks: scheduled rows
         // are inserted pre-delivery (and stay on cancel), failed/undelivered
-        // never landed (codex #3235 r1 P2).
-        .whereNotIn("status", ["scheduled", "canceled", "cancelled", "failed", "undelivered"])
+        // never landed, and the scheduled-SMS executor stamps 'blocked' on
+        // pre-delivery rejections (codex #3235 r1 P2 + r3 P2).
+        .whereNotIn("status", ["scheduled", "canceled", "cancelled", "failed", "undelivered", "blocked"])
         .orderBy("created_at", "desc")
         .limit(200)
         .select("message_body", "created_at");
@@ -699,9 +700,10 @@ const ReviewService = {
       } else if (notes.reviewDelayMinutes != null && Number.isFinite(Number(notes.reviewDelayMinutes))) {
         delayMinutes = Math.max(0, Number(notes.reviewDelayMinutes));
       }
-      // Legacy create() dedupes by service_record_id; the cadence path is
-      // idempotent per active sequence + capped/cooled-down — safe under
-      // webhook retries and double-clicked payment forms alike.
+      // Legacy create() dedupes by service_record_id; the cadence path
+      // dedupes per service record too (startReviewSequence) on top of the
+      // active-sequence + cap/cooldown guards — safe under webhook retries
+      // and double-clicked payment forms alike.
       const result = await this.enrollPostService({
         customerId: invoice.customer_id,
         serviceRecordId: invoice.service_record_id,
@@ -1974,6 +1976,21 @@ const ReviewService = {
     const renderVars = isNoLink ? { ...vars, review_url: "" } : vars;
     const body = OUTREACH.renderOutreachBody(rawBody, renderVars, { requireLink: requiresLink });
 
+    // Segment observability (codex #3235 r3): the one-segment contract is
+    // enforced on template copy and drafter output against the SHORT link;
+    // when the shortener degrades, shortenOrPassthrough falls back to the
+    // full tokenized URL (~112 GSM chars) and a second segment is the
+    // deliberate trade — no ask copy fits one segment around that URL, and
+    // dropping the ask or the link would cost more than the extra segment.
+    // Log it so a shortener outage is visible instead of silent spend.
+    try {
+      const { countSegments } = require("./messaging/segment-counter");
+      const seg = countSegments(require("./messaging/gsm-normalize").normalizeGsmPunctuation(body));
+      if (seg.segmentCount > 1) {
+        logger.warn(`[review] outreach SMS rendered to ${seg.segmentCount} segments (requestId=${request.id} template=${request.template_key || "custom"}) — likely short-url fallback`);
+      }
+    } catch { /* observability only */ }
+
     // ONLY the send attempt is in the retry-on-throw path. If sendCustomerMessage
     // itself throws (network/provider), it's safe to retry — Twilio never
     // accepted it. If it RETURNS and then post-send bookkeeping throws (a
@@ -2147,6 +2164,23 @@ const ReviewService = {
 
     const active = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
     if (active) return { started: false, reason: "already_active", sequence: active };
+
+    // One cadence per SERVICE RECORD, ever (codex #3235 r3 P1): the legacy
+    // create() deduped by service_record_id, and the cadence path used to be
+    // implicitly safe via the cap — but the cap-exempt first-treatment ask
+    // broke that: its one-step sequence completes on send, so a second
+    // enrollment for the same visit (completion first, paid-invoice webhook
+    // later) would re-send the identical ask. start_failed rows may retry.
+    // Fail CLOSED — a lookup error must not risk a duplicate text.
+    if (serviceRecordId) {
+      const priorForRecord = await db("review_sequences")
+        .where({ service_record_id: serviceRecordId })
+        .whereRaw("stop_reason IS DISTINCT FROM 'start_failed'")
+        .first();
+      if (priorForRecord) {
+        return { started: false, reason: "service_record_enrolled", sequence: priorForRecord };
+      }
+    }
 
     // The first touch is an immediate ask, so enforce the same lifetime cap +
     // 30-day cooldown as a one-off send (the candidate list already filters on

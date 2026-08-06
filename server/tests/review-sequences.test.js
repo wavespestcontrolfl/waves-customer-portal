@@ -795,6 +795,27 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan).toHaveLength(3);
   });
 
+  test('a second enrollment for the SAME service record is rejected even after the first sequence completed (cap-exempt dedupe)', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'dd-1', first_name: 'Kim', last_name: 'J', phone: '+19410000053', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-dd', customer_id: 'dd-1', scheduled_service_id: 'ss-dd' }],
+      scheduled_services: [{ id: 'ss-dd', customer_id: 'dd-1', service_id: 'svc-roach', status: 'completed', scheduled_date: '2026-08-01', service_key: 'cockroach_control' }],
+      // The visit-1 one-step sequence already ran to completion — its
+      // cap-exempt ask is invisible to cap/cooldown, so only the per-record
+      // dedupe stands between the paid-invoice re-enrollment and a
+      // duplicate first-treatment text.
+      review_sequences: [{ id: 'seq-dd', customer_id: 'dd-1', service_record_id: 'sr-dd', status: 'completed', stop_reason: 'completed', current_step: 1, touches_sent: 1, plan: '[]', started_at: new Date(Date.now() - 3600000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'dd-1', serviceRecordId: 'sr-dd', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('service_record_enrolled');
+    expect(mock.__state.rows.review_sequences).toHaveLength(1);
+  });
+
   test('a hand-sent review ask in the last 30 days stands the cadence down (manual_ask_recent)', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({

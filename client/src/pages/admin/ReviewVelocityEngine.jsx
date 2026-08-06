@@ -254,6 +254,12 @@ const TEMPLATES = [
     sentiment: "happy",
     body: "Hey {first}! Great seeing you today. Here is that review link one more time:\n\n{review_url}",
   },
+  {
+    id: "first_treatment_ask",
+    name: "Multi-Treatment: First Visit",
+    sentiment: "happy",
+    body: "Hi {first}! {tech} with Waves. Treatment 1 done - see you at the follow-up. A quick review helps:\n\n{review_url}",
+  },
 ];
 
 // ── Helpers ──
