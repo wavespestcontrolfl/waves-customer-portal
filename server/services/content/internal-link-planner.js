@@ -24,10 +24,14 @@ const fs = require('fs');
 const path = require('path');
 const GitHubClient = require('../content-astro/github-client');
 const fm = require('../content-astro/frontmatter');
+const policy = require('./internal-link-seo-policy');
 const { CITIES } = require('./scoring-config');
 
 const DEFAULT_LINK_CAP = 5; // per planning run
 const DEFAULT_PER_PAGE_CAP = 1; // per source file per target URL
+// Mirrors the executor's source_link_density_high default — a source above
+// it is rejected at execution, so planning it would burn a cap slot.
+const DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS = 30;
 const ALLOWED_SITE_HOSTS = new Set(['www.wavespestcontrol.com', 'wavespestcontrol.com']);
 const INLINE_MARKDOWN_LINK_RE = /\[[^\]\n]+\]\(\s*(?:<[^>\n]+>|(?:[^\s()\n]+|\([^()\n]*\))*)(?:\s+[^)]*)?\)/g;
 const SERVICE_ANCHOR_ALIASES = {
@@ -61,20 +65,94 @@ function anchorCandidates(target) {
     out.push({ phrase: `${service} in ${city}`, priority: 9 });
     out.push({ phrase: `${city} ${service}`, priority: 8 });
   }
+  for (const segment of keywordSegments(target.keyword)) {
+    out.push({ phrase: segment, priority: 7 });
+  }
   if (target.title) out.push({ phrase: target.title, priority: 5 });
-  // De-dupe by lowercased phrase.
+  // De-dupe by lowercased phrase, and drop candidates the executor's anchor
+  // policy is guaranteed to reject (too long, sentence punctuation, generic).
+  // The planner commits to the FIRST matching phrase per page, so a doomed
+  // high-priority candidate (e.g. a 9-word comparison keyword) would
+  // otherwise shadow a workable lower-priority segment on the same page.
   const seen = new Set();
   return out.filter(({ phrase }) => {
     const k = phrase.toLowerCase();
     if (seen.has(k)) return false;
     seen.add(k);
-    return true;
+    return policy.validateAnchorPolicy(phrase).ok;
   });
 }
 
 function serviceAnchorPhrase(service) {
   const normalized = String(service || '').trim().toLowerCase().replace(/\s+/g, '_');
   return SERVICE_ANCHOR_ALIASES[normalized] || String(service || '').trim();
+}
+
+/**
+ * Long-tail primary keywords ("bed bug bites vs flea bites", "tiny ants in
+ * kitchen identification") occur verbatim almost nowhere in the corpus, so
+ * the full-keyword candidate finds nothing and planning silently returns
+ * zero tasks. Split the keyword on comparison/connective separators into
+ * multi-word segments ("bed bug bites", "flea bites") that DO occur in
+ * sibling pages. Single-word and stopword-only segments are dropped — they
+ * anchor poorly and match promiscuously. Comma/slash between digits is
+ * numeric punctuation ("2,500", "1/2"), not a boundary.
+ */
+function keywordSegments(keyword) {
+  const raw = String(keyword || '').trim();
+  if (!raw) return [];
+  return raw
+    .split(/\s+(?:vs\.?|versus|and|or|in|for|with|without)\s+|\s*[:;()—–?!]\s*|\s*(?<!\d)[,/]\s*|\s*[,/](?!\d)\s*/i)
+    .map((segment) => String(segment || '').trim())
+    .filter((segment) => segment
+      && segment.toLowerCase() !== raw.toLowerCase()
+      && segment.split(/\s+/).length >= 2
+      && policy._internals.meaningfulTokens(segment).size > 0);
+}
+
+/**
+ * Same page-type/cluster inference the executor's fact builder uses (it
+ * delegates here) — ranking with different facts than the gate re-opens the
+ * cap-burn bug where mis-scored matches consume slots.
+ */
+function inferPageType(file, frontmatter = {}) {
+  if (frontmatter.page_type || frontmatter.content_type) return String(frontmatter.page_type || frontmatter.content_type);
+  const normalized = String(file || '').replace(/\\/g, '/');
+  if (normalized.includes('/blog/')) return 'supporting-blog';
+  if (normalized.includes('/services/')) return /-fl\.mdx?$/.test(normalized) ? 'city-service' : 'service';
+  if (normalized.includes('/locations/')) return 'location';
+  return 'unknown';
+}
+
+function inferCluster(file, frontmatter = {}) {
+  const text = [
+    frontmatter.category,
+    frontmatter.service,
+    frontmatter.primary_keyword,
+    frontmatter.title,
+    file,
+  ].filter(Boolean).join(' ').toLowerCase();
+  for (const cluster of ['termite', 'mosquito', 'rodent', 'lawn', 'tree', 'shrub', 'pest']) {
+    if (text.includes(cluster)) return cluster === 'tree' || cluster === 'shrub' ? 'tree-shrub' : cluster;
+  }
+  return null;
+}
+
+/**
+ * The topical facts scoreTopicalRelevance consumes, built with the SAME
+ * field precedence as the executor's pageFromAstroFile/pageFacts — when the
+ * target page exists in the corpus the plan-time score equals the gate's
+ * score exactly.
+ */
+function topicalFacts(file, frontmatter = {}, { bodyExcerpt = null } = {}) {
+  return {
+    page_type: inferPageType(file, frontmatter),
+    topic: frontmatter.primary_keyword || frontmatter.target_keyword || frontmatter.title || null,
+    topic_cluster: frontmatter.category || frontmatter.service || frontmatter.target_service || inferCluster(file, frontmatter),
+    title: frontmatter.title || null,
+    keyword: frontmatter.primary_keyword || frontmatter.target_keyword || null,
+    body_excerpt: bodyExcerpt,
+  };
 }
 
 // ── corpus scanner ──────────────────────────────────────────────────
@@ -128,7 +206,7 @@ function blankRegion(region) {
  * inside a markdown or HTML link. Returns { index, length, snippet }
  * or null.
  */
-function findFirstUnlinkedOccurrence(text, phrase) {
+function findFirstUnlinkedOccurrence(text, phrase, { fromIndex = 0 } = {}) {
   if (!text || !phrase) return null;
   const masked = maskExcludedRegions(text);
   // Require word-like phrase boundaries — raw indexOf matched short keywords like
@@ -136,6 +214,7 @@ function findFirstUnlinkedOccurrence(text, phrase) {
   // the rendered markdown when applyTaskToBody wrapped the partial.
   const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(escaped, 'gi');
+  re.lastIndex = Math.max(0, fromIndex);
   let m;
   while ((m = re.exec(masked)) !== null) {
     const idx = m.index;
@@ -201,6 +280,167 @@ function isInsideLink(text, start, end) {
   if (lastOpen > lastClose) return true;
   return false;
 }
+
+/**
+ * The blank-line-delimited paragraph containing `index`. This is the SAME
+ * context the executor's relevance gate scores (it delegates here) — the
+ * plan-time ranking must see identical text or weak matches can outrank a
+ * viable page whose supporting tokens sit outside a short snippet.
+ */
+function paragraphAround(body, index) {
+  const text = String(body || '');
+  let start = text.lastIndexOf('\n\n', Math.max(0, index - 1));
+  start = start === -1 ? 0 : start + 2;
+  let end = text.indexOf('\n\n', index);
+  end = end === -1 ? text.length : end;
+  return text.slice(start, end).trim();
+}
+
+/**
+ * Same check the executor's gate applies before patching (it delegates
+ * here): a paragraph that already carries a link is not a valid placement.
+ * The planner must apply it BEFORE the site-wide cap or such matches burn
+ * cap slots and then all skip as paragraph_already_has_link.
+ */
+function paragraphHasLink(paragraph) {
+  return /\[[^\]\n]+\]\(\s*[^)]+\)/.test(paragraph) || /<a\b[^>]*\bhref\s*=/i.test(paragraph);
+}
+
+// Bound on how many occurrences of one phrase to examine per page — a
+// runaway phrase ("pest control" on an index page) shouldn't scan forever.
+const MAX_PLACEMENT_SCAN = 20;
+
+/**
+ * The FIRST occurrence of `phrase` that is a placement the executor would
+ * accept: not inside a link/heading (findFirstUnlinkedOccurrence), in a
+ * paragraph with no existing link, and passing the contextual anchor
+ * policy there. Planner, executor dry-run, and applyTaskToBody all use
+ * THIS scan, so they always select the same occurrence — an early
+ * ineligible mention no longer hides a later clean one.
+ */
+function findEligiblePlacement(body, phrase, { fromIndex = 0 } = {}) {
+  for (let i = 0; i < MAX_PLACEMENT_SCAN; i++) {
+    const occ = findFirstUnlinkedOccurrence(body, phrase, { fromIndex });
+    if (!occ) return null;
+    const paragraph = paragraphAround(body, occ.index);
+    const anchor = String(body).slice(occ.index, occ.index + occ.length);
+    if (!paragraphHasLink(paragraph)
+      && policy.validateAnchorPolicy(anchor, { surroundingText: paragraph }).ok) {
+      return { ...occ, paragraph, anchor };
+    }
+    fromIndex = occ.index + occ.length;
+  }
+  return null;
+}
+
+/**
+ * The placement to evaluate/patch for a QUEUED task. Prefers the exact
+ * occurrence the planner recorded (task.source_offset) when it is still
+ * present and eligible — the planner may have deliberately chosen a later
+ * occurrence whose paragraph carries more topical support, and a fresh
+ * first-eligible scan would silently select a different (weaker) one.
+ * Falls back to the scan when the file drifted since planning.
+ */
+function placementForTask(body, task, { targetTerms = null } = {}) {
+  const anchor = String(task?.anchor_text || '');
+  if (!anchor) return null;
+  const text = String(body || '');
+  const offset = Number.isInteger(task?.source_offset) ? task.source_offset : null;
+  if (offset != null && offset >= 0 && text.slice(offset, offset + anchor.length) === anchor) {
+    const paragraph = paragraphAround(text, offset);
+    if (!paragraphHasLink(paragraph)
+      && policy.validateAnchorPolicy(anchor, { surroundingText: paragraph }).ok
+      // Confirms the occurrence at the offset is itself matchable (not
+      // inside a link/heading/masked region) — slice equality alone can't.
+      && findFirstUnlinkedOccurrence(text, anchor, { fromIndex: offset })?.index === offset
+      // An unchanged offset does not mean unchanged CONTEXT: if the copy
+      // around the anchor was edited (supporting terms removed), the scored
+      // basis is gone — fall through to relocation, which re-picks this
+      // occurrence only if it still matches the planned context best.
+      && paragraphMatchesContext(paragraph, task?.context_snippet)) {
+      return { index: offset, length: anchor.length, snippet: snippetAround(text, offset, anchor.length), paragraph, anchor };
+    }
+  }
+  // Drifted file: relocate using the target's topical terms and the
+  // persisted context (the full scored paragraph) — the planner may have
+  // deliberately scanned past a thin early mention, and a plain
+  // first-eligible scan would revive exactly that occurrence.
+  return relocateByContext(text, anchor, task, { targetTerms });
+}
+
+function relocateByContext(body, phrase, task = {}, { targetTerms = null } = {}) {
+  const contextSnippet = task?.context_snippet;
+  // Prefer the EXECUTOR'S effective target terms when the caller has the
+  // target page in hand (the gate scores frontmatter topic+cluster+keyword,
+  // which can differ from the brief keyword). The task-row reconstruction
+  // (keyword + filename-inferred cluster) is only the fallback for callers
+  // without target facts — in practice the pinned offset governs there,
+  // because applyTaskToBody patches the same body the dry-run just
+  // validated.
+  const targetTermsText = targetTerms || [
+    task?.target_keyword,
+    inferCluster(task?.target_file || task?.target_url || '', { primary_keyword: task?.target_keyword }),
+  ].filter(Boolean).join(' ');
+  const occurrences = [];
+  let fromIndex = 0;
+  for (let i = 0; i < MAX_PLACEMENT_SCAN; i++) {
+    const occ = findEligiblePlacement(body, phrase, { fromIndex });
+    if (!occ) break;
+    occurrences.push(occ);
+    fromIndex = occ.index + occ.length;
+  }
+  if (!occurrences.length) return null;
+  // The policy scorer's OWN tokenizer — a parallel token definition here
+  // counted stopwords the relevance gate strips, letting an edited old
+  // paragraph tie on "with"/"of" noise and then win on context overlap.
+  const { meaningfulTokens } = policy._internals;
+  const contextTokens = meaningfulTokens(contextSnippet);
+  const keywordTokens = meaningfulTokens(targetTermsText);
+  if (!contextTokens.size && !keywordTokens.size) return occurrences[0];
+  // Rank by the TARGET's topical terms first (a relevance proxy available
+  // to every call site from the task row alone — an edited old paragraph
+  // can keep incidental wording, and raw context overlap alone would pick
+  // it over an occurrence that still carries the target terms), then by
+  // full-paragraph context overlap; earliest wins remaining ties.
+  let best = occurrences[0];
+  let bestKeywordOverlap = -1;
+  let bestContextOverlap = -1;
+  for (const occ of occurrences) {
+    const paragraphTokens = meaningfulTokens(occ.paragraph);
+    let keywordOverlap = 0;
+    for (const token of keywordTokens) {
+      if (paragraphTokens.has(token)) keywordOverlap++;
+    }
+    let contextOverlap = 0;
+    for (const token of paragraphTokens) {
+      if (contextTokens.has(token)) contextOverlap++;
+    }
+    if (keywordOverlap > bestKeywordOverlap
+      || (keywordOverlap === bestKeywordOverlap && contextOverlap > bestContextOverlap)) {
+      best = occ;
+      bestKeywordOverlap = keywordOverlap;
+      bestContextOverlap = contextOverlap;
+    }
+  }
+  return best;
+}
+
+function paragraphMatchesContext(paragraph, contextSnippet) {
+  const context = String(contextSnippet || '').replace(/\s+/g, ' ').trim();
+  if (!context) return true; // nothing persisted to compare against
+  return String(paragraph || '').replace(/\s+/g, ' ').trim() === context;
+}
+
+/**
+ * The gate's relevance floor. Shared with the executor: an invalid env
+ * value must not make the planner reject everything (score >= NaN is
+ * false) while the gate accepts everything (score < NaN is also false).
+ */
+function envMinTopicalRelevance() {
+  const value = Number(process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE);
+  return Number.isFinite(value) ? value : 0.75;
+}
+
 
 function snippetAround(text, start, length, padding = 50) {
   const s = Math.max(0, start - padding);
@@ -269,9 +509,64 @@ function canonicalPointsOffHub(frontmatterData = {}) {
   return false;
 }
 
+/**
+ * Same noindex detection the executor's gate applies (it delegates here) —
+ * a noindex source fails source_not_indexable at execution, so planning it
+ * would burn a cap slot.
+ */
+function robotsNoindex(frontmatter = {}) {
+  return String(frontmatter.robots || frontmatter.indexing || '').toLowerCase().includes('noindex')
+    || frontmatter.noindex === true;
+}
+
 function eligibleLinkSource(page) {
   const data = fm.parse(String(page?.body || '')).data || {};
-  return !sourceRendersOffHub(data) && !canonicalPointsOffHub(data);
+  return !sourceRendersOffHub(data) && !canonicalPointsOffHub(data) && !robotsNoindex(data);
+}
+
+/**
+ * A frontmatter canonical that names a DIFFERENT hub path than the page's
+ * own URL fails source_canonical_mismatch at execution — planning such a
+ * source burns a cap slot. Off-hub canonicals are handled separately by
+ * canonicalPointsOffHub; run this only after that check has passed.
+ */
+function sourceCanonicalMismatch(frontmatterData = {}, pageUrl) {
+  if (!pageUrl) return false;
+  // Executor precedence (canonicalUrlFromFrontmatter): the FIRST valid
+  // internal value among canonical, canonical_url is the page's effective
+  // canonical — a stale secondary field must not disqualify a source whose
+  // primary canonical matches, or the planner rejects pages the gate
+  // accepts.
+  const values = [frontmatterData.canonical, frontmatterData.canonical_url]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  if (!values.length) return false;
+  for (const value of values) {
+    if (policy.normalizeInternalUrl(value)) return !policy.urlsEquivalent(value, pageUrl);
+  }
+  // Populated but no valid internal canonical: off-hub absolutes are
+  // rejected earlier by canonicalPointsOffHub; anything else cannot match.
+  return true;
+}
+
+/**
+ * Same internal-link count the executor's density gate uses (it delegates
+ * here): internal markdown links plus internal <a> hrefs, images excluded.
+ */
+function countInternalLinks(body) {
+  const text = String(body || '');
+  let count = 0;
+  // (?<!!) excludes markdown image embeds — ![alt](/x.webp) is not a link.
+  const mdLink = /(?<!!)\[[^\]\n]+\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)/g;
+  let match;
+  while ((match = mdLink.exec(text)) !== null) {
+    if (policy.normalizeInternalUrl(String(match[1] || '').replace(/^<|>$/g, ''))) count++;
+  }
+  const href = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi;
+  while ((match = href.exec(text)) !== null) {
+    if (policy.normalizeInternalUrl(match[1])) count++;
+  }
+  return count;
 }
 
 function unwrapAngleHref(href) {
@@ -310,6 +605,11 @@ class InternalLinkPlanner {
    *            source_offset, opportunity_id }]
    */
   planForTarget(target, { corpus = [], opportunityId = null, cap = DEFAULT_LINK_CAP, perPageCap = DEFAULT_PER_PAGE_CAP } = {}) {
+    // Deliberately NOT per-call options: the executor resolves these from
+    // its own env/defaults, and a caller overriding only the planner side
+    // would plan tasks the gate rejects (or starve valid ones).
+    const maxSourceContextualLinks = DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS;
+    const minTopicalRelevance = envMinTopicalRelevance();
     if (!target?.url) return [];
     const candidates = anchorCandidates(target);
     if (!candidates.length) return [];
@@ -319,40 +619,115 @@ class InternalLinkPlanner {
     // Resolve the target's content file from the corpus while we have it —
     // the executor can't reliably re-derive it from the URL alone (a
     // root-slug blog post and a location page have identical URL shapes).
-    const targetFile = corpus.find(
+    const targetPage = corpus.find(
       (page) => sameUrl(page.url || deriveUrlFromSourceFile(page.file, page.body), targetPath)
-    )?.file || null;
-    const tasks = [];
-    const perFileCount = new Map();
+    ) || null;
+    const targetFile = targetPage?.file || null;
+    const targetFront = targetPage ? (fm.parse(String(targetPage.body || '')).data || {}) : {};
+    // When the target page is in the corpus these facts equal the executor's
+    // exactly. A not-yet-merged target gets a synthetic frontmatter from the
+    // brief (the executor would skip everything as target_body_missing in
+    // that state anyway, so the approximation cannot cause divergence).
+    // The brief's keyword also backfills a corpus target whose (legacy)
+    // frontmatter carries no keyword — without it the descriptive title
+    // floods the core denominator, recreating the blackout this change
+    // removes. The executor mirrors the merge via task.target_keyword.
+    const targetFrontForFacts = targetPage
+      ? {
+        ...targetFront,
+        primary_keyword: targetFront.primary_keyword || targetFront.target_keyword || target.keyword || undefined,
+      }
+      : {
+        primary_keyword: target.keyword || undefined,
+        title: target.title || undefined,
+        service: target.service || undefined,
+      };
+    const targetFacts = topicalFacts(targetPage ? targetFile : targetPath, targetFrontForFacts);
+    const matches = [];
 
+    // Scan the WHOLE corpus before applying the site-wide cap. Taking the
+    // first N matches in corpus order let a common-but-weak segment fill
+    // every slot with sources the executor's relevance gate then skips,
+    // while a genuinely relevant later page was never planned.
     for (const page of corpus) {
-      if (tasks.length >= cap) break;
       const pageUrl = page.url || deriveUrlFromSourceFile(page.file, page.body);
       if (sameUrl(pageUrl, targetPath)) continue; // never link page to itself
-      if (!eligibleLinkSource(page)) continue; // never patch spoke-rendered or spoke-canonical pages
+      const front = fm.parse(String(page.body || '')).data || {};
+      // Every executor precondition knowable from the corpus runs HERE,
+      // before the cap — a source the gate would reject must never occupy
+      // a slot (spoke-rendered, spoke-canonical, noindex, canonical
+      // mismatch, link-saturated).
+      if (sourceRendersOffHub(front) || canonicalPointsOffHub(front) || robotsNoindex(front)) continue;
+      if (sourceCanonicalMismatch(front, pageUrl)) continue;
       if (pageAlreadyLinksTo(page.body, targetPath)) continue;
+      if (countInternalLinks(page.body) > maxSourceContextualLinks) continue;
 
-      for (const { phrase } of candidates) {
-        if ((perFileCount.get(page.file) || 0) >= perPageCap) break;
-        const occ = findFirstUnlinkedOccurrence(page.body, phrase);
+      // Evaluate EVERY candidate phrase for this page and keep the best
+      // per-page match(es) by relevance — committing to the first matching
+      // phrase let a low-relevance early candidate (e.g. a bare "roof rat")
+      // shadow a later fully-relevant segment on the same page, queueing a
+      // task the executor's relevance gate then rejects.
+      const pageMatches = [];
+      for (const { phrase, priority } of candidates) {
+        // Scan placements the executor would accept (findEligiblePlacement
+        // skips linked paragraphs and contextual anchor-policy failures)
+        // AND keep scanning past placements whose paragraph scores below
+        // the gate's floor — an early thin mention must not discard a later
+        // occurrence whose paragraph carries the supporting terms. The
+        // chosen occurrence is persisted as source_offset; the executor and
+        // applyTaskToBody re-locate it via placementForTask, so what was
+        // scored here is what gets evaluated and patched.
+        let occ = null;
+        let relevance = 0;
+        let fromIndex = 0;
+        for (let i = 0; i < MAX_PLACEMENT_SCAN; i++) {
+          const candidateOcc = findEligiblePlacement(page.body, phrase, { fromIndex });
+          if (!candidateOcc) break;
+          const score = policy.scoreTopicalRelevance(
+            // Mask non-rendered regions (MDX props, HTML comments, code)
+            // before scoring — hidden tokens must not lift topical overlap
+            // for text the reader never sees.
+            topicalFacts(page.file, front, { bodyExcerpt: maskExcludedRegions(candidateOcc.paragraph) }),
+            targetFacts
+          );
+          // Keep the HIGHEST-scoring passing occurrence across the bounded
+          // scan (earliest wins ties) — stopping at the first floor-clearing
+          // one recorded a weaker placement that best-first capping below
+          // could then rank beneath an equal-scored earlier corpus page.
+          if (score >= minTopicalRelevance && score > relevance) {
+            occ = candidateOcc;
+            relevance = score;
+            if (score >= 1) break; // full coverage can't be beaten
+          }
+          fromIndex = candidateOcc.index + candidateOcc.length;
+        }
         if (!occ) continue;
-        // Preserve the original casing from the matched text rather
-        // than the candidate phrase.
-        const actualAnchor = page.body.slice(occ.index, occ.index + occ.length);
-        tasks.push({
-          source_file: page.file,
-          target_url: targetPath,
-          target_file: targetFile,
-          anchor_text: actualAnchor,
-          context_snippet: occ.snippet,
-          source_offset: occ.index,
-          opportunity_id: opportunityId,
+        pageMatches.push({
+          priority,
+          relevance,
+          task: {
+            source_file: page.file,
+            target_url: targetPath,
+            target_file: targetFile,
+            target_keyword: target.keyword || null,
+            anchor_text: occ.anchor,
+            // The FULL scored paragraph, not a ±50-char snippet — drift
+            // relocation compares this against candidate paragraphs, and a
+            // truncated context ties occurrences that share local anchor
+            // wording, reviving the thin mention planning rejected.
+            context_snippet: occ.paragraph,
+            source_offset: occ.index,
+            opportunity_id: opportunityId,
+          },
         });
-        perFileCount.set(page.file, (perFileCount.get(page.file) || 0) + 1);
-        break; // only one anchor per page per target
       }
+      pageMatches.sort((a, b) => (b.relevance - a.relevance) || (b.priority - a.priority));
+      matches.push(...pageMatches.slice(0, perPageCap));
     }
-    return tasks;
+    // Fill the cap best-first: plan-time relevance (the executor gates on
+    // it), then anchor priority; ties keep corpus order (sort is stable).
+    matches.sort((a, b) => (b.relevance - a.relevance) || (b.priority - a.priority));
+    return matches.slice(0, cap).map((m) => m.task);
   }
 
   /**
@@ -360,14 +735,17 @@ class InternalLinkPlanner {
    * Re-locates the phrase before replacing (in case the file changed
    * since planning) so offsets aren't load-bearing.
    */
-  applyTaskToBody(body, task) {
+  applyTaskToBody(body, task, { targetTerms = null } = {}) {
     if (!body || !task) return body;
     const targetUrl = canonicalInternalPath(task.target_url);
     if (!targetUrl || pageAlreadyLinksTo(body, targetUrl)) return body;
-    const occ = findFirstUnlinkedOccurrence(body, task.anchor_text);
+    // Prefer the exact occurrence the planner recorded (source_offset), with
+    // a scan fallback — callers with the target page pass the same effective
+    // targetTerms the validation relocated with, so the occurrence that was
+    // validated is the occurrence that gets linked.
+    const occ = placementForTask(body, task, { targetTerms });
     if (!occ) return body;
-    const anchor = body.slice(occ.index, occ.index + occ.length);
-    const replacement = `[${anchor}](${targetUrl})`;
+    const replacement = `[${occ.anchor}](${targetUrl})`;
     return body.slice(0, occ.index) + replacement + body.slice(occ.index + occ.length);
   }
 
@@ -526,19 +904,33 @@ module.exports._internals = {
   INLINE_MARKDOWN_LINK_RE,
   anchorCandidates,
   serviceAnchorPhrase,
+  keywordSegments,
+  inferPageType,
+  inferCluster,
+  topicalFacts,
   maskExcludedRegions,
   maskNonContentRegions,
   blankRegion,
   findFirstUnlinkedOccurrence,
+  findEligiblePlacement,
+  placementForTask,
   isInsideMarkdownHeading,
   hasPhraseBoundary,
   isWordChar,
   isInsideLink,
   snippetAround,
+  paragraphAround,
+  paragraphHasLink,
   pageAlreadyLinksTo,
   sourceRendersOffHub,
   canonicalPointsOffHub,
+  robotsNoindex,
   eligibleLinkSource,
+  sourceCanonicalMismatch,
+  countInternalLinks,
+  envMinTopicalRelevance,
+  paragraphMatchesContext,
+  DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS,
   unwrapAngleHref,
   normalizePath,
   canonicalInternalPath,

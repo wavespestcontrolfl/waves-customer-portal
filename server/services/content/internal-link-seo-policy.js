@@ -180,15 +180,23 @@ function scoreTopicalRelevance(source = {}, target = {}) {
     source.title,
     source.body_excerpt,
   ].filter(Boolean).join(' ');
-  const targetText = [
+  // The denominator is the target's CORE topical identity (topic + cluster +
+  // keyword), not its full descriptive text. Including title/page_type made
+  // this containment ratio structurally uncoverable for blog targets — a
+  // descriptive title contributes 5–15 tokens no source body repeats, capping
+  // blog→blog scores at 0.1–0.4 against the 0.75 floor while 4-token
+  // city-service targets hit 1.0. Title/page_type only serve as a fallback
+  // denominator when a target carries no core facts at all.
+  const coreText = [
     target.topic,
     target.topic_cluster,
-    target.page_type,
-    target.title,
     target.keyword,
   ].filter(Boolean).join(' ');
   const sourceTokens = meaningfulTokens(sourceText);
-  const targetTokens = meaningfulTokens(targetText);
+  const coreTokens = meaningfulTokens(coreText);
+  const targetTokens = coreTokens.size
+    ? coreTokens
+    : meaningfulTokens([target.page_type, target.title].filter(Boolean).join(' '));
   if (!sourceTokens.size || !targetTokens.size) return 0;
   const overlap = Array.from(targetTokens).filter((token) => sourceTokens.has(token)).length;
   return round4(overlap / targetTokens.size);

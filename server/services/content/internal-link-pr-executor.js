@@ -13,6 +13,25 @@ const GitHubClient = require('../content-astro/github-client');
 const frontmatter = require('../content-astro/frontmatter');
 const planner = require('./internal-link-planner');
 const policy = require('./internal-link-seo-policy');
+// Text-level checks are OWNED by the planner and shared here — the planner
+// applies every one of them before its site-wide cap, so it never plans a
+// task this executor's gate would reject on corpus-knowable grounds.
+const {
+  sourceRendersOffHub,
+  canonicalPointsOffHub,
+  pageAlreadyLinksTo,
+  findFirstUnlinkedOccurrence,
+  findEligiblePlacement,
+  placementForTask,
+  paragraphAround,
+  paragraphHasLink,
+  robotsNoindex,
+  countInternalLinks,
+  inferPageType,
+  inferCluster,
+  maskExcludedRegions,
+  envMinTopicalRelevance,
+} = planner._internals;
 
 const TABLE = 'content_internal_link_tasks';
 const EXECUTOR_VERSION = 'internal-link-dry-run-v1';
@@ -101,7 +120,14 @@ class InternalLinkPrExecutor {
         continue;
       }
 
-      const patchedContent = planner.applyTaskToBody(source.body, { ...task, target_url: targetUrl });
+      // Same effective terms the dry-run validation relocated with — the
+      // patch must land on the occurrence that passed the gate, not one a
+      // terms-blind relocation picks after drift.
+      const patchedContent = planner.applyTaskToBody(
+        source.body,
+        { ...task, target_url: targetUrl },
+        { targetTerms: effectiveTargetTerms(target, targetUrl, task).targetTerms }
+      );
       if (patchedContent === source.body) {
         await this._persistDryRunResult(task.id, { ...validation, status: 'skipped', skip_reason: 'patch_noop' });
         continue;
@@ -600,6 +626,26 @@ class InternalLinkPrExecutor {
   }
 }
 
+/**
+ * The target facts this gate scores, plus the flattened topical terms used
+ * to rank drift relocation — ONE derivation shared by validation and patch
+ * application, so both relocate to the same occurrence.
+ */
+function effectiveTargetTerms(targetPage, targetUrl, task) {
+  const targetFacts = pageFacts(targetPage, { url: targetUrl });
+  if (!targetFacts.keyword && task.target_keyword) {
+    // Legacy targets without a frontmatter keyword: use the keyword the
+    // planner persisted on the task so the core denominator carries the
+    // topic instead of the descriptive title — mirrors the planner's merge.
+    targetFacts.keyword = task.target_keyword;
+    targetFacts.topic = task.target_keyword;
+  }
+  return {
+    targetFacts,
+    targetTerms: [targetFacts.topic, targetFacts.topic_cluster, targetFacts.keyword].filter(Boolean).join(' '),
+  };
+}
+
 function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {}) {
   const base = baseResult(task, sourcePage, targetPage);
   if (!sourcePage?.body) return skipped(base, 'source_body_missing');
@@ -607,10 +653,10 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   // Tasks planned before the planner grew its spoke guard can still name a
   // spoke-rendered or spoke-canonical source; re-check at execution time so
   // they skip cleanly.
-  if (planner._internals.sourceRendersOffHub(sourcePage.frontmatter || {})) {
+  if (sourceRendersOffHub(sourcePage.frontmatter || {})) {
     return skipped(base, 'source_renders_on_spoke');
   }
-  if (planner._internals.canonicalPointsOffHub(sourcePage.frontmatter || {})) {
+  if (canonicalPointsOffHub(sourcePage.frontmatter || {})) {
     return skipped(base, 'source_canonical_off_hub');
   }
 
@@ -619,17 +665,40 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   if (!targetUrl) return skipped(base, 'target_url_invalid');
   if (!sourceUrl) return skipped(base, 'source_url_invalid');
   if (sourceUrl === targetUrl) return skipped(base, 'self_link');
-  if (planner._internals.pageAlreadyLinksTo(sourcePage.body, targetUrl)) return skipped(base, 'source_already_links_target');
+  if (pageAlreadyLinksTo(sourcePage.body, targetUrl)) return skipped(base, 'source_already_links_target');
 
-  const occurrence = planner._internals.findFirstUnlinkedOccurrence(sourcePage.body, task.anchor_text);
-  if (!occurrence) return skipped(base, 'anchor_not_found');
+  // Target facts FIRST — relocation after a drift must rank occurrences by
+  // the same effective terms this gate scores (frontmatter topic + cluster
+  // + keyword), not a reconstruction from the brief keyword and filename.
+  const { targetFacts, targetTerms } = effectiveTargetTerms(targetPage, targetUrl, task);
+
+  // Prefer the exact occurrence the planner recorded (source_offset) — the
+  // planner may have chosen a later occurrence whose paragraph carries the
+  // topical support — with a scan fallback for drifted files. When no
+  // occurrence survives, report the first occurrence's specific failure so
+  // skip reasons stay diagnostic.
+  const occurrence = placementForTask(sourcePage.body, task, { targetTerms });
+  if (!occurrence) {
+    const first = findFirstUnlinkedOccurrence(sourcePage.body, task.anchor_text);
+    if (!first) return skipped(base, 'anchor_not_found');
+    const firstParagraph = paragraphAround(sourcePage.body, first.index);
+    if (paragraphHasLink(firstParagraph)) return skipped(base, 'paragraph_already_has_link');
+    const anchorCheck = policy.validateAnchorPolicy(
+      String(sourcePage.body).slice(first.index, first.index + first.length),
+      { surroundingText: firstParagraph, targetKeyword: task.target_keyword || undefined }
+    );
+    return skipped(base, anchorCheck.issues.map((issue) => issue.code).join(',') || 'anchor_not_found');
+  }
   if (isHeadingOccurrence(sourcePage.body, occurrence.index)) return skipped(base, 'anchor_in_heading');
 
-  const paragraph = paragraphAround(sourcePage.body, occurrence.index);
-  if (paragraphHasLink(paragraph)) return skipped(base, 'paragraph_already_has_link');
+  const paragraph = occurrence.paragraph;
 
-  const sourceFacts = pageFacts(sourcePage, { url: sourceUrl });
-  const targetFacts = pageFacts(targetPage, { url: targetUrl });
+  // The paragraph around the matched anchor is the link's actual context —
+  // without it the relevance score sees only frontmatter facts and misses
+  // that the source body demonstrably discusses the target's topic (the
+  // anchor phrase was found IN it). Masked first: hidden MDX props/comments
+  // must not lift topical overlap for text the reader never sees.
+  const sourceFacts = pageFacts(sourcePage, { url: sourceUrl, bodyExcerpt: maskExcludedRegions(paragraph) });
   const opportunity = policy.evaluateLinkOpportunity({
     source: sourceFacts,
     target: targetFacts,
@@ -642,7 +711,11 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
       surroundingText: paragraph,
     },
     options: {
-      minTopicalRelevance: Number(options.minTopicalRelevance ?? process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE ?? 0.75),
+      // Finite-guarded (shared with the planner): a nonnumeric env value
+      // must not turn the gate into accept-everything via `score < NaN`.
+      minTopicalRelevance: Number.isFinite(Number(options.minTopicalRelevance))
+        ? Number(options.minTopicalRelevance)
+        : envMinTopicalRelevance(),
       maxLinksPerTargetPerPr: Number(options.maxLinksPerTargetPerPr ?? process.env.AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_TARGET_PER_PR ?? 2),
       maxExactMatchAnchorsPerTarget: Number(options.maxExactMatchAnchorsPerTarget ?? process.env.AUTONOMOUS_INTERNAL_LINK_MAX_EXACT_MATCH_ANCHORS_PER_TARGET ?? 1),
       sourceCooldownDays: Number(options.sourceCooldownDays ?? process.env.AUTONOMOUS_INTERNAL_LINK_SOURCE_COOLDOWN_DAYS ?? 30),
@@ -658,7 +731,7 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
     }, opportunity.issues.map((issue) => issue.code).join(','));
   }
 
-  const patched = planner.applyTaskToBody(sourcePage.body, { ...task, target_url: targetUrl });
+  const patched = planner.applyTaskToBody(sourcePage.body, { ...task, target_url: targetUrl }, { targetTerms });
   if (patched === sourcePage.body) return skipped(base, 'patch_noop');
   const patchedParagraph = paragraphAround(patched, occurrence.index);
 
@@ -778,7 +851,7 @@ function slugToInternalUrl(slug) {
   return raw.startsWith('/') ? raw : `/${raw}/`;
 }
 
-function pageFacts(page, { url }) {
+function pageFacts(page, { url, bodyExcerpt = null } = {}) {
   const front = page.frontmatter || {};
   return {
     url: url || page.url,
@@ -790,6 +863,7 @@ function pageFacts(page, { url }) {
     topic_cluster: page.topic_cluster || front.category || front.service || inferCluster(page.file, front),
     title: page.title || front.title || null,
     keyword: page.keyword || front.primary_keyword || front.target_keyword || null,
+    body_excerpt: page.body_excerpt || bodyExcerpt || null,
     last_linked_at: page.last_linked_at || null,
   };
 }
@@ -864,67 +938,12 @@ const SERVICE_HUB_SLUGS = new Set([
   'tree-and-shrub-care',
 ]);
 
-function inferPageType(file, frontmatter = {}) {
-  if (frontmatter.page_type || frontmatter.content_type) return String(frontmatter.page_type || frontmatter.content_type);
-  const normalized = String(file || '').replace(/\\/g, '/');
-  if (normalized.includes('/blog/')) return 'supporting-blog';
-  if (normalized.includes('/services/')) return /-fl\.mdx?$/.test(normalized) ? 'city-service' : 'service';
-  if (normalized.includes('/locations/')) return 'location';
-  return 'unknown';
-}
-
-function inferCluster(file, frontmatter = {}) {
-  const text = [
-    frontmatter.category,
-    frontmatter.service,
-    frontmatter.primary_keyword,
-    frontmatter.title,
-    file,
-  ].filter(Boolean).join(' ').toLowerCase();
-  for (const cluster of ['termite', 'mosquito', 'rodent', 'lawn', 'tree', 'shrub', 'pest']) {
-    if (text.includes(cluster)) return cluster === 'tree' || cluster === 'shrub' ? 'tree-shrub' : cluster;
-  }
-  return null;
-}
-
-function robotsNoindex(frontmatter = {}) {
-  return String(frontmatter.robots || frontmatter.indexing || '').toLowerCase().includes('noindex')
-    || frontmatter.noindex === true;
-}
 
 function isHeadingOccurrence(body, index) {
   const lineStart = String(body || '').lastIndexOf('\n', Math.max(0, index - 1)) + 1;
   return /^[ \t]{0,3}#{1,6}\s/.test(String(body || '').slice(lineStart, index + 1));
 }
 
-function paragraphAround(body, index) {
-  const text = String(body || '');
-  let start = text.lastIndexOf('\n\n', Math.max(0, index - 1));
-  start = start === -1 ? 0 : start + 2;
-  let end = text.indexOf('\n\n', index);
-  end = end === -1 ? text.length : end;
-  return text.slice(start, end).trim();
-}
-
-function paragraphHasLink(paragraph) {
-  return /\[[^\]\n]+\]\(\s*[^)]+\)/.test(paragraph) || /<a\b[^>]*\bhref\s*=/i.test(paragraph);
-}
-
-function countInternalLinks(body) {
-  const text = String(body || '');
-  let count = 0;
-  // (?<!!) excludes markdown image embeds — ![alt](/x.webp) is not a link.
-  const mdLink = /(?<!!)\[[^\]\n]+\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)/g;
-  let match;
-  while ((match = mdLink.exec(text)) !== null) {
-    if (policy.normalizeInternalUrl(String(match[1] || '').replace(/^<|>$/g, ''))) count++;
-  }
-  const href = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi;
-  while ((match = href.exec(text)) !== null) {
-    if (policy.normalizeInternalUrl(match[1])) count++;
-  }
-  return count;
-}
 
 function envInt(name, fallback) {
   const value = Number(process.env[name]);

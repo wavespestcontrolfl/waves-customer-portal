@@ -2084,6 +2084,12 @@ class AutonomousRunner {
       { url: brief.target_url, keyword: brief.target_keyword, city: brief.city, service: brief.service, title: brief.title },
       { corpus, opportunityId: run.opportunity_id }
     );
+    if (!tasks.length) {
+      // No keyword in the log line — brief.target_keyword can carry the
+      // customer-derived opportunity query verbatim (PII); the URL and
+      // opportunity id are enough to look it up.
+      logger.warn(`[autonomous-runner] internal-link planner found ZERO anchor opportunities for ${brief.target_url} (opportunity: ${run.opportunity_id || 'none'}) across ${corpus.length} corpus pages — no link tasks queued for this target`);
+    }
     const taskIds = [];
     for (const task of tasks) {
       const queued = await queueInternalLinkTaskForDryRun(task, run.opportunity_id);
@@ -3187,10 +3193,21 @@ class AutonomousRunner {
           { url: out.published_url, keyword: brief.target_keyword, city: brief.city, service: brief.service },
           { corpus, opportunityId: run.opportunity_id }
         );
-        for (const task of tasks) {
-          await db('content_internal_link_tasks').insert(task).onConflict(['source_file', 'target_url', 'anchor_text']).ignore().catch(() => {});
+        if (!tasks.length) {
+          // No keyword in the log line — brief.target_keyword can carry the
+          // customer-derived opportunity query verbatim (PII).
+          logger.warn(`[autonomous-runner] internal-link planner planned ZERO NEW link tasks for freshly published ${out.published_url} (opportunity: ${run.opportunity_id || 'none'}) across ${corpus.length} corpus pages`);
         }
-        out.link_tasks_queued = tasks.length;
+        // Same insert-or-refresh helper as the action path. No per-task
+        // catch: a DB failure must reach the surrounding link-planner catch
+        // instead of recording tasks.length as queued with no rows written;
+        // the count reflects rows actually inserted/refreshed.
+        let queuedCount = 0;
+        for (const task of tasks) {
+          const queued = await queueInternalLinkTaskForDryRun(task, run.opportunity_id);
+          if (queued?.id) queuedCount++;
+        }
+        out.link_tasks_queued = queuedCount;
       } catch (err) {
         logger.warn(`[autonomous-runner] link-planner failed: ${err.message}`);
       }
@@ -3612,6 +3629,17 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
     .update({
       status: 'queued',
       opportunity_id: opportunityId || task.opportunity_id || null,
+      // Refresh what the current plan selected — keyword (rows planned
+      // before the column existed carry null) AND the placement fields: a
+      // stale source_offset would pin the executor to an occurrence an
+      // earlier planner chose, not the one this plan scored.
+      target_keyword: task.target_keyword || null,
+      source_offset: Number.isInteger(task.source_offset) ? task.source_offset : null,
+      context_snippet: task.context_snippet || null,
+      // A replan from a corpus that omits the target emits target_file:null
+      // — never erase a known path with it (root-slug blogs can't re-derive
+      // the file from the URL and would fail target_file_not_found).
+      ...(task.target_file ? { target_file: task.target_file } : {}),
       skip_reason: null,
       failure_reason: null,
       updated_at: new Date(),

@@ -34,6 +34,7 @@ const {
   deriveUrlFromSourceFile,
   extractFrontmatterSlug,
   serviceAnchorPhrase,
+  keywordSegments,
 } = planner._internals;
 
 // ── anchorCandidates ────────────────────────────────────────────────
@@ -76,6 +77,65 @@ describe('anchorCandidates', () => {
     expect(anchorCandidates({ url: '/x/' })).toEqual([]);
     expect(anchorCandidates({ url: '/x/', service: 'pest' })).toEqual([]); // no city → no phrase
     expect(anchorCandidates({ url: '/x/', city: 'Bradenton' })).toEqual([]);
+  });
+  test('long-tail keywords contribute multi-word segment candidates below city anchors', () => {
+    const out = anchorCandidates({
+      url: '/blog/bed-bug-bites-vs-flea-bites/',
+      keyword: 'bed bug bites vs flea bites',
+      title: 'Bed Bug and Flea Bite Comparison',
+    });
+    expect(out[0]).toEqual({ phrase: 'bed bug bites vs flea bites', priority: 10 });
+    expect(out).toEqual(expect.arrayContaining([
+      { phrase: 'bed bug bites', priority: 7 },
+      { phrase: 'flea bites', priority: 7 },
+    ]));
+    // Full keyword outranks its segments; segments outrank the title.
+    const phrases = out.map((c) => c.phrase);
+    expect(phrases.indexOf('bed bug bites')).toBeGreaterThan(phrases.indexOf('bed bug bites vs flea bites'));
+    expect(phrases.indexOf('bed bug bites')).toBeLessThan(phrases.indexOf('Bed Bug and Flea Bite Comparison'));
+  });
+  test('drops candidates the executor anchor policy would reject, so they cannot shadow segments', () => {
+    const out = anchorCandidates({
+      url: '/blog/roof-rat-vs-norway-rat/',
+      keyword: 'roof rat vs norway rat in florida attics and garages tonight',
+      title: 'Roof Rat vs Norway Rat: Which Rodent Is in Your Florida Attic Right Now?',
+    });
+    const phrases = out.map((c) => c.phrase);
+    // 11-word keyword → anchor_too_long; title → anchor_sentence. Both would
+    // be queued then rejected downstream, wasting the page's one match.
+    expect(phrases).not.toContain('roof rat vs norway rat in florida attics and garages tonight');
+    expect(phrases).not.toContain('Roof Rat vs Norway Rat: Which Rodent Is in Your Florida Attic Right Now?');
+    expect(phrases).toEqual(expect.arrayContaining(['roof rat', 'norway rat']));
+  });
+});
+
+describe('keywordSegments', () => {
+  test('splits on comparison and connective separators', () => {
+    expect(keywordSegments('bed bug bites vs flea bites')).toEqual(['bed bug bites', 'flea bites']);
+    expect(keywordSegments('roof rat vs. norway rat')).toEqual(['roof rat', 'norway rat']);
+    expect(keywordSegments('sugar ants versus carpenter ants')).toEqual(['sugar ants', 'carpenter ants']);
+  });
+  test('drops single-word segments and the full keyword itself', () => {
+    // "in" split leaves "kitchen identification" (kept, 2 words) and the
+    // 2-word head; nothing equals the original keyword.
+    expect(keywordSegments('tiny ants in kitchen identification')).toEqual(['tiny ants', 'kitchen identification']);
+    expect(keywordSegments('ants in kitchen')).toEqual([]); // both segments single-word
+    expect(keywordSegments('sand fleas')).toEqual([]); // no separator → no segments
+  });
+  test('handles punctuation separators and empty input', () => {
+    expect(keywordSegments('lawn grubs: identification signs')).toEqual(['lawn grubs', 'identification signs']);
+    expect(keywordSegments('bed bug bites? flea bite identification')).toEqual(['bed bug bites', 'flea bite identification']);
+    expect(keywordSegments('stop lawn fungus! treatment timing')).toEqual(['stop lawn fungus', 'treatment timing']);
+    expect(keywordSegments('')).toEqual([]);
+    expect(keywordSegments(null)).toEqual([]);
+  });
+  test('preserves numeric punctuation inside quantities', () => {
+    expect(keywordSegments('pest control for 2,500-square-foot homes')).toEqual(['pest control', '2,500-square-foot homes']);
+    expect(keywordSegments('mosquito control for 1/2 acre lots')).toEqual(['mosquito control', '1/2 acre lots']);
+    expect(keywordSegments('lawn grubs, chinch bugs')).toEqual(['lawn grubs', 'chinch bugs']); // word-adjacent comma still splits
+  });
+  test('drops stopword-only segments', () => {
+    expect(keywordSegments('what is in my attic')).toEqual(['my attic']); // "what is" carries no topical token
   });
 });
 
@@ -484,6 +544,496 @@ describe('planForTarget', () => {
     }));
     const tasks = planner.planForTarget(target, { corpus: big, cap: 3 });
     expect(tasks.length).toBe(3);
+  });
+  test('fills the cap best-first: a relevant late page beats weak earlier matches', () => {
+    // Three weak matches (segment occurs, but frontmatter shares no topical
+    // tokens with the target) come FIRST in corpus order; a topically
+    // aligned page comes last. With cap=2 the aligned page must win a slot —
+    // corpus-order capping would have burned both slots on weak matches.
+    const weak = (i) => ({
+      file: `src/content/blog/weak-${i}.md`,
+      body: [
+        '---',
+        `title: Pool Cage Repairs Part ${i}`,
+        'category: home-maintenance',
+        'primary_keyword: pool cage repair',
+        '---',
+        'One reader mentioned bed bug bites while asking about screens.',
+      ].join('\n'),
+      url: `/blog/weak-${i}/`,
+    });
+    // "flea" sits >50 chars after the matched anchor: inside the paragraph
+    // the executor scores, but OUTSIDE the old ±50-char snippet window —
+    // ranking must use the same paragraph context as the gate to see it.
+    const relevant = {
+      file: 'src/content/blog/bed-bug-signs.md',
+      body: [
+        '---',
+        'title: Early Signs of Bed Bugs',
+        'category: pest-control',
+        'primary_keyword: bed bug signs',
+        '---',
+        'Waking up with bed bug bites is the classic first sign homeowners notice in the morning, though a careful look can still reveal that flea bites look similar.',
+      ].join('\n'),
+      url: '/blog/bed-bug-signs/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [weak(1), weak(2), weak(3), relevant], cap: 2 }
+    );
+    // The weak matches score below the 0.75 gate floor and are not planned
+    // at all; the aligned page wins regardless of corpus position.
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].source_file).toBe('src/content/blog/bed-bug-signs.md');
+  });
+  test('never plans a match whose paragraph already has a link (executor would skip it)', () => {
+    const linked = {
+      file: 'src/content/blog/linked-paragraph.md',
+      body: [
+        '---',
+        'title: Bed Bug Basics',
+        'category: pest-control',
+        'primary_keyword: bed bug basics',
+        '---',
+        'If you notice bed bug bites, see [our prevention guide](/pest-control/bed-bug-prevention/) for next steps.',
+      ].join('\n'),
+      url: '/blog/linked-paragraph/',
+    };
+    const clean = {
+      file: 'src/content/blog/clean-paragraph.md',
+      body: [
+        '---',
+        'title: Overnight Itching Causes',
+        'category: pest-control',
+        'primary_keyword: overnight itching',
+        '---',
+        'Bed bug bites that appear overnight are worth a closer look, especially compared with flea bites.',
+      ].join('\n'),
+      url: '/blog/clean-paragraph/',
+    };
+    // cap=1: without the plan-time paragraph check, the linked page's higher
+    // token overlap could take the only slot and then skip at execution.
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [linked, clean], cap: 1 }
+    );
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].source_file).toBe('src/content/blog/clean-paragraph.md');
+  });
+  test('skips occurrences that split a commercial phrase in context (executor would reject)', () => {
+    const splitting = {
+      file: 'src/content/blog/tree-shrub-program.md',
+      body: [
+        '---',
+        'title: Palm and Hedge Program',
+        'category: tree-shrub',
+        'primary_keyword: shrub care program',
+        '---',
+        '',
+        'Our tree and shrub care program covers palms and hedges year round.',
+      ].join('\n'),
+      url: '/blog/tree-shrub-program/',
+    };
+    const clean = {
+      file: 'src/content/blog/hedge-health.md',
+      body: [
+        '---',
+        'title: Hedge Health Basics',
+        'category: tree-shrub',
+        'primary_keyword: hedge health',
+        '---',
+        '',
+        'Regular shrub care keeps Florida yards dense and healthy through summer.',
+      ].join('\n'),
+      url: '/blog/hedge-health/',
+    };
+    // "shrub care" inside "tree and shrub care" splits a commercial phrase —
+    // the executor rejects it (anchor_splits_service_phrase); the standalone
+    // occurrence on the second page is the only plannable match.
+    const tasks = planner.planForTarget(
+      { url: '/tree-shrub/shrub-care-guide/', keyword: 'shrub care for florida yards' },
+      { corpus: [splitting, clean], cap: 1 }
+    );
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].source_file).toBe('src/content/blog/hedge-health.md');
+  });
+  test('excludes noindex sources before the cap (executor would skip source_not_indexable)', () => {
+    const noindexPage = {
+      file: 'src/content/blog/noindex-page.md',
+      body: [
+        '---',
+        'title: Bed Bug Bite Photos',
+        'category: pest-control',
+        'primary_keyword: bed bug bites vs flea bites',
+        'robots: noindex, follow',
+        '---',
+        '',
+        'Compare bed bug bites vs flea bites in the gallery below.',
+      ].join('\n'),
+      url: '/blog/noindex-page/',
+    };
+    const indexable = {
+      file: 'src/content/blog/indexable-page.md',
+      body: [
+        '---',
+        'title: Overnight Itching Causes',
+        'category: pest-control',
+        'primary_keyword: overnight itching',
+        '---',
+        '',
+        'Bed bug bites that appear overnight are worth a closer look, especially compared with flea bites.',
+      ].join('\n'),
+      url: '/blog/indexable-page/',
+    };
+    // The noindex page even matches the full keyword (priority 10) — it must
+    // still lose to the indexable page rather than burn the only slot.
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [noindexPage, indexable], cap: 1 }
+    );
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].source_file).toBe('src/content/blog/indexable-page.md');
+  });
+  test('excludes canonical-mismatch and link-saturated sources before the cap', () => {
+    const mismatch = {
+      file: 'src/content/blog/canonical-elsewhere.md',
+      body: [
+        '---',
+        'title: Bed Bug FAQ',
+        'category: pest-control',
+        'primary_keyword: bed bug bites vs flea bites',
+        'canonical: https://www.wavespestcontrol.com/pest-library/bed-bugs/',
+        '---',
+        '',
+        'People ask about bed bug bites vs flea bites constantly.',
+      ].join('\n'),
+      url: '/blog/canonical-elsewhere/',
+    };
+    const saturated = {
+      file: 'src/content/blog/saturated.md',
+      body: [
+        '---',
+        'title: Mega Pest Index',
+        'category: pest-control',
+        'primary_keyword: pest index',
+        '---',
+        '',
+        Array.from({ length: 31 }, (_, i) => `[entry ${i}](/pest-library/entry-${i}/)`).join(' '),
+        '',
+        'Bed bug bites vs flea bites confusion is common among readers.',
+      ].join('\n'),
+      url: '/blog/saturated/',
+    };
+    const clean = {
+      file: 'src/content/blog/clean-source.md',
+      body: [
+        '---',
+        'title: Overnight Itching Causes',
+        'category: pest-control',
+        'primary_keyword: overnight itching',
+        '---',
+        '',
+        'Bed bug bites that appear overnight are worth a closer look, especially compared with flea bites.',
+      ].join('\n'),
+      url: '/blog/clean-source/',
+    };
+    // Both ineligible pages match at higher relevance/priority; the executor
+    // would reject them (source_canonical_mismatch, source_link_density_high)
+    // so neither may take the only slot.
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [mismatch, saturated, clean], cap: 1 }
+    );
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].source_file).toBe('src/content/blog/clean-source.md');
+  });
+  test('scans past an early ineligible occurrence to a later clean paragraph', () => {
+    const page = {
+      file: 'src/content/blog/two-mentions.md',
+      body: [
+        '---',
+        'title: Bite Comparisons',
+        'category: pest-control',
+        'primary_keyword: bite comparisons',
+        '---',
+        '',
+        'As covered in [our overview](/pest-library/), bed bug bites are common calls.',
+        '',
+        'Standalone paragraph: bed bug bites and flea bites are easy to confuse.',
+      ].join('\n'),
+      url: '/blog/two-mentions/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [page], cap: 1 }
+    );
+    // The first "bed bug bites" sits in a linked paragraph; the second is
+    // clean and must be chosen (offset beyond the first paragraph).
+    expect(tasks.length).toBe(1);
+    expect(page.body.slice(tasks[0].source_offset, tasks[0].source_offset + tasks[0].anchor_text.length)).toBe('bed bug bites');
+    expect(page.body.slice(0, tasks[0].source_offset)).toContain('Standalone paragraph');
+  });
+  test('scans past a low-relevance occurrence to a richer paragraph of the same phrase', () => {
+    const page = {
+      file: 'src/content/blog/two-clean-mentions.md',
+      body: [
+        '---',
+        'title: Reader Questions',
+        'category: home-maintenance',
+        'primary_keyword: reader questions',
+        '---',
+        '',
+        'A reader mentioned bed bug bites in passing last month.',
+        '',
+        'For pest-control purposes, bed bug bites and flea bites in Florida homes deserve a professional look.',
+      ].join('\n'),
+      url: '/blog/two-clean-mentions/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [page], cap: 1 }
+    );
+    // Both paragraphs are clean placements; the first scores below the floor
+    // (no flea/pest support) and must not discard the phrase — the second,
+    // richer paragraph is selected and its offset persisted.
+    expect(tasks.length).toBe(1);
+    expect(page.body.slice(0, tasks[0].source_offset)).toContain('in passing last month');
+    // The persisted context is the FULL scored paragraph (drift relocation
+    // compares paragraphs), not a ±50-char snippet.
+    expect(tasks[0].context_snippet).toBe('For pest-control purposes, bed bug bites and flea bites in Florida homes deserve a professional look.');
+  });
+  test('placementForTask honors the planned offset and falls back on drift', () => {
+    const { placementForTask } = planner._internals;
+    const body = [
+      'First bed bug bites mention here.',
+      '',
+      'Second bed bug bites mention with more context.',
+    ].join('\n');
+    const secondIdx = body.indexOf('bed bug bites', body.indexOf('Second'));
+    const task = { anchor_text: 'bed bug bites', source_offset: secondIdx };
+    // Honors the recorded (second) occurrence even though the first is
+    // eligible too.
+    expect(placementForTask(body, task).index).toBe(secondIdx);
+    // Drifted file without persisted context → first eligible occurrence.
+    const drifted = `X${body}`;
+    expect(placementForTask(drifted, task).index).toBe(drifted.indexOf('bed bug bites'));
+    // Drifted file WITH persisted context → relocates to the occurrence
+    // whose surroundings match the planned context, not the thin first one.
+    const contextTask = {
+      anchor_text: 'bed bug bites',
+      source_offset: secondIdx, // stale after the drift
+      context_snippet: 'Second bed bug bites mention with more context.',
+    };
+    expect(placementForTask(drifted, contextTask).index).toBe(drifted.indexOf('bed bug bites', drifted.indexOf('Second')));
+  });
+  test('keeps the highest-scoring passing occurrence, not the first over the floor', () => {
+    const page = {
+      file: 'src/content/blog/two-passing-mentions.md',
+      body: [
+        '---',
+        'title: Bite Notes',
+        'category: pest-control',
+        'primary_keyword: bite notes',
+        '---',
+        '',
+        'Flea bites and bed bug bites both itch.',
+        '',
+        'Pest experts compare bed bug bites with flea bites in Florida homes for identification.',
+      ].join('\n'),
+      url: '/blog/two-passing-mentions/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [page], cap: 1 }
+    );
+    // Both paragraphs clear the floor; the second covers the full core set
+    // (adds the pest token) and must win even though the first passes.
+    expect(tasks.length).toBe(1);
+    expect(page.body.slice(0, tasks[0].source_offset)).toContain('both itch');
+  });
+  test('nonnumeric relevance env falls back to the 0.75 default instead of disabling planning', () => {
+    const prev = process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE;
+    process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE = 'banana';
+    try {
+      const page = {
+        file: 'src/content/blog/env-guard.md',
+        body: [
+          '---',
+          'title: Env Guard',
+          'category: pest-control',
+          'primary_keyword: bed bug bites vs flea bites',
+          '---',
+          '',
+          'Comparing bed bug bites vs flea bites is a common pest question.',
+        ].join('\n'),
+        url: '/blog/env-guard/',
+      };
+      const tasks = planner.planForTarget(
+        { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+        { corpus: [page], cap: 1 }
+      );
+      expect(tasks.length).toBe(1);
+    } finally {
+      if (prev === undefined) delete process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE;
+      else process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE = prev;
+    }
+  });
+  test('an unchanged offset with changed context falls through to relocation', () => {
+    const { placementForTask } = planner._internals;
+    const planned = 'Hotel luggage seams and inspection tips often reveal bed bug bites after trips.';
+    // Same byte offset for the anchor, but the paragraph around it was
+    // rewritten (supporting terms removed); the planned paragraph now lives
+    // later in the file.
+    const body = [
+      'Some padding text goes here first so offsets line up cleanly, ok.',
+      '',
+      'A note about bed bug bites.',
+      '',
+      planned,
+    ].join('\n');
+    const staleOffset = body.indexOf('bed bug bites'); // in the rewritten thin paragraph
+    const task = { anchor_text: 'bed bug bites', source_offset: staleOffset, context_snippet: planned };
+    expect(placementForTask(body, task).index).toBe(body.indexOf('bed bug bites', body.indexOf('Hotel')));
+  });
+  test('a matching primary canonical is not disqualified by a stale secondary field', () => {
+    const page = {
+      file: 'src/content/blog/dual-canonical.md',
+      body: [
+        '---',
+        'title: Bite Comparison Notes',
+        'category: pest-control',
+        'primary_keyword: bed bug bites vs flea bites',
+        'canonical: https://www.wavespestcontrol.com/blog/dual-canonical/',
+        'canonical_url: https://www.wavespestcontrol.com/old-path/',
+        '---',
+        '',
+        'Comparing bed bug bites vs flea bites is a common pest question.',
+      ].join('\n'),
+      url: '/blog/dual-canonical/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [page], cap: 1 }
+    );
+    // Executor precedence: canonical (first valid) wins; the stale
+    // canonical_url must not exclude the source at plan time.
+    expect(tasks.length).toBe(1);
+  });
+  test('relocation ranks with the inferred cluster term, not the keyword alone', () => {
+    const { placementForTask } = planner._internals;
+    const body = [
+      'Attic noises at night worry homeowners across the region every winter.',
+      '',
+      'Attic noises usually mean rodent activity in the insulation.',
+    ].join('\n');
+    const task = {
+      anchor_text: 'Attic noises',
+      source_offset: 9999, // stale — forces relocation
+      target_keyword: 'attic noises',
+      target_file: 'src/content/blog/rodent-attic-noises.md',
+      context_snippet: 'Attic noises at night worry homeowners every winter season.',
+    };
+    // Both paragraphs carry the keyword tokens equally; only the second has
+    // the inferred cluster term (rodent), which the gate scores — context
+    // overlap alone would keep the first.
+    expect(placementForTask(body, task).index).toBe(body.indexOf('Attic noises usually'));
+  });
+  test('relocation prefers occurrences that keep the target keyword terms', () => {
+    const { placementForTask } = planner._internals;
+    // The old planned paragraph was edited in place: it keeps incidental
+    // wording from the persisted context (reader, mentioned, month) but
+    // lost the target terms; the later paragraph carries them.
+    const body = [
+      'A reader mentioned bed bug bites to us last month again.',
+      '',
+      'Comparing bed bug bites against flea bites helps homeowners.',
+    ].join('\n');
+    const task = {
+      anchor_text: 'bed bug bites',
+      source_offset: 9999, // stale — forces relocation
+      target_keyword: 'bed bug bites vs flea bites',
+      context_snippet: 'A reader mentioned bed bug bites and flea bites to us last month.',
+    };
+    // Raw context overlap favors the first (edited) paragraph; the keyword
+    // ranking sees "flea"/"bites" support only in the second.
+    expect(placementForTask(body, task).index).toBe(body.indexOf('bed bug bites', body.indexOf('Comparing')));
+  });
+  test('drift relocation compares full paragraphs, not just snippet windows', () => {
+    const { placementForTask } = planner._internals;
+    const body = [
+      'Bed bug bites at the hotel happen.',
+      '',
+      'Bed bug bites after long trips usually trace back to hotel luggage seams, and inspection tips help travelers check them.',
+    ].join('\n');
+    const task = {
+      anchor_text: 'Bed bug bites',
+      source_offset: 9999, // stale — forces relocation
+      context_snippet: 'hotel luggage seams inspection tips travelers check bed bug bites',
+    };
+    // Both occurrences' ±50-char snippets tie on shared tokens (bed, bug,
+    // bites, hotel); only the second paragraph's tail carries luggage/
+    // seams/inspection/tips — a snippet-level comparison would keep the
+    // thin first mention.
+    expect(placementForTask(body, task).index).toBe(body.indexOf('Bed bug bites after'));
+  });
+  test('hidden comment tokens do not lift relevance over the floor', () => {
+    const page = {
+      file: 'src/content/blog/comment-inflated.md',
+      body: [
+        '---',
+        'title: Pool Cage Screens',
+        'category: home-maintenance',
+        'primary_keyword: pool cage screens',
+        '---',
+        '',
+        'One reader mentioned bed bug bites while asking about screens. <!-- flea bites pest-control -->',
+      ].join('\n'),
+      url: '/blog/comment-inflated/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [page], cap: 1 }
+    );
+    // Visible copy only supports "bed bug bites"; the comment's extra tokens
+    // are masked out of the excerpt, so the match stays below the floor.
+    expect(tasks).toEqual([]);
+  });
+  test('merges the supplied keyword into corpus target facts when frontmatter has none', () => {
+    const legacyTarget = {
+      file: 'src/content/services/bed-bug-treatment.md',
+      body: [
+        '---',
+        'title: Professional Bed Bug Treatment for Southwest Florida Homes and Rentals',
+        'category: pest-control',
+        '---',
+        '',
+        'Treatment overview.',
+      ].join('\n'),
+      url: '/bed-bug-treatment/',
+    };
+    const source = {
+      file: 'src/content/blog/bite-signs.md',
+      body: [
+        '---',
+        'title: Early Bite Signs',
+        'category: pest-control',
+        'primary_keyword: bed bug treatment signs',
+        '---',
+        '',
+        'Persistent bites usually mean it is time for bed bug treatment.',
+      ].join('\n'),
+      url: '/blog/bite-signs/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/bed-bug-treatment/', keyword: 'bed bug treatment' },
+      { corpus: [legacyTarget, source], cap: 1 }
+    );
+    // Without the merge the target's long descriptive title floods the core
+    // denominator and nothing passes the floor; with it the source plans and
+    // the keyword is persisted for the executor.
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].source_file).toBe('src/content/blog/bite-signs.md');
+    expect(tasks[0].target_keyword).toBe('bed bug treatment');
   });
   test('uses service alias anchors instead of partial service fragments', () => {
     const tasks = planner.planForTarget({

@@ -2079,16 +2079,17 @@ async function planInternalLinksForTarget(target = {}) {
     { url, keyword: target.keyword, city: target.city, title: target.title },
     { corpus }
   );
+  // Same insert-or-refresh helper as the runner's planning paths — a raw
+  // onConflict().ignore() here discarded the current plan's keyword and
+  // placement fields on duplicates and left retryable skipped rows parked.
+  const { queueInternalLinkTaskForDryRun } = require('../content/autonomous-runner')._internals;
   const taskIds = [];
   for (const task of tasks) {
-    const inserted = await db('content_internal_link_tasks')
-      .insert(task)
-      .onConflict(['source_file', 'target_url', 'anchor_text'])
-      .ignore()
-      .returning('id');
-    const row = Array.isArray(inserted) ? inserted[0] : inserted;
-    const id = row && typeof row === 'object' ? row.id : row;
-    if (id) taskIds.push(id);
+    // No catch: a DB error (e.g. unapplied migration) must reach the outer
+    // planning rejection handler — swallowing it reported queued=0 as a
+    // successful plan and silently lost every task.
+    const queued = await queueInternalLinkTaskForDryRun(task, target.opportunity_id || null);
+    if (queued?.id) taskIds.push(queued.id);
   }
   let candidates = 0;
   if (taskIds.length) {
