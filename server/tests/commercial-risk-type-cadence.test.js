@@ -137,3 +137,47 @@ describe('direct pest-cadence override (input.commercialPestCadence)', () => {
     expect(lineFor({ commercialPestCadence: 'nonsense' }, 'commercial_pest').visitsPerYear).toBe(12);
   });
 });
+
+// The V2 estimator (and the public re-price path) reach the engine through
+// translateV2CallToV1Input, which whitelists fields — a field it drops is
+// silently discarded before pricing (codex #3240 P1: the override was inert
+// on the real estimator route without this forwarding).
+describe('estimator adapter forwards commercialPestCadence', () => {
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const commercialProfile = {
+    address: '100 Adapter Test Blvd',
+    propertyType: 'Commercial',
+    isCommercial: true,
+    homeSqFt: 3000,
+    lotSqFt: 8000,
+    stories: 1,
+  };
+  const pestLine = (profile, options) => generateEstimate(
+    translateV2CallToV1Input(profile, ['PEST'], options)
+  ).lineItems.find((l) => l.service === 'commercial_pest');
+
+  test('options-set override reaches the engine', () => {
+    expect(pestLine(commercialProfile, { commercialPestCadence: 'quarterly' }).visitsPerYear).toBe(4);
+  });
+
+  test('profile-persisted override replays on re-price', () => {
+    expect(pestLine({ ...commercialProfile, commercialPestCadence: 'bimonthly' }, {}).visitsPerYear).toBe(6);
+  });
+
+  test('options beat the persisted profile value', () => {
+    expect(pestLine(
+      { ...commercialProfile, commercialPestCadence: 'monthly' },
+      { commercialPestCadence: 'quarterly' }
+    ).visitsPerYear).toBe(4);
+  });
+
+  test('residential profile clears the override (never leaks into residential pricing)', () => {
+    const input = translateV2CallToV1Input(
+      { ...commercialProfile, propertyType: 'Single Family', isCommercial: false },
+      ['PEST'],
+      { isCommercial: 'NO', commercialPestCadence: 'quarterly' }
+    );
+    expect(input.commercialPestCadence).toBe(null);
+    expect(input.isCommercial).toBe(false);
+  });
+});
