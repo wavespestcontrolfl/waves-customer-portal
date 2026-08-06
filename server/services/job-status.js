@@ -404,12 +404,18 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // Savepoint-confined best-effort: a claim hiccup must never block the
     // cancellation itself (an error inside a Postgres trx aborts every
     // later statement, so the try/catch needs its own savepoint).
-    if (String(toStatus || '') === 'cancelled' && notifyCustomer !== 'caller') {
+    if (String(toStatus || '') === 'cancelled') {
       try {
         const { isEnabled } = require('../config/feature-gates');
         if (isEnabled('cancelNoticeHook')) {
           await t.transaction(async (sp) => {
             const claimTs = new Date();
+            // 'caller' paths get a durable 'pending' claim too (codex r7):
+            // their awaited handleCancellation ADOPTS it (tokenless claims
+            // accept pending rows) and settles send/suppress; if the route
+            // crashes in its post-commit window, the sweep settles instead
+            // — the obligation can no longer vanish. Only an explicit
+            // suppress intent finalizes terminally here.
             const targetState = notifyCustomer === false ? 'suppressed' : 'pending';
             const claimedRows = await sp('appointment_reminders')
               .where({ scheduled_service_id: jobId })
@@ -420,7 +426,9 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
                 });
               })
               .update({ cancellation_notice_at: claimTs, cancellation_notice_state: targetState, updated_at: claimTs });
-            if (claimedRows && targetState === 'pending') cancelNoticeClaimTs = claimTs;
+            // The immediate post-commit worker runs only for hook-owned
+            // paths; 'caller' claims are settled by the route (or sweep).
+            if (claimedRows && targetState === 'pending' && notifyCustomer !== 'caller') cancelNoticeClaimTs = claimTs;
           });
         }
       } catch (claimErr) {
