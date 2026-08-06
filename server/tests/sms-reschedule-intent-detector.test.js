@@ -378,3 +378,15 @@ describe('unavailable adjective (codex r38)', () => {
     expect(hasRescheduleOrAwayIntent("We are unavailable for tomorrow's appointment")).toBe(true);
   });
 });
+
+describe('explicit stand-down asks (codex r39)', () => {
+  test('please dont come tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent("Please don't come tomorrow")).toBe(true);
+  });
+  test('can you not come for tomorrows appointment flags', () => {
+    expect(hasRescheduleOrAwayIntent("Can you not come for tomorrow's appointment?")).toBe(true);
+  });
+  test('dont come to the front door stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("Please don't come to the front door, use the side gate")).toBe(false);
+  });
+});

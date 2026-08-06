@@ -276,7 +276,9 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
            AND NOT EXISTS (
              SELECT 1 FROM sms_log ps
              WHERE ps.customer_id = t.customer_id AND ps.direction = 'outbound'
-               AND ps.message_type IN ${HUMAN_REPLY_TYPES}
+               -- Human-authored subset (codex r39): the AI Assistant's
+               -- automatic reply is not staff working the task.
+               AND ps.message_type IN ('manual', 'ai_approved', 'ai_revised')
                -- A human-APPROVED click-followup nudge is proactive marketing,
                -- not a reply to this item (codex r24): its draft intent is
                -- 'click_followup' and finalize stamps sent_at at send time.
@@ -312,7 +314,9 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
            AND NOT EXISTS (
              SELECT 1 FROM sms_log es
              WHERE es.customer_id = t.customer_id AND es.direction = 'outbound'
-               AND es.message_type IN ${HUMAN_REPLY_TYPES}
+               -- Human-authored subset (codex r39): the AI Assistant's
+               -- automatic reply is not staff working the task.
+               AND es.message_type IN ('manual', 'ai_approved', 'ai_revised')
                -- A human-APPROVED click-followup nudge is proactive marketing,
                -- not a reply to this item (codex r24): its draft intent is
                -- 'click_followup' and finalize stamps sent_at at send time.
@@ -344,7 +348,9 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
              SELECT 1 FROM sms_log vs
              WHERE vs.customer_id = t.customer_id
                AND vs.direction = 'outbound'
-               AND vs.message_type IN ${HUMAN_REPLY_TYPES}
+               -- Human-authored subset (codex r39): the AI Assistant's
+               -- automatic reply is not staff working the task.
+               AND vs.message_type IN ('manual', 'ai_approved', 'ai_revised')
                -- A human-APPROVED click-followup nudge is proactive marketing,
                -- not a reply to this item (codex r24): its draft intent is
                -- 'click_followup' and finalize stamps sent_at at send time.

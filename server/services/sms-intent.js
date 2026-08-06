@@ -107,6 +107,12 @@ const AWAY_RE = /\b(?:out\s+of\s+town|on\s+vacation|leav(?:e|ing)\s+for\s+vacati
 // suppresses the AWAY leg — an explicit reschedule/cancel verb still wins.
 const AWAY_PERMISSION_RE = /\b(?:(?:the\s+)?gate\s*code\s+is\b|gate\s*code\b[^.!?]{0,25}?[:#]\s*\d{3,}|(?:i|we)\s+(?:do\s+)?have\s+(?:a|the)\s+gate\s*code\b|(?:here'?s|i'?ll\s+(?:text|send|give|leave)(?:\s+you)?)\s+(?:the\s+)?gate\s*code|use\s+(?:the\s+)?gate\s*code|door\s+(?:is\s+|will\s+be\s+)?(?:open|unlocked)|garage\s+(?:is\s+|will\s+be\s+)?open|no\s+need\s+to\s+(?:be|get|come)\s+in|don'?t\s+need\s+to\s+(?:be|get|come)\s+in|(?:it|that)'?s\s+fine|exterior\s+(?:only\s+)?(?:is\s+)?fine|(?:you|y'?all)\s+can\s+still\s+(?:come|do|spray|treat)|go\s+ahead)\b/i;
 
+// Explicit stand-down asks (codex #3232 r39): "Please don't come
+// tomorrow" is a reschedule-class request even though no move/cancel verb
+// appears. Requires an appointment or future-time object so "don't come
+// to the front door" stays quiet.
+const DONT_COME_RE = /\b(?:(?:please\s+)?(?:don'?t|do\s+not)|can\s+you\s+not|could\s+you\s+not)\s+(?:come|show\s+up|stop\s+by)\b[^.!?]{0,25}\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|appointment|appt|visit|this\s+week|next\s+week)\b/i;
+
 function hasRescheduleOrAwayIntent(body) {
   if (!body || typeof body !== 'string') return false;
   if (isSmsReaction(body)) return false;
@@ -174,6 +180,7 @@ function hasRescheduleOrAwayIntent(body) {
   // Past inability is history too (codex r37): "I was unable to attend
   // yesterday's appointment" reports, it doesn't request.
   const pastAway = /\b(?:were|was|got\s+back|just\s+got\s+back|returned)\b[^.!?]{0,25}\b(?:out\s+of\s+town|on\s+vacation|away)\b|\b(?:out\s+of\s+town|on\s+vacation|away)\b[^.!?]{0,15}\blast\s+(?:week|month|weekend)\b|\b(?:was|were)\s+unable\s+to\s+(?:attend|make)\b|\b(?:couldn'?t|could\s+not)\s+(?:attend|make)\s+(?:it\s+)?(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service|yesterday)\b|\bunable\s+to\s+attend\b[^.!?]{0,20}\byesterday/i.test(text);
+  if (DONT_COME_RE.test(text)) return true;
   return AWAY_RE.test(text) && !AWAY_PERMISSION_RE.test(text) && !pastAway;
 }
 
