@@ -1180,6 +1180,71 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan.plan).toHaveLength(1);
   });
 
+  test('one-sided units, declared initial setups, and the vanished-opener race (codex #3243 r10)', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // "Apt 4" vs the unitless same street = different premises.
+    let mock = makeMock({
+      scheduled_services: [
+        { id: 'ou-1', customer_id: 'ou', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null, service_address_line1: '100 Main St', service_address_zip: '34205' },
+        { id: 'ou-2', customer_id: 'ou', service_id: 'svc-trap', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping', follow_up_interval_days: 3, property_id: null, service_address_line1: '100 Main St', service_address_line2: 'Apt 4', service_address_zip: '34205' },
+      ],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'ou', scheduledServiceId: 'ou-2' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+
+    // A declared 'Initial setup' never inherits an earlier program's
+    // position, even inside the history window.
+    mock = makeMock({
+      service_records: [{ id: 'sr-di', customer_id: 'di', scheduled_service_id: 'di-2', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Initial setup' } } }) }],
+      scheduled_services: [
+        { id: 'di-1', customer_id: 'di', service_id: 'svc-trap', status: 'completed', scheduled_date: d(12), service_key: 'rodent_trapping' },
+        { id: 'di-2', customer_id: 'di', service_id: 'svc-trap', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping', follow_up_interval_days: 3 },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'di', serviceRecordId: 'sr-di' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+    expect(plan.plan[0].templateKey).toBe('first_treatment_ask');
+
+    // Vanished-opener race: the opener stops ITSELF between the proof and
+    // the transactional stop — the final's cadence is still created.
+    const base = makeMock({
+      customers: [{ id: 'vr', first_name: 'Kim', last_name: 'X', phone: '+19410000065', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-vr', customer_id: 'vr', scheduled_service_id: 'vr-2' }],
+      scheduled_services: [
+        { id: 'vr-1', customer_id: 'vr', service_id: 'svc-wt', status: 'completed', scheduled_date: d(2), service_key: 'wildlife_trapping' },
+        { id: 'vr-2', customer_id: 'vr', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+      ],
+      review_sequences: [{ id: 'seq-race', customer_id: 'vr', scheduled_service_id: 'vr-1', status: 'active', current_step: 0, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]) }],
+    });
+    // Simulate the concurrent self-stop: the first post-proof write path
+    // (the pending-ask suppression on review_requests) flips the opener.
+    const raceConn = jest.fn((tbl) => {
+      if (String(tbl) === 'review_requests') {
+        const opener = base.__state.rows.review_sequences.find((r) => r.id === 'seq-race');
+        if (opener && opener.status === 'active') {
+          opener.status = 'stopped';
+          opener.stop_reason = 'series_completed';
+        }
+      }
+      return base(tbl);
+    });
+    raceConn.__state = base.__state;
+    db.mockImplementation(raceConn);
+    const result = await ReviewService.enrollPostService({ customerId: 'vr', serviceRecordId: 'sr-vr', completedAt: new Date() });
+    expect(result.started).toBe(true);
+    const opener = base.__state.rows.review_sequences.find((r) => r.id === 'seq-race');
+    expect(opener.stop_reason).toBe('series_completed');
+    const replacement = base.__state.rows.review_sequences.find((r) => r.id !== 'seq-race');
+    expect(replacement).toBeTruthy();
+    expect(replacement.status).toBe('active');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);

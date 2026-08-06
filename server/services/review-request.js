@@ -56,7 +56,10 @@ function premiseStampConflicts(a, b) {
   // (explicit line2, else embedded in line1) when both sides carry one.
   const ua = unitKey(a?.service_address_line2) || streetEmbeddedUnitKey(a?.service_address_line1);
   const ub = unitKey(b?.service_address_line2) || streetEmbeddedUnitKey(b?.service_address_line1);
-  if (ua && ub && ua !== ub) return true;
+  // One-sided units diverge too (codex #3243 r10 P2): "100 Main St Apt 4"
+  // vs the unitless "100 Main St" is a sub-unit, not the same premise.
+  // Errs toward fewer merges — the safe direction for cadence position.
+  if ((ua || ub) && ua !== ub) return true;
   const za = normalizeZip(a?.service_address_zip);
   const zb = normalizeZip(b?.service_address_zip);
   if (za && zb && za !== zb) return true;
@@ -775,6 +778,14 @@ const ReviewService = {
           ].filter((r) => !FOLLOWUP_CHILD_INACTIVE_STATUSES.includes(r.status));
           trapLaterLive = laterInPremise.find((r) => r.status !== "completed") || null;
           trapLaterCompleted = laterInPremise.find((r) => r.status === "completed") || null;
+          // A technician-declared initial setup outranks history inference
+          // (codex #3243 r10 P2): a new program starting at the same
+          // premise inside the window of an old one must not inherit its
+          // position — trap_visit_type is REQUIRED on rodent_trapping
+          // reports and frozen into the typed report snapshot.
+          if (trapPrior && await this._isDeclaredInitialTrapVisit({ serviceRecordId, scheduledServiceId: svc.id })) {
+            trapPrior = null;
+          }
         }
 
         if (liveChild) {
@@ -2664,8 +2675,7 @@ const ReviewService = {
     const locId = locationId || customer.nearest_location_id || resolveLocation(customer);
 
     let sequence;
-    try {
-      [sequence] = await db.transaction(async (trx) => {
+    const insertReplacement = () => db.transaction(async (trx) => {
         // The opener stop commits WITH the replacement insert (codex #3243
         // r9 P2) — and the one-active partial index means the stop cannot
         // simply be deferred outside the insert's transaction. A concurrent
@@ -2713,12 +2723,33 @@ const ReviewService = {
         })
           .returning("*");
       });
+    try {
+      [sequence] = await insertReplacement();
     } catch (err) {
-      if (err?.code === "23505" || err?.code === "OPENER_SUPERSEDE_RACE") {
+      if (err?.code === "OPENER_SUPERSEDE_RACE") {
+        // The opener stopped ITSELF (its cron re-resolution can close it as
+        // series_completed) between the proof and this commit (codex #3243
+        // r10 P1). Another active sequence in its place is a genuine
+        // already_active; NO active sequence means the final's cadence must
+        // still be created — retry once without the stop.
+        const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
+        if (existing) return { started: false, reason: "already_active", sequence: existing };
+        supersedeOpenerId = null;
+        try {
+          [sequence] = await insertReplacement();
+        } catch (retryErr) {
+          if (retryErr?.code === "23505") {
+            const raced = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
+            return { started: false, reason: "already_active", sequence: raced };
+          }
+          throw retryErr;
+        }
+      } else if (err?.code === "23505") {
         const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
         return { started: false, reason: "already_active", sequence: existing };
+      } else {
+        throw err;
       }
-      throw err;
     }
 
     // Scheduled start: the cron fires step 0 at firstTouchAt; nothing to run
@@ -3118,6 +3149,38 @@ const ReviewService = {
    * completed same-service visits in the last 60 days. Fail-open to [] —
    * no exemption means FEWER sends, never more.
    */
+  /**
+   * Technician-declared initial setup (codex #3243 r10 P2): rodent_trapping
+   * reports REQUIRE trap_visit_type, frozen into service_data's
+   * typedReportSnapshot (or a companion snapshot when trapping rides a
+   * combined visit). Absence or a parse failure falls back to inference —
+   * the declaration is an override, not a gate.
+   */
+  async _isDeclaredInitialTrapVisit({ serviceRecordId = null, scheduledServiceId = null } = {}) {
+    try {
+      let record = null;
+      if (serviceRecordId) {
+        record = await db("service_records").where({ id: serviceRecordId }).select("service_data").first();
+      }
+      if (!record && scheduledServiceId) {
+        record = await db("service_records")
+          .where({ scheduled_service_id: scheduledServiceId })
+          .orderBy("created_at", "desc")
+          .select("service_data")
+          .first();
+      }
+      if (!record?.service_data) return false;
+      const data = typeof record.service_data === "string" ? JSON.parse(record.service_data) : record.service_data;
+      const snapshots = [
+        data?.typedReportSnapshot,
+        ...(Array.isArray(data?.companionReportSnapshots) ? data.companionReportSnapshots : []),
+      ];
+      return snapshots.some((snap) => String(snap?.values?.trap_visit_type || "").trim() === "Initial setup");
+    } catch {
+      return false;
+    }
+  },
+
   async _seriesExemptSequenceIds(customerId, { serviceRecordId = null, scheduledServiceId = null } = {}) {
     try {
       let visitId = scheduledServiceId || null;
