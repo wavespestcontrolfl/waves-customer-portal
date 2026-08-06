@@ -2657,6 +2657,15 @@ const AppointmentReminders = {
    * cancelled, then send one series-level notice through the same guarded
    * contact path as single-appointment cancellation.
    */
+  // Reminder rows created before this deploy have audit rows WITHOUT
+  // appointment_id (safeSend only started forwarding the linkage in this
+  // change, and legacy audits never stored a visit id, so a true backfill
+  // is impossible). For those rows ONLY, announcement is judged by the
+  // reminder flags — imprecise (pref-disable/booked-late also set them,
+  // codex r1) but bounded to the legacy window, where modest over-notice
+  // beats silently closing every pre-deploy obligation (codex r15).
+  CANCEL_NOTICE_LINKAGE_EPOCH: new Date('2026-08-07T00:00:00Z'),
+
   // Durable-retry sweep for the shared-writer cancellation-notice hook
   // (codex #3233 r4). The job-status trx commits a 'pending' claim with
   // the cancel transition; the immediate post-commit worker only sends
@@ -2679,7 +2688,7 @@ const AppointmentReminders = {
         // transition can. Terminal 'suppressed' (r13): releasing let a
         // cancelled→cancelled retry text a days-old cancellation.
         .whereRaw(
-          "(SELECT COALESCE(MAX(h.transitioned_at), 'infinity') FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled') < now() - interval '72 hours'",
+          "COALESCE((SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled'), appointment_reminders.cancellation_notice_at) < now() - interval '72 hours'",
         )
         .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
       const { isEnabled } = require('../config/feature-gates');
@@ -2762,12 +2771,24 @@ const AppointmentReminders = {
           settled += group.length;
           continue;
         }
-        const delivered = Boolean(await db('messaging_audit_log')
+        let delivered = Boolean(await db('messaging_audit_log')
           .whereIn('appointment_id', serviceIds)
           .whereIn('purpose', ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'])
           .whereNotNull('sent_at')
           .whereRaw("provider_message_id ~ '^(SM|MM)'")
           .first('id'));
+        if (!delivered) {
+          // Legacy-grace (r15): pre-epoch rows have unlinked audits.
+          delivered = Boolean(await db('appointment_reminders')
+            .whereIn('id', reminderIds)
+            .where('created_at', '<', this.CANCEL_NOTICE_LINKAGE_EPOCH)
+            .where(function announced() {
+              this.where('reminder_72h_sent', true)
+                .orWhere('reminder_24h_sent', true)
+                .orWhere('confirmation_sent', true);
+            })
+            .first('id'));
+        }
         if (group.length > 1) {
           // Multi-visit group = a series obligation: recovery must send the
           // COMBINED series template, not a single-visit "your visit on X

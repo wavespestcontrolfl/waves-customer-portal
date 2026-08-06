@@ -516,12 +516,27 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     if (!cancelNoticeClaimTs) return;
     void (async () => {
       try {
-        const delivered = Boolean(await db('messaging_audit_log')
+        let delivered = Boolean(await db('messaging_audit_log')
           .where({ appointment_id: String(jobId) })
           .whereIn('purpose', ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'])
           .whereNotNull('sent_at')
           .whereRaw("provider_message_id ~ '^(SM|MM)'")
           .first('id'));
+        if (!delivered) {
+          // Legacy-grace (codex r15): rows created before the linkage
+          // epoch have unlinked audits — judge announcement by the
+          // reminder flags for that bounded window only.
+          const AppointmentReminders = require('./appointment-reminders');
+          delivered = Boolean(await db('appointment_reminders')
+            .where({ scheduled_service_id: jobId })
+            .where('created_at', '<', AppointmentReminders.CANCEL_NOTICE_LINKAGE_EPOCH)
+            .where(function announced() {
+              this.where('reminder_72h_sent', true)
+                .orWhere('reminder_24h_sent', true)
+                .orWhere('confirmation_sent', true);
+            })
+            .first('id'));
+        }
         if (!delivered) return;
         const AppointmentReminders = require('./appointment-reminders');
         await AppointmentReminders.handleCancellation(jobId, { claimToken: cancelNoticeClaimTs });
