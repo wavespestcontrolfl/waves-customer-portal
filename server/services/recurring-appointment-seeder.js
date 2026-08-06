@@ -587,8 +587,20 @@ async function findActiveRecurringSeries(conn, {
     if (serviceAddressScope && columns.service_address_line1 && serviceAddressScope.estimateStreet) {
       const normalizeStreet = (v) => String(v || '')
         .toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-      const parentStreet = normalizeStreet(parent.service_address_line1)
-        || String(serviceAddressScope.customerPrimaryStreet || '');
+      let parentStreet = normalizeStreet(parent.service_address_line1);
+      if (!parentStreet && parent.source_estimate_id) {
+        // Unstamped parent: the post-commit linkage hook may not have run yet
+        // (or the gate is off), and under concurrent group accepts the other
+        // property's fresh series would otherwise read as the customer's
+        // primary street and falsely match (codex #3244 r2). The creating
+        // estimate's address committed in the SAME transaction as the parent,
+        // so it is authoritative and race-free.
+        try {
+          const src = await conn('estimates').where({ id: parent.source_estimate_id }).first('address');
+          parentStreet = normalizeStreet(String(src?.address || '').split(',')[0]);
+        } catch { /* fall back to the primary-street heuristic below */ }
+      }
+      parentStreet = parentStreet || String(serviceAddressScope.customerPrimaryStreet || '');
       if (parentStreet && parentStreet !== serviceAddressScope.estimateStreet) continue;
     }
     const upcoming = await conn('scheduled_services')

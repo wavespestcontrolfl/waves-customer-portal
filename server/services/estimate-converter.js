@@ -584,6 +584,8 @@ async function addOnPreservedMonthlyRateBase({
       .select(
         'scheduled_services.service_type',
         'scheduled_services.is_callback',
+        'scheduled_services.service_address_line1',
+        'scheduled_services.source_estimate_id',
         'services.service_key as catalog_service_key',
         'services.name as catalog_service_name',
       )
@@ -611,7 +613,38 @@ async function addOnPreservedMonthlyRateBase({
       service_type: row.service_type,
     }));
     if (!everyRowClassifiable) return 0;
-    if (!planRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
+    // Grouped accept (codex #3244 r2): a same-family plan at ANOTHER property
+    // is a true ADD-ON — property #1's pest plan must not classify property
+    // #2's pest plan as a re-quote (which would REPLACE monthly_rate with
+    // one property's rate and under-bill a monthly member). Replace evidence
+    // is scoped to rows at THIS estimate's address: stamped rows compare by
+    // service_address_line1, unstamped rows resolve via their creating
+    // estimate's address, then the customer's primary street; rows that
+    // still can't be located keep their replace vote (fail closed). Only
+    // grouped estimates take this path — ungrouped accepts are byte-identical.
+    let replaceEvidenceRows = planRows;
+    if (estimate?.estimate_group_id && estimate.address) {
+      const normalizeStreet = (v) => String(v || '')
+        .toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+      const estimateStreet = normalizeStreet(String(estimate.address).split(',')[0]);
+      if (estimateStreet) {
+        replaceEvidenceRows = await database.transaction(async (sp) => {
+          const customerPrimaryStreet = normalizeStreet(customer?.address_line1);
+          const kept = [];
+          for (const row of planRows) {
+            let street = normalizeStreet(row.service_address_line1);
+            if (!street && row.source_estimate_id) {
+              const src = await sp('estimates').where({ id: row.source_estimate_id }).first('address');
+              street = normalizeStreet(String(src?.address || '').split(',')[0]);
+            }
+            street = street || customerPrimaryStreet;
+            if (!street || street === estimateStreet) kept.push(row);
+          }
+          return kept;
+        });
+      }
+    }
+    if (!replaceEvidenceRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
       return existingMonthlyRate;
     }
     return 0;

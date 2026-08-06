@@ -723,6 +723,20 @@ router.post('/:id/send', async (req, res, next) => {
 // one) — two concurrent sends of different group members serialize, the loser
 // aborts pre-delivery. Returns the claimed rows for later publish/release.
 async function claimGroupSiblingsForPublish(estimate, { engineReviewAcknowledged } = {}) {
+  // A sibling already mid-send is a concurrent publisher (another pod's
+  // scheduled batch, or a parallel operator click): its send will publish
+  // this group with its own message, so this send must abort rather than
+  // deliver a second one. The scheduler claims one member per group per
+  // batch, so this only trips on true cross-process races.
+  const midSendSibling = await db('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id, status: 'sending' })
+    .whereNot({ id: estimate.id })
+    .first('id');
+  if (midSendSibling) {
+    const err = new Error('Another send is publishing this multi-property group — wait a moment and retry.');
+    err.statusCode = 409;
+    throw err;
+  }
   const siblings = await db('estimates')
     .where({ estimate_group_id: estimate.estimate_group_id })
     .whereNot({ id: estimate.id })
@@ -1123,34 +1137,63 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // Publishes ONLY the rows this send claimed pre-delivery (validated
   // sendable + moved to 'sending' by claimGroupSiblingsForPublish) — a row
   // that lost the claim, or was accepted mid-flight, keeps its own state.
+  // Per-sibling, each publication freezes the sibling's own send snapshot
+  // (codex #3244 r2: without it the sibling link reprices live, so a pricing
+  // change after the group message could alter what the customer accepts).
+  // A failed publication retries; a sibling that still can't publish is
+  // RELEASED back to its prior state (visible as unsent, operator re-sends)
+  // rather than left dangling in 'sending' for the stale-claim sweep to
+  // mislabel — and the failure is surfaced on the send result instead of
+  // silently reporting a fully-published group.
+  let groupPublicationFailures = 0;
   if (estimate.estimate_group_id && claimedGroupSiblings.length) {
-    try {
-      const publishedSiblings = await db('estimates')
-        .whereIn('id', claimedGroupSiblings.map((s) => s.id))
-        .where({ status: 'sending' })
-        .whereNull('price_locked_at')
-        .update({
-          status: 'sent',
-          sent_at: db.fn.now(),
-          expires_at: nextExpiresAt,
-          scheduled_at: null,
-          send_method: null,
-          followup_unviewed_sent: true,
-          followup_viewed_sent: true,
-          followup_final_sent: true,
-          followup_expiring_sent: true,
-          estimate_data: db.raw(
-            "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
-            [JSON.stringify({ groupPublishedByEstimateId: estimate.id })],
-          ),
-          updated_at: db.fn.now(),
-        });
-      if (publishedSiblings) {
-        logger.info(`[admin-estimates] group ${estimate.estimate_group_id}: published ${publishedSiblings} sibling estimate(s) with anchor ${estimate.id}`);
+    for (const sibling of claimedGroupSiblings) {
+      let published = false;
+      for (let attempt = 1; attempt <= 3 && !published; attempt += 1) {
+        try {
+          let siblingSnapshotPatch = { groupPublishedByEstimateId: estimate.id };
+          try {
+            const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: nextExpiresAt }, now);
+            if (snapshot?.sendSnapshot) {
+              siblingSnapshotPatch = { ...siblingSnapshotPatch, sendSnapshot: snapshot.sendSnapshot };
+            }
+          } catch (snapErr) {
+            logger.warn(`[admin-estimates] sibling ${sibling.id} send snapshot failed (publishing without freeze): ${snapErr.message}`);
+          }
+          const updated = await db('estimates')
+            .where({ id: sibling.id, status: 'sending' })
+            .whereNull('price_locked_at')
+            .update({
+              status: 'sent',
+              sent_at: db.fn.now(),
+              expires_at: nextExpiresAt,
+              scheduled_at: null,
+              send_method: null,
+              followup_unviewed_sent: true,
+              followup_viewed_sent: true,
+              followup_final_sent: true,
+              followup_expiring_sent: true,
+              estimate_data: db.raw(
+                "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
+                [JSON.stringify(siblingSnapshotPatch)],
+              ),
+              updated_at: db.fn.now(),
+            });
+          published = true;
+          if (!updated) {
+            logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (likely accepted) — state preserved.`);
+          }
+        } catch (e) {
+          logger.error(`[admin-estimates] sibling ${sibling.id} publication attempt ${attempt} failed: ${e.message}`);
+          if (attempt === 3) {
+            groupPublicationFailures += 1;
+            await releaseGroupSiblingClaims([sibling]);
+          }
+        }
       }
-    } catch (e) {
-      logger.error(`[admin-estimates] group sibling publication failed for estimate ${estimate.id}: ${e.message}`);
     }
+    const publishedCount = claimedGroupSiblings.length - groupPublicationFailures;
+    logger.info(`[admin-estimates] group ${estimate.estimate_group_id}: published ${publishedCount}/${claimedGroupSiblings.length} sibling estimate(s) with anchor ${estimate.id}${groupPublicationFailures ? ` (${groupPublicationFailures} released for re-send)` : ''}`);
   }
 
   try {
@@ -1209,6 +1252,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   return {
     sent: true,
     partialFailure: failedChannels.length > 0,
+    ...(groupPublicationFailures > 0 ? { groupPublicationFailures } : {}),
     channels,
     sentChannels,
     failedChannels,

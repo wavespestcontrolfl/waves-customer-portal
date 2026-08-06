@@ -307,15 +307,33 @@ async function recoverStaleScheduledEstimateClaims(now) {
 }
 
 async function claimDueScheduledEstimates(now) {
+  // One claim per estimate GROUP per batch (codex #3244 r2): sending any
+  // group member publishes its siblings with ONE customer message, so
+  // claiming two due siblings in the same batch would deliver two messages —
+  // and pre-claiming both to 'sending' would also hide each from the other's
+  // group pre-flight. DISTINCT ON keeps only the earliest-due member of each
+  // group in the claim; its send flips the still-'scheduled' siblings to
+  // published, so they never come due on their own.
   const result = await db.raw(`
-    WITH due AS (
-      SELECT id
+    WITH ranked AS (
+      SELECT id,
+             row_number() OVER (
+               PARTITION BY COALESCE(estimate_group_id::text, id::text)
+               ORDER BY scheduled_at ASC, created_at ASC
+             ) AS rn
       FROM estimates
       WHERE status = 'scheduled'
         AND scheduled_at IS NOT NULL
         AND scheduled_at <= ?
-      ORDER BY scheduled_at ASC, created_at ASC
-      FOR UPDATE SKIP LOCKED
+    ), due AS (
+      SELECT e.id
+      FROM estimates e
+      JOIN ranked r ON r.id = e.id AND r.rn = 1
+      WHERE e.status = 'scheduled'
+        AND e.scheduled_at IS NOT NULL
+        AND e.scheduled_at <= ?
+      ORDER BY e.scheduled_at ASC, e.created_at ASC
+      FOR UPDATE OF e SKIP LOCKED
       LIMIT ?
     )
     UPDATE estimates AS e
@@ -326,7 +344,7 @@ async function claimDueScheduledEstimates(now) {
     FROM due
     WHERE e.id = due.id
     RETURNING e.*
-  `, [now, SCHEDULED_ESTIMATE_CLAIM_LIMIT, now]);
+  `, [now, now, SCHEDULED_ESTIMATE_CLAIM_LIMIT, now]);
 
   return result.rows || [];
 }
