@@ -2773,15 +2773,6 @@ const AppointmentReminders = {
    * cancelled, then send one series-level notice through the same guarded
    * contact path as single-appointment cancellation.
    */
-  // Reminder rows created before this deploy have audit rows WITHOUT
-  // appointment_id (safeSend only started forwarding the linkage in this
-  // change, and legacy audits never stored a visit id, so a true backfill
-  // is impossible). For those rows ONLY, announcement is judged by the
-  // reminder flags — imprecise (pref-disable/booked-late also set them,
-  // codex r1) but bounded to the legacy window, where modest over-notice
-  // beats silently closing every pre-deploy obligation (codex r15).
-  CANCEL_NOTICE_LINKAGE_EPOCH: new Date('2026-08-07T00:00:00Z'),
-
   // Durable-retry sweep for the shared-writer cancellation-notice hook
   // (codex #3233 r4). The job-status trx commits a 'pending' claim with
   // the cancel transition; the immediate post-commit worker only sends
@@ -2961,7 +2952,10 @@ const AppointmentReminders = {
           // Legacy-grace (r15): pre-epoch rows have unlinked audits.
           delivered = Boolean(await db('appointment_reminders')
             .whereIn('id', reminderIds)
-            .where('created_at', '<', this.CANCEL_NOTICE_LINKAGE_EPOCH)
+            // Self-calibrating epoch (codex r27): "legacy" = created
+            // before the first appointment-linked audit row ever written,
+            // so a late deploy or rolling old pod cannot misclassify.
+            .whereRaw("created_at < (SELECT COALESCE(MIN(created_at), 'infinity') FROM messaging_audit_log WHERE appointment_id IS NOT NULL)")
             .where(function announced() {
               this.where('reminder_72h_sent', true)
                 .orWhere('reminder_24h_sent', true)
@@ -3209,12 +3203,16 @@ const AppointmentReminders = {
             }
             // Pre-stamp notify set (codex r23): the retryable revert must
             // restore pending_notify per row.
-            const notifyRows = await db('appointment_reminders')
-              .whereIn('scheduled_service_id', ids)
-              .where({ cancellation_notice_state: 'pending_notify' })
-              .where('cancellation_notice_at', seriesToken)
-              .select('id');
-            seriesSendOutcome.notifyRowIds = notifyRows.map((r) => r.id);
+            // Captured ONCE (codex r27): the second contact's check runs
+            // after the stamp and would overwrite the set with [].
+            if (!Array.isArray(seriesSendOutcome.notifyRowIds)) {
+              const notifyRows = await db('appointment_reminders')
+                .whereIn('scheduled_service_id', ids)
+                .where({ cancellation_notice_state: 'pending_notify' })
+                .where('cancellation_notice_at', seriesToken)
+                .select('id');
+              seriesSendOutcome.notifyRowIds = notifyRows.map((r) => r.id);
+            }
             // Durable pre-dispatch stamp for the group (codex r21/r22):
             // accepts our own prior stamp; zero rows = cleared mid-flight.
             const stamped = await db('appointment_reminders')

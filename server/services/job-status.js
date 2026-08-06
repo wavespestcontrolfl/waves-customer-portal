@@ -558,10 +558,10 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
           // Legacy-grace (codex r15): rows created before the linkage
           // epoch have unlinked audits — judge announcement by the
           // reminder flags for that bounded window only.
-          const AppointmentReminders = require('./appointment-reminders');
           delivered = Boolean(await db('appointment_reminders')
             .where({ scheduled_service_id: jobId })
-            .where('created_at', '<', AppointmentReminders.CANCEL_NOTICE_LINKAGE_EPOCH)
+            // Self-calibrating epoch (codex r27) — see the sweep's leg.
+            .whereRaw("created_at < (SELECT COALESCE(MIN(created_at), 'infinity') FROM messaging_audit_log WHERE appointment_id IS NOT NULL)")
             .where(function announced() {
               this.where('reminder_72h_sent', true)
                 .orWhere('reminder_24h_sent', true)
