@@ -783,6 +783,38 @@ async function ensureEstimateGroupId(trx, anchorEstimateId, sibling = {}, random
   return groupId;
 }
 
+// Direct estimateGroupId assignments (create/revision payloads) must clear
+// the same same-customer bar as the anchor path (codex #3244 r4): without
+// this, any caller-supplied UUID joins two strangers' estimates under one
+// bearer link. Every existing member (excluding self on revision) must match
+// the writing estimate's identity — customer_id when either side has one,
+// else normalized phone/email.
+async function assertGroupAssignmentAllowed(dbc, groupId, identity = {}, selfId = null) {
+  const members = await dbc('estimates')
+    .where({ estimate_group_id: groupId })
+    .whereNull('archived_at')
+    .select('id', 'customer_id', 'customer_phone', 'customer_email');
+  const others = members.filter((m) => !selfId || String(m.id) !== String(selfId));
+  if (!others.length) return;
+  const normPhone = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const normEmail = (v) => String(v || '').trim().toLowerCase();
+  const identityCustomerId = identity.customer_id ? String(identity.customer_id) : null;
+  for (const member of others) {
+    const memberCustomerId = member.customer_id ? String(member.customer_id) : null;
+    const same = identityCustomerId || memberCustomerId
+      ? identityCustomerId === memberCustomerId
+      : (
+        (normPhone(member.customer_phone).length === 10
+          && normPhone(member.customer_phone) === normPhone(identity.customer_phone))
+        || (normEmail(member.customer_email)
+          && normEmail(member.customer_email) === normEmail(identity.customer_email))
+      );
+    if (!same) {
+      throw errorWithStatus('estimateGroupId belongs to a different customer\'s group', 400);
+    }
+  }
+}
+
 function buildEstimatePersistenceFields(body, context = {}) {
   const estimateData = normalizeEstimateDethatchingManagerApproval(body.estimateData, context);
   const quoteRequired = estimateDataHasQuoteRequirement(estimateData) ||
@@ -1253,6 +1285,8 @@ async function createOrReuseAdminEstimate({
     // commit together.
     if (body.groupWithEstimateId) {
       writeFields.estimate_group_id = await ensureEstimateGroupId(trx, body.groupWithEstimateId, writeFields);
+    } else if (writeFields.estimate_group_id) {
+      await assertGroupAssignmentAllowed(trx, writeFields.estimate_group_id, writeFields);
     }
 
     if (linkedLeadId) {
@@ -1449,6 +1483,15 @@ async function reviseAdminEstimate({
     now,
     recompute,
   });
+
+  // A revision that changes or introduces a group id must clear the same
+  // same-customer bar as creation (codex #3244 r4). The self-derived id
+  // (threaded above from the row) passes trivially — its members are the
+  // row's own guarded siblings.
+  if (writeFields.estimate_group_id
+    && String(writeFields.estimate_group_id) !== String(estimate.estimate_group_id || '')) {
+    await assertGroupAssignmentAllowed(database, writeFields.estimate_group_id, writeFields, estimate.id);
+  }
 
   // Carry the linkage keys across the wholesale estimate_data rewrite.
   if (writeFields.estimate_data) {

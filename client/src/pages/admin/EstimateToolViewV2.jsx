@@ -2724,7 +2724,11 @@ export default function EstimateToolViewV2({
     return () => {
       cancelled = true;
     };
-  }, [activeLeadId]);
+    // groupAnchorId is a dependency so a group RESET (anchor cleared with no
+    // lead active) reruns the empty-ID branch and clears the extracted list —
+    // otherwise a previous lead's addresses could chain onto the next
+    // customer's group (codex #3244 r4).
+  }, [activeLeadId, groupAnchorId]);
 
   useEffect(() => {
     if (!editEstimateId) return undefined;

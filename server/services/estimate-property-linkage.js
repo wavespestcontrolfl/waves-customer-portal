@@ -144,7 +144,26 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
         const rows = await database('customer_properties').where({ customer_id: customerId, active: true });
         const matched = rows.find((p) => normalizeStreet(p.address_line1) === street);
         if (!matched) {
-          logger.info(`[estimate-property-linkage] estimate ${estimateId}: partial address didn't match an existing property — linkage skipped`);
+          // No property row to link — but a GROUPED accept's visits must
+          // still carry the quoted address or dispatch COALESCEs to the
+          // customer's primary property (codex #3244 r4). Stamp what the
+          // partial parse did yield (street is non-negotiable, city/zip
+          // best-effort); the property insert stays skipped.
+          if (estimate.estimate_group_id) {
+            await database('scheduled_services')
+              .where({ source_estimate_id: estimateId })
+              .whereNull('property_id')
+              .whereNull('service_address_line1')
+              .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
+              .update({
+                service_address_line1: parts.address_line1,
+                service_address_line2: null,
+                service_address_city: parts.city || null,
+                service_address_state: parts.state || 'FL',
+                service_address_zip: parts.zip || null,
+              });
+          }
+          logger.info(`[estimate-property-linkage] estimate ${estimateId}: partial address didn't match an existing property — linkage skipped${estimate.estimate_group_id ? ' (grouped visit addresses stamped)' : ''}`);
           return null;
         }
         propertyId = matched.id;
