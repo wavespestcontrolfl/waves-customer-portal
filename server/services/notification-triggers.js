@@ -159,7 +159,9 @@ const TRIGGER_REGISTRY = {
       title: `Reschedule request: ${p.name || 'customer'}`,
       body: [
         redactSensitiveText(p.message || '').slice(0, 120),
-        p.visitDate ? `Next visit: ${p.visitDate}${p.visitService ? ` (${p.visitService})` : ''} — still armed` : 'No upcoming visit on the books',
+        p.visitDate
+          ? `Next visit: ${p.visitDate}${p.visitService ? ` (${p.visitService})` : ''} — still armed`
+          : (p.ambiguousVisits ? 'Multiple upcoming visits — check which one they mean' : 'No upcoming visit on the books'),
       ].join(' — '),
       link: p.customerId ? `/admin/communications?thread=${p.customerId}` : '/admin/communications',
     }),

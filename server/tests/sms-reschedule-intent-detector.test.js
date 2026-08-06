@@ -73,3 +73,14 @@ describe('hasRescheduleOrAwayIntent', () => {
     expect(hasRescheduleOrAwayIntent('Thank you so much!')).toBe(false);
   });
 });
+
+describe('r6 regression cases', () => {
+  test('clock-time reschedule targets flag', () => {
+    expect(hasRescheduleOrAwayIntent('Can we change it to 3pm?')).toBe(true);
+    expect(hasRescheduleOrAwayIntent('Can we move it to 10:30 tomorrow?')).toBe(true);
+  });
+  test('delayed billing cancellations do not flag', () => {
+    expect(hasRescheduleOrAwayIntent("Please cancel tomorrow's payment")).toBe(false);
+    expect(hasRescheduleOrAwayIntent('Cancel my next invoice')).toBe(false);
+  });
+});

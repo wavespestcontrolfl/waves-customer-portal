@@ -83,7 +83,29 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
         .where('created_at', '>=', trx.raw(`now() - interval '${DEDUPE_HOURS} hours'`));
       if (visit?.id) dupe.where('entity_id', visit.id);
       else dupe.whereNull('entity_id');
-      if (await dupe.first('id')) return;
+      // A prior flag that staff already resolved (delivered human reply,
+      // or the slot moved since it was raised) must not swallow a second
+      // genuine request (codex r6).
+      dupe.whereNotExists(function humanReply() {
+        this.select(1).from('sms_log as sl')
+          .whereRaw('sl.customer_id = agent_decisions.customer_id')
+          .where('sl.direction', 'outbound')
+          .whereIn('sl.message_type', ['manual', 'ai_approved', 'ai_revised', 'appointment_rescheduled', 'reschedule_series_confirmation'])
+          .whereIn('sl.status', ['queued', 'sent', 'delivered'])
+          .whereRaw('sl.created_at > agent_decisions.created_at');
+      });
+      const dupeRow = await dupe.first('id', 'input_snapshot');
+      if (dupeRow) {
+        let snapVisit = null;
+        try {
+          const snap = typeof dupeRow.input_snapshot === 'string' ? JSON.parse(dupeRow.input_snapshot) : dupeRow.input_snapshot;
+          snapVisit = snap?.visit || null;
+        } catch { snapVisit = null; }
+        const slotUnchanged = !visit || !snapVisit
+          || (String(snapVisit.scheduled_date).slice(0, 10) === String(visit.scheduled_date).slice(0, 10)
+            && String(snapVisit.window_start || '') === String(visit.window_start || ''));
+        if (slotUnchanged) return;
+      }
       inserted = true;
 
       await trx('agent_decisions').insert({
@@ -129,6 +151,7 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
         message: body,
         visitDate: visit ? String(visit.scheduled_date).slice(0, 10) : null,
         visitService: visit?.service_type || null,
+        ambiguousVisits: ambiguous === true,
       });
       alerted = Boolean(stats && !stats.error
         && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));

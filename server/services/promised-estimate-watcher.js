@@ -74,6 +74,9 @@ async function loadUnkeptPromises() {
       -- V2 enriched extraction ONLY (codex r5): V1 ai_extraction is the
       -- deprecated legacy source downstream composers no longer read.
       AND c.ai_extraction_enriched #>> '{service_request,quote_promised}' = 'true'
+      -- Only validated V2 payloads: schema_failed extractions are kept for
+      -- audit and must not drive owner alerts (codex r6).
+      AND c.v2_extraction_status = 'valid'
       AND (c.disposition IS NULL
            OR c.disposition NOT IN ('spam_discarded', 'wrong_number_closed'))
       AND NOT EXISTS (
