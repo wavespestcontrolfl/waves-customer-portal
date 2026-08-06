@@ -84,7 +84,7 @@ function isSmsReaction(body) {
 // a false positive costs one owner bell, a false negative is the 2026-08-05
 // incident class where a 12:30am "can we reschedule?" text was followed by
 // the visit running (and invoicing) on schedule.
-const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|(?:miss(?:ing)?|delay(?:ing)?)\b\s+(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service)\b|put\s+off\s+(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service)\b|different\s+(?:day|date|time)|another\s+(?:day|date|time)|(?:can|could)\s+we\s+(?:do|move|push|change)\s+(?:it|this|that|the\s+\w+)?\s*(?:to|till|until|for)\s+(?:next|another|a\s+different|later|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day)|skip\s+(?:(?:this|the|my|that|our)\s+)?(?:\w+\s+)?(?:one|visit|service|treatment|month|week|appointment|appt)|skip\s+(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+week)|(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+(?:week|month)|(?:this\s+)?(?:morning|afternoon|evening))\s+instead)\b/i;
+const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|(?:miss(?:ing)?|delay(?:ing)?)\b\s+(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service)\b|(?:put|hold)\s+off\s+(?:on\s+)?(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service|treatment)s?\b|different\s+(?:day|date|time)|another\s+(?:day|date|time)|(?:can|could)\s+we\s+(?:do|move|push|change)\s+(?:it|this|that|the\s+\w+)?\s*(?:to|till|until|for)\s+(?:next|another|a\s+different|later|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day)|skip\s+(?:(?:this|the|my|that|our)\s+)?(?:\w+\s+)?(?:one|visit|service|treatment|month|week|appointment|appt)|skip\s+(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+week)|(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+(?:week|month)|(?:this\s+)?(?:morning|afternoon|evening))\s+instead)\b/i;
 // Move-verbs only count with a displacement preposition or an appointment
 // noun nearby — bare "moving" ("we're moving the couch") must not fire.
 // Move-verbs need an APPOINTMENT object or an explicit temporal target —
@@ -172,7 +172,7 @@ function hasRescheduleOrAwayIntent(body) {
   // detectors match — postpone and skip included (codex #3232 r25):
   // "Don't postpone my appointment" / "Has it been postponed?" /
   // "Did you skip tomorrow?" are not fresh asks.
-  const negated = (!freshAsk && /\b(?:don'?t|do\s+not|no\s+need\s+to|not\s+necessary\s+to|never)\s+(?:\w+\s+){0,2}?(?:reschedul|re-?book|move|change|postpon|skip|delay|miss|put\s+off)/i.test(text))
+  const negated = (!freshAsk && /\b(?:don'?t|do\s+not|no\s+need\s+to|not\s+necessary\s+to|never)\s+(?:\w+\s+){0,2}?(?:reschedul|re-?book|move|change|postpon|skip|delay|miss|(?:put|hold)\s+off)/i.test(text))
     || (!freshAsk && pastReport)
     // Present-perfect confirmations / status questions (codex r13) and
     // past acknowledgments (codex r9) — both yield to a fresh ask.

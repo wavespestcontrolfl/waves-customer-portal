@@ -501,3 +501,15 @@ describe('billing skip veto and treatment stand-downs (codex r47)', () => {
     expect(hasRescheduleOrAwayIntent("Don't spray the garden beds tomorrow, just the perimeter")).toBe(false);
   });
 });
+
+describe('hold-off asks (codex r48)', () => {
+  test('hold off on tomorrows treatment flags', () => {
+    expect(hasRescheduleOrAwayIntent("Please hold off on tomorrow's treatment")).toBe(true);
+  });
+  test('hold off on tomorrows service flags', () => {
+    expect(hasRescheduleOrAwayIntent("Can you hold off on tomorrow's service?")).toBe(true);
+  });
+  test('dont hold off veto stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("Please don't hold off on my service, come as planned")).toBe(false);
+  });
+});

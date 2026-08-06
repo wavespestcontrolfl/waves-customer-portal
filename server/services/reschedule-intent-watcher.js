@@ -64,7 +64,7 @@ async function resolveActionedFlags() {
           // Unlinked shared-phone flags (customer_id null) match replies
           // by the phone the reply went TO (codex r25).
           this.select(1).from('sms_log as sl')
-            .whereRaw("((sl.customer_id = agent_decisions.customer_id OR (agent_decisions.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail')) AND (COALESCE(agent_decisions.input_snapshot->>'phone_tail', '') = '' OR RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail'))")
+            .whereRaw("((COALESCE(agent_decisions.input_snapshot->>'phone_tail', '') <> '' AND RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail') OR (COALESCE(agent_decisions.input_snapshot->>'phone_tail', '') = '' AND sl.customer_id = agent_decisions.customer_id))")
             .where('sl.direction', 'outbound')
             .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             // Approved click-followup nudges are proactive, not replies
@@ -90,7 +90,7 @@ async function resolveActionedFlags() {
             .whereNotNull('agent_decisions.customer_id')
             .whereExists(function confirmed() {
             this.select(1).from('sms_log as rc')
-              .whereRaw("(rc.customer_id = agent_decisions.customer_id AND (COALESCE(agent_decisions.input_snapshot->>'phone_tail', '') = '' OR RIGHT(regexp_replace(COALESCE(rc.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail'))")
+              .whereRaw("((COALESCE(agent_decisions.input_snapshot->>'phone_tail', '') <> '' AND RIGHT(regexp_replace(COALESCE(rc.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail') OR (COALESCE(agent_decisions.input_snapshot->>'phone_tail', '') = '' AND rc.customer_id = agent_decisions.customer_id))")
               .where('rc.direction', 'outbound')
               .whereIn('rc.message_type', ['appointment_rescheduled', 'reschedule_series_confirmation'])
               .where('rc.status', 'delivered')
@@ -193,7 +193,7 @@ async function loadUnactionedFlags() {
         .orWhere(function liveAmbiguous() {
           this.whereNull('ad.entity_id')
             .whereNotNull('ad.customer_id')
-            .whereRaw("EXISTS (SELECT 1 FROM scheduled_services live WHERE live.customer_id = ad.customer_id AND ((live.scheduled_date >= (now() at time zone 'America/New_York')::date AND live.status IN ('pending', 'confirmed', 'en_route', 'on_site')) OR (live.status = 'completed' AND live.scheduled_date >= (now() at time zone 'America/New_York')::date - 1)))");
+            .whereRaw("EXISTS (SELECT 1 FROM scheduled_services live WHERE live.customer_id = ad.customer_id AND ((live.scheduled_date >= (now() at time zone 'America/New_York')::date AND live.status IN ('pending', 'confirmed', 'en_route', 'on_site')) OR (live.status IN ('completed', 'no_show') AND live.scheduled_date >= (now() at time zone 'America/New_York')::date - 1)))");
         })
         // Unlinked shared-phone flags (customer AND entity null) are
         // retained while ANY phone-matched customer's visit is still
@@ -201,7 +201,7 @@ async function loadUnactionedFlags() {
         .orWhere(function livePhoneMatched() {
           this.whereNull('ad.customer_id')
             .whereRaw("COALESCE(ad.input_snapshot->>'phone_tail', '') <> ''")
-            .whereRaw("EXISTS (SELECT 1 FROM customers pc JOIN scheduled_services pss ON pss.customer_id = pc.id WHERE pc.deleted_at IS NULL AND (RIGHT(regexp_replace(COALESCE(pc.phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail' OR RIGHT(regexp_replace(COALESCE(pc.service_contact_phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail' OR RIGHT(regexp_replace(COALESCE(pc.service_contact2_phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail' OR RIGHT(regexp_replace(COALESCE(pc.service_contact3_phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail') AND ((pss.scheduled_date >= (now() at time zone 'America/New_York')::date AND pss.status IN ('pending', 'confirmed', 'en_route', 'on_site')) OR (pss.status = 'completed' AND pss.scheduled_date >= (now() at time zone 'America/New_York')::date - 1)))");
+            .whereRaw("EXISTS (SELECT 1 FROM customers pc JOIN scheduled_services pss ON pss.customer_id = pc.id WHERE pc.deleted_at IS NULL AND (RIGHT(regexp_replace(COALESCE(pc.phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail' OR RIGHT(regexp_replace(COALESCE(pc.service_contact_phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail' OR RIGHT(regexp_replace(COALESCE(pc.service_contact2_phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail' OR RIGHT(regexp_replace(COALESCE(pc.service_contact3_phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail') AND ((pss.scheduled_date >= (now() at time zone 'America/New_York')::date AND pss.status IN ('pending', 'confirmed', 'en_route', 'on_site')) OR (pss.status IN ('completed', 'no_show') AND pss.scheduled_date >= (now() at time zone 'America/New_York')::date - 1)))");
         });
     })
     // A HUMAN reply that actually left (accepted carrier statuses) clears
@@ -211,7 +211,7 @@ async function loadUnactionedFlags() {
       // Unlinked shared-phone flags match replies by destination phone
       // (codex r25).
       this.select(1).from('sms_log as sl')
-        .whereRaw("((sl.customer_id = ad.customer_id OR (ad.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail')) AND (COALESCE(ad.input_snapshot->>'phone_tail', '') = '' OR RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail'))")
+        .whereRaw("((COALESCE(ad.input_snapshot->>'phone_tail', '') <> '' AND RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail') OR (COALESCE(ad.input_snapshot->>'phone_tail', '') = '' AND sl.customer_id = ad.customer_id))")
         .where('sl.direction', 'outbound')
         .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             // Approved click-followup nudges are proactive, not replies
