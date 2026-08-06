@@ -697,6 +697,12 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     expect(hasCallReServiceIntent({ call_summary: 'please revisit on Friday' })).toBe(true);
     expect(hasCallReServiceIntent({ call_summary: 'revisit next friday' })).toBe(true);
     expect(hasCallReServiceIntent({ call_summary: 'revisit at 9 am' })).toBe(true);
+    // Intra-clause punctuation cannot launder an administrative object
+    // (codex #3231 r5) — but a comma that leads back to service evidence,
+    // or true clause-ending punctuation, keeps its intent.
+    expect(hasCallReServiceIntent({ call_summary: 'revisit: payment terms and book the regular quarterly visit' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit, the ants are back inside' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'customer asked for a revisit. Payment discussed separately.' })).toBe(true);
     // A temporal modifier alone never launders an administrative object
     // (codex #3231 r3).
     expect(hasCallReServiceIntent({ call_summary: "revisit next month's pricing and book the regular quarterly visit" })).toBe(false);

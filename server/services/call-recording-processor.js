@@ -8797,7 +8797,7 @@ const CallRecordingProcessor = {
                   // a won deal and promote funnel metrics off a free visit —
                   // judged from the REUSED row's own identity (codex #3231:
                   // a reprocess may resolve differently than what booked).
-                  if (!outboundReviewBooking && !isReServiceBookingRow(primaryRow)) {
+                  if (!outboundReviewBooking && (!isReServiceBookingRow(primaryRow) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -8910,7 +8910,7 @@ const CallRecordingProcessor = {
                   // exception (that lead closes from the office confirmation)
                   // and the same re-service exception ($0 callback, not a sale
                   // — judged from the ATTACHED row's own identity, codex #3231).
-                  if (!outboundReviewBooking && !isReServiceBookingRow(primaryRow)) {
+                  if (!outboundReviewBooking && (!isReServiceBookingRow(primaryRow) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -9263,7 +9263,7 @@ const CallRecordingProcessor = {
                     // covered re-service: a $0 callback is not a closed sale
                     // (codex #3222 follow-up) — the caller is already a plan
                     // customer and the lead must not record a won deal.
-                    if (!isReServiceCatalogRow(callBookingCatalogRow)) {
+                    if (!isReServiceCatalogRow(callBookingCatalogRow) || callQuotePromised) {
                       await convertCallLeadOnPhoneBooking(trx, {
                         leadId,
                         customerId,
@@ -9305,7 +9305,7 @@ const CallRecordingProcessor = {
                   // the office confirmation path) or a covered re-service ($0
                   // callback, not a sale — judged from the reused row's own
                   // identity, codex #3231).
-                  if (!outboundReviewBooking && !isReServiceBookingRow(existingByKey)) {
+                  if (!outboundReviewBooking && (!isReServiceBookingRow(existingByKey) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,

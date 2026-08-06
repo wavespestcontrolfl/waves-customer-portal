@@ -100,14 +100,16 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // same-customer only), so a stale carried id can never reassign another
   // customer's lead.
   // A covered re-service confirmed from outbound review is still a $0
-  // callback, not a closed sale (codex #3231): converting would mark the
-  // lead won off a free visit. Row identity (is_callback stamp or the
-  // re-service service label) is the authority — the resolver's current
-  // opinion is irrelevant here.
+  // callback, not a closed sale (codex #3231): the WON conversion is
+  // suppressed for callback rows — but ONLY the won branch. A call that
+  // ALSO promised a quote stored keep_open_for_quote on the review card,
+  // and convertCallLeadOnPhoneBooking's quote branch claims/reopens the
+  // lead and records the booked appointment WITHOUT marking it won — that
+  // must still run or the owed quote silently disappears (codex r5). Row
+  // identity (is_callback stamp or the re-service label) is the authority.
   const { isReService } = require('./re-service');
-  if (svc.is_callback === true || isReService({ serviceType: svc.service_type })) {
-    logger.info(`[${routeTag}] Skipping lead conversion for confirmed re-service callback ${svc.id} ($0 callback, not a sale)`);
-  } else try {
+  const svcIsCallback = svc.is_callback === true || isReService({ serviceType: svc.service_type });
+  try {
     const CallProc = require('./call-recording-processor');
     let leadId = null;
     let keepOpenForQuote = false;
@@ -145,7 +147,9 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
         keepOpenForQuote = /estimate|quote/i.test(String(activeLeads[0].status || ''));
       }
     }
-    if (leadId) {
+    if (leadId && svcIsCallback && !keepOpenForQuote) {
+      logger.info(`[${routeTag}] Skipping won-conversion for confirmed re-service callback ${svc.id} ($0 callback, not a sale; no quote owed)`);
+    } else if (leadId) {
       await CallProc.convertCallLeadOnPhoneBooking(db, {
         leadId,
         customerId: svc.customer_id,
