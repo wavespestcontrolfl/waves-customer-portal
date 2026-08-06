@@ -63,6 +63,25 @@ describe('review outreach templates', () => {
     }
   });
 
+  test('every template fits ONE GSM segment as sent (owner spec 2026-08-06)', () => {
+    const { countSegments } = require('../services/messaging/segment-counter');
+    const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+    // Worst realistic inputs: 12-char first name, real shortened-link length.
+    const vars = {
+      first: 'Christopher2',
+      tech: 'Adam',
+      service_type: 'pest control service',
+      review_url: 'https://portal.wavespestcontrol.com/l/abcde',
+    };
+    for (const t of OUTREACH_TEMPLATES) {
+      const requireLink = t.body.includes('{review_url}');
+      const body = normalizeGsmPunctuation(renderOutreachBody(t.body, vars, { requireLink }));
+      const s = countSegments(body);
+      expect({ id: t.id, encoding: s.encoding, segments: s.segmentCount })
+        .toEqual({ id: t.id, encoding: 'GSM_7', segments: 1 });
+    }
+  });
+
   test('renderOutreachBody substitutes every placeholder', () => {
     const out = renderOutreachBody(
       'Hi {first} ({name}) — {tech} finished your {service_type} on {date}: {review_url}',

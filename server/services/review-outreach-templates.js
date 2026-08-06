@@ -8,10 +8,19 @@
  * canonical message (audit finding O2).
  *
  * Placeholders ({first}, {tech}, {service_type}, {review_url}, ...) are
- * substituted by renderOutreachBody. {review_url} always resolves to the
- * tokenized NPS rate page (/rate/<token>), never a bare Google link, so the
- * happy→Google / issue→private gate is preserved regardless of which template
- * an operator picks.
+ * substituted by renderOutreachBody. {review_url} always resolves to a
+ * tokenized portal link (never a bare Google URL): behind
+ * GATE_REVIEW_DIRECT_LINK it is the tracked /api/rate/<token>/go redirect
+ * straight to the Google review form; gate off, the legacy /rate/<token>
+ * NPS page.
+ *
+ * SEGMENT CONTRACT (owner spec 2026-08-06): every ask template must render
+ * to ONE GSM-7 segment (≤160 chars) with a 12-character first name and the
+ * ~43-char shortened link — asks were costing 2 segments each. Plain ASCII
+ * punctuation only (hyphens, straight quotes): smart punctuation would flip
+ * the message to UCS-2 and halve the per-segment budget (the send path
+ * normalizes as a backstop, but the copy here is what gets counted in
+ * tests). Enforced by review-outreach-templates.test.js.
  *
  * The mirror in client/src/pages/admin/ReviewVelocityEngine.jsx (TEMPLATES) is
  * presentation-only; this module is the single source of truth for the body
@@ -23,85 +32,85 @@ const OUTREACH_TEMPLATES = [
     id: 'friendly_ask',
     name: 'Friendly Ask',
     sentiment: 'happy',
-    body: "Hey {first}! This is Adam with Waves Pest Control. Thanks for being a great customer — it means the world to our small family business.\n\nIf you have 30 seconds, a quick Google review would help us more than you know:\n\n{review_url}\n\nThank you!",
+    body: "Hey {first}! Adam with Waves here. If we earned it, a quick Google review would mean the world:\n\n{review_url}",
   },
   {
     id: 'soft_reminder',
     name: 'Soft Reminder',
     sentiment: 'happy',
-    body: "Hi {first}! Just a quick follow-up from Waves. If you had a chance to leave us a review, we'd really appreciate it — helps other families find us.\n\n{review_url}\n\nThanks so much!",
+    body: "Hi {first}! Just a quick nudge from Waves - that review link one more time:\n\n{review_url}",
   },
   {
     id: 'final_nudge',
     name: 'Final Nudge (email)',
     sentiment: 'happy',
-    body: "Hey {first} — last one from us, promise! If you've been happy with Waves, a 15-second Google review would mean a lot to our crew.\n\n{review_url}\n\nEither way, thank you for trusting us with your home!",
+    body: "Hey {first} - last one from us, promise! If you have been happy with Waves, a quick review means a lot:\n\n{review_url}",
   },
   {
     id: 'post_service_hot',
     name: 'Post-Service Hot (2hr)',
     sentiment: 'happy',
-    body: "Hey {first}! {tech} here from Waves. Just finished up at your place — hope everything looks great!\n\nIf you have a sec, a quick Google review would make my day:\n\n{review_url}\n\nThanks for choosing Waves!",
+    body: "Hey {first}! {tech} here, just finished up at your place. A quick Google review would make my day:\n\n{review_url}",
   },
   {
     id: 'service_specific_pest',
     name: 'Service-Specific: Pest Control',
     sentiment: 'happy',
-    body: "Hi {first}! After your {service_type} treatment, we hope the critters are staying away!\n\nIf we earned it, a quick review would help other SWFL families find us:\n\n{review_url}\n\nThank you!",
+    body: "Hi {first}! Hope the bugs are staying away after your treatment. If we earned it:\n\n{review_url}",
   },
   {
     id: 'service_specific_lawn',
     name: 'Service-Specific: Lawn Care',
     sentiment: 'happy',
-    body: "Hey {first}! Hope the yard is looking great after your {service_type} service.\n\nIf you're loving the results, a quick review would mean the world:\n\n{review_url}\n\n— The Waves Crew",
+    body: "Hey {first}! Hope the yard is looking great. If you love the results, a quick review helps:\n\n{review_url}",
   },
   {
     id: 'resolution_check',
     name: 'Issue Resolution Check',
     sentiment: 'issue',
     // No review link — this is a private check-in, not an ask.
-    body: "Hi {first}, this is Adam with Waves. I wanted to follow up and make sure everything's been taken care of. Your satisfaction is our top priority.\n\nPlease let me know if there's anything else we can do. — Waves",
+    body: "Hi {first}, Adam with Waves. Just making sure everything has been taken care of - if there is anything else we can do, reply here anytime.",
   },
   {
     id: 'satisfaction_confirm',
     name: 'Satisfaction Confirm',
     sentiment: 'issue',
-    body: "Hey {first} — just checking in one more time. Is everything resolved to your satisfaction? We want to make sure you're 100% happy. Let me know!",
+    body: "Hey {first} - checking in one more time. Is everything resolved to your satisfaction? Let me know!",
   },
   {
     id: 'recovery_review',
     name: 'Recovery → Review',
     sentiment: 'issue',
-    body: "Hi {first}! Glad we got everything sorted. Since you mentioned things are looking good now, would you mind sharing your experience?\n\n{review_url}\n\nYour feedback helps us keep getting better. Thank you!",
+    body: "Hi {first}! Glad we got it sorted. Would you mind sharing your experience?\n\n{review_url}\n\nThank you!",
   },
   {
     id: 'winback_checkin',
     name: 'Win-Back Check-In',
     sentiment: 'neutral',
-    body: "Hey {first}! It's been a while since your last Waves service. Hope everything's been great at the property.\n\nJust wanted to check in — let us know if you need anything!",
+    body: "Hey {first}! It has been a while since your last Waves service - hope all is well. Need anything, just reply!",
   },
   {
     id: 'winback_ask',
     name: 'Win-Back Review Ask',
     sentiment: 'neutral',
-    body: "Hi {first}! We realized we never asked — if you were happy with your Waves service, a quick Google review would mean the world to our small team:\n\n{review_url}\n\nThanks so much!",
+    body: "Hi {first}! We never asked - if you were happy with your Waves service, a quick review would mean a lot:\n\n{review_url}",
   },
   {
     id: 'qr_followup',
     name: 'QR Code Follow-Up',
     sentiment: 'happy',
-    body: "Hey {first}! Great seeing you today. Here's that review link one more time in case you didn't get a chance:\n\n{review_url}\n\nThanks for supporting Waves!",
+    body: "Hey {first}! Great seeing you today. Here is that review link one more time:\n\n{review_url}",
   },
   {
     id: 'first_treatment_ask',
     name: 'Multi-Treatment: First Visit',
     sentiment: 'happy',
     // Sent after the FIRST visit of a multi-treatment series (roach clean-out,
-    // bed bug, any catalog service with requires_follow_up) — the full cadence
+    // bed bug, or any visit with a booked follow-up child) — the full cadence
     // waits for the FINAL visit. No "today": the smart send window can defer
     // past midnight. Cap/cooldown-exempt (CAP_EXEMPT_TEMPLATE_KEYS) so the
     // owner-spec'd 1-after-first + 3-after-final flow fits inside one series.
-    body: "Hi {first}! {tech} with Waves here. Thanks for having us out for your first treatment — we'll see you at the follow-up visit.\n\nIf you're happy so far, a quick Google review would mean a lot to our small family business:\n\n{review_url}\n\nThank you!",
+    body: "Hi {first}! {tech} with Waves. Treatment 1 done - see you at the follow-up. A quick review would help us:\n\n{review_url}",
   },
 ];
 

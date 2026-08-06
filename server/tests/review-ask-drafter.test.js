@@ -19,7 +19,9 @@ const db = require('../models/db');
 const Drafter = require('../services/review-ask-drafter');
 
 const CUSTOMER = { id: 'cust-1', first_name: 'Aaron', last_name: 'Boss' };
-const CLEAN_BODY = 'Hi Aaron, Adam here with Waves. Hope the centipedes are backing off at the entryway. If we earned it, a quick review means a lot: {review_url}. Anything off, just reply here.';
+// One-segment budget (owner spec 2026-08-06): pre-render ≤145 chars, and the
+// rendered preview (43-char link) must fit a single GSM segment.
+const CLEAN_BODY = 'Hi Aaron, Adam here - centipedes backing off? Quick review: {review_url} Reply if anything is off.';
 
 function mockDb(smsRows = []) {
   db.mockImplementation(() => ({
@@ -86,12 +88,12 @@ describe('verifyDraftBody — the auto-send safety net', () => {
     expect(verify('Hi Aaron, check wavespestcontrol.com then {review_url}')).toBe('raw_url');
   });
 
-  test('rejects a rendered body over the 2-segment policy cap', () => {
-    // 278 chars pre-render passes the char ceiling, but with the ~43-char
-    // rendered link it exceeds two GSM segments (306 chars) — reject.
-    const filler = 'We really appreciate you welcoming our crew and trusting the process from day one. '.repeat(4);
-    const body = `Hi Aaron, ${filler.slice(0, 255)} {review_url}`;
-    expect(body.length).toBeLessThanOrEqual(280);
+  test('rejects a rendered body over the 1-segment cadence cap (owner spec 2026-08-06)', () => {
+    // 130 chars pre-render passes the char ceiling, but with the ~43-char
+    // rendered link it exceeds one GSM segment (160 chars) — reject.
+    const filler = 'We really appreciate you welcoming our crew and trusting the process. '.repeat(2);
+    const body = `Hi Aaron, ${filler.slice(0, 107)} {review_url}`;
+    expect(body.length).toBeLessThanOrEqual(145);
     expect(verify(body)).toBe('too_many_segments');
   });
 
@@ -102,7 +104,7 @@ describe('verifyDraftBody — the auto-send safety net', () => {
   });
 
   test('"feel free to reply" is NOT an incentive', () => {
-    expect(verify('Hi Aaron, feel free to reply here — {review_url}')).toBeNull();
+    expect(verify('Hi Aaron, feel free to reply here - {review_url}')).toBeNull();
   });
 
   test('rejects unrendered placeholders other than the link', () => {

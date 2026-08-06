@@ -267,7 +267,7 @@ describe('review sequences — cadence engine', () => {
     expect(out.ok).toBe(true);
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
     // Body is the friendly-ask copy, not an empty/no_template failure.
-    expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/great customer/i);
+    expect(mockSendCustomerMessage.mock.calls[0][0].body).toMatch(/quick Google review/i);
     expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
   });
 
@@ -1037,7 +1037,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(touch.custom_body == null).toBe(true);
     expect(touch.template_key).toBe('friendly_ask');
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
-    expect(sentBody).toContain('Waves Pest Control'); // friendly_ask template copy
+    expect(sentBody).toContain('quick Google review would mean the world'); // friendly_ask template copy
   });
 
   test('a one-off send (no sequence) NEVER drafts — the operator template is exactly what sends', async () => {
@@ -1108,7 +1108,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(retry.custom_body == null).toBe(true);
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(sentBody).not.toContain('hope the ants stayed gone');
-    expect(sentBody).toContain('Waves Pest Control'); // friendly_ask template
+    expect(sentBody).toContain('quick Google review would mean the world'); // friendly_ask template
   });
 
   test('a cadence stops with reason "clicked" once a touch was redirected to Google (direct-link engagement)', async () => {

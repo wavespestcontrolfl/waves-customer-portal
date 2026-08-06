@@ -14,6 +14,12 @@
 const TEMPLATE_KEY = 'review_request_email';
 const SEEDED_INTRO = "We're a small, family-owned pest and lawn company here in Southwest Florida, and word of mouth is how neighbors find us. If your recent service hit the mark, would you take 15 seconds to share a quick review?";
 const VARIABLE_PARAGRAPH = '{{intro_paragraph}}';
+// The seeded closing paragraph promises the OLD /rate behavior ("the same
+// link lets you tell us privately first") — false since GATE_REVIEW_DIRECT_LINK
+// sends the link straight to the Google review form. The unhappy-customer
+// escape becomes "reply to this email".
+const SEEDED_CLOSING = "It genuinely makes our day — and helps other local families decide who to trust with their home. If anything fell short, the same link lets you tell us privately first so we can make it right.";
+const FIXED_CLOSING = "It genuinely makes our day — and helps other local families decide who to trust with their home. If anything fell short, just reply to this email and we'll make it right.";
 
 function parseJson(value, fallback) {
   if (value == null) return fallback;
@@ -35,11 +41,25 @@ async function swapIntroParagraph(knex, fromContent, toContent, { addVariable })
   const blocks = parseJson(version.blocks, []);
   if (!Array.isArray(blocks) || blocks.length === 0) return;
 
+  let dirty = false;
   if (!blocks.some((b) => String(b?.content || '').includes(toContent))) {
     let target = blocks.findIndex((b) => b?.type === 'paragraph' && String(b.content || '').trim() === fromContent);
     if (target === -1) target = blocks.findIndex((b) => b?.type === 'paragraph');
-    if (target === -1) return;
-    blocks[target] = { ...blocks[target], content: toContent };
+    if (target !== -1) {
+      blocks[target] = { ...blocks[target], content: toContent };
+      dirty = true;
+    }
+  }
+  // Closing-paragraph truth fix rides the same up/down direction. Exact-match
+  // only — an operator-edited closing is left alone.
+  const closingFrom = addVariable ? SEEDED_CLOSING : FIXED_CLOSING;
+  const closingTo = addVariable ? FIXED_CLOSING : SEEDED_CLOSING;
+  const closing = blocks.findIndex((b) => b?.type === 'paragraph' && String(b.content || '').trim() === closingFrom);
+  if (closing !== -1) {
+    blocks[closing] = { ...blocks[closing], content: closingTo };
+    dirty = true;
+  }
+  if (dirty) {
     await knex('email_template_versions').where({ id: version.id }).update({
       blocks: JSON.stringify(blocks),
       updated_at: new Date(),
