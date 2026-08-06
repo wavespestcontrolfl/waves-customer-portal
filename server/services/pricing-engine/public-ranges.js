@@ -369,14 +369,21 @@ function buildRows() {
       fleaExterior: true,
       fleaExteriorAreaSqFt: 4000,
     }]),
-    // Exterior profiles only while the add-on is enabled in live config.
-    ...((constants.SPECIALTY.flea.exterior || {}).enabled === false ? [] : [{
-      infestationComplexity: 'heavy',
-      features: { trees: 'heavy', complexity: 'complex' },
-      fleaExterior: true,
-      // Largest directly priced exterior tier — ceiling read from live config.
-      fleaExteriorAreaSqFt: Number((constants.SPECIALTY.flea.exterior || {}).maxSqFt) || 20000,
-    }]),
+    // Exterior profiles only while the add-on is enabled in live config —
+    // one profile per configured tier boundary (tiers price independently,
+    // so an intermediate tier can be the most expensive) plus the ceiling.
+    ...((constants.SPECIALTY.flea.exterior || {}).enabled === false ? [] : [
+      ...[...new Set([
+        ...(((constants.SPECIALTY.flea.exterior || {}).tiers) || [])
+          .map((t) => Number(t.maxSqFt)).filter((v) => Number.isFinite(v) && v > 0),
+        Number((constants.SPECIALTY.flea.exterior || {}).maxSqFt) || 20000,
+      ])].map((fleaExteriorAreaSqFt) => ({
+        infestationComplexity: 'heavy',
+        features: { trees: 'heavy', complexity: 'complex' },
+        fleaExterior: true,
+        fleaExteriorAreaSqFt,
+      })),
+    ]),
     // Selectable single-visit knockdown offer (lower entry price).
     { fleaOfferKey: 'flea_knockdown_single' },
     // The pricer applies the recurring-customer perk INTERNALLY (respecting
@@ -640,7 +647,7 @@ function buildRows() {
               [false, true].map((includeWarrantyExtended) => ({ slabSqFt, productKey, jobContext, volumeDiscount, includeWarrantyExtended })))))),
       ({ slabSqFt, ...opts }) => sp.pricePreSlabTermiticide({ slabSqFt }, { ...opts, labelConfirmed: true }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.treatmentPrice))),
-    notes: 'New-construction slab pre-treatment priced by slab area. The low end reflects discounted builder-batch and same-trip add-on scheduling; standalone one-off jobs price higher. Volume discounts available.',
+    notes: 'New-construction slab pre-treatment priced by slab area — larger slabs extend beyond this range by the same usage-step formula. The low end reflects discounted builder-batch and same-trip add-on scheduling; standalone one-off jobs price higher. Volume discounts available.',
   }));
 
   add('wdo_inspection', () => rangeRow({
@@ -724,7 +731,7 @@ function buildRows() {
     // auto-price; St. Augustine and heavy-cleanup jobs stay review-gated
     // and are excluded by the quote-required filter.
     values: sweepValues(
-      [2000, 4000, 6000, 9000].flatMap((sq) =>
+      [2000, 4000, 6000, 9000, 9999].flatMap((sq) =>
         ['bermuda', 'zoysia'].flatMap((grassType) =>
           ['none', 'light', 'moderate', 'heavy'].flatMap((cleanupLevel) =>
             ['easy', 'moderate'].map((access) => ({ sq, grassType, cleanupLevel, access }))))),
