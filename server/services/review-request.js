@@ -39,27 +39,62 @@ const TRAPPING_MULTI_TREATMENT_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS, "
 function trappingSeriesKeysFor(serviceKey) {
   return serviceKey === "wildlife_trapping" ? ["wildlife_trapping"] : [...RODENT_TRAPPING_SERIES_KEYS];
 }
-// Premise predicate for trapping history (codex #3243 r2+r3 P2): a linked
+// Normalized stamped-address identity for premise comparison. NULL when the
+// row carries no usable stamp (legacy rows) — callers treat that as
+// "no conflict evidence", not as a match.
+function premiseAddressKey(row) {
+  const line1 = String(row?.service_address_line1 || "").trim().toLowerCase().replace(/\s+/g, " ");
+  if (!line1) return null;
+  const zip = String(row?.service_address_zip || "").trim().slice(0, 5);
+  return `${line1}|${zip}`;
+}
+// Premise predicate for trapping history (codex #3243 r2+r3+r5 P2): a linked
 // NON-primary property (rental, second home) is strict; the primary premise
 // spans BOTH legacy NULL rows and rows carrying the backfilled primary
 // property id — call-booked visits stamp the primary row's id while older
 // rows for the same address carry NULL (same equivalence the re-service
-// premise classifier documents in call-recording-processor). Returns a
-// predicate over a row's property_id, applied JS-side. Fail-open to
-// customer-wide matching — scoping is a refinement, not a guarantee.
-async function trappingPremiseMatcher(customerId, propertyId) {
+// premise classifier documents in call-recording-processor). BUT NULL also
+// means an UNMATCHED caller-stated address, distinguished only by the
+// stamped service_address_* fields — so when BOTH rows carry stamps and
+// they differ, they are different premises regardless of the NULL fallback.
+// Takes the enrolling visit ROW, returns a predicate over candidate rows
+// ({property_id, service_address_line1, service_address_zip}), applied
+// JS-side. Fail-open to customer-wide matching — scoping is a refinement,
+// not a guarantee.
+async function trappingPremiseMatcher(customerId, visit) {
   try {
-    if (propertyId) {
-      const prop = await db("customer_properties").where({ id: propertyId }).select("id", "is_primary").first();
-      if (prop && !prop.is_primary) return (pid) => pid === propertyId;
-      return (pid) => pid == null || pid === propertyId;
+    const visitAddr = premiseAddressKey(visit);
+    const addrConflicts = (row) => {
+      const rowAddr = premiseAddressKey(row);
+      return !!(visitAddr && rowAddr && rowAddr !== visitAddr);
+    };
+    if (visit.property_id) {
+      const prop = await db("customer_properties").where({ id: visit.property_id }).select("id", "is_primary").first();
+      if (prop && !prop.is_primary) return (row) => row.property_id === visit.property_id;
+      return (row) => !addrConflicts(row) && (row.property_id == null || row.property_id === visit.property_id);
     }
     const primary = await db("customer_properties").where({ customer_id: customerId, is_primary: true }).select("id").first();
     const primaryId = primary?.id || null;
-    return (pid) => pid == null || (primaryId != null && pid === primaryId);
+    return (row) => !addrConflicts(row) && (row.property_id == null || (primaryId != null && row.property_id === primaryId));
   } catch {
     return () => true;
   }
+}
+// Order two visits sharing a scheduled_date (codex #3243 r5 P2: trap setup
+// and same-day capture/removal). window_start is a time-of-day string and
+// compares lexically; created_at breaks ties. 0 = indeterminate.
+function compareSameDayVisits(a, b) {
+  if (a?.window_start && b?.window_start) {
+    const x = String(a.window_start);
+    const y = String(b.window_start);
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  if (a?.created_at && b?.created_at) {
+    const x = new Date(a.created_at).getTime();
+    const y = new Date(b.created_at).getTime();
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
 }
 const { toE164 } = require("../utils/phone");
 const { runExclusive } = require("../utils/cron-lock");
@@ -576,7 +611,7 @@ const ReviewService = {
           svc = await db("scheduled_services as s")
             .leftJoin("services as sv", "s.service_id", "sv.id")
             .where("s.id", visitId)
-            .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "s.property_id", "sv.service_key", "sv.follow_up_interval_days")
+            .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "s.property_id", "s.service_address_line1", "s.service_address_zip", "s.window_start", "s.created_at", "sv.service_key", "sv.follow_up_interval_days")
             .first();
         }
       }
@@ -635,7 +670,7 @@ const ReviewService = {
           const ceilStr = new Date(Date.parse(`${anchorStr}T00:00:00Z`) + windowDays * 86400000)
             .toISOString().slice(0, 10);
           const seriesKeys = trappingSeriesKeysFor(svc.service_key);
-          const inPremise = await trappingPremiseMatcher(customerId, svc.property_id);
+          const inPremise = await trappingPremiseMatcher(customerId, svc);
           const priorRows = await db("scheduled_services as ps")
             .leftJoin("services as psv", "ps.service_id", "psv.id")
             .where("ps.customer_id", customerId)
@@ -644,8 +679,8 @@ const ReviewService = {
             .where("ps.scheduled_date", "<", anchorStr)
             .where("ps.scheduled_date", ">=", windowFloor)
             .whereIn("psv.service_key", seriesKeys)
-            .select("ps.id", "ps.property_id");
-          trapPrior = priorRows.find((r) => inPremise(r.property_id)) || null;
+            .select("ps.id", "ps.property_id", "ps.service_address_line1", "ps.service_address_zip");
+          trapPrior = priorRows.find((r) => inPremise(r)) || null;
           const laterRows = await db("scheduled_services as fs")
             .leftJoin("services as fsv", "fs.service_id", "fsv.id")
             .where("fs.customer_id", customerId)
@@ -653,10 +688,28 @@ const ReviewService = {
             .where("fs.scheduled_date", ">", anchorStr)
             .where("fs.scheduled_date", "<=", ceilStr)
             .whereIn("fsv.service_key", seriesKeys)
-            .select("fs.id", "fs.status", "fs.property_id");
-          const laterInPremise = laterRows.filter(
-            (r) => inPremise(r.property_id) && !FOLLOWUP_CHILD_INACTIVE_STATUSES.includes(r.status),
-          );
+            .select("fs.id", "fs.status", "fs.property_id", "fs.service_address_line1", "fs.service_address_zip");
+          // Same-day siblings (codex #3243 r5 P2: trap setup + same-day
+          // capture/removal) are invisible to the date-only comparisons —
+          // order them by appointment window (then created_at); an
+          // indeterminate order contributes nothing.
+          const sameDayRows = await db("scheduled_services as ds")
+            .leftJoin("services as dsv", "ds.service_id", "dsv.id")
+            .where("ds.customer_id", customerId)
+            .where("ds.id", "!=", svc.id)
+            .where("ds.scheduled_date", anchorStr)
+            .whereIn("dsv.service_key", seriesKeys)
+            .select("ds.id", "ds.status", "ds.property_id", "ds.service_address_line1", "ds.service_address_zip", "ds.window_start", "ds.created_at");
+          const sameDayInPremise = sameDayRows.filter((r) => inPremise(r));
+          if (!trapPrior) {
+            trapPrior = sameDayInPremise.find(
+              (r) => r.status === "completed" && compareSameDayVisits(r, svc) < 0,
+            ) || null;
+          }
+          const laterInPremise = [
+            ...laterRows.filter((r) => inPremise(r)),
+            ...sameDayInPremise.filter((r) => compareSameDayVisits(r, svc) > 0),
+          ].filter((r) => !FOLLOWUP_CHILD_INACTIVE_STATUSES.includes(r.status));
           trapLaterLive = laterInPremise.find((r) => r.status !== "completed") || null;
           trapLaterCompleted = laterInPremise.find((r) => r.status === "completed") || null;
         }
@@ -2971,7 +3024,7 @@ const ReviewService = {
       const visit = await db("scheduled_services as s")
         .leftJoin("services as sv", "s.service_id", "sv.id")
         .where("s.id", visitId)
-        .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "s.property_id", "sv.service_key", "sv.follow_up_interval_days")
+        .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "s.property_id", "s.service_address_line1", "s.service_address_zip", "s.window_start", "s.created_at", "sv.service_key", "sv.follow_up_interval_days")
         .first();
       if (!visit) return [];
       // Walk the FULL ancestor chain (codex #3235 r7 P1): in a 3+ visit
@@ -2992,7 +3045,7 @@ const ReviewService = {
         sourceIds.push(next);
         cursor = await db("scheduled_services")
           .where({ id: next })
-          .select("id", "parent_service_id", "followup_source_service_id", "service_id", "scheduled_date", "property_id")
+          .select("id", "parent_service_id", "followup_source_service_id", "service_id", "scheduled_date", "property_id", "service_address_line1", "service_address_zip", "window_start", "created_at")
           .first();
         if (!cursor) break;
         ancestorRows.push(cursor);
@@ -3012,9 +3065,10 @@ const ReviewService = {
         const intervalDays = Number(visit.follow_up_interval_days) > 0 ? Number(visit.follow_up_interval_days) : 15;
         const windowDays = Math.min(60, Math.max(30, intervalDays * 2));
         const seriesKeys = trappingSeriesKeysFor(visit.service_key);
-        const inPremise = await trappingPremiseMatcher(customerId, visit.property_id);
+        const inPremise = await trappingPremiseMatcher(customerId, visit);
         const collected = new Set(sourceIds);
         const queue = [visit, ...ancestorRows.filter((r) => r.scheduled_date != null)];
+        const walkSelect = ["ps.id", "ps.scheduled_date", "ps.property_id", "ps.service_address_line1", "ps.service_address_zip", "ps.window_start", "ps.created_at"];
         for (let hops = 0; queue.length && hops < 16; hops += 1) {
           const c = queue.shift();
           const w = etDayWindow(c.scheduled_date, windowDays);
@@ -3025,9 +3079,19 @@ const ReviewService = {
             .where("ps.scheduled_date", "<", w.anchorStr)
             .where("ps.scheduled_date", ">=", w.floorStr)
             .whereIn("psv.service_key", seriesKeys)
-            .select("ps.id", "ps.scheduled_date", "ps.property_id");
-          rows
-            .filter((r) => r.id !== visit.id && !collected.has(r.id) && inPremise(r.property_id))
+            .select(...walkSelect);
+          // Same-day earlier siblings (r5 P2): a same-date setup visit sits
+          // outside the strictly-earlier window — order by appointment
+          // window / created_at relative to this cursor.
+          const sameDay = await db("scheduled_services as ps")
+            .leftJoin("services as psv", "ps.service_id", "psv.id")
+            .where("ps.customer_id", customerId)
+            .where("ps.status", "completed")
+            .where("ps.scheduled_date", w.anchorStr)
+            .whereIn("psv.service_key", seriesKeys)
+            .select(...walkSelect);
+          [...rows, ...sameDay.filter((r) => compareSameDayVisits(r, c) < 0)]
+            .filter((r) => r.id !== visit.id && !collected.has(r.id) && inPremise(r))
             .forEach((r) => {
               collected.add(r.id);
               queue.push(r);

@@ -1008,6 +1008,44 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(merged).toContain('seq-mg-opener');
   });
 
+  test('NULL-property premises with different stamped addresses stay separate; same-day setup/removal orders by window (codex #3243 r5)', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // Two caller-stated addresses, both unmatched (property_id NULL) but
+    // stamped differently: rental A's program must not make rental B's
+    // first visit series-final.
+    let mock = makeMock({
+      scheduled_services: [
+        { id: 'ad-1', customer_id: 'ad', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null, service_address_line1: '12 Palm Ave', service_address_zip: '34205' },
+        { id: 'ad-2', customer_id: 'ad', service_id: 'svc-trap', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping', follow_up_interval_days: 3, property_id: null, service_address_line1: '99 Oak St', service_address_zip: '34293' },
+      ],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'ad', scheduledServiceId: 'ad-2' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+
+    // Same-day setup + capture/removal: the 1:00pm removal sees the 9:00am
+    // setup as its prior → series-final; the setup with the removal still
+    // booked keeps the first ask.
+    mock = makeMock({
+      scheduled_services: [
+        { id: 'sd-1', customer_id: 'sd', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1, window_start: '09:00' },
+        { id: 'sd-2', customer_id: 'sd', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1, window_start: '13:00' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'sd', scheduledServiceId: 'sd-2' });
+    expect(plan.seriesFinal).toBe(true);
+    expect(plan.plan).toHaveLength(3);
+
+    mock.__state.rows.scheduled_services.find((r) => r.id === 'sd-2').status = 'scheduled';
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'sd', scheduledServiceId: 'sd-1' });
+    expect(plan.plan).toHaveLength(1);
+    expect(plan.plan[0].templateKey).toBe('first_treatment_ask');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
