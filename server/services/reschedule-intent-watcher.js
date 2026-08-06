@@ -68,7 +68,7 @@ async function resolveActionedFlags() {
             .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             // Approved click-followup nudges are proactive, not replies
             // (codex r24) — matched by draft intent + finalize sent_at.
-            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.sms_log_id IS NULL AND (mdx.customer_id = sl.customer_id OR (mdx.customer_id IS NULL AND sl.customer_id IS NULL)) AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
+            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.sms_log_id IS NULL AND (mdx.customer_id = sl.customer_id OR (mdx.customer_id IS NULL AND sl.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10))) AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
             // Resolution is a durable status write — only CONFIRMED
             // delivery counts (codex r26): a queued/sent reply can still
             // fail, and nothing reopens an auto_resolved decision. The
@@ -215,7 +215,7 @@ async function loadUnactionedFlags() {
         .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             // Approved click-followup nudges are proactive, not replies
             // (codex r24) — matched by draft intent + finalize sent_at.
-            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.sms_log_id IS NULL AND (mdx.customer_id = sl.customer_id OR (mdx.customer_id IS NULL AND sl.customer_id IS NULL)) AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
+            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.sms_log_id IS NULL AND (mdx.customer_id = sl.customer_id OR (mdx.customer_id IS NULL AND sl.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10))) AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
         .whereIn('sl.status', ['queued', 'sent', 'delivered'])
         .whereRaw('sl.created_at > ad.created_at');
     })

@@ -139,7 +139,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
                 AND COALESCE(c.twilio_call_sid, '') <> ''
             )
             OR (dt.customer_id IS NOT NULL AND dt.customer_id = c.customer_id
-              AND dt.created_at BETWEEN c.created_at AND COALESCE(c.bridged_at, c.created_at) + CASE WHEN c.bridged_at IS NOT NULL THEN make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE interval '0' END + interval '45 minutes'))
+              AND dt.created_at BETWEEN c.created_at AND CASE WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE c.created_at END + interval '45 minutes'))
       )
       -- Already returned: a later outbound CALL to the same number, or a
       -- later human-typed text, clears the item (codex #3232 r1).
@@ -149,7 +149,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
       AND NOT EXISTS (
         SELECT 1 FROM call_log oc
         WHERE oc.direction = 'outbound'
-          AND oc.created_at > COALESCE(c.bridged_at, c.created_at) + CASE WHEN c.bridged_at IS NOT NULL THEN make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE interval '0' END
+          AND oc.created_at > CASE WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE c.created_at END
           -- Heuristic: the stored duration is the PARENT leg (admin
           -- answer), so a short pickup-and-abandon still counts positive;
           -- >= 60s approximates a real customer conversation (leg-level
@@ -177,12 +177,12 @@ async function loadCallbackCalls(cutoff = new Date()) {
           AND NOT EXISTS (
             SELECT 1 FROM message_drafts mdx
             WHERE mdx.sms_log_id IS NULL
-              AND (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL))
+              AND (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(os.to_phone, ''), '[^0-9]', '', 'g'), 10)))
               AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
                                   AND os.created_at + interval '2 minutes'
           )
           AND os.status IN ('queued', 'sent', 'delivered')
-          AND os.created_at > COALESCE(c.bridged_at, c.created_at) + CASE WHEN c.bridged_at IS NOT NULL THEN make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE interval '0' END
+          AND os.created_at > CASE WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE c.created_at END
           -- Same identity rule as the outbound-call leg (codex r31): a
           -- LINKED callback is cleared only by a text linked to the same
           -- customer — an unlinked manual send on a shared number may
@@ -236,7 +236,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
           AND NOT EXISTS (
             SELECT 1 FROM message_drafts mdx
             WHERE mdx.sms_log_id IS NULL
-              AND (mdx.customer_id = fsms.customer_id OR (mdx.customer_id IS NULL AND fsms.customer_id IS NULL))
+              AND (mdx.customer_id = fsms.customer_id OR (mdx.customer_id IS NULL AND fsms.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(fsms.to_phone, ''), '[^0-9]', '', 'g'), 10)))
               AND mdx.sent_at BETWEEN fsms.created_at - interval '2 minutes'
                                   AND fsms.created_at + interval '2 minutes'
           )
@@ -296,7 +296,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                AND NOT EXISTS (
                  SELECT 1 FROM message_drafts mdx
                  WHERE mdx.sms_log_id IS NULL
-                   AND (mdx.customer_id = ps.customer_id OR (mdx.customer_id IS NULL AND ps.customer_id IS NULL))
+                   AND (mdx.customer_id = ps.customer_id OR (mdx.customer_id IS NULL AND ps.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(ps.to_phone, ''), '[^0-9]', '', 'g'), 10)))
                    AND mdx.sent_at BETWEEN ps.created_at - interval '2 minutes'
                                        AND ps.created_at + interval '2 minutes'
                )
@@ -334,7 +334,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                AND NOT EXISTS (
                  SELECT 1 FROM message_drafts mdx
                  WHERE mdx.sms_log_id IS NULL
-                   AND (mdx.customer_id = es.customer_id OR (mdx.customer_id IS NULL AND es.customer_id IS NULL))
+                   AND (mdx.customer_id = es.customer_id OR (mdx.customer_id IS NULL AND es.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(es.to_phone, ''), '[^0-9]', '', 'g'), 10)))
                    AND mdx.sent_at BETWEEN es.created_at - interval '2 minutes'
                                        AND es.created_at + interval '2 minutes'
                )
@@ -368,7 +368,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                AND NOT EXISTS (
                  SELECT 1 FROM message_drafts mdx
                  WHERE mdx.sms_log_id IS NULL
-                   AND (mdx.customer_id = vs.customer_id OR (mdx.customer_id IS NULL AND vs.customer_id IS NULL))
+                   AND (mdx.customer_id = vs.customer_id OR (mdx.customer_id IS NULL AND vs.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(vs.to_phone, ''), '[^0-9]', '', 'g'), 10)))
                    AND mdx.sent_at BETWEEN vs.created_at - interval '2 minutes'
                                        AND vs.created_at + interval '2 minutes'
                )
@@ -458,7 +458,7 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         AND NOT EXISTS (
           SELECT 1 FROM message_drafts mdx
           WHERE mdx.sms_log_id IS NULL
-            AND (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL))
+            AND (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(os.to_phone, ''), '[^0-9]', '', 'g'), 10)))
             AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
                                 AND os.created_at + interval '2 minutes'
         )

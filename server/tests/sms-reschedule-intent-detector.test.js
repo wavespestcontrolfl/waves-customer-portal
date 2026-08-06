@@ -420,3 +420,15 @@ describe('billing veto per-clause override and negated gate-code use (codex r41)
     expect(hasRescheduleOrAwayIntent("I won't be home tomorrow but you can use the gate code")).toBe(false);
   });
 });
+
+describe('skip treatment and leading-context stand-downs (codex r42)', () => {
+  test('please skip this treatment flags', () => {
+    expect(hasRescheduleOrAwayIntent('Please skip this treatment')).toBe(true);
+  });
+  test('tomorrow please dont come flags', () => {
+    expect(hasRescheduleOrAwayIntent("Tomorrow, please don't come")).toBe(true);
+  });
+  test('for tomorrows appointment can you not come flags', () => {
+    expect(hasRescheduleOrAwayIntent("For tomorrow's appointment, can you not come?")).toBe(true);
+  });
+});
