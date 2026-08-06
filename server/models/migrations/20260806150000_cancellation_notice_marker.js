@@ -41,6 +41,15 @@ exports.up = async (knex) => {
   await knex.raw(
     "CREATE INDEX IF NOT EXISTS idx_job_status_history_cancelled_at ON job_status_history (transitioned_at) WHERE to_status = 'cancelled'",
   );
+  // Superseded by 20260806170000 (which drops it in favor of the
+  // live-visit-driven repair) but retained here so every migration
+  // history is symmetric (codex #3238 r6): environments at THIS
+  // migration's code level run the history-driven repair and need the
+  // index; fresh installs create it briefly and the next migration
+  // removes it.
+  await knex.raw(
+    "CREATE INDEX IF NOT EXISTS idx_job_status_history_restored_at ON job_status_history (transitioned_at) WHERE from_status = 'cancelled'",
+  );
 
   // Seed the reminder-linkage epoch UNSTAMPED (codex r30/r32): this
   // migration runs as preDeployCommand while the OLD instance still owns
