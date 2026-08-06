@@ -9679,6 +9679,21 @@ const CallRecordingProcessor = {
           // riding a confirmed text) and is idempotent on reused/attached
           // rows. Dark until APPOINTMENT_CARD_REQUEST + the template flip.
           if (scheduledServiceId && !outboundReviewBooking && !v2SmsBlocked && !holdImpliedSmsLeg) {
+            // Durable clearance record (codex #3234 r3): this exact guard IS
+            // the call-level SMS clearance decision, and nothing else
+            // persists it — the pre-visit card backstop keys on this stamp
+            // so a hold honored here stays honored days later. Covers fresh,
+            // reused, and attached rows alike (the guard runs for all of
+            // them). Best-effort: a failed stamp only makes the backstop
+            // more conservative, never less.
+            try {
+              await db('scheduled_services')
+                .where({ id: scheduledServiceId })
+                .whereNull('call_sms_cleared_at')
+                .update({ call_sms_cleared_at: new Date() });
+            } catch (clearErr) {
+              logger.warn(`[call-proc] call-sms clearance stamp failed for visit ${scheduledServiceId}: ${clearErr.message}`);
+            }
             try {
               const { requestCardForAppointment } = require('./appointment-card-request');
               await requestCardForAppointment({

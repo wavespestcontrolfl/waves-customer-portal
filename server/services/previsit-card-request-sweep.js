@@ -22,8 +22,12 @@
  *
  *   - visits LEAD_DAYS out or sooner (today included), live statuses only;
  *   - never a callback/re-service visit (free with the plan — a card ask
- *     on a free visit reads as a bill);
- *   - never an outbound-review pending row (office confirms first);
+ *     on a free visit reads as a bill), never an unpriced/zero-price visit
+ *     (the funnel's own owner rule — mirrored so they can't burn the cap);
+ *   - never an outbound-review row still pending office confirmation
+ *     (confirmed ones re-admit: the human confirm is the clearance);
+ *   - call-linked rows need the processor's durable call_sms_cleared_at
+ *     stamp — a call-level SMS hold honored at booking stays honored here;
  *   - one visit per customer per run (the soonest), and ONLY for customers
  *     the funnel has never invited anywhere (no appointment_card_requests
  *     row, no card_link_sent_at stamp on any visit) — repeat nudges are a
@@ -99,18 +103,35 @@ async function runSweep(dbh = db) {
     .whereNull('s.payer_id')
     .where((qb) => qb.where('s.is_callback', false).orWhereNull('s.is_callback'))
     .whereNot('s.service_type', 'ilike', '%re-service%')
-    .where((qb) => qb.whereNull('s.source_action').orWhereNot('s.source_action', OUTBOUND_REVIEW_SOURCE_ACTION))
     .whereNotNull('s.customer_id')
-    // Call-level TCPA holds survive into the sweep (codex r2 P1): a
-    // phone-booked visit whose confirmation SMS never sent may have been
-    // withheld by a call-level consent/routing decision the sweep cannot
-    // reconstruct — fail closed and leave it to the office (the admin
-    // send button re-runs the funnel with a human in the loop). A sent
-    // confirmation is the durable proof the call's SMS clearance was
-    // affirmed and used.
+    // Funnel positive-price predicate mirrored (codex r3 P1: the funnel
+    // skips unpriced/zero-price visits by owner rule 2026-07-30, and
+    // phone-booked recurring rows intentionally carry no price — they must
+    // not consume the batch allowance).
+    .where('s.estimated_price', '>', 0)
+    // Call-level TCPA holds survive into the sweep (codex r2/r3): ANY
+    // call-linked row — phone_call booking_source, a source_call_log_id
+    // linkage (attached manual bookings included), or an outbound-review
+    // row — needs a durable clearance record before the sweep may text:
+    //   - call_sms_cleared_at, stamped by the processor at the exact
+    //     decision point that releases the call's SMS legs (no proxy:
+    //     reminder rows register regardless of holds, and
+    //     confirmation_sent_at stamps even on skipped sends);
+    //   - or an outbound-review row the OFFICE CONFIRMED (the human
+    //     confirmation is the clearance decision — and re-admits confirmed
+    //     outbound rows the one-shot confirm-hook funnel missed, codex r3
+    //     P2, instead of excluding them forever).
+    // Pending outbound rows stay excluded; held or pre-feature call-linked
+    // history stays office-only (the admin send button).
     .where((qb) => qb
-      .whereRaw("s.booking_source IS DISTINCT FROM 'phone_call'")
-      .orWhereNotNull('s.confirmation_sms_sent_at'))
+      .where((nonCall) => nonCall
+        .whereRaw("s.booking_source IS DISTINCT FROM 'phone_call'")
+        .whereNull('s.source_call_log_id')
+        .where((sa) => sa.whereNull('s.source_action').orWhereNot('s.source_action', OUTBOUND_REVIEW_SOURCE_ACTION)))
+      .orWhereNotNull('s.call_sms_cleared_at')
+      .orWhere((outboundConfirmed) => outboundConfirmed
+        .where('s.source_action', OUTBOUND_REVIEW_SOURCE_ACTION)
+        .where('s.status', 'confirmed')))
     // Freshly created visits are excluded for one run (codex r2 P2): the
     // realistic cross-path double-invite is a booking-time trigger still in
     // flight for a visit created moments before the 10:26 sweep touches the
@@ -169,7 +190,7 @@ async function runSweep(dbh = db) {
       status: visit.status,
       isCallback: visit.is_callback === true,
       reServiceLabel: /re-?service/i.test(String(visit.service_type || '')),
-      outboundReviewPending: visit.source_action === OUTBOUND_REVIEW_SOURCE_ACTION,
+      outboundReviewPending: visit.source_action === OUTBOUND_REVIEW_SOURCE_ACTION && visit.status !== 'confirmed',
       cardLinkSentAt: visit.card_link_sent_at,
       customerEverInvited: false, // query-level NOT EXISTS owns the fast path; the locked recheck below owns the race
     });
