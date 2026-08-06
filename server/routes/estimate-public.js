@@ -9290,6 +9290,19 @@ router.put('/:token/accept', async (req, res, next) => {
       // the customer_properties model replaces. Same comms-lock fencing as
       // the phone-match path below.
       if (!customerId && estimate.estimate_group_id) {
+        // Serialize customer-unlinked grouped accepts (codex #3244 r6): two
+        // concurrent accepts (two tabs, two household members) could both
+        // run the sibling lookup below before either commits a customer_id,
+        // then both fall through to phone matching — which a second
+        // property's address fails — and mint TWO customer accounts for one
+        // group. The xact lock holds until commit, so the second accept
+        // re-reads only after the first's customer_id is visible. Key
+        // namespace is group-accept-specific; both accepts then take the
+        // comms lock in the same order (no inversion).
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['estimate-group-accept', String(estimate.estimate_group_id)],
+        );
         const resolvedSibling = await trx('estimates')
           .where({ estimate_group_id: estimate.estimate_group_id })
           .whereNot({ id: estimate.id })
@@ -10079,6 +10092,7 @@ router.put('/:token/accept', async (req, res, next) => {
     // right after the response can't strand the accept unlinked, but the
     // helper never throws — the committed acceptance stands regardless.
     if (customerId) {
+      await transferGroupFollowupOwnership(estimate);
       await require('../services/estimate-property-linkage').linkAcceptedEstimateProperty({
         estimateId: estimate.id,
         customerId,
@@ -11697,6 +11711,43 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
   } catch (err) { next(err); }
 });
 
+
+// When a group's comms-owning estimate goes TERMINAL (accepted/declined)
+// with other properties still undecided, the follow-up sweeps can no longer
+// select it (they scan sent/viewed only) and every sibling's stages were
+// pre-burned at publication — the remaining properties would never get a
+// follow-up (codex #3244 r6). Transfer ownership to exactly ONE live
+// sibling: un-burn its stage flags so the sweep runs its normal ladder off
+// that sibling's own sent/viewed timestamps. Deterministic pick (earliest
+// created) + guarded update keep concurrent terminal events from arming two
+// owners. Best-effort post-commit — never throws.
+async function transferGroupFollowupOwnership(estimate) {
+  try {
+    if (!estimate?.estimate_group_id) return;
+    const owner = await db('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNot({ id: estimate.id })
+      .whereIn('status', ['sent', 'viewed'])
+      .whereNull('archived_at')
+      .orderBy('created_at', 'asc')
+      .first('id');
+    if (!owner) return;
+    await db('estimates')
+      .where({ id: owner.id })
+      .whereIn('status', ['sent', 'viewed'])
+      .update({
+        followup_unviewed_sent: false,
+        followup_viewed_sent: false,
+        followup_final_sent: false,
+        followup_expiring_sent: false,
+        updated_at: db.fn.now(),
+      });
+    logger.info(`[estimate-public] group ${estimate.estimate_group_id}: follow-up ownership transferred to sibling ${owner.id} after ${estimate.id} went terminal`);
+  } catch (e) {
+    logger.warn(`[estimate-public] follow-up ownership transfer failed for estimate ${estimate?.id}: ${e.message}`);
+  }
+}
+
 // PUT /api/estimates/:token/decline
 router.put('/:token/decline', async (req, res, next) => {
   try {
@@ -11714,6 +11765,7 @@ router.put('/:token/decline', async (req, res, next) => {
       .whereNull('archived_at')
       .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', db.raw('NOW()')))
       .update({ status: 'declined', declined_at: db.fn.now(), updated_at: db.fn.now() });
+    if (declinedCount) await transferGroupFollowupOwnership(estimate);
     if (!declinedCount) {
       const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at', 'archived_at');
       const freshGuard = resolveEstimateDeclineGuard(fresh);

@@ -37,16 +37,30 @@ function parseEstimateAddress(raw) {
   const line = String(raw || '').replace(/,?\s*(USA|United States)\s*$/i, '').trim();
   if (!line) return null;
   const m = line.match(/^(.*),\s*([^,]+),\s*([A-Za-z]{2})\.?\s*(\d{5})(?:-\d{4})?$/);
-  if (!m) {
-    return { address_line1: line, city: '', state: 'FL', zip: '', partial: true };
+  const shaped = m
+    ? {
+      address_line1: m[1].trim(),
+      city: m[2].trim(),
+      state: m[3].toUpperCase(),
+      zip: m[4],
+      partial: false,
+    }
+    : { address_line1: line, city: '', state: 'FL', zip: '', partial: true };
+  // Canonicalize a LEADING unit segment into address_line2 ("Unit 4, 100
+  // Beach Rd" → line1 "100 Beach Rd", line2 "Unit 4"): existing
+  // customer_properties rows store the unit in line 2, and addressKey
+  // preserves token order — leaving the unit in line 1 makes the same
+  // property produce two different keys and mints a false second property
+  // (codex #3244 r6). Trailing "#4"-style suffixes already live in line 1 on
+  // both sides, so only the comma-separated leading form needs the split.
+  const unit = shaped.address_line1.match(/^((?:unit|apt|apartment|suite|ste|#)\s*[\w-]+)\s*,\s*(.+)$/i);
+  if (unit) {
+    shaped.address_line2 = unit[1].trim();
+    shaped.address_line1 = unit[2].trim();
+  } else {
+    shaped.address_line2 = null;
   }
-  return {
-    address_line1: m[1].trim(),
-    city: m[2].trim(),
-    state: m[3].toUpperCase(),
-    zip: m[4],
-    partial: false,
-  };
+  return shaped;
 }
 
 /**
@@ -99,7 +113,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
         .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
         .update({
           service_address_line1: gparts.address_line1,
-          service_address_line2: null,
+          service_address_line2: gparts.address_line2 || null,
           service_address_city: gparts.city || null,
           service_address_state: gparts.state || 'FL',
           service_address_zip: gparts.zip || null,
@@ -157,7 +171,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
               .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
               .update({
                 service_address_line1: parts.address_line1,
-                service_address_line2: null,
+                service_address_line2: parts.address_line2 || null,
                 service_address_city: parts.city || null,
                 service_address_state: parts.state || 'FL',
                 service_address_zip: parts.zip || null,
@@ -173,7 +187,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
       const created = await recordCallProperty({
         customerId,
         address_line1: parts.address_line1,
-        address_line2: null,
+        address_line2: parts.address_line2 || null,
         city: parts.city || null,
         state: parts.state || 'FL',
         zip: parts.zip || null,
@@ -185,7 +199,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
       if (!propertyId) {
         // Address already on file — resolve the existing row by the same
         // normalized key recordCallProperty deduped against.
-        const key = addressKey({ address_line1: parts.address_line1, address_line2: null, city: parts.city, zip: parts.zip });
+        const key = addressKey({ address_line1: parts.address_line1, address_line2: parts.address_line2 || null, city: parts.city, zip: parts.zip });
         const rows = await database('customer_properties').where({ customer_id: customerId, active: true });
         const matched = rows.find((p) => addressKey(p) === key);
         propertyId = matched ? matched.id : null;

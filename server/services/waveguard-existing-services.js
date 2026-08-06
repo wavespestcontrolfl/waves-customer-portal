@@ -117,6 +117,9 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   // other consumer of these rows.
   if (cols.is_callback) selectCols.push('is_callback');
   if (cols.source) selectCols.push('source');
+  // For per-property tier scoping: an unstamped row resolves its property via
+  // the estimate that created it (codex #3244 r6).
+  if (cols.source_estimate_id) selectCols.push('source_estimate_id');
   const hasStampedAddress = !!cols.service_address_line1;
   if (hasStampedAddress) {
     selectCols.push('service_address_line1');
@@ -261,9 +264,33 @@ function qualifyingKeysFromRows(rows = []) {
 }
 
 // Convenience: just the distinct qualifying keys for a customer.
-async function loadExistingQualifyingServiceKeys(database, customerId) {
+//
+// streetScope ({ estimateStreet, customerPrimaryStreet }, both from
+// normalizedEstimateStreet) scopes the keys to ONE property (codex #3244 r6):
+// a grouped/secondary-property estimate must count qualifying services already
+// active at THAT property (same-property add-ons keep their real tier) while
+// excluding the other properties' plans. Stamped rows compare by
+// service_address_line1; unstamped rows resolve via their creating estimate's
+// address, then the customer's primary street; a row that still can't be
+// located is EXCLUDED (counting an unlocatable plan toward another property's
+// tier would hand out an unearned discount).
+async function loadExistingQualifyingServiceKeys(database, customerId, { streetScope = null } = {}) {
   const rows = await loadExistingRecurringQualifyingRows(database, customerId);
-  return qualifyingKeysFromRows(rows);
+  if (!streetScope || !streetScope.estimateStreet) return qualifyingKeysFromRows(rows);
+  const { normalizedEstimateStreet } = require('./estimate-property-linkage');
+  const kept = [];
+  for (const row of rows) {
+    let street = normalizedEstimateStreet(row.service_address_line1);
+    if (!street && row.source_estimate_id) {
+      try {
+        const src = await database('estimates').where({ id: row.source_estimate_id }).first('address');
+        street = normalizedEstimateStreet(src?.address);
+      } catch { /* fall through to the primary-street default */ }
+    }
+    street = street || String(streetScope.customerPrimaryStreet || '');
+    if (street && street === streetScope.estimateStreet) kept.push(row);
+  }
+  return qualifyingKeysFromRows(kept);
 }
 
 module.exports = {

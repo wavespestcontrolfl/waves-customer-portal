@@ -12,6 +12,7 @@ describe('parseEstimateAddress', () => {
   test('parses the Google Places formatted shape', () => {
     expect(parseEstimateAddress('123 Main St, Bradenton, FL 34205')).toEqual({
       address_line1: '123 Main St',
+      address_line2: null,
       city: 'Bradenton',
       state: 'FL',
       zip: '34205',
@@ -22,6 +23,7 @@ describe('parseEstimateAddress', () => {
   test('strips a trailing USA and tolerates ZIP+4', () => {
     expect(parseEstimateAddress('123 Main St, Bradenton, FL 34205-1234, USA')).toEqual({
       address_line1: '123 Main St',
+      address_line2: null,
       city: 'Bradenton',
       state: 'FL',
       zip: '34205',
@@ -29,9 +31,13 @@ describe('parseEstimateAddress', () => {
     });
   });
 
-  test('keeps a multi-comma street on the street line (unit prefixes)', () => {
+  test('canonicalizes a leading unit prefix into address_line2 (codex r6)', () => {
+    // Existing customer_properties rows keep the unit in line 2, and
+    // addressKey preserves token order — the split keeps one property from
+    // producing two different keys.
     expect(parseEstimateAddress('Unit 4, 100 Beach Rd, Venice, FL 34285')).toEqual({
-      address_line1: 'Unit 4, 100 Beach Rd',
+      address_line1: '100 Beach Rd',
+      address_line2: 'Unit 4',
       city: 'Venice',
       state: 'FL',
       zip: '34285',
@@ -42,6 +48,7 @@ describe('parseEstimateAddress', () => {
   test('unparseable text falls back to partial with the whole line as street', () => {
     expect(parseEstimateAddress('the yellow house behind the marina')).toEqual({
       address_line1: 'the yellow house behind the marina',
+      address_line2: null,
       city: '',
       state: 'FL',
       zip: '',

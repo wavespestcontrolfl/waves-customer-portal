@@ -1150,19 +1150,24 @@ async function resolveEstimateWritePayload({
   // tier context; it prices standalone. The recurring-customer 15% one-time
   // perk below stays account-level — the person IS a recurring customer.
   let groupedEstimate = !!(body.groupWithEstimateId || body.estimateGroupId);
-  // The ANCHOR of a future group is saved before any group exists (codex
-  // #3244 r5): an existing customer quoting a NON-primary address must
-  // already price per-property, or the anchor keeps the combined account
-  // tier forever (grouping later never reprices it). Both streets must parse
-  // cleanly to flip — parse uncertainty keeps the long-standing combined
-  // behavior for same-property requotes with formatting drift.
-  if (!groupedEstimate && body.customerId && body.address) {
+  // Per-property street context (codex #3244 r5+r6). The ANCHOR of a future
+  // group is saved before any group exists: an existing customer quoting a
+  // NON-primary address must already price per-property, or the anchor keeps
+  // the combined account tier forever (grouping later never reprices it).
+  // Both streets must parse cleanly to flip — parse uncertainty keeps the
+  // long-standing combined behavior for same-property requotes with
+  // formatting drift.
+  let perPropertyStreetScope = null;
+  if (body.customerId && body.address) {
     try {
       const { normalizedEstimateStreet } = require('./estimate-property-linkage');
       const custRow = await database('customers').where({ id: body.customerId }).first('address_line1');
       const estimateStreet = normalizedEstimateStreet(body.address);
       const customerStreet = normalizedEstimateStreet(custRow?.address_line1);
-      if (estimateStreet && customerStreet && estimateStreet !== customerStreet) {
+      if (estimateStreet) {
+        perPropertyStreetScope = { estimateStreet, customerPrimaryStreet: customerStreet };
+      }
+      if (!groupedEstimate && estimateStreet && customerStreet && estimateStreet !== customerStreet) {
         groupedEstimate = true;
       }
     } catch (err) {
@@ -1175,6 +1180,18 @@ async function resolveEstimateWritePayload({
         priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId);
       } catch (err) {
         logger.warn(`[admin-estimate] prior qualifying services lookup skipped: ${err.message}`);
+      }
+    } else if (perPropertyStreetScope) {
+      // Grouped / non-primary property: qualifying services ALREADY ACTIVE at
+      // THIS property still count toward its own service-count tier (an
+      // add-on to a serviced secondary property keeps its real tier — codex
+      // #3244 r6); other properties' plans stay excluded.
+      try {
+        priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId, {
+          streetScope: perPropertyStreetScope,
+        });
+      } catch (err) {
+        logger.warn(`[admin-estimate] property-scoped qualifying services lookup skipped: ${err.message}`);
       }
     }
     try {
