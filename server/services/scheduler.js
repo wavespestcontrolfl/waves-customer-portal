@@ -2055,7 +2055,10 @@ function initScheduledJobs() {
   // AND the secure-card lane's own two levers are lit; all send policy lives
   // in requestCardForAppointment.
   // ==========================================================================
-  cron.schedule('20 10 * * *', async () => {
+  // 10:26 — an unoccupied minute (codex #3234 r1: 10:20 collides with the
+  // Monday seasonal-reactivation job; both hold runExclusive pool
+  // connections, recreating the 10am pileup the stagger exists to prevent).
+  cron.schedule('26 10 * * *', async () => {
     logger.info('Running: pre-visit card/Auto Pay invitation backstop');
     try {
       await runExclusive('previsit-card-request-sweep', async () => {

@@ -81,10 +81,16 @@ async function runSweep(dbh = db) {
   const horizonEt = etDateString(addETDays(parseETDateTime(`${todayEt}T12:00`), LEAD_DAYS));
 
   // Soonest live visit per customer inside the window, minus callbacks,
-  // outbound-review holds, and already-texted visits. The never-invited
-  // filter runs per customer below (two cheap EXISTS reads beat a
-  // three-way join here).
+  // outbound-review holds, already-texted visits, archived customers, and
+  // ever-invited customers (all in the query — the per-customer advisory
+  // lock below re-checks history at send time for the race window only).
   const candidates = await dbh('scheduled_services as s')
+    // Archived customers never get a payment-adjacent invite (codex #3234 r1
+    // P1 — the archive route only stamps customers.deleted_at, and the
+    // funnel has no deleted-customer guard of its own). Same join the
+    // neighboring balance-reminder sweep uses.
+    .join('customers as c', 's.customer_id', 'c.id')
+    .whereNull('c.deleted_at')
     .whereIn('s.status', LIVE_VISIT_STATUSES)
     .whereBetween('s.scheduled_date', [todayEt, horizonEt])
     .whereNull('s.card_link_sent_at')
@@ -93,36 +99,40 @@ async function runSweep(dbh = db) {
     .whereNot('s.service_type', 'ilike', '%re-service%')
     .where((qb) => qb.whereNull('s.source_action').orWhereNot('s.source_action', OUTBOUND_REVIEW_SOURCE_ACTION))
     .whereNotNull('s.customer_id')
+    // Never-invited is part of the QUERY (codex r1 P2): applying it after a
+    // LIMIT let already-invited customers' visits starve eligible first-time
+    // customers out of the window entirely.
+    .whereNotExists(function historyRequest() {
+      this.select(dbh.raw('1'))
+        .from('appointment_card_requests as r')
+        .join('scheduled_services as v', 'r.scheduled_service_id', 'v.id')
+        .whereRaw('v.customer_id = s.customer_id');
+    })
+    .whereNotExists(function historyStamp() {
+      this.select(dbh.raw('1'))
+        .from('scheduled_services as v2')
+        .whereRaw('v2.customer_id = s.customer_id')
+        .whereNotNull('v2.card_link_sent_at');
+    })
     .orderBy([{ column: 's.scheduled_date', order: 'asc' }, { column: 's.window_start', order: 'asc' }])
     .select('s.id', 's.customer_id', 's.scheduled_date', 's.status', 's.is_callback', 's.service_type', 's.source_action', 's.card_link_sent_at')
     .limit(500);
 
   const seenCustomers = new Set();
   let considered = 0;
+  let attempts = 0;
   let sent = 0;
   let skipped = 0;
   for (const visit of candidates) {
-    if (sent >= BATCH_CAP) break;
+    // The cap counts funnel ATTEMPTS, not confirmed sends (codex #3234 r1
+    // P1): an uncertain provider outcome (timeout/5xx/429) keeps the
+    // funnel's claim because the text MAY have been accepted — a sweep that
+    // only counted clean sends could fire hundreds of maybe-sent texts
+    // through a provider incident.
+    if (attempts >= BATCH_CAP) break;
     if (seenCustomers.has(visit.customer_id)) continue;
     seenCustomers.add(visit.customer_id);
     considered += 1;
-
-    let everInvited = true; // fail toward NOT texting
-    try {
-      const [reqRow, stampRow] = await Promise.all([
-        dbh('appointment_card_requests as r')
-          .join('scheduled_services as v', 'r.scheduled_service_id', 'v.id')
-          .where('v.customer_id', visit.customer_id)
-          .first('r.id'),
-        dbh('scheduled_services')
-          .where({ customer_id: visit.customer_id })
-          .whereNotNull('card_link_sent_at')
-          .first('id'),
-      ]);
-      everInvited = !!(reqRow || stampRow);
-    } catch (err) {
-      logger.warn(`[previsit-card-sweep] invite-history lookup failed for customer ${visit.customer_id} (skipping): ${err.message}`);
-    }
 
     const verdict = previsitCardInviteEligible({
       status: visit.status,
@@ -130,24 +140,45 @@ async function runSweep(dbh = db) {
       reServiceLabel: /re-?service/i.test(String(visit.service_type || '')),
       outboundReviewPending: visit.source_action === OUTBOUND_REVIEW_SOURCE_ACTION,
       cardLinkSentAt: visit.card_link_sent_at,
-      customerEverInvited: everInvited,
+      customerEverInvited: false, // query-level NOT EXISTS owns the fast path; the locked recheck below owns the race
     });
     if (!verdict.send) { skipped += 1; continue; }
 
+    // One introduction per CUSTOMER, atomically (codex r1 P2): the funnel's
+    // claim is per-visit, so a concurrent invite for the same customer's
+    // OTHER visit could double-introduce. A customer-keyed advisory lock +
+    // in-lock history recheck serializes the sweep against itself (and any
+    // other taker of this namespace); the funnel call runs INSIDE the lock
+    // so a second locker's recheck sees the request row.
+    attempts += 1;
     try {
-      const result = await requestCardForAppointment({
-        scheduledServiceId: visit.id,
-        trigger: 'previsit_backstop',
+      await dbh.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['previsit-card-invite', String(visit.customer_id)]);
+        const [reqRow, stampRow] = await Promise.all([
+          trx('appointment_card_requests as r')
+            .join('scheduled_services as v', 'r.scheduled_service_id', 'v.id')
+            .where('v.customer_id', visit.customer_id)
+            .first('r.id'),
+          trx('scheduled_services')
+            .where({ customer_id: visit.customer_id })
+            .whereNotNull('card_link_sent_at')
+            .first('id'),
+        ]);
+        if (reqRow || stampRow) { skipped += 1; return; }
+        const result = await requestCardForAppointment({
+          scheduledServiceId: visit.id,
+          trigger: 'previsit_backstop',
+        });
+        if (result?.requested || result?.action === 'sent' || result?.action === 'auto_secured') sent += 1;
+        else skipped += 1;
       });
-      if (result?.requested || result?.action === 'sent' || result?.action === 'auto_secured') sent += 1;
-      else skipped += 1;
     } catch (err) {
       skipped += 1;
       logger.warn(`[previsit-card-sweep] funnel call failed for visit ${visit.id}: ${err.message}`);
     }
   }
 
-  return { considered, sent, skipped };
+  return { considered, attempts, sent, skipped };
 }
 
 module.exports = {
