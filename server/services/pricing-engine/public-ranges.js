@@ -94,7 +94,7 @@ function buildRows() {
 
   add('cockroach_treatment', () => rangeRow({
     key: 'cockroach_treatment',
-    name: 'Cockroach Treatment (native / palmetto)',
+    name: 'Cockroach Treatment (native / palmetto / German knockdown)',
     unit: 'per treatment',
     // Standalone and recurring-plan-attached knockdowns, regular and German
     // scales — the estimate path adds the non-standalone charge when a
@@ -415,7 +415,9 @@ function buildRows() {
     // share — ordinary configuration fields the exact estimate flow passes;
     // manual-review configurations are excluded.
     values: sweepValues(
-      [150, 250, 400].flatMap((perimeterLF) =>
+      // Measured overrides above 400 LF stay directly priced (provenance
+      // review only) — sweep through 1,000 LF.
+      [150, 250, 400, 700, 1000].flatMap((perimeterLF) =>
         Object.keys(constants.SPECIALTY.trenching.products).flatMap((productKey) =>
           ['standard', 'high'].flatMap((applicationRate) =>
             [0.5, 1, 1.5].flatMap((trenchDepthFt) =>
@@ -445,7 +447,7 @@ function buildRows() {
               [false, true].map((includeWarrantyExtended) => ({ slabSqFt, productKey, jobContext, volumeDiscount, includeWarrantyExtended })))))),
       ({ slabSqFt, ...opts }) => sp.pricePreSlabTermiticide({ slabSqFt }, { ...opts, labelConfirmed: true }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.treatmentPrice))),
-    notes: 'New-construction slab pre-treatment; priced by slab area, volume discounts available.',
+    notes: 'New-construction slab pre-treatment priced by slab area. The low end reflects discounted builder-batch and same-trip add-on scheduling; standalone one-off jobs price higher. Volume discounts available.',
   }));
 
   add('wdo_inspection', () => rangeRow({
