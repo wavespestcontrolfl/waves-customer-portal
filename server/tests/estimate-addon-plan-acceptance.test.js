@@ -419,6 +419,34 @@ describe('family-scoped existing-appointment adoption', () => {
     expect(estimateFamilyKeysForAdoption({}, {}).size).toBe(0);
   });
 
+  test('specialty termite work never adopts a termite-bait visit (codex r11)', () => {
+    const boraCareData = {
+      result: {
+        oneTime: {
+          items: [{ name: 'Bora-Care Termite Treatment', service: 'termite_treatment', price: 1200 }],
+        },
+      },
+    };
+    const oneTimeKeys = estimateFamilyKeysForAdoption({}, boraCareData, { serviceMode: 'one_time' });
+    // The bait-program visit is a different service — never restamped by a
+    // specialty treatment accept.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Termite Bait Station Program' },
+      oneTimeKeys,
+    )).toBe(false);
+    // Specialty-to-specialty still matches.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Bora-Care Termite Treatment' },
+      oneTimeKeys,
+    )).toBe(true);
+    // Bait-to-bait adoption keeps working.
+    const baitKeys = new Set(['termite_bait']);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Termite Bait Station Program' },
+      baitKeys,
+    )).toBe(true);
+  });
+
   test('an unselectable one-time toggle never joins the contract intersection (codex r10)', () => {
     const pestRecurringData = {
       result: {

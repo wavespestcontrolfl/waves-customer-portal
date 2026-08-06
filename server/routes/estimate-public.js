@@ -494,6 +494,16 @@ function serviceFamilyKeyForAdoption(value) {
     if (raw.includes('commercial')) {
       return recurringServiceKey({ name: raw }) || null;
     }
+    // Termite work keeps its specialty split (codex #3228 r11): serviceKeyFor's
+    // generic termite branch buckets Bora-Care / liquid / trenching WITH the
+    // bait program, so a one-time specialty treatment could adopt (and
+    // restamp) a termite-bait visit. recurringServiceKey already splits
+    // termite_bait / termite_trenching / pre_slab_termiticide — delegate
+    // termite names to it. Its pest-first ordering also keeps combined
+    // pest+termite rows pest-primary.
+    if (raw.includes('termite')) {
+      return recurringServiceKey({ name: raw }) || null;
+    }
     // The CANONICAL scheduled-row classifier (recurring-appointment-seeder),
     // on BOTH the estimate's services and the candidate rows — the
     // duplicate-series guard and follow-up seeding bucket by the same
