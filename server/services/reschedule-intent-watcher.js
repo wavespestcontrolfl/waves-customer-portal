@@ -68,7 +68,7 @@ async function resolveActionedFlags() {
             .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             // Approved click-followup nudges are proactive, not replies
             // (codex r24) — matched by draft intent + finalize sent_at.
-            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.intent = 'click_followup' AND mdx.customer_id = sl.customer_id AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
+            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.sms_log_id IS NULL AND mdx.customer_id = sl.customer_id AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
             // Resolution is a durable status write — only CONFIRMED
             // delivery counts (codex r26): a queued/sent reply can still
             // fail, and nothing reopens an auto_resolved decision. The
@@ -175,6 +175,14 @@ async function loadUnactionedFlags() {
         .orWhere(function liveLinkedVisit() {
           this.whereNotNull('ad.entity_id')
             .whereRaw("ss.scheduled_date >= (now() at time zone 'America/New_York')::date");
+        })
+        // Ambiguous flags carry entity_id NULL by design (multi-visit) —
+        // retain them too while ANY of the customer's upcoming visits is
+        // still armed (codex r28).
+        .orWhere(function liveAmbiguous() {
+          this.whereNull('ad.entity_id')
+            .whereNotNull('ad.customer_id')
+            .whereRaw("EXISTS (SELECT 1 FROM scheduled_services live WHERE live.customer_id = ad.customer_id AND live.scheduled_date >= (now() at time zone 'America/New_York')::date AND live.status IN ('pending', 'confirmed', 'en_route', 'on_site'))");
         });
     })
     // A HUMAN reply that actually left (accepted carrier statuses) clears
@@ -189,7 +197,7 @@ async function loadUnactionedFlags() {
         .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             // Approved click-followup nudges are proactive, not replies
             // (codex r24) — matched by draft intent + finalize sent_at.
-            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.intent = 'click_followup' AND mdx.customer_id = sl.customer_id AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
+            .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.sms_log_id IS NULL AND mdx.customer_id = sl.customer_id AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
         .whereIn('sl.status', ['queued', 'sent', 'delivered'])
         .whereRaw('sl.created_at > ad.created_at');
     })

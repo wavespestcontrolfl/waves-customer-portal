@@ -126,10 +126,12 @@ async function loadCallbackCalls(cutoff = new Date()) {
           -- >= 60s approximates a real customer conversation (leg-level
           -- connect state is not recorded) (codex r5).
           AND COALESCE(oc.duration_seconds, 0) >= 60
-          -- Same-customer when both sides are linked (codex r18): a
-          -- shared household number must not let B's call clear A's
-          -- callback.
-          AND (c.customer_id IS NULL OR oc.customer_id IS NULL OR oc.customer_id = c.customer_id)
+          -- A LINKED source call is cleared only by an outbound call
+          -- linked to the SAME customer (codex r28): call surfaces insert
+          -- unlinked rows for shared numbers, and such a call may concern
+          -- the other household member. Unlinked source calls keep the
+          -- phone-level match (nothing better exists).
+          AND (c.customer_id IS NULL OR oc.customer_id = c.customer_id)
           AND RIGHT(REGEXP_REPLACE(COALESCE(oc.to_phone, ''), '\\D', '', 'g'), 10)
             = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, ''), '\\D', '', 'g'), 10)
       )
@@ -137,12 +139,12 @@ async function loadCallbackCalls(cutoff = new Date()) {
         SELECT 1 FROM sms_log os
         WHERE os.direction = 'outbound'
           AND os.message_type IN ${HUMAN_REPLY_TYPES}
-          -- A human-APPROVED click-followup nudge is proactive marketing,
-          -- not a reply to this item (codex r24): its draft intent is
-          -- 'click_followup' and finalize stamps sent_at at send time.
+          -- A human-APPROVED PROACTIVE draft (click-followup, lead nudge —
+          -- any draft with no inbound sms_log anchor) is not a reply to
+          -- this item (codex r24/r28); finalize stamps sent_at at send.
           AND NOT EXISTS (
             SELECT 1 FROM message_drafts mdx
-            WHERE mdx.intent = 'click_followup'
+            WHERE mdx.sms_log_id IS NULL
               AND mdx.customer_id = os.customer_id
               AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
                                   AND os.created_at + interval '2 minutes'
@@ -199,7 +201,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                -- 'click_followup' and finalize stamps sent_at at send time.
                AND NOT EXISTS (
                  SELECT 1 FROM message_drafts mdx
-                 WHERE mdx.intent = 'click_followup'
+                 WHERE mdx.sms_log_id IS NULL
                    AND mdx.customer_id = ps.customer_id
                    AND mdx.sent_at BETWEEN ps.created_at - interval '2 minutes'
                                        AND ps.created_at + interval '2 minutes'
@@ -231,7 +233,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                -- 'click_followup' and finalize stamps sent_at at send time.
                AND NOT EXISTS (
                  SELECT 1 FROM message_drafts mdx
-                 WHERE mdx.intent = 'click_followup'
+                 WHERE mdx.sms_log_id IS NULL
                    AND mdx.customer_id = es.customer_id
                    AND mdx.sent_at BETWEEN es.created_at - interval '2 minutes'
                                        AND es.created_at + interval '2 minutes'
@@ -259,7 +261,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                -- 'click_followup' and finalize stamps sent_at at send time.
                AND NOT EXISTS (
                  SELECT 1 FROM message_drafts mdx
-                 WHERE mdx.intent = 'click_followup'
+                 WHERE mdx.sms_log_id IS NULL
                    AND mdx.customer_id = vs.customer_id
                    AND mdx.sent_at BETWEEN vs.created_at - interval '2 minutes'
                                        AND vs.created_at + interval '2 minutes'
@@ -338,7 +340,7 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         -- 'click_followup' and finalize stamps sent_at at send time.
         AND NOT EXISTS (
           SELECT 1 FROM message_drafts mdx
-          WHERE mdx.intent = 'click_followup'
+          WHERE mdx.sms_log_id IS NULL
             AND mdx.customer_id = os.customer_id
             AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
                                 AND os.created_at + interval '2 minutes'

@@ -240,3 +240,18 @@ describe('absence forms, cancel negations, correction verbs (codex r27)', () => 
     expect(hasRescheduleOrAwayIntent('Please move forward with the treatment plan')).toBe(false);
   });
 });
+
+describe('fresh appointment-cancel overrides whole-message vetoes (codex r28)', () => {
+  test('corrected billing negation plus service cancel flags', () => {
+    expect(hasRescheduleOrAwayIntent("Please don't cancel autopay. I need to cancel tomorrow's service")).toBe(true);
+  });
+  test('pure billing cancel stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent('I need to cancel autopay tomorrow')).toBe(false);
+  });
+  test('negated service cancel stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("I don't want to cancel my service")).toBe(false);
+  });
+  test('plain please-cancel-my-appointment flags', () => {
+    expect(hasRescheduleOrAwayIntent('Please cancel my appointment for tomorrow')).toBe(true);
+  });
+});

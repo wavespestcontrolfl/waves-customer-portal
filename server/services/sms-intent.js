@@ -113,8 +113,14 @@ function hasRescheduleOrAwayIntent(body) {
   // Phone keyboards produce typographic apostrophes — "won\u2019t" must match
   // the same patterns as "won't".
   const text = body.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
+  // A fresh cancel ask that TARGETS the appointment overrides the
+  // whole-message negation/billing vetoes (codex r28): "Please don't
+  // cancel autopay. I need to cancel tomorrow's service." Guarded the
+  // same way as needAsk — a negated need/want phrase is not fresh.
+  const freshCancelAppt = /\b(?:(?:need|want|like|have)\s+to|please)\s+cancel\s+(?:[\w'’]+\s+){0,2}?(?:appointment|appt|visit|service|treatment)s?\b/i.test(text)
+    && !/\b(?:don'?t|do\s+not|doesn'?t|won'?t|not|no|never)\s+(?:\w+\s+){0,2}?(?:need|want|like|have)\s+to\s+cancel/i.test(text);
   const cancelAsk = CANCEL_RE.test(text) && CANCEL_CONTEXT_RE.test(text)
-    && !CANCEL_NEGATION_RE.test(text) && !CANCEL_NONAPPT_RE.test(text)
+    && (freshCancelAppt || (!CANCEL_NEGATION_RE.test(text) && !CANCEL_NONAPPT_RE.test(text)))
     // Acknowledgments / status questions about a DONE cancellation are
     // not requests (codex r18): "Has my appointment been canceled?",
     // "Did you cancel…?", "Thanks for canceling."
