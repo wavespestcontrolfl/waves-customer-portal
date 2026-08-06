@@ -221,3 +221,39 @@ describe('public frequency entry tracks the commercial pest cadence', () => {
     expect(commercialPestFrequenciesFromV1Services([])).toEqual([]);
   });
 });
+
+// Mixed commercial bundle (codex #3240 r4): the split-section path used to
+// mirror the generic pest-shaped Quarterly key onto the commercial pest card,
+// so a bi-monthly/monthly program still read "Quarterly" in a bundle.
+describe('mixed commercial bundle keeps the pest cadence on its section', () => {
+  const { buildPricingServices } = require('../routes/estimate-public');
+  const pestRow = { service: 'commercial_pest', name: 'Commercial Pest Control', visitsPerYear: 6, monthly: 100, annual: 1200, perApp: 200 };
+  const rodentRow = { service: 'commercial_rodent_bait', name: 'Commercial Rodent Bait Monitoring', visitsPerYear: 4, monthly: 80, annual: 960, perApp: 240 };
+  const payload = {
+    frequencies: [{
+      key: 'quarterly',
+      label: 'Quarterly',
+      monthly: 180,
+      annual: 2160,
+      perServiceTreatments: [
+        { service: 'commercial_pest', label: 'Commercial Pest Control', perTreatment: 200, displayPrice: 200, visitsPerYear: 6 },
+        { service: 'commercial_rodent_bait', label: 'Commercial Rodent Bait Monitoring', perTreatment: 240, displayPrice: 240, visitsPerYear: 4 },
+      ],
+    }],
+  };
+  const estData = { result: { recurring: { services: [pestRow, rodentRow] } } };
+
+  test('commercial pest section carries its own sold cadence, not the mirrored quarterly', () => {
+    const sections = buildPricingServices(payload, {}, estData);
+    const pestSection = sections.find((s) => s.key === 'commercial_pest');
+    expect(pestSection).toBeTruthy();
+    expect(pestSection.frequencies[0]).toMatchObject({ key: 'bimonthly', label: 'Bimonthly', visitsPerYear: 6 });
+    expect(pestSection.frequencies[0].annual).toBe(1200);
+  });
+
+  test('the other commercial service still gets its own section', () => {
+    const sections = buildPricingServices(payload, {}, estData);
+    expect(sections.length).toBeGreaterThanOrEqual(2);
+    expect(sections.some((s) => s.key === 'commercial_rodent_bait')).toBe(true);
+  });
+});

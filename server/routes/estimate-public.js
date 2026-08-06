@@ -16658,11 +16658,21 @@ function buildPricingServices(payload = {}, estimate = {}, estData = {}) {
         const ownLadder = (key !== 'pest_control' && hasRecurringPestSection && hasServiceCadenceCombos)
           ? bundleSectionLadderForService(key, estData, recurringService, recurringDiscount)
           : null;
-        const sectionFrequencies = (ownLadder && ownLadder.length)
-          ? ownLadder
-          : sectionFrequenciesForRecurringService(key, recurringService, frequencies, recurringDiscount, {
-            preserveSelectableKeys: !hasRecurringPestSection || hasSelectableLadder,
-          });
+        // Commercial pest sells ONE cadence (risk bucket / estimator override)
+        // and has no residential ladder — in a mixed commercial bundle the
+        // generic frequencies mirror the pest-shaped Quarterly key onto it, so
+        // a bi-monthly/monthly program would read "Quarterly" (codex #3240 r4).
+        // Shape its section from its own stored row, like the solo path.
+        const commercialPestFrequencies = key === 'commercial_pest'
+          ? commercialPestFrequenciesFromV1Services([recurringService])
+          : [];
+        const sectionFrequencies = commercialPestFrequencies.length
+          ? commercialPestFrequencies
+          : (ownLadder && ownLadder.length)
+            ? ownLadder
+            : sectionFrequenciesForRecurringService(key, recurringService, frequencies, recurringDiscount, {
+              preserveSelectableKeys: !hasRecurringPestSection || hasSelectableLadder,
+            });
         if (!sectionFrequencies.length && payload.quoteRequired !== true) return null;
         return buildServiceSection({
           key,
@@ -19974,6 +19984,7 @@ module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFami
 module.exports.adoptionServiceModesForContract = adoptionServiceModesForContract;
 module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
+module.exports.buildPricingServices = buildPricingServices;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
 module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscountSlices;
