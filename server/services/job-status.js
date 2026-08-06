@@ -673,6 +673,7 @@ function evaluateTerminalTransition(fromStatus, toStatus) {
 }
 
 module.exports = {
+  nextClaimTs,
   transitionJobStatus,
   evaluateTerminalTransition,
   CUSTOMER_EVENT,

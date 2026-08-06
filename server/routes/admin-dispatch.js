@@ -3335,7 +3335,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
       let ongoingStopped = 0;
       // Shared claim token for every target's trx claim — declared out
       // here because the post-commit series handler needs it too.
-      const seriesClaimToken = new Date();
+      const seriesClaimToken = require('../services/job-status').nextClaimTs();
       await db.transaction(async (trx) => {
         // Serialize with the per-parent series-maintenance advisory lock
         // (runRecurringSeriesMaintenance, admin-schedule) BEFORE selecting

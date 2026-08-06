@@ -777,7 +777,9 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     return false;
   }
 
-  const result = await sendCustomerMessage({
+  let result;
+  try {
+    result = await sendCustomerMessage({
     to: phone,
     body,
     channel: 'sms',
@@ -796,6 +798,13 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // the appointment moved or went terminal while validators ran.
     ...(typeof preDispatchCheck === 'function' ? { preDispatchCheck } : {}),
   });
+  } catch (sendErr) {
+    // A throw from inside the sender can postdate provider acceptance
+    // (audit persistence is after dispatch) — callers with durable claims
+    // must treat it as dispatch-uncertain, never retry it (codex r16).
+    if (sendOutcome && typeof sendOutcome === 'object') sendOutcome.dispatchUncertain = true;
+    throw sendErr;
+  }
   // Callers that must distinguish transient provider failures (Twilio
   // 429/5xx/timeouts — sendCustomerMessage returns { sent:false,
   // retryable:true }) from deterministic non-delivery pass an out-param:
@@ -2342,7 +2351,7 @@ const AppointmentReminders = {
                   .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"));
               });
           })
-          .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'pending', updated_at: noticeToken });
+          .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: db.raw("CASE WHEN cancellation_notice_state = 'pending_notify' THEN 'pending_notify' ELSE 'pending' END"), updated_at: noticeToken });
       }
 
       if (!sendNotification) {
@@ -2417,9 +2426,13 @@ const AppointmentReminders = {
       // row for THIS visit's cancellation carries a genuine Twilio SID), in
       // which case releasing would let a retry double-text the accepted
       // recipient; the claim finalizes as 'sent' instead.
-      const finalizeClaim = async (sentOk, { retryable = false } = {}) => {
+      const finalizeClaim = async (sentOk, { retryable = false, uncertain = false } = {}) => {
         try {
           let accepted = Boolean(sentOk);
+          // Dispatch-uncertain (r16): the provider may have accepted but
+          // the audit never persisted — silence beats a double-text, so
+          // finalize as sent.
+          if (!accepted && uncertain) accepted = true;
           if (!accepted) {
             accepted = await acceptedCancellationAudit();
           }
@@ -2458,6 +2471,7 @@ const AppointmentReminders = {
       };
 
       // Send cancellation notice
+      const sendOutcome = {};
       try {
         const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
         if (customer) {
@@ -2467,7 +2481,6 @@ const AppointmentReminders = {
           const date = formatDate(apptTime);
 
           const serviceLabel = smsServiceLabelStored(record.service_type);
-          const sendOutcome = {};
           const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
             return renderRequiredTemplate('appointment_cancelled', {
@@ -2521,7 +2534,10 @@ const AppointmentReminders = {
           reportOutcome(false, 'Customer not found');
         }
       } catch (sendErr) {
-        await finalizeClaim(false, { retryable: true });
+        await finalizeClaim(false, {
+          retryable: sendOutcome.dispatchUncertain !== true,
+          uncertain: sendOutcome.dispatchUncertain === true,
+        });
         throw sendErr;
       }
 
@@ -2688,7 +2704,7 @@ const AppointmentReminders = {
         // transition can. Terminal 'suppressed' (r13): releasing let a
         // cancelled→cancelled retry text a days-old cancellation.
         .whereRaw(
-          "COALESCE((SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled'), appointment_reminders.cancellation_notice_at) < now() - interval '72 hours'",
+          "COALESCE((SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled'), (SELECT ss2.updated_at FROM scheduled_services ss2 WHERE ss2.id = appointment_reminders.scheduled_service_id), appointment_reminders.cancellation_notice_at) < now() - interval '72 hours'",
         )
         .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
       const { isEnabled } = require('../config/feature-gates');
@@ -2848,6 +2864,8 @@ const AppointmentReminders = {
 
       await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
+        // Restored (live) targets keep their re-armed reminders (r16).
+        .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
         .update({ cancelled: true, updated_at: new Date() });
 
       const sendNotification = options.sendNotification !== false;
@@ -2884,7 +2902,9 @@ const AppointmentReminders = {
         })
         .update({
           cancellation_notice_at: seriesToken,
-          cancellation_notice_state: sendNotification ? 'pending' : 'suppressed',
+          cancellation_notice_state: sendNotification
+            ? db.raw("CASE WHEN cancellation_notice_state = 'pending_notify' THEN 'pending_notify' ELSE 'pending' END")
+            : 'suppressed',
           updated_at: seriesToken,
         });
       // Fenced (token) bulk finalize: sent on acceptance, released for
@@ -2915,6 +2935,7 @@ const AppointmentReminders = {
         return { cancelledCount: ids.length };
       }
 
+      const seriesSendOutcome = {};
       try {
       let record = null;
       if (representativeScheduledServiceId) {
@@ -2940,7 +2961,8 @@ const AppointmentReminders = {
         const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
         const scopeText = options.scope === 'series' ? 'recurring series' : 'future recurring appointments';
         const serviceLabel = smsServiceLabelStored(options.serviceType || record.service_type);
-        const sendOutcome = {};
+        Object.assign(seriesSendOutcome, {});
+        const sendOutcome = seriesSendOutcome;
         const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
           return renderTemplate(
@@ -3008,9 +3030,14 @@ const AppointmentReminders = {
 
       return { ...record, cancelledCount: ids.length };
       } catch (sendErr) {
-        // Thrown lookup/pref/validation/audit errors are retryable — keep
-        // the pending leases for the sweep (codex r13), then surface.
-        await finalizeSeriesClaims(false, { retryable: true });
+        // Thrown lookup/pref/validation errors are retryable; a
+        // dispatch-uncertain throw finalizes sent (r16) — silence beats a
+        // double combined text.
+        if (seriesSendOutcome && seriesSendOutcome.dispatchUncertain === true) {
+          await finalizeSeriesClaims(true);
+        } else {
+          await finalizeSeriesClaims(false, { retryable: true });
+        }
         throw sendErr;
       }
     } catch (err) {

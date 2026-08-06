@@ -19,12 +19,15 @@ jest.mock('../models/db', () => {
     update: async (patch) => {
       mockDbState.updates.push({ table, patch });
       // The atomic claim is the update that sets state to 'pending'.
-      if (patch.cancellation_notice_state === 'pending') return mockDbState.claimResult;
+      // The claim's state is now a raw CASE expression (preserves
+      // pending_notify) — any object-valued state marks the claim update.
+      if (patch.cancellation_notice_state === 'pending'
+        || (patch.cancellation_notice_state && typeof patch.cancellation_notice_state === 'object')) return mockDbState.claimResult;
       return 1;
     },
   });
   const qb = (table) => chain(table);
-  qb.raw = () => 'RAW';
+  qb.raw = (sql) => ({ __raw: String(sql) });
   qb.fn = { now: () => new Date() };
   return qb;
 });
