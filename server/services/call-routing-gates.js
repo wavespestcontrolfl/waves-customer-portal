@@ -171,6 +171,18 @@ function buildTriageItem({
     existing_appointment_coordination: 'time_ambiguous',
     auto_booking_skipped_after_approval: 'time_ambiguous',
     existing_appointment_same_date: 'time_ambiguous',
+    // Phone re-service refused because the lane already has an open free
+    // callback (call-recording-processor's in-transaction lane dedupe) —
+    // scheduling coordination, same review lane as the same-day hold.
+    open_reservice_callback_exists: 'time_ambiguous',
+    // Phone re-service held because the live-lane eligibility recheck under
+    // the booking locks no longer grants the lane (plan cancelled or
+    // customer deactivated since resolution) — office decides what to book.
+    reservice_eligibility_lapsed: 'time_ambiguous',
+    // Phone re-service held because the call's resolved property has no
+    // qualifying live coverage of its own (multi-property account — the
+    // account-level lane grant does not extend to an uncovered rental).
+    reservice_property_uncovered: 'time_ambiguous',
     // Several live bookings plausibly match the call (same service line
     // within a day of the discussed date) — a human picks which one the
     // call belongs to instead of the AI inserting a duplicate.

@@ -95,7 +95,7 @@ const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
-const { loadBookableCallServices, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
+const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
 const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -2550,6 +2550,53 @@ async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db
     logger.warn(`[call-proc] property-linkage resolution failed (booking proceeds unlinked): ${e.code || e.message}`);
   }
   return { propertyId, address, lat, lng };
+}
+
+/**
+ * Property-scope premise for a phone re-service booking (codex #3222 r8):
+ * resolveCallBookingPropertyLinkage's null propertyId is AMBIGUOUS — it can
+ * mean the on-file address (no property row / legacy account) OR a caller-
+ * stated address that matched nothing. And a linked propertyId can be the
+ * backfilled PRIMARY row, whose coverage often predates property linkage
+ * (legacy rows carry null property_id), so requiring property-scoped
+ * coverage for the primary would false-hold valid requests.
+ *
+ *   'account'  — the booking premise IS the customer's primary/on-file
+ *                address (linked primary row, or address equal to the
+ *                on-file address, or no address at all): the account-level
+ *                lane grant suffices, legacy unlinked coverage included.
+ *   'property' — a linked NON-primary property (a rental, a second home):
+ *                needs its own qualifying live coverage.
+ *   'unknown'  — a stated address that matches neither a property row nor
+ *                the on-file address: never a free visit there, hold.
+ * Fail-closed: classification errors return 'unknown'.
+ */
+async function classifyReServiceBookingPremise({ customer, propertyLinkage, trx = db }) {
+  const linkedId = propertyLinkage?.propertyId || null;
+  if (linkedId) {
+    try {
+      const prop = await trx('customer_properties').where({ id: linkedId }).first('is_primary');
+      return prop?.is_primary ? { scope: 'account' } : { scope: 'property', propertyId: linkedId };
+    } catch (e) {
+      logger.warn(`[call-proc] re-service premise lookup failed for property ${linkedId}: ${e.code || e.message}`);
+      return { scope: 'unknown' };
+    }
+  }
+  const booked = propertyLinkage?.address || null;
+  if (!booked) return { scope: 'account' };
+  try {
+    const { addressKey } = require('./customer-properties');
+    const bookedKey = addressKey({
+      address_line1: booked.line1, address_line2: booked.line2, city: booked.city, zip: booked.zip,
+    });
+    const onFileKey = addressKey({
+      address_line1: customer?.address_line1, address_line2: customer?.address_line2, city: customer?.city, zip: customer?.zip,
+    });
+    if (bookedKey === onFileKey) return { scope: 'account' };
+  } catch (e) {
+    logger.warn(`[call-proc] re-service premise address compare failed: ${e.code || e.message}`);
+  }
+  return { scope: 'unknown' };
 }
 
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
@@ -5221,6 +5268,11 @@ const CallRecordingProcessor = {
     // can name a specific bookable service) and to the booking block below
     // (service_id / price / duration / follow-up interval). Fails open to [].
     const bookableCallServices = await loadBookableCallServices(db);
+    // Covered re-service rows, loaded separately: NOT part of the prompt
+    // catalog block (they are booking_enabled=false by design — the reservice
+    // self-serve lane owns eligibility), only reachable through the
+    // deterministic existing-customer revisit override in the resolver.
+    const callReServiceRows = await loadCallReServiceRows(db);
     const bookableServiceNames = bookableCallServices.map((s) => s.name).filter(Boolean);
     // Catalog-aware provenance: the catalog block is part of the rendered
     // V2 prompt, so every stamp for this call must carry its hash.
@@ -7998,10 +8050,41 @@ const CallRecordingProcessor = {
     // the booking. Also rescues catalog services whose names don't hit the
     // coarse canonicalWavesService buckets (every bookable service must be
     // bookable by phone). null -> legacy coarse-label behavior.
+    // Live re-service lane context for the resolver's revisit override (codex
+    // #3222 r1): eligibility is the reservice lane's OWN plan check
+    // (reserviceLanesForCustomer — live recurring/WaveGuard coverage), never
+    // completed history. Lanes with an open callback are deliberately NOT
+    // filtered out here (codex r3): the re-service anchor must still resolve
+    // so the locked booking transaction can refuse the duplicate into
+    // hold-for-review or attach to the existing visit — dropping the lane
+    // would fall back to a generic label that books a second appointment
+    // outside the dedupe entirely. Intent-gated so the lookups only run on
+    // revisit-shaped calls; fail-closed — an error grants no lanes (generic
+    // anchoring, never a free visit).
+    let callReServiceLanes = [];
+    if (customerId && callReServiceRows.length > 0 && hasCallReServiceIntent(extracted)) {
+      try {
+        const { reserviceLanesForCustomer } = require('./reservice-scheduler');
+        const reServiceCustomerRow = await db('customers').where({ id: customerId }).first();
+        // Same inactive guard the public re-service route applies before its
+        // lane lookup (codex #3222 r2): reserviceLanesForCustomer itself does
+        // not reject deactivated rows, and a lingering WaveGuard tier/rate
+        // plus pest evidence would otherwise still grant the pest lane.
+        callReServiceLanes = (reServiceCustomerRow && reServiceCustomerRow.active !== false)
+          ? await reserviceLanesForCustomer(reServiceCustomerRow)
+          : [];
+      } catch (reErr) {
+        callReServiceLanes = [];
+        logger.warn(`[call-proc] re-service lane lookup failed for ${maskSid(callSid)} (falling back to generic anchoring): ${reErr.message}`);
+      }
+    }
     let callBookingCatalogRow = resolveCallBookingCatalogService({
       extracted,
       transcription,
       services: bookableCallServices,
+      reServices: callReServiceRows,
+      reServiceLanes: callReServiceLanes,
+      coarseServiceLabel: serviceResolution.ok ? serviceResolution.service : null,
     });
     // Never book a made-up service (owner directive 2026-07-10): service_type
     // MUST be a real admin-catalog service. When the service was UNCLEAR
@@ -8430,13 +8513,19 @@ const CallRecordingProcessor = {
               // Follow-up visit plan — only when the call specifically
               // discussed a second/follow-up treatment (transcript-driven);
               // date from the transcript when agreed, else parent date + the
-              // service's catalog interval (default 14 days).
-              const callFollowUpPlan = resolveCallFollowUpPlan({
-                extracted,
-                catalogRow: callBookingCatalogRow,
-                parentDate: scheduledDate,
-                parentWindowStart: windowStart || '09:00',
-              });
+              // service's catalog interval (default 14 days). Never for a
+              // covered re-service (codex #3222 r2): the re-service IS the
+              // free callback visit — a child row would be a second open
+              // callback from the same call, invisible to the lane dedupe's
+              // semantics and without the is_callback marker.
+              const callFollowUpPlan = isReServiceCatalogRow(callBookingCatalogRow)
+                ? null
+                : resolveCallFollowUpPlan({
+                  extracted,
+                  catalogRow: callBookingCatalogRow,
+                  parentDate: scheduledDate,
+                  parentWindowStart: windowStart || '09:00',
+                });
               let reusedExistingSchedule = false;
               // Set when the call was ATTACHED to a live booking made by a
               // human through another channel (see the attach guard below):
@@ -8498,6 +8587,22 @@ const CallRecordingProcessor = {
                     && String(freshCallRow.customer_id) !== String(customer.id)) {
                     throw new Error('call ownership changed while waiting on the comms fence (merge-undo) — booking held for office review');
                   }
+                }
+                // Re-service lane advisory lock (codex #3222 r2 — the SAME
+                // namespace+key createSelfBooking takes, so a phone booking
+                // and a self-serve commit for the customer's lane serialize
+                // against each other, not just against themselves). Lock
+                // order vs the self-serve writer is compatible: both take
+                // customer-comms before this terminal reservice-lane rung.
+                // Taken here, before the same-call replay lookup, for
+                // lock-order clarity — the replay/attach paths below still
+                // win for a reprocessed call, and the open-callback dedupe
+                // itself runs on the fresh-insert path only (after them).
+                if (isReServiceCatalogRow(callBookingCatalogRow)) {
+                  await trx.raw(
+                    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+                    ['reservice-lane', `${customerId}:${callBookingCatalogRow.service_key}`],
+                  );
                 }
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
@@ -8880,6 +8985,76 @@ const CallRecordingProcessor = {
                   logger.warn(`[call-proc] booking occupancy check failed for ${maskSid(callSid)} (booking proceeds unflagged): ${occErr.message}`);
                   bookingTimeConflicts = [];
                 }
+                // Re-service lane dedupe on the FRESH-INSERT path only,
+                // under the reservice-lane advisory lock taken above and
+                // AFTER the replay/attach lookups (codex #3222 r2 — mirrors
+                // createSelfBooking's lock → replay → dedupe order, so a
+                // reprocessed call reuses its own booking instead of seeing
+                // it as "already booked"). A hit holds for human review via
+                // the __held return — same non-blocking shape as the
+                // same-day hold above, keeping this occupancy-to-insert
+                // region free of booking-blocking exceptions (the source
+                // contract in call-booking-conflict-flag.test.js) — so no
+                // booking, no SMS, and the reason-flagged review card sends
+                // the office to the existing visit. An unverifiable lane
+                // holds too: fail closed, never a possibly-duplicate free
+                // visit.
+                if (isReServiceCatalogRow(callBookingCatalogRow)) {
+                  const { reserviceLanesForCustomer, reserviceLaneCoversProperty, openCallbackExistsForLane } = require('./reservice-scheduler');
+                  const reServiceLane = reServiceLaneForRow(callBookingCatalogRow);
+                  // Eligibility REVALIDATED under the locks (codex #3222 r6
+                  // — mirrors the reservice route's commit-time re-check),
+                  // and the customer row is read FOR UPDATE (r8): the admin
+                  // customer update row-locks before flipping `active`, so
+                  // sharing that row lock serializes a deactivation against
+                  // this booking — after this read it waits out the insert's
+                  // commit instead of landing between check and insert.
+                  // Unverifiable → hold, fail closed.
+                  let lockedReServiceCustomer = null;
+                  let laneStillEligible = false;
+                  try {
+                    lockedReServiceCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
+                    // Lanes read ON THE TRANSACTION with the qualifying
+                    // coverage rows locked (codex r9): an admin cancellation
+                    // of the recurring coverage now serializes against this
+                    // booking instead of committing between the lane read
+                    // and the callback insert.
+                    laneStillEligible = !!lockedReServiceCustomer && lockedReServiceCustomer.active !== false
+                      && (await reserviceLanesForCustomer(lockedReServiceCustomer, trx, { lockCoverage: true })).includes(reServiceLane);
+                  } catch (eligErr) {
+                    logger.warn(`[call-proc] re-service eligibility recheck failed for ${maskSid(callSid)} (holding for review): ${eligErr.message}`);
+                  }
+                  if (!laneStillEligible) {
+                    return { __held: { reason: 'reservice_eligibility_lapsed' } };
+                  }
+                  // Multi-property guard (codex #3222 r7+r8): the lane grant
+                  // is account-level, but this booking dispatches to the
+                  // call's RESOLVED premise. Classify it first — a linked
+                  // PRIMARY property (or the on-file address, matched by
+                  // key) rides the account grant (legacy coverage rows carry
+                  // null property_id and must not false-hold the primary); a
+                  // linked NON-primary property needs its own qualifying
+                  // live coverage; an address matching neither holds.
+                  const reServicePremise = await classifyReServiceBookingPremise({
+                    customer: lockedReServiceCustomer,
+                    propertyLinkage,
+                    trx,
+                  });
+                  if (reServicePremise.scope === 'unknown'
+                    || (reServicePremise.scope === 'property'
+                      && !(await reserviceLaneCoversProperty(customerId, reServiceLane, reServicePremise.propertyId, trx, { lockCoverage: true })))) {
+                    return { __held: { reason: 'reservice_property_uncovered' } };
+                  }
+                  let laneCallbackOpen = true;
+                  try {
+                    laneCallbackOpen = await openCallbackExistsForLane(trx, customerId, reServiceLane);
+                  } catch (dedupeErr) {
+                    logger.warn(`[call-proc] re-service lane dedupe check failed for ${maskSid(callSid)} (holding for review): ${dedupeErr.message}`);
+                  }
+                  if (laneCallbackOpen) {
+                    return { __held: { reason: 'open_reservice_callback_exists' } };
+                  }
+                }
                 // Bill-To linkage (callBookingPayerId resolved above, before the
                 // transaction): stamp payer_id (per-job) so the completion
                 // invoice routes to the payer. (propertyLinkage resolved above,
@@ -8909,6 +9084,22 @@ const CallRecordingProcessor = {
                     catalogRow: callBookingCatalogRow,
                   }),
                   estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
+                  // A phone-booked covered re-service is the same free
+                  // callback the reservice lane books — mirror the
+                  // createSelfBooking callbackVisit shape exactly (codex
+                  // #3222 r1+r2): is_callback is the explicit marker every
+                  // downstream free-callback path keys on (inspection-credit
+                  // exclusion, callback reporting, the lane's open-callback
+                  // dedupe, completion's monthly-dues suppression), and the
+                  // price/invoice overrides make the row unbillable even if
+                  // the extractor captured a number (the plan rate, a
+                  // misheard fee) — resolveCallBookingPrice also refuses to
+                  // price these rows, so this is belt and braces.
+                  ...(isReServiceCatalogRow(callBookingCatalogRow) ? {
+                    is_callback: true,
+                    estimated_price: null,
+                    create_invoice_on_complete: false,
+                  } : {}),
                   // Outbound-callback bookings land PENDING/needs-review (the
                   // office confirms in dispatch, which arms reminders); inbound
                   // confirmed bookings auto-confirm as before.
@@ -9782,7 +9973,7 @@ const CallRecordingProcessor = {
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
-      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled']);
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered']);
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError

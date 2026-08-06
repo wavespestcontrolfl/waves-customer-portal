@@ -84,8 +84,8 @@ const NON_COVERAGE_STATUSES = TERMINAL_STATUSES.filter((s) => s !== 'completed')
  * Callback/re-service rows never count (same exclusion the coverage loop
  * applies).
  */
-async function membershipPestEvidence(customerId) {
-  const rows = await db('scheduled_services as hist')
+async function membershipPestEvidence(customerId, dbh = db, { lockCoverage = false } = {}) {
+  let q = dbh('scheduled_services as hist')
     .leftJoin('services as sv', 'hist.service_id', 'sv.id')
     .where('hist.customer_id', customerId)
     .where('hist.is_recurring', true)
@@ -93,6 +93,11 @@ async function membershipPestEvidence(customerId) {
     .select('hist.service_type', 'hist.is_callback', 'sv.service_key', 'sv.category')
     .orderBy('hist.scheduled_date', 'desc')
     .limit(500);
+  // FOR UPDATE OF hist (the joined catalog side stays unlocked — PG forbids
+  // locking the nullable side of an outer join): inside a booking trx the
+  // qualifying rows stay put until the insert commits.
+  if (lockCoverage) q = q.forUpdate('hist');
+  const rows = await q;
   return rows.some((row) => row.is_callback !== true
     && !isReService({ serviceKey: row.service_key, serviceType: row.service_type })
     && laneForCoverageRow({ category: row.category, serviceType: row.service_type }) === 'pest');
@@ -117,11 +122,11 @@ async function membershipPestEvidence(customerId) {
  *
  * Returns ['pest'], ['lawn'], ['pest','lawn'], or [] (not eligible).
  */
-async function reserviceLanesForCustomer(customer) {
+async function reserviceLanesForCustomer(customer, dbh = db, { lockCoverage = false } = {}) {
   if (!customer?.id) return [];
   const lanes = new Set();
   try {
-    const rows = await db('scheduled_services as s')
+    let q = dbh('scheduled_services as s')
       .leftJoin('services as sv', 's.service_id', 'sv.id')
       .where('s.customer_id', customer.id)
       .where('s.is_recurring', true)
@@ -129,6 +134,8 @@ async function reserviceLanesForCustomer(customer) {
       .where('s.scheduled_date', '>=', etDateString())
       .select('s.service_type', 's.is_callback', 'sv.service_key', 'sv.category')
       .limit(200);
+    if (lockCoverage) q = q.forUpdate('s');
+    const rows = await q;
     for (const row of rows) {
       if (row.is_callback === true) continue;
       if (isReService({ serviceKey: row.service_key, serviceType: row.service_type })) continue;
@@ -136,13 +143,48 @@ async function reserviceLanesForCustomer(customer) {
       if (lane) lanes.add(lane);
     }
     if (!lanes.has('pest') && isMembershipCustomerRow(customer)
-        && await membershipPestEvidence(customer.id)) {
+        && await membershipPestEvidence(customer.id, dbh, { lockCoverage })) {
       lanes.add('pest');
     }
   } catch (err) {
     logger.warn(`[reservice-scheduler] lane lookup failed for customer ${customer.id}: ${err.message}`);
   }
   return ['pest', 'lawn'].filter((lane) => lanes.has(lane));
+}
+
+/**
+ * Property-scoped lane coverage (the phone re-service path's multi-property
+ * guard — codex #3222 r7/r8): true when the lane's LIVE coverage includes a
+ * recurring row FOR THIS PROPERTY. Callers classify the booking premise
+ * FIRST (call-recording-processor's classifyReServiceBookingPremise) and
+ * only pass a NON-primary linked property here — the primary/on-file
+ * premise rides the account-level grant instead, because legacy coverage
+ * rows carry null property_id and a property-scoped requirement would
+ * false-hold it. A null propertyId returns true for that account-level
+ * case. Fail-closed: a lookup error covers nothing.
+ */
+async function reserviceLaneCoversProperty(customerId, lane, propertyId, dbh = db, { lockCoverage = false } = {}) {
+  if (!propertyId) return true;
+  if (!customerId || !RESERVICE_LANES[lane]) return false;
+  try {
+    let q = dbh('scheduled_services as s')
+      .leftJoin('services as sv', 's.service_id', 'sv.id')
+      .where('s.customer_id', customerId)
+      .where('s.property_id', propertyId)
+      .where('s.is_recurring', true)
+      .whereNotIn('s.status', TERMINAL_STATUSES)
+      .where('s.scheduled_date', '>=', etDateString())
+      .select('s.service_type', 's.is_callback', 'sv.service_key', 'sv.category')
+      .limit(100);
+    if (lockCoverage) q = q.forUpdate('s');
+    const rows = await q;
+    return rows.some((row) => row.is_callback !== true
+      && !isReService({ serviceKey: row.service_key, serviceType: row.service_type })
+      && laneForCoverageRow({ category: row.category, serviceType: row.service_type }) === lane);
+  } catch (err) {
+    logger.warn(`[reservice-scheduler] property lane coverage lookup failed for customer ${customerId}: ${err.message}`);
+    return false;
+  }
 }
 
 // Statuses that keep a callback "open" for the lane dedupe: booked
@@ -227,6 +269,7 @@ module.exports = {
   laneForCoverageRow,
   laneForCallbackRow,
   reserviceLanesForCustomer,
+  reserviceLaneCoversProperty,
   openReserviceCallbacks,
   openCallbackExistsForLane,
 };
