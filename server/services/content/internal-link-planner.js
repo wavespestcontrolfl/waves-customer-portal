@@ -735,14 +735,15 @@ class InternalLinkPlanner {
    * Re-locates the phrase before replacing (in case the file changed
    * since planning) so offsets aren't load-bearing.
    */
-  applyTaskToBody(body, task) {
+  applyTaskToBody(body, task, { targetTerms = null } = {}) {
     if (!body || !task) return body;
     const targetUrl = canonicalInternalPath(task.target_url);
     if (!targetUrl || pageAlreadyLinksTo(body, targetUrl)) return body;
     // Prefer the exact occurrence the planner recorded (source_offset), with
-    // a scan fallback — the occurrence that was validated is the occurrence
-    // that gets linked.
-    const occ = placementForTask(body, task);
+    // a scan fallback — callers with the target page pass the same effective
+    // targetTerms the validation relocated with, so the occurrence that was
+    // validated is the occurrence that gets linked.
+    const occ = placementForTask(body, task, { targetTerms });
     if (!occ) return body;
     const replacement = `[${occ.anchor}](${targetUrl})`;
     return body.slice(0, occ.index) + replacement + body.slice(occ.index + occ.length);

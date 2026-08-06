@@ -120,7 +120,14 @@ class InternalLinkPrExecutor {
         continue;
       }
 
-      const patchedContent = planner.applyTaskToBody(source.body, { ...task, target_url: targetUrl });
+      // Same effective terms the dry-run validation relocated with — the
+      // patch must land on the occurrence that passed the gate, not one a
+      // terms-blind relocation picks after drift.
+      const patchedContent = planner.applyTaskToBody(
+        source.body,
+        { ...task, target_url: targetUrl },
+        { targetTerms: effectiveTargetTerms(target, targetUrl, task).targetTerms }
+      );
       if (patchedContent === source.body) {
         await this._persistDryRunResult(task.id, { ...validation, status: 'skipped', skip_reason: 'patch_noop' });
         continue;
@@ -619,6 +626,26 @@ class InternalLinkPrExecutor {
   }
 }
 
+/**
+ * The target facts this gate scores, plus the flattened topical terms used
+ * to rank drift relocation — ONE derivation shared by validation and patch
+ * application, so both relocate to the same occurrence.
+ */
+function effectiveTargetTerms(targetPage, targetUrl, task) {
+  const targetFacts = pageFacts(targetPage, { url: targetUrl });
+  if (!targetFacts.keyword && task.target_keyword) {
+    // Legacy targets without a frontmatter keyword: use the keyword the
+    // planner persisted on the task so the core denominator carries the
+    // topic instead of the descriptive title — mirrors the planner's merge.
+    targetFacts.keyword = task.target_keyword;
+    targetFacts.topic = task.target_keyword;
+  }
+  return {
+    targetFacts,
+    targetTerms: [targetFacts.topic, targetFacts.topic_cluster, targetFacts.keyword].filter(Boolean).join(' '),
+  };
+}
+
 function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {}) {
   const base = baseResult(task, sourcePage, targetPage);
   if (!sourcePage?.body) return skipped(base, 'source_body_missing');
@@ -643,15 +670,7 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   // Target facts FIRST — relocation after a drift must rank occurrences by
   // the same effective terms this gate scores (frontmatter topic + cluster
   // + keyword), not a reconstruction from the brief keyword and filename.
-  const targetFacts = pageFacts(targetPage, { url: targetUrl });
-  if (!targetFacts.keyword && task.target_keyword) {
-    // Legacy targets without a frontmatter keyword: use the keyword the
-    // planner persisted on the task so the core denominator carries the
-    // topic instead of the descriptive title — mirrors the planner's merge.
-    targetFacts.keyword = task.target_keyword;
-    targetFacts.topic = task.target_keyword;
-  }
-  const targetTerms = [targetFacts.topic, targetFacts.topic_cluster, targetFacts.keyword].filter(Boolean).join(' ');
+  const { targetFacts, targetTerms } = effectiveTargetTerms(targetPage, targetUrl, task);
 
   // Prefer the exact occurrence the planner recorded (source_offset) — the
   // planner may have chosen a later occurrence whose paragraph carries the
@@ -712,7 +731,7 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
     }, opportunity.issues.map((issue) => issue.code).join(','));
   }
 
-  const patched = planner.applyTaskToBody(sourcePage.body, { ...task, target_url: targetUrl });
+  const patched = planner.applyTaskToBody(sourcePage.body, { ...task, target_url: targetUrl }, { targetTerms });
   if (patched === sourcePage.body) return skipped(base, 'patch_noop');
   const patchedParagraph = paragraphAround(patched, occurrence.index);
 
