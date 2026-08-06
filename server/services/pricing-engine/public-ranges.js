@@ -29,7 +29,8 @@ function footprintsFromBrackets() {
   const last = boundaries.length ? Math.max(...boundaries) : 0;
   return [...new Set([...FOOTPRINTS_BASE, ...boundaries, ...(last ? [last + 500] : [])])];
 }
-const FOOTPRINTS_SQFT = footprintsFromBrackets();
+// NOTE: computed per sweep (inside buildRows / bundle pass), never at
+// module load — a post-sync bracket edit must reshape the sample grid.
 const LOTS_SQFT = [5000, 8000, 12000, 20000, 30000];
 // Confirmed measured turf above the 20,000 sq ft table maximum still
 // prices (extrapolated, provenance review only) — sweep through 30,000.
@@ -88,6 +89,7 @@ function rangeRow({ key, name, unit, values, notes = null, decimals = 0, oneTime
 // published lows must include these post-discount amounts.
 function waveGuardBundleValues() {
   const { generateEstimate } = require('./estimate-engine');
+  const FOOTPRINTS_SQFT = footprintsFromBrackets();
   const out = { pest: [], mosquito: [], treeShrub: [], lawn: [], palm: [] };
   for (const footprint of FOOTPRINTS_SQFT) {
     for (const lotSqFt of [5000, 8000, 20000]) {
@@ -134,6 +136,7 @@ function waveGuardBundleValues() {
 }
 
 function buildRows() {
+  const FOOTPRINTS_SQFT = footprintsFromBrackets();
   const rows = [];
   const errors = [];
   const add = (key, build) => {
@@ -206,8 +209,17 @@ function buildRows() {
     // Standalone and recurring-plan-attached knockdowns, regular and German
     // scales — the estimate path adds the non-standalone charge when a
     // recurring plan carries a roach type.
+    // Sample points include this pricer's OWN live bracket boundaries
+    // (regular/german/standalone arrays), which admins edit independently
+    // of the general pest brackets.
     values: sweepValues(
-      FOOTPRINTS_SQFT.flatMap((f) =>
+      [...new Set([
+        ...FOOTPRINTS_SQFT,
+        ...Object.values((constants.PEST.pestInitialRoach || {}))
+          .filter(Array.isArray)
+          .flatMap((arr) => arr.map((b) => Number(b.sqft)).filter((v) => Number.isFinite(v) && v > 0))
+          .flatMap((v) => [v, v + 1]),
+      ])].flatMap((f) =>
         ['regular', 'german'].flatMap((roachType) =>
           [true, false].map((standalone) => ({ f, roachType, standalone })))),
       ({ f, roachType, standalone }) => sp.pricePestInitialRoach({ footprint: f }, { roachType, standalone }),
@@ -997,7 +1009,7 @@ function computePublicPricingRanges({ refresh = false } = {}) {
   cached = {
     generatedAt: new Date().toISOString(),
     currency: 'USD',
-    disclaimer: 'Typical ranges for residential properties in our SW Florida service area under standard scheduling. Emergency, urgent, or after-hours service carries surcharges quoted at booking. Your exact price depends on property size and conditions — get an instant quote at https://www.wavespestcontrol.com/pest-control-calculator/. Commercial properties are custom-quoted.',
+    disclaimer: 'Typical ranges for residential properties in our SW Florida service area under standard scheduling. Low ends may reflect recurring-customer discounts, bundle pricing, and advertised waivers. Emergency, urgent, or after-hours service carries surcharges quoted at booking. Your exact price depends on property size and conditions — get an instant quote at https://www.wavespestcontrol.com/pest-control-calculator/. Commercial properties are custom-quoted.',
     services: rows,
     errors,
   };
