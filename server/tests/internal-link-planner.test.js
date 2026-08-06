@@ -895,6 +895,49 @@ describe('planForTarget', () => {
     const task = { anchor_text: 'bed bug bites', source_offset: staleOffset, context_snippet: planned };
     expect(placementForTask(body, task).index).toBe(body.indexOf('bed bug bites', body.indexOf('Hotel')));
   });
+  test('a matching primary canonical is not disqualified by a stale secondary field', () => {
+    const page = {
+      file: 'src/content/blog/dual-canonical.md',
+      body: [
+        '---',
+        'title: Bite Comparison Notes',
+        'category: pest-control',
+        'primary_keyword: bed bug bites vs flea bites',
+        'canonical: https://www.wavespestcontrol.com/blog/dual-canonical/',
+        'canonical_url: https://www.wavespestcontrol.com/old-path/',
+        '---',
+        '',
+        'Comparing bed bug bites vs flea bites is a common pest question.',
+      ].join('\n'),
+      url: '/blog/dual-canonical/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [page], cap: 1 }
+    );
+    // Executor precedence: canonical (first valid) wins; the stale
+    // canonical_url must not exclude the source at plan time.
+    expect(tasks.length).toBe(1);
+  });
+  test('relocation ranks with the inferred cluster term, not the keyword alone', () => {
+    const { placementForTask } = planner._internals;
+    const body = [
+      'Attic noises at night worry homeowners across the region every winter.',
+      '',
+      'Attic noises usually mean rodent activity in the insulation.',
+    ].join('\n');
+    const task = {
+      anchor_text: 'Attic noises',
+      source_offset: 9999, // stale — forces relocation
+      target_keyword: 'attic noises',
+      target_file: 'src/content/blog/rodent-attic-noises.md',
+      context_snippet: 'Attic noises at night worry homeowners every winter season.',
+    };
+    // Both paragraphs carry the keyword tokens equally; only the second has
+    // the inferred cluster term (rodent), which the gate scores — context
+    // overlap alone would keep the first.
+    expect(placementForTask(body, task).index).toBe(body.indexOf('Attic noises usually'));
+  });
   test('relocation prefers occurrences that keep the target keyword terms', () => {
     const { placementForTask } = planner._internals;
     // The old planned paragraph was edited in place: it keeps incidental

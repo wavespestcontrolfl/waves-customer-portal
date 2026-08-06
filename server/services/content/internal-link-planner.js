@@ -361,14 +361,23 @@ function placementForTask(body, task) {
       return { index: offset, length: anchor.length, snippet: snippetAround(text, offset, anchor.length), paragraph, anchor };
     }
   }
-  // Drifted file: relocate using the persisted target keyword and context
+  // Drifted file: relocate using the persisted target facts and context
   // (the full scored paragraph) — the planner may have deliberately scanned
   // past a thin early mention, and a plain first-eligible scan would revive
   // exactly that occurrence.
-  return relocateByContext(text, anchor, task?.context_snippet, task?.target_keyword);
+  return relocateByContext(text, anchor, task);
 }
 
-function relocateByContext(body, phrase, contextSnippet, targetKeyword) {
+function relocateByContext(body, phrase, task = {}) {
+  const contextSnippet = task?.context_snippet;
+  // Keyword PLUS inferred cluster — both derivable from the task row at
+  // every call site. Keyword-only ranking ties occurrences for targets
+  // whose cluster term ("rodent" for an "attic noises" target) is not in
+  // the keyword, and the gate scores topic+cluster+keyword.
+  const targetTermsText = [
+    task?.target_keyword,
+    inferCluster(task?.target_file || task?.target_url || '', { primary_keyword: task?.target_keyword }),
+  ].filter(Boolean).join(' ');
   const occurrences = [];
   let fromIndex = 0;
   for (let i = 0; i < MAX_PLACEMENT_SCAN; i++) {
@@ -383,7 +392,7 @@ function relocateByContext(body, phrase, contextSnippet, targetKeyword) {
   // paragraph tie on "with"/"of" noise and then win on context overlap.
   const { meaningfulTokens } = policy._internals;
   const contextTokens = meaningfulTokens(contextSnippet);
-  const keywordTokens = meaningfulTokens(targetKeyword);
+  const keywordTokens = meaningfulTokens(targetTermsText);
   if (!contextTokens.size && !keywordTokens.size) return occurrences[0];
   // Rank by the TARGET's topical terms first (a relevance proxy available
   // to every call site from the task row alone — an edited old paragraph
@@ -520,12 +529,21 @@ function eligibleLinkSource(page) {
  */
 function sourceCanonicalMismatch(frontmatterData = {}, pageUrl) {
   if (!pageUrl) return false;
-  for (const value of [frontmatterData.canonical, frontmatterData.canonical_url]) {
-    const raw = String(value || '').trim();
-    if (!raw) continue;
-    if (!policy.urlsEquivalent(raw, pageUrl)) return true;
+  // Executor precedence (canonicalUrlFromFrontmatter): the FIRST valid
+  // internal value among canonical, canonical_url is the page's effective
+  // canonical — a stale secondary field must not disqualify a source whose
+  // primary canonical matches, or the planner rejects pages the gate
+  // accepts.
+  const values = [frontmatterData.canonical, frontmatterData.canonical_url]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  if (!values.length) return false;
+  for (const value of values) {
+    if (policy.normalizeInternalUrl(value)) return !policy.urlsEquivalent(value, pageUrl);
   }
-  return false;
+  // Populated but no valid internal canonical: off-hub absolutes are
+  // rejected earlier by canonicalPointsOffHub; anything else cannot match.
+  return true;
 }
 
 /**

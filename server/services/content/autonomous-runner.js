@@ -3198,13 +3198,16 @@ class AutonomousRunner {
           // customer-derived opportunity query verbatim (PII).
           logger.warn(`[autonomous-runner] internal-link planner planned ZERO NEW link tasks for freshly published ${out.published_url} (opportunity: ${run.opportunity_id || 'none'}) across ${corpus.length} corpus pages`);
         }
-        // Same insert-or-refresh helper as the action path — a raw
-        // onConflict().ignore() here discarded the current plan's keyword
-        // and placement fields on duplicates and left skipped rows parked.
+        // Same insert-or-refresh helper as the action path. No per-task
+        // catch: a DB failure must reach the surrounding link-planner catch
+        // instead of recording tasks.length as queued with no rows written;
+        // the count reflects rows actually inserted/refreshed.
+        let queuedCount = 0;
         for (const task of tasks) {
-          await queueInternalLinkTaskForDryRun(task, run.opportunity_id).catch(() => {});
+          const queued = await queueInternalLinkTaskForDryRun(task, run.opportunity_id);
+          if (queued?.id) queuedCount++;
         }
-        out.link_tasks_queued = tasks.length;
+        out.link_tasks_queued = queuedCount;
       } catch (err) {
         logger.warn(`[autonomous-runner] link-planner failed: ${err.message}`);
       }
