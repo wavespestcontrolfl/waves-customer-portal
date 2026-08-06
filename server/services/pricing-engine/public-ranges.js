@@ -54,12 +54,25 @@ function buildRows() {
 
   add('general_pest_quarterly', () => rangeRow({
     key: 'general_pest_quarterly',
-    name: 'General Pest Control (WaveGuard quarterly)',
+    name: 'General Pest Control (WaveGuard recurring)',
     unit: 'per application',
+    // Sweep every supported cadence via the engine's tiers array — monthly
+    // per-application prices sit below quarterly, so quarterly-only would
+    // overstate the low end of an advertised option.
     values: sweepValues(FOOTPRINTS_SQFT,
       (f) => sp.pricePestControl({ footprint: f }, { frequency: 'quarterly' }),
-      (r) => r.perApp),
-    notes: `One-time initial service fee $${Math.round(constants.PEST.initialFee)}. Bi-monthly and monthly cadences also available.`,
+      (r) => (r.tiers || []).map((t) => t.perApp)),
+    notes: `Quarterly, bi-monthly, or monthly cadence. One-time initial service fee $${Math.round(constants.PEST.initialFee)}.`,
+  }));
+
+  add('cockroach_treatment', () => rangeRow({
+    key: 'cockroach_treatment',
+    name: 'Cockroach Treatment (native / palmetto)',
+    unit: 'per treatment',
+    values: sweepValues(FOOTPRINTS_SQFT,
+      (f) => sp.pricePestInitialRoach({ footprint: f }, { roachType: 'regular', standalone: true }),
+      (r) => r.price),
+    notes: 'Standalone treatment for SWFL native roaches; German roach infestations use the cleanout program.',
   }));
 
   add('german_roach_cleanout', () => rangeRow({
@@ -88,14 +101,22 @@ function buildRows() {
     notes: '1-4 rooms. Heat and hybrid treatments are custom-quoted after inspection.',
   }));
 
+  // Low- and high-pressure residential feature sets — the pricer's pressure
+  // multiplier (trees, landscaping complexity, pool, nearby water,
+  // irrigation) raises per-application prices well above a bare-lot sweep.
+  const MOSQUITO_FEATURE_SETS = [
+    {},
+    { trees: 'heavy', complexity: 'complex', pool: true, nearWater: true, irrigation: true },
+  ];
   add('mosquito_program', () => rangeRow({
     key: 'mosquito_program',
     name: 'Mosquito Program',
     unit: 'per application',
-    values: sweepValues(LOTS_SQFT,
-      (lotSqFt) => sp.priceMosquito({ footprint: 2000, lotSqFt }, {}),
+    values: sweepValues(
+      LOTS_SQFT.flatMap((lotSqFt) => MOSQUITO_FEATURE_SETS.map((features) => ({ lotSqFt, features }))),
+      ({ lotSqFt, features }) => sp.priceMosquito({ footprint: 2000, lotSqFt, features }, {}),
       (r) => (r.tiers || []).map((t) => t.perVisit)),
-    notes: 'Seasonal (9 applications/yr) or monthly (12 applications/yr) program.',
+    notes: 'Seasonal (9 applications/yr) or monthly (12 applications/yr) program; priced by treatable area and mosquito pressure.',
   }));
 
   add('wasp_hornet_removal', () => rangeRow({
@@ -173,12 +194,33 @@ function buildRows() {
     notes: 'Quarterly station-check applications.',
   }));
 
-  add('termite_bond', () => rangeRow({
-    key: 'termite_bond',
-    name: 'Termite Bond',
-    unit: 'per application',
-    values: sweepValues(Object.keys(constants.TERMITE.bond), (term) => sp.priceTermiteBond(term), (r) => r.perApp),
-    notes: 'Rides quarterly service applications; 1, 5, and 10-year terms.',
+  // Bond pricing publishes only while the purchase path exists: the estimate
+  // flow's GATE_TERMITE_BOND_OPTION is the single choke point (predicate
+  // mirrors estimate-engine.js), and advertising an option the exact-quote
+  // flow refuses to offer would mislead agents.
+  const bondGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
+  if (bondGateOn) {
+    add('termite_bond', () => rangeRow({
+      key: 'termite_bond',
+      name: 'Termite Bond',
+      unit: 'per application',
+      values: sweepValues(Object.keys(constants.TERMITE.bond), (term) => sp.priceTermiteBond(term), (r) => r.perApp),
+      notes: 'Rides quarterly service applications; 1, 5, and 10-year terms.',
+    }));
+  }
+
+  add('bora_care', () => rangeRow({
+    key: 'bora_care',
+    name: 'Bora-Care Wood Treatment',
+    unit: 'per job',
+    values: sweepValues(
+      [
+        { atticSqFt: 500 }, { atticSqFt: 1000 }, { atticSqFt: 2000 },
+        { surfaceLinearFt: 50, surfaceHeightFt: 2 }, { surfaceLinearFt: 150, surfaceHeightFt: 4 },
+      ],
+      (opts) => sp.priceBoraCare({ footprint: 2500 }, opts),
+      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
+    notes: 'Borate treatment for exposed wood; priced by treated attic or surface area.',
   }));
 
   add('termite_trenching', () => rangeRow({
@@ -267,21 +309,35 @@ function buildRows() {
     key: 'top_dressing',
     name: 'Lawn Top Dressing',
     unit: 'per job',
+    // Both pricing modes: estimated area (65% reduction) and exact-area
+    // (measured, or recurring-lawn customers) — the live estimate path uses
+    // exact-area for measured jobs, which prices above the estimated mode.
     values: sweepValues(
-      LAWNS_SQFT.flatMap((sq) => ['eighth', 'quarter'].map((depth) => ({ sq, depth }))),
-      ({ sq, depth }) => sp.priceTopDressing(sq, depth, false),
+      LAWNS_SQFT.flatMap((sq) =>
+        ['eighth', 'quarter'].flatMap((depth) => [false, true].map((exactArea) => ({ sq, depth, exactArea })))),
+      ({ sq, depth, exactArea }) => sp.priceTopDressing(sq, depth, exactArea),
       (r) => r.price),
   }));
 
+  // Auto-priced residential shapes only: bare lots plus planted/treed
+  // properties (bed area + tree count + access) that stay below the pricer's
+  // manual-review thresholds; reviewed results are excluded.
+  const TREE_SHRUB_PROFILES = [
+    { property: { footprint: 2000 }, options: {} },
+    { property: { footprint: 2000, bedArea: 4000 }, options: { treeCount: 6, access: 'moderate' } },
+    { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 14, access: 'moderate' } },
+  ];
   add('tree_shrub_care', () => rangeRow({
     key: 'tree_shrub_care',
     name: 'Tree & Shrub Care Program',
     unit: 'per month',
     values: sweepValues(
-      LOTS_SQFT.flatMap((lot) => ['light', 'standard', 'enhanced'].map((tier) => ({ lot, tier }))),
-      ({ lot, tier }) => sp.priceTreeShrub({ footprint: 2000, lotSqFt: lot }, { tier }),
-      (r) => r.monthly),
-    notes: 'Monthly-billed program; 4, 6, or 9 applications per year by tier.',
+      LOTS_SQFT.flatMap((lot) =>
+        ['light', 'standard', 'enhanced'].flatMap((tier) =>
+          TREE_SHRUB_PROFILES.map((p) => ({ lot, tier, p })))),
+      ({ lot, tier, p }) => sp.priceTreeShrub({ ...p.property, lotSqFt: lot }, { ...p.options, tier }),
+      (r) => (r.requiresManualReview ? NaN : r.monthly)),
+    notes: 'Monthly-billed program; 4, 6, or 9 applications per year by tier; priced by planting beds and tree count.',
   }));
 
   add('palm_injection', () => rangeRow({
@@ -297,6 +353,8 @@ function buildRows() {
         { treatmentType: 'nutrition' },
         { treatmentType: 'treeAge', dbhInches: 8 },
         { treatmentType: 'treeAge', dbhInches: 16 },
+        // 20" is the largest auto-priced Tree-Age tier; bigger palms are quote-based.
+        { treatmentType: 'treeAge', dbhInches: 20 },
       ].flatMap((opts) => [1, 5, 10].map((palmCount) => ({ ...opts, palmCount }))),
       (opts) => sp.pricePalmInjection({}, opts),
       (r) => r.pricePerPalm),

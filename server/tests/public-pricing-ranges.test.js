@@ -5,6 +5,7 @@ const { computePublicPricingRanges, _internals } = require('../services/pricing-
 
 const EXPECTED_KEYS = [
   'general_pest_quarterly',
+  'cockroach_treatment',
   'german_roach_cleanout',
   'bed_bug_treatment',
   'mosquito_program',
@@ -16,7 +17,6 @@ const EXPECTED_KEYS = [
   'rodent_exclusion',
   'termite_bait_install',
   'termite_bait_monitoring',
-  'termite_bond',
   'termite_trenching',
   'pre_slab_termiticide',
   'wdo_inspection',
@@ -24,6 +24,7 @@ const EXPECTED_KEYS = [
   'one_time_lawn',
   'one_time_pest',
   'one_time_mosquito',
+  'bora_care',
   'lawn_plugging',
   'top_dressing',
   'tree_shrub_care',
@@ -102,6 +103,23 @@ describe('public pricing ranges', () => {
     const again = computePublicPricingRanges();
     expect(again).not.toBe(payload);
     expect(again.services.map((s) => s.key)).toEqual(payload.services.map((s) => s.key));
+  });
+
+  test('termite bond publishes only while its purchase gate is on', () => {
+    // Default (gate off): no bond row — the estimate flow refuses bond
+    // selection while GATE_TERMITE_BOND_OPTION is dark.
+    expect(payload.services.find((s) => s.key === 'termite_bond')).toBeUndefined();
+
+    process.env.GATE_TERMITE_BOND_OPTION = 'true';
+    try {
+      const gated = computePublicPricingRanges();
+      const bond = gated.services.find((s) => s.key === 'termite_bond');
+      expect(bond).toBeDefined();
+      expect(bond.unit).toBe('per application');
+      expect(gated.errors).toEqual([]);
+    } finally {
+      delete process.env.GATE_TERMITE_BOND_OPTION;
+    }
   });
 
   test('buildRows exposes sweep errors instead of throwing', () => {
