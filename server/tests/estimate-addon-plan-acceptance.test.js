@@ -483,6 +483,30 @@ describe('family-scoped existing-appointment adoption', () => {
       { service_type: 'Quarterly Pest Control Service' },
       keys,
     )).toBe(true);
+    // Pest is primary regardless of list order — the reservation writer
+    // prefers pest_control anywhere in the profile (codex r15).
+    const treeFirst = {
+      result: {
+        recurring: {
+          services: [
+            {
+              name: 'Bi-Monthly Tree & Shrub Care Service',
+              service: 'tree_shrub',
+              selected: true,
+              isSelected: true,
+            },
+            {
+              name: 'Quarterly Pest Control Service',
+              service: 'pest_control',
+              selected: true,
+              isSelected: true,
+            },
+          ],
+        },
+      },
+    };
+    expect([...estimateFamilyKeysForAdoption({}, treeFirst, { serviceMode: 'recurring' })])
+      .toEqual(['pest_control']);
   });
 
   test('Bora-Care never adopts a trenching visit (codex r13)', () => {

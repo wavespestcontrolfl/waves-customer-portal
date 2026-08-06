@@ -653,10 +653,17 @@ function estimateFamilyKeysForAdoption(estimate, estData, { serviceMode, service
     // reserved-row path deliberately does NOT schedule ordinary remaining
     // services — so letting an add-on family adopt (pest-plus-tree plan
     // adopting a tree & shrub visit) restamps the add-on row while the
-    // primary pest work is never scheduled.
-    const primaryRecurring = (recurringSvcList || [])
+    // primary pest work is never scheduled. Primary selection mirrors the
+    // reservation writer (slot-reservation canonicalServiceTypeForProfile,
+    // codex r15): pest_control ANYWHERE in the profile is the primary — a
+    // tree-first, pest-second list still reserves a pest visit — otherwise
+    // the first classifiable line.
+    const recurringKeys = (recurringSvcList || [])
       .map((svc) => serviceFamilyKeyForAdoption(svc))
-      .find((key) => !!key);
+      .filter(Boolean);
+    const primaryRecurring = recurringKeys.includes('pest_control')
+      ? 'pest_control'
+      : recurringKeys[0];
     return new Set(primaryRecurring ? [primaryRecurring] : []);
   });
   return keySets.reduce((acc, set) => new Set([...acc].filter((k) => set.has(k))));
