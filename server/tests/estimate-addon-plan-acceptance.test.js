@@ -626,6 +626,24 @@ describe('family-scoped existing-appointment adoption', () => {
       { service_type: 'Rodent Wire Mesh Exclusion' },
       meshKeys,
     )).toBe(true);
+    // Rodent inspection (codex r20): diagnostic work is its own identity —
+    // a bait-monitoring visit must not be restamped with the inspection.
+    const inspectionData = {
+      result: {
+        oneTime: {
+          items: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 125 }],
+        },
+      },
+    };
+    const inspKeys = estimateFamilyKeysForAdoption({}, inspectionData, { serviceMode: 'one_time' });
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Rodent Bait Station Monitoring' },
+      inspKeys,
+    )).toBe(false);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Rodent Inspection' },
+      inspKeys,
+    )).toBe(true);
   });
 
   test('stale service_type slugs never bypass catalog authority (codex r19)', () => {

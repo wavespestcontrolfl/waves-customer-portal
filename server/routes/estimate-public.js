@@ -527,6 +527,11 @@ function classifyServiceFamilyText(text) {
   // rodent_wire_mesh catalog key carries no "exclusion" token).
   if (/rodent.*(?:exclusion|wire\s*mesh|seal)|(?:exclusion|wire\s*mesh|seal).*rodent/.test(raw)) return 'rodent_exclusion';
   if (/rodent.*sanitation|sanitation.*rodent/.test(raw)) return 'rodent_sanitation';
+  // Diagnostic inspections are their own identity too (codex r20:
+  // priceRodentInspection's standalone rodent_inspection item). \b after
+  // inspect(ion) keeps "inspector" out — "the home inspector found rats"
+  // names a person, not the service (same rule as the call-booking matcher).
+  if (/rodent.*\binspect(?:ion)?s?\b|\binspect(?:ion)?s?\b.*rodent/.test(raw)) return 'rodent_inspection';
   // The CANONICAL scheduled-row classifier (recurring-appointment-seeder),
   // on BOTH the estimate's services and the candidate rows — the
   // duplicate-series guard and follow-up seeding bucket by the same
@@ -625,7 +630,8 @@ function oneTimeItemFamilyKeys(item = {}) {
   // removed too — suppressing only the category bridge left it in place
   // and a bait-station monitoring visit stayed adoptable.
   const hasSpecificRodent = [...keys].some(
-    (k) => k === 'rodent_trapping' || k === 'rodent_exclusion' || k === 'rodent_sanitation',
+    (k) => k === 'rodent_trapping' || k === 'rodent_exclusion'
+      || k === 'rodent_sanitation' || k === 'rodent_inspection',
   );
   if (hasSpecificRodent) {
     keys.delete('rodent_bait');
