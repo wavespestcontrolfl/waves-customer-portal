@@ -473,4 +473,122 @@ describe('addOnPreservedMonthlyRateBase', () => {
       customer: LIVE_CUSTOMER,
     })).resolves.toBe(0);
   });
+
+  test('a mixed estimate that re-prices an existing family stays replace (full family union, codex r2)', async () => {
+    // The adoption helper narrows a mixed estimate to its PRIMARY family
+    // (pest) — the overlap test must see EVERY recurring family, or an
+    // active T&S customer accepting pest+T&S would get the old rate summed
+    // onto a total that already includes T&S.
+    const mixedEstData = {
+      result: {
+        recurring: {
+          services: [
+            { name: 'Quarterly Pest Control Service', service: 'pest_control', selected: true, isSelected: true, mo: 45 },
+            { name: 'Bi-Monthly Tree & Shrub Care Service', service: 'tree_shrub', selected: true, isSelected: true, mo: 32.87 },
+          ],
+        },
+      },
+    };
+    await expect(addOnPreservedMonthlyRateBase({
+      database: makeFakeConn([TS_PLAN_ROW]),
+      estimateId: 'est-addon',
+      estimate: TS_ADDON_ESTIMATE,
+      estimateData: mixedEstData,
+      customer: LIVE_CUSTOMER,
+    })).resolves.toBe(0);
+    await expect(addOnPreservedMonthlyRateBase({
+      database: makeFakeConn([PEST_PLAN_ROW]),
+      estimateId: 'est-addon',
+      estimate: TS_ADDON_ESTIMATE,
+      estimateData: mixedEstData,
+      customer: LIVE_CUSTOMER,
+    })).resolves.toBe(0);
+    // A mosquito-only customer is genuinely disjoint from pest+T&S -> sum.
+    await expect(addOnPreservedMonthlyRateBase({
+      database: makeFakeConn([{
+        service_type: 'Monthly Mosquito Control',
+        is_callback: false,
+        catalog_service_key: null,
+        catalog_service_name: null,
+      }]),
+      estimateId: 'est-addon',
+      estimate: TS_ADDON_ESTIMATE,
+      estimateData: mixedEstData,
+      customer: LIVE_CUSTOMER,
+    })).resolves.toBe(31.81);
+  });
+
+  test('an unclassifiable existing plan row fails CLOSED to replace (codex r3)', async () => {
+    // A generic/legacy row with no resolvable family cannot prove it is a
+    // different family — summing on top of it could double-bill.
+    await expect(addOnPreservedMonthlyRateBase({
+      database: makeFakeConn([{
+        service_type: 'Service',
+        is_callback: false,
+        catalog_service_key: null,
+        catalog_service_name: null,
+      }]),
+      estimateId: 'est-addon',
+      estimate: TS_ADDON_ESTIMATE,
+      estimateData: TS_ADDON_EST_DATA,
+      customer: LIVE_CUSTOMER,
+    })).resolves.toBe(0);
+  });
+
+  test('an in-progress (en_route/on_site) plan row still counts as the existing plan (codex r3)', async () => {
+    await expect(addOnPreservedMonthlyRateBase({
+      database: makeFakeConn([{ ...PEST_PLAN_ROW, status: 'on_site' }]),
+      estimateId: 'est-addon',
+      estimate: TS_ADDON_ESTIMATE,
+      estimateData: TS_ADDON_EST_DATA,
+      customer: LIVE_CUSTOMER,
+    })).resolves.toBe(31.81);
+  });
+
+  test('supplemental companion lines (scalar rodent bait) join the overlap union (codex r4)', async () => {
+    // Server-priced shape stores rodent bait as recurring.rodentBaitMo, not
+    // a service row; a rodent-only add-on for a pest member must still SUM,
+    // and a rodent-carrying customer must overlap the estimate.
+    const rodentScalarEstData = {
+      result: {
+        recurring: {
+          services: [],
+          rodentBaitMo: 24,
+        },
+      },
+    };
+    await expect(addOnPreservedMonthlyRateBase({
+      database: makeFakeConn([PEST_PLAN_ROW]),
+      estimateId: 'est-addon',
+      estimate: TS_ADDON_ESTIMATE,
+      estimateData: rodentScalarEstData,
+      customer: LIVE_CUSTOMER,
+    })).resolves.toBe(31.81);
+    await expect(addOnPreservedMonthlyRateBase({
+      database: makeFakeConn([{
+        service_type: 'Rodent Bait Stations',
+        is_callback: false,
+        catalog_service_key: null,
+        catalog_service_name: null,
+      }]),
+      estimateId: 'est-addon',
+      estimate: TS_ADDON_ESTIMATE,
+      estimateData: rodentScalarEstData,
+      customer: LIVE_CUSTOMER,
+    })).resolves.toBe(0);
+  });
+
+  test('a genuine adoption accept always keeps replace semantics (codex r4)', async () => {
+    // Adopting the customer's ONLY row of a plan stamps it with this
+    // estimate and hides it from the other-plans query — the flag from the
+    // accept route short-circuits before any classification.
+    await expect(addOnPreservedMonthlyRateBase({
+      database: makeFakeConn([PEST_PLAN_ROW]),
+      estimateId: 'est-addon',
+      estimate: TS_ADDON_ESTIMATE,
+      estimateData: TS_ADDON_EST_DATA,
+      customer: LIVE_CUSTOMER,
+      adoptedExistingAppointment: true,
+    })).resolves.toBe(0);
+  });
 });
