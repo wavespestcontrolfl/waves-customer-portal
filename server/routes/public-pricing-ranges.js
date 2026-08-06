@@ -55,7 +55,18 @@ router.get('/', async (req, res, next) => {
     // The payload cache keys itself to db-bridge's last-sync timestamp, so
     // any sync — this route's or an admin pricing-proposal approval —
     // invalidates it; bots can't force per-request sweeps.
-    const payload = computePublicPricingRanges();
+    // If a sweep overlapped an in-flight sync, don't serve the possibly
+    // mixed payload at all — wait briefly for the sync to settle and
+    // recompute; fail closed if it won't.
+    let payload = computePublicPricingRanges();
+    for (let attempt = 0; attempt < 20 && lastComputeUnstable(); attempt += 1) {
+      await new Promise((resolve) => { setTimeout(resolve, 100); });
+      payload = computePublicPricingRanges();
+    }
+    if (lastComputeUnstable()) {
+      res.set('Cache-Control', 'no-store');
+      return res.status(503).json({ error: 'pricing configuration is being updated — retry shortly' });
+    }
     // A partial payload is a contract violation, not a degraded success: if
     // any service sweep failed (engine change, bad config), consumers would
     // cache and publish an incomplete price list for an hour. Fail closed.

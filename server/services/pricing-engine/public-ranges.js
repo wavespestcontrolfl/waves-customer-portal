@@ -607,7 +607,7 @@ function buildRows() {
       // reasons; that's about verifying footage on site, not a refusal to
       // quote — exclude only configurations the engine won't price.
       (r) => (r.quoteRequired || !Number.isFinite(r.price) ? NaN : r.price)),
-    notes: 'Priced by treated perimeter, product, application rate, trench depth, warranty term, and concrete share; exact footage measured on site.',
+    notes: 'Priced by treated perimeter, product, application rate, trench depth, warranty term, and concrete share — longer measured perimeters extend beyond this range at the same per-foot rates; exact footage measured on site.',
   }));
 
   add('pre_slab_termiticide', () => rangeRow({
