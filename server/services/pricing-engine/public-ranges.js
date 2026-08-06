@@ -263,14 +263,17 @@ function buildRows() {
                   // In-house heat/hybrid auto-price for non-severe, prepared
                   // jobs; chemical ignores equipment. Subcontracted equipment
                   // and quote-required combos fall out via the filter.
-                  // Method combos restricted to the LIVE allowlist so an
-                  // admin-disabled method can't throw the whole row.
+                  // Method/equipment/scope combos derived from the LIVE
+                  // allowlists so any admin-disabled value drops out of the
+                  // sweep instead of throwing the row.
                   [
                     { method: 'CHEMICAL' },
-                    { method: 'HEAT', equipment: 'INHOUSE', heatScope: 'ROOMS_ONLY' },
-                    { method: 'HEAT', equipment: 'INHOUSE', heatScope: 'WHOLE_HOME' },
-                    { method: 'HYBRID', equipment: 'INHOUSE', heatScope: 'ROOMS_ONLY' },
-                    { method: 'HYBRID', equipment: 'INHOUSE', heatScope: 'WHOLE_HOME' },
+                    // SUBCONTRACT requires an operator-entered pass-through
+                    // cost (inherently custom-quoted) — only in-house heat
+                    // sweeps, and only while the allowlist permits it.
+                    ...['HEAT', 'HYBRID'].flatMap((method) =>
+                      (constants.BED_BUG.heat.allowedEquipment || []).filter((e) => e === 'INHOUSE').flatMap((equipment) =>
+                        ((constants.BED_BUG.heat.heatScope && constants.BED_BUG.heat.heatScope.allowed) || []).map((heatScope) => ({ method, equipment, heatScope })))),
                   ].filter((m) => (constants.BED_BUG.allowedMethods || []).includes(m.method))
                     .map((m) => ({ footprint, stories, rooms, severity, prepStatus, occupancyType, ...m })))))))),
       ({ footprint, stories, rooms, severity, prepStatus, occupancyType, method, equipment, heatScope }) => sp.priceBedBugTreatment(
@@ -349,8 +352,8 @@ function buildRows() {
       infestationComplexity: 'heavy',
       features: { trees: 'heavy', complexity: 'complex' },
       fleaExterior: true,
-      // Largest directly priced exterior tier; above 20,000 sq ft is custom.
-      fleaExteriorAreaSqFt: 20000,
+      // Largest directly priced exterior tier — ceiling read from live config.
+      fleaExteriorAreaSqFt: Number((constants.SPECIALTY.flea.exterior || {}).maxSqFt) || 20000,
     },
     // Selectable single-visit knockdown offer (lower entry price).
     { fleaOfferKey: 'flea_knockdown_single' },
@@ -475,6 +478,9 @@ function buildRows() {
     // station count.
     { perimeterLF: 1000 },
     { perimeterLF: 2000 },
+    // Measured perimeter COMBINED with the structural-modifier profile —
+    // the exact path always passes derived modifiers alongside overrides.
+    { perimeterLF: 2000, complexity: 'complex', modifiers: { termiteConstructionMult: 1.3, termiteFoundationAdj: 150 } },
   ];
   add('termite_bait_install', () => rangeRow({
     key: 'termite_bait_install',
@@ -621,7 +627,15 @@ function buildRows() {
         Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
           LAWN_TIER_KEYS.map((tier) => ({ sq, track, tier })))),
       ({ sq, track, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track, tier }),
-      (r) => r.perApp).concat(bundle('lawn')),
+      (r) => r.perApp).concat(sweepValues(
+      // Cost-floor property factors (matter when useLawnCostFloor is armed;
+      // harmless pass-through while the floor is disarmed).
+      [16000, 30000, 40000].flatMap((sq) =>
+        LAWN_TIER_KEYS.map((tier) => ({ sq, tier }))),
+      ({ sq, tier }) => sp.priceLawnCare(
+        { lawnSqFt: sq, features: { complexity: 'complex', shrubs: 'heavy', privacyFence: true, condition: 'poor', pestPressure: 'heavy' } },
+        { track: 'zoysia', tier }),
+      (r) => r.perApp)).concat(bundle('lawn')),
     notes: `${lawnCadenceText} applications per year by tier; priced by grass type and treatable turf area; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
   }));
 
