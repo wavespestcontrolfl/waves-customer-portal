@@ -533,13 +533,21 @@ function classifyServiceFamilyText(text) {
   if (/rodent.*trap|trap.*rodent/.test(raw)) return 'rodent_trapping';
   // Wire-mesh/seal wording is exclusion work (codex r19: the supported
   // rodent_wire_mesh catalog key carries no "exclusion" token).
-  if (/rodent.*(?:exclusion|wire\s*mesh|seal|bird\s*box)|(?:exclusion|wire\s*mesh|seal|bird\s*box).*rodent/.test(raw)) return 'rodent_exclusion';
+  // Guarantee combos include full exclusion work (codex r22:
+  // rodent_guarantee_combo / "Rodent Guarantee") — classify under the
+  // exclusion identity, never bait.
+  if (/rodent.*(?:exclusion|wire\s*mesh|seal|bird\s*box|guarantee)|(?:exclusion|wire\s*mesh|seal|bird\s*box|guarantee).*rodent/.test(raw)) return 'rodent_exclusion';
   if (/rodent.*sanitation|sanitation.*rodent/.test(raw)) return 'rodent_sanitation';
   // Diagnostic inspections are their own identity too (codex r20:
   // priceRodentInspection's standalone rodent_inspection item). \b after
   // inspect(ion) keeps "inspector" out — "the home inspector found rats"
   // names a person, not the service (same rule as the call-booking matcher).
   if (/rodent.*\binspect(?:ion)?s?\b|\binspect(?:ion)?s?\b.*rodent/.test(raw)) return 'rodent_inspection';
+  // Stinging-insect work shares ONE identity across vocabularies (codex
+  // r22): engine keys say stinging_insect*, the catalog row says
+  // bee_wasp_removal — independently generated slugs never intersect and a
+  // valid existing visit would be rejected into a duplicate booking.
+  if (/stinging|\bwasps?\b|\bhornets?\b|\bbees?\b|yellow\s*jacket/.test(raw)) return 'stinging_insect';
   // The CANONICAL scheduled-row classifier (recurring-appointment-seeder),
   // on BOTH the estimate's services and the candidate rows — the
   // duplicate-series guard and follow-up seeding bucket by the same
@@ -610,15 +618,19 @@ function oneTimeItemFamilyKeys(item = {}) {
   const specialtyText = fields.filter(Boolean).join(' ').toLowerCase();
   const lawnSpecialty = /top[ -_]?dress|dethatch|\bplugging\b/.test(specialtyText);
   if ((category === 'pest_control' && !genericPest) || lawnSpecialty) {
-    // Specific slug identities ONLY — no broad classifier, whose pest/roach
-    // and lawn tokens would re-add the broad family through the field union
-    // (codex r17). Matches only a row whose own label reduces to the same
-    // slug; anything else goes to the slot picker (fail-safe).
+    // Specific identities ONLY — no BROAD families, whose pest/roach and
+    // lawn tokens would re-add them through the field union (codex r17).
+    // Specific (non-broad) classifier families still participate (codex
+    // r22): the stinging_insect identity is how an engine-keyed specialty
+    // meets its catalog-keyed row. Anything else goes to the slot picker
+    // (fail-safe).
     const slugKeys = new Set();
     for (const field of fields) {
       const slug = String(field || '').toLowerCase()
         .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
       if (slug && !BROAD_ADOPTION_FAMILY_KEYS.has(slug)) slugKeys.add(slug);
+      const famKey = classifyServiceFamilyText(field);
+      if (famKey && !BROAD_ADOPTION_FAMILY_KEYS.has(famKey)) slugKeys.add(famKey);
     }
     return [...slugKeys];
   }

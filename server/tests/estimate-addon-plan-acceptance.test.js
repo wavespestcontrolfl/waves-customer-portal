@@ -646,6 +646,39 @@ describe('family-scoped existing-appointment adoption', () => {
     )).toBe(true);
   });
 
+  test('guarantee combos and stinging insects keep their identities (codex r22)', () => {
+    const comboData = {
+      result: {
+        oneTime: {
+          items: [{ service: 'rodent_guarantee_combo', name: 'Rodent Guarantee', price: 1400 }],
+        },
+      },
+    };
+    const comboKeys = estimateFamilyKeysForAdoption({}, comboData, { serviceMode: 'one_time' });
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Rodent Bait Station Monitoring' },
+      comboKeys,
+    )).toBe(false);
+    // Stinging insects: engine vocabulary must meet the catalog vocabulary.
+    const stingingData = {
+      result: {
+        oneTime: {
+          items: [{ service: 'stinging_insect_v2', name: 'Stinging Insect', price: 225 }],
+        },
+      },
+    };
+    const stingKeys = estimateFamilyKeysForAdoption({}, stingingData, { serviceMode: 'one_time' });
+    expect(appointmentMatchesEstimateFamily({
+      service_type: 'Bee / Wasp Nest Removal',
+      catalog_service_key: 'bee_wasp_removal',
+      catalog_service_name: 'Bee / Wasp Nest Removal',
+    }, stingKeys)).toBe(true);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Quarterly Pest Control Service' },
+      stingKeys,
+    )).toBe(false);
+  });
+
   test('bird-box work is exclusion; generic appointments have no family (codex r21)', () => {
     const birdBoxData = {
       result: {
