@@ -678,8 +678,47 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       coarseServiceLabel: 'General Pest Control',
     });
     expect(row?.service_key).toBe('pest_general_quarterly');
+    // Bare abstract objects without a determiner are blocked too (codex follow-up).
+    expect(hasCallReServiceIntent({ call_summary: 'revisit pricing and schedule the regular quarterly visit' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'wants to revisit billing next month' })).toBe(false);
+    // Positive whitelist (codex #3231): ANY non-service object is blocked,
+    // not just a listed noun — payment/account/terms included.
+    expect(hasCallReServiceIntent({ call_summary: 'revisit payment terms and book the regular quarterly visit' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'we should revisit the account setup' })).toBe(false);
+    // Service-ish objects keep their intent — locations and pests included
+    // (codex #3231 r2).
+    expect(hasCallReServiceIntent({ call_summary: 'can you revisit the house this week' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit between treatments, the ants are back' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'please revisit kitchen because the ants are back' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit ants' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit the lanai for wasps' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit next week for the ants' })).toBe(true);
+    // Terminal scheduling expressions count too (codex #3231 r4).
+    expect(hasCallReServiceIntent({ call_summary: 'please revisit on Friday' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit next friday' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit at 9 am' })).toBe(true);
+    // Intra-clause punctuation cannot launder an administrative object
+    // (codex #3231 r5) — but a comma that leads back to service evidence,
+    // or true clause-ending punctuation, keeps its intent.
+    expect(hasCallReServiceIntent({ call_summary: 'revisit: payment terms and book the regular quarterly visit' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit, the ants are back inside' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'customer asked for a revisit. Payment discussed separately.' })).toBe(true);
+    // Non-terminator symbols cannot launder either (codex #3231 r6) — and
+    // two-digit clock times still count in plain word position.
+    expect(hasCallReServiceIntent({ call_summary: 'revisit $100 pricing and book the regular quarterly visit' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit at 10' })).toBe(true);
+    // Bare numbers are administrative unless in scheduling shape (codex r7).
+    expect(hasCallReServiceIntent({ call_summary: 'revisit 2026 pricing and book the regular quarterly visit' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit 100 dollar balance' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit 9 am works for us' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit on the 15th' })).toBe(true);
+    // A temporal modifier alone never launders an administrative object
+    // (codex #3231 r3).
+    expect(hasCallReServiceIntent({ call_summary: "revisit next month's pricing and book the regular quarterly visit" })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit after the invoice goes out' })).toBe(false);
     // Noun usage keeps its intent.
     expect(hasCallReServiceIntent({ requested_service: 'schedule a revisit' })).toBe(true);
+    expect(hasCallReServiceIntent({ requested_service: 'Pest control revisit' })).toBe(true);
   });
 
   test('agent-offered re-service wording in the transcript is NOT the caller\'s intent (codex r9)', () => {
