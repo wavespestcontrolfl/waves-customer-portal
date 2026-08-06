@@ -805,7 +805,14 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // throws (contact load, validation, blocked-audit) stay retryable
     // (codex r16/r17).
     if (sendOutcome && typeof sendOutcome === 'object' && sendOutcome.dispatchStarted === true) {
-      sendOutcome.dispatchUncertain = true;
+      // A KNOWN provider outcome on the error (attached by the canonical
+      // sender when audit persistence throws) beats phase inference: a
+      // definite sent:false is a plain retryable failure (codex r18).
+      if (sendErr && sendErr.providerOutcome && sendErr.providerOutcome.sent === false) {
+        sendOutcome.retryable = sendOutcome.retryable === true || sendErr.providerOutcome.retryable === true;
+      } else {
+        sendOutcome.dispatchUncertain = true;
+      }
     }
     throw sendErr;
   }
@@ -2351,8 +2358,12 @@ const AppointmentReminders = {
                   .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
               })
               .orWhere(function staleLease() {
+                // Stale SINGLETON leases only (codex r18): a stale shared
+                // (series) group is the sweep's — it recovers with the
+                // combined copy, not a per-visit text.
                 this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
-                  .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"));
+                  .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
+                  .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
               });
           })
           .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: db.raw("CASE WHEN cancellation_notice_state = 'pending_notify' THEN 'pending_notify' ELSE 'pending' END"), updated_at: noticeToken });
@@ -2774,10 +2785,21 @@ const AppointmentReminders = {
         // accepted; series sends stamp their representative visit).
         // Finalize WITHOUT redispatching (codex r5).
         const alreadyAccepted = Boolean(await db('messaging_audit_log')
-          .whereIn('appointment_id', serviceIds)
           .where({ purpose: 'appointment_cancellation' })
           .whereNotNull('sent_at')
           .whereRaw("provider_message_id ~ '^(SM|MM)'")
+          .where(function linkedOrGroupEra() {
+            this.whereIn('appointment_id', serviceIds)
+              // A restored representative leaves the pending group but its
+              // acceptance still proves THIS group's send (codex r18):
+              // same customer, accepted at/after the group claim.
+              .orWhere(function customerScoped() {
+                this.whereRaw(
+                  'appointment_id IN (SELECT ss3.id::text FROM scheduled_services ss3 WHERE ss3.customer_id = ?)',
+                  [seed.customer_id],
+                ).where('sent_at', '>=', seed.claim_at);
+              });
+          })
           // Current cancellation cycle only (codex r9) — see
           // acceptedCancellationAudit.
           .whereRaw(

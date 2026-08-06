@@ -273,8 +273,13 @@ async function sendCustomerMessage(input) {
   // 7. Dispatch to provider
   const providerOutcome = await dispatchToProvider(sendInput);
 
-  // 8. Persist final audit row with provider outcome
-  const audit = await persistAudit({
+  // 8. Persist final audit row with provider outcome. A throw past this
+  // point carries the KNOWN provider outcome on the error, so callers with
+  // durable send-once claims can distinguish a definite provider failure
+  // (retryable) from an accepted-but-unaudited send (must not retry).
+  let audit;
+  try {
+    audit = await persistAudit({
     input: sendInput,
     policy,
     segmentMeta,
@@ -282,8 +287,12 @@ async function sendCustomerMessage(input) {
     validatorsFailed: [],
     blockedBy: providerOutcome.sent ? null : { code: 'PROVIDER_FAILURE', reason: providerOutcome.error || 'unknown' },
     identityTrust: resolvedTrust,
-    providerOutcome,
-  });
+      providerOutcome,
+    });
+  } catch (auditErr) {
+    auditErr.providerOutcome = providerOutcome;
+    throw auditErr;
+  }
 
   if (!providerOutcome.sent) {
     const retryAt = nextProviderRetryAt(providerOutcome);
