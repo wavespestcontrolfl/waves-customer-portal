@@ -4652,7 +4652,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // This branch owns the cancellation notice end-to-end
                 // (notify-or-suppress below per the bulk flag) — the
                 // shared-writer hook must stand down, not race the claim.
-                notifyCustomer: 'caller',
+                notifyCustomer: payload?.notifyCustomer === false ? 'caller_suppress' : 'caller',
               });
             });
             try {

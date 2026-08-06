@@ -282,7 +282,7 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
       // handleCancellation after its post-flip compensation check — a
       // fire-and-forget hook claim could land after a compensating revert
       // (codex r3).
-      notifyCustomer: 'caller',
+      notifyCustomer: 'caller_suppress',
     });
   });
   // The flip's atomic guard covers only `status` — a tech can tap En route

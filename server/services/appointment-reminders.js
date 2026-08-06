@@ -2678,6 +2678,20 @@ const AppointmentReminders = {
           .whereNotNull('sent_at')
           .whereRaw("provider_message_id ~ '^(SM|MM)'")
           .first('id'));
+        if (group.length > 1) {
+          // Multi-visit group = a series obligation: recovery must send the
+          // COMBINED series template, not a single-visit "your visit on X
+          // was cancelled" text (codex r8). handleSeriesCancellation adopts
+          // the pending claims, sends the series copy, and finalizes
+          // retryable-aware.
+          await this.handleSeriesCancellation(
+            group.map((g) => g.scheduled_service_id),
+            group[0].scheduled_service_id,
+            { sendNotification: delivered, scope: 'series' },
+          );
+          settled += group.length;
+          continue;
+        }
         const [representative, ...siblings] = group;
         if (siblings.length) {
           // Fenced: consolidate the group onto the representative — the
@@ -2816,14 +2830,23 @@ const AppointmentReminders = {
           // sweep reclaimed this series while we rendered, stand down —
           // its group recovery owns the notice now.
           preDispatchCheck: async () => {
+            // Full-group ownership (codex r8): any target's pending claim
+            // held under a FOREIGN token means a single-visit worker
+            // adopted it — sending the combined notice too would
+            // double-text. Own at least one target AND no foreign claims.
             const own = await db('appointment_reminders')
               .whereIn('scheduled_service_id', ids)
               .where({ cancellation_notice_state: 'pending' })
               .where('cancellation_notice_at', seriesToken)
               .first('id');
-            return own
+            const foreign = await db('appointment_reminders')
+              .whereIn('scheduled_service_id', ids)
+              .where({ cancellation_notice_state: 'pending' })
+              .whereNot('cancellation_notice_at', seriesToken)
+              .first('id');
+            return (own && !foreign)
               ? { ok: true }
-              : { ok: false, code: 'notice_claim_lost', reason: 'series notice lease was reclaimed' };
+              : { ok: false, code: 'notice_claim_lost', reason: 'series notice lease was reclaimed or partially adopted' };
           },
         });
         if (noticeSent) {

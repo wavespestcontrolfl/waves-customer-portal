@@ -3381,7 +3381,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
             // per-visit handleCancellation (notify-or-suppress per the
             // request flag) plus one combined notice — the hook must stand
             // down entirely, not race those claims.
-            notifyCustomer: 'caller',
+            notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
           });
         }
 
@@ -3573,7 +3573,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // shared-writer hook must stand down entirely, or its
           // fire-and-forget claim could race and steal the marker from the
           // operator-requested text.
-          notifyCustomer: 'caller',
+          notifyCustomer: notifyCustomer === false ? 'caller_suppress' : 'caller',
         });
       });
     } catch (err) {

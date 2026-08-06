@@ -244,7 +244,7 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
           // compensation check — a fire-and-forget hook claim here could
           // land after a compensating revert and close the reminder row of
           // a re-armed active visit (codex r3).
-          notifyCustomer: 'caller',
+          notifyCustomer: 'caller_suppress',
         });
         flipped = true;
       } catch (err) {
