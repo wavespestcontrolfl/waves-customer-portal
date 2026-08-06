@@ -679,6 +679,26 @@ describe('family-scoped existing-appointment adoption', () => {
     )).toBe(false);
   });
 
+  test('roach engine keys meet the catalog booking row (codex r23)', () => {
+    const germanRoachData = {
+      result: {
+        oneTime: {
+          items: [{ service: 'german_roach', name: 'German Roach Cleanout', price: 350 }],
+        },
+      },
+    };
+    const roachKeys = estimateFamilyKeysForAdoption({}, germanRoachData, { serviceMode: 'one_time' });
+    expect(appointmentMatchesEstimateFamily({
+      service_type: 'Cockroach Treatment',
+      catalog_service_key: 'cockroach_control',
+      catalog_service_name: 'Cockroach Treatment',
+    }, roachKeys)).toBe(true);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Quarterly Pest Control Service' },
+      roachKeys,
+    )).toBe(false);
+  });
+
   test('bird-box work is exclusion; generic appointments have no family (codex r21)', () => {
     const birdBoxData = {
       result: {

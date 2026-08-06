@@ -524,6 +524,12 @@ function classifyServiceFamilyText(text) {
   if (raw.includes('termite')) {
     return recurringServiceKey({ name: raw }) || null;
   }
+  // Roach work shares ONE identity across vocabularies (codex #3228 r23):
+  // engine german_roach / "German Roach Cleanout" vs the catalog booking
+  // row cockroach_control / "Cockroach Treatment" — independent slugs never
+  // intersect and a valid upcoming cockroach visit would be rejected into a
+  // duplicate. \b keeps "approach"-style words out.
+  if (/\b(?:cock)?roach(?:es)?\b/.test(raw)) return 'cockroach_control';
   // Rodent work keeps the slot profile's split (codex #3228 r18): the
   // seeder buckets EVERY rodent row as rodent_bait, but slot-reservation's
   // serviceKeyForLabel deliberately distinguishes trapping / exclusion /
@@ -9470,6 +9476,34 @@ router.put('/:token/accept', async (req, res, next) => {
             throw commitErr;
           }
         } else {
+          // Revalidate the adopted row UNDER LOCK (codex #3228 r23): the
+          // preflight family/callback checks ran outside this transaction,
+          // and staff can relabel or re-link the appointment (or a callback
+          // flow can claim it) in between — the update below rechecks
+          // status/date/ownership/claim but not the service identity. The
+          // FOR UPDATE reload serializes against such writes; a row that
+          // has become cross-family or a free callback aborts the adopt
+          // with the same re-pick 409 as a lost claim.
+          const lockedAdoptRow = await trx('scheduled_services')
+            .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+            .select(
+              'scheduled_services.*',
+              'services.service_key as catalog_service_key',
+              'services.name as catalog_service_name',
+            )
+            .where('scheduled_services.id', existingAppointmentRow.id)
+            .forUpdate('scheduled_services')
+            .first();
+          const lockedAnyModeKeys = new Set([
+            ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'recurring' }),
+            ...estimateFamilyKeysForAdoption(estimate, estData, { serviceMode: 'one_time' }),
+          ]);
+          const lockedFamilyKeys = estimateFamilyKeysForAdoption(estimate, estData, { serviceMode });
+          const lockedFamilyOk = lockedAnyModeKeys.size === 0
+            || appointmentMatchesEstimateFamily(lockedAdoptRow || {}, lockedFamilyKeys);
+          if (!lockedAdoptRow || lockedAdoptRow.is_callback === true || !lockedFamilyOk) {
+            assertExistingAppointmentUpdateApplied(0);
+          }
           const updates = {
             source_estimate_id: estimate.id,
             customer_id: existingAppointmentRow.customer_id || customerId,
