@@ -254,7 +254,7 @@ function buildRows() {
     // Footprint and story count carry ordinary size/story multipliers on
     // auto-priced homes — not custom-quote territory — so both are swept.
     values: sweepValues(
-      [1500, 2200, 3000, 4000, 6000, 10000].flatMap((footprint) =>
+      [1500, 2200, 3000, 4000, 6000, 10000, 15000].flatMap((footprint) =>
         [1, 2, 3].flatMap((stories) =>
           [1, 2, 4, 7, 10].flatMap((rooms) =>
             ['light', 'moderate', 'heavy'].flatMap((severity) =>
@@ -277,7 +277,7 @@ function buildRows() {
         { footprint, stories },
         { rooms, method, severity, prepStatus, occupancyType, equipment, heatScope }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.total ?? r.price))),
-    notes: '1-10 rooms; priced by rooms, severity, home size, stories, occupancy, and method (chemical, or in-house heat/hybrid where eligible). Severe or under-prepared jobs are quoted after inspection.',
+    notes: '1-10 rooms; priced by rooms, severity, home size, stories, occupancy, and method (chemical, or in-house heat/hybrid where eligible) — larger homes extend beyond this range at the same per-sq-ft heat rates. Severe or under-prepared jobs are quoted after inspection.',
   }));
 
   // Low- and high-pressure residential feature sets — the pricer's pressure
@@ -387,7 +387,7 @@ function buildRows() {
       // Metal roofs carry the negative adjustment property lookup forwards.
       ({ f, lot }) => sp.priceRodentBait({ footprint: f, lotSqFt: lot, features: {} }, { modifiers: { rodentRoofAdj: -5 } }),
       (r) => r.monthly)),
-    notes: 'Monthly-billed monitoring program with quarterly service visits.',
+    notes: `Monthly-billed monitoring program with ${Number(constants.RODENT.baitVisitsPerYear) || 4} service visits per year.`,
   }));
 
   add('rodent_trapping', () => rangeRow({
@@ -693,7 +693,7 @@ function buildRows() {
         [{}, { stationCount: 5, dunkCount: 9 }, { isRecurringCustomer: true }].map((opts) => ({ lotSqFt, opts }))),
       ({ lotSqFt, opts }) => sp.priceOneTimeMosquito({ footprint: 2000, lotSqFt }, opts),
       (r) => (r.quoteRequired ? NaN : r.price)),
-    notes: `Priced by treatable area. One-time add-ons per unit: mosquito stations $${Math.round(constants.ONE_TIME.mosquito.stationAddOn)} each, Bti dunks $${Math.round(constants.ONE_TIME.mosquito.dunkAddOn)} each — larger counts extend beyond this range at those rates.`,
+    notes: `Priced by treatable area — larger properties extend beyond this range by area increment. One-time add-ons per unit: mosquito stations $${Math.round(constants.ONE_TIME.mosquito.stationAddOn)} each, Bti dunks $${Math.round(constants.ONE_TIME.mosquito.dunkAddOn)} each, at any count.`,
   }));
 
   add('lawn_plugging', () => rangeRow({
@@ -724,7 +724,7 @@ function buildRows() {
         ['eighth', 'quarter'].flatMap((depth) => [false, true].map((exactArea) => ({ sq, depth, exactArea })))),
       ({ sq, depth, exactArea }) => sp.priceTopDressing(sq, depth, exactArea),
       (r) => r.price),
-    notes: 'Recurring-plan customers receive a discounted rate.',
+    notes: 'Recurring-plan customers receive a discounted rate; larger measured areas extend beyond this range at the same per-area rates.',
   }));
 
   // Auto-priced residential shapes only: bare lots plus planted/treed
@@ -816,7 +816,7 @@ function buildRows() {
       ],
       (opts) => sp.priceRodentGuarantee(opts),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
-    notes: 'Renewable 12-month rodent-free guarantee after completed exclusion work; priced by property tier.',
+    notes: 'Renewable 12-month rodent-free guarantee; eligibility requires completed trapping, completed exclusion, sanitation completed (or photo baseline), and no activity after the final trap check. Priced by property tier.',
   }));
 
   add('trap_only_retainer', () => rangeRow({
