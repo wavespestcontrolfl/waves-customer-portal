@@ -182,6 +182,51 @@ describe('computeFootprintTurf', () => {
     expect(result.parts.footprintSf).toBe(2000);
   });
 
+  test('an at-cap lot rejects the gross basis — capped lot never meets uncapped gross (codex r3)', () => {
+    // Commercial parsers cap lotSize at 200k while building gross rides
+    // uncapped: a campus footprint above the "lot" would emit a trusted
+    // ZERO ceiling and clamp real turf to nothing.
+    const result = computeFootprintTurf({
+      lotSize: 200000,
+      squareFootage: 120000,
+      stories: 1,
+      imperviousAreaSf: 0,
+      _buildings: [{ underRoofSqft: 250000, stories: 1 }],
+    });
+    expect(result.parts.footprintBasis).toBe('living_area');
+    expect(result.parts.footprintSf).toBe(120000);
+  });
+
+  test('a gross footprint at/above the lot (impossible geometry) rejects the gross basis (codex r3)', () => {
+    const result = computeFootprintTurf({
+      lotSize: 5000,
+      squareFootage: 1500,
+      stories: 1,
+      imperviousAreaSf: 0,
+      _buildings: [{ underRoofSqft: 6000, stories: 1 }],
+    });
+    expect(result.parts.footprintBasis).toBe('living_area');
+    expect(result.parts.footprintSf).toBe(1500);
+  });
+
+  test('a tech-verified story correction stands the gross basis down (codex r3)', () => {
+    // applyVerifiedOverrides updates record.stories but not the preserved
+    // _buildings rows — gross/staleStories would inflate the footprint, so
+    // living / verified-stories governs instead.
+    const result = computeFootprintTurf({
+      lotSize: 10000,
+      squareFootage: 3200,
+      stories: 1, // tech-corrected from the county's 2
+      imperviousAreaSf: 0,
+      _fieldEvidence: {
+        stories: { sourceType: 'verified' },
+      },
+      _buildings: [{ livingAreaSqft: 3200, underRoofSqft: 3900, stories: 2 }],
+    });
+    expect(result.parts.footprintBasis).toBe('living_area');
+    expect(result.parts.footprintSf).toBe(3200);
+  });
+
   test('one gross-less building row falls back whole-record to living/stories', () => {
     const result = computeFootprintTurf({
       lotSize: 20000,

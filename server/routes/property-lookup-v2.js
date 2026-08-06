@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -1206,6 +1206,12 @@ Return a JSON object with exactly these fields:
 function countyBuildingFootprintSf(rc) {
   const rows = Array.isArray(rc?._buildings) ? rc._buildings : [];
   if (!rows.length) return null;
+  // A tech-verified story correction updates record.stories but NOT the
+  // preserved _buildings rows (lookup-cache applyVerifiedOverrides), so the
+  // roll's per-row story counts are stale relative to what a human measured
+  // — the gross basis stands down and living / verified-stories governs
+  // (codex #3229 r3).
+  if (String(rc?._fieldEvidence?.stories?.sourceType || '').toLowerCase() === 'verified') return null;
   let total = 0;
   for (const row of rows) {
     const gross = firstNonNegativeNumber(row?.underRoofSqft, row?.grossAreaSqft, row?.totalAreaSqft);
@@ -1233,12 +1239,21 @@ function computeFootprintTurf(rc) {
   // be smaller than living/stories, so a short gross parse must not shrink
   // the footprint below the living-area floor.
   const grossFootprintSf = countyBuildingFootprintSf(rc);
-  const footprintSf = Math.max(livingFootprintSf, grossFootprintSf || 0);
+  // Never combine an uncapped gross area with a capped lot (codex #3229 r3):
+  // the county parsers cap lotSize at COUNTY_LOT_SQFT_MAX while _buildings
+  // gross areas ride uncapped, so a campus footprint can exceed the "lot"
+  // and emit a trusted ZERO ceiling that clamps real turf to nothing. An
+  // at-cap lot or impossible geometry (footprint >= lot) rejects the gross
+  // basis outright — living/stories governs as before.
+  const grossUsable = Boolean(grossFootprintSf)
+    && lotSqFt < COUNTY_LOT_SQFT_MAX
+    && grossFootprintSf < lotSqFt;
+  const footprintSf = Math.max(livingFootprintSf, grossUsable ? grossFootprintSf : 0);
   // The basis records which component actually DETERMINED footprintSf
   // (codex #3229 r2 P1): a short gross parse loses the max() to
   // living/stories, and labeling it gross would make the adapter treat the
   // footprint as independent of home-size edits it in fact tracks.
-  const grossGoverns = Boolean(grossFootprintSf) && grossFootprintSf >= livingFootprintSf;
+  const grossGoverns = grossUsable && grossFootprintSf >= livingFootprintSf;
   const imperviousRaw = Number(rc?.imperviousAreaSf);
   const imperviousKnown = rc?.imperviousAreaSf != null && Number.isFinite(imperviousRaw);
   const imperviousSf = imperviousKnown ? imperviousRaw : 0;

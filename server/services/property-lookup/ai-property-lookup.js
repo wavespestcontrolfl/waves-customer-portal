@@ -4980,6 +4980,10 @@ function summarizeProviderError(err) {
 }
 
 module.exports = {
+  // Lot values from the county parsers are capped at this bound —
+  // consumers combining them with UNCAPPED figures (e.g. _buildings gross
+  // areas) must treat an at-cap lot as unusable for geometry math.
+  COUNTY_LOT_SQFT_MAX: LOT_SQFT_MAX,
   auditAddressHouseNumber,
   hasCountyEvidence,
   buildPropertyDataQuality,
