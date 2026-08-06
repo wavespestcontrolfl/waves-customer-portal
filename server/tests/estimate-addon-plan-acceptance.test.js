@@ -196,6 +196,52 @@ describe('family-scoped existing-appointment adoption', () => {
     )).toBe(true);
   });
 
+  test('mixed estimates scope adoption to the accepted service mode (codex r4)', () => {
+    // Recurring pest + one-time Bora-Care: accepting the RECURRING plan must
+    // not adopt a termite-family appointment (the accept would stamp the
+    // recurring first-application price onto it), and vice versa.
+    const mixedData = {
+      result: {
+        recurring: {
+          services: [{
+            name: 'Quarterly Pest Control Service',
+            service: 'pest_control',
+            frequency: 'quarterly',
+            selected: true,
+            isSelected: true,
+          }],
+        },
+        oneTime: {
+          items: [{
+            name: 'Bora-Care Termite Treatment',
+            service: 'termite_treatment',
+            price: 1200,
+          }],
+        },
+      },
+    };
+    const recurringKeys = estimateFamilyKeysForAdoption(mixedData, { serviceMode: 'recurring' });
+    expect([...recurringKeys]).toEqual(['pest_control']);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Bora-Care Termite Treatment' },
+      recurringKeys,
+    )).toBe(false);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Quarterly Pest Control Service' },
+      recurringKeys,
+    )).toBe(true);
+
+    const oneTimeKeys = estimateFamilyKeysForAdoption(mixedData, { serviceMode: 'one_time' });
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Quarterly Pest Control Service' },
+      oneTimeKeys,
+    )).toBe(false);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Bora-Care Termite Treatment' },
+      oneTimeKeys,
+    )).toBe(true);
+  });
+
   test('an estimate with no resolvable services offers no adoption at all', () => {
     expect(estimateFamilyKeysForAdoption(null).size).toBe(0);
     expect(estimateFamilyKeysForAdoption({}).size).toBe(0);

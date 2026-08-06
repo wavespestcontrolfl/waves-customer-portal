@@ -506,10 +506,19 @@ function serviceFamilyKeyForAdoption(value) {
 // customer-wide fallback in findLinkedUpcomingAppointment). Derived from the
 // same acceptance lists the accept handler schedules from, so "what we'd
 // book" and "what an existing row may replace" can never disagree.
-function estimateFamilyKeysForAdoption(estData) {
+function estimateFamilyKeysForAdoption(estData, { serviceMode = 'recurring' } = {}) {
   const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData || {});
+  // Scoped to the accepted service mode (codex #3228 r4): a mixed estimate
+  // (recurring pest + one-time Bora-Care) must not let a one-time-family
+  // appointment stand in for the RECURRING plan's first visit — acceptance
+  // would treat the adopted row as the recurring reservation and stamp the
+  // recurring first-application price onto it. The /data contract sites pass
+  // the estimate's default mode; the accept path passes the mode the
+  // customer actually selected, so the accept-time revalidation can reject
+  // an adoption the contract offered under the other mode (409 → re-pick).
+  const list = serviceMode === 'one_time' ? oneTimeList : recurringSvcList;
   return new Set(
-    [...(recurringSvcList || []), ...(oneTimeList || [])]
+    (list || [])
       .map((svc) => serviceFamilyKeyForAdoption(svc))
       .filter(Boolean),
   );
@@ -583,7 +592,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // cross-family accepts fall through to the standard slot pick.
   if (!row && estimate.customer_id
     && featureGates.isEnabled('estimateExistingApptCustomerWide')) {
-    const familyKeys = estimateFamilyKeysForAdoption(data);
+    const familyKeys = estimateFamilyKeysForAdoption(data, { serviceMode: opts.serviceMode });
     if (familyKeys.size > 0) {
       // Page through the candidate list until a same-family row appears — a
       // fixed pre-filter LIMIT would hide a valid later appointment behind a
@@ -7626,7 +7635,9 @@ async function handleEstimateView(req, res, next) {
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
-    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData);
+    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
+      serviceMode: defaultServiceModeForEstimate(estData, estimate),
+    });
     // Resolved ONCE for this request and handed to every consumer below (the
     // bundle's flags, the hero fork) — a second lookup could answer
     // differently and put contradictory billing units on the same page
@@ -7961,7 +7972,10 @@ router.put('/:token/accept', async (req, res, next) => {
       return res.status(409).json({ error: 'No appointment is needed for this renewal — accept without selecting a slot.' });
     }
     const existingAppointmentRow = existingAppointmentId
-      ? await findLinkedUpcomingAppointment(estimate, estData, { appointmentId: existingAppointmentId })
+      ? await findLinkedUpcomingAppointment(estimate, estData, {
+        appointmentId: existingAppointmentId,
+        serviceMode,
+      })
       : null;
     if (existingAppointmentId && !existingAppointmentRow) {
       return res.status(409).json({ error: 'existing appointment is not linked to this active estimate' });
@@ -19007,7 +19021,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
     const trenchingReviewBeforeBooking = !quoteRequirement.quoteRequired
       && estimateTrenchingReviewRequired(estimateDataForIntelligence);
-    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence);
+    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence, {
+      serviceMode: defaultServiceMode,
+    });
     // Narrow low-confidence commercial recurring estimate (the population whose
     // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
     // its accept, whatever the billing mode — invoice-mode holds the first-
