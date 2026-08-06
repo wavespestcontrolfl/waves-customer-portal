@@ -2837,6 +2837,15 @@ const AppointmentReminders = {
       // every other creation path (codex r26): a dark feature must not
       // mint new obligations; settlement of existing ones stays ungated.
       const { isEnabled: gateEnabled } = require('../config/feature-gates');
+      if (!gateEnabled('cancelNoticeHook')) {
+        // Segment the enable boundary (codex r36): while the gate is off,
+        // keep the boundary cleared so re-enabling stamps a fresh one and
+        // gate-off cancellations never backfill late claims.
+        await db('ops_email_send_state')
+          .where({ email_key: 'cancel-notice-hook-enabled-at' })
+          .del()
+          .catch(() => {});
+      }
       if (gateEnabled('cancelNoticeHook')) {
       // (codex r25): a cancel whose in-trx claim AND
       // in-memory fallback were both lost (savepoint failure + crash)

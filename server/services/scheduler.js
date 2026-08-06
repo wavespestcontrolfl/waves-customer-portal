@@ -419,6 +419,16 @@ function initScheduledJobs() {
       .onConflict('email_key')
       .ignore()
       .catch((err) => logger.warn(`[scheduler] cancel-notice boundary stamp failed: ${err.message}`));
+  } else {
+    // Gate OFF: clear the boundary so a later re-enable stamps a FRESH
+    // one (codex #3233 r36) — cancellations made while the gate was off
+    // must never backfill claims on re-enable. Env gates only change
+    // across a restart, so this boot-time clear segments every enable
+    // interval; the sweep repeats it as a backstop.
+    db('ops_email_send_state')
+      .where({ email_key: 'cancel-notice-hook-enabled-at' })
+      .del()
+      .catch((err) => logger.warn(`[scheduler] cancel-notice boundary clear failed: ${err.message}`));
   }
 
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
