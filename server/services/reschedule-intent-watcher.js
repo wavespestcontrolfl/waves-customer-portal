@@ -96,6 +96,9 @@ async function replayPendingBells() {
       .where('ad.status', 'pending_review')
       .whereRaw("ad.input_snapshot->>'bell_pending' = 'true'")
       .where('ad.created_at', '<', db.raw("now() - interval '10 minutes'"))
+      // Newest-first (codex r19): persistently-failing replays must not
+      // starve fresh flags out of the capped batch.
+      .orderBy('ad.created_at', 'desc')
       .limit(10)
       .select('ad.id', 'ad.customer_id', 'ad.input_snapshot', 'cu.first_name', 'cu.last_name');
     for (const row of stale) {

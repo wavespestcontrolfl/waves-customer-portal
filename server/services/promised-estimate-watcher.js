@@ -144,7 +144,7 @@ function composePromisedEstimateDigest(rows) {
     ...lines.map((l) => `- ${l.day} (${l.age}d ago) ${l.who} — ${l.mins}${l.summary ? `: ${l.summary}` : ''}`),
     ...(total > lines.length ? [`…and ${total - lines.length} more not shown`] : []),
     '',
-    `Calls: ${adminPortalUrl()}/admin/communications?tab=calls`,
+    `Calls: ${adminPortalUrl()}/admin/communications#tab=calls`,
   ].join('\n');
   const html = [
     `<p>${promises.length} call${promises.length === 1 ? '' : 's'} where a quote was promised and <strong>no estimate has been sent since</strong>. Oldest is ${oldest} day${oldest === 1 ? '' : 's'} old.</p>`,
@@ -152,7 +152,7 @@ function composePromisedEstimateDigest(rows) {
       `<li style="margin:0 0 6px 0;">${esc(l.day)} (<strong>${esc(l.age)}d ago</strong>) ${esc(l.who)} — ${esc(l.mins)}${l.summary ? `: ${esc(l.summary)}` : ''}</li>`,
     ).join('')}</ul>`,
     ...(total > lines.length ? [`<p>…and ${total - lines.length} more not shown</p>`] : []),
-    `<p><a href="${esc(adminPortalUrl())}/admin/communications?tab=calls">Open call log</a></p>`,
+    `<p><a href="${esc(adminPortalUrl())}/admin/communications#tab=calls">Open call log</a></p>`,
   ].join('\n');
 
   return { subject, text, html, count: total, oldestDays: oldest };

@@ -144,7 +144,12 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
            COUNT(*) OVER () AS total_count
     FROM ai_follow_up_tasks t
     LEFT JOIN customers cu ON cu.id = t.customer_id
-    WHERE (t.status IN ('pending', 'in_progress') AND t.deadline <= :cutoff
+    -- A sent estimate fulfills a send_estimate task (codex r19).
+    WHERE NOT (t.task_type = 'send_estimate' AND EXISTS (
+        SELECT 1 FROM estimates fe
+        WHERE fe.customer_id = t.customer_id AND fe.sent_at > t.created_at
+      ))
+      AND ((t.status IN ('pending', 'in_progress') AND t.deadline <= :cutoff
            -- Revalidated (codex r17): a human send/interaction after the
            -- task means it was worked even if the verifier hasn't run.
            AND NOT EXISTS (
@@ -167,7 +172,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
        -- Half-open 24h window tiles exactly with the daily 6:15pm run —
        -- a 25h window re-reported yesterday's expiries (codex r2).
        OR (t.status = 'expired' AND t.action_verified = false
-           AND t.deadline > ${ET_DAY_START_SQL} AND t.deadline <= :cutoff
+           AND t.deadline > now() - interval '7 days' AND t.deadline <= :cutoff
            -- Staff completing AFTER auto-expiry counts (codex r16).
            AND NOT EXISTS (
              SELECT 1 FROM sms_log es
@@ -185,7 +190,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
        -- 'verified' can be bogus (the verifier accepts ANY later outbound,
        -- codex r10): re-surface verified tasks with no HUMAN outbound.
        OR (t.status = 'verified'
-           AND t.deadline > ${ET_DAY_START_SQL} AND t.deadline <= :cutoff
+           AND t.deadline > now() - interval '7 days' AND t.deadline <= :cutoff
            AND NOT EXISTS (
              SELECT 1 FROM sms_log vs
              WHERE vs.customer_id = t.customer_id

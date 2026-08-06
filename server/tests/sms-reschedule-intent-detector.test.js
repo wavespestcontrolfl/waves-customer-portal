@@ -130,3 +130,10 @@ describe('r18 regression cases (cancel acknowledgments)', () => {
     expect(hasRescheduleOrAwayIntent('Thanks for canceling my appointment')).toBe(false);
   });
 });
+
+describe('r19 regression cases (active cancel auxiliaries)', () => {
+  test('active cancellation requests with auxiliaries flag', () => {
+    expect(hasRescheduleOrAwayIntent('I have to cancel my appointment Friday')).toBe(true);
+    expect(hasRescheduleOrAwayIntent('I was hoping to cancel my appointment')).toBe(true);
+  });
+});

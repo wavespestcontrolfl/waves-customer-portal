@@ -3398,10 +3398,13 @@ function initScheduledJobs() {
     try {
       // runExclusive: verifyFollowUps expires past-deadline tasks — a
       // deploy-overlap tick racing itself can double-process the same rows.
-      await runExclusive('csr-follow-up-verify', async () => {
+      const verifyLock = await runExclusive('csr-follow-up-verify', async () => {
         const CSRCoach = require('./csr/csr-coach');
         await CSRCoach.verifyFollowUps();
       });
+      if (verifyLock && verifyLock.skipped && verifyLock.reason !== 'lease_held') {
+        throw new Error(`follow-up verification tick skipped: ${verifyLock.reason || 'no_connection'}`);
+      }
     } catch (err) {
       logger.error(`Follow-up verification failed: ${err.message}`);
     }
