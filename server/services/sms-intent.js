@@ -117,7 +117,9 @@ function hasRescheduleOrAwayIntent(body) {
     // "Did you cancel…?", "Thanks for canceling."
     // Perfect/passive/interrogative DONE-forms only (codex r19): "I have
     // to cancel" and "I was hoping to cancel" are active requests.
-    && !/\b(?:has|have|had|was|were)\b[^.!?]{0,30}\b(?:been\s+)?cancell?ed\b|\bdid\s+you\s+cancel\b|\bthanks?\s+(?:you\s+)?for\s+cancel/i.test(text);
+    && !(/\b(?:has|have|had|was|were)\b[^.!?]{0,30}\b(?:been\s+)?cancell?ed\b|\bdid\s+you\s+cancel\b|\bthanks?\s+(?:you\s+)?for\s+cancel/i.test(text)
+      // …unless a FRESH cancel ask follows the acknowledgment (codex r22).
+      && !/\b(?:need|want|like|have)\s+to\s+cancel|\bplease\s+cancel|\bcancel\w*(?:\s+\w+){0,2}\s+again\b/i.test(text));
   // "don't reschedule us, you can still come" is the opposite of a
   // reschedule ask (codex r5).
   // A FRESH request anywhere overrides status/acknowledgment clauses

@@ -144,3 +144,9 @@ describe('r20 regression cases (billing synonyms)', () => {
     expect(hasRescheduleOrAwayIntent('Please move my bill to next month')).toBe(false);
   });
 });
+
+describe('r22 regression cases (fresh cancel after ack)', () => {
+  test('acknowledgment followed by a fresh cancel ask flags', () => {
+    expect(hasRescheduleOrAwayIntent('Thanks for canceling last week. I need to cancel my appointment Friday too')).toBe(true);
+  });
+});

@@ -96,6 +96,16 @@ async function loadCallbackCalls(cutoff = new Date()) {
     WHERE c.updated_at >= now() - interval '7 days'
       AND c.updated_at <= :cutoff
       AND c.disposition = 'callback_task_created'
+      -- One obligation, one lane (codex r22): when the coach minted a
+      -- call_back task for the same customer around this call, the task
+      -- lane carries it (with the richer recommended action).
+      AND NOT EXISTS (
+        SELECT 1 FROM ai_follow_up_tasks dt
+        WHERE dt.task_type = 'call_back'
+          AND dt.customer_id IS NOT NULL
+          AND dt.customer_id = c.customer_id
+          AND dt.created_at BETWEEN c.created_at AND c.created_at + interval '30 minutes'
+      )
       -- Already returned: a later outbound CALL to the same number, or a
       -- later human-typed text, clears the item (codex #3232 r1).
       -- Cleared only by a CONNECTED callback: the admin callback route
@@ -344,14 +354,14 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   }
 
   const text = [
-    `End-of-day check: ${total} item${total === 1 ? '' : 's'} from today never got worked. Tomorrow morning these are a day old.`,
+    `End-of-day check: ${total} open comm item${total === 1 ? '' : 's'} (rolling 7-day worklist — items stay until worked).`,
     '',
     ...sectionText,
     ...(a.length ? [`Calls: ${adminPortalUrl()}/admin/communications#tab=calls`] : []),
     `Communications: ${adminPortalUrl()}/admin/communications`,
   ].join('\n');
   const html = [
-    `<p>End-of-day check: <strong>${total}</strong> item${total === 1 ? '' : 's'} from today never got worked. Tomorrow morning these are a day old.</p>`,
+    `<p>End-of-day check: <strong>${total}</strong> open comm item${total === 1 ? '' : 's'} (rolling 7-day worklist — items stay until worked).</p>`,
     ...sectionHtml,
     ...(a.length ? [`<p><a href="${esc(adminPortalUrl())}/admin/communications#tab=calls">Open the Calls tab</a></p>`] : []),
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
