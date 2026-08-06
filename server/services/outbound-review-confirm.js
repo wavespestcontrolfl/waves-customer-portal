@@ -108,7 +108,11 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // must still run or the owed quote silently disappears (codex r5). Row
   // identity (is_callback stamp or the re-service label) is the authority.
   const { isReService } = require('./re-service');
-  const svcIsCallback = svc.is_callback === true || isReService({ serviceType: svc.service_type });
+  // Priced callbacks (operator-added billable extra) are PAID sales and
+  // convert normally (codex #3231 r7) — only an actually-free callback
+  // suppresses the won branch.
+  const svcIsCallback = (svc.is_callback === true || isReService({ serviceType: svc.service_type }))
+    && !(Number(svc.estimated_price) > 0);
   try {
     const CallProc = require('./call-recording-processor');
     let leadId = null;

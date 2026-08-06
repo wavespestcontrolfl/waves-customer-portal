@@ -707,6 +707,11 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     // two-digit clock times still count in plain word position.
     expect(hasCallReServiceIntent({ call_summary: 'revisit $100 pricing and book the regular quarterly visit' })).toBe(false);
     expect(hasCallReServiceIntent({ call_summary: 'revisit at 10' })).toBe(true);
+    // Bare numbers are administrative unless in scheduling shape (codex r7).
+    expect(hasCallReServiceIntent({ call_summary: 'revisit 2026 pricing and book the regular quarterly visit' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit 100 dollar balance' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit 9 am works for us' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit on the 15th' })).toBe(true);
     // A temporal modifier alone never launders an administrative object
     // (codex #3231 r3).
     expect(hasCallReServiceIntent({ call_summary: "revisit next month's pricing and book the regular quarterly visit" })).toBe(false);

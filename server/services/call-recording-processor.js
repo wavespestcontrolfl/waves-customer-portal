@@ -2610,6 +2610,14 @@ function isReServiceBookingRow(row) {
   return isReService({ serviceType: row.service_type });
 }
 
+// Conversion-gate variant (codex #3231 r7): an operator-created re-service
+// carrying a billable extra (is_callback + positive estimated_price —
+// admin-schedule supports this) is a PAID sale, not a $0 callback, and its
+// lead must still convert. Only an actually-free callback suppresses.
+function isFreeReServiceBookingRow(row) {
+  return isReServiceBookingRow(row) && !(Number(row?.estimated_price) > 0);
+}
+
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
   if (!customerId) return null;
 
@@ -8797,7 +8805,7 @@ const CallRecordingProcessor = {
                   // a won deal and promote funnel metrics off a free visit —
                   // judged from the REUSED row's own identity (codex #3231:
                   // a reprocess may resolve differently than what booked).
-                  if (!outboundReviewBooking && (!isReServiceBookingRow(primaryRow) || callQuotePromised)) {
+                  if (!outboundReviewBooking && (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -8910,7 +8918,7 @@ const CallRecordingProcessor = {
                   // exception (that lead closes from the office confirmation)
                   // and the same re-service exception ($0 callback, not a sale
                   // — judged from the ATTACHED row's own identity, codex #3231).
-                  if (!outboundReviewBooking && (!isReServiceBookingRow(primaryRow) || callQuotePromised)) {
+                  if (!outboundReviewBooking && (!isFreeReServiceBookingRow(primaryRow) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -9305,7 +9313,7 @@ const CallRecordingProcessor = {
                   // the office confirmation path) or a covered re-service ($0
                   // callback, not a sale — judged from the reused row's own
                   // identity, codex #3231).
-                  if (!outboundReviewBooking && (!isReServiceBookingRow(existingByKey) || callQuotePromised)) {
+                  if (!outboundReviewBooking && (!isFreeReServiceBookingRow(existingByKey) || callQuotePromised)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
