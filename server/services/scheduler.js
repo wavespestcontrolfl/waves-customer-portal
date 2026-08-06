@@ -414,7 +414,10 @@ function initScheduledJobs() {
   // only narrows recovery to the sweep's stamp.
   if (isEnabled('cancelNoticeHook')) {
     db('ops_email_send_state')
-      .insert({ email_key: 'cancel-notice-hook-enabled-at', last_sent_at: db.fn.now(), updated_at: db.fn.now() })
+      // Stamped with this pod's BOOT time, same as the sweep-side stamp
+      // (codex #3233 r39/r41): a late fire-and-forget insert must not
+      // look newer than a gate-off pod's boot and survive its guards.
+      .insert({ email_key: 'cancel-notice-hook-enabled-at', last_sent_at: PROCESS_BOOT_AT, updated_at: db.fn.now() })
       .onConflict('email_key')
       .ignore()
       .catch((err) => logger.warn(`[scheduler] cancel-notice boundary stamp failed: ${err.message}`));
