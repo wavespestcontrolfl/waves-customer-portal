@@ -2338,7 +2338,7 @@ const AppointmentReminders = {
         // with the same singleton-only adoption guards as the notify path
         // (codex r19): a shared series token is the series/sweep's — a
         // single-visit suppress must not swallow the whole group's notice.
-        noticeToken = new Date();
+        noticeToken = require('./job-status').nextClaimTs();
         claimed = await db('appointment_reminders')
           .where({ id: record.id })
           .where(function claimable() {
@@ -2360,7 +2360,7 @@ const AppointmentReminders = {
           })
           .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'suppressed', updated_at: noticeToken });
       } else {
-        noticeToken = new Date();
+        noticeToken = require('./job-status').nextClaimTs();
         // Tokenless claims (routes) take NULL rows AND adopt any 'pending'
         // row — the shared writer now persists a pending claim in the
         // cancel transaction for caller-owned paths too (codex r7), and
@@ -2499,6 +2499,12 @@ const AppointmentReminders = {
           // claim: re-attempting cannot change the outcome, and a route
           // retry stays possible.
           if (!accepted && retryable) {
+            // Revert OUR pre-dispatch 'sent' stamp to pending first
+            // (codex r22) — retaining must retain a RETRYABLE state.
+            await db('appointment_reminders')
+              .where({ id: record.id, cancellation_notice_state: 'sent' })
+              .where('cancellation_notice_at', noticeToken)
+              .update({ cancellation_notice_state: 'pending', updated_at: new Date() });
             // Keep the pending lease ONLY while the sweep runs to settle
             // it — with the gate off there is no sweep, so parking would
             // strand the claim and block an immediate route retry for the
@@ -2571,10 +2577,17 @@ const AppointmentReminders = {
               // read as SENT, never retry. A definite failure reverts via
               // the token-fenced finalize below; a pre-acceptance crash
               // sacrifices the notice rather than risking a double text.
-              await db('appointment_reminders')
+              // Accepts our own prior stamp (multi-contact fanout) and
+              // MUST win rows — zero rows means a restoration cleared the
+              // claim mid-flight (codex r22).
+              const stamped = await db('appointment_reminders')
                 .where({ id: record.id })
+                .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
                 .where('cancellation_notice_at', noticeToken)
                 .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
+              if (!stamped) {
+                return { ok: false, code: 'notice_claim_lost', reason: 'claim cleared before dispatch (restoration?)' };
+              }
               sendOutcome.dispatchStarted = true;
               return { ok: true };
             },
@@ -2754,6 +2767,14 @@ const AppointmentReminders = {
   // still none → terminal silent suppression. Fenced by the reclaim token.
   async sweepStaleCancellationClaims() {
     try {
+      // Repair pass (codex r22): a restoration whose in-trx marker clear
+      // failed leaves a stale terminal marker on a LIVE visit — shed it
+      // here so a later real cancellation notices normally.
+      await db('appointment_reminders')
+        .whereNotNull('cancellation_notice_state')
+        .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status IN ('pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'))")
+        .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+
       // Age-out runs regardless of the gate (r12): a notice older than
       // 72h is moot — texting "your visit was cancelled" days later is
       // worse than silence, and claims born before a gate-off period must
@@ -2999,6 +3020,12 @@ const AppointmentReminders = {
       const finalizeSeriesClaims = async (accepted, { retryable = false } = {}) => {
         try {
           if (!accepted && retryable) {
+            // Revert OUR pre-dispatch stamps to pending first (r22).
+            await db('appointment_reminders')
+              .whereIn('scheduled_service_id', ids)
+              .where({ cancellation_notice_state: 'sent' })
+              .where('cancellation_notice_at', seriesToken)
+              .update({ cancellation_notice_state: 'pending', updated_at: new Date() });
             // Keep the leases REGARDLESS of the gate (r14): a series has
             // no manual retry (the route's target query excludes
             // already-cancelled rows), so releasing strands the
@@ -3112,12 +3139,16 @@ const AppointmentReminders = {
             if (restored) {
               return { ok: false, code: 'appointment_restored', reason: 'a series target is live again' };
             }
-            // Durable pre-dispatch stamp for the group (codex r21).
-            await db('appointment_reminders')
+            // Durable pre-dispatch stamp for the group (codex r21/r22):
+            // accepts our own prior stamp; zero rows = cleared mid-flight.
+            const stamped = await db('appointment_reminders')
               .whereIn('scheduled_service_id', ids)
-              .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+              .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
               .where('cancellation_notice_at', seriesToken)
               .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
+            if (!stamped) {
+              return { ok: false, code: 'notice_claim_lost', reason: 'group claims cleared before dispatch' };
+            }
             seriesSendOutcome.dispatchStarted = true;
             return { ok: true };
           },
