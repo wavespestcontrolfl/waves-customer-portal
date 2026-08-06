@@ -269,6 +269,26 @@ describe('family-scoped existing-appointment adoption', () => {
     )).toBe(true);
   });
 
+  test('combined catalog keys stay pest-primary (codex r7)', () => {
+    const pestKeys = new Set(['pest_control']);
+    // The combined-service cutover row: catalog key has no "+" and its
+    // underscores defeat word-boundary rules unless normalized first.
+    expect(appointmentMatchesEstimateFamily({
+      service_type: 'Pest Control + Termite Bait Stations',
+      catalog_service_key: 'pest_termite_bait_quarterly',
+      catalog_service_name: 'Quarterly Pest + Termite Bait Stations',
+    }, pestKeys)).toBe(true);
+    // Even the bare key classifies pest-primary once separators normalize.
+    expect(appointmentMatchesEstimateFamily({
+      service_type: '',
+      catalog_service_key: 'pest_termite_bait_quarterly',
+    }, pestKeys)).toBe(true);
+    // A plain termite bait program stays termite-family.
+    expect(appointmentMatchesEstimateFamily({
+      service_type: 'Termite Bait Station Program',
+    }, pestKeys)).toBe(false);
+  });
+
   test('stale service_type labels classify by catalog identity (codex r5)', () => {
     const familyKeys = estimateFamilyKeysForAdoption(treeShrubEstimateData);
     // Row labeled "Tree & Shrub Care" but actually a palm program per its

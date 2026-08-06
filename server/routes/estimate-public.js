@@ -470,44 +470,51 @@ function shapeLinkedAppointment(row) {
 const SERVICE_FAMILY_FALLBACK_KEY = 'service';
 
 function serviceFamilyKeyForAdoption(value) {
-  // Palm precedence (codex #3228 r3): serviceKeyFor checks the tree token
-  // before its palm branch, so "Palm Tree Injections" buckets as tree_shrub
-  // there — fine for its cadence defaults, but adoption must never let a
-  // tree & shrub estimate swallow a palm visit (price overwrite + suppressed
-  // T&S series, the exact cross-family failure this guard exists for). Same
-  // palm rule as detectServiceLine / toQualifyingKeys: \bpalms?\b never
-  // matches "palmetto", so palmetto-bug pest names fall through untouched.
-  const raw = String(
-    value?.service || value?.service_key || value?.key || value?.kind
-    || value?.name || value?.label || value?.displayName || value?.service_type || '',
-  ).toLowerCase();
-  if (raw.includes('palm_injection') || /\bpalms?\b/.test(raw.replace(/[_-]+/g, ' '))) {
-    return 'palm_injection';
-  }
-  // Commercial stays a DISTINCT family (codex #3228 r5): the seeder's
-  // generic lawn/tree branches run before any commercial distinction, so
-  // "Commercial Lawn" would collapse into residential lawn_care and a
-  // residential visit could suppress the commercial manual-scheduling path
-  // (or vice versa). recurringServiceKey already keeps commercial_* keys
-  // separate — delegate commercial names to it.
-  if (raw.includes('commercial')) {
-    return recurringServiceKey({ name: raw }) || null;
-  }
-  // The CANONICAL scheduled-row classifier (recurring-appointment-seeder), on
-  // BOTH the estimate's services and the candidate rows — the duplicate-series
-  // guard and follow-up seeding bucket by the same function, so "may this row
-  // stand in" and "would seeding treat these as one family" can never
-  // disagree. (The route's recurringServiceKey diverges on combined labels:
-  // "Pest & Rodent Control" is pest-primary there per the seeder, rodent
-  // here — codex #3228 r1.)
-  const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
-  // serviceKeyFor's own palm branch is substring-based ("Palmetto Bug Pest
-  // Control" would bucket as palm_injection there). Real palms were consumed
-  // by the word-boundary check above, so strip the palmetto token before
-  // delegating — the remaining words classify the row ("bug pest control" →
-  // pest_control).
-  const key = serviceKeyFor({ name: raw.replace(/palmetto/g, ' ') });
-  return key && key !== SERVICE_FAMILY_FALLBACK_KEY ? key : null;
+  const classify = (text) => {
+    // Separators normalize to spaces BEFORE any word-boundary test (codex
+    // #3228 r7): combined catalog keys like pest_termite_bait_quarterly
+    // otherwise defeat \b rules — the underscore glues "pest" to the next
+    // token, the pest-primary combined rule misses, and serviceKeyFor's
+    // termite branch claims an intentionally pest-primary series.
+    const raw = String(text || '').toLowerCase().replace(/[_-]+/g, ' ').trim();
+    if (!raw) return null;
+    // Palm precedence (codex #3228 r3): serviceKeyFor checks the tree token
+    // before its palm branch, so "Palm Tree Injections" buckets as
+    // tree_shrub there — fine for its cadence defaults, but adoption must
+    // never let a tree & shrub estimate swallow a palm visit. Same palm
+    // rule as detectServiceLine / toQualifyingKeys: \bpalms?\b never
+    // matches "palmetto", so palmetto-bug pest names fall through.
+    if (/\bpalms?\b/.test(raw)) return 'palm_injection';
+    // Commercial stays a DISTINCT family (codex #3228 r5): the seeder's
+    // generic lawn/tree branches run before any commercial distinction, so
+    // "Commercial Lawn" would collapse into residential lawn_care and a
+    // residential visit could suppress the commercial manual-scheduling
+    // path (or vice versa). recurringServiceKey keeps commercial_* keys
+    // separate — delegate commercial names to it.
+    if (raw.includes('commercial')) {
+      return recurringServiceKey({ name: raw }) || null;
+    }
+    // The CANONICAL scheduled-row classifier (recurring-appointment-seeder),
+    // on BOTH the estimate's services and the candidate rows — the
+    // duplicate-series guard and follow-up seeding bucket by the same
+    // function, so "may this row stand in" and "would seeding treat these
+    // as one family" can never disagree (codex #3228 r1). Its palm branch
+    // is substring-based ("Palmetto Bug Pest Control" would bucket palm);
+    // real palms were consumed above, so strip the palmetto token.
+    const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
+    const key = serviceKeyFor({ name: raw.replace(/palmetto/g, ' ') });
+    return key && key !== SERVICE_FAMILY_FALLBACK_KEY ? key : null;
+  };
+  // Catalog identity (key + name + labels) classifies as ONE text so a
+  // combined catalog key and its display name reinforce each other (codex
+  // #3228 r7); the row's service_type text is a separate FALLBACK stage —
+  // never mixed in, or a stale label could override the catalog identity
+  // (the r5 stale-label guarantee).
+  const catalogAndLabelText = [
+    value?.service, value?.service_key, value?.key, value?.kind,
+    value?.name, value?.label, value?.displayName,
+  ].filter(Boolean).join(' ');
+  return classify(catalogAndLabelText) || classify(value?.service_type);
 }
 
 // Service families this estimate actually covers — the only families whose
