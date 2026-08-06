@@ -747,6 +747,91 @@ describe('planForTarget', () => {
     expect(tasks.length).toBe(1);
     expect(tasks[0].source_file).toBe('src/content/blog/clean-source.md');
   });
+  test('scans past an early ineligible occurrence to a later clean paragraph', () => {
+    const page = {
+      file: 'src/content/blog/two-mentions.md',
+      body: [
+        '---',
+        'title: Bite Comparisons',
+        'category: pest-control',
+        'primary_keyword: bite comparisons',
+        '---',
+        '',
+        'As covered in [our overview](/pest-library/), bed bug bites are common calls.',
+        '',
+        'Standalone paragraph: bed bug bites and flea bites are easy to confuse.',
+      ].join('\n'),
+      url: '/blog/two-mentions/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [page], cap: 1 }
+    );
+    // The first "bed bug bites" sits in a linked paragraph; the second is
+    // clean and must be chosen (offset beyond the first paragraph).
+    expect(tasks.length).toBe(1);
+    expect(page.body.slice(tasks[0].source_offset, tasks[0].source_offset + tasks[0].anchor_text.length)).toBe('bed bug bites');
+    expect(page.body.slice(0, tasks[0].source_offset)).toContain('Standalone paragraph');
+  });
+  test('hidden comment tokens do not lift relevance over the floor', () => {
+    const page = {
+      file: 'src/content/blog/comment-inflated.md',
+      body: [
+        '---',
+        'title: Pool Cage Screens',
+        'category: home-maintenance',
+        'primary_keyword: pool cage screens',
+        '---',
+        '',
+        'One reader mentioned bed bug bites while asking about screens. <!-- flea bites pest-control -->',
+      ].join('\n'),
+      url: '/blog/comment-inflated/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [page], cap: 1 }
+    );
+    // Visible copy only supports "bed bug bites"; the comment's extra tokens
+    // are masked out of the excerpt, so the match stays below the floor.
+    expect(tasks).toEqual([]);
+  });
+  test('merges the supplied keyword into corpus target facts when frontmatter has none', () => {
+    const legacyTarget = {
+      file: 'src/content/services/bed-bug-treatment.md',
+      body: [
+        '---',
+        'title: Professional Bed Bug Treatment for Southwest Florida Homes and Rentals',
+        'category: pest-control',
+        '---',
+        '',
+        'Treatment overview.',
+      ].join('\n'),
+      url: '/bed-bug-treatment/',
+    };
+    const source = {
+      file: 'src/content/blog/bite-signs.md',
+      body: [
+        '---',
+        'title: Early Bite Signs',
+        'category: pest-control',
+        'primary_keyword: bed bug treatment signs',
+        '---',
+        '',
+        'Persistent bites usually mean it is time for bed bug treatment.',
+      ].join('\n'),
+      url: '/blog/bite-signs/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/bed-bug-treatment/', keyword: 'bed bug treatment' },
+      { corpus: [legacyTarget, source], cap: 1 }
+    );
+    // Without the merge the target's long descriptive title floods the core
+    // denominator and nothing passes the floor; with it the source plans and
+    // the keyword is persisted for the executor.
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].source_file).toBe('src/content/blog/bite-signs.md');
+    expect(tasks[0].target_keyword).toBe('bed bug treatment');
+  });
   test('uses service alias anchors instead of partial service fragments', () => {
     const tasks = planner.planForTarget({
       url: '/pest-control-bradenton-fl/',

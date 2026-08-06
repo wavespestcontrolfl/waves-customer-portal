@@ -206,7 +206,7 @@ function blankRegion(region) {
  * inside a markdown or HTML link. Returns { index, length, snippet }
  * or null.
  */
-function findFirstUnlinkedOccurrence(text, phrase) {
+function findFirstUnlinkedOccurrence(text, phrase, { fromIndex = 0 } = {}) {
   if (!text || !phrase) return null;
   const masked = maskExcludedRegions(text);
   // Require word-like phrase boundaries — raw indexOf matched short keywords like
@@ -214,6 +214,7 @@ function findFirstUnlinkedOccurrence(text, phrase) {
   // the rendered markdown when applyTaskToBody wrapped the partial.
   const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(escaped, 'gi');
+  re.lastIndex = Math.max(0, fromIndex);
   let m;
   while ((m = re.exec(masked)) !== null) {
     const idx = m.index;
@@ -303,6 +304,34 @@ function paragraphAround(body, index) {
  */
 function paragraphHasLink(paragraph) {
   return /\[[^\]\n]+\]\(\s*[^)]+\)/.test(paragraph) || /<a\b[^>]*\bhref\s*=/i.test(paragraph);
+}
+
+// Bound on how many occurrences of one phrase to examine per page — a
+// runaway phrase ("pest control" on an index page) shouldn't scan forever.
+const MAX_PLACEMENT_SCAN = 20;
+
+/**
+ * The FIRST occurrence of `phrase` that is a placement the executor would
+ * accept: not inside a link/heading (findFirstUnlinkedOccurrence), in a
+ * paragraph with no existing link, and passing the contextual anchor
+ * policy there. Planner, executor dry-run, and applyTaskToBody all use
+ * THIS scan, so they always select the same occurrence — an early
+ * ineligible mention no longer hides a later clean one.
+ */
+function findEligiblePlacement(body, phrase) {
+  let fromIndex = 0;
+  for (let i = 0; i < MAX_PLACEMENT_SCAN; i++) {
+    const occ = findFirstUnlinkedOccurrence(body, phrase, { fromIndex });
+    if (!occ) return null;
+    const paragraph = paragraphAround(body, occ.index);
+    const anchor = String(body).slice(occ.index, occ.index + occ.length);
+    if (!paragraphHasLink(paragraph)
+      && policy.validateAnchorPolicy(anchor, { surroundingText: paragraph }).ok) {
+      return { ...occ, paragraph, anchor };
+    }
+    fromIndex = occ.index + occ.length;
+  }
+  return null;
 }
 
 function snippetAround(text, start, length, padding = 50) {
@@ -484,13 +513,21 @@ class InternalLinkPlanner {
     // exactly. A not-yet-merged target gets a synthetic frontmatter from the
     // brief (the executor would skip everything as target_body_missing in
     // that state anyway, so the approximation cannot cause divergence).
-    const targetFacts = targetPage
-      ? topicalFacts(targetFile, targetFront)
-      : topicalFacts(targetPath, {
+    // The brief's keyword also backfills a corpus target whose (legacy)
+    // frontmatter carries no keyword — without it the descriptive title
+    // floods the core denominator, recreating the blackout this change
+    // removes. The executor mirrors the merge via task.target_keyword.
+    const targetFrontForFacts = targetPage
+      ? {
+        ...targetFront,
+        primary_keyword: targetFront.primary_keyword || targetFront.target_keyword || target.keyword || undefined,
+      }
+      : {
         primary_keyword: target.keyword || undefined,
         title: target.title || undefined,
         service: target.service || undefined,
-      });
+      };
+    const targetFacts = topicalFacts(targetPage ? targetFile : targetPath, targetFrontForFacts);
     const matches = [];
 
     // Scan the WHOLE corpus before applying the site-wide cap. Taking the
@@ -517,25 +554,20 @@ class InternalLinkPlanner {
       // task the executor's relevance gate then rejects.
       const pageMatches = [];
       for (const { phrase, priority } of candidates) {
-        const occ = findFirstUnlinkedOccurrence(page.body, phrase);
+        // findEligiblePlacement scans past occurrences the executor would
+        // reject (linked paragraph, contextual anchor-policy failure) and
+        // returns the first placement that survives — the executor dry-run
+        // and applyTaskToBody run the SAME scan, so the occurrence chosen
+        // here is the one that gets evaluated and patched. occ.anchor
+        // preserves the original casing from the matched text.
+        const occ = findEligiblePlacement(page.body, phrase);
         if (!occ) continue;
-        // The executor re-locates each phrase's FIRST occurrence and skips
-        // when its paragraph already has a link — a match it would reject
-        // must not be planned (it would burn a cap slot), but another
-        // candidate phrase may land in a clean paragraph, so keep trying.
-        const paragraph = paragraphAround(page.body, occ.index);
-        if (paragraphHasLink(paragraph)) continue;
-        // Preserve the original casing from the matched text rather
-        // than the candidate phrase.
-        const actualAnchor = page.body.slice(occ.index, occ.index + occ.length);
-        // Re-validate WITH the paragraph as surroundingText: the candidate
-        // filter is context-free, but the executor also rejects anchors that
-        // split a commercial phrase ("shrub care" inside "tree and shrub
-        // care") or leave a dangling geo qualifier — both only detectable
-        // in context. The same phrase may still be clean on another page.
-        if (!policy.validateAnchorPolicy(actualAnchor, { surroundingText: paragraph }).ok) continue;
         const relevance = policy.scoreTopicalRelevance(
-          topicalFacts(page.file, front, { bodyExcerpt: paragraph }),
+          // Mask non-rendered regions (MDX props, HTML comments, code)
+          // before scoring — hidden tokens must not lift topical overlap
+          // for text the reader never sees; the occurrence finder already
+          // excludes those regions from matching.
+          topicalFacts(page.file, front, { bodyExcerpt: maskExcludedRegions(occ.paragraph) }),
           targetFacts
         );
         // Below the gate's floor the executor is certain to reject — with
@@ -548,7 +580,8 @@ class InternalLinkPlanner {
             source_file: page.file,
             target_url: targetPath,
             target_file: targetFile,
-            anchor_text: actualAnchor,
+            target_keyword: target.keyword || null,
+            anchor_text: occ.anchor,
             context_snippet: occ.snippet,
             source_offset: occ.index,
             opportunity_id: opportunityId,
@@ -573,10 +606,11 @@ class InternalLinkPlanner {
     if (!body || !task) return body;
     const targetUrl = canonicalInternalPath(task.target_url);
     if (!targetUrl || pageAlreadyLinksTo(body, targetUrl)) return body;
-    const occ = findFirstUnlinkedOccurrence(body, task.anchor_text);
+    // Same eligible-placement scan the planner and executor dry-run use, so
+    // the occurrence that was validated is the occurrence that gets linked.
+    const occ = findEligiblePlacement(body, task.anchor_text);
     if (!occ) return body;
-    const anchor = body.slice(occ.index, occ.index + occ.length);
-    const replacement = `[${anchor}](${targetUrl})`;
+    const replacement = `[${occ.anchor}](${targetUrl})`;
     return body.slice(0, occ.index) + replacement + body.slice(occ.index + occ.length);
   }
 
@@ -743,6 +777,7 @@ module.exports._internals = {
   maskNonContentRegions,
   blankRegion,
   findFirstUnlinkedOccurrence,
+  findEligiblePlacement,
   isInsideMarkdownHeading,
   hasPhraseBoundary,
   isWordChar,

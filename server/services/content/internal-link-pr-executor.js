@@ -13,6 +13,23 @@ const GitHubClient = require('../content-astro/github-client');
 const frontmatter = require('../content-astro/frontmatter');
 const planner = require('./internal-link-planner');
 const policy = require('./internal-link-seo-policy');
+// Text-level checks are OWNED by the planner and shared here — the planner
+// applies every one of them before its site-wide cap, so it never plans a
+// task this executor's gate would reject on corpus-knowable grounds.
+const {
+  sourceRendersOffHub,
+  canonicalPointsOffHub,
+  pageAlreadyLinksTo,
+  findFirstUnlinkedOccurrence,
+  findEligiblePlacement,
+  paragraphAround,
+  paragraphHasLink,
+  robotsNoindex,
+  countInternalLinks,
+  inferPageType,
+  inferCluster,
+  maskExcludedRegions,
+} = planner._internals;
 
 const TABLE = 'content_internal_link_tasks';
 const EXECUTOR_VERSION = 'internal-link-dry-run-v1';
@@ -607,10 +624,10 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   // Tasks planned before the planner grew its spoke guard can still name a
   // spoke-rendered or spoke-canonical source; re-check at execution time so
   // they skip cleanly.
-  if (planner._internals.sourceRendersOffHub(sourcePage.frontmatter || {})) {
+  if (sourceRendersOffHub(sourcePage.frontmatter || {})) {
     return skipped(base, 'source_renders_on_spoke');
   }
-  if (planner._internals.canonicalPointsOffHub(sourcePage.frontmatter || {})) {
+  if (canonicalPointsOffHub(sourcePage.frontmatter || {})) {
     return skipped(base, 'source_canonical_off_hub');
   }
 
@@ -619,21 +636,42 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   if (!targetUrl) return skipped(base, 'target_url_invalid');
   if (!sourceUrl) return skipped(base, 'source_url_invalid');
   if (sourceUrl === targetUrl) return skipped(base, 'self_link');
-  if (planner._internals.pageAlreadyLinksTo(sourcePage.body, targetUrl)) return skipped(base, 'source_already_links_target');
+  if (pageAlreadyLinksTo(sourcePage.body, targetUrl)) return skipped(base, 'source_already_links_target');
 
-  const occurrence = planner._internals.findFirstUnlinkedOccurrence(sourcePage.body, task.anchor_text);
-  if (!occurrence) return skipped(base, 'anchor_not_found');
+  // Same eligible-placement scan the planner used — the occurrence chosen at
+  // plan time is the occurrence evaluated (and later patched) here. When no
+  // occurrence survives, report the first occurrence's specific failure so
+  // skip reasons stay diagnostic.
+  const occurrence = findEligiblePlacement(sourcePage.body, task.anchor_text);
+  if (!occurrence) {
+    const first = findFirstUnlinkedOccurrence(sourcePage.body, task.anchor_text);
+    if (!first) return skipped(base, 'anchor_not_found');
+    const firstParagraph = paragraphAround(sourcePage.body, first.index);
+    if (paragraphHasLink(firstParagraph)) return skipped(base, 'paragraph_already_has_link');
+    const anchorCheck = policy.validateAnchorPolicy(
+      String(sourcePage.body).slice(first.index, first.index + first.length),
+      { surroundingText: firstParagraph, targetKeyword: task.target_keyword || undefined }
+    );
+    return skipped(base, anchorCheck.issues.map((issue) => issue.code).join(',') || 'anchor_not_found');
+  }
   if (isHeadingOccurrence(sourcePage.body, occurrence.index)) return skipped(base, 'anchor_in_heading');
 
-  const paragraph = paragraphAround(sourcePage.body, occurrence.index);
-  if (paragraphHasLink(paragraph)) return skipped(base, 'paragraph_already_has_link');
+  const paragraph = occurrence.paragraph;
 
   // The paragraph around the matched anchor is the link's actual context —
   // without it the relevance score sees only frontmatter facts and misses
   // that the source body demonstrably discusses the target's topic (the
-  // anchor phrase was found IN it).
-  const sourceFacts = pageFacts(sourcePage, { url: sourceUrl, bodyExcerpt: paragraph });
+  // anchor phrase was found IN it). Masked first: hidden MDX props/comments
+  // must not lift topical overlap for text the reader never sees.
+  const sourceFacts = pageFacts(sourcePage, { url: sourceUrl, bodyExcerpt: maskExcludedRegions(paragraph) });
   const targetFacts = pageFacts(targetPage, { url: targetUrl });
+  if (!targetFacts.keyword && task.target_keyword) {
+    // Legacy targets without a frontmatter keyword: use the keyword the
+    // planner persisted on the task so the core denominator carries the
+    // topic instead of the descriptive title — mirrors the planner's merge.
+    targetFacts.keyword = task.target_keyword;
+    targetFacts.topic = task.target_keyword;
+  }
   const opportunity = policy.evaluateLinkOpportunity({
     source: sourceFacts,
     target: targetFacts,
@@ -869,46 +907,12 @@ const SERVICE_HUB_SLUGS = new Set([
   'tree-and-shrub-care',
 ]);
 
-function inferPageType(file, frontmatter = {}) {
-  // Delegates to the planner — plan-time ranking builds facts with the same
-  // inference so its scores equal this gate's scores.
-  return planner._internals.inferPageType(file, frontmatter);
-}
-
-function inferCluster(file, frontmatter = {}) {
-  // Delegates to the planner — see inferPageType.
-  return planner._internals.inferCluster(file, frontmatter);
-}
-
-function robotsNoindex(frontmatter = {}) {
-  // Delegates to the planner's implementation — the planner excludes noindex
-  // sources before its cap so it never plans a task this gate would skip.
-  return planner._internals.robotsNoindex(frontmatter);
-}
 
 function isHeadingOccurrence(body, index) {
   const lineStart = String(body || '').lastIndexOf('\n', Math.max(0, index - 1)) + 1;
   return /^[ \t]{0,3}#{1,6}\s/.test(String(body || '').slice(lineStart, index + 1));
 }
 
-function paragraphAround(body, index) {
-  // Delegates to the planner's implementation so plan-time ranking and this
-  // gate score the SAME context — divergence re-opens the cap-burn bug where
-  // weak matches outrank a viable page (codex r3 on #3226).
-  return planner._internals.paragraphAround(body, index);
-}
-
-function paragraphHasLink(paragraph) {
-  // Delegates to the planner's implementation — the planner applies the same
-  // check before its cap so it never plans a task this gate would skip.
-  return planner._internals.paragraphHasLink(paragraph);
-}
-
-function countInternalLinks(body) {
-  // Delegates to the planner's implementation — the planner applies the same
-  // density cutoff before its cap so it never plans a saturated source.
-  return planner._internals.countInternalLinks(body);
-}
 
 function envInt(name, fallback) {
   const value = Number(process.env[name]);
