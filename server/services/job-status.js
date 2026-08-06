@@ -559,7 +559,15 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
                 .first('id');
               if (survivor) repairState = 'suppressed';
             }
-          } catch { /* fail toward operator intent */ }
+          } catch (classifyErr) {
+            // Classification failed — do NOT stamp (codex #3238 r3): a
+            // defaulted pending_notify would read as unconditional
+            // operator intent and could text against a live merged-slot
+            // sibling. The marker stays unclaimed; the sweep's late-claim
+            // recovers it evidence-gated, and silence beats a wrong text.
+            logger.warn(`[job-status] caller claim repair classification failed for ${jobId}: ${classifyErr.message}`);
+            return;
+          }
           await db('appointment_reminders')
             .where({ scheduled_service_id: jobId })
             .where(function claimable() {
