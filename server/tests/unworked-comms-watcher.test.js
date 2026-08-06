@@ -28,11 +28,11 @@ const callback = (over = {}) => ({
 });
 const followUp = (over = {}) => ({
   id: 't1', task_type: 'call_back', deadline: '2026-08-05T20:57:00Z', status: 'expired',
-  recommended_action: 'Call back about flea/tick rental inspection', customer_name: 'David M', ...over,
+  recommended_action: 'Call back about flea/tick rental inspection', customer_name: 'Test Customertwo', ...over,
 });
 const thread = (over = {}) => ({
   peer: '9415558360', message_body: 'Do you plan to swing by next week?', created_at: '2026-08-05T14:00:00Z',
-  customer_name: 'Prasan C', customer_id: 'cu-1', ...over,
+  customer_name: 'Test Customerthree', customer_id: 'cu-1', ...over,
 });
 
 describe('composeUnworkedCommsDigest', () => {
@@ -54,7 +54,7 @@ describe('composeUnworkedCommsDigest', () => {
   test('single lane composes with only that section', () => {
     const composed = composeUnworkedCommsDigest({ unanswered: [thread()] });
     expect(composed.subject).toBe('ACT: 1 unworked comm at end of day — 0 callbacks, 0 follow-ups, 1 unanswered text');
-    expect(composed.text).toContain('Prasan C');
+    expect(composed.text).toContain('Test Customerthree');
     expect(composed.text).not.toContain('Callbacks requested');
     expect(composed.text).not.toContain('Follow-up tasks');
   });

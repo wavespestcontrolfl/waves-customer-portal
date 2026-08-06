@@ -59,8 +59,8 @@ describe('composePromisedEstimateDigest', () => {
   });
 
   test('uses customer name when present', () => {
-    const composed = composePromisedEstimateDigest([row(3, { customer_name: 'Joyce C' })]);
-    expect(composed.text).toContain('Joyce C');
+    const composed = composePromisedEstimateDigest([row(3, { customer_name: 'Test Customerfour' })]);
+    expect(composed.text).toContain('Test Customerfour');
   });
 
   test('html escapes the summary', () => {

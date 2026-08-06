@@ -20,8 +20,8 @@ const flag = (over = {}) => ({
   created_at: '2026-08-05T04:30:00Z',
   input_snapshot: JSON.stringify({ body_excerpt: 'leaving for vacation tomorrow, can we reschedule?' }),
   customer_id: 'cu-1',
-  first_name: 'Sharon',
-  last_name: 'F',
+  first_name: 'Testa',
+  last_name: 'Customerone',
   scheduled_date: '2026-08-05',
   window_start: '09:00:00',
   service_type: 'Quarterly Pest Control',
@@ -44,7 +44,7 @@ describe('composeRescheduleIntentDigest', () => {
   test('ACT subject and STILL ARMED marker on linked visit', () => {
     const composed = composeRescheduleIntentDigest([flag()]);
     expect(composed.subject).toBe('ACT: 1 reschedule request by text with no schedule change');
-    expect(composed.text).toContain('Sharon F');
+    expect(composed.text).toContain('Testa Customerone');
     expect(composed.text).toContain('STILL ARMED');
     expect(composed.text).toContain('can we reschedule?');
   });

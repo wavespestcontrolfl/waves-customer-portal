@@ -114,7 +114,10 @@ function hasRescheduleOrAwayIntent(body) {
     && !CANCEL_NEGATION_RE.test(text) && !CANCEL_NONAPPT_RE.test(text);
   // "don't reschedule us, you can still come" is the opposite of a
   // reschedule ask (codex r5).
-  const negated = /\b(?:don'?t|do\s+not|no\s+need\s+to|not\s+necessary\s+to|never)\s+(?:\w+\s+){0,2}?(?:reschedul|re-?book|move|change)/i.test(text);
+  const negated = /\b(?:don'?t|do\s+not|no\s+need\s+to|not\s+necessary\s+to|never)\s+(?:\w+\s+){0,2}?(?:reschedul|re-?book|move|change)/i.test(text)
+    // Past/acknowledged changes are not requests: "thanks for
+    // rescheduling us", "what day were we rescheduled to?" (codex r9).
+    || /\b(?:thanks?\s+for|thank\s+you\s+for|already|were|was|got)\s+(?:being\s+)?re-?schedul/i.test(text);
   if (!negated && (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text))) return true;
   if (cancelAsk) return true;
   return AWAY_RE.test(text) && !AWAY_PERMISSION_RE.test(text);

@@ -97,8 +97,11 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
           .whereIn('sl.status', ['queued', 'sent', 'delivered'])
           .whereRaw('sl.created_at > agent_decisions.created_at');
       });
-      const dupeRow = await dupe.first('id', 'input_snapshot');
-      if (dupeRow) {
+      // Every unresolved candidate is examined (codex r9): after one
+      // move, an old-slot flag and a new-slot flag can coexist — only a
+      // flag matching the CURRENT slot dedupes.
+      const dupeRows = await dupe.select('id', 'input_snapshot');
+      for (const dupeRow of dupeRows) {
         let snapVisit = null;
         try {
           const snap = typeof dupeRow.input_snapshot === 'string' ? JSON.parse(dupeRow.input_snapshot) : dupeRow.input_snapshot;

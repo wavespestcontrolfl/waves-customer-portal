@@ -47,6 +47,38 @@ function esc(value) {
 // the flag was created (updated_at predates the flag = nobody rescheduled,
 // cancelled, or otherwise moved it). Flags with no linked visit are included
 // too — "no upcoming visit" still means the customer is waiting on a reply.
+// Persist proven resolutions (codex r9): a delivered human reply or a
+// moved/cancelled slot marks the decision auto_resolved so the Agent
+// Review surfaces and this digest agree; completion is NOT resolution.
+async function resolveActionedFlags() {
+  try {
+    await db('agent_decisions as ad')
+      .leftJoin('scheduled_services as ss', 'ad.entity_id', 'ss.id')
+      .where('ad.workflow', 'comms_guards')
+      .where('ad.detected_intent', 'reschedule_or_away_needs_review')
+      .where('ad.status', 'pending_review')
+      .where(function proven() {
+        this.whereExists(function humanReply() {
+          this.select(1).from('sms_log as sl')
+            .whereRaw('sl.customer_id = ad.customer_id')
+            .where('sl.direction', 'outbound')
+            .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
+            .whereIn('sl.status', ['queued', 'sent', 'delivered'])
+            .whereRaw('sl.created_at > ad.created_at');
+        }).orWhere(function slotMovedOrCancelled() {
+          this.whereNotNull('ad.entity_id').where(function changed() {
+            this.where('ss.status', 'cancelled')
+              .orWhereRaw("LEFT(ad.input_snapshot#>>'{visit,scheduled_date}', 10) <> ss.scheduled_date::text")
+              .orWhereRaw("COALESCE(ad.input_snapshot#>>'{visit,window_start}', '') <> COALESCE(ss.window_start::text, '')");
+          });
+        });
+      })
+      .update({ status: db.raw("'auto_resolved'"), updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[reschedule-intent-watcher] resolve pass failed: ${err.message}`);
+  }
+}
+
 async function loadUnactionedFlags() {
   return db('agent_decisions as ad')
     .leftJoin('scheduled_services as ss', 'ad.entity_id', 'ss.id')
@@ -73,7 +105,10 @@ async function loadUnactionedFlags() {
         // Linked visit: unactioned = still upcoming AND still on the
         // flagged slot, judged against the flag's own snapshot — NOT
         // updated_at, which the public rebooker does not bump (codex r1).
-        this.whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
+        // 'completed' stays in the backstop (codex r9): a visit that RAN
+        // on the flagged slot despite the request is the incident class
+        // itself, not a resolution.
+        this.whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site', 'completed'])
           .whereRaw("LEFT(ad.input_snapshot#>>'{visit,scheduled_date}', 10) = ss.scheduled_date::text")
           .whereRaw("COALESCE(ad.input_snapshot#>>'{visit,window_start}', '') = COALESCE(ss.window_start::text, '')");
       });
@@ -107,7 +142,7 @@ function composeRescheduleIntentDigest(rows) {
     const name = [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Unknown customer';
     const asked = etDateString(new Date(row.created_at));
     const visit = row.scheduled_date
-      ? `visit ${String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date).slice(0, 10)}${row.window_start ? ` ${String(row.window_start).slice(0, 5)}` : ''}${row.service_type ? ` (${row.service_type})` : ''} STILL ARMED`
+      ? `visit ${String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date).slice(0, 10)}${row.window_start ? ` ${String(row.window_start).slice(0, 5)}` : ''}${row.service_type ? ` (${row.service_type})` : ''} ${row.visit_status === 'completed' ? 'COMPLETED despite the request' : 'STILL ARMED'}`
       : (parseSnapshot(row.input_snapshot).ambiguous
         ? 'multiple upcoming visits — check which one they mean'
         : 'no upcoming visit on the books');
@@ -170,6 +205,7 @@ async function runRescheduleIntentWatcher(opts = {}) {
 
   let rows;
   try {
+    await (opts.resolveActionedFlags || resolveActionedFlags)();
     rows = await (opts.loadRows || loadUnactionedFlags)();
   } catch (err) {
     logger.error(`[reschedule-intent-watcher] query failed: ${err.message}`);

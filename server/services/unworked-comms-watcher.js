@@ -103,7 +103,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
         WHERE os.direction = 'outbound'
           AND os.message_type IN ${HUMAN_REPLY_TYPES}
           AND os.status IN ('queued', 'sent', 'delivered')
-          AND os.created_at > c.created_at
+          AND os.created_at > c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
           AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10)
             = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, ''), '\\D', '', 'g'), 10)
       )
