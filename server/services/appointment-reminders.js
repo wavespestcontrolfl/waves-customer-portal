@@ -2300,10 +2300,18 @@ const AppointmentReminders = {
       // Guarded in ONE statement (codex r20): a restoration committing
       // between the status read above and this write must not be
       // re-closed.
-      await db('appointment_reminders')
+      const closed = await db('appointment_reminders')
         .where({ id: record.id })
         .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
         .update({ cancelled: true, updated_at: new Date() });
+      if (!closed) {
+        // A restoration won the race after the status read (codex r24) —
+        // touch nothing further (a suppressed stamp here would block the
+        // NEXT cancellation's notice).
+        logger.info(`[appt-remind] Cancellation skipped for ${scheduledServiceId} — visit restored mid-flight`);
+        reportOutcome(false, 'visit was restored mid-flight — no cancellation processed');
+        return record;
+      }
 
       // Send-once via the dedicated atomic claim. `cancelled` is NOT
       // usable as evidence — the status-sync trigger (20260720000000) sets
