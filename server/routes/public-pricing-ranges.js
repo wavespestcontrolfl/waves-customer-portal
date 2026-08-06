@@ -2,6 +2,17 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 
+// Coalesce concurrent syncs: a burst of requests landing just after the 60s
+// interval expires must share ONE in-flight syncConstantsFromDB call instead
+// of each launching the full multi-query sync against pricing_config.
+let inflightSync = null;
+function coalescedSync(syncConstantsFromDB) {
+  if (!inflightSync) {
+    inflightSync = syncConstantsFromDB(db).finally(() => { inflightSync = null; });
+  }
+  return inflightSync;
+}
+
 // GET / — Agent-readable public price ranges
 // Engine-derived low/high per service; no auth, no PII, no side effects.
 // Consumed by the Astro build for /pricing.md and available directly to
@@ -19,7 +30,7 @@ router.get('/', async (req, res, next) => {
     // with an uncacheable 503 instead.
     const { needsSync, syncConstantsFromDB } = require('../services/pricing-engine');
     if (needsSync()) {
-      const synced = await syncConstantsFromDB(db);
+      const synced = await coalescedSync(syncConstantsFromDB);
       if (!synced) {
         res.set('Cache-Control', 'no-store');
         return res.status(503).json({ error: 'pricing configuration temporarily unavailable' });

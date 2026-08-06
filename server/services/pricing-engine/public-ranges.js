@@ -266,17 +266,18 @@ function buildRows() {
     key: 'rodent_trapping',
     name: 'Rodent Trapping',
     unit: 'per program',
+    // The mid-program upgrade is an incremental delta, not a program price —
+    // it goes in the note (config-derived), never into the range.
     values: sweepValues(
       [
         { plan: 'standard' },
         { plan: 'unlimited' },
-        { plan: 'standard', upgradeToUnlimited: true },
         // Standard plan with included callbacks exhausted + billable extras.
         { plan: 'standard', callbacksUsed: 2, extraCallbackCount: 2 },
       ],
       (opts) => sp.priceRodentTrapping({}, opts),
       (r) => r.price),
-    notes: 'Standard (setup + 2 included callbacks), unlimited-callback plan, or mid-program upgrade to unlimited; emergency same-day service carries a surcharge quoted at booking.',
+    notes: `Standard (setup + 2 included callbacks) or unlimited-callback plan; existing Standard customers can upgrade to unlimited mid-program for $${Math.round(sp.priceRodentTrapping({}, { plan: 'standard', upgradeToUnlimited: true }).price)}. Emergency same-day service carries a surcharge quoted at booking.`,
   }));
 
   add('rodent_sanitation', () => rangeRow({
@@ -494,9 +495,10 @@ function buildRows() {
     values: sweepValues(
       [2000, 4000, 6000, 9000].flatMap((sq) =>
         ['bermuda', 'zoysia'].flatMap((grassType) =>
-          ['none', 'light'].map((cleanupLevel) => ({ sq, grassType, cleanupLevel })))),
-      ({ sq, grassType, cleanupLevel }) =>
-        sp.priceDethatching(sq, { grassType, cleanupLevel, thatchDepthInches: 1, access: 'easy' }),
+          ['none', 'light', 'moderate'].flatMap((cleanupLevel) =>
+            ['easy', 'moderate'].map((access) => ({ sq, grassType, cleanupLevel, access }))))),
+      ({ sq, grassType, cleanupLevel, access }) =>
+        sp.priceDethatching(sq, { grassType, cleanupLevel, thatchDepthInches: 1, access }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.estimatedPrice))),
     notes: 'Bermuda and Zoysia lawns; St. Augustine and heavy-debris jobs are quoted after inspection.',
   }));
