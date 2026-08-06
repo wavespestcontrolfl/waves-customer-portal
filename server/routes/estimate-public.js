@@ -484,6 +484,15 @@ function serviceFamilyKeyForAdoption(value) {
   if (raw.includes('palm_injection') || /\bpalms?\b/.test(raw.replace(/[_-]+/g, ' '))) {
     return 'palm_injection';
   }
+  // Commercial stays a DISTINCT family (codex #3228 r5): the seeder's
+  // generic lawn/tree branches run before any commercial distinction, so
+  // "Commercial Lawn" would collapse into residential lawn_care and a
+  // residential visit could suppress the commercial manual-scheduling path
+  // (or vice versa). recurringServiceKey already keeps commercial_* keys
+  // separate — delegate commercial names to it.
+  if (raw.includes('commercial')) {
+    return recurringServiceKey({ name: raw }) || null;
+  }
   // The CANONICAL scheduled-row classifier (recurring-appointment-seeder), on
   // BOTH the estimate's services and the candidate rows — the duplicate-series
   // guard and follow-up seeding bucket by the same function, so "may this row
@@ -506,22 +515,33 @@ function serviceFamilyKeyForAdoption(value) {
 // customer-wide fallback in findLinkedUpcomingAppointment). Derived from the
 // same acceptance lists the accept handler schedules from, so "what we'd
 // book" and "what an existing row may replace" can never disagree.
-function estimateFamilyKeysForAdoption(estData, { serviceMode = 'recurring' } = {}) {
+function estimateFamilyKeysForAdoption(estData, { serviceMode, serviceModes } = {}) {
   const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData || {});
   // Scoped to the accepted service mode (codex #3228 r4): a mixed estimate
   // (recurring pest + one-time Bora-Care) must not let a one-time-family
   // appointment stand in for the RECURRING plan's first visit — acceptance
   // would treat the adopted row as the recurring reservation and stamp the
-  // recurring first-application price onto it. The /data contract sites pass
-  // the estimate's default mode; the accept path passes the mode the
-  // customer actually selected, so the accept-time revalidation can reject
-  // an adoption the contract offered under the other mode (409 → re-pick).
-  const list = serviceMode === 'one_time' ? oneTimeList : recurringSvcList;
-  return new Set(
-    (list || [])
-      .map((svc) => serviceFamilyKeyForAdoption(svc))
-      .filter(Boolean),
-  );
+  // recurring first-application price onto it.
+  //
+  // MULTIPLE modes intersect (codex #3228 r5 P1): the /data contract is
+  // built once, but a mixed estimate lets the customer toggle modes AFTER
+  // the contract rendered — an existing_appointment contract valid only
+  // under the default mode dead-ends the alternate mode client-side (the
+  // accept 409s while the picker stays hidden). Contract sites therefore
+  // pass every mode the customer can select and only a row adoptable under
+  // ALL of them is offered; the accept path passes the single selected mode.
+  const modes = (Array.isArray(serviceModes) && serviceModes.length > 0)
+    ? serviceModes
+    : [serviceMode || 'recurring'];
+  const keySets = modes.map((mode) => {
+    const list = mode === 'one_time' ? oneTimeList : recurringSvcList;
+    return new Set(
+      (list || [])
+        .map((svc) => serviceFamilyKeyForAdoption(svc))
+        .filter(Boolean),
+    );
+  });
+  return keySets.reduce((acc, set) => new Set([...acc].filter((k) => set.has(k))));
 }
 
 // Whether an existing scheduled_services row belongs to one of the estimate's
@@ -529,7 +549,16 @@ function estimateFamilyKeysForAdoption(estData, { serviceMode = 'recurring' } = 
 // (generic assessment shells, blank types) never match — adopting them would
 // re-create the cross-family clobber this guard exists to prevent.
 function appointmentMatchesEstimateFamily(row = {}, familyKeys = new Set()) {
-  const key = serviceFamilyKeyForAdoption({ service_type: row.service_type });
+  // Catalog identity first (codex #3228 r5): a stale service_type label
+  // ("Tree & Shrub Care" on a row whose service_id links palm_injection)
+  // must classify by what the row actually IS — the same catalog-first rule
+  // waveguard-existing-services applies. service_type remains the fallback
+  // for unlinked legacy rows.
+  const key = serviceFamilyKeyForAdoption({
+    service: row.catalog_service_key || null,
+    name: row.catalog_service_name || null,
+    service_type: row.service_type,
+  });
   return !!key && familyKeys.has(key);
 }
 
@@ -541,27 +570,31 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   const today = etDateString();
   if (!linkedId && !estimate.id) return null;
 
+  // Column refs are table-qualified: the customer-wide fallback left-joins
+  // `services` for catalog identity (codex #3228 r5), and unqualified `id`
+  // in ORDER BY would be ambiguous on that query.
   const baseQuery = () => conn('scheduled_services')
-    .whereIn('status', ['pending', 'confirmed'])
-    .where('scheduled_date', '>=', today)
+    .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+    .where('scheduled_services.scheduled_date', '>=', today)
     .where((builder) => {
       if (estimate.customer_id) {
-        builder.whereNull('customer_id').orWhere('customer_id', estimate.customer_id);
+        builder.whereNull('scheduled_services.customer_id')
+          .orWhere('scheduled_services.customer_id', estimate.customer_id);
       } else {
-        builder.whereNull('customer_id');
+        builder.whereNull('scheduled_services.customer_id');
       }
     })
     .andWhere((builder) => {
-      builder.whereNull('reservation_expires_at')
-        .orWhereRaw('reservation_expires_at > NOW()');
+      builder.whereNull('scheduled_services.reservation_expires_at')
+        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
     })
-    .orderBy('scheduled_date', 'asc')
-    .orderBy('window_start', 'asc')
+    .orderBy('scheduled_services.scheduled_date', 'asc')
+    .orderBy('scheduled_services.window_start', 'asc')
     // Unique final key: scheduled_date + window_start is not a total order
     // (bundled/multi-property visits tie), and the fallback below paginates —
     // without a stable tiebreaker LIMIT/OFFSET pages can repeat or skip tied
     // rows and miss a same-family appointment (codex #3228 r2).
-    .orderBy('id', 'asc');
+    .orderBy('scheduled_services.id', 'asc');
 
   const q = baseQuery()
     .where((builder) => {
@@ -592,7 +625,10 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // cross-family accepts fall through to the standard slot pick.
   if (!row && estimate.customer_id
     && featureGates.isEnabled('estimateExistingApptCustomerWide')) {
-    const familyKeys = estimateFamilyKeysForAdoption(data, { serviceMode: opts.serviceMode });
+    const familyKeys = estimateFamilyKeysForAdoption(data, {
+      serviceMode: opts.serviceMode,
+      serviceModes: opts.serviceModes,
+    });
     if (familyKeys.size > 0) {
       // Page through the candidate list until a same-family row appears — a
       // fixed pre-filter LIMIT would hide a valid later appointment behind a
@@ -604,8 +640,16 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
         const cw = baseQuery()
           .where('customer_id', estimate.customer_id)
           .whereNull('source_estimate_id')
-          .whereNull('reservation_expires_at');
-        if (requestedId) cw.where('id', requestedId);
+          .whereNull('reservation_expires_at')
+          // Candidate rows carry their catalog identity so classification
+          // survives stale service_type labels (codex #3228 r5).
+          .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+          .select(
+            'scheduled_services.*',
+            'services.service_key as catalog_service_key',
+            'services.name as catalog_service_name',
+          );
+        if (requestedId) cw.where('scheduled_services.id', requestedId);
         const candidates = await cw.limit(CANDIDATE_PAGE_SIZE).offset(offset);
         if (!Array.isArray(candidates) || candidates.length === 0) break;
         row = candidates.find(
@@ -7636,7 +7680,7 @@ async function handleEstimateView(req, res, next) {
     }
 
     const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
-      serviceMode: defaultServiceModeForEstimate(estData, estimate),
+      serviceModes: adoptionServiceModesForContract(estimate, estData),
     });
     // Resolved ONCE for this request and handed to every consumer below (the
     // bundle's flags, the hero fork) — a second lookup could answer
@@ -12743,6 +12787,17 @@ function resolveEstimateInvoiceMode(estimate = {}, estData = null) {
 
 function defaultServiceModeForEstimate(estData, estimate = {}) {
   return isStructuralOneTimeOnlyEstimate(estData, estimate) ? 'one_time' : 'recurring';
+}
+
+// Every service mode the customer can select on the public estimate page.
+// The /data acceptance contract is built ONCE, so an existing-appointment
+// offer must hold under all of them — a contract valid only under the
+// default mode dead-ends the alternate mode client-side (codex #3228 r5:
+// the accept 409s while the slot picker stays hidden).
+function adoptionServiceModesForContract(estimate = {}, estData = null) {
+  const def = defaultServiceModeForEstimate(estData, estimate);
+  const canToggleOneTime = !!(estimate.show_one_time_option || estimate.showOneTimeOption);
+  return def === 'recurring' && canToggleOneTime ? ['recurring', 'one_time'] : [def];
 }
 
 function shouldPersistPestOnlyRecurringChoice(estimate = {}, estData = {}) {
@@ -19022,7 +19077,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     const trenchingReviewBeforeBooking = !quoteRequirement.quoteRequired
       && estimateTrenchingReviewRequired(estimateDataForIntelligence);
     const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence, {
-      serviceMode: defaultServiceMode,
+      serviceModes: adoptionServiceModesForContract(estimate, estimateDataForIntelligence),
     });
     // Narrow low-confidence commercial recurring estimate (the population whose
     // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at

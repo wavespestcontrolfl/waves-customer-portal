@@ -242,6 +242,95 @@ describe('family-scoped existing-appointment adoption', () => {
     )).toBe(true);
   });
 
+  test('stale service_type labels classify by catalog identity (codex r5)', () => {
+    const familyKeys = estimateFamilyKeysForAdoption(treeShrubEstimateData);
+    // Row labeled "Tree & Shrub Care" but actually a palm program per its
+    // catalog link — must NOT be adopted by a T&S estimate.
+    expect(appointmentMatchesEstimateFamily({
+      service_type: 'Tree & Shrub Care',
+      catalog_service_key: 'palm_injection',
+      catalog_service_name: 'Palm Tree Injections',
+    }, familyKeys)).toBe(false);
+    // Catalog identity also rescues rows the label alone would misfile.
+    expect(appointmentMatchesEstimateFamily({
+      service_type: 'Recurring Care Program',
+      catalog_service_key: 'tree_shrub_program',
+      catalog_service_name: 'Bi-Monthly Tree & Shrub Care Service',
+    }, familyKeys)).toBe(true);
+  });
+
+  test('commercial families never cross-match residential (codex r5)', () => {
+    // Residential lawn estimate vs a commercial lawn visit: distinct keys.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Commercial Lawn Treatment Program' },
+      new Set(['lawn_care']),
+    )).toBe(false);
+    // Commercial-to-commercial still matches (both sides key commercial_*).
+    const commercialData = {
+      result: {
+        recurring: {
+          services: [{
+            name: 'Commercial Lawn Treatment Program',
+            selected: true,
+            isSelected: true,
+          }],
+        },
+      },
+    };
+    const commercialKeys = estimateFamilyKeysForAdoption(commercialData);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Commercial Lawn Treatment Program' },
+      commercialKeys,
+    )).toBe(true);
+  });
+
+  test('contract-time adoption intersects every selectable mode (codex r5 P1)', () => {
+    const mixedData = {
+      result: {
+        recurring: {
+          services: [{
+            name: 'Quarterly Pest Control Service',
+            service: 'pest_control',
+            frequency: 'quarterly',
+            selected: true,
+            isSelected: true,
+          }],
+        },
+        oneTime: {
+          items: [{
+            name: 'Bora-Care Termite Treatment',
+            service: 'termite_treatment',
+            price: 1200,
+          }],
+        },
+      },
+    };
+    // Cross-family modes: nothing is adoptable under BOTH → contract falls
+    // to the slot picker, which works for either mode.
+    expect(estimateFamilyKeysForAdoption(mixedData, {
+      serviceModes: ['recurring', 'one_time'],
+    }).size).toBe(0);
+    // Same-family modes (pest plan with a pest one-time choice) still adopt.
+    const pestBothModes = {
+      result: {
+        recurring: {
+          services: [{
+            name: 'Quarterly Pest Control Service',
+            service: 'pest_control',
+            selected: true,
+            isSelected: true,
+          }],
+        },
+        oneTime: {
+          items: [{ name: 'One-Time Pest Control', service: 'pest_control', price: 150 }],
+        },
+      },
+    };
+    expect([...estimateFamilyKeysForAdoption(pestBothModes, {
+      serviceModes: ['recurring', 'one_time'],
+    })]).toEqual(['pest_control']);
+  });
+
   test('an estimate with no resolvable services offers no adoption at all', () => {
     expect(estimateFamilyKeysForAdoption(null).size).toBe(0);
     expect(estimateFamilyKeysForAdoption({}).size).toBe(0);

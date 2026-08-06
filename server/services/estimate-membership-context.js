@@ -40,6 +40,7 @@ const { determineWaveGuardTier } = require('./pricing-engine/discount-engine');
 const {
   toQualifyingKey,
   toQualifyingKeys,
+  qualifyingKeysForRow,
   loadActiveRecurringServiceRows,
   loadExistingRecurringQualifyingRows,
 } = require('./waveguard-existing-services');
@@ -588,7 +589,13 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
       // membership and cross-sell purposes. A scalar toQualifyingKey call
       // keeps only the first match (for example pest from "Pest + Lawn"),
       // which makes the frozen snapshot disagree with Agent pricing.
-      const componentKeys = toQualifyingKeys(row.service_type);
+      // Catalog-authoritative reducer (codex #3228 r5): the loader returns
+      // rows ENRICHED with their catalog identity, and the converter's
+      // combined-tier activation reduces through qualifyingKeysForRow — a
+      // stale text label ("Pest Control" linked to lawn_care_monthly) must
+      // produce the same family here, or the displayed tier disagrees with
+      // the activated tier.
+      const componentKeys = qualifyingKeysForRow(row);
       for (const key of componentKeys) {
         if (!existingByKey.has(key)) existingByKey.set(key, []);
         existingByKey.get(key).push(row);

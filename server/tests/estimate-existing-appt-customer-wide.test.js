@@ -21,7 +21,7 @@ function makeFakeConn(resultsByQuery) {
       return q;
     };
     const q = {};
-    ['whereIn', 'where', 'andWhere', 'orWhere', 'whereNull', 'orWhereRaw', 'orderBy', 'limit', 'offset'].forEach((m) => {
+    ['whereIn', 'where', 'andWhere', 'orWhere', 'whereNull', 'orWhereRaw', 'orderBy', 'limit', 'offset', 'leftJoin', 'select'].forEach((m) => {
       q[m] = record(m);
     });
     q.first = async () => {
@@ -133,9 +133,13 @@ describe('findLinkedUpcomingAppointment — customer-wide fallback (gated)', () 
     expect(nullChecks).toEqual(
       expect.arrayContaining(['source_estimate_id', 'reservation_expires_at'])
     );
-    // Same upcoming/status guards as the linked query.
+    // Same upcoming/status guards as the linked query (columns qualified —
+    // the fallback left-joins `services` for catalog identity).
     expect(clauseArgs(cw, 'whereIn')).toEqual(
-      expect.arrayContaining([['status', ['pending', 'confirmed']]])
+      expect.arrayContaining([['scheduled_services.status', ['pending', 'confirmed']]])
+    );
+    expect(clauseArgs(cw, 'leftJoin')).toEqual(
+      expect.arrayContaining([['services', 'services.id', 'scheduled_services.service_id']])
     );
   });
 
@@ -185,12 +189,13 @@ describe('findLinkedUpcomingAppointment — customer-wide fallback (gated)', () 
       appointmentId: 'ss-anywhere',
     });
     expect(row).toEqual(CW_ROW);
-    // Both queries pin the requested id.
+    // Both queries pin the requested id (the fallback qualifies its column —
+    // it joins `services`, where a bare `id` would be ambiguous).
     expect(clauseArgs(conn.queries[0], 'where')).toEqual(
       expect.arrayContaining([['id', 'ss-anywhere']])
     );
     expect(clauseArgs(conn.queries[1], 'where')).toEqual(
-      expect.arrayContaining([['id', 'ss-anywhere']])
+      expect.arrayContaining([['scheduled_services.id', 'ss-anywhere']])
     );
   });
 

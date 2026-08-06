@@ -272,6 +272,7 @@ module.exports = {
   toQualifyingKeys,
   loadActiveRecurringServiceRows,
   loadExistingRecurringQualifyingRows,
+  qualifyingKeysForRow,
   qualifyingKeysFromRows,
   loadExistingQualifyingServiceKeys,
   isMembershipCustomerRow,
