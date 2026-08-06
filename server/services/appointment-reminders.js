@@ -760,6 +760,11 @@ async function isLandline(customerId, phone) {
 // ── Send SMS with landline guard ──
 
 async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}, preDispatchCheck = null, sendOutcome = null) {
+  // Per-contact phase state (codex r19): dispatchStarted must reflect THIS
+  // attempt only — a prior contact's handoff must not classify a later
+  // contact's pre-dispatch throw as uncertain. (retryable/dispatchUncertain
+  // stay sticky across the loop by design.)
+  if (sendOutcome && typeof sendOutcome === 'object') sendOutcome.dispatchStarted = false;
   if (!body) {
     // A null render is a transient failure (template lookup catch returns
     // null) — callers with a durable claim must keep it for the sweep
@@ -2325,16 +2330,19 @@ const AppointmentReminders = {
           .where('cancellation_notice_at', claimToken)
           .update({ updated_at: new Date() });
       } else if (!sendNotification) {
-        // Suppression claims terminally IN ONE atomic update (codex r5):
-        // a pending-then-suppress two-step could crash between statements
-        // and leave a pending lease the sweep would later SEND against the
-        // caller's explicit don't-text intent.
+        // Suppression claims terminally IN ONE atomic update (codex r5),
+        // with the same singleton-only adoption guards as the notify path
+        // (codex r19): a shared series token is the series/sweep's — a
+        // single-visit suppress must not swallow the whole group's notice.
         noticeToken = new Date();
         claimed = await db('appointment_reminders')
           .where({ id: record.id })
           .where(function claimable() {
             this.whereNull('cancellation_notice_at')
-              .orWhereIn('cancellation_notice_state', ['pending', 'pending_notify']);
+              .orWhere(function singletonPending() {
+                this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                  .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
+              });
           })
           .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'suppressed', updated_at: noticeToken });
       } else {
@@ -2794,8 +2802,12 @@ const AppointmentReminders = {
               // acceptance still proves THIS group's send (codex r18):
               // same customer, accepted at/after the group claim.
               .orWhere(function customerScoped() {
+                // Restored-representative audits only (codex r19): the
+                // visit must be LIVE again — an audit linked to a
+                // still-cancelled other visit is that visit's own notice,
+                // not this group's.
                 this.whereRaw(
-                  'appointment_id IN (SELECT ss3.id::text FROM scheduled_services ss3 WHERE ss3.customer_id = ?)',
+                  "appointment_id IN (SELECT ss3.id::text FROM scheduled_services ss3 WHERE ss3.customer_id = ? AND ss3.status <> 'cancelled')",
                   [seed.customer_id],
                 ).where('sent_at', '>=', seed.claim_at);
               });
