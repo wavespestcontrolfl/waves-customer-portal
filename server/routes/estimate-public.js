@@ -9765,11 +9765,13 @@ router.put('/:token/accept', async (req, res, next) => {
           autoSendInvoice: false,
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
-          // Genuine adoption (a PRE-EXISTING appointment, not a reservation
-          // hold) = same-family re-quote — the converter's add-on rate sum
-          // must not run (codex #3241 r4).
-          adoptedExistingAppointment: !!(existingAppointmentRow
-            && !isReservationHeldAppointment(existingAppointmentRow)),
+          // Genuinely ADOPTED pre-existing appointment (not a reservation
+          // hold): the converter's add-on classification re-admits it BY ID
+          // so it stands on its own billed-plan evidence (codex #3241 r4/r5).
+          adoptedExistingAppointmentId: (existingAppointmentRow
+            && !isReservationHeldAppointment(existingAppointmentRow))
+            ? existingAppointmentRow.id
+            : null,
         });
         if (!annualPrepayConversionResult?.draftInvoiceId) {
           throw new Error('Annual prepay invoice was not created');
@@ -9819,13 +9821,16 @@ router.put('/:token/accept', async (req, res, next) => {
           skipMembershipEmail: true,
           deferFollowUpReminderRegistration: true,
           deferCommercialScheduleNotification: true,
-          // Genuine adoption (a PRE-EXISTING appointment, not a reservation
-          // hold) = same-family re-quote — the converter's add-on rate sum
-          // must not run (codex #3241 r4: adopting the customer's ONLY row
-          // of that plan hides it from the other-plans query and the accept
-          // would double-count the plan being re-priced).
-          adoptedExistingAppointment: !!(existingAppointmentRow
-            && !isReservationHeldAppointment(existingAppointmentRow)),
+          // Genuinely ADOPTED pre-existing appointment (not a reservation
+          // hold): the converter's add-on classification re-admits it BY ID
+          // — its own is_recurring/family is the billed-plan evidence, so a
+          // re-priced plan's only row still forces replace (codex r4) while
+          // an adopted ad-hoc visit doesn't block a true add-on's sum
+          // (codex r5).
+          adoptedExistingAppointmentId: (existingAppointmentRow
+            && !isReservationHeldAppointment(existingAppointmentRow))
+            ? existingAppointmentRow.id
+            : null,
         });
         // Mint the standard setup/first-application invoice on THIS
         // transaction — the same invoice the converter's standard branch

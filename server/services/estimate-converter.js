@@ -523,17 +523,8 @@ function hasWaveGuardSetupService(services = []) {
 // re-signup's stale rate must never be summed back in.
 async function addOnPreservedMonthlyRateBase({
   database, estimateId, estimate, estimateData, customer,
-  adoptedExistingAppointment = false,
+  adoptedExistingAppointmentId = null,
 } = {}) {
-  // A genuine adoption accept (the route adopted a PRE-EXISTING appointment
-  // — not a reservation hold) is a same-family re-quote by definition: the
-  // #3228 adoption gate only offers same-family rows. Replace semantics,
-  // always (codex #3241 r4 P1) — without this, adopting the customer's ONLY
-  // row of that plan removes it from the other-plans query below (it now
-  // carries this estimate's source_estimate_id) and the accept would read
-  // as disjoint and SUM the old rate — double-counting the very plan being
-  // re-priced.
-  if (adoptedExistingAppointment === true) return 0;
   const existingMonthlyRate = Number(customer?.monthly_rate);
   if (!['active_customer', 'won', 'at_risk'].includes(customer?.pipeline_stage)
     || !Number.isFinite(existingMonthlyRate) || !(existingMonthlyRate > 0)) {
@@ -566,16 +557,28 @@ async function addOnPreservedMonthlyRateBase({
         .filter(Boolean),
     );
     if (familyKeys.size === 0) return 0;
-    // The customer's OTHER plans: future recurring rows not sourced from
-    // THIS estimate. The adoption path has already stamped source_estimate_id
-    // on an adopted (same-family) row inside this transaction, but that
-    // row's family would match familyKeys anyway; the exclusion just keeps
-    // this accept's own rows out. Callbacks never represent a plan.
+    // The customer's BILLED plan rows: live recurring rows, using the SAME
+    // coverage semantics as loadActiveRecurringServiceRows (waveguard-
+    // existing-services): NOT IN TERMINAL_STATUSES and NO future-only date
+    // cutoff (codex #3241 r5 — a visit still en_route/on_site across ET
+    // midnight is the customer's plan all the same). is_recurring=true is
+    // the billed-plan evidence: ad-hoc one-time bookings never contribute
+    // to monthly_rate. Callbacks never represent a plan.
+    //
+    // Rows sourced from THIS estimate are excluded — the picker path's
+    // committed reservation row is this accept's OWN new booking — EXCEPT
+    // the genuinely ADOPTED pre-existing appointment (codex r4/r5): it
+    // carries this estimate's source_estimate_id since the adoption stamp,
+    // but it existed before this accept, so it re-enters BY ID and stands
+    // on its own evidence — a billed-plan (is_recurring) same-family row
+    // forces replace, while an adopted ad-hoc visit (is_recurring=false,
+    // filtered here) proves nothing and a disjoint billed plan still sums.
     // Savepoint-confined (codex #3241 r1, mirroring the prior-services
     // lookup): a SQL error on the caller's accept transaction would abort
     // the whole transaction — the catch below could then only return 0
     // while the customer update still failed, turning this optional lookup
     // into an acceptance-killer instead of the advertised replace fallback.
+    const { TERMINAL_STATUSES } = require('./waveguard-existing-services');
     const otherPlanRows = await database.transaction((sp) => sp('scheduled_services')
       .leftJoin('services', 'scheduled_services.service_id', 'services.id')
       .select(
@@ -585,16 +588,16 @@ async function addOnPreservedMonthlyRateBase({
         'services.name as catalog_service_name',
       )
       .where('scheduled_services.customer_id', customer.id)
-      // Every nonterminal status (codex #3241 r3): a customer whose only
-      // live plan row is currently en_route/on_site (annual visit, no
-      // future child seeded yet) still HAS that plan — same status set the
-      // reminder machinery treats as live.
-      .whereIn('scheduled_services.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
-      .where('scheduled_services.scheduled_date', '>=', etDateString())
+      .whereNotIn('scheduled_services.status', TERMINAL_STATUSES)
       .where('scheduled_services.is_recurring', true)
-      .where((builder) => builder
-        .whereNull('scheduled_services.source_estimate_id')
-        .orWhereNot('scheduled_services.source_estimate_id', estimateId)));
+      .where((builder) => {
+        builder
+          .whereNull('scheduled_services.source_estimate_id')
+          .orWhereNot('scheduled_services.source_estimate_id', estimateId);
+        if (adoptedExistingAppointmentId) {
+          builder.orWhere('scheduled_services.id', adoptedExistingAppointmentId);
+        }
+      }));
     const planRows = (Array.isArray(otherPlanRows) ? otherPlanRows : [])
       .filter((row) => row && row.is_callback !== true);
     if (planRows.length === 0) return 0;
@@ -2049,7 +2052,7 @@ const EstimateConverter = {
       ? 0
       : await addOnPreservedMonthlyRateBase({
         database, estimateId, estimate, estimateData, customer,
-        adoptedExistingAppointment: opts.adoptedExistingAppointment === true,
+        adoptedExistingAppointmentId: opts.adoptedExistingAppointmentId || null,
       });
     // Provisional figure for the audit outputs below — the WRITE itself is
     // an atomic in-database increment (see customerUpdates), and the actual

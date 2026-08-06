@@ -324,15 +324,22 @@ describe('pricingBundleLacksManualDiscountNetting', () => {
 // Chainable fake knex connection (pattern from
 // estimate-existing-appt-customer-wide.test.js): thenable builder resolving
 // the queued row list, with the nested where-builder the query composes.
+// Records every clause (codex r5: no-op wheres cannot exercise the
+// predicates) so tests can assert WHAT the query filtered on, mirroring the
+// estimate-existing-appt-customer-wide fake.
 function makeFakeConn(rows, { throwOnQuery = false } = {}) {
+  const queries = [];
   const conn = () => {
     if (throwOnQuery) throw new Error('db unavailable');
+    const rec = { clauses: [] };
+    queries.push(rec);
     const q = {};
-    const record = () => (...args) => {
-      if (typeof args[0] === 'function') args[0](nestedBuilder());
+    const record = (method) => (...args) => {
+      rec.clauses.push([method, args]);
+      if (typeof args[0] === 'function') args[0](nestedBuilder(rec));
       return q;
     };
-    ['whereIn', 'where', 'andWhere', 'whereNull', 'orderBy', 'leftJoin', 'select'].forEach((m) => {
+    ['whereIn', 'whereNotIn', 'where', 'andWhere', 'whereNull', 'orderBy', 'leftJoin', 'select'].forEach((m) => {
       q[m] = record(m);
     });
     q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
@@ -341,18 +348,24 @@ function makeFakeConn(rows, { throwOnQuery = false } = {}) {
   // The lookup is savepoint-confined (codex r1 P2) — mirror knex's
   // trx.transaction(fn) shape by handing the callback the same conn.
   conn.transaction = async (fn) => fn(conn);
+  conn.queries = queries;
   return conn;
 }
 
-function nestedBuilder() {
+function nestedBuilder(rec) {
   const b = {};
   ['where', 'orWhere', 'whereNull', 'orWhereNull', 'whereNot', 'orWhereNot'].forEach((m) => {
     b[m] = (...args) => {
-      if (typeof args[0] === 'function') args[0](nestedBuilder());
+      rec.clauses.push([`nested.${m}`, args]);
+      if (typeof args[0] === 'function') args[0](nestedBuilder(rec));
       return b;
     };
   });
   return b;
+}
+
+function allClauses(conn) {
+  return conn.queries.flatMap((rec) => rec.clauses);
 }
 
 const TS_ADDON_ESTIMATE = { id: 'est-addon', customer_id: 'cust-1' };
@@ -578,17 +591,40 @@ describe('addOnPreservedMonthlyRateBase', () => {
     })).resolves.toBe(0);
   });
 
-  test('a genuine adoption accept always keeps replace semantics (codex r4)', async () => {
-    // Adopting the customer's ONLY row of a plan stamps it with this
-    // estimate and hides it from the other-plans query — the flag from the
-    // accept route short-circuits before any classification.
+  test('an adopted billed-plan row re-enters BY ID and forces replace on a same-family re-quote (codex r4/r5)', async () => {
+    // The adopted row carries this estimate's source_estimate_id, so the
+    // linked-row exclusion would hide it — the id re-admission puts its own
+    // family evidence back on the table.
+    const conn = makeFakeConn([TS_PLAN_ROW]);
     await expect(addOnPreservedMonthlyRateBase({
-      database: makeFakeConn([PEST_PLAN_ROW]),
+      database: conn,
       estimateId: 'est-addon',
       estimate: TS_ADDON_ESTIMATE,
       estimateData: TS_ADDON_EST_DATA,
       customer: LIVE_CUSTOMER,
-      adoptedExistingAppointment: true,
+      adoptedExistingAppointmentId: 'ss-adopted',
     })).resolves.toBe(0);
+    // The query really re-admits the adopted id.
+    expect(allClauses(conn)).toContainEqual(['nested.orWhere', ['scheduled_services.id', 'ss-adopted']]);
+  });
+
+  test('the plan-row query uses active-coverage semantics: TERMINAL_STATUSES exclusion, no date cutoff (codex r5)', async () => {
+    const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
+    const conn = makeFakeConn([PEST_PLAN_ROW]);
+    await expect(addOnPreservedMonthlyRateBase({
+      database: conn,
+      estimateId: 'est-addon',
+      estimate: TS_ADDON_ESTIMATE,
+      estimateData: TS_ADDON_EST_DATA,
+      customer: LIVE_CUSTOMER,
+    })).resolves.toBe(31.81);
+    const clauses = allClauses(conn);
+    // Same terminal-status set as loadActiveRecurringServiceRows.
+    expect(clauses).toContainEqual(['whereNotIn', ['scheduled_services.status', TERMINAL_STATUSES]]);
+    // No future-only cutoff — an overdue en_route/on_site visit is still
+    // the customer's plan.
+    expect(clauses.some(([, args]) => String(args?.[0] ?? '').includes('scheduled_date'))).toBe(false);
+    // Billed-plan evidence only.
+    expect(clauses).toContainEqual(['where', ['scheduled_services.is_recurring', true]]);
   });
 });
