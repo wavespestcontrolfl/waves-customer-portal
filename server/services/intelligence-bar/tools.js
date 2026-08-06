@@ -1055,10 +1055,13 @@ async function updateCustomer(customerId, updates) {
         // needs only this lock: its claim probe runs under the same key.
       }
       await trx('customers').where('id', customerId).update(clean);
-      if (clean.monthly_rate !== undefined) {
-        // Blind rate writes invalidate per-family attribution — reset the
-        // plan-rate ledger to match the new scalar (codex #3245 r2;
-        // gate-aware error policy lives in the helper).
+      if (clean.monthly_rate !== undefined
+        && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
+          !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
+        // Only an ACTUAL rate change invalidates per-family attribution
+        // (codex #3245 r2/r6) — resetting on a same-value write would
+        // replace seeded components with an unattributed blob. Gate-aware
+        // error policy lives in the helper.
         await require('../plan-rate-ledger')
           .syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_update' });
       }
@@ -1189,12 +1192,26 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // One transaction for the scalar write AND every ledger reset (codex
     // #3245 r3): a partial failure must roll back all of it — otherwise
     // the scalars commit while failed/later customers keep stale
-    // components a subsequent accept could restore.
+    // components a subsequent accept could restore. Only customers whose
+    // rate ACTUALLY changes reset (codex r6): setting the same value a
+    // customer already has must not replace their family components with
+    // an unattributed blob.
     const count = await db.transaction(async (trx) => {
-      const updated = await trx('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
+      let rateChangedIds = [];
       if (clean.monthly_rate !== undefined) {
+        const beforeRows = await trx('customers')
+          .whereIn('id', customerIds)
+          .forUpdate()
+          .select('id', 'monthly_rate');
+        const newCents = Math.round((Number(clean.monthly_rate) || 0) * 100);
+        rateChangedIds = beforeRows
+          .filter((row) => Math.round((Number(row.monthly_rate) || 0) * 100) !== newCents)
+          .map((row) => row.id);
+      }
+      const updated = await trx('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
+      if (rateChangedIds.length) {
         const PlanRateLedger = require('../plan-rate-ledger');
-        for (const cid of customerIds) {
+        for (const cid of rateChangedIds) {
           await PlanRateLedger.syncScalarWriteToLedger(trx, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
       }
@@ -1246,8 +1263,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
           // updateCustomer.
         }
         await trx('customers').where('id', customerId).update({ ...clean, ...stageStamp });
-        if (clean.monthly_rate !== undefined) {
-          // Same ledger sync as the non-address bulk branch (codex #3245 r2).
+        if (clean.monthly_rate !== undefined
+          && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
+            !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
+          // Same changed-rate-only ledger sync as the other branches
+          // (codex #3245 r2/r6).
           await require('../plan-rate-ledger')
             .syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_bulk_update' });
         }

@@ -26,10 +26,25 @@
 //   notification tells the owner when that happened on a multi-plan
 //   customer).
 
+const crypto = require('crypto');
 const { isEnabled } = require('../config/feature-gates');
 const logger = require('./logger');
 
 const UNATTRIBUTED = 'unattributed';
+
+// The classifier deliberately preserves unknown service names as unbounded
+// slugs, but family_key is varchar(64) (codex #3245 r6) — an oversized key
+// would fail the authoritative upsert AFTER the ledger was cleared and
+// reintroduce whole-scalar replacement. Bound every key deterministically:
+// short keys pass through untouched; long ones become a stable
+// prefix + hash so the same service always maps to the same component and
+// prefix-based grouping (termite riders) keeps working.
+function boundedFamilyKey(family) {
+  const key = String(family || '');
+  if (key.length <= 64) return key;
+  const digest = crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
+  return `${key.slice(0, 47)}_${digest}`;
+}
 
 function roundMoney(value) {
   return Math.round(Number(value || 0) * 100) / 100;
@@ -103,7 +118,7 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
     return null;
   };
   const addLine = (line) => {
-    const family = serviceFamilyKeyForAdoption(line) || UNATTRIBUTED;
+    const family = boundedFamilyKey(serviceFamilyKeyForAdoption(line) || UNATTRIBUTED);
     const monthly = lineMonthly(line);
     if (monthly == null || monthly < 0) return null;
     if (monthly === 0) {
@@ -125,7 +140,7 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
   // distorts every proportionally-normalized sibling slice even though the
   // total still reconciles.
   for (const line of supplementalCompanionLines(estimateData)) {
-    const family = serviceFamilyKeyForAdoption(line) || UNATTRIBUTED;
+    const family = boundedFamilyKey(serviceFamilyKeyForAdoption(line) || UNATTRIBUTED);
     if (recurringFamilies.has(family)) continue;
     addLine(line);
   }
@@ -362,6 +377,7 @@ async function syncScalarWriteToLedger(database, customerId, rate, { source = 's
 module.exports = {
   UNATTRIBUTED,
   planRateLedgerEnabled,
+  boundedFamilyKey,
   estimateFamilySlices,
   loadComponents,
   applyAcceptToLedger,

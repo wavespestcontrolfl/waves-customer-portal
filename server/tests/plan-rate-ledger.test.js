@@ -349,6 +349,27 @@ describe('applyAcceptToLedger', () => {
   });
 });
 
+describe('codex r6 hardening', () => {
+  test('oversized classifier slugs map to a stable bounded key that fits varchar(64)', () => {
+    const { boundedFamilyKey } = require('../services/plan-rate-ledger');
+    // No family tokens anywhere — the classifier emits its full slug
+    // identity (92 chars), which must bound to the 64-char column.
+    const longName = 'Zanzibar Quilted Meridian Halcyon Zephyr Cadenza Marigold Sonata Vermillion Arpeggio Program';
+    const slug = longName.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    const bounded = boundedFamilyKey(slug);
+    expect(bounded.length).toBeLessThanOrEqual(64);
+    expect(boundedFamilyKey(slug)).toBe(bounded); // deterministic
+    expect(bounded.startsWith(slug.slice(0, 40))).toBe(true); // prefix preserved
+    expect(boundedFamilyKey('pest_control')).toBe('pest_control'); // short keys untouched
+    // Slicing an estimate with such a line stores the bounded key.
+    const slices = estimateFamilySlices({
+      estimateData: { result: { recurring: { services: [{ name: longName, mo: 20 }] } } },
+      monthlyRate: 20,
+    });
+    expect(slices[bounded]).toBe(20);
+  });
+});
+
 describe('codex r5 hardening', () => {
   test('annual-only engine rows (annual/ann, no monthly) still slice per family', () => {
     const slices = estimateFamilySlices({

@@ -36,10 +36,13 @@ const EXECUTE = process.argv.includes('--execute');
 // divergent classification.
 let serviceFamilyKeyForAdoption;
 let COMBINED_SERVICE_ROUTES;
+let boundedFamilyKey;
 try {
   ({ serviceFamilyKeyForAdoption } = require(path.join(__dirname, '..', '..', 'server', 'routes', 'estimate-public')));
   ({ COMBINED_SERVICE_ROUTES } = require(path.join(__dirname, '..', '..', 'server', 'services', 'estimate-converter')));
-  if (typeof serviceFamilyKeyForAdoption !== 'function' || !Array.isArray(COMBINED_SERVICE_ROUTES)) {
+  ({ boundedFamilyKey } = require(path.join(__dirname, '..', '..', 'server', 'services', 'plan-rate-ledger')));
+  if (typeof serviceFamilyKeyForAdoption !== 'function' || !Array.isArray(COMBINED_SERVICE_ROUTES)
+    || typeof boundedFamilyKey !== 'function') {
     throw new Error('classifier exports missing');
   }
 } catch (loadErr) {
@@ -48,11 +51,14 @@ try {
 }
 
 function familyFor(row) {
-  return serviceFamilyKeyForAdoption({
+  const family = serviceFamilyKeyForAdoption({
     service: row.catalog_service_key || null,
     name: row.catalog_service_name || null,
     service_type: row.service_type,
   });
+  // Same bounded representation the accept path stores (codex #3245 r6) —
+  // family_key is varchar(64) while classifier slugs are unbounded.
+  return family ? boundedFamilyKey(family) : family;
 }
 
 // A combined-series row (Pest+Termite quarterly, Lawn+Tree combo, …)
@@ -163,7 +169,10 @@ function isCombinedRow(row) {
           const seededFamilies = new Set(seededRows.map((r) => r.family_key));
           const componentSum = Math.round(seededRows
             .reduce((sum, r) => sum + Number(r.monthly_rate || 0), 0) * 100) / 100;
-          const sumMatches = Math.abs(componentSum - rate) <= 0.02;
+          // EXACT integer cents (codex #3245 r6): both figures are already
+          // currency-precision, so any difference is a real discrepancy the
+          // gate flip would bill — never tolerance it away.
+          const sumMatches = Math.round(componentSum * 100) === Math.round(rate * 100);
           const familiesCovered = [...families].every((f) => seededFamilies.has(f));
           if (sumMatches && familiesCovered && !hasCombinedRow && !unclassifiable) {
             alreadyComplete += 1;
