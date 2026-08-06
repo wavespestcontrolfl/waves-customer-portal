@@ -2950,20 +2950,18 @@ const AppointmentReminders = {
       // Repair pass (codex r22): a restoration whose in-trx marker clear
       // failed leaves a stale terminal marker on a LIVE visit — shed it
       // here so a later real cancellation notices normally.
-      // Driven from RECENT restorations (codex r35), not a scan of every
-      // historical terminal marker: the failure this repairs is an
-      // un-cancel whose in-trx marker clear was swallowed, and that
-      // restoration is a cancelled→live history row. 7 days of ticks is
-      // hundreds of repair chances before the bound ages one out.
+      // Driven from the LIVE-visit population (codex r35 perf, r46
+      // durability): a marker on a LIVE visit is the anomaly this
+      // repairs, and that population is small and bounded — unlike the
+      // ever-growing terminal-marker history (r35) or a time-bounded
+      // restoration window that a >7-day cron outage would out-age (r46).
+      // Eligibility persists until the stale marker is actually cleared.
       await db('appointment_reminders')
         .whereNotNull('cancellation_notice_state')
-        .whereIn('scheduled_service_id', function recentRestorations() {
-          this.select('h.job_id').from('job_status_history as h')
-            .where('h.from_status', 'cancelled')
-            .whereNot('h.to_status', 'cancelled')
-            .whereRaw("h.transitioned_at >= now() - interval '7 days'");
+        .whereIn('scheduled_service_id', function liveVisits() {
+          this.select('ss.id').from('scheduled_services as ss')
+            .whereIn('ss.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
         })
-        .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status IN ('pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'))")
         .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
 
       // Age-out runs regardless of the gate (r12): a notice older than
