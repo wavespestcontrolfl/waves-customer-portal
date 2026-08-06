@@ -1447,6 +1447,60 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan.skip).toBe('series_engaged');
   });
 
+  test('r14: walk-discovered openers prune linked seeds, declared follow-ups take the final cadence, absent primary keeps stamps distinct', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // ① Final links through a middle to the OLD program while the current
+    // program's declared initial is UNLINKED: the walk's bound must prune
+    // the linked old ancestor from the seeds too.
+    let mock = makeMock({
+      service_records: [{ id: 'sr-up', customer_id: 'up', scheduled_service_id: 'up-init', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Initial setup' } } }) }],
+      scheduled_services: [
+        { id: 'up-oldanc', customer_id: 'up', service_id: 'svc-trap', status: 'completed', scheduled_date: d(18), service_key: 'rodent_trapping' },
+        { id: 'up-init', customer_id: 'up', service_id: 'svc-trap', status: 'completed', scheduled_date: d(8), service_key: 'rodent_trapping' },
+        { id: 'up-mid', customer_id: 'up', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(4), service_key: 'rodent_trapping_followup', parent_service_id: 'up-oldanc' },
+        { id: 'up-fin', customer_id: 'up', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3, parent_service_id: 'up-mid' },
+      ],
+      review_sequences: [
+        { id: 'seq-up-oldanc', customer_id: 'up', scheduled_service_id: 'up-oldanc', status: 'completed' },
+        { id: 'seq-up-init', customer_id: 'up', scheduled_service_id: 'up-init', status: 'completed' },
+      ],
+    });
+    db.mockImplementation(mock);
+    const exempt = await ReviewService._seriesExemptSequenceIds('up', { scheduledServiceId: 'up-fin' });
+    expect(exempt).toContain('seq-up-init');
+    expect(exempt).not.toContain('seq-up-oldanc');
+
+    // ② A declared "Follow-up check" whose real prior fell outside the
+    // window still carries the final cadence, not another opener ask.
+    mock = makeMock({
+      service_records: [{ id: 'sr-fc', customer_id: 'fc2', scheduled_service_id: 'fc2-2', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Follow-up check' } } }) }],
+      scheduled_services: [
+        { id: 'fc2-1', customer_id: 'fc2', service_id: 'svc-trap', status: 'completed', scheduled_date: d(45), service_key: 'rodent_trapping' },
+        { id: 'fc2-2', customer_id: 'fc2', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'fc2', serviceRecordId: 'sr-fc' });
+    expect(plan.seriesFinal).toBe(true);
+    expect(plan.plan).toHaveLength(3);
+
+    // ③ A customer with NO primary address on file: a stamped visit never
+    // merges with an unstamped legacy visit.
+    mock = makeMock({
+      customers: [{ id: 'np2', first_name: 'Sky' }],
+      scheduled_services: [
+        { id: 'np2-1', customer_id: 'np2', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null },
+        { id: 'np2-2', customer_id: 'np2', service_id: 'svc-trap', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping', follow_up_interval_days: 3, property_id: null, service_address_line1: '55 Pine Rd', service_address_zip: '34275' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'np2', scheduledServiceId: 'np2-2' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);

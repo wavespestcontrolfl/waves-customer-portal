@@ -150,21 +150,28 @@ async function trappingPremiseMatcher(customerId, visit) {
   const primaryId = primary?.id || null;
   // Missing stamped units inherit the primary's unit before any conflict
   // decision (codex #3243 r12 P2) — phone extractions often omit line 2.
+  const { streetKey: streetKeyFn } = require("./customer-properties");
   const visitN = inheritReferenceUnit(visit, primaryStamp);
-  if (premiseStampConflicts(visitN, primaryStamp)) {
+  // The relaxed-requirements migration allows customers with NO primary
+  // street at all (codex #3243 r14 P2) — with no street identity to judge
+  // against, a stamped visit is an UNMATCHED premise, never mergeable with
+  // unstamped legacy rows.
+  const primaryHasStreet = !!streetKeyFn(primaryStamp.service_address_line1);
+  if (premiseStampConflicts(visitN, primaryStamp)
+    || (!primaryHasStreet && !!streetKeyFn(visitN?.service_address_line1))) {
     // The visit is a stamped UNMATCHED premise (a rental the property
     // table doesn't know): only rows stamped with the SAME address are
     // the same series — unstamped legacy rows are the primary, not it.
-    return (row) => {
-      const { streetKey } = require("./customer-properties");
-      return !!streetKey(row?.service_address_line1) && !premiseStampConflicts(row, visitN);
-    };
+    return (row) => !!streetKeyFn(row?.service_address_line1) && !premiseStampConflicts(row, visitN);
   }
   // The visit IS the primary premise: legacy NULL rows and rows carrying
   // the backfilled primary id match; a row stamped with a DIFFERENT
-  // address than the primary does not, whatever its property_id.
+  // address than the primary does not, whatever its property_id — and with
+  // NO primary street identity on file, a stamped row is uncertain and
+  // never merges into the unstamped premise.
   return (row) => {
     const rowN = inheritReferenceUnit(row, primaryStamp);
+    if (!primaryHasStreet && streetKeyFn(rowN?.service_address_line1)) return false;
     return !premiseStampConflicts(rowN, primaryStamp)
       && !premiseStampConflicts(rowN, visitN)
       && (row.property_id == null
@@ -754,6 +761,7 @@ const ReviewService = {
         let trapLaterLive = null;
         let trapLaterCompleted = null;
         let visitDeclaredInitial = false;
+        let visitDeclaredType = null;
         let trapEngaged = false;
         if (isTrappingSeries) {
           const intervalDays = Number(svc.follow_up_interval_days) > 0 ? Number(svc.follow_up_interval_days) : 15;
@@ -832,7 +840,8 @@ const ReviewService = {
           // wrongly linked to it — must not inherit its position.
           // trap_visit_type is REQUIRED on rodent_trapping reports and
           // frozen into the typed report snapshot.
-          visitDeclaredInitial = await this._isDeclaredInitialTrapVisit({ serviceRecordId, scheduledServiceId: svc.id });
+          visitDeclaredType = await this._declaredTrapVisitType({ serviceRecordId, scheduledServiceId: svc.id });
+          visitDeclaredInitial = visitDeclaredType === "initial";
           if (trapPrior && visitDeclaredInitial) {
             trapPrior = null;
           }
@@ -910,6 +919,17 @@ const ReviewService = {
           // Opener engagement stands the final cadence down (codex #3243
           // r11 P1) — computed once in the hoisted block.
           if (trapPrior && trapEngaged) return { skip: "series_engaged" };
+          // An explicit "Follow-up check" declaration is a position signal
+          // too (codex #3243 r14 P2): when the window missed the real prior
+          // (long gap, unrecoverable legacy history), the tech's own
+          // declaration says this is NOT an opener — a booked later check
+          // makes it a middle, otherwise it carries the final cadence
+          // (the exemption walk simply finds nothing when the opener is
+          // outside the window, so the cap counts normally).
+          if (!trapPrior && visitDeclaredType === "followup") {
+            if (trapLaterLive) return { skip: "multi_treatment_middle" };
+            return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true };
+          }
           return trapPrior
             ? { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true }
             : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
@@ -3241,7 +3261,11 @@ const ReviewService = {
    * combined visit). Absence or a parse failure falls back to inference —
    * the declaration is an override, not a gate.
    */
-  async _isDeclaredInitialTrapVisit({ serviceRecordId = null, scheduledServiceId = null } = {}) {
+  async _declaredTrapVisitType({ serviceRecordId = null, scheduledServiceId = null } = {}) {
+    // Returns 'initial' | 'followup' | null (codex #3243 r14 P2: the
+    // explicit "Follow-up check" declaration is a position signal too —
+    // collapsing it into "not declared" sent a duplicate opener ask when
+    // the window missed the real prior).
     // DB failures PROPAGATE (codex #3243 r13 P1): collapsing them into
     // "not declared" let a genuine new setup inherit the old program's
     // position — the resolver's retry/plan_resolution_failed path must see
@@ -3257,17 +3281,26 @@ const ReviewService = {
         .select("service_data")
         .first();
     }
-    if (!record?.service_data) return false;
+    if (!record?.service_data) return null;
     try {
       const data = typeof record.service_data === "string" ? JSON.parse(record.service_data) : record.service_data;
       const snapshots = [
         data?.typedReportSnapshot,
         ...(Array.isArray(data?.companionReportSnapshots) ? data.companionReportSnapshots : []),
       ];
-      return snapshots.some((snap) => String(snap?.values?.trap_visit_type || "").trim() === "Initial setup");
+      for (const snap of snapshots) {
+        const t = String(snap?.values?.trap_visit_type || "").trim();
+        if (t === "Initial setup") return "initial";
+        if (t === "Follow-up check") return "followup";
+      }
+      return null;
     } catch {
-      return false;
+      return null;
     }
+  },
+
+  async _isDeclaredInitialTrapVisit(args) {
+    return (await this._declaredTrapVisitType(args)) === "initial";
   },
 
   async _seriesExemptSequenceIds(customerId, { serviceRecordId = null, scheduledServiceId = null, strict = false } = {}) {
@@ -3358,7 +3391,8 @@ const ReviewService = {
           }
         }
         const keptAncestryIds = new Set(ancestryRows.map((r) => r.id));
-        const seedIds = new Set(sourceIds.filter((id) => keptAncestryIds.has(id) || !ancestorRows.some((r) => r.id === id)));
+        const ancestorById = new Map(ancestorRows.map((r) => [r.id, r]));
+        const seedIds = new Set(sourceIds.filter((id) => keptAncestryIds.has(id) || !ancestorById.has(id)));
         const queue = [visit, ...ancestryRows.filter((r) => r.scheduled_date != null)];
         // Exhaust the queue (codex #3243 r6 P2): a dequeue cap truncated
         // long chains — each cursor can enqueue several same-window
@@ -3414,7 +3448,18 @@ const ReviewService = {
             }
           }
         }
-        sourceIds = [...new Set([...seedIds, ...collectedRows.keys()])];
+        // Seeds re-filter against the FINAL bound (codex #3243 r14 P1): the
+        // walk can discover an UNLINKED declared opener after the seeds were
+        // fixed, and a linked old-program ancestor must not survive the
+        // union that pruned its walk-discovered twin. Ancestry ids without
+        // row data stay — unknown, not judged.
+        sourceIds = [...new Set([
+          ...[...seedIds].filter((id) => {
+            const row = ancestorById.get(id);
+            return !row || row.scheduled_date == null || afterBound(row);
+          }),
+          ...collectedRows.keys(),
+        ])];
       } else if (!sourceIds.length && visit.service_id) {
         // Same anchoring as the plan resolver (codex #3235 r10 P1): the
         // series' earlier visits, relative to THIS visit's date — never a
