@@ -761,6 +761,10 @@ async function isLandline(customerId, phone) {
 
 async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}, preDispatchCheck = null, sendOutcome = null) {
   if (!body) {
+    // A null render is a transient failure (template lookup catch returns
+    // null) — callers with a durable claim must keep it for the sweep
+    // rather than clearing the obligation (codex #3233 r12).
+    if (sendOutcome && typeof sendOutcome === 'object') sendOutcome.retryable = true;
     logger.warn(`[appt-remind] Empty SMS body for customer ${customerId}, skipping ${messageType}`);
     return false;
   }
@@ -2271,6 +2275,11 @@ const AppointmentReminders = {
       // provider acceptance) is reclaimable so the crash window cannot
       // recreate the silent-cancellation failure (r3); 'suppressed' and
       // 'sent' are terminal and never reclaimed.
+      // Captured BEFORE any claim/adoption rewrites it: the pre-existing
+      // token identifies this row's GROUP, so a sibling adoption can still
+      // recognize a series acceptance linked to the representative (r12).
+      const priorClaimToken = record.cancellation_notice_at || null;
+
       // options.claimToken = the caller already holds the durable claim
       // (job-status trx claim or the stale-claim sweep) — verify ownership
       // by the claim timestamp (fence token, codex r4) instead of
@@ -2351,7 +2360,18 @@ const AppointmentReminders = {
       // persist provider acceptance and die before finalizing — a
       // reclaimed/adopted lease must recognize that and finalize instead
       // of re-texting the customer.
-      if (await acceptedCancellationAudit()) {
+      const groupAccepted = async () => {
+        if (!priorClaimToken) return false;
+        return Boolean(await db('messaging_audit_log as ml')
+          .join('appointment_reminders as rep', db.raw('rep.scheduled_service_id::text = ml.appointment_id'))
+          .where('rep.customer_id', record.customer_id)
+          .where('rep.cancellation_notice_at', priorClaimToken)
+          .where('ml.purpose', 'appointment_cancellation')
+          .whereNotNull('ml.sent_at')
+          .whereRaw("ml.provider_message_id ~ '^(SM|MM)'")
+          .first('ml.id'));
+      };
+      if (await acceptedCancellationAudit() || await groupAccepted()) {
         await db('appointment_reminders')
           .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
           .where('cancellation_notice_at', noticeToken)
@@ -2620,6 +2640,15 @@ const AppointmentReminders = {
   // still none → terminal silent suppression. Fenced by the reclaim token.
   async sweepStaleCancellationClaims() {
     try {
+      // Age-out runs regardless of the gate (r12): a notice older than
+      // 72h is moot — texting "your visit was cancelled" days later is
+      // worse than silence, and claims born before a gate-off period must
+      // not replay on re-enable. Released to NULL so a future re-cancel
+      // evaluates fresh.
+      await db('appointment_reminders')
+        .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+        .where('cancellation_notice_at', '<', db.raw("now() - interval '72 hours'"))
+        .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
       const { isEnabled } = require('../config/feature-gates');
       if (!isEnabled('cancelNoticeHook')) return { swept: 0 };
       const stale = await db('appointment_reminders as ar')
@@ -2869,7 +2898,12 @@ const AppointmentReminders = {
               .first('id');
             const foreign = await db('appointment_reminders')
               .whereIn('scheduled_service_id', ids)
-              .whereNot('cancellation_notice_at', seriesToken)
+              .where(function notOurToken() {
+                this.whereNot('cancellation_notice_at', seriesToken)
+                  // A restored target's marker was cleared to NULL — the
+                  // series no longer describes reality (r12).
+                  .orWhereNull('cancellation_notice_at');
+              })
               .where(function foreignOwner() {
                 // A pending foreign claim = an adopter mid-send; a SENT
                 // row stamped after our claim = an adopter that already

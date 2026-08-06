@@ -126,6 +126,18 @@ const ADMIN_ROOM = 'dispatch:admins';
 const STALE_TECH_STATUS_MS = 5 * 60 * 1000;
 const CUSTOMER_ETA_TIMEOUT_MS = 750;
 
+// Strictly-increasing claim timestamps within this process — the sweep
+// groups series claims by (customer, exact token), and two independent
+// same-millisecond cancels must not read as one series (codex #3233 r12;
+// cross-process same-ms collision remains theoretical and its consequence
+// is only a combined-copy notice).
+let lastClaimMs = 0;
+function nextClaimTs() {
+  const now = Date.now();
+  lastClaimMs = now > lastClaimMs ? now : lastClaimMs + 1;
+  return new Date(lastClaimMs);
+}
+
 function customerRoom(customerId) {
   return `customer:${customerId}`;
 }
@@ -428,7 +440,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             // Series routes pass ONE shared token for every target so the
             // sweep sees a single group even if the process dies before
             // the post-commit series handler coalesces them (codex r10).
-            const claimTs = cancelNoticeToken instanceof Date ? cancelNoticeToken : new Date();
+            const claimTs = cancelNoticeToken instanceof Date ? cancelNoticeToken : nextClaimTs();
             // 'caller_suppress' = the route will suppress (operator chose
             // no-text / consolidated comms): finalize terminally NOW so a
             // crash before the route's own call cannot let the sweep text
@@ -439,9 +451,25 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             // crashes in its post-commit window, the sweep settles instead
             // — the obligation can no longer vanish. Only an explicit
             // suppress intent finalizes terminally here.
-            const targetState = (notifyCustomer === false || notifyCustomer === 'caller_suppress')
+            let targetState = (notifyCustomer === false || notifyCustomer === 'caller_suppress')
               ? 'suppressed'
               : (notifyCustomer === 'caller' ? 'pending_notify' : 'pending');
+            // Merged-slot survivor (codex r12): when the status-sync
+            // trigger promoted a sibling for the SAME customer/slot, the
+            // customer still has a live visit at that time — a
+            // cancellation text would be wrong. Suppress terminally.
+            if (targetState !== 'suppressed') {
+              const own = await sp('appointment_reminders')
+                .where({ scheduled_service_id: jobId })
+                .first('customer_id', 'appointment_time');
+              if (own) {
+                const survivor = await sp('appointment_reminders')
+                  .where({ customer_id: own.customer_id, appointment_time: own.appointment_time, cancelled: false })
+                  .whereNot('scheduled_service_id', jobId)
+                  .first('id');
+                if (survivor) targetState = 'suppressed';
+              }
+            }
             const claimedRows = await sp('appointment_reminders')
               .where({ scheduled_service_id: jobId })
               .where(function claimable() {
