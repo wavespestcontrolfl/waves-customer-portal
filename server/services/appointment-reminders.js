@@ -2625,6 +2625,12 @@ const AppointmentReminders = {
                 .where({ id: record.id })
                 .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
                 .where('cancellation_notice_at', noticeToken)
+                // Still-cancelled guard IN the stamp itself (codex r33):
+                // a restoration whose marker-clear failed (job-status
+                // catches that and commits the live status anyway) can
+                // land between the status read above and this update —
+                // the token alone would still match. Zero rows = abort.
+                .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
                 .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
               if (!stamped) {
                 return { ok: false, code: 'notice_claim_lost', reason: 'claim cleared before dispatch (restoration?)' };
