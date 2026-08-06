@@ -2067,7 +2067,7 @@ function initScheduledJobs() {
         if (result.skipped === true) {
           logger.info(`Pre-visit card invitations inert: ${result.reason}`);
         } else {
-          logger.info(`Pre-visit card invitations done: ${result.sent} sent, ${result.skipped} skipped of ${result.considered}`);
+          logger.info(`Pre-visit card invitations done: ${result.sent} sent, ${result.autoSecured} auto-secured, ${result.skipped} skipped of ${result.considered} (attempts ${result.attempts})`);
         }
       });
     } catch (err) {

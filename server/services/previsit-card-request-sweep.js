@@ -100,7 +100,12 @@ async function runSweep(dbh = db) {
     .whereIn('s.status', LIVE_VISIT_STATUSES)
     .whereBetween('s.scheduled_date', [todayEt, horizonEt])
     .whereNull('s.card_link_sent_at')
+    // Payer-billed visits resolve by PRECEDENCE (payer.js: per-job
+    // payer_id ?? customers.payer_id unless the visit pins self-pay) — the
+    // funnel would skip them as payer_billed AFTER the attempt burned the
+    // cap (codex r4), so mirror the resolution here.
     .whereNull('s.payer_id')
+    .where((qb) => qb.whereNull('c.payer_id').orWhere('s.self_pay_override', true))
     .where((qb) => qb.where('s.is_callback', false).orWhereNull('s.is_callback'))
     .whereNot('s.service_type', 'ilike', '%re-service%')
     .whereNotNull('s.customer_id')
@@ -167,13 +172,14 @@ async function runSweep(dbh = db) {
         .whereNotNull('v2.card_link_sent_at');
     })
     .orderBy([{ column: 's.scheduled_date', order: 'asc' }, { column: 's.window_start', order: 'asc' }])
-    .select('s.id', 's.customer_id', 's.scheduled_date', 's.status', 's.is_callback', 's.service_type', 's.source_action', 's.card_link_sent_at')
+    .select('s.id', 's.customer_id', 's.scheduled_date', 's.status', 's.is_callback', 's.service_type', 's.source_action', 's.card_link_sent_at', 's.call_sms_cleared_recipient')
     .limit(500);
 
   const seenCustomers = new Set();
   let considered = 0;
   let attempts = 0;
   let sent = 0;
+  let autoSecured = 0;
   let skipped = 0;
   for (const visit of candidates) {
     // The cap counts funnel ATTEMPTS, not confirmed sends (codex #3234 r1
@@ -220,8 +226,16 @@ async function runSweep(dbh = db) {
         const result = await requestCardForAppointment({
           scheduledServiceId: visit.id,
           trigger: 'previsit_backstop',
+          // A call-cleared visit's send goes to the recipient the clearance
+          // covered (codex r4: implied-consent redirects can point at the
+          // caller's ANI, not customers.phone); non-call rows carry null and
+          // take the funnel's normal recipient resolution.
+          recipientPhone: visit.call_sms_cleared_recipient || null,
         });
-        if (result?.requested || result?.action === 'sent' || result?.action === 'auto_secured') sent += 1;
+        // Launch metrics tell the truth (codex r4 P2): auto-secure enrolls a
+        // saved method SILENTLY — it is not a sent invitation.
+        if (result?.action === 'sent' || result?.requested === true) sent += 1;
+        else if (result?.action === 'auto_secured') autoSecured += 1;
         else skipped += 1;
       });
     } catch (err) {
@@ -230,7 +244,7 @@ async function runSweep(dbh = db) {
     }
   }
 
-  return { considered, attempts, sent, skipped };
+  return { considered, attempts, sent, autoSecured, skipped };
 }
 
 module.exports = {

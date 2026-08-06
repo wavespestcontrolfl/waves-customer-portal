@@ -9690,7 +9690,14 @@ const CallRecordingProcessor = {
               await db('scheduled_services')
                 .where({ id: scheduledServiceId })
                 .whereNull('call_sms_cleared_at')
-                .update({ call_sms_cleared_at: new Date() });
+                .update({
+                  call_sms_cleared_at: new Date(),
+                  // The number this clearance covers (codex r4): an
+                  // implied-consent redirect points at the caller's ANI,
+                  // not necessarily customers.phone — the backstop must
+                  // reuse exactly this recipient.
+                  call_sms_cleared_recipient: (smsRecipient || null),
+                });
             } catch (clearErr) {
               logger.warn(`[call-proc] call-sms clearance stamp failed for visit ${scheduledServiceId}: ${clearErr.message}`);
             }

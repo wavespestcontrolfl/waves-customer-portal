@@ -17,6 +17,12 @@ exports.up = async function up(knex) {
   if (await knex.schema.hasColumn('scheduled_services', 'call_sms_cleared_at')) return;
   await knex.schema.alterTable('scheduled_services', (t) => {
     t.timestamp('call_sms_cleared_at', { useTz: true }).nullable();
+    // The RECIPIENT the clearance applies to (codex #3234 r4): implied
+    // inbound consent can redirect the call's sends to the caller's ANI
+    // when the stored customer phone belongs to someone else — a later
+    // backstop send must reuse this number, never fall back to
+    // customers.phone.
+    t.string('call_sms_cleared_recipient', 32).nullable();
   });
 };
 
@@ -25,5 +31,6 @@ exports.down = async function down(knex) {
   if (!(await knex.schema.hasColumn('scheduled_services', 'call_sms_cleared_at'))) return;
   await knex.schema.alterTable('scheduled_services', (t) => {
     t.dropColumn('call_sms_cleared_at');
+    t.dropColumn('call_sms_cleared_recipient');
   });
 };
