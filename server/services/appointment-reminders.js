@@ -839,6 +839,11 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     logger.warn(`[appt-remind] SMS blocked for customer ${customerId}: ${result.code || 'unknown'} ${result.reason || ''}`);
     return false;
   }
+  // Sticky fanout acceptance (codex r34): once ANY contact was accepted
+  // by the provider, a later contact's throw must not classify the whole
+  // fanout as retryable — a retry would double-text the accepted
+  // recipient. Callers finalize 'sent' when this is set.
+  if (sendOutcome && typeof sendOutcome === 'object') sendOutcome.providerAccepted = true;
   return true;
 }
 
@@ -2657,9 +2662,13 @@ const AppointmentReminders = {
           reportOutcome(false, 'Customer not found');
         }
       } catch (sendErr) {
+        // An earlier contact's provider acceptance is sticky (codex r34):
+        // finalize sent — sacrificing the failed contact's copy beats
+        // re-texting the accepted one when the audit insert also failed.
+        const accepted = sendOutcome.providerAccepted === true || sendOutcome.dispatchUncertain === true;
         await finalizeClaim(false, {
-          retryable: sendOutcome.dispatchUncertain !== true,
-          uncertain: sendOutcome.dispatchUncertain === true,
+          retryable: !accepted,
+          uncertain: accepted,
         });
         throw sendErr;
       }
@@ -2828,14 +2837,31 @@ const AppointmentReminders = {
       // backdated to its cancel time so this same run can settle it.
       // Residual: a suppress-intent cancel hitting that double failure
       // may get a (truthful) notice — accepted, evidence-gated anyway.
+      // Durable rollout boundary (codex r34): stamped once, the first
+      // time the hook is seen enabled — cancels before it never late-claim.
+      await db('ops_email_send_state')
+        .insert({ email_key: 'cancel-notice-hook-enabled-at', last_sent_at: db.fn.now(), updated_at: db.fn.now() })
+        .onConflict('email_key')
+        .ignore()
+        .catch(() => {});
+      // Driven from the (indexed) recent cancellation history, not a scan
+      // of every unclaimed reminder row (codex r34). Bounded by the 72h
+      // age-out horizon: a claim older than that would be suppressed
+      // unsent anyway, so scanning further back buys nothing — and within
+      // it, a sweep delayed past the old 25-minute window still recovers.
       await db('appointment_reminders')
         .whereNull('cancellation_notice_at')
+        .whereIn('scheduled_service_id', function recentCancels() {
+          this.select('h.job_id').from('job_status_history as h')
+            .where('h.to_status', 'cancelled')
+            .whereNot('h.from_status', 'cancelled')
+            .whereRaw("h.transitioned_at >= GREATEST(COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-enabled-at'), 'infinity'::timestamptz), now() - interval '72 hours')");
+        })
         .whereRaw(`EXISTS (
           SELECT 1 FROM scheduled_services ss
           WHERE ss.id = appointment_reminders.scheduled_service_id
             AND ss.status = 'cancelled'
         )`)
-        .whereRaw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled') > now() - interval '25 minutes'`)
         .update({
           cancellation_notice_at: db.raw("(SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')"),
           cancellation_notice_state: 'pending',
@@ -3306,7 +3332,8 @@ const AppointmentReminders = {
         // Thrown lookup/pref/validation errors are retryable; a
         // dispatch-uncertain throw finalizes sent (r16) — silence beats a
         // double combined text.
-        if (seriesSendOutcome && seriesSendOutcome.dispatchUncertain === true) {
+        if (seriesSendOutcome
+          && (seriesSendOutcome.dispatchUncertain === true || seriesSendOutcome.providerAccepted === true)) {
           await finalizeSeriesClaims(true);
         } else {
           await finalizeSeriesClaims(false, { retryable: true });
