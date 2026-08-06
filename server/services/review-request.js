@@ -463,7 +463,7 @@ const ReviewService = {
    * the full cadence right after treatment. Fail-open to the default plan on
    * lookup errors: a wrong-but-bounded cadence beats no ask.
    */
-  async resolveSequencePlanForEnrollment({ customerId, serviceRecordId = null, scheduledServiceId = null }) {
+  async resolveSequencePlanForEnrollment({ customerId, serviceRecordId = null, scheduledServiceId = null, _attempt = 0 }) {
     // Owner-named multi-treatment jobs (2026-08-05: "we should treat
     // cockroach different than one time pest, as we should bed bug") — the
     // follow-up visit IS a treatment, so the review ask waits for it. Other
@@ -493,7 +493,7 @@ const ReviewService = {
           svc = await db("scheduled_services as s")
             .leftJoin("services as sv", "s.service_id", "sv.id")
             .where("s.id", visitId)
-            .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "sv.service_key")
+            .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "sv.service_key", "sv.follow_up_interval_days")
             .first();
         }
       }
@@ -512,18 +512,35 @@ const ReviewService = {
         // TERMINAL list wrongly discarded it. 'completed' is excluded here
         // too: a finished child means nothing further is coming.
         const { FOLLOWUP_CHILD_INACTIVE_STATUSES } = require("./typed-followup-obligation");
-        const deadChildStatuses = [...FOLLOWUP_CHILD_INACTIVE_STATUSES, "completed"];
-        const childQuery = (col) => db("scheduled_services")
+        // Two separate questions (codex #3235 r11 P1):
+        //   POSITION — does ANY non-dead child exist (canonical inactive
+        //   list only: cancelled/skipped/no_show)? A COMPLETED child still
+        //   proves this visit is not the series' last — a late-paid middle
+        //   visit must not classify as final.
+        //   OUTSTANDING — is a child still coming (non-dead AND not
+        //   completed)? That decides first-visit ask vs stand-down.
+        const childQuery = (col, statuses) => db("scheduled_services")
           .where({ [col]: svc.id })
-          .whereNotIn("status", deadChildStatuses)
+          .whereNotIn("status", statuses)
           .first();
-        const futureChild = (await childQuery("followup_source_service_id")) || (await childQuery("parent_service_id"));
+        const liveStatuses = [...FOLLOWUP_CHILD_INACTIVE_STATUSES, "completed"];
+        const liveChild = (await childQuery("followup_source_service_id", liveStatuses))
+          || (await childQuery("parent_service_id", liveStatuses));
+        const anyChild = liveChild
+          || (await childQuery("followup_source_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES))
+          || (await childQuery("parent_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES));
         const isFollowUpChild = !!(svc.parent_service_id || svc.followup_source_service_id);
-        if (futureChild) {
-          // Another treatment in this series is already on the books.
+        if (liveChild) {
+          // Another treatment in this series is still on the books.
           return isFollowUpChild
             ? { skip: "multi_treatment_middle" }
             : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
+        }
+        if (anyChild) {
+          // Only COMPLETED children remain: the series moved past this visit
+          // and the final visit carried (or will carry) the cadence — a late
+          // enrollment here would just be an extra ask.
+          return { skip: "series_completed" };
         }
         if (isFollowUpChild) {
           // This IS the follow-up visit and nothing further is scheduled —
@@ -541,8 +558,14 @@ const ReviewService = {
           // payment time, so a now-relative window let a LATER treatment
           // make an earlier visit look final (and a late-paid final visit
           // look first).
+          // Window = 2x the catalog's follow-up interval (fallback 30d),
+          // not a flat 60d (codex #3235 r11 P1): a NEW package started 60
+          // days after the previous one must not read as its follow-up —
+          // real roach/bed-bug follow-ups run ~14 days.
+          const intervalDays = Number(svc.follow_up_interval_days) > 0 ? Number(svc.follow_up_interval_days) : 15;
+          const windowDays = Math.min(60, intervalDays * 2);
           const anchorMs = svc.scheduled_date ? new Date(svc.scheduled_date).getTime() : Date.now();
-          const windowFloor = etDateString(new Date(anchorMs - 60 * 86400000));
+          const windowFloor = etDateString(new Date(anchorMs - windowDays * 86400000));
           const anchorStr = etDateString(new Date(anchorMs));
           const prior = await db("scheduled_services")
             .where({ customer_id: customerId, service_id: svc.service_id, status: "completed" })
@@ -584,6 +607,13 @@ const ReviewService = {
       // first-send re-resolve. Callers decide: enrollment skips (the
       // invoice-paid trigger naturally retries), the runner keeps the
       // enrolled plan.
+      // One internal retry (codex #3235 r11 P1): the paid-invoice trigger
+      // is one-shot — the processed webhook never re-fires — so a transient
+      // blip here would otherwise permanently lose the deferred cadence.
+      if (_attempt < 1) {
+        await new Promise((r) => setTimeout(r, 250));
+        return this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId, scheduledServiceId, _attempt: _attempt + 1 });
+      }
       logger.warn(`[review] plan resolution failed (customerId=${customerId}): ${err.message}`);
       return { error: true };
     }
@@ -767,6 +797,13 @@ const ReviewService = {
         delayMinutes,
         legacyDelayMinutes: 120,
       });
+      // Honest outcome (codex #3235 r11 P1): the paid webhook is one-shot,
+      // so a swallowed plan_resolution_failed here would silently lose the
+      // deferred ask — after the resolver's internal retry, surface it loud.
+      if (result?.started === false && result?.reason === "plan_resolution_failed") {
+        logger.error(`[review] Paid-invoice enrollment LOST to plan-resolution failure after retry (invoiceId=${invoice?.id} source=${source}) — enroll manually from the reviews admin if the ask is still wanted`);
+        return { enrolled: false, reason: "plan_resolution_failed", result };
+      }
       return { enrolled: true, result };
     } catch (err) {
       logger.error(`[review] Paid-invoice enrollment failed (invoiceId=${invoice?.id} source=${source}): ${err.message}`);
@@ -2760,19 +2797,23 @@ const ReviewService = {
         visitId = sr?.scheduled_service_id || null;
       }
       if (!visitId) return [];
-      const visit = await db("scheduled_services")
-        .where({ id: visitId })
-        .select("id", "parent_service_id", "followup_source_service_id", "service_id", "scheduled_date")
+      const visit = await db("scheduled_services as s")
+        .leftJoin("services as sv", "s.service_id", "sv.id")
+        .where("s.id", visitId)
+        .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "sv.follow_up_interval_days")
         .first();
       if (!visit) return [];
       // Walk the FULL ancestor chain (codex #3235 r7 P1): in a 3+ visit
       // series the final visit's immediate parent is the middle visit, and
       // only the chain's first visit carries the exempt ask. Bounded depth
       // + cycle guard.
+      // Traverse until the chain ends (codex #3235 r11 P1: trapping
+      // programs legitimately reach visit 9+); the seen-set is the real
+      // terminator, the depth cap is only a runaway guard.
       const seen = new Set([visit.id]);
       let sourceIds = [];
       let cursor = visit;
-      for (let depth = 0; depth < 6; depth += 1) {
+      for (let depth = 0; depth < 50; depth += 1) {
         const next = cursor.parent_service_id || cursor.followup_source_service_id;
         if (!next || seen.has(next)) break;
         seen.add(next);
@@ -2788,11 +2829,13 @@ const ReviewService = {
         // series' earlier visits, relative to THIS visit's date — never a
         // now-relative window that payment-deferred enrollment would skew.
         const anchorMs = visit.scheduled_date ? new Date(visit.scheduled_date).getTime() : Date.now();
+        const intervalDays = Number(visit.follow_up_interval_days) > 0 ? Number(visit.follow_up_interval_days) : 15;
+        const windowDays = Math.min(60, intervalDays * 2);
         const priors = await db("scheduled_services")
           .where({ customer_id: customerId, service_id: visit.service_id, status: "completed" })
           .where("id", "!=", visit.id)
           .where("scheduled_date", "<", etDateString(new Date(anchorMs)))
-          .where("scheduled_date", ">=", etDateString(new Date(anchorMs - 60 * 86400000)))
+          .where("scheduled_date", ">=", etDateString(new Date(anchorMs - windowDays * 86400000)))
           .select("id");
         sourceIds = priors.map((r) => r.id);
       }

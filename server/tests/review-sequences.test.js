@@ -1603,3 +1603,74 @@ describe('codex #3235 r10 — failure propagation, record-less dedupe, history a
     expect(plan[0].templateKey).toBe('first_treatment_ask');
   });
 });
+
+describe('codex #3235 r11 — completed descendants, package separation, long chains', () => {
+  const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+
+  test('a late-paid middle visit whose child already COMPLETED is not classified final (series_completed)', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'cd-1', first_name: 'Tia', last_name: 'A', phone: '+19410000072', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-cd2', customer_id: 'cd-1', scheduled_service_id: 'ss-cd2' }],
+      scheduled_services: [
+        { id: 'ss-cd1', customer_id: 'cd-1', status: 'completed', scheduled_date: d(20) },
+        { id: 'ss-cd2', customer_id: 'cd-1', parent_service_id: 'ss-cd1', status: 'completed', scheduled_date: d(12) },
+        { id: 'ss-cd3', customer_id: 'cd-1', parent_service_id: 'ss-cd2', status: 'completed', scheduled_date: d(4) },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'cd-1', serviceRecordId: 'sr-cd2', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('series_completed');
+  });
+
+  test('a new package starting outside 2x the follow-up interval is a FIRST visit, not the old package\'s final', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'np-1', first_name: 'Gus', last_name: 'B', phone: '+19410000073', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-np2', customer_id: 'np-1', scheduled_service_id: 'ss-np2' }],
+      scheduled_services: [
+        // Previous package's visit 45 days ago; catalog interval 14d → window 28d.
+        { id: 'ss-np1', customer_id: 'np-1', service_id: 'svc-roach', status: 'completed', scheduled_date: d(45), service_key: 'cockroach_control', follow_up_interval_days: 14 },
+        { id: 'ss-np2', customer_id: 'np-1', service_id: 'svc-roach', status: 'completed', scheduled_date: d(0), service_key: 'cockroach_control', follow_up_interval_days: 14 },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'np-1', serviceRecordId: 'sr-np2', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+  });
+
+  test('a 9-visit linked chain still reaches the root sequence for the exemption', async () => {
+    mockGates.reviewSequences = true;
+    const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+    const visits = [];
+    for (let i = 1; i <= 9; i += 1) {
+      visits.push({
+        id: `ss-l${i}`, customer_id: 'lc-1', status: 'completed',
+        scheduled_date: d(30 - i * 3),
+        ...(i > 1 ? { parent_service_id: `ss-l${i - 1}` } : {}),
+      });
+    }
+    const mock = makeMock({
+      customers: [{ id: 'lc-1', first_name: 'Roy', last_name: 'C', phone: '+19410000074', nearest_location_id: 'bradenton' }],
+      review_sequences: [{ id: 'seq-root', customer_id: 'lc-1', service_record_id: null, scheduled_service_id: 'ss-l1', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: tenDaysAgo }],
+      review_requests: [{ id: 'rr-root', customer_id: 'lc-1', sequence_id: 'seq-root', template_key: 'first_treatment_ask', channel: 'sms', status: 'sent', sms_sent_at: tenDaysAgo, sent_at: tenDaysAgo }],
+      service_records: [{ id: 'sr-l9', customer_id: 'lc-1', scheduled_service_id: 'ss-l9' }],
+      scheduled_services: visits,
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'lc-1', serviceRecordId: 'sr-l9', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const seq = mock.__state.rows.review_sequences.find((r) => r.id !== 'seq-root');
+    expect(JSON.parse(seq.plan)).toHaveLength(3);
+  });
+});
