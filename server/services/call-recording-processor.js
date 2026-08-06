@@ -9043,6 +9043,10 @@ const CallRecordingProcessor = {
                   if (reServicePremise.scope === 'property') {
                     coverageScope = { propertyId: reServicePremise.propertyId, includeUnlinked: false };
                   } else {
+                    // Fail closed on a failed primary lookup: degrading to
+                    // unlinked-only coverage would silently narrow (or, for
+                    // an all-linked account, empty) the premise — hold for
+                    // review instead, same as an unknown premise.
                     let primaryPropertyId = null;
                     try {
                       const primaryProp = await trx('customer_properties')
@@ -9050,7 +9054,8 @@ const CallRecordingProcessor = {
                         .first('id');
                       primaryPropertyId = primaryProp?.id || null;
                     } catch (primErr) {
-                      logger.warn(`[call-proc] primary-property lookup failed for ${maskSid(callSid)} (unlinked coverage only): ${primErr.message}`);
+                      logger.warn(`[call-proc] primary-property lookup failed for ${maskSid(callSid)} (holding for review): ${primErr.message}`);
+                      return { __held: { reason: 'reservice_property_uncovered' } };
                     }
                     coverageScope = { propertyId: primaryPropertyId, includeUnlinked: true };
                   }
