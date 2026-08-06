@@ -99,7 +99,15 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // convertCallLeadOnPhoneBooking is ownership-guarded (unclaimed or
   // same-customer only), so a stale carried id can never reassign another
   // customer's lead.
-  try {
+  // A covered re-service confirmed from outbound review is still a $0
+  // callback, not a closed sale (codex #3231): converting would mark the
+  // lead won off a free visit. Row identity (is_callback stamp or the
+  // re-service service label) is the authority — the resolver's current
+  // opinion is irrelevant here.
+  const { isReService } = require('./re-service');
+  if (svc.is_callback === true || isReService({ serviceType: svc.service_type })) {
+    logger.info(`[${routeTag}] Skipping lead conversion for confirmed re-service callback ${svc.id} ($0 callback, not a sale)`);
+  } else try {
     const CallProc = require('./call-recording-processor');
     let leadId = null;
     let keepOpenForQuote = false;

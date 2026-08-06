@@ -2599,6 +2599,17 @@ async function classifyReServiceBookingPremise({ customer, propertyLinkage, trx 
   return { scope: 'unknown' };
 }
 
+// A booked row IS a covered re-service callback when it carries the
+// is_callback stamp or the re-service catalog label — the authority for
+// row-based decisions (lead conversion on reuse/attach), where the CURRENT
+// resolver opinion may differ from what was actually booked (codex #3231).
+function isReServiceBookingRow(row) {
+  if (!row) return false;
+  if (row.is_callback === true) return true;
+  const { isReService } = require('./re-service');
+  return isReService({ serviceType: row.service_type });
+}
+
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
   if (!customerId) return null;
 
@@ -8783,8 +8794,10 @@ const CallRecordingProcessor = {
                   // confirmation, not a reused/reprocessed pending row.
                   // A covered re-service is a $0 callback, not a closed sale
                   // (codex #3222 follow-up): converting the lead would record
-                  // a won deal and promote funnel metrics off a free visit.
-                  if (!outboundReviewBooking && !isReServiceCatalogRow(callBookingCatalogRow)) {
+                  // a won deal and promote funnel metrics off a free visit —
+                  // judged from the REUSED row's own identity (codex #3231:
+                  // a reprocess may resolve differently than what booked).
+                  if (!outboundReviewBooking && !isReServiceBookingRow(primaryRow)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -8895,8 +8908,9 @@ const CallRecordingProcessor = {
                   // The deal still closed — same idempotent, ownership-guarded
                   // conversion as the reuse path above, same outbound-review
                   // exception (that lead closes from the office confirmation)
-                  // and the same re-service exception ($0 callback, not a sale).
-                  if (!outboundReviewBooking && !isReServiceCatalogRow(callBookingCatalogRow)) {
+                  // and the same re-service exception ($0 callback, not a sale
+                  // — judged from the ATTACHED row's own identity, codex #3231).
+                  if (!outboundReviewBooking && !isReServiceBookingRow(primaryRow)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,
@@ -9289,8 +9303,9 @@ const CallRecordingProcessor = {
                   // the lead must still convert (idempotent, ownership-guarded) —
                   // unless this is a pending outbound-review booking (closes from
                   // the office confirmation path) or a covered re-service ($0
-                  // callback, not a sale).
-                  if (!outboundReviewBooking && !isReServiceCatalogRow(callBookingCatalogRow)) {
+                  // callback, not a sale — judged from the reused row's own
+                  // identity, codex #3231).
+                  if (!outboundReviewBooking && !isReServiceBookingRow(existingByKey)) {
                     await convertCallLeadOnPhoneBooking(trx, {
                       leadId,
                       customerId,

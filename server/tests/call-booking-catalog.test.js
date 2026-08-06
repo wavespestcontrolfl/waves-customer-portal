@@ -681,6 +681,13 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     // Bare abstract objects without a determiner are blocked too (codex follow-up).
     expect(hasCallReServiceIntent({ call_summary: 'revisit pricing and schedule the regular quarterly visit' })).toBe(false);
     expect(hasCallReServiceIntent({ call_summary: 'wants to revisit billing next month' })).toBe(false);
+    // Positive whitelist (codex #3231): ANY non-service object is blocked,
+    // not just a listed noun — payment/account/terms included.
+    expect(hasCallReServiceIntent({ call_summary: 'revisit payment terms and book the regular quarterly visit' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'we should revisit the account setup' })).toBe(false);
+    // Service-ish objects keep their intent.
+    expect(hasCallReServiceIntent({ call_summary: 'can you revisit the house this week' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'revisit between treatments, the ants are back' })).toBe(true);
     // Noun usage keeps its intent.
     expect(hasCallReServiceIntent({ requested_service: 'schedule a revisit' })).toBe(true);
     expect(hasCallReServiceIntent({ requested_service: 'Pest control revisit' })).toBe(true);

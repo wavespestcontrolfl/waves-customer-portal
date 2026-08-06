@@ -134,9 +134,12 @@ function hasAffirmativeRodentMention(text) {
 //     revisit wording ("rodent inspection re-visit" books the inspection);
 //   - the coarse resolver's label must be lane-compatible — a mosquito or
 //     termite resolution is a different service, not a covered re-service.
-// Bare "retreat" is excluded on purpose — too common as a plain English word.
+// Bare "retreat" is excluded on purpose — too common as a plain English
+// word. "revisit <object>" only counts when the object is service-ish
+// (POSITIVE whitelist — codex #3231: a noun blacklist is unwinnable;
+// "revisit payment terms"/"revisit the account" are administrative).
 const RE_SERVICE_KEYS = { pest: 'pest_re_service', lawn: 'lawn_re_service' };
-const RE_SERVICE_PHRASE = "(?:re[-\\s]?service|re[-\\s]?visit(?!\\s+(?:(?:the|my|our|your|this|that|it|them)\\b|(?:pric(?:e|es|ing)|bill(?:s|ing)?|invoice|invoices|quote|quotes|estimate|estimates|contract|contracts|plan|plans|terms|schedule|scheduling|decision|decisions|discussion|conversation|question|questions|topic|issue|issues)\\b))|revisit(?!\\s+(?:(?:the|my|our|your|this|that|it|them)\\b|(?:pric(?:e|es|ing)|bill(?:s|ing)?|invoice|invoices|quote|quotes|estimate|estimates|contract|contracts|plan|plans|terms|schedule|scheduling|decision|decisions|discussion|conversation|question|questions|topic|issue|issues)\\b))|re[-\\s]treat(?:ment)?|retreatment|spray\\s+again|treat\\s+again|come\\s+back\\s+out)";
+const RE_SERVICE_PHRASE = "(?:re[-\\s]?service|re[-\\s]?visit(?!\\s+(?:(?:the|my|our|your|this|that|its?|them)\\s+(?!(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|between|before|after|soon|asap|today|tomorrow|next|again|on|in|at|us|me|for)\\b)[a-z]|(?!(?:the|my|our|your|this|that|its?|them)\\b)(?!(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|between|before|after|soon|asap|today|tomorrow|next|again|on|in|at|us|me|for)\\b)[a-z]))|revisit(?!\\s+(?:(?:the|my|our|your|this|that|its?|them)\\s+(?!(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|between|before|after|soon|asap|today|tomorrow|next|again|on|in|at|us|me|for)\\b)[a-z]|(?!(?:the|my|our|your|this|that|its?|them)\\b)(?!(?:service|visit|treatment|treatments|appointment|spray|spraying|house|home|property|yard|lawn|garden|between|before|after|soon|asap|today|tomorrow|next|again|on|in|at|us|me|for)\\b)[a-z]))|re[-\\s]treat(?:ment)?|retreatment|spray\\s+again|treat\\s+again|come\\s+back\\s+out)";
 const RE_SERVICE_INTENT_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b`, 'i');
 // Negated wording ("I don't need a re-service, just my regular visit") is not
 // intent (codex #3222 r3) — same shape as NEGATED_ROACH_RE: negation word +
