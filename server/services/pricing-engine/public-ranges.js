@@ -37,8 +37,17 @@ function sweepValues(inputs, fn, pick) {
 
 function rangeRow({ key, name, unit, values, notes = null, decimals = 0 }) {
   if (!values.length) throw new Error(`No priced values for ${key}`);
-  const round = (v) => (decimals ? Math.round(v * 10 ** decimals) / 10 ** decimals : Math.round(v));
-  return { key, name, unit, low: round(Math.min(...values)), high: round(Math.max(...values)), notes };
+  // Round outward (floor the low, ceil the high) so a valid exact engine
+  // quote with cents can never fall outside the advertised range.
+  const scale = 10 ** decimals;
+  return {
+    key,
+    name,
+    unit,
+    low: Math.floor(Math.min(...values) * scale) / scale,
+    high: Math.ceil(Math.max(...values) * scale) / scale,
+    notes,
+  };
 }
 
 function buildRows() {
@@ -186,6 +195,13 @@ function buildRows() {
       fleaExterior: true,
       fleaExteriorAreaSqFt: 4000,
     },
+    {
+      infestationComplexity: 'heavy',
+      features: { trees: 'heavy', complexity: 'complex' },
+      fleaExterior: true,
+      // Largest directly priced exterior tier; above 20,000 sq ft is custom.
+      fleaExteriorAreaSqFt: 20000,
+    },
     { isRecurringCustomer: true },
   ];
   add('flea_elimination', () => rangeRow({
@@ -219,8 +235,11 @@ function buildRows() {
     key: 'rodent_trapping',
     name: 'Rodent Trapping',
     unit: 'per program',
-    values: sweepValues(['standard', 'unlimited'], (plan) => sp.priceRodentTrapping({}, { plan }), (r) => r.price),
-    notes: 'Standard (setup + 2 included callbacks) or unlimited-callback plan; emergency same-day service carries a surcharge quoted at booking.',
+    values: sweepValues(
+      [{ plan: 'standard' }, { plan: 'unlimited' }, { plan: 'standard', upgradeToUnlimited: true }],
+      (opts) => sp.priceRodentTrapping({}, opts),
+      (r) => r.price),
+    notes: 'Standard (setup + 2 included callbacks), unlimited-callback plan, or mid-program upgrade to unlimited; emergency same-day service carries a surcharge quoted at booking.',
   }));
 
   add('rodent_sanitation', () => rangeRow({
@@ -333,10 +352,12 @@ function buildRows() {
         { atticSqFt: 500 }, { atticSqFt: 1000 }, { atticSqFt: 2000 }, { atticSqFt: 4500 },
         { surfaceLinearFt: 50, surfaceHeightFt: 2 }, { surfaceLinearFt: 150, surfaceHeightFt: 4 },
         { atticSqFt: 2000, surfaceLinearFt: 150, surfaceHeightFt: 4 },
-        { atticSqFt: 4500, surfaceLinearFt: 150, surfaceHeightFt: 4 },
+        // Multi-day jobs stay directly priced (the flag is scheduling
+        // provenance, not a quote refusal) — sweep through them.
+        { atticSqFt: 8000, surfaceLinearFt: 200, surfaceHeightFt: 4 },
       ],
       (opts) => sp.priceBoraCare({ footprint: 2500 }, opts),
-      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
+      (r) => (r.quoteRequired ? NaN : r.price)),
     notes: 'Borate treatment for exposed wood; priced by treated attic or surface area.',
   }));
 
@@ -418,10 +439,22 @@ function buildRows() {
     notes: 'Priced by treatment type, grass type, and turf area.',
   }));
 
-  // Dethatching is deliberately NOT published: priceDethatching returns
-  // quoteRequired/manual-review for every residential input, so the engine
-  // refuses to auto-quote it — publishing a range would contradict the
-  // authoritative quote path. It stays in the custom-quoted bucket.
+  add('dethatching', () => rangeRow({
+    key: 'dethatching',
+    name: 'Lawn Dethatching',
+    unit: 'per job',
+    // Bermuda/Zoysia lawns under 10,000 sq ft with recorded thatch depth
+    // auto-price; St. Augustine and heavy-cleanup jobs stay review-gated
+    // and are excluded by the quote-required filter.
+    values: sweepValues(
+      [2000, 4000, 6000, 9000].flatMap((sq) =>
+        ['bermuda', 'zoysia'].flatMap((grassType) =>
+          ['none', 'light'].map((cleanupLevel) => ({ sq, grassType, cleanupLevel })))),
+      ({ sq, grassType, cleanupLevel }) =>
+        sp.priceDethatching(sq, { grassType, cleanupLevel, thatchDepthInches: 1, access: 'easy' }),
+      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.price ?? r.estimatedPrice))),
+    notes: 'Bermuda and Zoysia lawns; St. Augustine and heavy-debris jobs are quoted after inspection.',
+  }));
 
   add('one_time_mosquito', () => rangeRow({
     key: 'one_time_mosquito',
@@ -513,6 +546,26 @@ function buildRows() {
     notes: 'Localized Termidor foam application; discounted as an add-on to a liquid treatment.',
   }));
 
+  add('rodent_guarantee', () => rangeRow({
+    key: 'rodent_guarantee',
+    name: 'Rodent Guarantee',
+    unit: 'per 12-month term',
+    // Renewable guarantee premium by property tier; eligibility (completed
+    // trapping/exclusion/sanitation) is a customer-state flag, not pricing.
+    // Tier derives from home size / stories / roof — sweep the property
+    // shapes rather than naming tiers directly.
+    values: sweepValues(
+      [
+        { homeSqFt: 1500, stories: 1, roofType: 'shingle' },
+        { homeSqFt: 3000, stories: 2, roofType: 'tile' },
+        { homeSqFt: 5000, stories: 2, roofType: 'tile', sealedPoints: 20, totalLinearMeshLF: 60 },
+        { homeSqFt: 7000, stories: 3, roofType: 'tile', sealedPoints: 40, totalLinearMeshLF: 120 },
+      ],
+      (opts) => sp.priceRodentGuarantee(opts),
+      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
+    notes: 'Renewable 12-month rodent-free guarantee after completed exclusion work; priced by property tier.',
+  }));
+
   add('trap_only_retainer', () => rangeRow({
     key: 'trap_only_retainer',
     name: 'Trap-Only Rodent Monitoring Retainer',
@@ -532,7 +585,7 @@ function buildRows() {
       // 20 points is the configured recurring-foam maximum; larger jobs are
       // one-time foam or custom.
       [5, 12, 20].flatMap((points) =>
-        ['quarterly', 'bimonthly'].map((cadence) => ({ points, cadence }))),
+        ['quarterly', 'bimonthly', 'monthly'].map((cadence) => ({ points, cadence }))),
       ({ points, cadence }) => sp.priceRecurringFoam(points, { cadence }),
       (r) => r.perTreatment),
     notes: 'Quarterly or bi-monthly foam program; discounted vs one-time treatments.',

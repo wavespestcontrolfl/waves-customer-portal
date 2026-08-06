@@ -29,6 +29,8 @@ const EXPECTED_KEYS = [
   'termite_foam',
   'trap_only_retainer',
   'recurring_foam',
+  'rodent_guarantee',
+  'dethatching',
   'lawn_plugging',
   'top_dressing',
   'tree_shrub_care',
@@ -46,7 +48,18 @@ describe('public pricing ranges', () => {
   let payload;
 
   beforeAll(() => {
-    payload = computePublicPricingRanges();
+    // Compute the baseline with both purchase gates explicitly unset so the
+    // expected-key assertions don't depend on the ambient environment.
+    const priorBond = process.env.GATE_TERMITE_BOND_OPTION;
+    const priorRental = process.env.GATE_TERMITE_STATION_RENTAL;
+    delete process.env.GATE_TERMITE_BOND_OPTION;
+    delete process.env.GATE_TERMITE_STATION_RENTAL;
+    try {
+      payload = computePublicPricingRanges();
+    } finally {
+      if (priorBond !== undefined) process.env.GATE_TERMITE_BOND_OPTION = priorBond;
+      if (priorRental !== undefined) process.env.GATE_TERMITE_STATION_RENTAL = priorRental;
+    }
   });
 
   test('every service sweeps without errors', () => {
@@ -110,36 +123,46 @@ describe('public pricing ranges', () => {
     expect(again.services.map((s) => s.key)).toEqual(payload.services.map((s) => s.key));
   });
 
-  test('termite bond publishes only while its purchase gate is on', () => {
-    // Default (gate off): no bond row — the estimate flow refuses bond
-    // selection while GATE_TERMITE_BOND_OPTION is dark.
-    expect(payload.services.find((s) => s.key === 'termite_bond')).toBeUndefined();
-
-    process.env.GATE_TERMITE_BOND_OPTION = 'true';
+  // Gate tests must not depend on the ambient environment: explicitly unset
+  // the gate for the off assertion, and restore the caller's value after.
+  function withGate(gate, value, fn) {
+    const prior = process.env[gate];
+    if (value === undefined) delete process.env[gate];
+    else process.env[gate] = value;
     try {
+      return fn();
+    } finally {
+      if (prior === undefined) delete process.env[gate];
+      else process.env[gate] = prior;
+    }
+  }
+
+  test('termite bond publishes only while its purchase gate is on', () => {
+    withGate('GATE_TERMITE_BOND_OPTION', undefined, () => {
+      const ungated = computePublicPricingRanges();
+      expect(ungated.services.find((s) => s.key === 'termite_bond')).toBeUndefined();
+    });
+    withGate('GATE_TERMITE_BOND_OPTION', 'true', () => {
       const gated = computePublicPricingRanges();
       const bond = gated.services.find((s) => s.key === 'termite_bond');
       expect(bond).toBeDefined();
       expect(bond.unit).toBe('per application');
       expect(gated.errors).toEqual([]);
-    } finally {
-      delete process.env.GATE_TERMITE_BOND_OPTION;
-    }
+    });
   });
 
   test('termite station rental publishes only while its purchase gate is on', () => {
-    expect(payload.services.find((s) => s.key === 'termite_station_rental')).toBeUndefined();
-
-    process.env.GATE_TERMITE_STATION_RENTAL = 'true';
-    try {
+    withGate('GATE_TERMITE_STATION_RENTAL', undefined, () => {
+      const ungated = computePublicPricingRanges();
+      expect(ungated.services.find((s) => s.key === 'termite_station_rental')).toBeUndefined();
+    });
+    withGate('GATE_TERMITE_STATION_RENTAL', 'true', () => {
       const gated = computePublicPricingRanges();
       const rental = gated.services.find((s) => s.key === 'termite_station_rental');
       expect(rental).toBeDefined();
       expect(rental.unit).toBe('per application');
       expect(gated.errors).toEqual([]);
-    } finally {
-      delete process.env.GATE_TERMITE_STATION_RENTAL;
-    }
+    });
   });
 
   test('buildRows exposes sweep errors instead of throwing', () => {
