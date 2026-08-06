@@ -568,6 +568,12 @@ describe('family-scoped existing-appointment adoption', () => {
       { service_type: 'Quarterly Pest Control Service' },
       roachKeys,
     )).toBe(false);
+    // Symmetric slugs (codex r18): an appointment labeled EXACTLY like the
+    // specialty is the same job — it must still adopt.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Cockroach Treatment' },
+      roachKeys,
+    )).toBe(true);
     // Lawn specialty: top dressing must not adopt an ordinary Lawn Care visit.
     const topDressData = {
       result: {
@@ -581,6 +587,26 @@ describe('family-scoped existing-appointment adoption', () => {
       { service_type: 'Lawn Care' },
       lawnKeys,
     )).toBe(false);
+  });
+
+  test('one-time rodent work never adopts a bait-station visit (codex r18)', () => {
+    const trappingData = {
+      result: {
+        oneTime: {
+          items: [{ service: 'rodent_trapping', name: 'Rodent Trapping Service', price: 450 }],
+        },
+      },
+    };
+    const trapKeys = estimateFamilyKeysForAdoption({}, trappingData, { serviceMode: 'one_time' });
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Rodent Bait Station Monitoring' },
+      trapKeys,
+    )).toBe(false);
+    // Trapping-to-trapping still adopts (both sides key rodent_trapping).
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Rodent Trapping Service' },
+      trapKeys,
+    )).toBe(true);
   });
 
   test('multi-service one-time accepts adopt only under the PRIMARY service (codex r13)', () => {

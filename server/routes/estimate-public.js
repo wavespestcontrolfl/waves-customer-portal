@@ -516,6 +516,15 @@ function classifyServiceFamilyText(text) {
   if (raw.includes('termite')) {
     return recurringServiceKey({ name: raw }) || null;
   }
+  // Rodent work keeps the slot profile's split (codex #3228 r18): the
+  // seeder buckets EVERY rodent row as rodent_bait, but slot-reservation's
+  // serviceKeyForLabel deliberately distinguishes trapping / exclusion /
+  // sanitation from bait — sold exclusion or trapping work must never adopt
+  // (and restamp) a bait-station monitoring visit. Same regexes as
+  // slot-reservation.
+  if (/rodent.*trap|trap.*rodent/.test(raw)) return 'rodent_trapping';
+  if (/rodent.*exclusion|exclusion.*rodent/.test(raw)) return 'rodent_exclusion';
+  if (/rodent.*sanitation|sanitation.*rodent/.test(raw)) return 'rodent_sanitation';
   // The CANONICAL scheduled-row classifier (recurring-appointment-seeder),
   // on BOTH the estimate's services and the candidate rows — the
   // duplicate-series guard and follow-up seeding bucket by the same
@@ -603,12 +612,21 @@ function oneTimeItemFamilyKeys(item = {}) {
   // slug still matches a row whose label is the only identity it has
   // (codex #3228 r13).
   const keys = new Set();
-  if (category) {
-    for (const key of (ONE_TIME_CATEGORY_FAMILIES[category] || [category])) keys.add(key);
-  }
   for (const field of fields) {
     const key = classifyServiceFamilyText(field);
     if (key) keys.add(key);
+  }
+  if (category) {
+    // The rodent bridge only for GENERIC rodent work (codex #3228 r18):
+    // when the fields resolve a specific rodent identity (trapping /
+    // exclusion / sanitation, mirroring the slot profile), adding the bait
+    // family would let a bait-station monitoring visit stand in for sold
+    // trapping/exclusion work.
+    const specificRodent = category === 'rodent'
+      && [...keys].some((k) => k === 'rodent_trapping' || k === 'rodent_exclusion' || k === 'rodent_sanitation');
+    if (!specificRodent) {
+      for (const key of (ONE_TIME_CATEGORY_FAMILIES[category] || [category])) keys.add(key);
+    }
   }
   return [...keys];
 }
@@ -717,7 +735,20 @@ function appointmentMatchesEstimateFamily(row = {}, familyKeys = new Set()) {
     name: row.catalog_service_name || null,
     service_type: row.service_type,
   });
-  return !!key && familyKeys.has(key);
+  if (key && familyKeys.has(key)) return true;
+  // Symmetric specialty slugs (codex #3228 r18): specialty items emit
+  // slug-only identities, but the row's broad classification (a roach row
+  // buckets pest_control) could never meet them — an appointment labeled
+  // exactly "Cockroach Treatment" was rejected and the customer sent to
+  // book a duplicate. The row's own field slugs may satisfy a specialty
+  // key; broad family-key slugs stay excluded so this door never widens
+  // generic adoption.
+  for (const field of [row.catalog_service_key, row.catalog_service_name, row.service_type]) {
+    const slug = String(field || '').toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (slug && !BROAD_ADOPTION_FAMILY_KEYS.has(slug) && familyKeys.has(slug)) return true;
+  }
+  return false;
 }
 
 async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts = {}) {
