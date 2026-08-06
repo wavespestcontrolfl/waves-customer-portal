@@ -577,7 +577,19 @@ function oneTimeItemFamilyKeys(item = {}) {
   const keys = new Set();
   const category = serviceCategoryForOneTimeItem(item);
   if (category) {
-    for (const key of (ONE_TIME_CATEGORY_FAMILIES[category] || [category])) keys.add(key);
+    // The BROAD pest category only for genuinely GENERIC choices (codex
+    // #3228 r16): a specialty item the category classifier files under
+    // pest_control (flea_package) must not make an ordinary quarterly-pest
+    // visit adoptable — acceptance restamps that row without changing its
+    // service type, and the specialty work never reaches dispatch. Generic
+    // = the derived one-time pest choice or a plainly pest-named line;
+    // specialty items keep only their specific identities (field union).
+    const genericPest = isOneTimePestChoiceItem(item)
+      || String(item?.service || '').toLowerCase() === 'one_time_pest'
+      || isPestServiceName(item?.name || item?.label || '');
+    if (category !== 'pest_control' || genericPest) {
+      for (const key of (ONE_TIME_CATEGORY_FAMILIES[category] || [category])) keys.add(key);
+    }
   }
   for (const field of [
     item?.service, item?.service_key, item?.key, item?.kind,

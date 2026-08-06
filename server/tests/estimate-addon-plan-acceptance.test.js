@@ -544,6 +544,13 @@ describe('family-scoped existing-appointment adoption', () => {
       { service_type: 'Flea Treatment Package' },
       fleaKeys,
     )).toBe(true);
+    // But the BROAD pest category must not leak in (codex r16): an ordinary
+    // quarterly-pest visit is a different service — restamping it would
+    // leave the flea work undispatched.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Quarterly Pest Control Service' },
+      fleaKeys,
+    )).toBe(false);
   });
 
   test('multi-service one-time accepts adopt only under the PRIMARY service (codex r13)', () => {
