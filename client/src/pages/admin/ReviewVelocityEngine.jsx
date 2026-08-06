@@ -316,7 +316,10 @@ function hydrate(body, c) {
   return body
     .replace(/\{first\}/g, c.first)
     .replace(/\{name\}/g, c.name)
-    .replace(/\{tech\}/g, c.lastTech || "Adam")
+    // Tech FIRST name only — the hydrated body submits as custom copy, so the
+    // server's own first-name substitution never runs on it, and a full name
+    // would tip the one-segment ask templates into a second segment.
+    .replace(/\{tech\}/g, String(c.lastTech || "Adam").trim().split(/\s+/)[0] || "Adam")
     .replace(/\{service_type\}/g, c.lastSvc || "pest control")
     .replace(/\{review_url\}/g, c.reviewUrl)
     .replace(/\{date\}/g, c.lastDate);

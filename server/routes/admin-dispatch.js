@@ -10470,6 +10470,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         await ReviewService.enrollPostService({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
+          // Direct visit identity for plan resolution (codex #3235 r5 P1).
+          scheduledServiceId: svc.id || null,
           serviceType: svc.service_type || null,
           techName: svc.tech_name || null,
           completedAt: new Date(),

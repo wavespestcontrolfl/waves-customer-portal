@@ -8664,6 +8664,9 @@ async function scheduleReviewRequest(svc) {
     await ReviewService.enrollPostService({
       customerId: customer.id,
       serviceRecordId,
+      // Direct visit identity for plan resolution — the service_records row
+      // may not exist yet on this path (codex #3235 r5 P1).
+      scheduledServiceId: svc.id,
       triggeredBy: 'auto',
       // Historical hardcoded default, not an operator choice — legacy path
       // only; cadence mode uses the smart send window.

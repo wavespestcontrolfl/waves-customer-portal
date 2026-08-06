@@ -459,7 +459,7 @@ const ReviewService = {
    * the full cadence right after treatment. Fail-open to the default plan on
    * lookup errors: a wrong-but-bounded cadence beats no ask.
    */
-  async resolveSequencePlanForEnrollment({ customerId, serviceRecordId = null }) {
+  async resolveSequencePlanForEnrollment({ customerId, serviceRecordId = null, scheduledServiceId = null }) {
     // Owner-named multi-treatment jobs (2026-08-05: "we should treat
     // cockroach different than one time pest, as we should bed bug") — the
     // follow-up visit IS a treatment, so the review ask waits for it. Other
@@ -471,15 +471,24 @@ const ReviewService = {
     const { TWO_TREATMENT_PACKAGE_KEYS } = require("./typed-followup-obligation");
     try {
       let svc = null;
-      if (serviceRecordId) {
+      // Visit identity: the service record's linked visit, or a directly
+      // supplied scheduled_services id (codex #3235 r5 P1 — the admin
+      // completion route can run before a service_records row exists, and
+      // without visit context the resolver defaulted an ongoing plan's last
+      // seeded visit or a series opener to the 3-touch one-time cadence).
+      let visitId = scheduledServiceId || null;
+      if (!visitId && serviceRecordId) {
         const sr = await db("service_records")
           .where({ id: serviceRecordId })
           .select("scheduled_service_id")
           .first();
-        if (sr?.scheduled_service_id) {
+        visitId = sr?.scheduled_service_id || null;
+      }
+      if (visitId) {
+        {
           svc = await db("scheduled_services as s")
             .leftJoin("services as sv", "s.service_id", "sv.id")
-            .where("s.id", sr.scheduled_service_id)
+            .where("s.id", visitId)
             .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "sv.service_key")
             .first();
         }
@@ -574,6 +583,7 @@ const ReviewService = {
   async enrollPostService({
     customerId,
     serviceRecordId = null,
+    scheduledServiceId = null,
     serviceType = null,
     serviceDate = null,
     techName = null,
@@ -622,7 +632,7 @@ const ReviewService = {
       // Per-type cadence plan (owner spec 2026-08-05): recurring = one ask,
       // one-time = full cadence, multi-treatment = one after the first visit
       // then the cadence after the final one (middle visits send nothing).
-      const resolved = await this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId });
+      const resolved = await this.resolveSequencePlanForEnrollment({ customerId, serviceRecordId, scheduledServiceId });
       if (resolved.skip) {
         logger.info(`[review] Post-service cadence skipped (customerId=${customerId} reason=${resolved.skip})`);
         return { started: false, reason: resolved.skip };
@@ -2258,6 +2268,9 @@ const ReviewService = {
           // NOT fired inline — it's scheduled at the smart send window and the
           // sequence cron delivers it.
           next_run_at: firstTouchAt || null,
+          // Persisted so the step runner applies the series-final cap
+          // exemption deterministically (codex #3235 r5 P1).
+          series_final: seriesFinal === true,
           service_record_id: serviceRecordId || null,
           tech_name: tName,
           service_type: svcType,
@@ -2375,11 +2388,12 @@ const ReviewService = {
     // (incl. this cadence's own) are counted, so the sequence stops once 3 is hit.
     let askStats;
     try {
-      // forSeriesFinal: the only way an active cadence coexists with a <30d
-      // first-treatment ask is the series-final enrollment (every other
-      // enrollment counted that ask and was cooldown-blocked), and the final
-      // cadence must deliver its full 3 touches (owner spec: 1 + 3).
-      askStats = await this.getDeliveredAskStats(seq.customer_id, { forSeriesFinal: true });
+      // The persisted enrollment-time flag (codex #3235 r5 P1): only a
+      // series-final cadence may ignore the first-treatment ask — an
+      // unconditional exemption here let an unrelated cadence 31-179 days
+      // after that ask deliver a 4th touch inside the 180-day cap. The
+      // series-final cadence itself still delivers its full 3 (owner 1+3).
+      askStats = await this.getDeliveredAskStats(seq.customer_id, { forSeriesFinal: seq.series_final === true });
     } catch {
       // Fail CLOSED: sendOutreachTouch does NOT enforce the lifetime cap, so a
       // stats blip must defer the step (retry next tick), not send a 4th ask.

@@ -793,6 +793,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(result.started).toBe(true);
     plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
     expect(plan).toHaveLength(3);
+    // The series-final flag is persisted for the step runner's cap check.
+    expect(mock.__state.rows.review_sequences[0].series_final).toBe(true);
   });
 
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
@@ -811,6 +813,10 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     const finalVisit = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'sf-1', serviceRecordId: 'sr-sf' });
     expect(finalVisit.seriesFinal).toBe(true);
     expect(finalVisit.plan).toHaveLength(3);
+
+    // Direct visit identity (no service_records row yet) resolves the same.
+    const direct = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'sf-1', scheduledServiceId: 'ss-r2' });
+    expect(direct.seriesFinal).toBe(true);
 
     // An unlinked one-time completion resolves WITHOUT the exemption flag —
     // its enrollment counts the first-treatment ask for cap/cooldown.
