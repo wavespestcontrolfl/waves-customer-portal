@@ -50,7 +50,9 @@ function makeLedgerDb(initialRows = [], { hasTable = true } = {}) {
       del() {
         const before = store.length;
         for (let i = store.length - 1; i >= 0; i -= 1) {
-          if (store[i].customer_id === ctx.filter.customer_id) store.splice(i, 1);
+          const matches = store[i].customer_id === ctx.filter.customer_id
+            && (ctx.filter.family_key === undefined || store[i].family_key === ctx.filter.family_key);
+          if (matches) store.splice(i, 1);
         }
         return Promise.resolve(before - store.length);
       },
@@ -132,6 +134,27 @@ describe('estimateFamilySlices', () => {
         result: {
           recurring: {
             services: [{ name: 'Quarterly Pest Control Service', service: 'pest_control', mo: 40 }],
+            rodentBaitMo: 24,
+          },
+        },
+      },
+      monthlyRate: 64,
+    });
+    expect(slices.pest_control).toBe(40);
+    expect(slices.rodent_bait).toBe(24);
+  });
+
+  test('a supplement duplicated as a recurring line counts once (codex r1)', () => {
+    // Legacy payloads carry rodent bait BOTH ways — double-counting would
+    // distort every proportionally-normalized sibling slice.
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control', mo: 40 },
+              { name: 'Rodent Bait Stations', service: 'rodent_bait', mo: 24 },
+            ],
             rodentBaitMo: 24,
           },
         },
@@ -232,6 +255,53 @@ describe('applyAcceptToLedger', () => {
       addOnBase: 0,
     });
     expect(out.scalar).toBe(75);
+  });
+
+  test('an unattributed blob is QUARANTINED, not seeded (codex r1)', async () => {
+    // Backfill-parked multi-plan customer ($90 unattributed) re-quotes a
+    // family that may be INSIDE the blob → the blob is deleted (legacy
+    // replace semantics), the accept's slices stand, and the owner reviews.
+    const requote = makeLedgerDb([
+      { customer_id: CUST, family_key: UNATTRIBUTED, monthly_rate: 90 },
+    ]);
+    const out = await applyAcceptToLedger(requote, {
+      customerId: CUST,
+      estimateId: 'est-1',
+      slices: { lawn_care: 60 },
+      previousScalar: 90,
+      addOnBase: 0,
+      hadOtherLiveFamilies: true,
+    });
+    expect(out.scalar).toBe(60); // NOT 150 — the blob may contain lawn
+    expect(out.reviewNeeded).toBe(true);
+    expect(requote.store.some((r) => r.family_key === UNATTRIBUTED)).toBe(false);
+    // A PROVEN-disjoint add-on keeps the blob parked and sums.
+    const addon = makeLedgerDb([
+      { customer_id: CUST, family_key: UNATTRIBUTED, monthly_rate: 90 },
+    ]);
+    const addOut = await applyAcceptToLedger(addon, {
+      customerId: CUST,
+      estimateId: 'est-1',
+      slices: { mosquito: 30 },
+      previousScalar: 90,
+      addOnBase: 90,
+    });
+    expect(addOut.scalar).toBe(120);
+    expect(addOut.reviewNeeded).toBe(false);
+    // A re-quote of an ALREADY-attributed family leaves the blob alone.
+    const mixed = makeLedgerDb([
+      { customer_id: CUST, family_key: UNATTRIBUTED, monthly_rate: 90 },
+      { customer_id: CUST, family_key: 'tree_shrub', monthly_rate: 32.87 },
+    ]);
+    const mixedOut = await applyAcceptToLedger(mixed, {
+      customerId: CUST,
+      estimateId: 'est-1',
+      slices: { tree_shrub: 35 },
+      previousScalar: 122.87,
+      addOnBase: 0,
+    });
+    expect(mixedOut.scalar).toBe(125); // 90 blob + 35 new tree
+    expect(mixedOut.reviewNeeded).toBe(false);
   });
 
   test('missing table or empty slices yields null scalar (caller keeps legacy semantics)', async () => {

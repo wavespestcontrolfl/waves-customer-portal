@@ -64,12 +64,8 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
     recurringServicesFromEstimateData,
     supplementalCompanionLines,
   } = require('./estimate-converter');
-  const lines = [
-    ...recurringServicesFromEstimateData(estimateData),
-    ...supplementalCompanionLines(estimateData),
-  ];
   const raw = {};
-  for (const line of lines) {
+  const addLine = (line) => {
     const family = serviceFamilyKeyForAdoption(line) || UNATTRIBUTED;
     const manualFinal = Number(line?.manualFinalAnnual);
     const annualAfter = Number(line?.annualAfterDiscount);
@@ -78,8 +74,25 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
       : (Number.isFinite(annualAfter) && annualAfter >= 0
         ? annualAfter / 12
         : Number(line?.monthly ?? line?.mo));
-    if (!Number.isFinite(monthly) || monthly <= 0) continue;
+    if (!Number.isFinite(monthly) || monthly <= 0) return null;
     raw[family] = (raw[family] || 0) + monthly;
+    return family;
+  };
+  const recurringFamilies = new Set();
+  for (const line of recurringServicesFromEstimateData(estimateData)) {
+    const family = addLine(line);
+    if (family) recurringFamilies.add(family);
+  }
+  // Supplemental companions dedupe by FAMILY against the recurring rows
+  // (codex #3245 r1, mirroring combineRecurringServicesForScheduling's
+  // companion resolution): legacy payloads can carry rodent bait BOTH as a
+  // recurring line and as the rodentBaitMo scalar — counting it twice
+  // distorts every proportionally-normalized sibling slice even though the
+  // total still reconciles.
+  for (const line of supplementalCompanionLines(estimateData)) {
+    const family = serviceFamilyKeyForAdoption(line) || UNATTRIBUTED;
+    if (recurringFamilies.has(family)) continue;
+    addLine(line);
   }
   const families = Object.keys(raw);
   if (!families.length) return { [UNATTRIBUTED]: billedMonthly };
@@ -170,7 +183,29 @@ async function applyAcceptToLedger(database, {
   const components = new Map(existing.map((row) => [row.family_key, roundMoney(row.monthly_rate)]));
   const prior = roundMoney(previousScalar);
   let reviewNeeded = false;
-  if (components.size === 0) {
+  // An 'unattributed' component is a QUARANTINED blob, not a seeded ledger
+  // (codex #3245 r1): it may CONTAIN the very family this accept re-prices
+  // (backfill-parked multi-plan customers, admin resets). It is only safe
+  // to keep it parked when this accept is proven NOT to touch its contents:
+  // - a proven-disjoint add-on (addOnBase > 0 — the #3241 row evidence says
+  //   none of the customer's live plans share the estimate's families), or
+  // - a re-quote whose families are ALL already attributed components (the
+  //   blob describes the customer's plans as of its parking; a family that
+  //   was split out afterward is no longer inside it).
+  // Anything else deletes the blob (legacy replace semantics — exactly what
+  // the scalar did pre-ledger) and raises the review alert so the owner
+  // re-verifies the total once.
+  const attributedFamilies = new Set([...components.keys()].filter((f) => f !== UNATTRIBUTED));
+  const unattributedAmount = components.get(UNATTRIBUTED) || 0;
+  if (unattributedAmount > 0 && !(addOnBase > 0)
+    && !sliceFamilies.every((f) => attributedFamilies.has(f))) {
+    components.delete(UNATTRIBUTED);
+    await database('customer_plan_rates')
+      .where({ customer_id: customerId, family_key: UNATTRIBUTED })
+      .del();
+    reviewNeeded = true;
+  }
+  if (attributedFamilies.size === 0 && unattributedAmount === 0) {
     if (addOnBase > 0 && prior > 0) {
       // Case 2 — park the pre-ledger amount so the sum equals old + new.
       components.set(UNATTRIBUTED, prior);

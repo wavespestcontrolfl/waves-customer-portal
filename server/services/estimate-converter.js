@@ -2110,6 +2110,21 @@ const EstimateConverter = {
       } catch (ledgerErr) {
         logger.error(`[estimate-converter] plan-rate ledger apply failed for customer ${customerId} (scalar keeps legacy semantics): ${ledgerErr.message}`);
         ledgerScalar = null;
+        // With the gate ON the ledger has scalar authority — falling back
+        // to a legacy scalar while STALE components survive would let the
+        // next successful accept resurrect an obsolete sum (codex #3245
+        // r1). Invalidate the components before falling back; if even the
+        // invalidation fails, abort the acceptance (fail closed — money
+        // math may not proceed on a half-written ledger).
+        try {
+          const PlanRateLedger = require('./plan-rate-ledger');
+          if (PlanRateLedger.planRateLedgerEnabled()) {
+            await database.transaction((sp) => PlanRateLedger.clearLedger(sp, customerId, { source: 'apply_failure' }));
+          }
+        } catch (clearErr) {
+          logger.error(`[estimate-converter] plan-rate ledger invalidation ALSO failed for customer ${customerId} — aborting acceptance: ${clearErr.message}`);
+          throw ledgerErr;
+        }
       }
     }
     // Provisional figure for the audit outputs below — the WRITE itself is

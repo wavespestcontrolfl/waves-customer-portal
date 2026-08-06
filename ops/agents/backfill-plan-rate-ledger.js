@@ -25,21 +25,26 @@ const { Client } = require(path.join(__dirname, '..', '..', 'node_modules', 'pg'
 
 const EXECUTE = process.argv.includes('--execute');
 
-// Family classification mirrors the adoption-classifier vocabulary closely
-// enough for backfill triage; anything ambiguous lands on the review list
-// rather than guessing (the server-side classifier is the runtime
-// authority — this script only decides single-family vs review).
-function familyFor(serviceType) {
-  const s = String(serviceType || '').toLowerCase();
-  if (!s) return null;
-  if (/\bpalms?\b/.test(s)) return 'palm_injection';
-  if (s.includes('mosquito')) return 'mosquito';
-  if (s.includes('lawn') || s.includes('turf')) return 'lawn_care';
-  if (s.includes('tree') || s.includes('shrub') || s.includes('ornamental')) return 'tree_shrub';
-  if (s.includes('termite')) return 'termite_bait';
-  if (/\b(rodent|rats?|mouse|mice)\b/.test(s) && !/\bpest\b.*\brodent\b/.test(s)) return 'rodent_bait';
-  if (s.includes('pest') || s.includes('roach')) return 'pest_control';
-  return null;
+// The RUNTIME family classifier is the only taxonomy (codex #3245 r1 —
+// a parallel substring classifier collapsed commercial families into their
+// residential counterparts, seeding components a later commercial re-quote
+// could never replace). If it cannot load, ABORT — never fall back to a
+// divergent classification.
+let serviceFamilyKeyForAdoption;
+try {
+  ({ serviceFamilyKeyForAdoption } = require(path.join(__dirname, '..', '..', 'server', 'routes', 'estimate-public')));
+  if (typeof serviceFamilyKeyForAdoption !== 'function') throw new Error('classifier export missing');
+} catch (loadErr) {
+  console.error(`ABORT: runtime family classifier unavailable (${loadErr.message}) — run via \`railway run\` from the repo root so server modules can load.`);
+  process.exit(1);
+}
+
+function familyFor(row) {
+  return serviceFamilyKeyForAdoption({
+    service: row.catalog_service_key || null,
+    name: row.catalog_service_name || null,
+    service_type: row.service_type,
+  });
 }
 
 (async () => {
@@ -62,15 +67,16 @@ function familyFor(serviceType) {
     const review = [];
     for (const cust of customers) {
       const { rows: planRows } = await client.query(`
-        SELECT DISTINCT ss.service_type
+        SELECT DISTINCT ss.service_type, s.service_key AS catalog_service_key, s.name AS catalog_service_name
         FROM scheduled_services ss
+        LEFT JOIN services s ON ss.service_id = s.id
         WHERE ss.customer_id = $1
           AND ss.is_recurring = true
           AND ss.is_callback IS NOT TRUE
           AND ss.status NOT IN ('cancelled','completed','no_show','skipped','rescheduled')
       `, [cust.id]);
-      const families = new Set(planRows.map((r) => familyFor(r.service_type)).filter(Boolean));
-      const unclassifiable = planRows.some((r) => !familyFor(r.service_type));
+      const families = new Set(planRows.map((r) => familyFor(r)).filter(Boolean));
+      const unclassifiable = planRows.some((r) => !familyFor(r));
       const rate = Number(cust.monthly_rate);
       if (families.size === 1 && !unclassifiable) {
         const family = [...families][0];
