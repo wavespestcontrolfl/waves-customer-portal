@@ -107,9 +107,11 @@ function waveGuardBundleValues() {
           out.mosquito.push(li.annualAfterDiscount / li.visits);
         }
         if (li.service === 'tree_shrub' && Number.isFinite(li.monthlyAfterDiscount)) out.treeShrub.push(li.monthlyAfterDiscount);
-        if (li.service === 'palm_injection' && Number.isFinite(li.pricePerPalm)
+        if (li.service === 'palm_injection' && Number.isFinite(li.perVisit) && li.palmCount > 0
           && li.annualBeforeCredits > 0 && Number.isFinite(li.annualAfterCredits)) {
-          out.palm.push(li.pricePerPalm * (li.annualAfterCredits / li.annualBeforeCredits));
+          // perVisit already carries the per-visit minimum; apply the credit
+          // ratio to the actually-charged amount, not the raw catalog rate.
+          out.palm.push((li.perVisit / li.palmCount) * (li.annualAfterCredits / li.annualBeforeCredits));
         }
       }
         }
@@ -130,8 +132,11 @@ function buildRows() {
       errors.push({ key, message: err.message });
     }
   };
-  const lawnCadenceText = Object.values(constants.LAWN_TIERS || {})
-    .map((t) => `${t.freq}x`).join(', ')
+  const visibleLawnTiers = Object.entries(constants.LAWN_TIERS || {})
+    .filter(([, t]) => !t.hidden);
+  const LAWN_TIER_KEYS = visibleLawnTiers.map(([k]) => k);
+  const lawnCadenceText = visibleLawnTiers
+    .map(([, t]) => `${t.freq}x`).join(', ')
     .replace(/, ([^,]*)$/, ', or $1');
   const b = constants.RODENT.bundles || {};
   // NOTE: only trapping+sanitation is advertised — the live bundle selector
@@ -161,7 +166,8 @@ function buildRows() {
         nearWater: true,
         features: { shrubs: 'heavy', trees: 'heavy', complexity: 'complex', indoor: true, poolCage: true, poolCageSize: 'oversized', attachedGarage: true, nearWater: true },
       },
-      options: { modifiers: { pestAgeAdj: 10 } },
+      // Pre-1970 homes carry the $20 age adjustment property lookup forwards.
+      options: { modifiers: { pestAgeAdj: 20 } },
     },
   ];
   add('general_pest_quarterly', () => rangeRow({
@@ -257,13 +263,15 @@ function buildRows() {
                   // In-house heat/hybrid auto-price for non-severe, prepared
                   // jobs; chemical ignores equipment. Subcontracted equipment
                   // and quote-required combos fall out via the filter.
+                  // Method combos restricted to the LIVE allowlist so an
+                  // admin-disabled method can't throw the whole row.
                   [
                     { method: 'CHEMICAL' },
                     { method: 'HEAT', equipment: 'INHOUSE', heatScope: 'ROOMS_ONLY' },
                     { method: 'HEAT', equipment: 'INHOUSE', heatScope: 'WHOLE_HOME' },
                     { method: 'HYBRID', equipment: 'INHOUSE', heatScope: 'ROOMS_ONLY' },
                     { method: 'HYBRID', equipment: 'INHOUSE', heatScope: 'WHOLE_HOME' },
-                  ]
+                  ].filter((m) => (constants.BED_BUG.allowedMethods || []).includes(m.method))
                     .map((m) => ({ footprint, stories, rooms, severity, prepStatus, occupancyType, ...m })))))))),
       ({ footprint, stories, rooms, severity, prepStatus, occupancyType, method, equipment, heatScope }) => sp.priceBedBugTreatment(
         { footprint, stories },
@@ -298,7 +306,7 @@ function buildRows() {
       // Per-application amount including any station/dunk add-ons amortized
       // across the program's applications (add-ons bill annually).
       (r) => (r.tiers || []).map((t) => t.perVisit + ((r.addOns && r.addOns.annualAddOns) || 0) / t.visits)).concat(bundle('mosquito')),
-    notes: `Seasonal (9 applications/yr) or monthly (12 applications/yr) program; priced by treatable area and mosquito pressure; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%. Optional add-ons bill annually per unit: mosquito stations $${Math.round(constants.MOSQUITO.addOns.in2CareStation.price)} each, Bti dunks $${Math.round(constants.MOSQUITO.addOns.dunkTablet.price)} each — larger counts extend beyond this range at those rates.`,
+    notes: `Seasonal (${Number((constants.MOSQUITO.tierVisits || {}).seasonal9) || 9} applications/yr) or monthly (${Number((constants.MOSQUITO.tierVisits || {}).monthly12) || 12} applications/yr) program; priced by treatable area and mosquito pressure; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%. Optional add-ons bill annually per unit: mosquito stations $${Math.round(constants.MOSQUITO.addOns.in2CareStation.price)} each, Bti dunks $${Math.round(constants.MOSQUITO.addOns.dunkTablet.price)} each — larger counts extend beyond this range at those rates.`,
   }));
 
   add('wasp_hornet_removal', () => rangeRow({
@@ -374,6 +382,10 @@ function buildRows() {
       // Tile-roof properties carry the derived rodentRoofAdj the estimate
       // path forwards.
       ({ f, lot }) => sp.priceRodentBait({ footprint: f, lotSqFt: lot, features: {} }, { modifiers: { rodentRoofAdj: 50 } }),
+      (r) => r.monthly)).concat(sweepValues(
+      LOTS_SQFT.flatMap((lot) => FOOTPRINTS_SQFT.map((f) => ({ f, lot }))),
+      // Metal roofs carry the negative adjustment property lookup forwards.
+      ({ f, lot }) => sp.priceRodentBait({ footprint: f, lotSqFt: lot, features: {} }, { modifiers: { rodentRoofAdj: -5 } }),
       (r) => r.monthly)),
     notes: 'Monthly-billed monitoring program with quarterly service visits.',
   }));
@@ -458,8 +470,11 @@ function buildRows() {
     {},
     { complexity: 'complex', modifiers: { termiteConstructionMult: 1.3, termiteFoundationAdj: 150 } },
     // Measured perimeter override — provenance review flag only; the exact
-    // branch still publishes the priced line.
+    // branch still publishes the priced line. Perimeter is unbounded; the
+    // sweep covers the residential span and larger overrides scale by
+    // station count.
     { perimeterLF: 1000 },
+    { perimeterLF: 2000 },
   ];
   add('termite_bait_install', () => rangeRow({
     key: 'termite_bait_install',
@@ -604,7 +619,7 @@ function buildRows() {
     values: sweepValues(
       LAWNS_SQFT.flatMap((sq) =>
         Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
-          ['standard', 'enhanced', 'premium'].map((tier) => ({ sq, track, tier })))),
+          LAWN_TIER_KEYS.map((tier) => ({ sq, track, tier })))),
       ({ sq, track, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track, tier }),
       (r) => r.perApp).concat(bundle('lawn')),
     notes: `${lawnCadenceText} applications per year by tier; priced by grass type and treatable turf area; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
@@ -620,7 +635,7 @@ function buildRows() {
       LAWNS_SQFT.flatMap((sq) =>
         ['weed', 'fungicide', 'pest', 'fert'].flatMap((treatmentType) =>
           Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
-            ['standard', 'enhanced', 'premium'].flatMap((tier) =>
+            LAWN_TIER_KEYS.flatMap((tier) =>
               [false, true].map((isRecurringCustomer) => ({ sq, treatmentType, track, tier, isRecurringCustomer })))))),
       ({ sq, treatmentType, track, tier, isRecurringCustomer }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType, track, tier, isRecurringCustomer }),
       (r) => r.price),
@@ -637,7 +652,7 @@ function buildRows() {
     values: sweepValues(
       LAWNS_SQFT.flatMap((sq) =>
         Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
-          ['standard', 'enhanced', 'premium'].flatMap((tier) =>
+          LAWN_TIER_KEYS.flatMap((tier) =>
             [false, true].map((isRecurringCustomer) => ({ sq, track, tier, isRecurringCustomer }))))),
       ({ sq, track, tier, isRecurringCustomer }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType: 'pest', track, tier, isRecurringCustomer }),
       (r) => r.price),
@@ -678,7 +693,7 @@ function buildRows() {
         [{}, { stationCount: 5, dunkCount: 9 }, { isRecurringCustomer: true }].map((opts) => ({ lotSqFt, opts }))),
       ({ lotSqFt, opts }) => sp.priceOneTimeMosquito({ footprint: 2000, lotSqFt }, opts),
       (r) => (r.quoteRequired ? NaN : r.price)),
-    notes: `Priced by treatable area. Add-ons per unit: mosquito stations $${Math.round(constants.MOSQUITO.addOns.in2CareStation.price)} each, Bti dunks $${Math.round(constants.MOSQUITO.addOns.dunkTablet.price)} each — larger counts extend beyond this range at those rates.`,
+    notes: `Priced by treatable area. One-time add-ons per unit: mosquito stations $${Math.round(constants.ONE_TIME.mosquito.stationAddOn)} each, Bti dunks $${Math.round(constants.ONE_TIME.mosquito.dunkAddOn)} each — larger counts extend beyond this range at those rates.`,
   }));
 
   add('lawn_plugging', () => rangeRow({

@@ -795,7 +795,17 @@ function isSyncInFlight() {
   return _syncsInFlight > 0;
 }
 
-async function syncConstantsFromDB(dbInstance) {
+// Serialize syncs: overlapping direct callers (route, admin config,
+// proposal approval) must not interleave — a later sync's snapshot taken
+// mid-mutation of an earlier one could restore mixed constants on failure.
+let _syncQueue = Promise.resolve();
+function syncConstantsFromDB(dbInstance) {
+  const run = _syncQueue.then(() => _syncConstantsFromDBUnserialized(dbInstance));
+  _syncQueue = run.catch(() => {});
+  return run;
+}
+
+async function _syncConstantsFromDBUnserialized(dbInstance) {
   const db = dbInstance || require('../../models/db');
   _syncsInFlight += 1;
   let constantsSnapshot = null;
