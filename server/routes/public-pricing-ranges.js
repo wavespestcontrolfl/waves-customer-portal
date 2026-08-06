@@ -9,8 +9,16 @@ const db = require('../models/db');
 router.get('/', async (req, res, next) => {
   try {
     // Pricing is DB-authoritative — sync (60s-cached) before reading the engine.
+    // syncConstantsFromDB returns false when the admin-edited config could not
+    // be applied (missing table, connection failure); publishing in-code
+    // defaults as if they were authoritative would violate the contract, so
+    // fail closed with an uncacheable 503 instead.
     const { syncConstantsFromDB } = require('../services/pricing-engine');
-    await syncConstantsFromDB(db);
+    const synced = await syncConstantsFromDB(db);
+    if (!synced) {
+      res.set('Cache-Control', 'no-store');
+      return res.status(503).json({ error: 'pricing configuration temporarily unavailable' });
+    }
     const { computePublicPricingRanges } = require('../services/pricing-engine/public-ranges');
     const payload = computePublicPricingRanges();
     res.set('Cache-Control', 'public, max-age=3600');

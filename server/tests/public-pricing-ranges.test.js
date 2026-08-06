@@ -22,7 +22,8 @@ const EXPECTED_KEYS = [
   'wdo_inspection',
   'lawn_care_program',
   'one_time_lawn',
-  'dethatching',
+  'one_time_pest',
+  'one_time_mosquito',
   'lawn_plugging',
   'top_dressing',
   'tree_shrub_care',
@@ -32,7 +33,6 @@ const EXPECTED_KEYS = [
 // Services that genuinely bill monthly — the only ones allowed a per-month unit.
 const MONTHLY_BILLED_KEYS = new Set([
   'rodent_bait_program',
-  'termite_bait_monitoring',
   'tree_shrub_care',
 ]);
 
@@ -40,7 +40,7 @@ describe('public pricing ranges', () => {
   let payload;
 
   beforeAll(() => {
-    payload = computePublicPricingRanges({ force: true });
+    payload = computePublicPricingRanges();
   });
 
   test('every service sweeps without errors', () => {
@@ -72,10 +72,9 @@ describe('public pricing ranges', () => {
       if (s.unit === 'per month') {
         expect(MONTHLY_BILLED_KEYS.has(s.key)).toBe(true);
       }
-      // per-year is only a real billing unit for the termite bond.
-      if (s.unit === 'per year') {
-        expect(s.key).toBe('termite_bond');
-      }
+      // No per-year units: even the termite bond rides quarterly
+      // applications (owner copy rule: no combined annual totals).
+      expect(s.unit).not.toMatch(/per year/i);
       expect(text).toBeTruthy();
     }
     const pest = payload.services.find((s) => s.key === 'general_pest_quarterly');
@@ -99,12 +98,10 @@ describe('public pricing ranges', () => {
     expect(new Date(payload.generatedAt).getTime()).not.toBeNaN();
   });
 
-  test('result is cached within the TTL and force refreshes', () => {
+  test('every call recomputes from current constants (no stale memoization)', () => {
     const again = computePublicPricingRanges();
-    expect(again).toBe(payload);
-    const forced = computePublicPricingRanges({ force: true });
-    expect(forced).not.toBe(payload);
-    expect(forced.services.length).toBe(payload.services.length);
+    expect(again).not.toBe(payload);
+    expect(again.services.map((s) => s.key)).toEqual(payload.services.map((s) => s.key));
   });
 
   test('buildRows exposes sweep errors instead of throwing', () => {

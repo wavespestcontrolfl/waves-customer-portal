@@ -24,10 +24,6 @@ const FOOTPRINTS_SQFT = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000, 6000];
 const LOTS_SQFT = [5000, 8000, 12000, 20000, 30000];
 const LAWNS_SQFT = [2000, 4000, 6000, 8000, 12000, 16000, 20000];
 
-const CACHE_TTL_MS = 10 * 60 * 1000;
-let cache = null;
-let cacheAt = 0;
-
 function sweepValues(inputs, fn, pick) {
   const values = [];
   for (const input of inputs) {
@@ -172,17 +168,17 @@ function buildRows() {
   add('termite_bait_monitoring', () => rangeRow({
     key: 'termite_bait_monitoring',
     name: 'Termite Bait Monitoring',
-    unit: 'per month',
-    values: sweepValues(FOOTPRINTS_SQFT, (f) => sp.priceTermiteBait({ footprint: f }, {}), (r) => r.monthly),
-    notes: 'Monthly-billed monitoring with quarterly station checks.',
+    unit: 'per application',
+    values: sweepValues(FOOTPRINTS_SQFT, (f) => sp.priceTermiteBait({ footprint: f }, {}), (r) => r.perApp),
+    notes: 'Quarterly station-check applications.',
   }));
 
   add('termite_bond', () => rangeRow({
     key: 'termite_bond',
     name: 'Termite Bond',
-    unit: 'per year',
-    values: sweepValues(Object.keys(constants.TERMITE.bond), (term) => sp.priceTermiteBond(term), (r) => r.annual),
-    notes: '1, 5, and 10-year terms.',
+    unit: 'per application',
+    values: sweepValues(Object.keys(constants.TERMITE.bond), (term) => sp.priceTermiteBond(term), (r) => r.perApp),
+    notes: 'Rides quarterly service applications; 1, 5, and 10-year terms.',
   }));
 
   add('termite_trenching', () => rangeRow({
@@ -218,10 +214,12 @@ function buildRows() {
     name: 'Lawn Care Program',
     unit: 'per application',
     values: sweepValues(
-      LAWNS_SQFT.flatMap((sq) => ['standard', 'enhanced', 'premium'].map((tier) => ({ sq, tier }))),
-      ({ sq, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track: 'st_augustine', tier }),
+      LAWNS_SQFT.flatMap((sq) =>
+        Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
+          ['standard', 'enhanced', 'premium'].map((tier) => ({ sq, track, tier })))),
+      ({ sq, track, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track, tier }),
       (r) => r.perApp),
-    notes: '6x, 9x, or 12x applications per year by tier; priced by treatable turf area.',
+    notes: '6x, 9x, or 12x applications per year by tier; priced by grass type and treatable turf area.',
   }));
 
   add('one_time_lawn', () => rangeRow({
@@ -229,19 +227,31 @@ function buildRows() {
     name: 'One-Time Lawn Treatment',
     unit: 'per treatment',
     values: sweepValues(
-      LAWNS_SQFT.flatMap((sq) => ['weed', 'fungus', 'insect', 'fertilizer'].map((treatmentType) => ({ sq, treatmentType }))),
+      LAWNS_SQFT.flatMap((sq) => ['weed', 'fungicide', 'pest', 'fert'].map((treatmentType) => ({ sq, treatmentType }))),
       ({ sq, treatmentType }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType }),
       (r) => r.price),
   }));
 
-  add('dethatching', () => rangeRow({
-    key: 'dethatching',
-    name: 'Lawn Dethatching',
-    unit: 'per job',
-    values: sweepValues(LAWNS_SQFT,
-      (sq) => sp.priceDethatching(sq, { grassType: 'st_augustine', thatchDepthInches: 1 }),
-      (r) => r.price ?? r.estimatedPrice),
-    notes: 'Debris removal add-ons priced separately.',
+  // Dethatching is deliberately NOT published: priceDethatching returns
+  // quoteRequired/manual-review for every residential input, so the engine
+  // refuses to auto-quote it — publishing a range would contradict the
+  // authoritative quote path. It stays in the custom-quoted bucket.
+
+  add('one_time_pest', () => rangeRow({
+    key: 'one_time_pest',
+    name: 'One-Time Pest Treatment',
+    unit: 'per treatment',
+    values: sweepValues(FOOTPRINTS_SQFT, (f) => sp.priceOneTimePest({ footprint: f }, {}), (r) => r.price),
+    notes: 'Single knockdown visit; recurring plans price lower per application.',
+  }));
+
+  add('one_time_mosquito', () => rangeRow({
+    key: 'one_time_mosquito',
+    name: 'One-Time Mosquito Treatment',
+    unit: 'per treatment',
+    values: sweepValues(LOTS_SQFT,
+      (lotSqFt) => sp.priceOneTimeMosquito({ footprint: 2000, lotSqFt }, {}),
+      (r) => r.price),
   }));
 
   add('lawn_plugging', () => rangeRow({
@@ -271,7 +281,7 @@ function buildRows() {
       LOTS_SQFT.flatMap((lot) => ['light', 'standard', 'enhanced'].map((tier) => ({ lot, tier }))),
       ({ lot, tier }) => sp.priceTreeShrub({ footprint: 2000, lotSqFt: lot }, { tier }),
       (r) => r.monthly),
-    notes: 'Monthly-billed program; visits every other month.',
+    notes: 'Monthly-billed program; 4, 6, or 9 applications per year by tier.',
   }));
 
   add('palm_injection', () => rangeRow({
@@ -296,19 +306,19 @@ function buildRows() {
   return { rows, errors };
 }
 
-function computePublicPricingRanges({ force = false } = {}) {
-  const now = Date.now();
-  if (!force && cache && now - cacheAt < CACHE_TTL_MS) return cache;
+// No in-process cache: the sweep is a few ms of pure constants reads, and any
+// memoization here would keep serving pre-edit ranges after an admin pricing
+// sync (the route re-syncs constants per request; the HTTP Cache-Control is
+// the one explicit, bounded staleness window).
+function computePublicPricingRanges() {
   const { rows, errors } = buildRows();
-  cache = {
-    generatedAt: new Date(now).toISOString(),
+  return {
+    generatedAt: new Date().toISOString(),
     currency: 'USD',
     disclaimer: 'Typical ranges for residential properties in our SW Florida service area. Your exact price depends on property size and conditions — get an instant quote at https://www.wavespestcontrol.com/pest-control-calculator/. Commercial properties are custom-quoted.',
     services: rows,
     errors,
   };
-  cacheAt = now;
-  return cache;
 }
 
-module.exports = { computePublicPricingRanges, _internals: { buildRows, CACHE_TTL_MS } };
+module.exports = { computePublicPricingRanges, _internals: { buildRows } };
