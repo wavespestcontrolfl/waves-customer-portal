@@ -3618,6 +3618,10 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
     .update({
       status: 'queued',
       opportunity_id: opportunityId || task.opportunity_id || null,
+      // Rows planned before the target_keyword column existed carry null —
+      // refresh it or the executor scores legacy targets with the
+      // title-flooded denominator this field exists to prevent.
+      target_keyword: task.target_keyword || null,
       skip_reason: null,
       failure_reason: null,
       updated_at: new Date(),

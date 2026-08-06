@@ -9,7 +9,10 @@ exports.up = async (knex) => {
   const has = await knex.schema.hasColumn('content_internal_link_tasks', 'target_keyword');
   if (!has) {
     await knex.schema.alterTable('content_internal_link_tasks', (t) => {
-      t.string('target_keyword', 200);
+      // 500 matches content_briefs.target_keyword — the value persisted here
+      // is that field verbatim; a narrower column would fail the insert for
+      // long-tail keywords the briefs table accepts.
+      t.string('target_keyword', 500);
     });
   }
 };
