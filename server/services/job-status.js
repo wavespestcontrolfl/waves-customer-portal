@@ -542,6 +542,24 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
           // owner to handleSeriesCancellation's adoption fence and block
           // the combined notice.
           const callerTs = cancelNoticeToken instanceof Date ? cancelNoticeToken : nextClaimTs();
+          // Merged-slot survivor check, same as the in-trx claim (codex
+          // #3238 r2): if the customer still has a live visit at this
+          // slot, the repaired claim must be terminal 'suppressed' — a
+          // pending_notify would read as unconditional operator intent
+          // and the sweep would text against a live visit.
+          let repairState = 'pending_notify';
+          try {
+            const own = await db('appointment_reminders')
+              .where({ scheduled_service_id: jobId })
+              .first('customer_id', 'appointment_time');
+            if (own) {
+              const survivor = await db('appointment_reminders')
+                .where({ customer_id: own.customer_id, appointment_time: own.appointment_time, cancelled: false })
+                .whereNot('scheduled_service_id', jobId)
+                .first('id');
+              if (survivor) repairState = 'suppressed';
+            }
+          } catch { /* fail toward operator intent */ }
           await db('appointment_reminders')
             .where({ scheduled_service_id: jobId })
             .where(function claimable() {
@@ -553,7 +571,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
                 });
             })
             .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
-            .update({ cancellation_notice_at: callerTs, cancellation_notice_state: 'pending_notify', updated_at: callerTs });
+            .update({ cancellation_notice_at: callerTs, cancellation_notice_state: repairState, updated_at: callerTs });
           return;
         }
         if (!cancelNoticeClaimTs && cancelNoticeLateClaim) {
