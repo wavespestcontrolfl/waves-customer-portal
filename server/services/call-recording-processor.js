@@ -9665,6 +9665,31 @@ const CallRecordingProcessor = {
               .ignore()
               .catch((e) => logger.warn(`[call-proc] held-confirmation triage insert failed for ${maskSid(callSid)}: ${e.message}`));
           }
+          // Card-on-file spec §3 Phase 5.3, REORDERED by owner ruling
+          // 2026-08-06: the card/Auto Pay link goes out FIRST, before the
+          // confirmation text — right after the call, when the appointment
+          // is top of mind (was: after the confirmation leg). Same
+          // call-level TCPA clearance as before (Codex #2771 P1): a
+          // v2-blocked or held-implied-consent call has no consented SMS
+          // recipient, so it gets no card text either, and a redirected
+          // implied-consent send goes to the resolved recipient (the
+          // inbound caller who consented), never a non-consenting saved
+          // number. The funnel owns the rest (gate, exemptions,
+          // saved-method auto-secure, dedup, one-text-ever, the email leg
+          // riding a confirmed text) and is idempotent on reused/attached
+          // rows. Dark until APPOINTMENT_CARD_REQUEST + the template flip.
+          if (scheduledServiceId && !outboundReviewBooking && !v2SmsBlocked && !holdImpliedSmsLeg) {
+            try {
+              const { requestCardForAppointment } = require('./appointment-card-request');
+              await requestCardForAppointment({
+                scheduledServiceId,
+                trigger: 'ai_call_pipeline',
+                recipientPhone: smsRecipient || null,
+              });
+            } catch (cardErr) {
+              logger.warn(`[call-proc] card-request funnel failed for visit ${scheduledServiceId}: ${cardErr.message}`);
+            }
+          }
           // Only send the confirmation if the schedule row landed and the TCPA gate allows it.
           if (scheduledServiceId && outboundReviewBooking) {
             // Pending outbound booking — never auto-text a "confirmed" appt the
@@ -9942,29 +9967,6 @@ const CallRecordingProcessor = {
             } else {
               logger.info(`[call-proc] Skipping duplicate appointment SMS to customer ${customerId} (sent within last 10 min)`);
               appointmentResult = { smsSent: false, smsSkippedReason: 'duplicate', scheduledServiceId, service: serviceType, dateTime: extracted.preferred_date_time };
-            }
-          }
-          // Card-on-file spec §3 Phase 5.3: phone bookings ride the same
-          // request-card funnel as every other channel — AFTER the
-          // confirmation leg and under the SAME call-level TCPA clearance
-          // (Codex #2771 P1): a v2-blocked or held-implied-consent call has
-          // no consented SMS recipient, so it gets no card text either, and
-          // a redirected implied-consent send goes to the resolved recipient
-          // (the inbound caller who consented), never a non-consenting
-          // saved number. The funnel owns the rest (gate, exemptions,
-          // saved-method auto-secure, dedup, one-text-ever) and is
-          // idempotent on reused/attached rows. Dark until
-          // APPOINTMENT_CARD_REQUEST + the template flip.
-          if (scheduledServiceId && !outboundReviewBooking && !v2SmsBlocked && !holdImpliedSmsLeg) {
-            try {
-              const { requestCardForAppointment } = require('./appointment-card-request');
-              await requestCardForAppointment({
-                scheduledServiceId,
-                trigger: 'ai_call_pipeline',
-                recipientPhone: smsRecipient || null,
-              });
-            } catch (cardErr) {
-              logger.warn(`[call-proc] card-request funnel failed for visit ${scheduledServiceId}: ${cardErr.message}`);
             }
           }
           if (followUpCreated) {

@@ -2048,6 +2048,30 @@ function initScheduledJobs() {
   // DARK unless PREVISIT_BALANCE_REMINDER=true AND the seeded-inactive
   // previsit_balance_reminder SMS template is activated by the owner.
   // =========================================================================
+  // ==========================================================================
+  // Pre-visit card/Auto Pay invitation BACKSTOP (owner directive 2026-08-06):
+  // catches visits the booking-time card triggers missed (held call comms,
+  // post-booking plan conversions). DARK unless GATE_PREVISIT_CARD_SWEEP=true
+  // AND the secure-card lane's own two levers are lit; all send policy lives
+  // in requestCardForAppointment.
+  // ==========================================================================
+  cron.schedule('20 10 * * *', async () => {
+    logger.info('Running: pre-visit card/Auto Pay invitation backstop');
+    try {
+      await runExclusive('previsit-card-request-sweep', async () => {
+        const PrevisitCardSweep = require('./previsit-card-request-sweep');
+        const result = await PrevisitCardSweep.runSweep();
+        if (result.skipped === true) {
+          logger.info(`Pre-visit card invitations inert: ${result.reason}`);
+        } else {
+          logger.info(`Pre-visit card invitations done: ${result.sent} sent, ${result.skipped} skipped of ${result.considered}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Pre-visit card invitation sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('5 10 * * *', async () => {
     logger.info('Running: pre-visit balance reminders');
     try {
