@@ -6,9 +6,20 @@ const db = require('../models/db');
 // interval expires must share ONE in-flight syncConstantsFromDB call instead
 // of each launching the full multi-query sync against pricing_config.
 let inflightSync = null;
+// Failed-sync backoff: a failed sync doesn't advance the bridge's interval,
+// so without this every subsequent request would re-hit the already-unhealthy
+// database; retry at most once per FAILED_SYNC_BACKOFF_MS.
+const FAILED_SYNC_BACKOFF_MS = 30 * 1000;
+let lastFailedSyncAt = 0;
 function coalescedSync(syncConstantsFromDB) {
   if (!inflightSync) {
-    inflightSync = syncConstantsFromDB(db).finally(() => { inflightSync = null; });
+    inflightSync = syncConstantsFromDB(db)
+      .then((ok) => {
+        if (!ok) lastFailedSyncAt = Date.now();
+        else lastFailedSyncAt = 0;
+        return ok;
+      })
+      .finally(() => { inflightSync = null; });
   }
   return inflightSync;
 }
@@ -30,6 +41,10 @@ router.get('/', async (req, res, next) => {
     // with an uncacheable 503 instead.
     const { needsSync, syncConstantsFromDB } = require('../services/pricing-engine');
     if (needsSync()) {
+      if (Date.now() - lastFailedSyncAt < FAILED_SYNC_BACKOFF_MS) {
+        res.set('Cache-Control', 'no-store');
+        return res.status(503).json({ error: 'pricing configuration temporarily unavailable' });
+      }
       const synced = await coalescedSync(syncConstantsFromDB);
       if (!synced) {
         res.set('Cache-Control', 'no-store');

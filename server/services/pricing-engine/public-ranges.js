@@ -22,7 +22,9 @@ const sp = require('./service-pricing');
 
 const FOOTPRINTS_SQFT = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000, 6000];
 const LOTS_SQFT = [5000, 8000, 12000, 20000, 30000];
-const LAWNS_SQFT = [2000, 4000, 6000, 8000, 12000, 16000, 20000];
+// Confirmed measured turf above the 20,000 sq ft table maximum still
+// prices (extrapolated, provenance review only) — sweep through 30,000.
+const LAWNS_SQFT = [2000, 4000, 6000, 8000, 12000, 16000, 20000, 30000];
 
 function sweepValues(inputs, fn, pick) {
   const values = [];
@@ -50,6 +52,40 @@ function rangeRow({ key, name, unit, values, notes = null, decimals = 0 }) {
   };
 }
 
+// Customer-PAID recurring values: generateEstimate applies the WaveGuard
+// tier discount (up to 20% at platinum) to qualifying recurring lines after
+// the whole bundle is known — the individual pricers never see it, so the
+// published lows must include these post-discount amounts.
+function waveGuardBundleValues() {
+  const { generateEstimate } = require('./estimate-engine');
+  const out = { pest: [], mosquito: [], treeShrub: [], lawn: [] };
+  for (const footprint of FOOTPRINTS_SQFT) {
+    for (const lotSqFt of [5000, 8000, 20000]) {
+      for (const propertyType of ['single_family', 'condo_upper']) {
+        for (const frequency of ['quarterly', 'monthly']) {
+      const est = generateEstimate({
+        propertyType,
+        property: { footprint, lotSqFt, lawnSqFt: 6000 },
+        services: { lawn: {}, pest: { frequency }, mosquito: {}, treeShrub: {}, termiteBait: {} },
+      });
+      for (const li of est.lineItems || []) {
+        const ratio = li.annualBeforeDiscount > 0 && Number.isFinite(li.annualAfterDiscount)
+          ? li.annualAfterDiscount / li.annualBeforeDiscount
+          : 1;
+        if (li.service === 'pest_control' && Number.isFinite(li.perApp)) out.pest.push(li.perApp * ratio);
+        if (li.service === 'lawn_care' && Number.isFinite(li.perApp)) out.lawn.push(li.perApp * ratio);
+        if (li.service === 'mosquito' && Number.isFinite(li.visits) && li.visits > 0 && Number.isFinite(li.annualAfterDiscount)) {
+          out.mosquito.push(li.annualAfterDiscount / li.visits);
+        }
+        if (li.service === 'tree_shrub' && Number.isFinite(li.monthlyAfterDiscount)) out.treeShrub.push(li.monthlyAfterDiscount);
+      }
+        }
+      }
+    }
+  }
+  return out;
+}
+
 function buildRows() {
   const rows = [];
   const errors = [];
@@ -59,6 +95,11 @@ function buildRows() {
     } catch (err) {
       errors.push({ key, message: err.message });
     }
+  };
+  let bundleMemo = null;
+  const bundle = (key) => {
+    if (!bundleMemo) bundleMemo = waveGuardBundleValues();
+    return bundleMemo[key] || [];
   };
 
   // Bare and complex residential profiles — the pest pricer adds charges for
@@ -70,7 +111,7 @@ function buildRows() {
       property: {
         attachedGarage: true,
         nearWater: true,
-        features: { shrubs: 'heavy', trees: 'heavy', complexity: 'complex', indoor: true, poolCage: true, poolCageSize: 'large', attachedGarage: true, nearWater: true },
+        features: { shrubs: 'heavy', trees: 'heavy', complexity: 'complex', indoor: true, poolCage: true, poolCageSize: 'oversized', attachedGarage: true, nearWater: true },
       },
       options: { modifiers: { pestAgeAdj: 10 } },
     },
@@ -88,8 +129,8 @@ function buildRows() {
         PEST_PROFILES.flatMap((p) =>
           Object.keys(constants.PROPERTY_TYPE_ADJ).map((propertyType) => ({ f, p, propertyType })))),
       ({ f, p, propertyType }) => sp.pricePestControl({ footprint: f, propertyType, ...p.property }, { frequency: 'quarterly', ...p.options }),
-      (r) => (r.tiers || []).map((t) => t.perApp)),
-    notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features. One-time initial service fee $${Math.round(constants.PEST.initialFee)}.`,
+      (r) => (r.tiers || []).map((t) => t.perApp)).concat(bundle('pest')),
+    notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features; WaveGuard bundle tiers discount qualifying recurring services up to 20%. One-time initial service fee $${Math.round(constants.PEST.initialFee)}.`,
   }));
 
   add('cockroach_treatment', () => rangeRow({
@@ -188,8 +229,8 @@ function buildRows() {
       ({ lotSqFt, p }) => sp.priceMosquito({ footprint: 2000, lotSqFt, features: p.features }, { ...p.options, ...p.addOns }),
       // Per-application amount including any station/dunk add-ons amortized
       // across the program's applications (add-ons bill annually).
-      (r) => (r.tiers || []).map((t) => t.perVisit + ((r.addOns && r.addOns.annualAddOns) || 0) / t.visits)),
-    notes: 'Seasonal (9 applications/yr) or monthly (12 applications/yr) program; priced by treatable area and mosquito pressure.',
+      (r) => (r.tiers || []).map((t) => t.perVisit + ((r.addOns && r.addOns.annualAddOns) || 0) / t.visits)).concat(bundle('mosquito')),
+    notes: 'Seasonal (9 applications/yr) or monthly (12 applications/yr) program; priced by treatable area and mosquito pressure; WaveGuard bundle tiers discount up to 20%.',
   }));
 
   add('wasp_hornet_removal', () => rangeRow({
@@ -401,6 +442,7 @@ function buildRows() {
         // Multi-day jobs stay directly priced (the flag is scheduling
         // provenance, not a quote refusal) — sweep through them.
         { atticSqFt: 8000, surfaceLinearFt: 200, surfaceHeightFt: 4 },
+        { atticSqFt: 12000, surfaceLinearFt: 200, surfaceHeightFt: 4 },
       ],
       (opts) => sp.priceBoraCare({ footprint: 2500 }, opts),
       (r) => (r.quoteRequired ? NaN : r.price)),
@@ -467,8 +509,8 @@ function buildRows() {
         Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
           ['standard', 'enhanced', 'premium'].map((tier) => ({ sq, track, tier })))),
       ({ sq, track, tier }) => sp.priceLawnCare({ lawnSqFt: sq }, { track, tier }),
-      (r) => r.perApp),
-    notes: '6x, 9x, or 12x applications per year by tier; priced by grass type and treatable turf area.',
+      (r) => r.perApp).concat(bundle('lawn')),
+    notes: '6x, 9x, or 12x applications per year by tier; priced by grass type and treatable turf area; WaveGuard bundle tiers discount up to 20%.',
   }));
 
   add('one_time_lawn', () => rangeRow({
@@ -566,8 +608,8 @@ function buildRows() {
         ['light', 'standard', 'enhanced'].flatMap((tier) =>
           TREE_SHRUB_PROFILES.map((p) => ({ lot, tier, p })))),
       ({ lot, tier, p }) => sp.priceTreeShrub({ ...p.property, lotSqFt: lot }, { ...p.options, tier }),
-      (r) => (r.requiresManualReview ? NaN : r.monthly)),
-    notes: 'Monthly-billed program; 4, 6, or 9 applications per year by tier; priced by planting beds and tree count.',
+      (r) => (r.requiresManualReview ? NaN : r.monthly)).concat(bundle('treeShrub')),
+    notes: 'Monthly-billed program; 4, 6, or 9 applications per year by tier; priced by planting beds and tree count; WaveGuard bundle tiers discount up to 20%.',
   }));
 
   add('rodent_plugging', () => rangeRow({
