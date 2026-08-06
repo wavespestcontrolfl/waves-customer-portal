@@ -2983,6 +2983,11 @@ const AppointmentReminders = {
                 AND lsl.direction = 'outbound'
                 AND lsl.message_type IN ('reminder_72h', 'appointment_reminder', 'confirmation')
                 AND lsl.twilio_sid ~ '^(SM|MM)'
+                -- Tied to THIS visit's lifetime (codex r31): after its
+                -- registration, before (a day past) its slot — an older
+                -- other-visit confirmation cannot announce a seeded row.
+                AND lsl.created_at >= appointment_reminders.created_at
+                AND lsl.created_at <= appointment_reminders.appointment_time + interval '1 day'
             )`)
             .first('id'));
         }
