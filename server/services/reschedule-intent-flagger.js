@@ -61,11 +61,19 @@ async function nextUpcomingVisit(customerId) {
  * Called fire-and-forget from the Twilio webhook AFTER the TwiML ack.
  * Returns a small result object for tests; never throws.
  */
-async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSid }) {
+async function flagInboundRescheduleIntent({ customer, phone, body, smsLogId, messageSid }) {
   try {
-    if (!customer?.id || !body) return { flagged: false, reason: 'no_customer_or_body' };
+    // Shared/ambiguous sender phone (codex #3232 r25): two active customer
+    // records on one number means no customer object, but the request is
+    // just as real — persist an UNLINKED flag keyed by the phone instead
+    // of guessing which customer or visit it belongs to.
+    const customerId = customer?.id || null;
+    const phoneTail = phone ? String(phone).replace(/[^0-9]/g, '').slice(-10) : null;
+    if ((!customerId && !phoneTail) || !body) return { flagged: false, reason: 'no_customer_or_body' };
 
-    const { visit: nearestVisit, ambiguous } = await nextUpcomingVisit(customer.id);
+    const { visit: nearestVisit, ambiguous } = customerId
+      ? await nextUpcomingVisit(customerId)
+      : { visit: null, ambiguous: false };
     const visit = ambiguous ? null : nearestVisit;
     // Atomic dedupe (codex r2): the check and insert share a transaction
     // serialized by a per-customer advisory lock — two texts processed
@@ -73,14 +81,16 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
     let inserted = false;
     let insertedId = null;
     await db.transaction(async (trx) => {
-      await trx.raw("SELECT pg_advisory_xact_lock(hashtext('reschedule-flag:' || ?::text))", [customer.id]);
+      await trx.raw("SELECT pg_advisory_xact_lock(hashtext('reschedule-flag:' || ?::text))", [customerId || `phone:${phoneTail}`]);
       const dupe = trx('agent_decisions')
         .where({
-          customer_id: customer.id,
           workflow: WORKFLOW,
           detected_intent: DETECTED_INTENT,
           status: 'pending_review',
-        })
+        });
+      if (customerId) dupe.where('customer_id', customerId);
+      else dupe.whereNull('customer_id').whereRaw("input_snapshot->>'phone_tail' = ?", [phoneTail]);
+      dupe
         // Null-entity flags (ambiguous or no visit) have no slot to compare
         // for re-arming, so they dedupe on a short 6h thread-window only
         // (codex #3232 r7) — a next-morning follow-up bells again.
@@ -91,8 +101,10 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
       // or the slot moved since it was raised) must not swallow a second
       // genuine request (codex r6).
       dupe.whereNotExists(function humanReply() {
+        // Unlinked (null-customer) flags match replies by the phone the
+        // reply went TO instead of a customer id (codex r25).
         this.select(1).from('sms_log as sl')
-          .whereRaw('sl.customer_id = agent_decisions.customer_id')
+          .whereRaw("(sl.customer_id = agent_decisions.customer_id OR (agent_decisions.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail'))")
           .where('sl.direction', 'outbound')
           .whereIn('sl.message_type', ['manual', 'ai_approved', 'ai_revised', 'appointment_rescheduled', 'reschedule_series_confirmation'])
           .whereIn('sl.status', ['queued', 'sent', 'delivered'])
@@ -123,7 +135,7 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
       status: 'pending_review',
       entity_type: visit ? 'scheduled_service' : null,
       entity_id: visit?.id || null,
-      customer_id: customer.id,
+      customer_id: customerId,
       source_channel: 'sms',
       sms_log_id: smsLogId || null,
       source_message_id: messageSid || null,
@@ -134,6 +146,7 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
         body_excerpt: String(body).slice(0, 240),
         ambiguous: ambiguous === true,
         bell_pending: true,
+        ...(customerId ? {} : { phone_tail: phoneTail, shared_phone: true }),
         visit: visit ? {
           id: visit.id,
           scheduled_date: visit.scheduled_date,
@@ -146,7 +159,9 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
         ? `Inbound SMS reads as a reschedule/away request with a visit on ${String(visit.scheduled_date).slice(0, 10)} still armed.`
         : (ambiguous
           ? 'Inbound SMS reads as a reschedule/away request; multiple upcoming visits — not auto-linked.'
-          : 'Inbound SMS reads as a reschedule/away request; no upcoming visit inside the horizon.'),
+          : (customerId
+            ? 'Inbound SMS reads as a reschedule/away request; no upcoming visit inside the horizon.'
+            : 'Inbound SMS reads as a reschedule/away request from a phone shared by multiple customer records — not auto-linked.')),
       }).returning('id');
       insertedId = insertedRow?.id || insertedRow || null;
     });
@@ -157,8 +172,10 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
       try {
       const { triggerNotification } = require('./notification-triggers');
       const stats = await triggerNotification('appointment_reschedule_intent', {
-        name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') || 'Customer',
-        customerId: customer.id,
+        name: customerId
+          ? ([customer.first_name, customer.last_name].filter(Boolean).join(' ') || 'Customer')
+          : `Shared number …${String(phoneTail).slice(-4)}`,
+        customerId,
         message: body,
         visitDate: visit ? String(visit.scheduled_date).slice(0, 10) : null,
         visitService: visit?.service_type || null,

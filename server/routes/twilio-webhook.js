@@ -539,18 +539,39 @@ router.post('/sms', async (req, res) => {
     // one awaited insert wide.
     // The bell fires post-ack via flagResult.fireBell.
     let rescheduleFlagResult = null;
-    if (customer && Body && !smsReaction && rescheduleAsk) {
-      rescheduleFlagResult = await require('../services/reschedule-intent-flagger')
-        .flagInboundRescheduleIntent({
-          customer,
-          body: Body,
-          smsLogId: smsLogEntry?.id || null,
-          messageSid: MessageSid || null,
-        })
-        .catch((err) => {
-          logger.warn(`[reschedule-intent] flag rejected: ${err.message}`);
-          return null;
-        });
+    if (Body && !smsReaction && rescheduleAsk) {
+      // No matched customer can mean a SHARED phone (findSingleCustomerByPhone
+      // deliberately returns null on multiple actives) — those requests are
+      // just as real, so persist an UNLINKED flag rather than dropping the
+      // durable guard entirely (codex #3232 r25). Unknown numbers (zero
+      // matches) stay in the lead lane.
+      let flagEligible = Boolean(customer);
+      if (!customer) {
+        const key = phoneLookupKey(From);
+        if (key) {
+          const matches = await db('customers')
+            .whereNull('deleted_at')
+            .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
+            .limit(2)
+            .select('id')
+            .catch(() => []);
+          flagEligible = matches.length > 1;
+        }
+      }
+      if (flagEligible) {
+        rescheduleFlagResult = await require('../services/reschedule-intent-flagger')
+          .flagInboundRescheduleIntent({
+            customer,
+            phone: From,
+            body: Body,
+            smsLogId: smsLogEntry?.id || null,
+            messageSid: MessageSid || null,
+          })
+          .catch((err) => {
+            logger.warn(`[reschedule-intent] flag rejected: ${err.message}`);
+            return null;
+          });
+      }
     }
 
     // Event-driven health rescore for any matched customer (the opt-out branch

@@ -177,3 +177,21 @@ describe('corrected asks override same-message negations (codex r24)', () => {
     expect(hasRescheduleOrAwayIntent('Actually they already rescheduled it, thanks')).toBe(false);
   });
 });
+
+describe('postpone/skip veto coverage (codex r25)', () => {
+  test('dont-postpone negation suppresses', () => {
+    expect(hasRescheduleOrAwayIntent("Don't postpone my appointment")).toBe(false);
+  });
+  test('been-postponed status question suppresses', () => {
+    expect(hasRescheduleOrAwayIntent('Has my appointment been postponed?')).toBe(false);
+  });
+  test('did-you-skip status question suppresses', () => {
+    expect(hasRescheduleOrAwayIntent('Did you skip tomorrow?')).toBe(false);
+  });
+  test('need-to-postpone fresh ask still flags', () => {
+    expect(hasRescheduleOrAwayIntent('We need to postpone our appointment this week')).toBe(true);
+  });
+  test('please-postpone fresh ask still flags', () => {
+    expect(hasRescheduleOrAwayIntent('Please postpone my service until next week')).toBe(true);
+  });
+});

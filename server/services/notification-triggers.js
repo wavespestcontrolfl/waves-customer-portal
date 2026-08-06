@@ -643,6 +643,16 @@ async function triggerNotification(triggerKey, payload = {}) {
     }
 
     const prefsByUser = new Map(prefs.map((p) => [p.admin_user_id, p]));
+    const anyBellEnabled = activeAdmins.some((u) => {
+      const pref = prefsByUser.get(u.id);
+      return !pref || pref.bell_enabled !== false;
+    });
+    const pushEnabledIds = activeAdmins
+      .filter((u) => {
+        const pref = prefsByUser.get(u.id);
+        return !pref || pref.push_enabled !== false;
+      })
+      .map((u) => u.id);
     let bellWritten = false;
 
     for (const user of activeAdmins) {
@@ -670,15 +680,16 @@ async function triggerNotification(triggerKey, payload = {}) {
     }
 
     const stats = { bellWritten, push: null };
+    // Every active admin turned BOTH channels off: that is deliberate
+    // preference suppression, not a delivery failure — report it so
+    // callers (bell replay) stop retrying forever (codex #3232 r25).
+    if (activeAdmins.length > 0 && !anyBellEnabled && pushEnabledIds.length === 0) {
+      stats.suppressed = true;
+    }
 
     // Push: send to all admin/technician subscriptions whose user has push enabled.
     try {
-      const enabledUserIds = activeAdmins
-        .filter((u) => {
-          const pref = prefsByUser.get(u.id);
-          return !pref || pref.push_enabled !== false;
-        })
-        .map((u) => u.id);
+      const enabledUserIds = pushEnabledIds;
 
       if (enabledUserIds.length > 0) {
         const wantsSoundByUser = new Map(

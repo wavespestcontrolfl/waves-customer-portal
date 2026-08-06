@@ -124,15 +124,22 @@ function hasRescheduleOrAwayIntent(body) {
   // reschedule ask (codex r5).
   // A FRESH request anywhere overrides status/acknowledgment clauses
   // (codex r15/r16): "…been rescheduled, but I need to reschedule again."
-  const freshAsk = /\b(?:need|want|like|have)\s+to\s+re-?schedul|\bplease\s+re-?schedul|\bactually\b[^.!?]{0,30}\b(?:please|can|could|need|want)\b[^.!?]{0,20}\bre-?schedul|\bre-?schedul\w*(?:\s+\w+){0,2}\s+again\b/i.test(text);
+  const freshAsk = /\b(?:need|want|like|have)\s+to\s+(?:re-?schedul|postpon)|\bplease\s+(?:re-?schedul|postpon)|\bactually\b[^.!?]{0,30}\b(?:please|can|could|need|want)\b[^.!?]{0,20}\b(?:re-?schedul|postpon)|\b(?:re-?schedul|postpon)\w*(?:\s+\w+){0,2}\s+again\b/i.test(text);
   // A self-correction ("Don't reschedule Tuesday. Actually, please
   // reschedule for Friday.") is a live ask — the fresh ask outranks the
   // whole-message negation scan (codex r24).
-  const negated = (!freshAsk && /\b(?:don'?t|do\s+not|no\s+need\s+to|not\s+necessary\s+to|never)\s+(?:\w+\s+){0,2}?(?:reschedul|re-?book|move|change)/i.test(text))
+  // Negation/status/acknowledgment vetoes must cover every verb the
+  // detectors match — postpone and skip included (codex #3232 r25):
+  // "Don't postpone my appointment" / "Has it been postponed?" /
+  // "Did you skip tomorrow?" are not fresh asks.
+  const negated = (!freshAsk && /\b(?:don'?t|do\s+not|no\s+need\s+to|not\s+necessary\s+to|never)\s+(?:\w+\s+){0,2}?(?:reschedul|re-?book|move|change|postpon|skip)/i.test(text))
     // Present-perfect confirmations / status questions (codex r13) and
     // past acknowledgments (codex r9) — both yield to a fresh ask.
-    || (!freshAsk && /\b(?:has|have|had|is|was)\b[^.!?]{0,30}\bbeen\s+re-?schedul/i.test(text))
-    || (!freshAsk && /\b(?:thanks?\s+for|thank\s+you\s+for|already|were|was|got)\s+(?:being\s+)?re-?schedul/i.test(text))
+    || (!freshAsk && /\b(?:has|have|had|is|was)\b[^.!?]{0,30}\bbeen\s+(?:re-?schedul|postpon|skipp?)/i.test(text))
+    || (!freshAsk && /\b(?:thanks?\s+for|thank\s+you\s+for|already|were|was|got)\s+(?:being\s+)?(?:re-?schedul|postpon|skipp)/i.test(text))
+    // Status QUESTIONS about a move that may already have happened
+    // (codex r25): "Did you skip/reschedule tomorrow?" asks, not asks-for.
+    || (!freshAsk && /\bdid\s+you\b[^.!?]{0,25}\b(?:re-?schedul|postpon|skip|mov)/i.test(text))
     // Non-appointment reschedule objects (codex r16): "reschedule my
     // autopay/payment" is billing, not an appointment change.
     || /\b(?:re-?schedul\w*|postpon\w*|mov(?:e|ing)|push(?:ing|ed)?|defer(?:ring)?|delay(?:ing)?|chang(?:e|ing))\s+(?:[\w'’]+\s+){0,2}?(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b/i.test(text)

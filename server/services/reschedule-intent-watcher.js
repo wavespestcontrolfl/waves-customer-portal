@@ -60,8 +60,10 @@ async function resolveActionedFlags() {
       .where('status', 'pending_review')
       .where(function proven() {
         this.whereExists(function humanReply() {
+          // Unlinked shared-phone flags (customer_id null) match replies
+          // by the phone the reply went TO (codex r25).
           this.select(1).from('sms_log as sl')
-            .whereRaw('sl.customer_id = agent_decisions.customer_id')
+            .whereRaw("(sl.customer_id = agent_decisions.customer_id OR (agent_decisions.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail'))")
             .where('sl.direction', 'outbound')
             .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             // Approved click-followup nudges are proactive, not replies
@@ -75,7 +77,7 @@ async function resolveActionedFlags() {
           // (codex r23).
           this.whereNull('agent_decisions.entity_id').whereExists(function confirmed() {
             this.select(1).from('sms_log as rc')
-              .whereRaw('rc.customer_id = agent_decisions.customer_id')
+              .whereRaw("(rc.customer_id = agent_decisions.customer_id OR (agent_decisions.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(rc.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail'))")
               .where('rc.direction', 'outbound')
               .whereIn('rc.message_type', ['appointment_rescheduled', 'reschedule_series_confirmation'])
               .whereIn('rc.status', ['queued', 'sent', 'delivered'])
@@ -123,7 +125,8 @@ async function replayPendingBells() {
       try {
         const { triggerNotification } = require('./notification-triggers');
         const stats = await triggerNotification('appointment_reschedule_intent', {
-          name: [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Customer',
+          name: [row.first_name, row.last_name].filter(Boolean).join(' ')
+            || (snap.phone_tail ? `Shared number …${String(snap.phone_tail).slice(-4)}` : 'Customer'),
           customerId: row.customer_id,
           message: snap.body_excerpt || '',
           visitDate: snap.visit ? String(snap.visit.scheduled_date || '').slice(0, 10) : null,
@@ -173,8 +176,10 @@ async function loadUnactionedFlags() {
     // ANY flag — linked or not: staff can resolve a request without moving
     // the slot ("exterior is fine, no need to be home") (codex r3).
     .whereNotExists(function humanReply() {
+      // Unlinked shared-phone flags match replies by destination phone
+      // (codex r25).
       this.select(1).from('sms_log as sl')
-        .whereRaw('sl.customer_id = ad.customer_id')
+        .whereRaw("(sl.customer_id = ad.customer_id OR (ad.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(sl.to_phone, ''), '[^0-9]', '', 'g'), 10) = ad.input_snapshot->>'phone_tail'))")
         .where('sl.direction', 'outbound')
         .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             // Approved click-followup nudges are proactive, not replies
@@ -209,12 +214,16 @@ async function loadUnactionedFlags() {
 }
 
 function parseSnapshot(snapshot) {
-  if (!snapshot) return { excerpt: '', ambiguous: false };
+  if (!snapshot) return { excerpt: '', ambiguous: false, phoneTail: null };
   try {
     const parsed = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
-    return { excerpt: String(parsed.body_excerpt || ''), ambiguous: parsed.ambiguous === true };
+    return {
+      excerpt: String(parsed.body_excerpt || ''),
+      ambiguous: parsed.ambiguous === true,
+      phoneTail: parsed.phone_tail ? String(parsed.phone_tail) : null,
+    };
   } catch {
-    return { excerpt: '', ambiguous: false };
+    return { excerpt: '', ambiguous: false, phoneTail: null };
   }
 }
 
@@ -224,7 +233,9 @@ function composeRescheduleIntentDigest(rows) {
   if (!flags.length) return null;
 
   const lines = flags.map((row) => {
-    const name = [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Unknown customer';
+    const snapTail = parseSnapshot(row.input_snapshot).phoneTail;
+    const name = [row.first_name, row.last_name].filter(Boolean).join(' ')
+      || (snapTail ? `Shared number …${snapTail.slice(-4)}` : 'Unknown customer');
     const asked = etDateString(new Date(row.created_at));
     const visit = row.scheduled_date
       ? `visit ${String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date).slice(0, 10)}${row.window_start ? ` ${String(row.window_start).slice(0, 5)}` : ''}${row.service_type ? ` (${row.service_type})` : ''} ${row.visit_status === 'completed' ? 'COMPLETED despite the request' : 'STILL ARMED'}`
