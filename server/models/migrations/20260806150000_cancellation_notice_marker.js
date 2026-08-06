@@ -56,6 +56,12 @@ exports.up = async (knex) => {
 
 exports.down = async (knex) => {
   await knex.raw("DELETE FROM ops_email_send_state WHERE email_key = 'cancel-notice-linkage-epoch'");
+  // No longer created by this migration's up() (superseded, see
+  // 20260806170000), but batch rollbacks reach here AFTER the newer
+  // migration's down() recreates it — drop IF EXISTS so both
+  // single-migration and full-batch rollbacks restore the same schema
+  // (codex #3238 r5).
+  await knex.raw('DROP INDEX IF EXISTS idx_job_status_history_restored_at');
   await knex.raw('DROP INDEX IF EXISTS idx_job_status_history_cancelled_at');
   await knex.raw('DROP INDEX IF EXISTS idx_appt_reminders_cancel_pending');
   await knex.raw('DROP INDEX IF EXISTS idx_messaging_audit_appointment_id');
