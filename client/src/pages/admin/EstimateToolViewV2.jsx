@@ -1158,12 +1158,15 @@ function fallbackCadenceForPreview(E) {
       period: "/quarter",
     };
   }
-  // Commercial pest sells one cadence (risk bucket / estimator override) and
-  // has no residential pest tiers, so without this the preview takes the
+  // SOLO commercial pest sells one cadence (risk bucket / estimator override)
+  // and has no residential pest tiers, so without this the preview takes the
   // monthly path and shows annual/12 as "$X/mo" even for a 4x/6x program.
   // monthlyTotal × intervalMonths lands on the per-application amount
-  // (annual/12 × 3 = annual/4 for quarterly).
-  const commercialPest = services.find((s) => {
+  // (annual/12 × 3 = annual/4 for quarterly). Solo ONLY: in a mixed bundle the
+  // preview total spans services with their own cadences, so converting the
+  // combined monthly by the pest cadence would invent a bundle price — mixed
+  // stays on the monthly path (codex #3240 r6).
+  const commercialPest = services.length === 1 && services.find((s) => {
     const label = String(s?.service || s?.name || s?.label || s?.displayName || "").toLowerCase();
     return label.includes("commercial") && label.includes("pest");
   });
