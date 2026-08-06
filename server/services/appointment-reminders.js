@@ -2297,8 +2297,12 @@ const AppointmentReminders = {
         return record;
       }
 
+      // Guarded in ONE statement (codex r20): a restoration committing
+      // between the status read above and this write must not be
+      // re-closed.
       await db('appointment_reminders')
         .where({ id: record.id })
+        .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
         .update({ cancelled: true, updated_at: new Date() });
 
       // Send-once via the dedicated atomic claim. `cancelled` is NOT
@@ -2341,6 +2345,7 @@ const AppointmentReminders = {
             this.whereNull('cancellation_notice_at')
               .orWhere(function singletonPending() {
                 this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                  .where('cancellation_notice_at', '<', db.raw("now() - interval '90 seconds'"))
                   .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
               });
           })
@@ -2362,7 +2367,10 @@ const AppointmentReminders = {
                 // Adopt fresh pending claims only when NOT group-shared —
                 // a same-token sibling means an in-progress series owns
                 // this obligation (r14); stale groups belong to the sweep.
+                // >=90s old only (r20): an ACTIVE hook worker settles in
+                // seconds — don't steal a lease mid-flight.
                 this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                  .where('cancellation_notice_at', '<', db.raw("now() - interval '90 seconds'"))
                   .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
               })
               .orWhere(function staleLease() {
@@ -2396,7 +2404,7 @@ const AppointmentReminders = {
       const acceptedCancellationAudit = async () => Boolean(await db('messaging_audit_log')
         .where({ appointment_id: String(scheduledServiceId), purpose: 'appointment_cancellation' })
         .whereNotNull('sent_at')
-        .whereRaw("provider_message_id ~ '^(SM|MM)'")
+        .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel = 'email')")
         .whereRaw(
           "sent_at >= (SELECT COALESCE(MAX(h.transitioned_at), '-infinity') FROM job_status_history h WHERE h.job_id = ? AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')",
           [scheduledServiceId],
@@ -2732,8 +2740,10 @@ const AppointmentReminders = {
           "COALESCE((SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled'), (SELECT ss2.updated_at FROM scheduled_services ss2 WHERE ss2.id = appointment_reminders.scheduled_service_id), appointment_reminders.cancellation_notice_at) < now() - interval '72 hours'",
         )
         .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
-      const { isEnabled } = require('../config/feature-gates');
-      if (!isEnabled('cancelNoticeHook')) return { swept: 0 };
+      // No gate check for SETTLEMENT (codex r20): pending leases only
+      // exist if the gate was on when the cancel committed — settling
+      // that residue (send or close) is finishing owed work, not new
+      // feature activity. Claim CREATION remains gated in job-status.
       const stale = await db('appointment_reminders as ar')
         .join('scheduled_services as ss', 'ss.id', 'ar.scheduled_service_id')
         .whereIn('ar.cancellation_notice_state', ['pending', 'pending_notify'])
@@ -2795,7 +2805,7 @@ const AppointmentReminders = {
         const alreadyAccepted = Boolean(await db('messaging_audit_log')
           .where({ purpose: 'appointment_cancellation' })
           .whereNotNull('sent_at')
-          .whereRaw("provider_message_id ~ '^(SM|MM)'")
+          .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel = 'email')")
           .where(function linkedOrGroupEra() {
             this.whereIn('appointment_id', serviceIds)
               // A restored representative leaves the pending group but its
@@ -2809,7 +2819,12 @@ const AppointmentReminders = {
                 this.whereRaw(
                   "appointment_id IN (SELECT ss3.id::text FROM scheduled_services ss3 WHERE ss3.customer_id = ? AND ss3.status <> 'cancelled')",
                   [seed.customer_id],
-                ).where('sent_at', '>=', seed.claim_at);
+                ).where('sent_at', '>=', seed.claim_at)
+                  // 30-min bound (r20): an unrelated cancel-then-restored
+                  // visit's own notice outside this group's send window
+                  // must not reconcile it. Residual overlap within the
+                  // window is accepted and documented.
+                  .whereRaw("sent_at <= ?::timestamptz + interval '30 minutes'", [seed.claim_at]);
               });
           })
           // Current cancellation cycle only (codex r9) — see
@@ -2831,7 +2846,7 @@ const AppointmentReminders = {
           .whereIn('appointment_id', serviceIds)
           .whereIn('purpose', ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'])
           .whereNotNull('sent_at')
-          .whereRaw("provider_message_id ~ '^(SM|MM)'")
+          .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel = 'email')")
           .first('id'));
         if (!delivered) {
           // Legacy-grace (r15): pre-epoch rows have unlinked audits.

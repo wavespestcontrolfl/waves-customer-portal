@@ -314,6 +314,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   // Set inside doWrites when this transition durably claimed a pending
   // cancellation-notice obligation; read by the post-commit worker.
   let cancelNoticeClaimTs = null;
+  let cancelNoticeLateClaim = false;
 
   async function doWrites(t) {
     // A pending outbound-callback booking (AI call pipeline, held for office
@@ -485,6 +486,9 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
           });
         }
       } catch (claimErr) {
+        // The transition still commits; the post-commit worker attempts a
+        // LATE claim so the obligation isn't lost (codex r20).
+        cancelNoticeLateClaim = notifyCustomer === undefined || notifyCustomer === true;
         logger.warn(`[job-status] cancellation-notice claim failed for ${jobId}: ${claimErr.message}`);
       }
     }
@@ -513,14 +517,30 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // Evidence = THIS visit's messaging_audit_log rows (sms_log never
     // stores the visit id) with provider acceptance and a genuine Twilio
     // SID; sends predating the linkage close silently via the sweep.
-    if (!cancelNoticeClaimTs) return;
+    if (!cancelNoticeClaimTs && !cancelNoticeLateClaim) return;
     void (async () => {
       try {
+        if (!cancelNoticeClaimTs && cancelNoticeLateClaim) {
+          // In-trx claim failed (r20): take it now, outside the trx.
+          const lateTs = nextClaimTs();
+          const won = await db('appointment_reminders')
+            .where({ scheduled_service_id: jobId })
+            .where(function claimable() {
+              this.whereNull('cancellation_notice_at')
+                .orWhere(function stale() {
+                  this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                    .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"));
+                });
+            })
+            .update({ cancellation_notice_at: lateTs, cancellation_notice_state: 'pending', updated_at: lateTs });
+          if (!won) return;
+          cancelNoticeClaimTs = lateTs;
+        }
         let delivered = Boolean(await db('messaging_audit_log')
           .where({ appointment_id: String(jobId) })
           .whereIn('purpose', ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'])
           .whereNotNull('sent_at')
-          .whereRaw("provider_message_id ~ '^(SM|MM)'")
+          .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel = 'email')")
           .first('id'));
         if (!delivered) {
           // Legacy-grace (codex r15): rows created before the linkage
