@@ -3566,10 +3566,12 @@ router.put('/:serviceId/status', async (req, res, next) => {
           lng,
           notes,
           trx,
-          // Pass the caller's notice intent through to the shared-writer
-          // cancellation-notice hook: false = don't text; the notify path
-          // below still sends its own notice (send-once marker dedupes).
-          notifyCustomer,
+          // This route owns the cancellation notice end-to-end (its cancel
+          // branch below sends or suppresses per the request flag) — the
+          // shared-writer hook must stand down entirely, or its
+          // fire-and-forget claim could race and steal the marker from the
+          // operator-requested text.
+          notifyCustomer: 'caller',
         });
       });
     } catch (err) {

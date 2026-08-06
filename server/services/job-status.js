@@ -426,6 +426,11 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // cancellation_notice_at claim inside handleCancellation.
     // Dark behind GATE_CANCEL_NOTICE_HOOK. Post-commit, best-effort.
     if (String(toStatus || '') !== 'cancelled') return;
+    // 'caller' = the route owns the notice end-to-end (it sends or
+    // suppresses via its own awaited handleCancellation). The hook stands
+    // down COMPLETELY — claiming here would race the route's send and
+    // could steal the marker from an operator-requested text (codex r2).
+    if (notifyCustomer === 'caller') return;
     try {
       const { isEnabled } = require('../config/feature-gates');
       if (!isEnabled('cancelNoticeHook')) return;
@@ -434,19 +439,37 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       try {
         const row = await db('appointment_reminders')
           .where({ scheduled_service_id: jobId })
-          .first('cancellation_notice_at', 'suppressed_by_sibling');
+          .first('cancellation_notice_at', 'suppressed_by_sibling', 'customer_id',
+            'reminder_72h_sent', 'reminder_24h_sent');
         if (!row || row.cancellation_notice_at) return;
         const AppointmentReminders = require('./appointment-reminders');
         if (notifyCustomer === false || row.suppressed_by_sibling) {
           await AppointmentReminders.handleCancellation(jobId, { sendNotification: false });
           return;
         }
-        const delivered = await db('sms_log')
-          .whereRaw("metadata->>'scheduled_service_id' = ?", [String(jobId)])
-          .whereIn('message_type', ['reminder_72h', 'appointment_reminder', 'confirmation'])
-          .whereRaw("twilio_sid ~ '^(SM|MM)'")
-          .first('id');
-        await AppointmentReminders.handleCancellation(jobId, { sendNotification: Boolean(delivered) });
+        // Delivery evidence lives in messaging_audit_log — sms_log never
+        // stores the visit id (the provider forwards a metadata allowlist).
+        // Primary: audit rows linked by appointment_id (populated by
+        // safeSend as of this PR) with provider acceptance and a genuine
+        // Twilio SID (suppressed/sentinel sends fail the regex). Fallback
+        // for sends predating the linkage: the pipeline's this-visit sent
+        // flag PLUS a customer-level real appointment send — strictly
+        // stronger than the flags alone (which pref-disable and
+        // booked-<72h closures also set without any send).
+        const APPT_PURPOSES = ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'];
+        const realSend = (q) => q
+          .whereIn('purpose', APPT_PURPOSES)
+          .whereNotNull('sent_at')
+          .whereRaw("provider_message_id ~ '^(SM|MM)'");
+        let delivered = Boolean(await realSend(
+          db('messaging_audit_log').where({ appointment_id: String(jobId) }),
+        ).first('id'));
+        if (!delivered && (row.reminder_72h_sent || row.reminder_24h_sent) && row.customer_id) {
+          delivered = Boolean(await realSend(
+            db('messaging_audit_log').where({ customer_id: row.customer_id }),
+          ).first('id'));
+        }
+        await AppointmentReminders.handleCancellation(jobId, { sendNotification: delivered });
       } catch (e) {
         logger.warn(`[job-status] cancellation-notice hook failed for ${jobId}: ${e.message}`);
       }

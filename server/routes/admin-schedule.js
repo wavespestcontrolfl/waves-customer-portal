@@ -4649,10 +4649,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 transitionedBy: req.technicianId,
                 notes: 'Bulk cancellation',
                 trx,
-                // Pass the bulk "don't text" choice through to the
-                // shared-writer notice hook; the notify default below still
-                // sends its own notice (send-once marker dedupes).
-                notifyCustomer: payload?.notifyCustomer,
+                // This branch owns the cancellation notice end-to-end
+                // (notify-or-suppress below per the bulk flag) — the
+                // shared-writer hook must stand down, not race the claim.
+                notifyCustomer: 'caller',
               });
             });
             try {
@@ -7487,6 +7487,9 @@ router.put('/:id/status', async (req, res, next) => {
           transitionedBy: req.technicianId,
           notes: notes || null,
           trx,
+          // This route's cancel branch sends its own notice below — the
+          // shared-writer hook must stand down, not race the claim.
+          notifyCustomer: 'caller',
         });
       });
     } catch (err) {

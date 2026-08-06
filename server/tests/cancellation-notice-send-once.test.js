@@ -59,6 +59,15 @@ describe('handleCancellation send-once (atomic notice marker)', () => {
     expect(claim.patch.cancellation_notice_at).toBeInstanceOf(Date);
   });
 
+  test('failed attempt (customer lookup miss) RELEASES the claim for retry', async () => {
+    mockDbState.reminderRow = { id: 'r4', customer_id: 'cu-gone', cancelled: false, appointment_time: '2026-08-05T13:00:00Z', service_type: 'X' };
+    const outcome = {};
+    await AppointmentReminders.handleCancellation('svc4', { outcome });
+    const release = mockDbState.updates.find((u) => u.patch && u.patch.cancellation_notice_at === null);
+    expect(release).toBeTruthy();
+    expect(outcome.notificationSent).toBe(false);
+  });
+
   test('missing reminder row is a no-op with an explanatory outcome', async () => {
     const outcome = {};
     const record = await AppointmentReminders.handleCancellation('svc3', { outcome });

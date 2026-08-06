@@ -782,6 +782,11 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     customerId,
     identityTrustLevel,
     metadata: { original_message_type: messageType, ...metaExtra },
+    // Canonical visit linkage for the audit row (messaging_audit_log.
+    // appointment_id) — sms_log metadata does NOT survive the provider
+    // handoff (twilio-sms.js forwards an allowlist), so the audit record is
+    // the only queryable delivery evidence per visit (codex #3233 r2).
+    ...(metaExtra.scheduled_service_id ? { appointmentId: String(metaExtra.scheduled_service_id) } : {}),
     // Optional caller-supplied final recheck at the provider handoff —
     // race-sensitive senders (the admin reschedule notice) abort here if
     // the appointment moved or went terminal while validators ran.
@@ -2269,36 +2274,59 @@ const AppointmentReminders = {
         return record;
       }
 
-      // Send cancellation notice
-      const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
-      if (customer) {
-        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
-        const apptTime = new Date(record.appointment_time);
-        const day = formatDay(apptTime);
-        const date = formatDate(apptTime);
-
-        const serviceLabel = smsServiceLabelStored(record.service_type);
-        const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
-          const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-          return renderRequiredTemplate('appointment_cancelled', {
-            first_name: firstName,
-            service_type: serviceLabel,
-            day,
-            date,
-          }, {
-            workflow: 'appointment_cancelled',
-            entity_type: 'scheduled_service',
-            entity_id: scheduledServiceId,
-          });
-        }, 'appointment_cancelled', 'appointment_cancellation');
-        if (noticeSent) {
-          logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id}`);
+      // Claim-release on failed attempts (codex r2 P2): the marker must
+      // only survive a successful send or a deliberate suppression — a
+      // failed attempt (lookup / render / provider) releases it so the
+      // routes' existing retry behavior can re-attempt the notice.
+      const releaseClaim = async () => {
+        try {
+          await db('appointment_reminders')
+            .where({ id: record.id })
+            .update({ cancellation_notice_at: null, updated_at: new Date() });
+        } catch (releaseErr) {
+          logger.warn(`[appt-remind] notice-claim release failed for ${scheduledServiceId}: ${releaseErr.message}`);
         }
-        reportOutcome(noticeSent, noticeSent
-          ? null
-          : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)');
-      } else {
-        reportOutcome(false, 'Customer not found');
+      };
+
+      // Send cancellation notice
+      try {
+        const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
+        if (customer) {
+          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
+          const apptTime = new Date(record.appointment_time);
+          const day = formatDay(apptTime);
+          const date = formatDate(apptTime);
+
+          const serviceLabel = smsServiceLabelStored(record.service_type);
+          const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
+            const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
+            return renderRequiredTemplate('appointment_cancelled', {
+              first_name: firstName,
+              service_type: serviceLabel,
+              day,
+              date,
+            }, {
+              workflow: 'appointment_cancelled',
+              entity_type: 'scheduled_service',
+              entity_id: scheduledServiceId,
+            });
+          }, 'appointment_cancelled', 'appointment_cancellation', { scheduled_service_id: scheduledServiceId });
+          if (noticeSent) {
+            logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id}`);
+          } else {
+            // No provider acceptance — release so a retry can re-attempt.
+            await releaseClaim();
+          }
+          reportOutcome(noticeSent, noticeSent
+            ? null
+            : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)');
+        } else {
+          await releaseClaim();
+          reportOutcome(false, 'Customer not found');
+        }
+      } catch (sendErr) {
+        await releaseClaim();
+        throw sendErr;
       }
 
       return record;
