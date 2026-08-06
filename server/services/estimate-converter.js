@@ -506,6 +506,77 @@ function hasWaveGuardSetupService(services = []) {
   return shouldIncludeWaveGuardSetupFeeForRecurring({ recurringServices: services });
 }
 
+// An ADD-ON accept (existing recurring customer buying a NEW service family)
+// must not clobber monthly_rate with just the add-on's monthly: for a monthly
+// member the billing cron charges monthly_rate directly, so the overwrite
+// silently swaps their whole bill for the add-on's slice; for per-application
+// customers the rate feeds MRR, LTV, and every membership predicate. The
+// customer's total becomes existing + add-on (the combined-tier quote card
+// promises exactly that: additions are discounted "without repricing current
+// service"). A SAME-family accept (re-quote/reprice — the #3228 adoption
+// path, which stamps source_estimate_id on the adopted row before conversion
+// runs) keeps the replace semantic: the new quote IS that plan's new price.
+//
+// Returns the existing rate to SUM onto when this accept is a true add-on;
+// 0 in every other case (fail-safe: any classification doubt → replace,
+// the pre-existing behavior). Live pipeline stages only — a churned/dormant
+// re-signup's stale rate must never be summed back in.
+async function addOnPreservedMonthlyRateBase({
+  database, estimateId, estimate, estimateData, customer,
+} = {}) {
+  const existingMonthlyRate = Number(customer?.monthly_rate);
+  if (!['active_customer', 'won', 'at_risk'].includes(customer?.pipeline_stage)
+    || !Number.isFinite(existingMonthlyRate) || !(existingMonthlyRate > 0)) {
+    return 0;
+  }
+  try {
+    // Lazy require — estimate-public requires this module inline only, so a
+    // function-scope require cannot create a load cycle. Same classifier
+    // spine as the adoption gate (one taxonomy, #3228 r5).
+    const {
+      estimateFamilyKeysForAdoption,
+      appointmentMatchesEstimateFamily,
+    } = require('../routes/estimate-public');
+    const familyKeys = estimateFamilyKeysForAdoption(estimate, estimateData, { serviceMode: 'recurring' });
+    if (!(familyKeys instanceof Set) || familyKeys.size === 0) return 0;
+    // The customer's OTHER plans: future recurring rows not sourced from
+    // THIS estimate. The adoption path has already stamped source_estimate_id
+    // on an adopted (same-family) row inside this transaction, but that
+    // row's family would match familyKeys anyway; the exclusion just keeps
+    // this accept's own rows out. Callbacks never represent a plan.
+    // Savepoint-confined (codex #3241 r1, mirroring the prior-services
+    // lookup): a SQL error on the caller's accept transaction would abort
+    // the whole transaction — the catch below could then only return 0
+    // while the customer update still failed, turning this optional lookup
+    // into an acceptance-killer instead of the advertised replace fallback.
+    const otherPlanRows = await database.transaction((sp) => sp('scheduled_services')
+      .leftJoin('services', 'scheduled_services.service_id', 'services.id')
+      .select(
+        'scheduled_services.service_type',
+        'scheduled_services.is_callback',
+        'services.service_key as catalog_service_key',
+        'services.name as catalog_service_name',
+      )
+      .where('scheduled_services.customer_id', customer.id)
+      .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+      .where('scheduled_services.scheduled_date', '>=', etDateString())
+      .where('scheduled_services.is_recurring', true)
+      .where((builder) => builder
+        .whereNull('scheduled_services.source_estimate_id')
+        .orWhereNot('scheduled_services.source_estimate_id', estimateId)));
+    const planRows = (Array.isArray(otherPlanRows) ? otherPlanRows : [])
+      .filter((row) => row && row.is_callback !== true);
+    if (planRows.length > 0
+      && !planRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
+      return existingMonthlyRate;
+    }
+    return 0;
+  } catch (addOnErr) {
+    logger.warn(`[estimate-converter] add-on rate classification failed for customer ${customer?.id} (monthly_rate keeps replace semantics): ${addOnErr.message}`);
+    return 0;
+  }
+}
+
 function calculateAnnualPrepayAmount(monthlyRate) {
   return Math.round((parseFloat(monthlyRate || 0) || 0) * 12 * 100) / 100;
 }
@@ -1921,6 +1992,26 @@ const EstimateConverter = {
     // read the same function so the "Billed $X/mo" disclosure can never
     // drift from the billing behavior decided here.
     const preservesExistingMembership = customerPreservesMonthlyMembership(customer);
+    // An ADD-ON accept (existing recurring customer buying a NEW service
+    // family) must not clobber monthly_rate with just the add-on's monthly:
+    // for a monthly member the cron charges monthly_rate directly, so the
+    // overwrite silently swaps their whole bill for the add-on's slice; for
+    // per-application customers the rate feeds MRR, LTV, and every
+    // membership predicate. The customer's total becomes existing + add-on
+    // (the combined-tier quote card promises exactly that: additions are
+    // discounted "without repricing current service"). A SAME-family accept
+    // (re-quote/reprice — the #3228 adoption path, which stamps
+    // source_estimate_id on the adopted row before conversion runs) keeps
+    // the replace semantic: the new quote IS that plan's new price.
+    // Fail-safe: any classification doubt → 0 → replace (status quo).
+    const addOnPreservedRateBase = suppressRecurringConversion
+      ? 0
+      : await addOnPreservedMonthlyRateBase({
+        database, estimateId, estimate, estimateData, customer,
+      });
+    const convertedMonthlyRate = addOnPreservedRateBase > 0
+      ? Math.round((addOnPreservedRateBase + monthlyRate) * 100) / 100
+      : monthlyRate;
     // Pre-migration compatibility (Codex round-8): billing_mode +
     // per_application_fee ship in migration 20260709000010 — on a database
     // that hasn't run it (preview env, deploy window) the update keys would
@@ -1962,7 +2053,9 @@ const EstimateConverter = {
           // Without this the customer reads residential and tax is forced to $0.
           // Only SET it for commercial; never downgrade a residential customer.
           ...(hasCommercialRecurring ? { property_type: 'commercial' } : {}),
-          monthly_rate: monthlyRate,
+          // Add-on accepts SUM onto the existing rate; everything else
+          // (new signups, re-signups, same-family re-quotes) replaces.
+          monthly_rate: convertedMonthlyRate,
           // Estimate-flow recurring customers bill PER VISIT (owner ruling
           // 2026-07-09), never as a monthly membership subscription: the
           // monthly billing cron skips non-membership modes and completion
@@ -2782,10 +2875,15 @@ const EstimateConverter = {
       // tier is activated from prior + added families, and the timeline
       // reads this description without the metadata — an estimate-only
       // count beside a combined tier reads as a contradiction.
-      description: `Estimate #${estimateId} converted: ${customer.first_name} ${customer.last_name} → WaveGuard ${tier} at $${monthlyRate.toFixed(2)}/mo (${combinedServiceCount} combined qualifying services, ${serviceCount} from this estimate, ${scheduledCount} scheduled)`,
+      // Post-conversion CUSTOMER rate, not just this estimate's slice
+      // (codex #3241 r1): an add-on accept sums onto the existing rate, and
+      // staff reading the timeline must see the figure the customer is
+      // actually billed. The estimate's own slice stays in the metadata.
+      description: `Estimate #${estimateId} converted: ${customer.first_name} ${customer.last_name} → WaveGuard ${tier} at $${convertedMonthlyRate.toFixed(2)}/mo (${combinedServiceCount} combined qualifying services, ${serviceCount} from this estimate, ${scheduledCount} scheduled)`,
       metadata: JSON.stringify({
         estimateId, tier, discount, monthlyRate, serviceCount, scheduledCount, firstScheduledServiceId,
         priorQualifyingKeys, combinedServiceCount,
+        convertedMonthlyRate, addOnPreservedRateBase,
       }),
     });
 
@@ -3300,14 +3398,16 @@ const EstimateConverter = {
       logger.error(`[estimate-converter] Draft invoice creation failed for estimate ${estimateId}: ${err.message}`);
     }
 
-    logger.info(`[estimate-converter] Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${monthlyRate}/mo, ${scheduledCount} services scheduled, billingTerm=${billingTerm}, draftInvoiceId=${draftInvoiceId || 'none'}`);
+    logger.info(`[estimate-converter] Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${convertedMonthlyRate}/mo customer rate ($${monthlyRate}/mo from this estimate), ${scheduledCount} services scheduled, billingTerm=${billingTerm}, draftInvoiceId=${draftInvoiceId || 'none'}`);
 
     const membershipEmail = {
       customerId,
       effectiveDate: termStartDate || new Date(),
       sourceId: `estimate:${estimateId}`,
       membershipTier: tier,
-      monthlyRate,
+      // The email describes the customer's membership — the post-conversion
+      // customer rate (summed on add-on accepts), not this estimate's slice.
+      monthlyRate: convertedMonthlyRate,
       billingCadence: billingCadence?.periodLabel || (billingTerm === 'prepay_annual' ? 'annual prepay' : 'monthly'),
       includedServices: recurringServicesForConversion
         .map((svc) => svc.name || svc.serviceName || svc.service_name || svc.label)
@@ -3450,7 +3550,10 @@ const EstimateConverter = {
       customerId,
       tier,
       discount,
-      monthlyRate,
+      // Post-conversion customer rate (summed on add-on accepts). The
+      // estimate's own slice rides beside it for callers that need it.
+      monthlyRate: convertedMonthlyRate,
+      estimateMonthlyRate: monthlyRate,
       serviceCount,
       scheduledCount,
       requiresManualRecurringScheduling: hasCommercialRecurring,
@@ -3550,3 +3653,4 @@ module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceFo
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
 module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
+module.exports.addOnPreservedMonthlyRateBase = addOnPreservedMonthlyRateBase;
