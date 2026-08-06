@@ -388,8 +388,11 @@ router.post('/sms', async (req, res) => {
     // backyard") would exist only in the comms log for someone to find by
     // hand. Only the quote-generating branch is skipped.
     let intakeScopeVetoed = false;
+    // A reschedule/away ask about an EXISTING visit must never be consumed
+    // by the intake flow (codex #3232 r29) — consumption returns before
+    // the durable reschedule flag below, silently dropping the guard.
     if (customer && Body && customer.lead_intake_status &&
-        customer.lead_intake_status !== 'estimate_drafted') {
+        customer.lead_intake_status !== 'estimate_drafted' && !rescheduleAsk) {
       try {
         const LeadIntake = require('../services/lead-intake');
         const intakeResult = await LeadIntake.handleIntakeReply(customer, Body);

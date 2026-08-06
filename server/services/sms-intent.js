@@ -84,7 +84,7 @@ function isSmsReaction(body) {
 // a false positive costs one owner bell, a false negative is the 2026-08-05
 // incident class where a 12:30am "can we reschedule?" text was followed by
 // the visit running (and invoicing) on schedule.
-const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|different\s+(?:day|date|time)|another\s+(?:day|date|time)|(?:can|could)\s+we\s+(?:do|move|push|change)\s+(?:it|this|that|the\s+\w+)?\s*(?:to|till|until|for)\s+(?:next|another|a\s+different|later|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day)|skip\s+(?:this|the|my|that)\s+(?:one|visit|service|month|week|appointment|appt)|skip\s+(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+week))\b/i;
+const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|different\s+(?:day|date|time)|another\s+(?:day|date|time)|(?:can|could)\s+we\s+(?:do|move|push|change)\s+(?:it|this|that|the\s+\w+)?\s*(?:to|till|until|for)\s+(?:next|another|a\s+different|later|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day)|skip\s+(?:this|the|my|that|our)\s+(?:\w+\s+)?(?:one|visit|service|month|week|appointment|appt)|skip\s+(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+week))\b/i;
 // Move-verbs only count with a displacement preposition or an appointment
 // noun nearby — bare "moving" ("we're moving the couch") must not fire.
 // Move-verbs need an APPOINTMENT object or an explicit temporal target —
@@ -101,7 +101,7 @@ const CANCEL_CONTEXT_RE = /\b(?:appointment|appt|visit|service|treatment|today|t
 // "was not ASKING TO cancel".
 const CANCEL_NEGATION_RE = /\b(?:don'?t|do\s+not|not|never|no\s+need\s+to)\s+(?:\w+\s+){0,3}?cancel/i;
 const CANCEL_NONAPPT_RE = /\bcancel\w*\s+(?:[\w'’]+\s+){0,2}?(?:invoice|autopay|payment|card|subscription|estimate|quote)s?\b/i;
-const AWAY_RE = /\b(?:out\s+of\s+town|on\s+vacation|leav(?:e|ing)\s+for\s+vacation|going\s+out\s+of\s+town|(?:won'?t|will\s+not|not\s+going\s+to|can'?t|cannot|can\s+not)\s+be\s+(?:home|here|there|available|around|in\s+town)|(?:nobody|no\s+one)\s+(?:will\s+be|is|'?s\s+going\s+to\s+be)\s+(?:home|here|there)|away\s+(?:until|till|through|for)|travel(?:ing|ling)\s+(?:until|till|through|next|this)|back\s+(?:in\s+town\s+)?(?:on|until|till)\b|not\s+(?:be\s+)?back\s+(?:till|until)|(?:am|'m)\s+away\b|away\s+(?:this|next)\s+(?:week|month)|not\s+(?:at\s+)?home\s+(?:today|tomorrow|this|next|until|till))\b/i;
+const AWAY_RE = /\b(?:out\s+of\s+town|on\s+vacation|leav(?:e|ing)\s+for\s+vacation|going\s+out\s+of\s+town|(?:won'?t|will\s+not|not\s+going\s+to|can'?t|cannot|can\s+not)\s+be\s+(?:home|here|there|available|around|in\s+town)|(?:nobody|no\s+one)\s+(?:will\s+be|is|'?s\s+going\s+to\s+be)\s+(?:home|here|there)|away\s+(?:until|till|through|for)|travel(?:ing|ling)\s+(?:until|till|through|next|this)|back\s+(?:in\s+town\s+)?(?:on|until|till)\b|not\s+(?:be\s+)?back\s+(?:till|until)|(?:we|i)(?:\s+all)?\s+(?:am|are|will\s+be|are\s+going\s+to\s+be|going\s+to\s+be|gonna\s+be)\s+(?:gone|away)\b|(?:we|i)'(?:ll|re|m)\s+(?:all\s+)?(?:be\s+)?(?:gone|away)\b|(?:am|'m)\s+away\b|away\s+(?:this|next)\s+(?:week|month)|not\s+(?:at\s+)?home\s+(?:today|tomorrow|this|next|until|till))\b/i;
 // Away + permission = a heads-up, not a reschedule ask ("won't be home but
 // here's the gate code" / "exterior only is fine"). Permission only
 // suppresses the AWAY leg — an explicit reschedule/cancel verb still wins.

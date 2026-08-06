@@ -213,6 +213,10 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
              SELECT 1 FROM customer_interactions pi
              WHERE pi.customer_id = t.customer_id
                AND pi.interaction_type IN ('call_outbound', 'call', 'note')
+               -- Inbound-call logs and automated pipeline notes are not
+               -- staff follow-up (codex r29): 'call'/'note' rows count
+               -- only when admin-authored.
+               AND (pi.interaction_type = 'call_outbound' OR pi.admin_user_id IS NOT NULL)
                AND pi.created_at > t.created_at
            ))
        -- "Expired today": judged by the DEADLINE window — the hourly
@@ -275,6 +279,10 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
              SELECT 1 FROM customer_interactions ci
              WHERE ci.customer_id = t.customer_id
                AND ci.interaction_type IN ('call_outbound', 'call', 'note')
+               -- Inbound-call logs and automated pipeline notes are not
+               -- staff follow-up (codex r29): 'call'/'note' rows count
+               -- only when admin-authored.
+               AND (ci.interaction_type = 'call_outbound' OR ci.admin_user_id IS NOT NULL)
                AND ci.created_at > t.created_at
            ))
     -- Newest-first (codex r8): oldest-first returned the same stuck 12
@@ -305,7 +313,10 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         WHERE created_at >= now() - interval '30 days'
           AND created_at <= :cutoff
           AND direction = 'inbound'
-          AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request')
+          -- reschedule_reply rows are machine-handled by RescheduleSMS,
+          -- whose confirmation goes out BEFORE the inbound row is
+          -- persisted — they are never 'unanswered' (codex r29).
+          AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply')
       ) inbound
       WHERE peer <> ''
       ORDER BY peer, created_at DESC

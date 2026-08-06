@@ -255,3 +255,18 @@ describe('fresh appointment-cancel overrides whole-message vetoes (codex r28)', 
     expect(hasRescheduleOrAwayIntent('Please cancel my appointment for tomorrow')).toBe(true);
   });
 });
+
+describe('skip-with-adjective and gone/away forms (codex r29)', () => {
+  test('skip my next appointment flags', () => {
+    expect(hasRescheduleOrAwayIntent('I need to skip my next appointment')).toBe(true);
+  });
+  test('we will be gone tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent('We will be gone tomorrow')).toBe(true);
+  });
+  test('we are going to be away tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent('We are going to be away tomorrow')).toBe(true);
+  });
+  test('the ants are gone stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent('Great news, the ants are gone')).toBe(false);
+  });
+});
