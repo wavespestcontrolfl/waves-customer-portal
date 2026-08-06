@@ -475,8 +475,13 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
               .where({ scheduled_service_id: jobId })
               .where(function claimable() {
                 this.whereNull('cancellation_notice_at').orWhere(function staleLease() {
+                  // Singleton leases only (codex r39): a stale SHARED
+                  // (series) token stays owned as a group — the sweep
+                  // recovers it with the combined copy; stealing one row
+                  // here would double-text that visit.
                   this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
-                    .where('cancellation_notice_at', '<', sp.raw("now() - interval '15 minutes'"));
+                    .where('cancellation_notice_at', '<', sp.raw("now() - interval '15 minutes'"))
+                    .whereRaw("NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN ('pending', 'pending_notify'))");
                 });
               })
               .update({ cancellation_notice_at: claimTs, cancellation_notice_state: targetState, updated_at: claimTs });

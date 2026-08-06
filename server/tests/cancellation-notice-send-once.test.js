@@ -71,13 +71,18 @@ describe('handleCancellation send-once (atomic notice claim)', () => {
     expect(claim.patch.cancellation_notice_at).toBeInstanceOf(Date);
   });
 
-  test('failed attempt (customer lookup miss, no provider acceptance) RELEASES the claim', async () => {
+  test('failed attempt (customer lookup miss, no provider acceptance) finalizes TERMINALLY suppressed', async () => {
+    // Deterministic non-delivery is terminal (codex r39): a released null
+    // marker would be re-minted by the late-claim fallback every sweep
+    // tick and could text a stale notice if the block ever lifts.
     mockDbState.reminderRow = { id: 'r4', customer_id: 'cu-gone', cancelled: false, appointment_time: '2026-08-05T13:00:00Z', service_type: 'X' };
     const outcome = {};
     await AppointmentReminders.handleCancellation('svc4', { outcome });
     const release = mockDbState.updates.find((u) => u.patch
       && u.patch.cancellation_notice_at === null && u.patch.cancellation_notice_state === null);
-    expect(release).toBeTruthy();
+    expect(release).toBeFalsy();
+    const terminal = mockDbState.updates.filter((u) => u.patch.cancellation_notice_state === 'suppressed');
+    expect(terminal.length).toBeGreaterThan(0);
     expect(outcome.notificationSent).toBe(false);
   });
 

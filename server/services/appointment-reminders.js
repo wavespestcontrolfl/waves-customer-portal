@@ -2427,10 +2427,14 @@ const AppointmentReminders = {
 
       if (!sendNotification) {
         if (claimToken && claimed) {
-          // Fenced: only the claim owner may finalize as suppressed.
+          // Fenced: only the claim owner may finalize as suppressed —
+          // and only while the visit is STILL cancelled (codex r39): a
+          // restoration whose marker clear was swallowed must not receive
+          // a terminal marker that blocks its next real cancellation.
           await db('appointment_reminders')
             .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
             .where('cancellation_notice_at', noticeToken)
+            .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
             .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
         }
         logger.info(`[appt-remind] Cancellation notice suppressed for ${scheduledServiceId}`);
@@ -2572,7 +2576,12 @@ const AppointmentReminders = {
             .where('cancellation_notice_at', noticeToken)
             .update(accepted
               ? { cancellation_notice_state: 'sent', updated_at: new Date() }
-              : { cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+              // Deterministic non-delivery is TERMINAL (codex r39): a
+              // released (null) marker is indistinguishable from a lost
+              // claim, so the late-claim fallback would re-mint and
+              // re-attempt the blocked send every 15 minutes for 72h —
+              // and could text a stale notice if the block lifts.
+              : { cancellation_notice_state: 'suppressed', updated_at: new Date() });
           return accepted;
         } catch (finalizeErr) {
           logger.warn(`[appt-remind] notice-claim finalize failed for ${scheduledServiceId}: ${finalizeErr.message}`);
@@ -2862,8 +2871,13 @@ const AppointmentReminders = {
       // may get a (truthful) notice — accepted, evidence-gated anyway.
       // Durable rollout boundary (codex r34): stamped once, the first
       // time the hook is seen enabled — cancels before it never late-claim.
+      // Stamped with THIS POD'S BOOT TIME, not now() (codex r39): a
+      // draining gate-on pod that recreates the marker after an on-off
+      // deploy writes a value OLDER than the new gate-off pod's boot, so
+      // that pod's guarded delete can still remove it — generation
+      // ownership works in both directions.
       await db('ops_email_send_state')
-        .insert({ email_key: 'cancel-notice-hook-enabled-at', last_sent_at: db.fn.now(), updated_at: db.fn.now() })
+        .insert({ email_key: 'cancel-notice-hook-enabled-at', last_sent_at: PROCESS_BOOT_AT, updated_at: db.fn.now() })
         .onConflict('email_key')
         .ignore()
         .catch(() => {});
@@ -3165,6 +3179,10 @@ const AppointmentReminders = {
       const priorGroupToken = options.claimToken instanceof Date ? options.claimToken : null;
       await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
+        // Still-cancelled applies to EVERY adoption branch (codex r39) —
+        // prior-token and stale-lease rows restored mid-flight must not
+        // be stamped (especially not terminally suppressed).
+        .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
         .where(function claimable() {
           // Adopt unclaimed rows, rows under OUR provided group token
           // (route trx claim / sweep reclaim), and stale leases — never a
@@ -3223,7 +3241,10 @@ const AppointmentReminders = {
             .where('cancellation_notice_at', seriesToken)
             .update(accepted
               ? { cancellation_notice_state: 'sent', updated_at: new Date() }
-              : { cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+              // Terminal, same as the singleton finalize (codex r39) —
+              // released rows would be re-minted by the late-claim
+              // fallback and re-attempted indefinitely.
+              : { cancellation_notice_state: 'suppressed', updated_at: new Date() });
         } catch (finalizeErr) {
           logger.warn(`[appt-remind] series notice-claim finalize failed: ${finalizeErr.message}`);
         }
