@@ -168,7 +168,7 @@ function buildRows() {
           Object.keys(constants.PROPERTY_TYPE_ADJ).map((propertyType) => ({ f, p, propertyType })))),
       ({ f, p, propertyType }) => sp.pricePestControl({ footprint: f, propertyType, ...p.property }, { frequency: 'quarterly', ...p.options }),
       (r) => (r.tiers || []).map((t) => t.perApp)).concat(bundle('pest')),
-    notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features; WaveGuard bundle tiers discount qualifying recurring services up to ${maxWaveGuardPct}%. One-time initial service fee $${Math.round(constants.PEST.initialFee)}.`,
+    notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features; WaveGuard bundle tiers discount qualifying recurring services up to ${maxWaveGuardPct}%. A one-time $${Math.round(constants.PEST.initialFee)} initial service fee applies to standalone pest service only — waived when bundled with another recurring service or with annual prepay.`,
   }));
 
   add('cockroach_treatment', () => rangeRow({
@@ -403,12 +403,14 @@ function buildRows() {
       Object.keys(constants.RODENT.sanitation)
         .filter((tier) => constants.RODENT.sanitation[tier] && typeof constants.RODENT.sanitation[tier] === 'object' && 'base' in constants.RODENT.sanitation[tier])
         .flatMap((tier) => [250, 500, 1500, 4000, 10000].flatMap((affectedSqFt) =>
-          [0, 50].flatMap((insulationRemovalCuFt) =>
+          [0, 50, 100].flatMap((insulationRemovalCuFt) =>
             ['normal', 'crawlspace', 'tight'].map((accessType) => ({ tier, affectedSqFt, insulationRemovalCuFt, accessType }))))),
       ({ tier, affectedSqFt, insulationRemovalCuFt, accessType }) =>
         sp.priceSanitation({ tier, affectedSqFt, insulationRemovalCuFt, accessType }),
-      (r) => (r.customQuoteRecommended ? NaN : r.price)),
-    notes: 'Priced by affected area, debris removal volume, and access.',
+      // customQuoteRecommended is routing-only; the numeric line is retained
+      // by the estimate path — publish it.
+      (r) => r.price),
+    notes: 'Priced by affected area, debris removal volume (per cu ft beyond the included allowance), and access; larger scopes extend beyond this range at the same per-unit rates.',
   }));
 
   add('rodent_exclusion', () => rangeRow({
@@ -709,6 +711,7 @@ function buildRows() {
     // High tree counts stay numerically priced — the review flag only
     // routes the estimate; the priced line is still published.
     { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 20, access: 'moderate' } },
+    { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 40, access: 'moderate' } },
   ];
   add('tree_shrub_care', () => rangeRow({
     key: 'tree_shrub_care',
@@ -720,7 +723,7 @@ function buildRows() {
           TREE_SHRUB_PROFILES.map((p) => ({ lot, tier, p })))),
       ({ lot, tier, p }) => sp.priceTreeShrub({ ...p.property, lotSqFt: lot }, { ...p.options, tier }),
       (r) => r.monthly).concat(bundle('treeShrub')),
-    notes: `Monthly-billed program; 4, 6, or 9 applications per year by tier; priced by planting beds and tree count; WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
+    notes: `Monthly-billed program; 4, 6, or 9 applications per year by tier; priced by planting beds and tree count (larger counts extend beyond this range); WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
   }));
 
   // rodent_plugging (calculatePluggingPrice) is deliberately NOT published:
