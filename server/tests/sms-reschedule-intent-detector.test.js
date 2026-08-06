@@ -195,3 +195,18 @@ describe('postpone/skip veto coverage (codex r25)', () => {
     expect(hasRescheduleOrAwayIntent('Please postpone my service until next week')).toBe(true);
   });
 });
+
+describe('negated need/want phrases are not fresh asks (codex r26)', () => {
+  test('dont-need-to-reschedule suppresses', () => {
+    expect(hasRescheduleOrAwayIntent("I don't need to reschedule")).toBe(false);
+  });
+  test('dont-want-to-reschedule suppresses', () => {
+    expect(hasRescheduleOrAwayIntent("We don't want to reschedule, Tuesday still works")).toBe(false);
+  });
+  test('no-need-to-reschedule suppresses', () => {
+    expect(hasRescheduleOrAwayIntent('No need to reschedule, see you then')).toBe(false);
+  });
+  test('plain need-to-reschedule still flags', () => {
+    expect(hasRescheduleOrAwayIntent('I need to reschedule my appointment')).toBe(true);
+  });
+});

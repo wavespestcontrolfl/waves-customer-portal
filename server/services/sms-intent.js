@@ -124,7 +124,13 @@ function hasRescheduleOrAwayIntent(body) {
   // reschedule ask (codex r5).
   // A FRESH request anywhere overrides status/acknowledgment clauses
   // (codex r15/r16): "…been rescheduled, but I need to reschedule again."
-  const freshAsk = /\b(?:need|want|like|have)\s+to\s+(?:re-?schedul|postpon)|\bplease\s+(?:re-?schedul|postpon)|\bactually\b[^.!?]{0,30}\b(?:please|can|could|need|want)\b[^.!?]{0,20}\b(?:re-?schedul|postpon)|\b(?:re-?schedul|postpon)\w*(?:\s+\w+){0,2}\s+again\b/i.test(text);
+  // A need/want phrase governed by a negation is the OPPOSITE of a fresh
+  // ask (codex r26): "I don't need to reschedule" / "no need to
+  // reschedule" must not disarm the negation guard below.
+  const needAsk = /\b(?:need|want|like|have)\s+to\s+(?:re-?schedul|postpon)/i.test(text)
+    && !/\b(?:don'?t|do\s+not|doesn'?t|won'?t|not|no|never)\s+(?:\w+\s+){0,2}?(?:need|want|like|have)\s+to\s+(?:re-?schedul|postpon)/i.test(text);
+  const freshAsk = needAsk
+    || /\bplease\s+(?:re-?schedul|postpon)|\bactually\b[^.!?]{0,30}\b(?:please|can|could|need|want)\b[^.!?]{0,20}\b(?:re-?schedul|postpon)|\b(?:re-?schedul|postpon)\w*(?:\s+\w+){0,2}\s+again\b/i.test(text);
   // A self-correction ("Don't reschedule Tuesday. Actually, please
   // reschedule for Friday.") is a live ask — the fresh ask outranks the
   // whole-message negation scan (codex r24).

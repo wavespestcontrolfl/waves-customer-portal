@@ -35,11 +35,14 @@ const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcon
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wavespestcontrol.com').replace(/\/+$/, '');
 
-const LOOKBACK_HOURS = 7 * 24;
+// 30 days (codex r26): an unresolved promise must not age out of the
+// 7-day window while it only ever appeared in the overflow count — rows
+// leave this lane by being fulfilled, not by expiring quickly.
+const LOOKBACK_HOURS = 30 * 24;
 // The promise window: calls younger than this may legitimately still be
 // in-progress; the estimate lanes send same-day when they work.
 const GRACE_HOURS = 24;
-const MAX_ROWS = 10;
+const MAX_ROWS = 25;
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -102,7 +105,10 @@ async function loadUnkeptPromises() {
                 -- Unlinked (or same-customer) estimates only (codex r12):
                 -- a shared household number must not let customer B's
                 -- estimate clear customer A's promise.
-                AND (e.customer_id IS NULL OR c.customer_id IS NULL OR e.customer_id = c.customer_id)
+                -- An UNLINKED call (shared number) is cleared only by an
+                -- UNLINKED estimate (codex r26): customer B's linked
+                -- estimate must not clear caller A's promise.
+                AND (e.customer_id IS NULL OR e.customer_id = c.customer_id)
                 AND RIGHT(REGEXP_REPLACE(e.customer_phone, '\\D', '', 'g'), 10)
                   = RIGHT(REGEXP_REPLACE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, '\\D', '', 'g'), 10))
           )

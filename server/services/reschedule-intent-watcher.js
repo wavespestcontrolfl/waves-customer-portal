@@ -69,7 +69,12 @@ async function resolveActionedFlags() {
             // Approved click-followup nudges are proactive, not replies
             // (codex r24) — matched by draft intent + finalize sent_at.
             .whereRaw("NOT EXISTS (SELECT 1 FROM message_drafts mdx WHERE mdx.intent = 'click_followup' AND mdx.customer_id = sl.customer_id AND mdx.sent_at BETWEEN sl.created_at - interval '2 minutes' AND sl.created_at + interval '2 minutes')")
-            .whereIn('sl.status', ['queued', 'sent', 'delivered'])
+            // Resolution is a durable status write — only CONFIRMED
+            // delivery counts (codex r26): a queued/sent reply can still
+            // fail, and nothing reopens an auto_resolved decision. The
+            // digest's own hide-predicate stays optimistic, so a later
+            // failure re-surfaces the flag there.
+            .where('sl.status', 'delivered')
             .whereRaw('sl.created_at > agent_decisions.created_at');
         }).orWhere(function ambiguousRescheduled() {
           // Null-entity flags can't observe slot changes — a delivered
@@ -80,7 +85,7 @@ async function resolveActionedFlags() {
               .whereRaw("(rc.customer_id = agent_decisions.customer_id OR (agent_decisions.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(rc.to_phone, ''), '[^0-9]', '', 'g'), 10) = agent_decisions.input_snapshot->>'phone_tail'))")
               .where('rc.direction', 'outbound')
               .whereIn('rc.message_type', ['appointment_rescheduled', 'reschedule_series_confirmation'])
-              .whereIn('rc.status', ['queued', 'sent', 'delivered'])
+              .where('rc.status', 'delivered')
               .whereRaw('rc.created_at > agent_decisions.created_at');
           });
         }).orWhereExists(function slotMovedOrCancelled() {

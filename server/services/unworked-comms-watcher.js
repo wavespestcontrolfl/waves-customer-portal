@@ -104,7 +104,10 @@ async function loadCallbackCalls(cutoff = new Date()) {
         WHERE dt.task_type = 'call_back'
           AND dt.customer_id IS NOT NULL
           AND dt.customer_id = c.customer_id
-          AND dt.created_at BETWEEN c.created_at AND c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) + interval '45 minutes'
+          -- End-of-call boundary (codex r26): recovered rows (Studio /
+          -- status fallback) are created near call END; adding duration
+          -- again would overshoot. Bridged rows end at bridge + duration.
+          AND dt.created_at BETWEEN c.created_at AND COALESCE(c.bridged_at, c.created_at) + CASE WHEN c.bridged_at IS NOT NULL THEN make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE interval '0' END + interval '45 minutes'
       )
       -- Already returned: a later outbound CALL to the same number, or a
       -- later human-typed text, clears the item (codex #3232 r1).
@@ -114,7 +117,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
       AND NOT EXISTS (
         SELECT 1 FROM call_log oc
         WHERE oc.direction = 'outbound'
-          AND oc.created_at > c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
+          AND oc.created_at > COALESCE(c.bridged_at, c.created_at) + CASE WHEN c.bridged_at IS NOT NULL THEN make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE interval '0' END
           -- Heuristic: the stored duration is the PARENT leg (admin
           -- answer), so a short pickup-and-abandon still counts positive;
           -- >= 60s approximates a real customer conversation (leg-level
@@ -142,7 +145,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
                                   AND os.created_at + interval '2 minutes'
           )
           AND os.status IN ('queued', 'sent', 'delivered')
-          AND os.created_at > c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
+          AND os.created_at > COALESCE(c.bridged_at, c.created_at) + CASE WHEN c.bridged_at IS NOT NULL THEN make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE interval '0' END
           AND (c.customer_id IS NULL OR os.customer_id IS NULL OR os.customer_id = c.customer_id)
           AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10)
             = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, ''), '\\D', '', 'g'), 10)
