@@ -1111,6 +1111,80 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(sentBody).toContain('quick Google review would mean the world'); // friendly_ask template
   });
 
+  test('a scheduled-but-never-sent review-looking SMS does not trigger the manual-ask standdown', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'ma-3', first_name: 'Joy', last_name: 'H', phone: '+19410000049', nearest_location_id: 'bradenton' }],
+      sms_log: [{ id: 'sms-3', customer_id: 'ma-3', direction: 'outbound', status: 'scheduled', message_body: 'review us: https://g.page/r/waves/review', created_at: new Date(Date.now() - 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ma-3', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+  });
+
+  test('a manual ask sent AFTER enrollment stops the cadence at the next touch (manual_ask_recent)', async () => {
+    const startedAt = new Date(Date.now() - 3 * 86400000);
+    const mock = makeMock({
+      customers: [{ id: 'ma-4', first_name: 'Ana', last_name: 'K', phone: '+19410000050', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-ma', customer_id: 'ma-4', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true }]),
+        started_at: startedAt, next_run_at: new Date(Date.now() - 60000),
+      }],
+      // Owner hand-sent an ask a day after enrollment — no correlated
+      // review_requests send within ±10 min.
+      sms_log: [{ id: 'sms-4', customer_id: 'ma-4', direction: 'outbound', status: 'sent', message_body: 'Hey Ana, would love a Google review: https://g.page/r/waves/review', created_at: new Date(startedAt.getTime() + 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('manual_ask_recent');
+  });
+
+  test('a booked follow-up child via followup_source_service_id drives the multi-treatment plans (canonical CTA linkage)', async () => {
+    mockGates.reviewSequences = true;
+    const future = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'fs-1', first_name: 'Max', last_name: 'V', phone: '+19410000051', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-fs1', customer_id: 'fs-1', scheduled_service_id: 'ss-src' }],
+      scheduled_services: [
+        { id: 'ss-src', customer_id: 'fs-1', status: 'completed', scheduled_date: '2026-08-01' },
+        { id: 'ss-inc', customer_id: 'fs-1', followup_source_service_id: 'ss-src', status: 'confirmed', scheduled_date: future },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'fs-1', serviceRecordId: 'sr-fs1', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].templateKey).toBe('first_treatment_ask');
+  });
+
+  test('an email-resolved first-treatment ask keeps its cap-exempt provenance (first_treatment_ask_email)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'fe-1', first_name: 'Lea', last_name: 'B', phone: '+19410000052', email: 'x@y.com', nearest_location_id: 'bradenton' }],
+      notification_prefs: [{ customer_id: 'fe-1', review_request: true, sms_enabled: true, email_enabled: true, review_request_channel: 'email' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0],
+      channel: 'sms', templateId: 'first_treatment_ask',
+      sequenceId: 'seq-fe', sequenceStep: 0, manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(true);
+    expect(out.channel).toBe('email');
+    expect(mock.__state.rows.review_requests[0].template_key).toBe('first_treatment_ask_email');
+  });
+
   test('a cadence stops with reason "clicked" once a touch was redirected to Google (direct-link engagement)', async () => {
     const mock = makeMock({
       customers: [{ id: 'cl-1', first_name: 'Ivy', last_name: 'W', phone: '+19410000034', nearest_location_id: 'bradenton' }],

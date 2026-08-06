@@ -66,10 +66,12 @@ describe('review outreach templates', () => {
   test('every template fits ONE GSM segment as sent (owner spec 2026-08-06)', () => {
     const { countSegments } = require('../services/messaging/segment-counter');
     const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
-    // Worst realistic inputs: 12-char first name, real shortened-link length.
+    // Worst realistic inputs: 12-char first name, an 11-char technician
+    // FIRST name (sendOutreachTouch substitutes first name only), real
+    // shortened-link length.
     const vars = {
       first: 'Christopher2',
-      tech: 'Adam',
+      tech: 'Christopher',
       service_type: 'pest control service',
       review_url: 'https://portal.wavespestcontrol.com/l/abcde',
     };

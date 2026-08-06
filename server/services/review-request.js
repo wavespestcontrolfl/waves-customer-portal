@@ -389,17 +389,25 @@ const ReviewService = {
    * review_requests send within ±10 minutes of it — the pipeline's own
    * touches always have a matching review_requests row, so time correlation
    * separates "Adam asked personally" from "the cadence asked".
+   * `since` (a Date) overrides the default 30-day window — _runSequenceStep
+   * passes the sequence's started_at so a mid-cadence recheck only reacts to
+   * manual asks sent AFTER enrollment (an operator who deliberately started
+   * a sequence despite their own recent ask keeps that override).
    * Fail-open on lookup errors (enroll anyway, warn): the cap/cooldown still
    * bound total volume, and an sms_log blip must not silently kill every
    * post-service enrollment.
    */
-  async manualReviewAskSentRecently(customerId, { windowDays = 30 } = {}) {
+  async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null } = {}) {
     const MANUAL_ASK_RE = /g\.page\/|writereview|\/rate\/[A-Za-z0-9]|\bgoogle\s+review\b/i;
     try {
-      const since = new Date(Date.now() - windowDays * 86400000);
+      const sinceAt = since ? new Date(since) : new Date(Date.now() - windowDays * 86400000);
       const outbound = await db("sms_log")
         .where({ customer_id: customerId, direction: "outbound" })
-        .where("created_at", ">=", since)
+        .where("created_at", ">=", sinceAt)
+        // Rows that never reached the customer are not asks: scheduled rows
+        // are inserted pre-delivery (and stay on cancel), failed/undelivered
+        // never landed (codex #3235 r1 P2).
+        .whereNotIn("status", ["scheduled", "canceled", "cancelled", "failed", "undelivered"])
         .orderBy("created_at", "desc")
         .limit(200)
         .select("message_body", "created_at");
@@ -446,8 +454,11 @@ const ReviewService = {
     // cockroach different than one time pest, as we should bed bug") — the
     // follow-up visit IS a treatment, so the review ask waits for it. Other
     // multi-visit work joins this flow structurally once its follow-up is
-    // actually booked as a child visit.
-    const MULTI_TREATMENT_SERVICE_KEYS = new Set(["cockroach_control", "bed_bug_treatment"]);
+    // actually booked as a linked child visit. The package set is the
+    // canonical TWO_TREATMENT_PACKAGE_KEYS from the follow-up-obligation
+    // lane — never a parallel copy (codex #3235 r1 P1). Lazy require: that
+    // module is heavier than this hot path needs at load time.
+    const { TWO_TREATMENT_PACKAGE_KEYS } = require("./typed-followup-obligation");
     try {
       let svc = null;
       if (serviceRecordId) {
@@ -459,30 +470,37 @@ const ReviewService = {
           svc = await db("scheduled_services as s")
             .leftJoin("services as sv", "s.service_id", "sv.id")
             .where("s.id", sr.scheduled_service_id)
-            .select("s.id", "s.parent_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "sv.service_key")
+            .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "sv.service_key")
             .first();
         }
       }
 
       if (svc) {
         const { TERMINAL_STATUSES } = require("./waveguard-existing-services");
-        const futureChild = await db("scheduled_services")
-          .where({ parent_service_id: svc.id })
+        // A booked next treatment links back via followup_source_service_id
+        // (the admin-dispatch included-follow-up CTA — the canonical
+        // mechanism) or parent_service_id (call-booked linked visits).
+        // Two lookups, not an OR (codex #3235 r2 P1: the first cut only
+        // checked parent_service_id and missed every CTA-booked child).
+        const childQuery = (col) => db("scheduled_services")
+          .where({ [col]: svc.id })
           .whereNotIn("status", TERMINAL_STATUSES)
           .where("scheduled_date", ">=", etDateString())
           .first();
+        const futureChild = (await childQuery("followup_source_service_id")) || (await childQuery("parent_service_id"));
+        const isFollowUpChild = !!(svc.parent_service_id || svc.followup_source_service_id);
         if (futureChild) {
           // Another treatment in this series is already on the books.
-          return svc.parent_service_id
+          return isFollowUpChild
             ? { skip: "multi_treatment_middle" }
             : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
         }
-        if (svc.parent_service_id) {
+        if (isFollowUpChild) {
           // This IS the follow-up visit and nothing further is scheduled —
           // the series is done; run the full cadence.
           return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN };
         }
-        if (MULTI_TREATMENT_SERVICE_KEYS.has(svc.service_key)) {
+        if (TWO_TREATMENT_PACKAGE_KEYS.has(svc.service_key)) {
           // Named multi-treatment service with no child linkage — position in
           // the series comes from history: a completed same-service visit in
           // the prior 60 days makes THIS the follow-up treatment (owner spec:
@@ -1803,7 +1821,10 @@ const ReviewService = {
       if (recipientIsAccountHolder) {
         try {
           const prior = await db("review_requests")
-            .where({ sequence_id: sequenceId, sequence_step: sequenceStep })
+            // Channel-scoped (codex #3235 r1 P2): a step that flipped
+            // email→SMS between attempts must not resend the email intro
+            // (no {review_url}, wrong shape) as the SMS body.
+            .where({ sequence_id: sequenceId, sequence_step: sequenceStep, channel: "sms" })
             .whereNotNull("custom_body")
             .orderBy("created_at", "desc")
             .first();
@@ -1845,7 +1866,11 @@ const ReviewService = {
       if (recipientIsAccountHolder) {
         try {
           const prior = await db("review_requests")
-            .where({ sequence_id: sequenceId, sequence_step: sequenceStep })
+            // Channel-scoped (codex #3235 r1 P2): a step that flipped
+            // SMS→email between attempts must not inject the persisted SMS
+            // draft — its single-brace {review_url} placeholder would render
+            // literally in the email paragraph.
+            .where({ sequence_id: sequenceId, sequence_step: sequenceStep, channel: "email" })
             .whereNotNull("custom_body")
             .orderBy("created_at", "desc")
             .first();
@@ -1857,6 +1882,7 @@ const ReviewService = {
             recipientFirstName: firstNameFrom(emailContact.name) || customer.first_name || "",
             serviceType,
             techName,
+            sequenceStep,
             serviceDate,
           });
           if (drafted) persistedBody = drafted;
@@ -1865,6 +1891,17 @@ const ReviewService = {
           recordedTemplateKey = "review_request_email_personalized";
         }
       }
+    }
+
+    // Cap-exempt provenance survives the email fallback (codex #3235 r1 P1):
+    // an email-only/email-preferred customer's FIRST-TREATMENT ask resolves
+    // to email — recorded as a review_request_email* key it would count
+    // toward the cap/cooldown and deterministically block the final-visit
+    // cadence. Record it under first_treatment_ask_email* instead (both
+    // listed in CAP_EXEMPT_TEMPLATE_KEYS; ASK_TOUCH_SQL still counts them
+    // as asks for the funnel and supersede guards).
+    if (actualChannel === "email" && templateId && OUTREACH.CAP_EXEMPT_TEMPLATE_KEYS.includes(templateId) && !noLinkSend) {
+      recordedTemplateKey = persistedBody ? `${templateId}_email_personalized` : `${templateId}_email`;
     }
 
     // A no-link template (resolution_check / satisfaction_confirm) is a PRIVATE
@@ -1902,7 +1939,10 @@ const ReviewService = {
 
     const vars = {
       first: firstNameFrom(contact.name) || customer.first_name || "",
-      tech: techName || "Adam",
+      // First name only (codex #3235 r2 P2): a full technician name blows the
+      // one-segment budget on the {tech}-bearing templates, and the customer
+      // knows the tech by first name anyway.
+      tech: firstNameFrom(techName) || "Adam",
       service_type: serviceType || "service",
       review_url: reviewUrl,
     };
@@ -2326,7 +2366,11 @@ const ReviewService = {
         .where({ customer_id: seq.customer_id })
         .where("created_at", ">", new Date(Date.now() - 30 * 86400000))
         .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
-        .whereRaw(ASK_TOUCH_SQL)
+        // CAP_TOUCH_SQL, not ASK_TOUCH_SQL (codex #3235 r2 P1): the
+        // multi-treatment first-visit ask is delivered by its own earlier
+        // sequence — counting it here would stop the final-visit cadence as
+        // "superseded" before step 0, every time the visits are <30d apart.
+        .whereRaw(CAP_TOUCH_SQL)
         .select("sequence_id", "sms_sent_at", "sent_at");
     } catch {
       recentAskRows = []; // hygiene check is best-effort; the cap/cooldown guards below still hold
@@ -2335,6 +2379,15 @@ const ReviewService = {
       (r) => (r.sms_sent_at || r.sent_at) && r.sequence_id !== seq.id,
     );
     if (externallyAsked) return stop("superseded");
+
+    // Mid-cadence manual-ask standdown (codex #3235 r1 P1): the owner can
+    // hand-send an ask AFTER enrollment (evening of a next-morning Day-0, or
+    // between Day 0 and Day 4). Scoped to evidence since the sequence
+    // started — pre-enrollment asks were already screened at enrollment, and
+    // an operator-started sequence keeps its deliberate override.
+    if (seq.started_at && await this.manualReviewAskSentRecently(seq.customer_id, { since: seq.started_at })) {
+      return stop("manual_ask_recent");
+    }
 
     const step = plan[seq.current_step] || {};
 

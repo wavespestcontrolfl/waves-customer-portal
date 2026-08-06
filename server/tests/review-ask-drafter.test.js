@@ -262,3 +262,22 @@ describe('draftEmailIntro — gating + fallback contract', () => {
     expect(await Drafter.draftEmailIntro({ customer: CUSTOMER })).toBeNull();
   });
 });
+
+describe('draftEmailIntro — step-aware instruction (codex #3235 r1)', () => {
+  const CLEAN_INTRO = 'Hi Aaron, thanks for having us out. If anything looks off, just reply to this email. Otherwise a quick review would mean a lot to our small crew.';
+
+  test('a Day-0 step (email fallback) is prompted as a right-after-the-visit email, not a follow-up', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: CLEAN_INTRO });
+    const today = new Date().toISOString().slice(0, 10);
+    await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron', sequenceStep: 0, serviceDate: today });
+    const system = mockDispatch.mock.calls[0][1].system;
+    expect(system).toMatch(/right after the visit/);
+    expect(system).not.toMatch(/final follow-up/);
+  });
+
+  test('a later step keeps the final-follow-up instruction', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: CLEAN_INTRO });
+    await Drafter.draftEmailIntro({ customer: CUSTOMER, recipientFirstName: 'Aaron', sequenceStep: 2 });
+    expect(mockDispatch.mock.calls[0][1].system).toMatch(/final follow-up email/);
+  });
+});

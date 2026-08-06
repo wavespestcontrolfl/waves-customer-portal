@@ -110,7 +110,7 @@ const OUTREACH_TEMPLATES = [
     // waits for the FINAL visit. No "today": the smart send window can defer
     // past midnight. Cap/cooldown-exempt (CAP_EXEMPT_TEMPLATE_KEYS) so the
     // owner-spec'd 1-after-first + 3-after-final flow fits inside one series.
-    body: "Hi {first}! {tech} with Waves. Treatment 1 done - see you at the follow-up. A quick review would help us:\n\n{review_url}",
+    body: "Hi {first}! {tech} with Waves. Treatment 1 done - see you at the follow-up. A quick review helps:\n\n{review_url}",
   },
 ];
 
@@ -150,10 +150,15 @@ const ASK_TOUCH_SQL =
 // touches under `<template>_personalized` for funnel attribution.
 // ASK_TOUCH_SQL (funnel + queued-ask supersede) intentionally still counts
 // first_treatment_ask — it IS a review ask; it's only the cap that ignores it.
+// The *_email variants cover the channel fallback: an email-only customer's
+// first-treatment step resolves to email, and losing the exemption there
+// would cooldown-block the final-visit cadence (codex #3235 r1 P1).
 const CAP_EXEMPT_TEMPLATE_KEYS = [
   ...NO_LINK_TEMPLATE_KEYS,
   'first_treatment_ask',
   'first_treatment_ask_personalized',
+  'first_treatment_ask_email',
+  'first_treatment_ask_email_personalized',
 ];
 const CAP_TOUCH_SQL = `(template_key IS NULL OR template_key NOT IN (${CAP_EXEMPT_TEMPLATE_KEYS.map((k) => `'${k}'`).join(",")}))`;
 

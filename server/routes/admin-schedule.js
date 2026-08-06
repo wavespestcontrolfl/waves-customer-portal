@@ -8620,17 +8620,24 @@ async function scheduleReviewRequest(svc) {
       return;
     }
 
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
-    let recentRequest = null;
-    try {
-      recentRequest = await db('review_requests')
-        .where({ customer_id: customer.id })
-        .where('created_at', '>', thirtyDaysAgo)
-        .first();
-    } catch { /* table may not exist yet */ }
-    if (recentRequest) {
-      logger.info(`[review-auto] Skipping review request for customer ${customer.id} — already asked recently`);
-      return;
+    // Legacy-mode pre-gate only. In cadence mode this coarse any-row-in-30d
+    // check would deterministically skip the multi-treatment FINAL-visit
+    // cadence (the cap-exempt first-treatment ask row is <30d old by design;
+    // codex #3235 r1 P1) — enrollment enforces the real cap/cooldown with
+    // the correct exemptions in startReviewSequence.
+    if (!cadenceEnabled) {
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
+      let recentRequest = null;
+      try {
+        recentRequest = await db('review_requests')
+          .where({ customer_id: customer.id })
+          .where('created_at', '>', thirtyDaysAgo)
+          .first();
+      } catch { /* table may not exist yet */ }
+      if (recentRequest) {
+        logger.info(`[review-auto] Skipping review request for customer ${customer.id} — already asked recently`);
+        return;
+      }
     }
 
     // Look up the service_record created for this scheduled service so
