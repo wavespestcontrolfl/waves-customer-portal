@@ -111,7 +111,7 @@ const AWAY_PERMISSION_RE = /\b(?:(?:the\s+)?gate\s*code\s+is\b|gate\s*code\b[^.!
 // tomorrow" is a reschedule-class request even though no move/cancel verb
 // appears. Requires an appointment or future-time object so "don't come
 // to the front door" stays quiet.
-const DONT_COME_RE = /\b(?:(?:please\s+)?(?:don'?t|do\s+not)|can\s+you\s+not|could\s+you\s+not)\s+(?:come|show\s+up|stop\s+by)\b(?!\s+(?:to|through|via|by|in(?:side)?|around|near)\b[^.!?]{0,20}\b(?:door|gate|entrance|back|front|side|garage|yard|porch|driveway|house))[^.!?]{0,25}\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|appointment|appt|visit|this\s+week|next\s+week)\b|\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|appointment|appt|visit)\b[^.!?]{0,30}\b(?:(?:please\s+)?(?:don'?t|do\s+not)|can\s+you\s+not|could\s+you\s+not)\s+(?:come|show\s+up|stop\s+by)\b(?!\s+(?:to|through|via|by|in(?:side)?|around|near)\b[^.!?]{0,20}\b(?:door|gate|entrance|back|front|side|garage|yard|porch|driveway|house))/i;
+const DONT_COME_RE = /\b(?:(?:please\s+)?(?:don'?t|do\s+not)|can\s+you\s+not|could\s+you\s+not)\s+(?:come|show\s+up|stop\s+by|treat|spray|service)\b(?!\s+(?:to|through|via|by|in(?:side)?|around|near)\b[^.!?]{0,20}\b(?:door|gate|entrance|back|front|side|garage|yard|porch|driveway|house))(?!\s+(?:the\s+|my\s+|our\s+)?(?:front|back|side|garden|inside|indoors|interior|bed|bush|plant|shrub|lawn|yard))[^.!?]{0,25}\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|appointment|appt|visit|this\s+week|next\s+week)\b|\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|appointment|appt|visit)\b[^.!?]{0,30}\b(?:(?:please\s+)?(?:don'?t|do\s+not)|can\s+you\s+not|could\s+you\s+not)\s+(?:come|show\s+up|stop\s+by|treat|spray|service)\b(?!\s+(?:to|through|via|by|in(?:side)?|around|near)\b[^.!?]{0,20}\b(?:door|gate|entrance|back|front|side|garage|yard|porch|driveway|house))(?!\s+(?:the\s+|my\s+|our\s+)?(?:front|back|side|garden|inside|indoors|interior|bed|bush|plant|shrub|lawn|yard))/i;
 
 function hasRescheduleOrAwayIntent(body) {
   if (!body || typeof body !== 'string') return false;
@@ -186,7 +186,7 @@ function hasRescheduleOrAwayIntent(body) {
     // SEPARATELY grounded appointment ask in the same message overrides
     // the billing clause (codex r41): "postpone my payment. Also
     // reschedule tomorrow's appointment."
-    || (!freshApptAsk && /\b(?:re-?schedul\w*|postpon\w*|mov(?:e|ing)|push(?:ing|ed)?|defer(?:ring)?|delay(?:ing)?|chang(?:e|ing))\s+(?:[\w'’]+\s+){0,2}?(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b/i.test(text))
+    || (!freshApptAsk && /\b(?:re-?schedul\w*|postpon\w*|skipp?\w*|mov(?:e|ing)|push(?:ing|ed)?|defer(?:ring)?|delay(?:ing)?|chang(?:e|ing))\s+(?:[\w'’]+\s+){0,3}?(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b|\b(?:autopay|payment|invoice|bill|billing)s?\b[^.!?]{0,25}\bskip\b/i.test(text))
     // Billing subjects with date-only phrasing (codex r23): "can I make
     // my payment a different day?"
     || (!freshApptAsk && /\b(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b[^.!?]{0,30}\b(?:different|another)\s+(?:day|date|time)\b|\b(?:different|another)\s+(?:day|date|time)\b[^.!?]{0,20}\b(?:autopay|payment|invoice|bill|billing)s?\b/i.test(text));

@@ -480,3 +480,24 @@ describe('negated go-ahead stand-down (codex r45)', () => {
     expect(hasRescheduleOrAwayIntent("I won't be home tomorrow but you can go ahead and treat the yard")).toBe(false);
   });
 });
+
+describe('billing skip veto and treatment stand-downs (codex r47)', () => {
+  test('skip this month for autopay stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent('Can we skip this month for autopay?')).toBe(false);
+  });
+  test('skip this month still flags', () => {
+    expect(hasRescheduleOrAwayIntent('Can we skip this month?')).toBe(true);
+  });
+  test('please do not treat tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent('Please do not treat tomorrow')).toBe(true);
+  });
+  test('dont service the house tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent("Don't service the house tomorrow")).toBe(true);
+  });
+  test('can you not spray tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent('Can you not spray tomorrow?')).toBe(true);
+  });
+  test('dont spray the garden beds stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("Don't spray the garden beds tomorrow, just the perimeter")).toBe(false);
+  });
+});

@@ -146,7 +146,11 @@ async function flagInboundRescheduleIntent({ customer, phone, body, smsLogId, me
         body_excerpt: String(body).slice(0, 240),
         ambiguous: ambiguous === true,
         bell_pending: true,
-        ...(customerId ? {} : { phone_tail: phoneTail, shared_phone: true }),
+        // phone_tail is stored for EVERY flag (codex r47): a flag raised
+        // by a service contact resolves only when the reply went to THAT
+        // number, not to the account's primary phone.
+        ...(phoneTail ? { phone_tail: phoneTail } : {}),
+        ...(customerId ? {} : { shared_phone: true }),
         visit: visit ? {
           id: visit.id,
           scheduled_date: visit.scheduled_date,
