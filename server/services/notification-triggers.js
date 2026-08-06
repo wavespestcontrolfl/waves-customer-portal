@@ -592,7 +592,9 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'appointment_reschedule_intent') {
     // Per-customer tag: two customers texting reschedule requests before
     // the owner opens notifications must not collapse into one push.
-    return `waves-appointment_reschedule_intent-${payload.customerId || 'unknown-customer'}`;
+    // Per-request (codex r12): a re-armed second request must not replace
+    // the first push silently (renotify:false in the service worker).
+    return `waves-appointment_reschedule_intent-${payload.customerId || 'unknown-customer'}-${payload.decisionId || 'x'}`;
   }
   return `waves-${triggerKey}`;
 }

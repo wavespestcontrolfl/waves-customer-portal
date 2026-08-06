@@ -59,6 +59,7 @@ async function loadUnkeptPromises() {
   const { rows } = await db.raw(
     `
     SELECT COUNT(*) OVER () AS total_count,
+           MIN(c.created_at) OVER () AS oldest_created_at,
            c.id, c.created_at, c.customer_id, c.disposition,
            CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END AS from_phone,
            c.duration_seconds,
@@ -93,6 +94,10 @@ async function loadUnkeptPromises() {
                )
             OR (c.customer_id IS NOT NULL AND e.customer_id = c.customer_id)
             OR (e.customer_phone IS NOT NULL
+                -- Unlinked (or same-customer) estimates only (codex r12):
+                -- a shared household number must not let customer B's
+                -- estimate clear customer A's promise.
+                AND (e.customer_id IS NULL OR e.customer_id = c.customer_id)
                 AND RIGHT(REGEXP_REPLACE(e.customer_phone, '\\D', '', 'g'), 10)
                   = RIGHT(REGEXP_REPLACE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, '\\D', '', 'g'), 10))
           )
@@ -117,7 +122,11 @@ function composePromisedEstimateDigest(rows) {
   const promises = (rows || []).filter(Boolean);
   if (!promises.length) return null;
 
-  const oldest = Math.max(...promises.map((r) => ageDays(r.created_at)));
+  // Oldest across the FULL set (codex r12): the newest-first page hides
+  // the true backlog head.
+  const oldest = promises[0]?.oldest_created_at
+    ? ageDays(promises[0].oldest_created_at)
+    : Math.max(...promises.map((r) => ageDays(r.created_at)));
   const total = Number(promises[0]?.total_count) > 0 ? Number(promises[0].total_count) : promises.length;
   const subject = `ACT: ${total} promised quote${total === 1 ? '' : 's'} never went out — oldest ${oldest}d`;
 

@@ -154,7 +154,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
            AND NOT EXISTS (
              SELECT 1 FROM customer_interactions ci
              WHERE ci.customer_id = t.customer_id
-               AND ci.type IN ('call_outbound', 'call', 'note')
+               AND ci.interaction_type IN ('call_outbound', 'call', 'note')
                AND ci.created_at > t.created_at
            ))
     -- Newest-first (codex r8): oldest-first returned the same stuck 12

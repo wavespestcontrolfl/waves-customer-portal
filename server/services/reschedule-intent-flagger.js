@@ -71,6 +71,7 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
     // serialized by a per-customer advisory lock — two texts processed
     // concurrently cannot both pass the check and double-bell.
     let inserted = false;
+    let insertedId = null;
     await db.transaction(async (trx) => {
       await trx.raw("SELECT pg_advisory_xact_lock(hashtext('reschedule-flag:' || ?::text))", [customer.id]);
       const dupe = trx('agent_decisions')
@@ -114,7 +115,7 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
       }
       inserted = true;
 
-      await trx('agent_decisions').insert({
+      const [insertedRow] = await trx('agent_decisions').insert({
         workflow: WORKFLOW,
       agent_name: 'reschedule-intent-flagger',
       decision_version: 'v1',
@@ -145,7 +146,8 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
         : (ambiguous
           ? 'Inbound SMS reads as a reschedule/away request; multiple upcoming visits — not auto-linked.'
           : 'Inbound SMS reads as a reschedule/away request; no upcoming visit inside the horizon.'),
-      });
+      }).returning('id');
+      insertedId = insertedRow?.id || insertedRow || null;
     });
     if (!inserted) return { flagged: false, reason: 'recent_flag' };
 
@@ -159,6 +161,7 @@ async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSi
         visitDate: visit ? String(visit.scheduled_date).slice(0, 10) : null,
         visitService: visit?.service_type || null,
         ambiguousVisits: ambiguous === true,
+        decisionId: insertedId,
       });
       alerted = Boolean(stats && !stats.error
         && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
