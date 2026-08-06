@@ -71,15 +71,16 @@ async function loadUnkeptPromises() {
       -- The PROMISE signal is required: decideDisposition maps a mere
       -- quote_requested to estimate_send too, and a caller who only asked
       -- for pricing is not a broken promise (codex r2).
-      AND (c.ai_extraction::text ~ '"quote_promised"\\s*:\\s*true'
-           OR c.ai_extraction_enriched #>> '{service_request,quote_promised}' = 'true')
+      -- V2 enriched extraction ONLY (codex r5): V1 ai_extraction is the
+      -- deprecated legacy source downstream composers no longer read.
+      AND c.ai_extraction_enriched #>> '{service_request,quote_promised}' = 'true'
       AND (c.disposition IS NULL
            OR c.disposition NOT IN ('spam_discarded', 'wrong_number_closed'))
       AND NOT EXISTS (
         SELECT 1
         FROM estimates e
         WHERE e.sent_at IS NOT NULL
-          AND e.sent_at > c.created_at
+          AND e.sent_at > c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
           AND (
                e.estimate_data #>> '{estimatorEngine,callLogId}' = c.id::text
             OR EXISTS (

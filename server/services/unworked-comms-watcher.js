@@ -86,7 +86,11 @@ async function loadCallbackCalls() {
         SELECT 1 FROM call_log oc
         WHERE oc.direction = 'outbound'
           AND oc.created_at > c.created_at
-          AND COALESCE(oc.duration_seconds, 0) > 0
+          -- Heuristic: the stored duration is the PARENT leg (admin
+          -- answer), so a short pickup-and-abandon still counts positive;
+          -- >= 60s approximates a real customer conversation (leg-level
+          -- connect state is not recorded) (codex r5).
+          AND COALESCE(oc.duration_seconds, 0) >= 60
           AND RIGHT(REGEXP_REPLACE(COALESCE(oc.to_phone, ''), '\\D', '', 'g'), 10)
             = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, ''), '\\D', '', 'g'), 10)
       )
@@ -226,21 +230,21 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     sectionText.push(...a.map((r) => `- ${etTime(r.created_at)} ${r.customer_name || maskPhone(r.from_phone)}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${String(r.summary).replace(/\s+/g, ' ').trim()}` : ''}`));
     sectionText.push(...moreLine(a.length, aTotal));
     sectionText.push('');
-    sectionHtml.push(`<p><strong>Callbacks requested on calls today</strong> (nothing else tracks these):</p><ul style="margin:0 0 12px 18px;padding:0;">${a.map((r) => `<li style="margin:0 0 6px 0;">${esc(etTime(r.created_at))} ${esc(r.customer_name || maskPhone(r.from_phone))}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${esc(String(r.summary).replace(/\s+/g, ' ').trim())}` : ''}</li>`).join('')}</ul>`);
+    sectionHtml.push(`<p><strong>Callbacks requested on calls today</strong> (nothing else tracks these):</p><ul style="margin:0 0 12px 18px;padding:0;">${a.map((r) => `<li style="margin:0 0 6px 0;">${esc(etTime(r.created_at))} ${esc(r.customer_name || maskPhone(r.from_phone))}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${esc(String(r.summary).replace(/\s+/g, ' ').trim())}` : ''}</li>`).join('')}</ul>${aTotal > a.length ? `<p>…and ${aTotal - a.length} more not shown</p>` : ''}`);
   }
   if (b.length) {
     sectionText.push('Follow-up tasks overdue or silently expired today:');
     sectionText.push(...b.map((r) => `- ${r.customer_name || 'Unknown'} [${r.task_type || 'task'}${r.status === 'expired' ? ', auto-expired' : ''}]${r.recommended_action ? ` — ${String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120)}` : ''}`));
     sectionText.push(...moreLine(b.length, bTotal));
     sectionText.push('');
-    sectionHtml.push(`<p><strong>Follow-up tasks overdue or silently expired today:</strong></p><ul style="margin:0 0 12px 18px;padding:0;">${b.map((r) => `<li style="margin:0 0 6px 0;">${esc(r.customer_name || 'Unknown')} [${esc(r.task_type || 'task')}${r.status === 'expired' ? ', auto-expired' : ''}]${r.recommended_action ? ` — ${esc(String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120))}` : ''}</li>`).join('')}</ul>`);
+    sectionHtml.push(`<p><strong>Follow-up tasks overdue or silently expired today:</strong></p><ul style="margin:0 0 12px 18px;padding:0;">${b.map((r) => `<li style="margin:0 0 6px 0;">${esc(r.customer_name || 'Unknown')} [${esc(r.task_type || 'task')}${r.status === 'expired' ? ', auto-expired' : ''}]${r.recommended_action ? ` — ${esc(String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120))}` : ''}</li>`).join('')}</ul>${bTotal > b.length ? `<p>…and ${bTotal - b.length} more not shown</p>` : ''}`);
   }
   if (c.length) {
     sectionText.push('Texts still waiting on a reply (thread ends inbound):');
     sectionText.push(...c.map((r) => `- ${etTime(r.created_at)} ${r.customer_name || maskPhone(r.peer)}: "${String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120)}"`));
     sectionText.push(...moreLine(c.length, cTotal));
     sectionText.push('');
-    sectionHtml.push(`<p><strong>Texts still waiting on a reply</strong> (thread ends inbound):</p><ul style="margin:0 0 12px 18px;padding:0;">${c.map((r) => `<li style="margin:0 0 6px 0;">${esc(etTime(r.created_at))} ${r.customer_id ? `<a href="${esc(adminPortalUrl())}/admin/communications?thread=${esc(r.customer_id)}">${esc(r.customer_name || maskPhone(r.peer))}</a>` : esc(r.customer_name || maskPhone(r.peer))}: &quot;${esc(String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120))}&quot;</li>`).join('')}</ul>`);
+    sectionHtml.push(`<p><strong>Texts still waiting on a reply</strong> (thread ends inbound):</p><ul style="margin:0 0 12px 18px;padding:0;">${c.map((r) => `<li style="margin:0 0 6px 0;">${esc(etTime(r.created_at))} ${r.customer_id ? `<a href="${esc(adminPortalUrl())}/admin/communications?thread=${esc(r.customer_id)}">${esc(r.customer_name || maskPhone(r.peer))}</a>` : esc(r.customer_name || maskPhone(r.peer))}: &quot;${esc(String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120))}&quot;</li>`).join('')}</ul>${cTotal > c.length ? `<p>…and ${cTotal - c.length} more not shown</p>` : ''}`);
   }
 
   const text = [
@@ -272,13 +276,16 @@ async function sentRecently() {
   }
 }
 
-async function stampSendMarker() {
+async function stampSendMarker(cutoff) {
   try {
-    const now = new Date();
+    // The marker records the PRE-QUERY cutoff, not send time — an item
+    // arriving between the loaders' scan and the send must fall inside
+    // the NEXT window, not vanish between them (codex r5).
+    const now = cutoff instanceof Date ? cutoff : new Date();
     await db('ops_email_send_state')
-      .insert({ email_key: SEND_MARKER_KEY, last_sent_at: now, updated_at: now })
+      .insert({ email_key: SEND_MARKER_KEY, last_sent_at: now, updated_at: new Date() })
       .onConflict('email_key')
-      .merge({ last_sent_at: now, updated_at: now });
+      .merge({ last_sent_at: now, updated_at: new Date() });
   } catch (err) {
     logger.warn(`[unworked-comms] send-marker write failed (${err.message}) — next tick may re-send`);
   }
@@ -286,6 +293,7 @@ async function stampSendMarker() {
 
 async function runUnworkedCommsWatcher(opts = {}) {
   if (await (opts.sentRecently || sentRecently)()) return { skipped: 'recent_send' };
+  const windowCutoff = new Date();
 
   let sections;
   try {
@@ -336,7 +344,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
     logger.error(`[unworked-comms] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);
     return { sent: false, error: true, ...composed };
   }
-  await (opts.stampSendMarker || stampSendMarker)();
+  await (opts.stampSendMarker || stampSendMarker)(windowCutoff);
   logger.info(`[unworked-comms] sent: ${composed.total} unworked (${composed.callbacks} callbacks, ${composed.followUps} follow-ups, ${composed.unanswered} unanswered)`);
   return { sent: true, ...composed };
 }

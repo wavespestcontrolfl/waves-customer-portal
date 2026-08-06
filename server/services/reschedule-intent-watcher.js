@@ -30,7 +30,10 @@ const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wa
 const LOOKBACK_DAYS = 4;
 // Outbound types that count as a human answer to a waiting customer —
 // automated broadcasts (reminders, receipts, review asks) do not.
-const HUMAN_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised', 'estimate_sent', 'appointment_rescheduled', 'reschedule_series_confirmation'];
+// Canonical human-reply types only (sms-suggest-mode) — estimate_sent is
+// excluded here: an unrelated estimate is not an answer to a reschedule
+// request (codex r5).
+const HUMAN_REPLY_TYPES = ['manual', 'ai_approved', 'ai_revised', 'appointment_rescheduled', 'reschedule_series_confirmation'];
 const MAX_ROWS = 12;
 
 function esc(value) {

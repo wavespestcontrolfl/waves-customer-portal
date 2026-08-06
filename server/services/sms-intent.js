@@ -112,7 +112,11 @@ function hasRescheduleOrAwayIntent(body) {
   const text = body.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
   const cancelAsk = CANCEL_RE.test(text) && CANCEL_CONTEXT_RE.test(text)
     && !CANCEL_NEGATION_RE.test(text) && !CANCEL_NONAPPT_RE.test(text);
-  if (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text) || cancelAsk) return true;
+  // "don't reschedule us, you can still come" is the opposite of a
+  // reschedule ask (codex r5).
+  const negated = /\b(?:don'?t|do\s+not|no\s+need\s+to|not\s+necessary\s+to|never)\s+(?:\w+\s+){0,2}?(?:reschedul|re-?book|move|change)/i.test(text);
+  if (!negated && (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text))) return true;
+  if (cancelAsk) return true;
   return AWAY_RE.test(text) && !AWAY_PERMISSION_RE.test(text);
 }
 
