@@ -574,7 +574,7 @@ function buildRows() {
     // Slab area x product x job context x volume discount x extended
     // warranty — the selectable options the exact estimate branch forwards.
     values: sweepValues(
-      [500, 1000, 2000, 4000, 6000, 8000, 12000, 20000].flatMap((slabSqFt) =>
+      [500, 1000, 2000, 4000, 6000, 8000, 12000, 20000, 30000].flatMap((slabSqFt) =>
         Object.keys(constants.SPECIALTY.preSlabTermiticide.products).flatMap((productKey) =>
           ['standalone', 'builderBatch', 'sameTripAddOn'].flatMap((jobContext) =>
             ['none', '5plus', '10plus'].flatMap((volumeDiscount) =>
@@ -879,6 +879,10 @@ function buildRows() {
 const { getLastSyncAt, isSyncInFlight } = require('./db-bridge');
 let cached = null;
 let cachedKey = null;
+let lastUnstable = false;
+function lastComputeUnstable() {
+  return lastUnstable;
+}
 
 function gateSignature() {
   return `${getLastSyncAt()}|${process.env.GATE_TERMITE_BOND_OPTION || ''}|${process.env.GATE_TERMITE_STATION_RENTAL || ''}`;
@@ -886,7 +890,10 @@ function gateSignature() {
 
 function computePublicPricingRanges({ refresh = false } = {}) {
   let sig = gateSignature();
-  if (!refresh && cached && cachedKey === sig) return cached;
+  if (!refresh && cached && cachedKey === sig) {
+    lastUnstable = false;
+    return cached;
+  }
   // Admin routes call syncConstantsFromDB directly and mutate the shared
   // constants object before stamping _lastSync — if a sync lands while we
   // sweep, the payload could mix pre/post-edit values. Rebuild until the
@@ -912,7 +919,9 @@ function computePublicPricingRanges({ refresh = false } = {}) {
   };
   // A sweep that overlapped an in-flight sync may mix pre/post-edit
   // constants (db-bridge mutates before stamping) — serve it, but don't
-  // cache it; the next request rebuilds from settled constants.
+  // cache it (in-process OR downstream); the next request rebuilds from
+  // settled constants. The route reads lastComputeUnstable to send no-store.
+  lastUnstable = sawInFlight;
   if (sawInFlight) {
     const uncachedPayload = cached;
     cached = null;
@@ -923,4 +932,4 @@ function computePublicPricingRanges({ refresh = false } = {}) {
   return cached;
 }
 
-module.exports = { computePublicPricingRanges, _internals: { buildRows } };
+module.exports = { computePublicPricingRanges, lastComputeUnstable, _internals: { buildRows } };

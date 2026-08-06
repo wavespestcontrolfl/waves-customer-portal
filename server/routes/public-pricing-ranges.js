@@ -51,7 +51,7 @@ router.get('/', async (req, res, next) => {
         return res.status(503).json({ error: 'pricing configuration temporarily unavailable' });
       }
     }
-    const { computePublicPricingRanges } = require('../services/pricing-engine/public-ranges');
+    const { computePublicPricingRanges, lastComputeUnstable } = require('../services/pricing-engine/public-ranges');
     // The payload cache keys itself to db-bridge's last-sync timestamp, so
     // any sync — this route's or an admin pricing-proposal approval —
     // invalidates it; bots can't force per-request sweeps.
@@ -68,7 +68,13 @@ router.get('/', async (req, res, next) => {
     // pre-edit payload after an admin pricing change (the in-process memo
     // invalidates immediately, but a shared cache only revalidates on
     // expiry).
-    res.set('Cache-Control', 'public, max-age=300');
+    // A payload computed while a sync was in flight must not be cached
+    // downstream either — it may mix pre/post-edit constants.
+    if (lastComputeUnstable()) {
+      res.set('Cache-Control', 'no-store');
+    } else {
+      res.set('Cache-Control', 'public, max-age=300');
+    }
     res.json(payload);
   } catch (err) {
     next(err);

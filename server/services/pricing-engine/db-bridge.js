@@ -787,14 +787,17 @@ async function syncPreSlabContainerCostsFromCatalog(db) {
   }
 }
 
-let _syncInFlight = false;
+// Counter, not a boolean: overlapping direct callers (route + admin config
+// + proposal approval) must all be tracked — the first to finish must not
+// clear the flag while another sync is still mutating constants.
+let _syncsInFlight = 0;
 function isSyncInFlight() {
-  return _syncInFlight;
+  return _syncsInFlight > 0;
 }
 
 async function syncConstantsFromDB(dbInstance) {
   const db = dbInstance || require('../../models/db');
-  _syncInFlight = true;
+  _syncsInFlight += 1;
   let constantsSnapshot = null;
 
   try {
@@ -1793,12 +1796,12 @@ async function syncConstantsFromDB(dbInstance) {
     assertValidPestPricingConfig(constants);
 
     _lastSync = Date.now();
-    _syncInFlight = false;
+    _syncsInFlight = Math.max(0, _syncsInFlight - 1);
     console.log(`[pricing-engine] Synced ${Object.keys(config).length} pricing configs from DB`);
     return true;
   } catch (err) {
     restorePricingConstants(constantsSnapshot);
-    _syncInFlight = false;
+    _syncsInFlight = Math.max(0, _syncsInFlight - 1);
     console.error('[pricing-engine] DB sync failed, using defaults:', err.message);
     return false;
   }
