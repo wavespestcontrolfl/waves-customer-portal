@@ -18,6 +18,7 @@ const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
+const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { etDateString } = require('../utils/datetime-et');
 
 const watcherDisabled = () => ['1', 'true', 'on']
@@ -166,7 +167,7 @@ async function replayPendingBells() {
 }
 
 async function loadUnactionedFlags() {
-  return db('agent_decisions as ad')
+  const rows = await db('agent_decisions as ad')
     .leftJoin('scheduled_services as ss', 'ad.entity_id', 'ss.id')
     .leftJoin('customers as cu', 'ad.customer_id', 'cu.id')
     .where('ad.workflow', 'comms_guards')
@@ -242,6 +243,9 @@ async function loadUnactionedFlags() {
       'cu.first_name', 'cu.last_name',
       'ss.scheduled_date', 'ss.window_start', 'ss.service_type', 'ss.status as visit_status',
     );
+  // Demo/App-Review activity is deliberately suppressed at the bell
+  // (codex r44) — the daily digest applies the same canonical exclusion.
+  return rows.filter((row) => !isInternalTestCustomerId(row.customer_id));
 }
 
 function parseSnapshot(snapshot) {

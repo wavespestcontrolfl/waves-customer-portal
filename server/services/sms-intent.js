@@ -111,7 +111,7 @@ const AWAY_PERMISSION_RE = /\b(?:(?:the\s+)?gate\s*code\s+is\b|gate\s*code\b[^.!
 // tomorrow" is a reschedule-class request even though no move/cancel verb
 // appears. Requires an appointment or future-time object so "don't come
 // to the front door" stays quiet.
-const DONT_COME_RE = /\b(?:(?:please\s+)?(?:don'?t|do\s+not)|can\s+you\s+not|could\s+you\s+not)\s+(?:come|show\s+up|stop\s+by)\b[^.!?]{0,25}\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|appointment|appt|visit|this\s+week|next\s+week)\b|\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|appointment|appt|visit)\b[^.!?]{0,30}\b(?:(?:please\s+)?(?:don'?t|do\s+not)|can\s+you\s+not|could\s+you\s+not)\s+(?:come|show\s+up|stop\s+by)\b/i;
+const DONT_COME_RE = /\b(?:(?:please\s+)?(?:don'?t|do\s+not)|can\s+you\s+not|could\s+you\s+not)\s+(?:come|show\s+up|stop\s+by)\b(?!\s+(?:to|through|via|by|in(?:side)?|around|near)\b[^.!?]{0,20}\b(?:door|gate|entrance|back|front|side|garage|yard|porch|driveway|house))[^.!?]{0,25}\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|appointment|appt|visit|this\s+week|next\s+week)\b|\b(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|appointment|appt|visit)\b[^.!?]{0,30}\b(?:(?:please\s+)?(?:don'?t|do\s+not)|can\s+you\s+not|could\s+you\s+not)\s+(?:come|show\s+up|stop\s+by)\b(?!\s+(?:to|through|via|by|in(?:side)?|around|near)\b[^.!?]{0,20}\b(?:door|gate|entrance|back|front|side|garage|yard|porch|driveway|house))/i;
 
 function hasRescheduleOrAwayIntent(body) {
   if (!body || typeof body !== 'string') return false;
@@ -125,7 +125,16 @@ function hasRescheduleOrAwayIntent(body) {
   // same way as needAsk — a negated need/want phrase is not fresh.
   const freshCancelAppt = /\b(?:(?:need|want|like|have)\s+to|please)\s+cancel\s+(?:[\w'’]+\s+){0,2}?(?:appointment|appt|visit|service|treatment)s?\b/i.test(text)
     && !/\b(?:don'?t|do\s+not|doesn'?t|won'?t|not|no|never)\s+(?:\w+\s+){0,2}?(?:need|want|like|have)\s+to\s+cancel/i.test(text);
+  // Past-event reports (codex r44): "I had to miss yesterday's
+  // appointment" reports history — a clause-scoped past reference next
+  // to the action verb vetoes both the cancel and direct branches.
+  const pastReport = /\b(?:miss(?:ed|ing)?|delay(?:ed|ing)?|postpon\w*|put\s+off|skipp?(?:ed|ing)?|cancell?\w*|re-?schedul\w*)\b[^.!?]{0,30}\b(?:yesterday|last\s+(?:week|month))\b/i.test(text);
+  // A fresh cancel ask outranks the past-report veto ("Thanks for
+  // canceling last week. I need to cancel Friday too") — same override
+  // the done-forms clause uses (codex r22/r44).
+  const freshCancel = /\b(?:need|want|like|have)\s+to\s+cancel|\bplease\s+cancel|\bcancel\w*(?:\s+\w+){0,2}\s+again\b/i.test(text);
   const cancelAsk = CANCEL_RE.test(text) && CANCEL_CONTEXT_RE.test(text)
+    && !(pastReport && !freshCancel)
     && (freshCancelAppt || (!CANCEL_NEGATION_RE.test(text) && !CANCEL_NONAPPT_RE.test(text)))
     // Acknowledgments / status questions about a DONE cancellation are
     // not requests (codex r18): "Has my appointment been canceled?",
@@ -164,6 +173,7 @@ function hasRescheduleOrAwayIntent(body) {
   // "Don't postpone my appointment" / "Has it been postponed?" /
   // "Did you skip tomorrow?" are not fresh asks.
   const negated = (!freshAsk && /\b(?:don'?t|do\s+not|no\s+need\s+to|not\s+necessary\s+to|never)\s+(?:\w+\s+){0,2}?(?:reschedul|re-?book|move|change|postpon|skip|delay|miss|put\s+off)/i.test(text))
+    || (!freshAsk && pastReport)
     // Present-perfect confirmations / status questions (codex r13) and
     // past acknowledgments (codex r9) — both yield to a fresh ask.
     || (!freshAsk && /\b(?:has|have|had|is|was)\b[^.!?]{0,30}\bbeen\s+(?:re-?schedul|postpon|skipp?)/i.test(text))

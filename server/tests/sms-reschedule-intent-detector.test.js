@@ -453,3 +453,21 @@ describe('past miss reports and treatment moves (codex r43)', () => {
     expect(hasRescheduleOrAwayIntent('We are changing treatment plans with our doctor')).toBe(false);
   });
 });
+
+describe('past-report vetoes and location stand-down exclusion (codex r44)', () => {
+  test('had to miss yesterdays appointment stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("I had to miss yesterday's appointment")).toBe(false);
+  });
+  test('needed to delay yesterdays appointment stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("I needed to delay yesterday's appointment")).toBe(false);
+  });
+  test('had to put off yesterdays service stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("We had to put off yesterday's service")).toBe(false);
+  });
+  test('front-door instruction with leading tomorrow stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("Tomorrow, please don't come to the front door; use the side gate")).toBe(false);
+  });
+  test('plain tomorrow dont come still flags', () => {
+    expect(hasRescheduleOrAwayIntent("Tomorrow please don't come")).toBe(true);
+  });
+});

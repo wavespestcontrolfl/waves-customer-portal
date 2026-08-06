@@ -105,9 +105,16 @@ async function loadCallbackCalls(cutoff = new Date()) {
             AND c.created_at >= now() - interval '30 days')
         OR (c.v2_extraction_status = 'valid'
             AND COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') <> ''
-            AND (c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}')::timestamptz >= now() - interval '30 days'))
+            AND ((LEFT(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', 19))::timestamp AT TIME ZONE 'America/New_York') >= now() - interval '30 days'))
       AND c.updated_at <= :cutoff
-      AND c.disposition = 'callback_task_created'
+      -- Terminal disposition OR the validated enriched callback signal
+      -- (codex r44): decideDisposition overwrites the recommendation with
+      -- booked/quote outcomes, and the coach skips tasks for booked calls
+      -- — an explicitly agreed later callback must still surface when due.
+      AND (c.disposition = 'callback_task_created'
+        OR (c.v2_extraction_status = 'valid'
+          AND COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') <> ''
+          AND COALESCE(c.disposition, '') NOT IN ('spam_discarded', 'wrong_number_closed')))
       -- Not yet due (codex r37): an explicitly agreed future callback
       -- time (scheduling.follow_up_start_at) is scheduled work, not an
       -- unworked obligation, until that time arrives.
@@ -116,7 +123,10 @@ async function loadCallbackCalls(cutoff = new Date()) {
       -- the whole digest as query_failed.
       AND (c.v2_extraction_status IS DISTINCT FROM 'valid'
         OR COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') = ''
-        OR (c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}')::timestamptz <= now())
+        -- ET wall-clock semantics (codex r44): the model can emit the
+        -- wrong seasonal offset — the LOCAL portion is authoritative,
+        -- interpreted as America/New_York (v2IsoToEtWallClock parity).
+        OR ((LEFT(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', 19))::timestamp AT TIME ZONE 'America/New_York') <= now())
       -- One obligation, one lane (codex r22): when the coach minted a
       -- call_back task for the same customer around this call, the task
       -- lane carries it (with the richer recommended action).
