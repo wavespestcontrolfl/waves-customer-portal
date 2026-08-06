@@ -11,7 +11,7 @@ const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/m
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
-const { hasSchedulingIntent, isSmsReaction } = require('../services/sms-intent');
+const { hasSchedulingIntent, isSmsReaction, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { properCase } = require('../utils/name-case');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -574,6 +574,21 @@ router.post('/sms', async (req, res) => {
     // "📩 New SMS" dashboard forward — the thread in /admin/communications
     // never rang (observed 2026-07-17, customer texting three Waves numbers).
     const shouldNotifyKnownInbound = numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking' || isTrackingLeadInbound;
+
+    // Reschedule/away flag — customer texts asking to move or miss a visit
+    // are invisible to the reminder/en-route automation (2026-08-05: a
+    // 12:30am "can we reschedule?" was followed by the visit running and
+    // invoicing on schedule). Detect-and-surface only; never mutates the
+    // appointment. Fire-and-forget: the flagger is fail-soft internally.
+    if (customer && Body && !smsReaction && hasRescheduleOrAwayIntent(Body)) {
+      void require('../services/reschedule-intent-flagger')
+        .flagInboundRescheduleIntent({
+          customer,
+          body: Body,
+          smsLogId: smsLogEntry?.id || null,
+          messageSid: MessageSid || null,
+        });
+    }
 
     // In-app + push notification for inbound SMS from known customers.
     // knownInboundNotified records whether this modern bell/push actually

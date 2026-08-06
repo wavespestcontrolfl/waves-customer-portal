@@ -719,12 +719,14 @@ async function getCsrOverview(days) {
   } catch { /* table may not exist */ }
 
   try {
-    // Follow-up tasks
-    tasks = await db('csr_follow_up_tasks')
+    // Follow-up tasks. The real table is ai_follow_up_tasks (csr_coach
+    // migration) — this queried a non-existent csr_follow_up_tasks for
+    // months and the try/catch silently returned nothing.
+    tasks = await db('ai_follow_up_tasks')
       .where('status', 'pending')
-      .leftJoin('customers', 'csr_follow_up_tasks.customer_id', 'customers.id')
-      .select('csr_follow_up_tasks.*', 'customers.first_name', 'customers.last_name', 'customers.phone')
-      .orderBy('csr_follow_up_tasks.due_date').limit(10);
+      .leftJoin('customers', 'ai_follow_up_tasks.customer_id', 'customers.id')
+      .select('ai_follow_up_tasks.*', 'customers.first_name', 'customers.last_name', 'customers.phone')
+      .orderBy('ai_follow_up_tasks.deadline').limit(10);
   } catch { /* table may not exist */ }
 
   try {

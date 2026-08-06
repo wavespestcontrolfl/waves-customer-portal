@@ -1,0 +1,269 @@
+'use strict';
+
+// End-of-day owner exception email: today's comms that nobody worked.
+//
+// Three lanes feed it, all proven dead-ends by the 2026-08-05 weekly sweep:
+//   1. call_log.disposition = 'callback_task_created' — the disposition enum
+//      promises a task; the code writes a label that NOTHING reads (a
+//      15-minute customer call landed there and rotted). This watcher is the
+//      first and only consumer.
+//   2. ai_follow_up_tasks — written on every scored call, then silently
+//      auto-expired by the hourly verifier with no notification; the only
+//      UI defaults to hiding expired rows.
+//   3. Inbound SMS threads whose LAST message today is inbound — i.e. the
+//      customer is waiting and no reply went out ("the afternoon queue
+//      simply didn't get worked", 08-04).
+//
+// Principle (call-booking-miss-watchdog): the triage queue is a park, not a
+// pager. This email is the pager. Exception-based: a fully-worked day sends
+// nothing. Live by default with a kill switch
+// (UNWORKED_COMMS_WATCHER_DISABLED=1). Cron: daily 6:15pm ET — after the
+// 6:00pm missed-appointment check closes out no-shows, before the 6:40pm
+// stale-visit sweep.
+
+const sendgrid = require('./sendgrid-mail');
+const logger = require('./logger');
+const db = require('../models/db');
+const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
+
+const watcherDisabled = () => ['1', 'true', 'on']
+  .includes(String(process.env.UNWORKED_COMMS_WATCHER_DISABLED || '').toLowerCase());
+const watcherEmail = () => process.env.UNWORKED_COMMS_WATCHER_EMAIL || 'contact@wavespestcontrol.com';
+const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
+const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
+const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wavespestcontrol.com').replace(/\/+$/, '');
+
+const MAX_PER_SECTION = 12;
+
+// Start of the current ET day as a timestamptz — anchor every "today" scan
+// here, never in JS Date math (UTC-vs-ET off-by-a-day).
+const ET_DAY_START_SQL = `((now() at time zone 'America/New_York')::date::timestamp AT TIME ZONE 'America/New_York')`;
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function maskPhone(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 4 ? `…${digits.slice(-4)}` : '(unknown)';
+}
+
+function etTime(value) {
+  try {
+    return new Date(value).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
+// Lane 1: callback-requested calls from today with nothing behind them.
+async function loadCallbackCalls() {
+  const { rows } = await db.raw(
+    `
+    SELECT c.id, c.created_at, c.from_phone, c.duration_seconds,
+           NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
+           LEFT(COALESCE(c.call_summary, c.lead_synopsis, ''), 160) AS summary
+    FROM call_log c
+    LEFT JOIN customers cu ON cu.id = c.customer_id
+    WHERE c.created_at >= ${ET_DAY_START_SQL}
+      AND c.disposition = 'callback_task_created'
+    ORDER BY c.created_at ASC
+    LIMIT :cap
+    `,
+    { cap: MAX_PER_SECTION },
+  );
+  return rows;
+}
+
+// Lane 2: follow-up tasks that are overdue-pending, or were auto-expired
+// today without any verified action — the silent-drop class.
+async function loadDroppedFollowUps() {
+  const { rows } = await db.raw(
+    `
+    SELECT t.id, t.task_type, t.deadline, t.status, t.recommended_action,
+           NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name
+    FROM ai_follow_up_tasks t
+    LEFT JOIN customers cu ON cu.id = t.customer_id
+    WHERE (t.status = 'pending' AND t.deadline <= now())
+       OR (t.status = 'expired' AND t.action_verified = false AND t.updated_at >= ${ET_DAY_START_SQL})
+    ORDER BY t.deadline ASC NULLS LAST
+    LIMIT :cap
+    `,
+    { cap: MAX_PER_SECTION },
+  );
+  return rows;
+}
+
+// Lane 3: threads whose last message today is inbound — customer waiting.
+// Peer = normalized last-10 counterpart phone; reactions/opt-flows excluded.
+async function loadUnansweredThreads() {
+  const { rows } = await db.raw(
+    `
+    WITH day_sms AS (
+      SELECT direction, message_body, message_type, created_at,
+             CASE WHEN direction = 'inbound'
+                  THEN RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10)
+                  ELSE RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g'), 10) END AS peer
+      FROM sms_log
+      WHERE created_at >= ${ET_DAY_START_SQL}
+        AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request')
+    ),
+    latest AS (
+      SELECT DISTINCT ON (peer) peer, direction, message_body, created_at
+      FROM day_sms
+      WHERE peer <> ''
+      ORDER BY peer, created_at DESC
+    )
+    SELECT l.peer, l.message_body, l.created_at,
+           NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
+           cu.id AS customer_id
+    FROM latest l
+    LEFT JOIN LATERAL (
+      SELECT id, first_name, last_name FROM customers
+      WHERE deleted_at IS NULL
+        AND RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g'), 10) = l.peer
+      LIMIT 1
+    ) cu ON true
+    WHERE l.direction = 'inbound'
+    ORDER BY l.created_at ASC
+    LIMIT :cap
+    `,
+    { cap: MAX_PER_SECTION },
+  );
+  return rows;
+}
+
+// Pure composition: null = the day is fully worked (the common, quiet case).
+function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered = [] } = {}) {
+  const a = (callbacks || []).filter(Boolean);
+  const b = (followUps || []).filter(Boolean);
+  const c = (unanswered || []).filter(Boolean);
+  const total = a.length + b.length + c.length;
+  if (!total) return null;
+
+  const subject = `ACT: ${total} unworked comm${total === 1 ? '' : 's'} at end of day — ${a.length} callback${a.length === 1 ? '' : 's'}, ${b.length} follow-up${b.length === 1 ? '' : 's'}, ${c.length} unanswered text${c.length === 1 ? '' : 's'}`;
+
+  const sectionText = [];
+  const sectionHtml = [];
+
+  if (a.length) {
+    sectionText.push('Callbacks requested on calls today (nothing else tracks these):');
+    sectionText.push(...a.map((r) => `- ${etTime(r.created_at)} ${r.customer_name || maskPhone(r.from_phone)}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${String(r.summary).replace(/\s+/g, ' ').trim()}` : ''}`));
+    sectionText.push('');
+    sectionHtml.push(`<p><strong>Callbacks requested on calls today</strong> (nothing else tracks these):</p><ul style="margin:0 0 12px 18px;padding:0;">${a.map((r) => `<li style="margin:0 0 6px 0;">${esc(etTime(r.created_at))} ${esc(r.customer_name || maskPhone(r.from_phone))}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${esc(String(r.summary).replace(/\s+/g, ' ').trim())}` : ''}</li>`).join('')}</ul>`);
+  }
+  if (b.length) {
+    sectionText.push('Follow-up tasks overdue or silently expired today:');
+    sectionText.push(...b.map((r) => `- ${r.customer_name || 'Unknown'} [${r.task_type || 'task'}${r.status === 'expired' ? ', auto-expired' : ''}]${r.recommended_action ? ` — ${String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120)}` : ''}`));
+    sectionText.push('');
+    sectionHtml.push(`<p><strong>Follow-up tasks overdue or silently expired today:</strong></p><ul style="margin:0 0 12px 18px;padding:0;">${b.map((r) => `<li style="margin:0 0 6px 0;">${esc(r.customer_name || 'Unknown')} [${esc(r.task_type || 'task')}${r.status === 'expired' ? ', auto-expired' : ''}]${r.recommended_action ? ` — ${esc(String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120))}` : ''}</li>`).join('')}</ul>`);
+  }
+  if (c.length) {
+    sectionText.push('Texts still waiting on a reply (thread ends inbound):');
+    sectionText.push(...c.map((r) => `- ${etTime(r.created_at)} ${r.customer_name || maskPhone(r.peer)}: "${String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120)}"`));
+    sectionText.push('');
+    sectionHtml.push(`<p><strong>Texts still waiting on a reply</strong> (thread ends inbound):</p><ul style="margin:0 0 12px 18px;padding:0;">${c.map((r) => `<li style="margin:0 0 6px 0;">${esc(etTime(r.created_at))} ${r.customer_id ? `<a href="${esc(adminPortalUrl())}/admin/communications?thread=${esc(r.customer_id)}">${esc(r.customer_name || maskPhone(r.peer))}</a>` : esc(r.customer_name || maskPhone(r.peer))}: &quot;${esc(String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120))}&quot;</li>`).join('')}</ul>`);
+  }
+
+  const text = [
+    `End-of-day check: ${total} item${total === 1 ? '' : 's'} from today never got worked. Tomorrow morning these are a day old.`,
+    '',
+    ...sectionText,
+    `Communications: ${adminPortalUrl()}/admin/communications`,
+  ].join('\n');
+  const html = [
+    `<p>End-of-day check: <strong>${total}</strong> item${total === 1 ? '' : 's'} from today never got worked. Tomorrow morning these are a day old.</p>`,
+    ...sectionHtml,
+    `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
+  ].join('\n');
+
+  return { subject, text, html, total, callbacks: a.length, followUps: b.length, unanswered: c.length };
+}
+
+// Durable daily-send guard — same rationale as turf-variance-digest.js.
+const SEND_MARKER_KEY = 'unworked-comms-eod';
+const TWENTY_HOURS_MS = 20 * 60 * 60 * 1000;
+
+async function sentRecently() {
+  try {
+    const row = await db('ops_email_send_state').where({ email_key: SEND_MARKER_KEY }).first('last_sent_at');
+    return Boolean(row?.last_sent_at && (Date.now() - new Date(row.last_sent_at).getTime()) < TWENTY_HOURS_MS);
+  } catch (err) {
+    logger.warn(`[unworked-comms] send-marker read failed (${err.message}) — proceeding without the guard`);
+    return false;
+  }
+}
+
+async function stampSendMarker() {
+  try {
+    const now = new Date();
+    await db('ops_email_send_state')
+      .insert({ email_key: SEND_MARKER_KEY, last_sent_at: now, updated_at: now })
+      .onConflict('email_key')
+      .merge({ last_sent_at: now, updated_at: now });
+  } catch (err) {
+    logger.warn(`[unworked-comms] send-marker write failed (${err.message}) — next tick may re-send`);
+  }
+}
+
+async function runUnworkedCommsWatcher(opts = {}) {
+  if (await (opts.sentRecently || sentRecently)()) return { skipped: 'recent_send' };
+
+  let sections;
+  try {
+    const [callbacks, followUps, unanswered] = await Promise.all([
+      (opts.loadCallbackCalls || loadCallbackCalls)(),
+      (opts.loadDroppedFollowUps || loadDroppedFollowUps)(),
+      (opts.loadUnansweredThreads || loadUnansweredThreads)(),
+    ]);
+    sections = { callbacks, followUps, unanswered };
+  } catch (err) {
+    logger.error(`[unworked-comms] query failed: ${err.message}`);
+    return { skipped: 'query_failed' };
+  }
+
+  const composed = composeUnworkedCommsDigest(sections);
+  if (!composed) return { skipped: 'nothing_found' };
+
+  if (watcherDisabled()) {
+    logger.info(`[unworked-comms] disabled — would send ${composed.total} item(s)`);
+    return { skipped: 'disabled', ...composed };
+  }
+
+  const mailer = opts.sendgrid || sendgrid;
+  if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
+    logger.warn('[unworked-comms] mailer not configured — skipping send');
+    return { skipped: 'unconfigured', ...composed };
+  }
+
+  // FAIL CLOSED: owner/internal inboxes only.
+  const to = watcherEmail();
+  if (!isInternalEmailRecipient(to)) {
+    logger.warn('[unworked-comms] recipient is not an internal address — skipping send; set a valid UNWORKED_COMMS_WATCHER_EMAIL');
+    return { skipped: 'recipient', ...composed };
+  }
+
+  try {
+    await mailer.sendOne({
+      to,
+      fromEmail: fromEmail(),
+      fromName: FROM_NAME,
+      subject: composed.subject,
+      html: composed.html,
+      text: composed.text,
+      categories: ['ops', 'unworked-comms'],
+      suppressErrorLog: true,
+    });
+  } catch (err) {
+    logger.error(`[unworked-comms] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);
+    return { sent: false, error: true, ...composed };
+  }
+  await (opts.stampSendMarker || stampSendMarker)();
+  logger.info(`[unworked-comms] sent: ${composed.total} unworked (${composed.callbacks} callbacks, ${composed.followUps} follow-ups, ${composed.unanswered} unanswered)`);
+  return { sent: true, ...composed };
+}
+
+module.exports = {
+  runUnworkedCommsWatcher,
+  _private: { composeUnworkedCommsDigest },
+};

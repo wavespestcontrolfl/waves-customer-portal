@@ -146,6 +146,24 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // Fired by reschedule-intent-flagger when an inbound SMS reads as a
+  // reschedule/away request while a visit is still armed — the automation
+  // does not act on these, so the owner must (2026-08-05 incident class:
+  // customer asked to reschedule at 12:30am, visit ran and invoiced anyway).
+  appointment_reschedule_intent: {
+    label: 'Customer asked to reschedule by text',
+    category: 'schedule',
+    priority: 'urgent',
+    group: 'Communication',
+    build: (p) => ({
+      title: `Reschedule request: ${p.name || 'customer'}`,
+      body: [
+        redactSensitiveText(p.message || '').slice(0, 120),
+        p.visitDate ? `Next visit: ${p.visitDate}${p.visitService ? ` (${p.visitService})` : ''} — still armed` : 'No upcoming visit on the books',
+      ].join(' — '),
+      link: p.customerId ? `/admin/communications?thread=${p.customerId}` : '/admin/communications',
+    }),
+  },
   sms_reply: {
     label: 'SMS reply received',
     category: 'inbound_sms',

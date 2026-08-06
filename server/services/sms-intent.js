@@ -76,8 +76,34 @@ function isSmsReaction(body) {
   return SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text);
 }
 
+// Reschedule/away intent — a strict SUBSET of scheduling intent. Scheduling
+// intent only decides whether the AI auto-reply stands down; this detector
+// decides whether to raise a "customer is asking to move or miss an upcoming
+// visit" flag, so it must not fire on ordinary timing questions ("what time
+// are you coming?"). Recall is weighted over precision within that subset:
+// a false positive costs one owner bell, a false negative is the 2026-08-05
+// incident class where a 12:30am "can we reschedule?" text was followed by
+// the visit running (and invoicing) on schedule.
+const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|different\s+(?:day|date|time)|another\s+(?:day|date|time)|(?:can|could)\s+we\s+(?:do|move|push|change)|skip\s+(?:this|the|my|that)\s+(?:one|visit|service|month|week|appointment|appt))\b/i;
+// Move-verbs only count with a displacement preposition or an appointment
+// noun nearby — bare "moving" ("we're moving the couch") must not fire.
+const MOVE_VERB_RE = /\b(?:mov(?:e|ing)|push(?:ed|ing)?|bump(?:ed|ing)?|chang(?:e|ing))\b[^.!?\n]{0,40}\b(?:till|until|to|out|back|up|later|appointment|appt|service|visit|date|day|time|week|month|october|november|december|january|february|march|april|may|june|july|august|september)\b/i;
+const CANCEL_RE = /\bcancel\w*\b/i;
+const AWAY_RE = /\b(?:out\s+of\s+town|on\s+vacation|leav(?:e|ing)\s+for\s+vacation|going\s+out\s+of\s+town|(?:won'?t|will\s+not|not\s+going\s+to)\s+be\s+(?:home|here|there|in\s+town)|away\s+(?:until|till|through|for)|travel(?:ing|ling)\s+(?:until|till|through|next|this)|back\s+(?:in\s+town\s+)?(?:on|until|till)\b|not\s+(?:be\s+)?back\s+(?:till|until))\b/i;
+// Away + permission = a heads-up, not a reschedule ask ("won't be home but
+// here's the gate code" / "exterior only is fine"). Permission only
+// suppresses the AWAY leg — an explicit reschedule/cancel verb still wins.
+const AWAY_PERMISSION_RE = /\b(?:gate\s*code|door\s+(?:is\s+|will\s+be\s+)?(?:open|unlocked)|garage\s+(?:is\s+|will\s+be\s+)?open|no\s+need\s+to\s+(?:be|get|come)\s+in|don'?t\s+need\s+to\s+(?:be|get|come)\s+in|(?:it|that)'?s\s+fine|exterior\s+(?:only\s+)?(?:is\s+)?fine|(?:you|y'?all)\s+can\s+still\s+(?:come|do|spray|treat)|go\s+ahead)\b/i;
+
+function hasRescheduleOrAwayIntent(body) {
+  if (!body || typeof body !== 'string') return false;
+  if (isSmsReaction(body)) return false;
+  if (RESCHEDULE_DIRECT_RE.test(body) || MOVE_VERB_RE.test(body) || CANCEL_RE.test(body)) return true;
+  return AWAY_RE.test(body) && !AWAY_PERMISSION_RE.test(body);
+}
+
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-module.exports = { hasSchedulingIntent, isSmsReaction };
+module.exports = { hasSchedulingIntent, isSmsReaction, hasRescheduleOrAwayIntent };

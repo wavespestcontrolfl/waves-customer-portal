@@ -836,6 +836,71 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // COMMS GUARDS — three daily exception emails (2026-08-05 weekly sweep).
+  // Each is exception-based (a quiet day sends nothing), carries its own
+  // env kill switch, and dedupes via ops_email_send_state. Cron minutes are
+  // deliberately unused elsewhere in this file (#3208 pool-timeout outage:
+  // never share a minute with other jobs).
+  // =========================================================================
+
+  // Reschedule/away texts whose visit never moved (kill:
+  // RESCHEDULE_INTENT_WATCHER_DISABLED=1) — daily 6:55am ET.
+  cron.schedule('55 6 * * *', async () => {
+    try {
+      await runExclusive('reschedule-intent-watcher', async () => {
+        const { runRescheduleIntentWatcher } = require('./reschedule-intent-watcher');
+        const result = await runRescheduleIntentWatcher();
+        logger.info(`[reschedule-intent-watcher] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0 })}`);
+        // Delivery-BLOCKING skips count as failures; expected skips
+        // (nothing_found / disabled / recent_send) stay healthy.
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`reschedule-intent watcher did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Reschedule-intent watcher failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Quotes promised on calls with no estimate sent since (kill:
+  // PROMISED_ESTIMATE_WATCHER_DISABLED=1) — daily 7:12am ET.
+  cron.schedule('12 7 * * *', async () => {
+    try {
+      await runExclusive('promised-estimate-watcher', async () => {
+        const { runPromisedEstimateWatcher } = require('./promised-estimate-watcher');
+        const result = await runPromisedEstimateWatcher();
+        logger.info(`[promised-estimate-watcher] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0 })}`);
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`promised-estimate watcher did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Promised-estimate watcher failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Today's unworked callbacks / follow-ups / unanswered texts (kill:
+  // UNWORKED_COMMS_WATCHER_DISABLED=1) — daily 6:15pm ET, after the 6:00pm
+  // missed-appointment check and before the 6:40pm stale-visit sweep.
+  cron.schedule('15 18 * * *', async () => {
+    try {
+      await runExclusive('unworked-comms-eod', async () => {
+        const { runUnworkedCommsWatcher } = require('./unworked-comms-watcher');
+        const result = await runUnworkedCommsWatcher();
+        logger.info(`[unworked-comms] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, total: result.total || 0 })}`);
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`unworked-comms watcher did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Unworked-comms watcher failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY NEWSLETTER INACTIVITY SUNSET (gated: GATE_NEWSLETTER_SUNSET)
   // Monday 7:30am ET — flags subscribers with 90+ days of zero opens/clicks
   // across 6+ delivered campaigns, parks ONE win-back draft for the owner to
@@ -3292,8 +3357,12 @@ function initScheduledJobs() {
   cron.schedule('30 * * * *', async () => {
     logger.info('Running: follow-up task verification');
     try {
-      const CSRCoach = require('./csr/csr-coach');
-      await CSRCoach.verifyFollowUps();
+      // runExclusive: verifyFollowUps expires past-deadline tasks — a
+      // deploy-overlap tick racing itself can double-process the same rows.
+      await runExclusive('csr-follow-up-verify', async () => {
+        const CSRCoach = require('./csr/csr-coach');
+        await CSRCoach.verifyFollowUps();
+      });
     } catch (err) {
       logger.error(`Follow-up verification failed: ${err.message}`);
     }
