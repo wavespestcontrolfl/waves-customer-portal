@@ -2087,12 +2087,17 @@ const EstimateConverter = {
       try {
         const PlanRateLedger = require('./plan-rate-ledger');
         const slices = PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate });
-        // Serialize concurrent accepts on the customer row when the ledger
-        // has scalar authority — the read-modify-write over components is
-        // only safe if two accepts can't interleave (the legacy add-on path
-        // used an atomic SQL increment for the same reason). Locks taken in
-        // a savepoint persist to the end of the OUTER transaction.
-        if (database.isTransaction && PlanRateLedger.planRateLedgerEnabled()) {
+        // Serialize on the customer row for EVERY dual-write, not only
+        // under the authority gate (codex #3245 r3): the pre-flip backfill
+        // takes this same lock (customers FOR UPDATE) and relies on accepts
+        // sharing it — a gate-off accept that skipped the lock could
+        // observe an empty ledger while the backfill's insert is
+        // uncommitted and write components beside a stale full-rate one.
+        // The read-modify-write over components needs it under the gate for
+        // the same interleaving reason (the legacy add-on path used an
+        // atomic SQL increment). Locks taken in a savepoint persist to the
+        // end of the OUTER transaction.
+        if (database.isTransaction) {
           await database('customers').where({ id: customerId }).forUpdate().first('id');
         }
         const ledgerOutcome = await database.transaction((sp) => PlanRateLedger.applyAcceptToLedger(sp, {

@@ -1186,16 +1186,20 @@ async function bulkUpdateCustomers(customerIds, updates) {
     .some((f) => clean[f] !== undefined);
   const emailSubmitted = clean.email !== undefined;
   if (!addressSubmitted && !emailSubmitted) {
-    const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
-    if (clean.monthly_rate !== undefined) {
-      // Blind rate writes invalidate per-family attribution — reset each
-      // customer's plan-rate ledger to match the new scalar (codex #3245
-      // r2; gate-aware error policy lives in the helper).
-      const PlanRateLedger = require('../plan-rate-ledger');
-      for (const cid of customerIds) {
-        await PlanRateLedger.syncScalarWriteToLedger(db, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
+    // One transaction for the scalar write AND every ledger reset (codex
+    // #3245 r3): a partial failure must roll back all of it — otherwise
+    // the scalars commit while failed/later customers keep stale
+    // components a subsequent accept could restore.
+    const count = await db.transaction(async (trx) => {
+      const updated = await trx('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
+      if (clean.monthly_rate !== undefined) {
+        const PlanRateLedger = require('../plan-rate-ledger');
+        for (const cid of customerIds) {
+          await PlanRateLedger.syncScalarWriteToLedger(trx, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
+        }
       }
-    }
+      return updated;
+    });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     return {
       success: true,

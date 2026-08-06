@@ -57,20 +57,38 @@ function familyFor(row) {
 // later companion-family re-quote double-count the plan (codex #3245 r2).
 // Detect the known combined catalog identities and quarantine those
 // customers as unattributed for owner review.
+// Only catalog keys that UNIQUELY identify a combined row count (codex
+// #3245 r3 P2): the bait+bond routes deliberately reuse the ordinary
+// termite_bait catalog key (no combined catalog row exists), so a bare
+// route-key set would park every normal bait-only customer. A key is
+// combined-unique when it carries BOTH the route's primary and companion
+// family tokens and those tokens differ ('pest'+'termite' in
+// pest_termite_bait_quarterly; termite_bait fails the distinctness test).
+// Bond rows are still caught by the exact route-name match below.
+function routeTokens(route) {
+  const primary = String(route.primaryKey || '').split('_')[0];
+  const companion = String(route.companionKey || '').split('_')[0];
+  return primary && companion && primary !== companion ? { primary, companion } : null;
+}
 const COMBINED_KEYS = new Set(COMBINED_SERVICE_ROUTES
-  .map((route) => route.catalogServiceKey).filter(Boolean));
+  .filter((route) => {
+    const tokens = routeTokens(route);
+    const key = String(route.catalogServiceKey || '').toLowerCase();
+    return tokens && key && key.includes(tokens.primary) && key.includes(tokens.companion);
+  })
+  .map((route) => route.catalogServiceKey));
 const COMBINED_NAMES = COMBINED_SERVICE_ROUTES
   .map((route) => String(route.name || '').toLowerCase()).filter(Boolean);
 function isCombinedRow(row) {
   if (row.catalog_service_key && COMBINED_KEYS.has(row.catalog_service_key)) return true;
   const label = String(row.catalog_service_name || row.service_type || '').toLowerCase();
   return COMBINED_NAMES.some((name) => label === name)
-    // Combined labels join two family names with an ampersand/plus around
-    // the primary token (e.g. "Quarterly Pest + Termite Bait Station").
+    // Combined labels join two DISTINCT family tokens (e.g. "Quarterly
+    // Pest + Termite Bait Station"); same-token routes (bait+bond) rely on
+    // the exact-name match above instead.
     || COMBINED_SERVICE_ROUTES.some((route) => {
-      const primary = String(route.primaryKey || '').split('_')[0];
-      const companion = String(route.companionKey || '').split('_')[0];
-      return primary && companion && label.includes(primary) && label.includes(companion);
+      const tokens = routeTokens(route);
+      return tokens && label.includes(tokens.primary) && label.includes(tokens.companion);
     });
 }
 
