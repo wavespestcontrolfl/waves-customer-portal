@@ -305,6 +305,40 @@ describe('applyAcceptToLedger', () => {
     expect(mixedOut.reviewNeeded).toBe(false);
   });
 
+  test('a new termite accept supersedes obsolete termite rider components (codex r4)', async () => {
+    // Rental → purchased-stations: the rental component must not keep
+    // billing beside the new bait plan.
+    const db = makeLedgerDb([
+      { customer_id: CUST, family_key: 'pest_control', monthly_rate: 40 },
+      { customer_id: CUST, family_key: 'termite_station_rental', monthly_rate: 15 },
+      { customer_id: CUST, family_key: 'termite_bait', monthly_rate: 30 },
+    ]);
+    const out = await applyAcceptToLedger(db, {
+      customerId: CUST,
+      estimateId: 'est-1',
+      slices: { termite_bait: 35 },
+      previousScalar: 85,
+      addOnBase: 0,
+    });
+    expect(out.scalar).toBe(75); // 40 pest + 35 new bait; rental GONE
+    expect(db.store.some((r) => r.family_key === 'termite_station_rental')).toBe(false);
+    expect(out.reviewNeeded).toBe(true); // superseded rider gets one eyeball
+    // Non-termite accepts leave termite components alone.
+    const untouched = makeLedgerDb([
+      { customer_id: CUST, family_key: 'termite_bait', monthly_rate: 30 },
+    ]);
+    const pestOut = await applyAcceptToLedger(untouched, {
+      customerId: CUST,
+      estimateId: 'est-1',
+      slices: { pest_control: 45 },
+      previousScalar: 30,
+      addOnBase: 0,
+    });
+    expect(pestOut.scalar).toBe(75);
+    expect(untouched.store.some((r) => r.family_key === 'termite_bait')).toBe(true);
+    expect(pestOut.reviewNeeded).toBe(false);
+  });
+
   test('missing table or empty slices yields null scalar (caller keeps legacy semantics)', async () => {
     await expect(applyAcceptToLedger(makeLedgerDb([], { hasTable: false }), {
       customerId: CUST, slices: { pest_control: 40 }, previousScalar: 0,

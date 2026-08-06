@@ -255,6 +255,26 @@ async function applyAcceptToLedger(database, {
         .del();
     }
   }
+  // Termite rider variants are mutually exclusive billing arrangements
+  // (station rental vs purchased stations, bond terms) that a NEW termite
+  // accept supersedes wholesale (codex #3245 r4): an accepted
+  // purchased-stations quote must not leave a termite_station_rental
+  // component billing beside it. When this accept carries ANY termite
+  // family, every termite-prefixed component it did not re-quote is
+  // removed — and flagged for review, since a rider the owner intended to
+  // keep (an active bond beside a bait-only re-quote) needs one eyeball.
+  const acceptTouchesTermite = sliceFamilies.some((f) => String(f).startsWith('termite'));
+  if (acceptTouchesTermite) {
+    for (const family of [...components.keys()]) {
+      if (String(family).startsWith('termite') && !sliceFamilies.includes(family)) {
+        components.delete(family);
+        await database('customer_plan_rates')
+          .where({ customer_id: customerId, family_key: family })
+          .del();
+        reviewNeeded = true;
+      }
+    }
+  }
   const scalar = roundMoney([...components.values()].reduce((sum, v) => sum + v, 0));
   return { scalar, components: Object.fromEntries(components), reviewNeeded };
 }

@@ -3005,7 +3005,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // customer's mailbox; an operator can.
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
-          if (updates.monthly_rate !== undefined) {
+          // Only an ACTUAL rate change invalidates the attribution (codex
+          // #3245 r4): the directory editor posts the whole form on every
+          // save, so a presence check would wipe the seeded components on a
+          // routine name/phone/stage edit and leave one unattributed blob.
+          const rateActuallyChanged = updates.monthly_rate !== undefined
+            && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
+              !== Math.round((Number(updates.monthly_rate) || 0) * 100);
+          if (rateActuallyChanged) {
             // A blind admin rate edit invalidates any finer per-family
             // attribution — reset the plan-rate ledger to a single
             // unattributed component matching the new scalar (cleared when

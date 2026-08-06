@@ -5,18 +5,22 @@
 // run before flipping GATE_PLAN_RATE_LEDGER).
 //
 // Rules:
-// - Scope: live-stage customers (active_customer/won/at_risk) with
-//   monthly_rate > 0 and NO existing ledger rows (idempotent — re-runs
-//   skip seeded customers).
-// - Exactly ONE plan family among their live recurring rows → a single
-//   component (family, full scalar). This is ~90% of the book.
-// - MULTIPLE families (or none classifiable) → a single 'unattributed'
-//   component equal to the scalar, and the customer id is printed on the
-//   REVIEW list: the owner can split components by hand, or leave them —
-//   the ledger degrades exactly to pre-ledger behavior for unattributed
+// - Scope: EVERY live-stage customer (active_customer/won/at_risk) with
+//   monthly_rate > 0 — seeded or not. Pre-seeded ledgers (a gate-off
+//   accept ran before the backfill) are AUDITED for coverage: complete
+//   (all live families componentized, Σ == scalar) → skipped; incomplete →
+//   review list, with any positive shortfall parked as 'unattributed' so
+//   the sum matches the scalar (an overshoot is owner-only). Idempotent —
+//   re-runs converge.
+// - Unseeded + exactly ONE plan family among live recurring rows → a
+//   single component (family, full scalar). This is ~90% of the book.
+// - Unseeded + MULTIPLE families / unclassifiable / combined-series rows →
+//   a single 'unattributed' component equal to the scalar + the REVIEW
+//   list: the owner can split components by hand, or leave them — the
+//   ledger degrades exactly to pre-ledger behavior for unattributed
 //   amounts, and the accept-time review alert covers their next re-quote.
 // - The scalar is never changed by this script; components always sum to
-//   it. No customer comms fire (direct DB writes).
+//   it (or under it, never over). No customer comms fire (direct DB writes).
 //
 // Run: railway run --service Postgres node ops/agents/backfill-plan-rate-ledger.js [--execute]
 
@@ -99,16 +103,22 @@ function isCombinedRow(row) {
   });
   await client.connect();
   try {
+    // EVERY live-stage rate-bearing customer, seeded or not (codex #3245
+    // r4): a gate-off accept that ran before this backfill seeds only ITS
+    // OWN slices — a legacy Pest+Lawn customer whose Pest re-quote landed
+    // first has a one-family ledger the gate flip would wrongly treat as
+    // complete, permanently dropping the Lawn charge. Pre-seeded customers
+    // are audited for coverage (families + sum) instead of skipped.
     const { rows: customers } = await client.query(`
       SELECT c.id, c.monthly_rate
       FROM customers c
       WHERE c.pipeline_stage IN ('active_customer','won','at_risk')
         AND COALESCE(c.monthly_rate, 0) > 0
         AND c.deleted_at IS NULL
-        AND NOT EXISTS (SELECT 1 FROM customer_plan_rates l WHERE l.customer_id = c.id)
       ORDER BY c.id
     `);
     let single = 0;
+    let alreadyComplete = 0;
     const review = [];
     for (const cust of customers) {
       // Per-customer transaction with a ROW LOCK and a re-check of both the
@@ -126,14 +136,14 @@ function isCombinedRow(row) {
           [cust.id],
         );
         const rate = Number(lockedRows[0]?.monthly_rate);
-        const { rows: seededRows } = await client.query(
-          'SELECT 1 FROM customer_plan_rates WHERE customer_id = $1 LIMIT 1', [cust.id],
-        );
-        if (!(rate > 0) || seededRows.length > 0) {
+        if (!(rate > 0)) {
           if (EXECUTE) await client.query('ROLLBACK');
-          console.log(`SKIP ${cust.id}: ${seededRows.length > 0 ? 'ledger already seeded' : 'rate no longer positive'} (concurrent accept)`);
+          console.log(`SKIP ${cust.id}: rate no longer positive (concurrent change)`);
           continue;
         }
+        const { rows: seededRows } = await client.query(
+          'SELECT family_key, monthly_rate FROM customer_plan_rates WHERE customer_id = $1', [cust.id],
+        );
         const { rows: planRows } = await client.query(`
           SELECT DISTINCT ss.service_type, s.service_key AS catalog_service_key, s.name AS catalog_service_name
           FROM scheduled_services ss
@@ -146,6 +156,45 @@ function isCombinedRow(row) {
         const families = new Set(planRows.map((r) => familyFor(r)).filter(Boolean));
         const unclassifiable = planRows.some((r) => !familyFor(r));
         const hasCombinedRow = planRows.some((r) => isCombinedRow(r));
+        if (seededRows.length > 0) {
+          // Pre-seeded (a gate-off accept ran first): audit coverage
+          // instead of trusting the rows. Complete = every live plan
+          // family has a component AND the components sum to the scalar.
+          const seededFamilies = new Set(seededRows.map((r) => r.family_key));
+          const componentSum = Math.round(seededRows
+            .reduce((sum, r) => sum + Number(r.monthly_rate || 0), 0) * 100) / 100;
+          const sumMatches = Math.abs(componentSum - rate) <= 0.02;
+          const familiesCovered = [...families].every((f) => seededFamilies.has(f));
+          if (sumMatches && familiesCovered && !hasCombinedRow && !unclassifiable) {
+            alreadyComplete += 1;
+            if (EXECUTE) await client.query('COMMIT');
+            continue;
+          }
+          review.push({
+            id: cust.id,
+            families: [...families],
+            unclassifiable,
+            combined: hasCombinedRow,
+            rate,
+            preSeeded: true,
+            componentSum,
+          });
+          // Restore Σ(components) == scalar by parking the shortfall as
+          // unattributed; an overshoot (components > scalar) is left for
+          // the owner — deleting someone's component is not this script's
+          // call.
+          const shortfall = Math.round((rate - componentSum) * 100) / 100;
+          if (EXECUTE && shortfall > 0) {
+            await client.query(`
+              INSERT INTO customer_plan_rates (customer_id, family_key, monthly_rate, source)
+              VALUES ($1, 'unattributed', $2, 'backfill')
+              ON CONFLICT (customer_id, family_key)
+              DO UPDATE SET monthly_rate = customer_plan_rates.monthly_rate + EXCLUDED.monthly_rate
+            `, [cust.id, shortfall]);
+          }
+          if (EXECUTE) await client.query('COMMIT');
+          continue;
+        }
         if (families.size === 1 && !unclassifiable && !hasCombinedRow) {
           const family = [...families][0];
           single += 1;
@@ -176,9 +225,9 @@ function isCombinedRow(row) {
         throw custErr;
       }
     }
-    console.log(`\n${EXECUTE ? 'EXECUTED' : 'DRY-RUN'}: ${customers.length} unseeded customers — ${single} single-family seeded, ${review.length} parked unattributed for review:`);
+    console.log(`\n${EXECUTE ? 'EXECUTED' : 'DRY-RUN'}: ${customers.length} rate-bearing customers — ${single} single-family seeded, ${alreadyComplete} already complete, ${review.length} on the review list:`);
     for (const r of review) {
-      console.log(`REVIEW ${r.id} rate=$${r.rate} families=[${r.families.join(",")}]${r.unclassifiable ? " +unclassifiable-rows" : ""}${r.combined ? " +combined-series" : ""}`);
+      console.log(`REVIEW ${r.id} rate=$${r.rate} families=[${r.families.join(",")}]${r.unclassifiable ? " +unclassifiable-rows" : ""}${r.combined ? " +combined-series" : ""}${r.preSeeded ? ` +pre-seeded(sum=$${r.componentSum})` : ""}`);
     }
   } finally {
     await client.end();
