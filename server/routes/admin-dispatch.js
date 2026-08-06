@@ -3333,6 +3333,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
       const { transitionJobStatus } = require('../services/job-status');
       let targets = [];
       let ongoingStopped = 0;
+      // Shared claim token for every target's trx claim — declared out
+      // here because the post-commit series handler needs it too.
+      const seriesClaimToken = new Date();
       await db.transaction(async (trx) => {
         // Serialize with the per-parent series-maintenance advisory lock
         // (runRecurringSeriesMaintenance, admin-schedule) BEFORE selecting
@@ -3367,7 +3370,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
           .select('id', 'status', 'customer_id', 'service_type');
         if (!targets.length) return; // nothing written — 409 after commit
 
-        const seriesClaimToken = new Date();
         for (const target of targets) {
           await transitionJobStatus({
             jobId: target.id,
@@ -3418,6 +3420,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
         await AppointmentReminders.handleSeriesCancellation(targetIds, svc.id, {
           sendNotification: notifyCustomer !== false,
           scope,
+          // The trx claims were minted under this shared token — the
+          // series claim adopts exactly them, never a foreign lease.
+          claimToken: seriesClaimToken,
           ...(cancelNoticeOutcome ? { outcome: cancelNoticeOutcome } : {}),
         });
       } catch (e) { logger.error(`[admin-dispatch] series cancellation reminder handling failed: ${e.message}`); }

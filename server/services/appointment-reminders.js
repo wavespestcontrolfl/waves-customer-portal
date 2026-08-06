@@ -2265,6 +2265,17 @@ const AppointmentReminders = {
         .where({ id: record.id })
         .update({ cancelled: true, updated_at: new Date() });
 
+      // A restored visit is LIVE — a stale cancellation worker must not
+      // re-close its reminder row or touch claims (codex r13).
+      const svcNow = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('status');
+      if (svcNow && String(svcNow.status) !== 'cancelled') {
+        logger.info(`[appt-remind] Cancellation skipped for ${scheduledServiceId} — visit is ${svcNow.status}`);
+        reportOutcome(false, `visit is ${svcNow.status} — no cancellation processed`);
+        return record;
+      }
+
       // Send-once via the dedicated atomic claim. `cancelled` is NOT
       // usable as evidence — the status-sync trigger (20260720000000) sets
       // it during the cancel transition itself, before any caller runs
@@ -2369,6 +2380,11 @@ const AppointmentReminders = {
           .where('ml.purpose', 'appointment_cancellation')
           .whereNotNull('ml.sent_at')
           .whereRaw("ml.provider_message_id ~ '^(SM|MM)'")
+          // Current cycle only (codex r13): bound by the representative's
+          // latest real cancelled transition.
+          .whereRaw(
+            "ml.sent_at >= (SELECT COALESCE(MAX(h.transitioned_at), '-infinity') FROM job_status_history h WHERE h.job_id = rep.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')",
+          )
           .first('ml.id'));
       };
       if (await acceptedCancellationAudit() || await groupAccepted()) {
@@ -2648,7 +2664,10 @@ const AppointmentReminders = {
       await db('appointment_reminders')
         .whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
         .where('cancellation_notice_at', '<', db.raw("now() - interval '72 hours'"))
-        .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+        // Terminal (codex r13): releasing to NULL let a cancelled→cancelled
+        // retry reclaim and text a days-old cancellation. A genuine future
+        // cycle passes through a live restore, which clears markers.
+        .update({ cancellation_notice_state: 'suppressed', updated_at: new Date() });
       const { isEnabled } = require('../config/feature-gates');
       if (!isEnabled('cancelNoticeHook')) return { swept: 0 };
       const stale = await db('appointment_reminders as ar')
@@ -2744,7 +2763,9 @@ const AppointmentReminders = {
           await this.handleSeriesCancellation(
             group.map((g) => g.scheduled_service_id),
             group[0].scheduled_service_id,
-            { sendNotification: delivered || callerNotify, scope: 'series' },
+            // No scope passed (codex r13): recovery cannot know series-vs-
+            // following; the default wording covers both truthfully.
+            { sendNotification: delivered || callerNotify, claimToken: token },
           );
           settled += group.length;
           continue;
@@ -2805,12 +2826,21 @@ const AppointmentReminders = {
       // finalizes only after the combined send is attempted (r5 — marking
       // 'sent' upfront made a failed send unretryable). Unclaimed rows
       // only: never clobber an existing terminal state.
-      const seriesToken = new Date();
+            const seriesToken = new Date();
+      const priorGroupToken = options.claimToken instanceof Date ? options.claimToken : null;
       await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
         .where(function claimable() {
-          this.whereNull('cancellation_notice_at')
-            .orWhereIn('cancellation_notice_state', ['pending', 'pending_notify']);
+          // Adopt unclaimed rows, rows under OUR provided group token
+          // (route trx claim / sweep reclaim), and stale leases — never a
+          // fresh foreign single-visit lease mid-send (codex r13): those
+          // must stay visible to the handoff fence.
+          this.whereNull('cancellation_notice_at');
+          if (priorGroupToken) this.orWhere('cancellation_notice_at', priorGroupToken);
+          this.orWhere(function staleLease() {
+            this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+              .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"));
+          });
         })
         .update({
           cancellation_notice_at: seriesToken,
@@ -2846,6 +2876,7 @@ const AppointmentReminders = {
         return { cancelledCount: ids.length };
       }
 
+      try {
       let record = null;
       if (representativeScheduledServiceId) {
         record = await db('appointment_reminders')
@@ -2881,7 +2912,10 @@ const AppointmentReminders = {
         }, 'appointment_series_cancelled', 'appointment_cancellation',
         // Representative-visit linkage: the sweep's accepted-cancellation
         // check recognizes the combined send through this audit row.
-        { scheduled_service_id: representativeScheduledServiceId || record.scheduled_service_id }, {
+        // Row-backed linkage (codex r13): record always has a reminder
+        // row, so acceptance reconciliation can find the group through it
+        // even when the preferred representative lacks one.
+        { scheduled_service_id: record.scheduled_service_id }, {
           sendOutcome,
           // Ownership fence at the provider handoff (codex r7): if the
           // sweep reclaimed this series while we rendered, stand down —
@@ -2934,6 +2968,12 @@ const AppointmentReminders = {
       }
 
       return { ...record, cancelledCount: ids.length };
+      } catch (sendErr) {
+        // Thrown lookup/pref/validation/audit errors are retryable — keep
+        // the pending leases for the sweep (codex r13), then surface.
+        await finalizeSeriesClaims(false, { retryable: true });
+        throw sendErr;
+      }
     } catch (err) {
       logger.error(`[appt-remind] handleSeriesCancellation failed: ${err.message}`);
       reportOutcome(false, err.message);
