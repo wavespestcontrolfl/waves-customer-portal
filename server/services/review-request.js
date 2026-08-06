@@ -21,17 +21,24 @@ const CAP_TOUCH_SQL = OUTREACH.CAP_TOUCH_SQL;
 // its other consumers (admin-dispatch follow-up alert, typed follow-up
 // obligations) encode exactly-two-visit package semantics that open-ended
 // trapping programs do not share. Keys mirror the prod services catalog —
-// every trapping row plus rodent_exclusion, whose catalog name is "Rodent
-// Exclusion & Trapping Service" (7-day return visit standard).
-const TRAPPING_MULTI_TREATMENT_KEYS = new Set([
+// every rodent trapping row plus rodent_exclusion, whose catalog name is
+// "Rodent Exclusion & Trapping Service" (7-day return visit standard).
+const RODENT_TRAPPING_SERIES_KEYS = new Set([
   "rodent_trapping",
   "rodent_trapping_followup",
   "rodent_trapping_exclusion",
   "rodent_trapping_exclusion_sanitation",
   "rodent_trapping_sanitation",
   "rodent_exclusion",
-  "wildlife_trapping",
 ]);
+const TRAPPING_MULTI_TREATMENT_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS, "wildlife_trapping"]);
+// Series position crosses keys only within ONE service line (codex #3243 r2
+// P2): a wildlife job must not read as a rodent program's prior/next visit.
+// Wildlife has a single catalog row, so it matches only itself; the rodent
+// SKUs cross-match because the return check has its own row.
+function trappingSeriesKeysFor(serviceKey) {
+  return serviceKey === "wildlife_trapping" ? ["wildlife_trapping"] : [...RODENT_TRAPPING_SERIES_KEYS];
+}
 const { toE164 } = require("../utils/phone");
 const { runExclusive } = require("../utils/cron-lock");
 
@@ -547,7 +554,7 @@ const ReviewService = {
           svc = await db("scheduled_services as s")
             .leftJoin("services as sv", "s.service_id", "sv.id")
             .where("s.id", visitId)
-            .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "sv.service_key", "sv.follow_up_interval_days")
+            .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "s.property_id", "sv.service_key", "sv.follow_up_interval_days")
             .first();
         }
       }
@@ -627,46 +634,69 @@ const ReviewService = {
             ? Math.min(60, Math.max(30, intervalDays * 2))
             : Math.min(60, intervalDays * 2);
           const { anchorStr, floorStr: windowFloor } = etDayWindow(svc.scheduled_date, windowDays);
-          // Trapping position matches the whole FAMILY, not one service_id:
-          // the return check is booked under its own catalog row
-          // (rodent_trapping_followup), so same-service matching would never
-          // see the initial visit.
+          // Trapping position matches its service LINE's key set, not one
+          // service_id: the rodent return check is booked under its own
+          // catalog row (rodent_trapping_followup), so same-service matching
+          // would never see the initial visit. Scoped to the serviced
+          // property (codex #3243 r2 P2): a program at a customer's rental
+          // must not read as the prior/next visit of a program at their
+          // home. property_id NULL = the primary service address, so NULL
+          // matches NULL.
+          const seriesKeys = trappingSeriesKeysFor(svc.service_key);
+          const propertyScope = (q, col) => (svc.property_id ? q.where(col, svc.property_id) : q.whereNull(col));
           const prior = isTrappingSeries
-            ? await db("scheduled_services as ps")
-                .leftJoin("services as psv", "ps.service_id", "psv.id")
-                .where("ps.customer_id", customerId)
-                .where("ps.status", "completed")
-                .where("ps.id", "!=", svc.id)
-                .where("ps.scheduled_date", "<", anchorStr)
-                .where("ps.scheduled_date", ">=", windowFloor)
-                .whereIn("psv.service_key", [...TRAPPING_MULTI_TREATMENT_KEYS])
-                .first()
+            ? await propertyScope(
+                db("scheduled_services as ps")
+                  .leftJoin("services as psv", "ps.service_id", "psv.id")
+                  .where("ps.customer_id", customerId)
+                  .where("ps.status", "completed")
+                  .where("ps.id", "!=", svc.id)
+                  .where("ps.scheduled_date", "<", anchorStr)
+                  .where("ps.scheduled_date", ">=", windowFloor)
+                  .whereIn("psv.service_key", seriesKeys),
+                "ps.property_id",
+              ).first()
             : await db("scheduled_services")
                 .where({ customer_id: customerId, service_id: svc.service_id, status: "completed" })
                 .where("id", "!=", svc.id)
                 .where("scheduled_date", "<", anchorStr)
                 .where("scheduled_date", ">=", windowFloor)
                 .first();
-          if (prior && isTrappingSeries) {
-            // An already-booked LATER family visit means THIS is a middle
-            // check, not the final — unlinked programs book several checks
-            // up front, and the child queries above can't see them (they
-            // are unlinked too). Non-dead statuses only ('completed' counts:
-            // a late-paid middle enrollment must not fire the cadence the
-            // real final visit carries), bounded to the family window
-            // ahead — a far-future booking is a new series.
+          if (isTrappingSeries) {
+            // Look AHEAD in the same line+property window — unlinked
+            // programs book several checks up front, and the child queries
+            // above can't see them (they are unlinked too). Bounded ahead:
+            // a far-future booking is a new series.
             const ceilStr = new Date(Date.parse(`${anchorStr}T00:00:00Z`) + windowDays * 86400000)
               .toISOString().slice(0, 10);
-            const later = await db("scheduled_services as fs")
-              .leftJoin("services as fsv", "fs.service_id", "fsv.id")
-              .where("fs.customer_id", customerId)
-              .where("fs.id", "!=", svc.id)
-              .where("fs.scheduled_date", ">", anchorStr)
-              .where("fs.scheduled_date", "<=", ceilStr)
+            const laterQuery = () => propertyScope(
+              db("scheduled_services as fs")
+                .leftJoin("services as fsv", "fs.service_id", "fsv.id")
+                .where("fs.customer_id", customerId)
+                .where("fs.id", "!=", svc.id)
+                .where("fs.scheduled_date", ">", anchorStr)
+                .where("fs.scheduled_date", "<=", ceilStr)
+                .whereIn("fsv.service_key", seriesKeys),
+              "fs.property_id",
+            );
+            const later = await laterQuery()
               .whereNotIn("fs.status", [...FOLLOWUP_CHILD_INACTIVE_STATUSES])
-              .whereIn("fsv.service_key", [...TRAPPING_MULTI_TREATMENT_KEYS])
               .first();
-            if (later) return { skip: "multi_treatment_middle" };
+            // With a prior visit behind it, ANY non-dead later visit makes
+            // this a middle check ('completed' counts: a late-paid middle
+            // enrollment must not fire the cadence the real final carries).
+            if (later && prior) return { skip: "multi_treatment_middle" };
+            // Without a prior (a payment-deferred FIRST visit), only a later
+            // COMPLETED visit stands the ask down — the series moved past it
+            // and the final visit carried the cadence (mirrors the linked
+            // path's series_completed). A merely-booked later check keeps
+            // the owner-spec first-treatment ask.
+            if (!prior && later) {
+              const laterCompleted = later.status === "completed"
+                ? later
+                : await laterQuery().where("fs.status", "completed").first();
+              if (laterCompleted) return { skip: "series_completed" };
+            }
           }
           return prior
             ? { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true }
@@ -2914,7 +2944,7 @@ const ReviewService = {
       const visit = await db("scheduled_services as s")
         .leftJoin("services as sv", "s.service_id", "sv.id")
         .where("s.id", visitId)
-        .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "sv.service_key", "sv.follow_up_interval_days")
+        .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "s.property_id", "sv.service_key", "sv.follow_up_interval_days")
         .first();
       if (!visit) return [];
       // Walk the FULL ancestor chain (codex #3235 r7 P1): in a 3+ visit
@@ -2944,22 +2974,25 @@ const ReviewService = {
         // now-relative window that payment-deferred enrollment would skew.
         const isTrappingSeries = TRAPPING_MULTI_TREATMENT_KEYS.has(visit.service_key);
         const intervalDays = Number(visit.follow_up_interval_days) > 0 ? Number(visit.follow_up_interval_days) : 15;
-        // Same family-window rules as the plan resolver: trapping matches
-        // any trapping-family key (the return check has its own catalog row)
-        // with a 30-day floor; packages stay same-service, 2x-interval.
+        // Same line-window rules as the plan resolver: trapping matches its
+        // service line's key set (the rodent return check has its own
+        // catalog row) with a 30-day floor, scoped to the serviced property;
+        // packages stay same-service, 2x-interval.
         const windowDays = isTrappingSeries
           ? Math.min(60, Math.max(30, intervalDays * 2))
           : Math.min(60, intervalDays * 2);
         const w = etDayWindow(visit.scheduled_date, windowDays);
         const priors = isTrappingSeries
-          ? await db("scheduled_services as ps")
+          ? await (visit.property_id
+              ? db("scheduled_services as ps").where("ps.property_id", visit.property_id)
+              : db("scheduled_services as ps").whereNull("ps.property_id"))
               .leftJoin("services as psv", "ps.service_id", "psv.id")
               .where("ps.customer_id", customerId)
               .where("ps.status", "completed")
               .where("ps.id", "!=", visit.id)
               .where("ps.scheduled_date", "<", w.anchorStr)
               .where("ps.scheduled_date", ">=", w.floorStr)
-              .whereIn("psv.service_key", [...TRAPPING_MULTI_TREATMENT_KEYS])
+              .whereIn("psv.service_key", trappingSeriesKeysFor(visit.service_key))
               .select("ps.id as id")
           : await db("scheduled_services")
               .where({ customer_id: customerId, service_id: visit.service_id, status: "completed" })

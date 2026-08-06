@@ -879,6 +879,60 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(rerun.plan).toHaveLength(3);
   });
 
+  test('trapping series position respects service line and property; a deferred first visit stands down once the series completed past it (codex #3243 r2)', async () => {
+    mockGates.reviewSequences = true;
+    const tenAgo = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
+    const today = new Date().toISOString().slice(0, 10);
+    const inFive = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+
+    // Wildlife history does NOT make a first rodent visit series-final.
+    let mock = makeMock({
+      scheduled_services: [
+        { id: 'ss-wl', customer_id: 'ln-1', service_id: 'svc-wt', status: 'completed', scheduled_date: tenAgo, service_key: 'wildlife_trapping' },
+        { id: 'ss-rt', customer_id: 'ln-1', service_id: 'svc-trap', status: 'completed', scheduled_date: today, service_key: 'rodent_trapping', follow_up_interval_days: 3 },
+      ],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'ln-1', scheduledServiceId: 'ss-rt' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+
+    // A prior program at ANOTHER property does not make this visit final.
+    mock = makeMock({
+      scheduled_services: [
+        { id: 'ss-pa', customer_id: 'pp-1', service_id: 'svc-trap', status: 'completed', scheduled_date: tenAgo, service_key: 'rodent_trapping', property_id: 'prop-rental' },
+        { id: 'ss-pb', customer_id: 'pp-1', service_id: 'svc-trap', status: 'completed', scheduled_date: today, service_key: 'rodent_trapping', follow_up_interval_days: 3, property_id: null },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'pp-1', scheduledServiceId: 'ss-pb' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+
+    // Deferred FIRST visit: a later COMPLETED check proves the series moved
+    // past it → stand down; a merely BOOKED later check keeps the first ask.
+    mock = makeMock({
+      scheduled_services: [
+        { id: 'ss-df', customer_id: 'df-1', service_id: 'svc-trap', status: 'completed', scheduled_date: tenAgo, service_key: 'rodent_trapping', follow_up_interval_days: 3 },
+        { id: 'ss-dl', customer_id: 'df-1', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: today, service_key: 'rodent_trapping_followup' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'df-1', scheduledServiceId: 'ss-df' });
+    expect(plan.skip).toBe('series_completed');
+
+    mock = makeMock({
+      scheduled_services: [
+        { id: 'ss-df2', customer_id: 'df-2', service_id: 'svc-trap', status: 'completed', scheduled_date: today, service_key: 'rodent_trapping', follow_up_interval_days: 3 },
+        { id: 'ss-dl2', customer_id: 'df-2', service_id: 'svc-trap-fu', status: 'scheduled', scheduled_date: inFive, service_key: 'rodent_trapping_followup' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'df-2', scheduledServiceId: 'ss-df2' });
+    expect(plan.plan).toHaveLength(1);
+    expect(plan.plan[0].templateKey).toBe('first_treatment_ask');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
