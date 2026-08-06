@@ -30,6 +30,7 @@ const {
   inferPageType,
   inferCluster,
   maskExcludedRegions,
+  envMinTopicalRelevance,
 } = planner._internals;
 
 const TABLE = 'content_internal_link_tasks';
@@ -686,7 +687,11 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
       surroundingText: paragraph,
     },
     options: {
-      minTopicalRelevance: Number(options.minTopicalRelevance ?? process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE ?? 0.75),
+      // Finite-guarded (shared with the planner): a nonnumeric env value
+      // must not turn the gate into accept-everything via `score < NaN`.
+      minTopicalRelevance: Number.isFinite(Number(options.minTopicalRelevance))
+        ? Number(options.minTopicalRelevance)
+        : envMinTopicalRelevance(),
       maxLinksPerTargetPerPr: Number(options.maxLinksPerTargetPerPr ?? process.env.AUTONOMOUS_INTERNAL_LINK_MAX_LINKS_PER_TARGET_PER_PR ?? 2),
       maxExactMatchAnchorsPerTarget: Number(options.maxExactMatchAnchorsPerTarget ?? process.env.AUTONOMOUS_INTERNAL_LINK_MAX_EXACT_MATCH_ANCHORS_PER_TARGET ?? 1),
       sourceCooldownDays: Number(options.sourceCooldownDays ?? process.env.AUTONOMOUS_INTERNAL_LINK_SOURCE_COOLDOWN_DAYS ?? 30),

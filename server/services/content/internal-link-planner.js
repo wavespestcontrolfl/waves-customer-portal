@@ -352,7 +352,12 @@ function placementForTask(body, task) {
       && policy.validateAnchorPolicy(anchor, { surroundingText: paragraph }).ok
       // Confirms the occurrence at the offset is itself matchable (not
       // inside a link/heading/masked region) — slice equality alone can't.
-      && findFirstUnlinkedOccurrence(text, anchor, { fromIndex: offset })?.index === offset) {
+      && findFirstUnlinkedOccurrence(text, anchor, { fromIndex: offset })?.index === offset
+      // An unchanged offset does not mean unchanged CONTEXT: if the copy
+      // around the anchor was edited (supporting terms removed), the scored
+      // basis is gone — fall through to relocation, which re-picks this
+      // occurrence only if it still matches the planned context best.
+      && paragraphMatchesContext(paragraph, task?.context_snippet)) {
       return { index: offset, length: anchor.length, snippet: snippetAround(text, offset, anchor.length), paragraph, anchor };
     }
   }
@@ -393,6 +398,22 @@ function relocateByContext(body, phrase, contextSnippet) {
     }
   }
   return best;
+}
+
+function paragraphMatchesContext(paragraph, contextSnippet) {
+  const context = String(contextSnippet || '').replace(/\s+/g, ' ').trim();
+  if (!context) return true; // nothing persisted to compare against
+  return String(paragraph || '').replace(/\s+/g, ' ').trim() === context;
+}
+
+/**
+ * The gate's relevance floor. Shared with the executor: an invalid env
+ * value must not make the planner reject everything (score >= NaN is
+ * false) while the gate accepts everything (score < NaN is also false).
+ */
+function envMinTopicalRelevance() {
+  const value = Number(process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE);
+  return Number.isFinite(value) ? value : 0.75;
 }
 
 function snippetTokens(value) {
@@ -562,7 +583,7 @@ class InternalLinkPlanner {
     // its own env/defaults, and a caller overriding only the planner side
     // would plan tasks the gate rejects (or starve valid ones).
     const maxSourceContextualLinks = DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS;
-    const minTopicalRelevance = Number(process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE ?? 0.75);
+    const minTopicalRelevance = envMinTopicalRelevance();
     if (!target?.url) return [];
     const candidates = anchorCandidates(target);
     if (!candidates.length) return [];
@@ -643,13 +664,14 @@ class InternalLinkPlanner {
             topicalFacts(page.file, front, { bodyExcerpt: maskExcludedRegions(candidateOcc.paragraph) }),
             targetFacts
           );
-          // At or above the gate's floor the executor accepts this exact
-          // placement (identical facts on both sides); below it, try the
-          // phrase's next occurrence.
-          if (score >= minTopicalRelevance) {
+          // Keep the HIGHEST-scoring passing occurrence across the bounded
+          // scan (earliest wins ties) — stopping at the first floor-clearing
+          // one recorded a weaker placement that best-first capping below
+          // could then rank beneath an equal-scored earlier corpus page.
+          if (score >= minTopicalRelevance && score > relevance) {
             occ = candidateOcc;
             relevance = score;
-            break;
+            if (score >= 1) break; // full coverage can't be beaten
           }
           fromIndex = candidateOcc.index + candidateOcc.length;
         }
@@ -879,6 +901,8 @@ module.exports._internals = {
   eligibleLinkSource,
   sourceCanonicalMismatch,
   countInternalLinks,
+  envMinTopicalRelevance,
+  paragraphMatchesContext,
   DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS,
   unwrapAngleHref,
   normalizePath,

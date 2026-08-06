@@ -826,6 +826,75 @@ describe('planForTarget', () => {
     };
     expect(placementForTask(drifted, contextTask).index).toBe(drifted.indexOf('bed bug bites', drifted.indexOf('Second')));
   });
+  test('keeps the highest-scoring passing occurrence, not the first over the floor', () => {
+    const page = {
+      file: 'src/content/blog/two-passing-mentions.md',
+      body: [
+        '---',
+        'title: Bite Notes',
+        'category: pest-control',
+        'primary_keyword: bite notes',
+        '---',
+        '',
+        'Flea bites and bed bug bites both itch.',
+        '',
+        'Pest experts compare bed bug bites with flea bites in Florida homes for identification.',
+      ].join('\n'),
+      url: '/blog/two-passing-mentions/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [page], cap: 1 }
+    );
+    // Both paragraphs clear the floor; the second covers the full core set
+    // (adds the pest token) and must win even though the first passes.
+    expect(tasks.length).toBe(1);
+    expect(page.body.slice(0, tasks[0].source_offset)).toContain('both itch');
+  });
+  test('nonnumeric relevance env falls back to the 0.75 default instead of disabling planning', () => {
+    const prev = process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE;
+    process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE = 'banana';
+    try {
+      const page = {
+        file: 'src/content/blog/env-guard.md',
+        body: [
+          '---',
+          'title: Env Guard',
+          'category: pest-control',
+          'primary_keyword: bed bug bites vs flea bites',
+          '---',
+          '',
+          'Comparing bed bug bites vs flea bites is a common pest question.',
+        ].join('\n'),
+        url: '/blog/env-guard/',
+      };
+      const tasks = planner.planForTarget(
+        { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+        { corpus: [page], cap: 1 }
+      );
+      expect(tasks.length).toBe(1);
+    } finally {
+      if (prev === undefined) delete process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE;
+      else process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE = prev;
+    }
+  });
+  test('an unchanged offset with changed context falls through to relocation', () => {
+    const { placementForTask } = planner._internals;
+    const planned = 'Hotel luggage seams and inspection tips often reveal bed bug bites after trips.';
+    // Same byte offset for the anchor, but the paragraph around it was
+    // rewritten (supporting terms removed); the planned paragraph now lives
+    // later in the file.
+    const body = [
+      'Some padding text goes here first so offsets line up cleanly, ok.',
+      '',
+      'A note about bed bug bites.',
+      '',
+      planned,
+    ].join('\n');
+    const staleOffset = body.indexOf('bed bug bites'); // in the rewritten thin paragraph
+    const task = { anchor_text: 'bed bug bites', source_offset: staleOffset, context_snippet: planned };
+    expect(placementForTask(body, task).index).toBe(body.indexOf('bed bug bites', body.indexOf('Hotel')));
+  });
   test('drift relocation compares full paragraphs, not just snippet windows', () => {
     const { placementForTask } = planner._internals;
     const body = [

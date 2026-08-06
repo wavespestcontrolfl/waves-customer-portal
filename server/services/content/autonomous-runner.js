@@ -3631,9 +3631,12 @@ async function queueInternalLinkTaskForDryRun(task, opportunityId) {
       // stale source_offset would pin the executor to an occurrence an
       // earlier planner chose, not the one this plan scored.
       target_keyword: task.target_keyword || null,
-      target_file: task.target_file || null,
       source_offset: Number.isInteger(task.source_offset) ? task.source_offset : null,
       context_snippet: task.context_snippet || null,
+      // A replan from a corpus that omits the target emits target_file:null
+      // — never erase a known path with it (root-slug blogs can't re-derive
+      // the file from the URL and would fail target_file_not_found).
+      ...(task.target_file ? { target_file: task.target_file } : {}),
       skip_reason: null,
       failure_reason: null,
       updated_at: new Date(),
