@@ -1434,3 +1434,56 @@ describe('codex #3235 r7 — lineage walk + visit-context exemption', () => {
     expect(seq.scheduled_service_id).toBe('ss-n2');
   });
 });
+
+describe('codex #3235 r8 — record-less sequence corners', () => {
+  test('a record-less first-visit sequence (scheduled_service_id only) is still exempt at the final visit', async () => {
+    mockGates.reviewSequences = true;
+    const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'rl-1', first_name: 'Sam', last_name: 'Y', phone: '+19410000065', nearest_location_id: 'bradenton' }],
+      // Visit-1 sequence enrolled BEFORE its service_records row existed:
+      // service_record_id NULL, only the persisted visit id.
+      review_sequences: [{ id: 'seq-rl1', customer_id: 'rl-1', service_record_id: null, scheduled_service_id: 'ss-rl1', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: tenDaysAgo }],
+      review_requests: [{ id: 'rr-rl1', customer_id: 'rl-1', sequence_id: 'seq-rl1', template_key: 'first_treatment_ask', channel: 'sms', status: 'sent', sms_sent_at: tenDaysAgo, sent_at: tenDaysAgo }],
+      service_records: [{ id: 'sr-rl2', customer_id: 'rl-1', scheduled_service_id: 'ss-rl2' }],
+      scheduled_services: [
+        { id: 'ss-rl1', customer_id: 'rl-1', status: 'completed', scheduled_date: d(10) },
+        { id: 'ss-rl2', customer_id: 'rl-1', parent_service_id: 'ss-rl1', status: 'completed', scheduled_date: d(0) },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'rl-1', serviceRecordId: 'sr-rl2', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const seq = mock.__state.rows.review_sequences.find((r) => r.id !== 'seq-rl1');
+    expect(JSON.parse(seq.plan)).toHaveLength(3);
+  });
+
+  test('a touch on a record-less sequence recovers date/tech from the persisted visit id', async () => {
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'rl-2', first_name: 'Kay', last_name: 'V', phone: '+19410000066', nearest_location_id: 'bradenton' }],
+      scheduled_services: [{ id: 'ss-rl3', customer_id: 'rl-2', status: 'completed', scheduled_date: d(1), service_type: 'Bed Bug Treatment', technician_id: 'tech-9' }],
+      technicians: [{ id: 'tech-9', name: 'Adam Benetti' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0],
+      channel: 'sms', templateId: 'first_treatment_ask',
+      scheduledServiceId: 'ss-rl3',
+      sequenceId: 'seq-rl3', sequenceStep: 0, manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(true);
+    const row = mock.__state.rows.review_requests[0];
+    // Visit context recovered from the scheduled_services row (the mock's
+    // leftJoin is a no-op, so tech name resolution stays best-effort here —
+    // date + type + technician_id are the load-bearing recoveries).
+    expect(row.service_type).toBe('Bed Bug Treatment');
+    expect(row.service_date).toBe(d(1));
+    expect(row.technician_id).toBe('tech-9');
+  });
+});

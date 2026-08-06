@@ -1681,6 +1681,7 @@ const ReviewService = {
     serviceDate,
     technicianId = null,
     serviceRecordId = null,
+    scheduledServiceId = null,
     sequenceId = null,
     sequenceStep = null,
     triggeredBy = "admin",
@@ -1731,6 +1732,32 @@ const ReviewService = {
         }
       } catch (err) {
         logger.warn(`[review] outreach visit-context recovery failed (serviceRecordId=${serviceRecordId}): ${err.message}`);
+      }
+    }
+    // Record-less sequences (admin-schedule completion before the
+    // service_records row exists) recover date/tech from the persisted visit
+    // id instead (codex #3235 r8 P2) — without it a post-midnight smart send
+    // would draft "today"/"just finished" copy the next morning.
+    if (scheduledServiceId && (!serviceDate || !technicianId || !serviceType)) {
+      try {
+        const ss = await db("scheduled_services")
+          .where({ "scheduled_services.id": scheduledServiceId })
+          .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
+          .select(
+            "scheduled_services.service_type",
+            "scheduled_services.scheduled_date",
+            "scheduled_services.technician_id",
+            "technicians.name as tech_name",
+          )
+          .first();
+        if (ss) {
+          serviceDate = serviceDate || ss.scheduled_date || null;
+          serviceType = serviceType || ss.service_type || null;
+          technicianId = technicianId || ss.technician_id || null;
+          techName = techName || ss.tech_name || null;
+        }
+      } catch (err) {
+        logger.warn(`[review] outreach visit-context recovery failed (scheduledServiceId=${scheduledServiceId}): ${err.message}`);
       }
     }
 
@@ -2502,10 +2529,12 @@ const ReviewService = {
         techName: seq.tech_name,
         serviceType: seq.service_type,
         // serviceDate is NOT passed here: sendOutreachTouch recovers the real
-        // service_date (and technician) from service_record_id, which grounds
-        // both the touch row and the drafter's "completed N days ago" fact —
-        // seq.started_at would shadow that recovery with a timestamp.
+        // service_date (and technician) from service_record_id — or from the
+        // persisted visit id when no record backs the sequence (codex #3235
+        // r8 P2) — which grounds both the touch row and the drafter's
+        // "completed N days ago" fact; seq.started_at would shadow that.
         serviceRecordId: seq.service_record_id,
+        scheduledServiceId: seq.scheduled_service_id,
         sequenceId: seq.id,
         sequenceStep: seq.current_step,
         triggeredBy: "sequence",
@@ -2686,14 +2715,21 @@ const ReviewService = {
         sourceIds = priors.map((r) => r.id);
       }
       if (!sourceIds.length) return [];
+      // Two lookups (codex #3235 r8 P1): a first-visit sequence enrolled
+      // before its service_records row existed carries only
+      // scheduled_service_id — record-mapped matching alone misses it.
       const records = await db("service_records")
         .whereIn("scheduled_service_id", sourceIds)
         .select("id");
-      if (!records.length) return [];
-      const seqs = await db("review_sequences")
-        .whereIn("service_record_id", records.map((r) => r.id))
+      const byRecord = records.length
+        ? await db("review_sequences")
+            .whereIn("service_record_id", records.map((r) => r.id))
+            .select("id")
+        : [];
+      const byVisit = await db("review_sequences")
+        .whereIn("scheduled_service_id", sourceIds)
         .select("id");
-      return seqs.map((r) => r.id);
+      return [...new Set([...byRecord, ...byVisit].map((r) => r.id))];
     } catch (err) {
       logger.warn(`[review] series-exempt lookup failed (customerId=${customerId}): ${err.message} — no exemption`);
       return [];
