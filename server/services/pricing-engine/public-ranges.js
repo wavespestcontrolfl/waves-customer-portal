@@ -133,12 +133,23 @@ function buildRows() {
         [1, 2, 3].flatMap((stories) =>
           [1, 2, 3, 4].flatMap((rooms) =>
             ['light', 'moderate', 'heavy'].flatMap((severity) =>
-              Object.keys(constants.BED_BUG.prepStatus).map((prepStatus) => ({ footprint, stories, rooms, severity, prepStatus })))))),
-      ({ footprint, stories, rooms, severity, prepStatus }) => sp.priceBedBugTreatment(
+              Object.keys(constants.BED_BUG.prepStatus).flatMap((prepStatus) =>
+                ['singleFamily', 'apartment'].flatMap((occupancyType) =>
+                  // In-house heat/hybrid auto-price for non-severe, prepared
+                  // jobs; chemical ignores equipment. Subcontracted equipment
+                  // and quote-required combos fall out via the filter.
+                  [
+                    { method: 'CHEMICAL' },
+                    { method: 'HEAT', equipment: 'INHOUSE', heatScope: 'ROOMS_ONLY' },
+                    { method: 'HEAT', equipment: 'INHOUSE', heatScope: 'WHOLE_HOME' },
+                    { method: 'HYBRID', equipment: 'INHOUSE', heatScope: 'ROOMS_ONLY' },
+                  ]
+                    .map((m) => ({ footprint, stories, rooms, severity, prepStatus, occupancyType, ...m })))))))),
+      ({ footprint, stories, rooms, severity, prepStatus, occupancyType, method, equipment, heatScope }) => sp.priceBedBugTreatment(
         { footprint, stories },
-        { rooms, method: 'CHEMICAL', severity, prepStatus, occupancyType: 'singleFamily' }),
+        { rooms, method, severity, prepStatus, occupancyType, equipment, heatScope }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.total ?? r.price))),
-    notes: '1-4 rooms; priced by rooms, severity, home size, and stories. Heat and hybrid treatments are custom-quoted after inspection.',
+    notes: '1-4 rooms; priced by rooms, severity, home size, stories, occupancy, and method (chemical, or in-house heat/hybrid where eligible). Severe or under-prepared jobs are quoted after inspection.',
   }));
 
   // Low- and high-pressure residential feature sets — the pricer's pressure
@@ -463,10 +474,12 @@ function buildRows() {
     // Station/dunk add-ons raise the high; the recurring-customer discount
     // lowers the low — both forwarded by the exact estimate path.
     values: sweepValues(
-      LOTS_SQFT.flatMap((lotSqFt) =>
-        [{}, { stationCount: 4, dunkCount: 4 }, { isRecurringCustomer: true }].map((opts) => ({ lotSqFt, opts }))),
+      // Through the one-acre (43,560 treatable sq ft) direct-price boundary;
+      // 5 stations / 9 dunks are the largest non-review add-on counts.
+      [...LOTS_SQFT, 45560].flatMap((lotSqFt) =>
+        [{}, { stationCount: 5, dunkCount: 9 }, { isRecurringCustomer: true }].map((opts) => ({ lotSqFt, opts }))),
       ({ lotSqFt, opts }) => sp.priceOneTimeMosquito({ footprint: 2000, lotSqFt }, opts),
-      (r) => r.price),
+      (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
     notes: 'Priced by treatable area; station and dunk add-ons available.',
   }));
 
@@ -589,6 +602,18 @@ function buildRows() {
       ({ points, cadence }) => sp.priceRecurringFoam(points, { cadence }),
       (r) => r.perTreatment),
     notes: 'Quarterly or bi-monthly foam program; discounted vs one-time treatments.',
+  }));
+
+  add('foam_drill', () => rangeRow({
+    key: 'foam_drill',
+    name: 'Drill-and-Foam Termite Treatment',
+    unit: 'per job',
+    // Distinct from the termite_foam spot treatment: this is the tiered
+    // drill-and-foam service the estimate path prices via priceFoamDrill.
+    values: sweepValues([5, 10, 15, 20],
+      (points) => sp.priceFoamDrill(points, {}),
+      (r) => r.price),
+    notes: 'Tiered by drill-point count; standard scheduling.',
   }));
 
   add('palm_injection', () => rangeRow({

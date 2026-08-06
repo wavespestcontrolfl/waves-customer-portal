@@ -31,6 +31,7 @@ const EXPECTED_KEYS = [
   'recurring_foam',
   'rodent_guarantee',
   'dethatching',
+  'foam_drill',
   'lawn_plugging',
   'top_dressing',
   'tree_shrub_care',
