@@ -64,6 +64,11 @@ describe('hasRescheduleOrAwayIntent', () => {
     expect(hasRescheduleOrAwayIntent(null)).toBe(false);
   });
 
+  test('typographic apostrophes match like ASCII (phone keyboards)', () => {
+    expect(hasRescheduleOrAwayIntent('I won’t be home tomorrow')).toBe(true);
+    expect(hasRescheduleOrAwayIntent('We’re on vacation until Friday')).toBe(true);
+  });
+
   test('thanks does not flag', () => {
     expect(hasRescheduleOrAwayIntent('Thank you so much!')).toBe(false);
   });

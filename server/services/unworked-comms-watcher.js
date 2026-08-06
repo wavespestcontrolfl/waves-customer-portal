@@ -34,6 +34,10 @@ const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wavespestcontrol.com').replace(/\/+$/, '');
 
 const MAX_PER_SECTION = 12;
+// Outbound types that count as a human answer — automated broadcasts
+// (reminders, en-route, receipts, review asks) must not clear a waiting
+// customer from the digest (codex #3232 r1).
+const HUMAN_REPLY_TYPES = "('manual', 'estimate_sent', 'invoice', 'voicemail_quote_link', 'appointment_rescheduled', 'confirmation', 'reschedule_series_confirmation')";
 
 // Start of the current ET day as a timestamptz — anchor every "today" scan
 // here, never in JS Date math (UTC-vs-ET off-by-a-day).
@@ -62,11 +66,29 @@ async function loadCallbackCalls() {
     `
     SELECT c.id, c.created_at, c.from_phone, c.duration_seconds,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
-           LEFT(COALESCE(c.call_summary, c.lead_synopsis, ''), 160) AS summary
+           LEFT(COALESCE(c.call_summary, c.lead_synopsis, ''), 160) AS summary,
+           COUNT(*) OVER () AS total_count
     FROM call_log c
     LEFT JOIN customers cu ON cu.id = c.customer_id
     WHERE c.created_at >= ${ET_DAY_START_SQL}
       AND c.disposition = 'callback_task_created'
+      -- Already returned: a later outbound CALL to the same number, or a
+      -- later human-typed text, clears the item (codex #3232 r1).
+      AND NOT EXISTS (
+        SELECT 1 FROM call_log oc
+        WHERE oc.direction = 'outbound'
+          AND oc.created_at > c.created_at
+          AND RIGHT(REGEXP_REPLACE(COALESCE(oc.to_phone, ''), '\\D', '', 'g'), 10)
+            = RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone, ''), '\\D', '', 'g'), 10)
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM sms_log os
+        WHERE os.direction = 'outbound'
+          AND os.message_type IN ${HUMAN_REPLY_TYPES}
+          AND os.created_at > c.created_at
+          AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10)
+            = RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone, ''), '\\D', '', 'g'), 10)
+      )
     ORDER BY c.created_at ASC
     LIMIT :cap
     `,
@@ -81,11 +103,17 @@ async function loadDroppedFollowUps() {
   const { rows } = await db.raw(
     `
     SELECT t.id, t.task_type, t.deadline, t.status, t.recommended_action,
-           NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name
+           NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
+           COUNT(*) OVER () AS total_count
     FROM ai_follow_up_tasks t
     LEFT JOIN customers cu ON cu.id = t.customer_id
     WHERE (t.status = 'pending' AND t.deadline <= now())
-       OR (t.status = 'expired' AND t.action_verified = false AND t.updated_at >= ${ET_DAY_START_SQL})
+       -- "Expired today": judged by the DEADLINE window — the hourly
+       -- verifier's UPDATE does not bump updated_at (no pg auto-touch;
+       -- codex #3232 r1), so a deadline inside the last ~25h means the
+       -- expiry happened today.
+       OR (t.status = 'expired' AND t.action_verified = false
+           AND t.deadline >= now() - interval '25 hours' AND t.deadline <= now())
     ORDER BY t.deadline ASC NULLS LAST
     LIMIT :cap
     `,
@@ -99,32 +127,40 @@ async function loadDroppedFollowUps() {
 async function loadUnansweredThreads() {
   const { rows } = await db.raw(
     `
-    WITH day_sms AS (
-      SELECT direction, message_body, message_type, created_at,
-             CASE WHEN direction = 'inbound'
-                  THEN RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10)
-                  ELSE RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g'), 10) END AS peer
-      FROM sms_log
-      WHERE created_at >= ${ET_DAY_START_SQL}
-        AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request')
-    ),
-    latest AS (
-      SELECT DISTINCT ON (peer) peer, direction, message_body, created_at
-      FROM day_sms
+    WITH last_inbound AS (
+      SELECT DISTINCT ON (peer) peer, message_body, created_at
+      FROM (
+        SELECT message_body, created_at,
+               RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) AS peer
+        FROM sms_log
+        WHERE created_at >= ${ET_DAY_START_SQL}
+          AND direction = 'inbound'
+          AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request')
+      ) inbound
       WHERE peer <> ''
       ORDER BY peer, created_at DESC
     )
     SELECT l.peer, l.message_body, l.created_at,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
-           cu.id AS customer_id
-    FROM latest l
+           cu.id AS customer_id,
+           COUNT(*) OVER () AS total_count
+    FROM last_inbound l
     LEFT JOIN LATERAL (
       SELECT id, first_name, last_name FROM customers
       WHERE deleted_at IS NULL
         AND RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g'), 10) = l.peer
       LIMIT 1
     ) cu ON true
-    WHERE l.direction = 'inbound'
+    -- Answered = a HUMAN outbound after the last inbound. Automated
+    -- broadcasts (reminders, receipts, review asks) must not clear a
+    -- waiting customer (codex #3232 r1).
+    WHERE NOT EXISTS (
+      SELECT 1 FROM sms_log os
+      WHERE os.direction = 'outbound'
+        AND os.message_type IN ${HUMAN_REPLY_TYPES}
+        AND os.created_at > l.created_at
+        AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10) = l.peer
+    )
     ORDER BY l.created_at ASC
     LIMIT :cap
     `,
@@ -138,10 +174,20 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   const a = (callbacks || []).filter(Boolean);
   const b = (followUps || []).filter(Boolean);
   const c = (unanswered || []).filter(Boolean);
-  const total = a.length + b.length + c.length;
+  // Full per-lane counts ride each row as total_count (COUNT(*) OVER ()) —
+  // the LIMIT keeps the email readable, but the SUBJECT and the "+N more"
+  // lines must report everything: overflow rows would otherwise vanish
+  // forever once the daily send-marker stamps (codex #3232 r1).
+  const laneTotal = (rows) => (rows.length && Number(rows[0].total_count) > 0
+    ? Number(rows[0].total_count) : rows.length);
+  const aTotal = laneTotal(a);
+  const bTotal = laneTotal(b);
+  const cTotal = laneTotal(c);
+  const total = aTotal + bTotal + cTotal;
   if (!total) return null;
+  const moreLine = (shown, totalCount) => (totalCount > shown ? [`…and ${totalCount - shown} more not shown`] : []);
 
-  const subject = `ACT: ${total} unworked comm${total === 1 ? '' : 's'} at end of day — ${a.length} callback${a.length === 1 ? '' : 's'}, ${b.length} follow-up${b.length === 1 ? '' : 's'}, ${c.length} unanswered text${c.length === 1 ? '' : 's'}`;
+  const subject = `ACT: ${total} unworked comm${total === 1 ? '' : 's'} at end of day — ${aTotal} callback${aTotal === 1 ? '' : 's'}, ${bTotal} follow-up${bTotal === 1 ? '' : 's'}, ${cTotal} unanswered text${cTotal === 1 ? '' : 's'}`;
 
   const sectionText = [];
   const sectionHtml = [];
@@ -149,18 +195,21 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   if (a.length) {
     sectionText.push('Callbacks requested on calls today (nothing else tracks these):');
     sectionText.push(...a.map((r) => `- ${etTime(r.created_at)} ${r.customer_name || maskPhone(r.from_phone)}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${String(r.summary).replace(/\s+/g, ' ').trim()}` : ''}`));
+    sectionText.push(...moreLine(a.length, aTotal));
     sectionText.push('');
     sectionHtml.push(`<p><strong>Callbacks requested on calls today</strong> (nothing else tracks these):</p><ul style="margin:0 0 12px 18px;padding:0;">${a.map((r) => `<li style="margin:0 0 6px 0;">${esc(etTime(r.created_at))} ${esc(r.customer_name || maskPhone(r.from_phone))}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${esc(String(r.summary).replace(/\s+/g, ' ').trim())}` : ''}</li>`).join('')}</ul>`);
   }
   if (b.length) {
     sectionText.push('Follow-up tasks overdue or silently expired today:');
     sectionText.push(...b.map((r) => `- ${r.customer_name || 'Unknown'} [${r.task_type || 'task'}${r.status === 'expired' ? ', auto-expired' : ''}]${r.recommended_action ? ` — ${String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120)}` : ''}`));
+    sectionText.push(...moreLine(b.length, bTotal));
     sectionText.push('');
     sectionHtml.push(`<p><strong>Follow-up tasks overdue or silently expired today:</strong></p><ul style="margin:0 0 12px 18px;padding:0;">${b.map((r) => `<li style="margin:0 0 6px 0;">${esc(r.customer_name || 'Unknown')} [${esc(r.task_type || 'task')}${r.status === 'expired' ? ', auto-expired' : ''}]${r.recommended_action ? ` — ${esc(String(r.recommended_action).replace(/\s+/g, ' ').trim().slice(0, 120))}` : ''}</li>`).join('')}</ul>`);
   }
   if (c.length) {
     sectionText.push('Texts still waiting on a reply (thread ends inbound):');
     sectionText.push(...c.map((r) => `- ${etTime(r.created_at)} ${r.customer_name || maskPhone(r.peer)}: "${String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120)}"`));
+    sectionText.push(...moreLine(c.length, cTotal));
     sectionText.push('');
     sectionHtml.push(`<p><strong>Texts still waiting on a reply</strong> (thread ends inbound):</p><ul style="margin:0 0 12px 18px;padding:0;">${c.map((r) => `<li style="margin:0 0 6px 0;">${esc(etTime(r.created_at))} ${r.customer_id ? `<a href="${esc(adminPortalUrl())}/admin/communications?thread=${esc(r.customer_id)}">${esc(r.customer_name || maskPhone(r.peer))}</a>` : esc(r.customer_name || maskPhone(r.peer))}: &quot;${esc(String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120))}&quot;</li>`).join('')}</ul>`);
   }
@@ -177,7 +226,7 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
   ].join('\n');
 
-  return { subject, text, html, total, callbacks: a.length, followUps: b.length, unanswered: c.length };
+  return { subject, text, html, total, callbacks: aTotal, followUps: bTotal, unanswered: cTotal };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js.

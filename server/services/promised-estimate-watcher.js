@@ -57,7 +57,8 @@ function maskPhone(phone) {
 async function loadUnkeptPromises() {
   const { rows } = await db.raw(
     `
-    SELECT c.id, c.created_at, c.from_phone, c.customer_id, c.disposition,
+    SELECT c.id, c.created_at, c.customer_id, c.disposition,
+           CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END AS from_phone,
            c.duration_seconds,
            COALESCE(NULLIF(TRIM(cu.first_name || ' ' || COALESCE(cu.last_name, '')), ''), NULL) AS customer_name,
            LEFT(COALESCE(c.call_summary, c.lead_synopsis, ''), 200) AS summary
@@ -65,10 +66,10 @@ async function loadUnkeptPromises() {
     LEFT JOIN customers cu ON cu.id = c.customer_id
     WHERE c.created_at >= now() - (:lookbackHours * interval '1 hour')
       AND c.created_at <  now() - (:graceHours * interval '1 hour')
-      AND c.direction = 'inbound'
       AND (
             c.disposition = 'estimate_send'
-         OR (c.ai_extraction::text ILIKE '%"quote_promised": true%'
+         OR ((c.ai_extraction::text ILIKE '%"quote_promised": true%'
+              OR c.ai_extraction_enriched #>> '{service_request,quote_promised}' = 'true')
              AND (c.disposition IS NULL
                   OR c.disposition NOT IN ('spam_discarded', 'wrong_number_closed')))
       )
@@ -85,9 +86,9 @@ async function loadUnkeptPromises() {
                    AND (l.estimate_id = e.id OR e.estimate_data ->> 'lead_id' = l.id::text)
                )
             OR (c.customer_id IS NOT NULL AND e.customer_id = c.customer_id)
-            OR (e.customer_phone IS NOT NULL AND c.from_phone IS NOT NULL
+            OR (e.customer_phone IS NOT NULL
                 AND RIGHT(REGEXP_REPLACE(e.customer_phone, '\\D', '', 'g'), 10)
-                  = RIGHT(REGEXP_REPLACE(c.from_phone,     '\\D', '', 'g'), 10))
+                  = RIGHT(REGEXP_REPLACE(CASE WHEN c.direction = 'outbound' THEN c.to_phone ELSE c.from_phone END, '\\D', '', 'g'), 10))
           )
       )
     ORDER BY c.created_at ASC

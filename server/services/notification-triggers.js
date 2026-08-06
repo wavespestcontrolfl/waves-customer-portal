@@ -587,6 +587,11 @@ function pushTagFor(triggerKey, payload = {}) {
     // the SAME call may replace itself.
     return `waves-customer_voicemail_callback-${payload.callLogId || 'unknown-call'}`;
   }
+  if (triggerKey === 'appointment_reschedule_intent') {
+    // Per-customer tag: two customers texting reschedule requests before
+    // the owner opens notifications must not collapse into one push.
+    return `waves-appointment_reschedule_intent-${payload.customerId || 'unknown-customer'}`;
+  }
   return `waves-${triggerKey}`;
 }
 

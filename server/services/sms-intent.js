@@ -98,8 +98,11 @@ const AWAY_PERMISSION_RE = /\b(?:gate\s*code|door\s+(?:is\s+|will\s+be\s+)?(?:op
 function hasRescheduleOrAwayIntent(body) {
   if (!body || typeof body !== 'string') return false;
   if (isSmsReaction(body)) return false;
-  if (RESCHEDULE_DIRECT_RE.test(body) || MOVE_VERB_RE.test(body) || CANCEL_RE.test(body)) return true;
-  return AWAY_RE.test(body) && !AWAY_PERMISSION_RE.test(body);
+  // Phone keyboards produce typographic apostrophes — "won\u2019t" must match
+  // the same patterns as "won't".
+  const text = body.replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"');
+  if (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text) || CANCEL_RE.test(text)) return true;
+  return AWAY_RE.test(text) && !AWAY_PERMISSION_RE.test(text);
 }
 
 function escapeRe(s) {

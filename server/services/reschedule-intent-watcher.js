@@ -27,6 +27,9 @@ const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wavespestcontrol.com').replace(/\/+$/, '');
 
 const LOOKBACK_DAYS = 4;
+// Outbound types that count as a human answer to a waiting customer —
+// automated broadcasts (reminders, receipts, review asks) do not.
+const HUMAN_REPLY_TYPES = ['manual', 'estimate_sent', 'invoice', 'voicemail_quote_link', 'appointment_rescheduled', 'confirmation', 'reschedule_series_confirmation'];
 const MAX_ROWS = 12;
 
 function esc(value) {
@@ -45,9 +48,24 @@ async function loadUnactionedFlags() {
     .where('ad.detected_intent', 'reschedule_or_away_needs_review')
     .where('ad.created_at', '>=', db.raw(`now() - interval '${LOOKBACK_DAYS} days'`))
     .where(function stillUnactioned() {
-      this.whereNull('ad.entity_id').orWhere(function visitUntouched() {
+      this.where(function noVisitStillUnanswered() {
+        // No linked visit: the customer is waiting on a REPLY — the flag
+        // drops once any human-initiated outbound went to them after it
+        // (codex r1: it otherwise recurs every morning for the lookback).
+        this.whereNull('ad.entity_id').whereNotExists(function humanReply() {
+          this.select(1).from('sms_log as sl')
+            .whereRaw('sl.customer_id = ad.customer_id')
+            .where('sl.direction', 'outbound')
+            .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
+            .whereRaw('sl.created_at > ad.created_at');
+        });
+      }).orWhere(function visitUnchanged() {
+        // Linked visit: unactioned = still upcoming AND still on the
+        // flagged slot, judged against the flag's own snapshot — NOT
+        // updated_at, which the public rebooker does not bump (codex r1).
         this.whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
-          .whereRaw('ss.updated_at <= ad.created_at');
+          .whereRaw("LEFT(ad.input_snapshot#>>'{visit,scheduled_date}', 10) = ss.scheduled_date::text")
+          .whereRaw("COALESCE(ad.input_snapshot#>>'{visit,window_start}', '') = COALESCE(ss.window_start::text, '')");
       });
     })
     .orderBy('ad.created_at', 'asc')

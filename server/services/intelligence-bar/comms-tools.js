@@ -752,9 +752,9 @@ async function getCsrOverview(days) {
       id: t.id,
       customer: t.first_name ? `${t.first_name} ${t.last_name}` : 'Unknown',
       phone: t.phone,
-      task: t.description,
-      due: t.due_date,
-      priority: t.priority,
+      task: t.recommended_action || t.context_summary || t.task_type,
+      due: t.deadline,
+      type: t.task_type,
     })),
     lost_lead_reasons: (leadQuality || []).map(r => ({
       reason: r.loss_reason, count: parseInt(r.count),

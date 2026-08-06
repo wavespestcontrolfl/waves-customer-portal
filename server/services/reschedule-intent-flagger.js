@@ -22,7 +22,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString } = require('../utils/dates');
+const { etDateString } = require('../utils/datetime-et');
 
 // Only flag when a visit is close enough for the request to be actionable
 // noise-free; a "reschedule" text with nothing on the books inside the
@@ -49,11 +49,22 @@ async function nextUpcomingVisit(customerId) {
     .first('id', 'scheduled_date', 'window_start', 'service_type', 'status');
 }
 
-async function alreadyFlaggedRecently(customerId) {
-  const row = await db('agent_decisions')
-    .where({ customer_id: customerId, workflow: WORKFLOW, detected_intent: DETECTED_INTENT })
-    .where('created_at', '>=', db.raw(`now() - interval '${DEDUPE_HOURS} hours'`))
-    .first('id');
+async function alreadyFlaggedRecently(customerId, visitId) {
+  // Dedupe only a repeat of the SAME unresolved request (codex #3232 r1):
+  // an earlier flag for a different visit, or one already
+  // reviewed/dismissed, must not swallow a fresh "actually, about my other
+  // appointment" text.
+  const query = db('agent_decisions')
+    .where({
+      customer_id: customerId,
+      workflow: WORKFLOW,
+      detected_intent: DETECTED_INTENT,
+      status: 'pending_review',
+    })
+    .where('created_at', '>=', db.raw(`now() - interval '${DEDUPE_HOURS} hours'`));
+  if (visitId) query.where('entity_id', visitId);
+  else query.whereNull('entity_id');
+  const row = await query.first('id');
   return Boolean(row);
 }
 
@@ -65,9 +76,11 @@ async function alreadyFlaggedRecently(customerId) {
 async function flagInboundRescheduleIntent({ customer, body, smsLogId, messageSid }) {
   try {
     if (!customer?.id || !body) return { flagged: false, reason: 'no_customer_or_body' };
-    if (await alreadyFlaggedRecently(customer.id)) return { flagged: false, reason: 'recent_flag' };
 
     const visit = await nextUpcomingVisit(customer.id);
+    if (await alreadyFlaggedRecently(customer.id, visit?.id || null)) {
+      return { flagged: false, reason: 'recent_flag' };
+    }
 
     await db('agent_decisions').insert({
       workflow: WORKFLOW,
