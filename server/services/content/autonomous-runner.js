@@ -2085,7 +2085,10 @@ class AutonomousRunner {
       { corpus, opportunityId: run.opportunity_id }
     );
     if (!tasks.length) {
-      logger.warn(`[autonomous-runner] internal-link planner found ZERO anchor opportunities for ${brief.target_url} (keyword: ${brief.target_keyword || 'none'}) across ${corpus.length} corpus pages — no link tasks queued for this target`);
+      // No keyword in the log line — brief.target_keyword can carry the
+      // customer-derived opportunity query verbatim (PII); the URL and
+      // opportunity id are enough to look it up.
+      logger.warn(`[autonomous-runner] internal-link planner found ZERO anchor opportunities for ${brief.target_url} (opportunity: ${run.opportunity_id || 'none'}) across ${corpus.length} corpus pages — no link tasks queued for this target`);
     }
     const taskIds = [];
     for (const task of tasks) {
@@ -3191,7 +3194,9 @@ class AutonomousRunner {
           { corpus, opportunityId: run.opportunity_id }
         );
         if (!tasks.length) {
-          logger.warn(`[autonomous-runner] internal-link planner planned ZERO NEW link tasks for freshly published ${out.published_url} (keyword: ${brief.target_keyword || 'none'}) across ${corpus.length} corpus pages`);
+          // No keyword in the log line — brief.target_keyword can carry the
+          // customer-derived opportunity query verbatim (PII).
+          logger.warn(`[autonomous-runner] internal-link planner planned ZERO NEW link tasks for freshly published ${out.published_url} (opportunity: ${run.opportunity_id || 'none'}) across ${corpus.length} corpus pages`);
         }
         // Same insert-or-refresh helper as the action path — a raw
         // onConflict().ignore() here discarded the current plan's keyword
