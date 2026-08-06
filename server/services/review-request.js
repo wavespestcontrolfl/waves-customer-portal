@@ -39,6 +39,16 @@ const TRAPPING_MULTI_TREATMENT_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS, "
 function trappingSeriesKeysFor(serviceKey) {
   return serviceKey === "wildlife_trapping" ? ["wildlife_trapping"] : [...RODENT_TRAPPING_SERIES_KEYS];
 }
+// Position-window policy (codex #3243 r15 P2): plain exclusion carries no
+// trap_visit_type to declare a series boundary, and its return visit runs
+// ~7 days — so its tight 2x-interval window IS the boundary signal, and a
+// new exclusion program a few weeks later never inherits the old one's
+// position. Check-based programs stretch across weeks and keep the 30-day
+// floor (r2).
+function trappingWindowDaysFor(serviceKey, intervalDays) {
+  if (serviceKey === "rodent_exclusion") return Math.min(60, intervalDays * 2);
+  return Math.min(60, Math.max(30, intervalDays * 2));
+}
 // Stamped-address conflict for premise comparison — CANONICAL forms via the
 // property-dedup streetKey ("123 Main St." == "123 Main Street", suffixes
 // never stripped) and normalizeZip, the same identity stampedAddressDiverges
@@ -162,7 +172,20 @@ async function trappingPremiseMatcher(customerId, visit) {
     // The visit is a stamped UNMATCHED premise (a rental the property
     // table doesn't know): only rows stamped with the SAME address are
     // the same series — unstamped legacy rows are the primary, not it.
-    return (row) => !!streetKeyFn(row?.service_address_line1) && !premiseStampConflicts(row, visitN);
+    return (row) => {
+      if (!streetKeyFn(row?.service_address_line1)) return false;
+      // A stamp that reads as the PRIMARY premise — matches the on-file
+      // address with no unit evidence of its own — is the primary, not
+      // this unmatched premise (r10 preserved: a sub-unit never merges
+      // with the whole-street primary).
+      const { unitKey, streetEmbeddedUnitKey } = require("./customer-properties");
+      const rowUnit = unitKey(row.service_address_line2) || streetEmbeddedUnitKey(row.service_address_line1);
+      if (primaryHasStreet && !rowUnit && !premiseStampConflicts(row, primaryStamp)) return false;
+      // Between two stamps of the SAME unmatched premise, an omitted unit
+      // inherits (codex #3243 r15 P2 — phone extractions often skip it).
+      const rowN = inheritReferenceUnit(row, visitN);
+      return !premiseStampConflicts(rowN, visitN);
+    };
   }
   // The visit IS the primary premise: legacy NULL rows and rows carrying
   // the backfilled primary id match; a row stamped with a DIFFERENT
@@ -763,14 +786,18 @@ const ReviewService = {
         let visitDeclaredInitial = false;
         let visitDeclaredType = null;
         let trapEngaged = false;
+        let trapSeriesKeys = null;
+        let trapInPremise = null;
         if (isTrappingSeries) {
           const intervalDays = Number(svc.follow_up_interval_days) > 0 ? Number(svc.follow_up_interval_days) : 15;
-          const windowDays = Math.min(60, Math.max(30, intervalDays * 2));
+          const windowDays = trappingWindowDaysFor(svc.service_key, intervalDays);
           const { anchorStr, floorStr: windowFloor } = etDayWindow(svc.scheduled_date, windowDays);
           const ceilStr = new Date(Date.parse(`${anchorStr}T00:00:00Z`) + windowDays * 86400000)
             .toISOString().slice(0, 10);
           const seriesKeys = trappingSeriesKeysFor(svc.service_key);
           const inPremise = await trappingPremiseMatcher(customerId, svc);
+          trapSeriesKeys = seriesKeys;
+          trapInPremise = inPremise;
           const priorRows = await db("scheduled_services as ps")
             .leftJoin("services as psv", "ps.service_id", "psv.id")
             .where("ps.customer_id", customerId)
@@ -856,18 +883,7 @@ const ReviewService = {
             // engaged" and over-send (codex #3243 r13 P1) — propagate to
             // the resolver's retry/plan_resolution_failed path instead.
             const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId: svc.id, strict: true });
-            if (seriesIds.length) {
-              const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked"]).first())
-                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereIn("status", ["submitted", "reviewed", "rated"]).first())
-                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("redirected_at").first())
-                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("rated_at").first())
-                || (await db("review_requests").whereIn("sequence_id", seriesIds).where({ google_review_clicked: true }).first())
-                // A NON-PROMOTER draft tap — score + category without a
-                // submit — is engagement too (codex #3243 r13 P1; mirrors
-                // the step runner's own lowDraft predicate).
-                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("score").whereNot("category", "promoter").first());
-              trapEngaged = !!engaged;
-            }
+            trapEngaged = await this._seriesEngagement(seriesIds);
           }
         }
         // A declared initial never reads as a follow-up child — stale or
@@ -928,6 +944,30 @@ const ReviewService = {
           // outside the window, so the cap counts normally).
           if (!trapPrior && visitDeclaredType === "followup") {
             if (trapLaterLive) return { skip: "multi_treatment_middle" };
+            // The opener may sit beyond the position window (that is why
+            // trapPrior is null) — recover the line's premise history over
+            // the ask-cap horizon so a rated/clicked opener still stands
+            // the cadence down (codex #3243 r15 P1).
+            const w180 = etDayWindow(svc.scheduled_date, ASK_CAP_WINDOW_DAYS);
+            const lineageRows = await db("scheduled_services as lp")
+              .leftJoin("services as lpv", "lp.service_id", "lpv.id")
+              .where("lp.customer_id", customerId)
+              .where("lp.status", "completed")
+              .where("lp.id", "!=", svc.id)
+              .where("lp.scheduled_date", "<", w180.anchorStr)
+              .where("lp.scheduled_date", ">=", w180.floorStr)
+              .whereIn("lpv.service_key", trapSeriesKeys)
+              .select("lp.id", "lp.property_id", "lp.service_address_line1", "lp.service_address_line2", "lp.service_address_city", "lp.service_address_zip");
+            const lineageIds = lineageRows.filter((r) => trapInPremise(r)).map((r) => r.id);
+            if (lineageIds.length) {
+              const records = await db("service_records").whereIn("scheduled_service_id", lineageIds).select("id");
+              const byRecord = records.length
+                ? await db("review_sequences").whereIn("service_record_id", records.map((r) => r.id)).select("id")
+                : [];
+              const byVisit = await db("review_sequences").whereIn("scheduled_service_id", lineageIds).select("id");
+              const seqIds = [...new Set([...byRecord, ...byVisit].map((r) => r.id))];
+              if (await this._seriesEngagement(seqIds)) return { skip: "series_engaged" };
+            }
             return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true };
           }
           return trapPrior
@@ -3292,6 +3332,19 @@ const ReviewService = {
         const t = String(snap?.values?.trap_visit_type || "").trim();
         if (t === "Initial setup") return "initial";
         if (t === "Follow-up check") return "followup";
+        // Wildlife reports carry no trap_visit_type (codex #3243 r15 P2) —
+        // derive the boundary from trap_actions: a pure install opens a
+        // series; check/capture actions without an install are follow-ups.
+        // Mixed or absent actions stay undeclared.
+        const actions = Array.isArray(snap?.values?.trap_actions) ? snap.values.trap_actions.map(String) : [];
+        if (actions.length) {
+          const installed = actions.includes("Trap installed") || actions.includes("One-way door installed");
+          const checked = actions.some((a) => [
+            "Trap checked", "Capture removed", "Traps reset", "Bait/lure refreshed", "Trap removed", "No activity at traps",
+          ].includes(a));
+          if (installed && !checked) return "initial";
+          if (checked && !installed) return "followup";
+        }
       }
       return null;
     } catch {
@@ -3301,6 +3354,25 @@ const ReviewService = {
 
   async _isDeclaredInitialTrapVisit(args) {
     return (await this._declaredTrapVisitType(args)) === "initial";
+  },
+
+  /**
+   * Engagement across a set of sequence ids (codex #3243 r11+r13 P1): a
+   * customer who responded to any of the series' asks — sequence stopped
+   * responded/clicked, request submitted/reviewed/rated, tracked redirect,
+   * rated_at, legacy click stamp, or an abandoned NON-PROMOTER score tap
+   * (the step runner's own lowDraft predicate) — must not receive the
+   * final cadence. Separate simple queries by design (no OR groups).
+   */
+  async _seriesEngagement(seriesIds = []) {
+    if (!seriesIds.length) return false;
+    const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked"]).first())
+      || (await db("review_requests").whereIn("sequence_id", seriesIds).whereIn("status", ["submitted", "reviewed", "rated"]).first())
+      || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("redirected_at").first())
+      || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("rated_at").first())
+      || (await db("review_requests").whereIn("sequence_id", seriesIds).where({ google_review_clicked: true }).first())
+      || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("score").whereNot("category", "promoter").first());
+    return !!engaged;
   },
 
   async _seriesExemptSequenceIds(customerId, { serviceRecordId = null, scheduledServiceId = null, strict = false } = {}) {
@@ -3360,7 +3432,7 @@ const ReviewService = {
         // cross, the walk reaches unlinked visits linkage can't. The
         // seen-set terminates; the hop cap is a runaway guard.
         const intervalDays = Number(visit.follow_up_interval_days) > 0 ? Number(visit.follow_up_interval_days) : 15;
-        const windowDays = Math.min(60, Math.max(30, intervalDays * 2));
+        const windowDays = trappingWindowDaysFor(visit.service_key, intervalDays);
         const seriesKeys = trappingSeriesKeysFor(visit.service_key);
         const inPremise = await trappingPremiseMatcher(customerId, visit);
         const collectedRows = new Map(); // walk discoveries: id -> row

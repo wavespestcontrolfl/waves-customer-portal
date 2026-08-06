@@ -1184,8 +1184,12 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     mockGates.reviewSequences = true;
     const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
 
-    // "Apt 4" vs the unitless same street = different premises.
+    // "Apt 4" vs the unitless PRIMARY at the same street = different
+    // premises (r15 refined: the divergence is against the primary — the
+    // unitless prior reads as the on-file whole-street address, never the
+    // sub-unit).
     let mock = makeMock({
+      customers: [{ id: 'ou', first_name: 'Bo', address_line1: '100 Main St', zip: '34205' }],
       scheduled_services: [
         { id: 'ou-1', customer_id: 'ou', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null, service_address_line1: '100 Main St', service_address_zip: '34205' },
         { id: 'ou-2', customer_id: 'ou', service_id: 'svc-trap', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping', follow_up_interval_days: 3, property_id: null, service_address_line1: '100 Main St', service_address_line2: 'Apt 4', service_address_zip: '34205' },
@@ -1499,6 +1503,66 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'np2', scheduledServiceId: 'np2-2' });
     expect(plan.seriesFinal).not.toBe(true);
     expect(plan.plan).toHaveLength(1);
+  });
+
+  test('r15: declared follow-ups honor out-of-window engagement, exclusion keeps its tight window, wildlife derives from trap_actions, unmatched premises inherit units', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // ① Declared follow-up with a rated out-of-window opener → stand down.
+    let mock = makeMock({
+      service_records: [{ id: 'sr-oe', customer_id: 'oe', scheduled_service_id: 'oe-2', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Follow-up check' } } }) }],
+      scheduled_services: [
+        { id: 'oe-1', customer_id: 'oe', service_id: 'svc-trap', status: 'completed', scheduled_date: d(45), service_key: 'rodent_trapping' },
+        { id: 'oe-2', customer_id: 'oe', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [{ id: 'seq-oe', customer_id: 'oe', scheduled_service_id: 'oe-1', status: 'completed' }],
+      review_requests: [{ id: 'req-oe', customer_id: 'oe', sequence_id: 'seq-oe', status: 'rated' }],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'oe', serviceRecordId: 'sr-oe' });
+    expect(plan.skip).toBe('series_engaged');
+
+    // ② A NEW exclusion program 20 days after the old one is a new series
+    // (7d interval → 14d window, no 30d floor for plain exclusion).
+    mock = makeMock({
+      scheduled_services: [
+        { id: 'ex-1', customer_id: 'ex', service_id: 'svc-excl', status: 'completed', scheduled_date: d(20), service_key: 'rodent_exclusion' },
+        { id: 'ex-2', customer_id: 'ex', service_id: 'svc-excl', status: 'completed', scheduled_date: d(0), service_key: 'rodent_exclusion', follow_up_interval_days: 7 },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'ex', scheduledServiceId: 'ex-2' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+
+    // ③ Wildlife with a pure 'Trap installed' report is a declared initial
+    // even with a prior program in the window.
+    mock = makeMock({
+      service_records: [{ id: 'sr-wi', customer_id: 'wi', scheduled_service_id: 'wi-2', service_data: JSON.stringify({ typedReportSnapshot: { type: 'wildlife_trapping', values: { trap_actions: ['Trap installed'] } } }) }],
+      scheduled_services: [
+        { id: 'wi-1', customer_id: 'wi', service_id: 'svc-wt', status: 'completed', scheduled_date: d(12), service_key: 'wildlife_trapping' },
+        { id: 'wi-2', customer_id: 'wi', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'wi', serviceRecordId: 'sr-wi' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+    expect(plan.plan[0].templateKey).toBe('first_treatment_ask');
+
+    // ④ Two unmatched-rental visits where the earlier phone stamp omitted
+    // the unit: the current visit's unit inherits onto it → one series.
+    mock = makeMock({
+      customers: [{ id: 'ui', first_name: 'Max', address_line1: '1 Beach Blvd', zip: '34229' }],
+      scheduled_services: [
+        { id: 'ui-1', customer_id: 'ui', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null, service_address_line1: '77 Bay St', service_address_zip: '34293' },
+        { id: 'ui-2', customer_id: 'ui', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3, property_id: null, service_address_line1: '77 Bay St', service_address_line2: 'Unit B', service_address_zip: '34293' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'ui', scheduledServiceId: 'ui-2' });
+    expect(plan.seriesFinal).toBe(true);
   });
 
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
