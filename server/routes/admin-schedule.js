@@ -4649,6 +4649,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 transitionedBy: req.technicianId,
                 notes: 'Bulk cancellation',
                 trx,
+                // Pass the bulk "don't text" choice through to the
+                // shared-writer notice hook; the notify default below still
+                // sends its own notice (send-once marker dedupes).
+                notifyCustomer: payload?.notifyCustomer,
               });
             });
             try {

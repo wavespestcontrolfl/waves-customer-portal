@@ -288,7 +288,7 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  *           the two payloads broadcast (or, with an outer trx, the
  *           payloads that will broadcast on commit)
  */
-async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx }) {
+async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer }) {
   if (!jobId || !toStatus || fromStatus == null) {
     throw new Error(
       'transitionJobStatus: jobId, fromStatus, and toStatus are required'
@@ -404,6 +404,55 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     emitToAdmins(adminPayload);
   }
 
+  function maybeSendCancellationNotice() {
+    // Customer-facing cancellation notice for EVERY cancel path (2026-08-05
+    // silent-cancel incident: reminders delivered, then the visit vanished —
+    // the cascade/track/IB cancel surfaces never call handleCancellation).
+    // Guarded HERE, the one shared status writer, so no surface can forget
+    // it. Behavior (codex #3233 r1):
+    //   - notifyCustomer === false (routes that suppress or send their own
+    //     combined notice pass it through) → claim the notice marker
+    //     silently, never text.
+    //   - suppressed siblings → claim silently (their reminder belongs to
+    //     the surviving owner visit).
+    //   - otherwise send ONLY on real delivery evidence: an outbound
+    //     sms_log row carrying THIS visit id with a genuine Twilio SID.
+    //     The reminder sent-flags are bookkeeping (also set by
+    //     pref-disable and booked-<72h window closures) and the
+    //     `cancelled` column is set by the status-sync trigger during the
+    //     transition itself — neither proves the customer ever heard
+    //     about the visit.
+    // Send-once across route + hook on any ordering via the atomic
+    // cancellation_notice_at claim inside handleCancellation.
+    // Dark behind GATE_CANCEL_NOTICE_HOOK. Post-commit, best-effort.
+    if (String(toStatus || '') !== 'cancelled') return;
+    try {
+      const { isEnabled } = require('../config/feature-gates');
+      if (!isEnabled('cancelNoticeHook')) return;
+    } catch { return; }
+    void (async () => {
+      try {
+        const row = await db('appointment_reminders')
+          .where({ scheduled_service_id: jobId })
+          .first('cancellation_notice_at', 'suppressed_by_sibling');
+        if (!row || row.cancellation_notice_at) return;
+        const AppointmentReminders = require('./appointment-reminders');
+        if (notifyCustomer === false || row.suppressed_by_sibling) {
+          await AppointmentReminders.handleCancellation(jobId, { sendNotification: false });
+          return;
+        }
+        const delivered = await db('sms_log')
+          .whereRaw("metadata->>'scheduled_service_id' = ?", [String(jobId)])
+          .whereIn('message_type', ['reminder_72h', 'appointment_reminder', 'confirmation'])
+          .whereRaw("twilio_sid ~ '^(SM|MM)'")
+          .first('id');
+        await AppointmentReminders.handleCancellation(jobId, { sendNotification: Boolean(delivered) });
+      } catch (e) {
+        logger.warn(`[job-status] cancellation-notice hook failed for ${jobId}: ${e.message}`);
+      }
+    })();
+  }
+
   function maybeReparkFollowupObligation() {
     // Cancelling/skipping/no-showing a completion-linked follow-up child
     // resurfaces the source visit's owed follow-up as a fresh dispatch
@@ -458,6 +507,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
         .then(() => {
           emitBoth(customerId, customerPayload, adminPayload);
           maybeReparkFollowupObligation();
+          maybeSendCancellationNotice();
         })
         .catch(() => {
           // Rollback path. Caller will see the rejection on their
@@ -481,6 +531,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   // trx committed by here.
   emitBoth(captured.customerId, captured.customerPayload, captured.adminPayload);
   maybeReparkFollowupObligation();
+  maybeSendCancellationNotice();
   return {
     customerPayload: captured.customerPayload,
     adminPayload: captured.adminPayload,

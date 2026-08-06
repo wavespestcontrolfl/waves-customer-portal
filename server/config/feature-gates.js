@@ -704,6 +704,12 @@ const gates = {
   // admin notifications.
   // Off → cron ticks are no-ops.
   callBookingMissWatchdog: process.env.GATE_CALL_BOOKING_MISS_WATCHDOG === 'true',
+  // Shared-writer cancellation notice (job-status.js): when a visit whose
+  // reminders already went out is cancelled through ANY path (cascade,
+  // track, IB, raw transition), text the customer the existing
+  // appointment_cancelled template instead of vanishing silently
+  // (2026-08-05 silent-cancel incident). Fail-closed; owner flips.
+  cancelNoticeHook: process.env.GATE_CANCEL_NOTICE_HOOK === 'true',
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
   // past-dated visits stuck in on_site/en_route (performed but never
   // completed → no service record, invoice, report, or post-service SMS;

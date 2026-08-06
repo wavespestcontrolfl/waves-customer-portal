@@ -2246,8 +2246,26 @@ const AppointmentReminders = {
         .where({ id: record.id })
         .update({ cancelled: true, updated_at: new Date() });
 
+      // Send-once via the dedicated atomic marker. `cancelled` is NOT
+      // usable as evidence — the status-sync trigger (20260720000000) sets
+      // it during the cancel transition itself, before any caller runs
+      // (codex #3233 r1). Whoever flips the NULL marker owns the notice; a
+      // sendNotification:false caller claims too, because suppression is a
+      // decision that must block a later auto-send by the shared-writer
+      // hook regardless of call ordering.
+      const claimed = await db('appointment_reminders')
+        .where({ id: record.id })
+        .whereNull('cancellation_notice_at')
+        .update({ cancellation_notice_at: new Date(), updated_at: new Date() });
+
       if (!sendNotification) {
         logger.info(`[appt-remind] Cancellation notice suppressed for ${scheduledServiceId}`);
+        return record;
+      }
+
+      if (!claimed) {
+        logger.info(`[appt-remind] Cancellation notice already handled for ${scheduledServiceId} — not re-sending`);
+        reportOutcome(false, 'A cancellation notice was already handled for this visit');
         return record;
       }
 

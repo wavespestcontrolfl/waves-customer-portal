@@ -239,6 +239,9 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
           toStatus: 'cancelled',
           transitionedBy: null,
           notes: cancelReason,
+          // This processor sends its own consolidated cancellation comms —
+          // the shared-writer notice hook must not text per-visit.
+          notifyCustomer: false,
         });
         flipped = true;
       } catch (err) {

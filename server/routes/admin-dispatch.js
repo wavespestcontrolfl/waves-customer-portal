@@ -3377,6 +3377,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
             lng,
             notes,
             trx,
+            // Series operations send ONE combined notice below — the
+            // shared-writer notice hook must not also text per visit.
+            notifyCustomer: false,
           });
         }
 
@@ -3563,6 +3566,10 @@ router.put('/:serviceId/status', async (req, res, next) => {
           lng,
           notes,
           trx,
+          // Pass the caller's notice intent through to the shared-writer
+          // cancellation-notice hook: false = don't text; the notify path
+          // below still sends its own notice (send-once marker dedupes).
+          notifyCustomer,
         });
       });
     } catch (err) {
