@@ -150,3 +150,12 @@ describe('r22 regression cases (fresh cancel after ack)', () => {
     expect(hasRescheduleOrAwayIntent('Thanks for canceling last week. I need to cancel my appointment Friday too')).toBe(true);
   });
 });
+
+describe('r23 regression cases', () => {
+  test('skip with direct temporal targets flags', () => {
+    expect(hasRescheduleOrAwayIntent('Can we skip tomorrow?')).toBe(true);
+  });
+  test('billing date-only phrasing does not flag', () => {
+    expect(hasRescheduleOrAwayIntent('Can I make my payment a different day?')).toBe(false);
+  });
+});

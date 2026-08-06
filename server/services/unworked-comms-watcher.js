@@ -43,7 +43,7 @@ const MAX_PER_SECTION = 12;
 // ai_assistant = the conversational AI's own successful answer — a real
 // reply for thread-clearing purposes (codex r20). The reschedule watcher
 // keeps its stricter list (the AI stands down on reschedule intent).
-const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised', 'ai_assistant', 'ai_assistant_reply')";
+const HUMAN_REPLY_TYPES = "('manual', 'ai_approved', 'ai_revised', 'ai_assistant', 'ai_assistant_reply', 'follow_up')";
 
 // Scan window: since the previous SUCCESSFUL send (the ops_email_send_state
 // marker), bounded to 7 days — windows tile exactly run-to-run, including
@@ -93,7 +93,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
     -- an uncleared item must reappear until worked, so no marker boundary
     -- can strand it (this also moots the mutable-updated_at window
     -- concern) and overflow beyond the cap resurfaces on later runs.
-    WHERE c.updated_at >= now() - interval '7 days'
+    WHERE c.updated_at >= now() - interval '30 days'
       AND c.updated_at <= :cutoff
       AND c.disposition = 'callback_task_created'
       -- One obligation, one lane (codex r22): when the coach minted a
@@ -104,7 +104,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
         WHERE dt.task_type = 'call_back'
           AND dt.customer_id IS NOT NULL
           AND dt.customer_id = c.customer_id
-          AND dt.created_at BETWEEN c.created_at AND c.created_at + interval '30 minutes'
+          AND dt.created_at BETWEEN c.created_at AND c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) + interval '45 minutes'
       )
       -- Already returned: a later outbound CALL to the same number, or a
       -- later human-typed text, clears the item (codex #3232 r1).
@@ -194,7 +194,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
        -- Half-open 24h window tiles exactly with the daily 6:15pm run —
        -- a 25h window re-reported yesterday's expiries (codex r2).
        OR (t.status = 'expired' AND t.action_verified = false
-           AND t.deadline > now() - interval '7 days' AND t.deadline <= :cutoff
+           AND t.deadline > now() - interval '30 days' AND t.deadline <= :cutoff
            -- Staff completing AFTER auto-expiry counts (codex r16).
            AND NOT EXISTS (
              SELECT 1 FROM sms_log es
@@ -212,7 +212,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
        -- 'verified' can be bogus (the verifier accepts ANY later outbound,
        -- codex r10): re-surface verified tasks with no HUMAN outbound.
        OR (t.status = 'verified'
-           AND t.deadline > now() - interval '7 days' AND t.deadline <= :cutoff
+           AND t.deadline > now() - interval '30 days' AND t.deadline <= :cutoff
            AND NOT EXISTS (
              SELECT 1 FROM sms_log vs
              WHERE vs.customer_id = t.customer_id
@@ -254,7 +254,7 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         -- Rolling 7-day live worklist (codex r15): an unanswered thread
         -- must reappear until answered — the marker window stranded
         -- overflow rows.
-        WHERE created_at >= now() - interval '7 days'
+        WHERE created_at >= now() - interval '30 days'
           AND created_at <= :cutoff
           AND direction = 'inbound'
           AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request')
@@ -354,14 +354,14 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   }
 
   const text = [
-    `End-of-day check: ${total} open comm item${total === 1 ? '' : 's'} (rolling 7-day worklist — items stay until worked).`,
+    `End-of-day check: ${total} open comm item${total === 1 ? '' : 's'} (rolling 30-day worklist — items stay until worked).`,
     '',
     ...sectionText,
     ...(a.length ? [`Calls: ${adminPortalUrl()}/admin/communications#tab=calls`] : []),
     `Communications: ${adminPortalUrl()}/admin/communications`,
   ].join('\n');
   const html = [
-    `<p>End-of-day check: <strong>${total}</strong> open comm item${total === 1 ? '' : 's'} (rolling 7-day worklist — items stay until worked).</p>`,
+    `<p>End-of-day check: <strong>${total}</strong> open comm item${total === 1 ? '' : 's'} (rolling 30-day worklist — items stay until worked).</p>`,
     ...sectionHtml,
     ...(a.length ? [`<p><a href="${esc(adminPortalUrl())}/admin/communications#tab=calls">Open the Calls tab</a></p>`] : []),
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,

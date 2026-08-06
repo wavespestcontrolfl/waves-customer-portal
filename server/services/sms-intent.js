@@ -84,7 +84,7 @@ function isSmsReaction(body) {
 // a false positive costs one owner bell, a false negative is the 2026-08-05
 // incident class where a 12:30am "can we reschedule?" text was followed by
 // the visit running (and invoicing) on schedule.
-const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|different\s+(?:day|date|time)|another\s+(?:day|date|time)|(?:can|could)\s+we\s+(?:do|move|push|change)\s+(?:it|this|that|the\s+\w+)?\s*(?:to|till|until|for)\s+(?:next|another|a\s+different|later|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day)|skip\s+(?:this|the|my|that)\s+(?:one|visit|service|month|week|appointment|appt))\b/i;
+const RESCHEDULE_DIRECT_RE = /\b(?:re-?schedul\w*|re-?book\w*|postpon\w*|different\s+(?:day|date|time)|another\s+(?:day|date|time)|(?:can|could)\s+we\s+(?:do|move|push|change)\s+(?:it|this|that|the\s+\w+)?\s*(?:to|till|until|for)\s+(?:next|another|a\s+different|later|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day)|skip\s+(?:this|the|my|that)\s+(?:one|visit|service|month|week|appointment|appt)|skip\s+(?:today|tomorrow|(?:mon|tues?|wednes|thurs?|fri|satur|sun)day|next\s+week))\b/i;
 // Move-verbs only count with a displacement preposition or an appointment
 // noun nearby — bare "moving" ("we're moving the couch") must not fire.
 // Move-verbs need an APPOINTMENT object or an explicit temporal target —
@@ -132,7 +132,10 @@ function hasRescheduleOrAwayIntent(body) {
     || (!freshAsk && /\b(?:thanks?\s+for|thank\s+you\s+for|already|were|was|got)\s+(?:being\s+)?re-?schedul/i.test(text))
     // Non-appointment reschedule objects (codex r16): "reschedule my
     // autopay/payment" is billing, not an appointment change.
-    || /\b(?:re-?schedul\w*|postpon\w*|mov(?:e|ing)|push(?:ing|ed)?|defer(?:ring)?|delay(?:ing)?|chang(?:e|ing))\s+(?:[\w'’]+\s+){0,2}?(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b/i.test(text);
+    || /\b(?:re-?schedul\w*|postpon\w*|mov(?:e|ing)|push(?:ing|ed)?|defer(?:ring)?|delay(?:ing)?|chang(?:e|ing))\s+(?:[\w'’]+\s+){0,2}?(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b/i.test(text)
+    // Billing subjects with date-only phrasing (codex r23): "can I make
+    // my payment a different day?"
+    || /\b(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b[^.!?]{0,30}\b(?:different|another)\s+(?:day|date|time)\b|\b(?:different|another)\s+(?:day|date|time)\b[^.!?]{0,20}\b(?:autopay|payment|invoice|bill|billing)s?\b/i.test(text);
   if (!negated && (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text))) return true;
   if (cancelAsk) return true;
   // Past absences are history, not a request (codex r17): "we were out

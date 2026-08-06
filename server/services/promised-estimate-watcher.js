@@ -84,7 +84,12 @@ async function loadUnkeptPromises() {
         SELECT 1
         FROM estimates e
         WHERE e.sent_at IS NOT NULL
-          AND e.sent_at > c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
+          -- End-of-call boundary (codex r23): bridged rows end at
+          -- bridge-start + duration; late-created rows (recording/status
+          -- callback) already carry post-call created_at — adding
+          -- duration there would overshoot.
+          AND e.sent_at > COALESCE(c.bridged_at, c.created_at)
+            + CASE WHEN c.bridged_at IS NOT NULL THEN make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE interval '0' END
           AND (
                e.estimate_data #>> '{estimatorEngine,callLogId}' = c.id::text
             OR EXISTS (

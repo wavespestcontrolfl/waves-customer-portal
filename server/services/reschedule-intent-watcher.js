@@ -66,6 +66,18 @@ async function resolveActionedFlags() {
             .whereIn('sl.message_type', HUMAN_REPLY_TYPES)
             .whereIn('sl.status', ['queued', 'sent', 'delivered'])
             .whereRaw('sl.created_at > agent_decisions.created_at');
+        }).orWhere(function ambiguousRescheduled() {
+          // Null-entity flags can't observe slot changes — a delivered
+          // reschedule confirmation to the customer is the proof
+          // (codex r23).
+          this.whereNull('agent_decisions.entity_id').whereExists(function confirmed() {
+            this.select(1).from('sms_log as rc')
+              .whereRaw('rc.customer_id = agent_decisions.customer_id')
+              .where('rc.direction', 'outbound')
+              .whereIn('rc.message_type', ['appointment_rescheduled', 'reschedule_series_confirmation'])
+              .whereIn('rc.status', ['queued', 'sent', 'delivered'])
+              .whereRaw('rc.created_at > agent_decisions.created_at');
+          });
         }).orWhereExists(function slotMovedOrCancelled() {
           this.select(1).from('scheduled_services as ss')
             .whereRaw('ss.id = agent_decisions.entity_id')
@@ -318,5 +330,6 @@ async function runRescheduleIntentWatcher(opts = {}) {
 module.exports = {
   runRescheduleIntentWatcher,
   replayPendingBells,
+  resolveActionedFlags,
   _private: { composeRescheduleIntentDigest },
 };
