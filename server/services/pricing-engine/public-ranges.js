@@ -24,7 +24,9 @@ const FOOTPRINTS_SQFT = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000, 6000];
 const LOTS_SQFT = [5000, 8000, 12000, 20000, 30000];
 // Confirmed measured turf above the 20,000 sq ft table maximum still
 // prices (extrapolated, provenance review only) — sweep through 30,000.
-const LAWNS_SQFT = [2000, 4000, 6000, 8000, 12000, 16000, 20000, 30000, 40000];
+// The public quote route accepts lots to 200,000 sq ft, so inferred turf
+// can run far past the table — sweep the extrapolated span too.
+const LAWNS_SQFT = [2000, 4000, 6000, 8000, 12000, 16000, 20000, 30000, 40000, 80000, 150000];
 
 function sweepValues(inputs, fn, pick) {
   const values = [];
@@ -374,8 +376,14 @@ function buildRows() {
     key: 'flea_elimination',
     name: 'Flea Treatment',
     unit: 'per program',
+    // Home sizes derive from the LIVE footprint-adjustment brackets (each
+    // bracket boundary + one past the last) plus the shared span.
     values: sweepValues(
-      FOOTPRINTS_SQFT.flatMap((f) => FLEA_PROFILES.map((p) => ({ f, p }))),
+      [...new Set([
+        ...FOOTPRINTS_SQFT,
+        ...(((constants.SPECIALTY.flea.footprintAdjustments || {}).initial) || []).map((b) => b.at),
+        (((((constants.SPECIALTY.flea.footprintAdjustments || {}).initial) || []).slice(-1)[0] || {}).at || 4000) + 2000,
+      ])].flatMap((f) => FLEA_PROFILES.map((p) => ({ f, p }))),
       ({ f, p }) => sp.priceFlea({ footprint: f, ...p }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.total)),
     notes: 'Single-visit knockdown or 2-visit elimination package; priced by home size, infestation severity, and optional exterior treatment area.',
@@ -774,6 +782,7 @@ function buildRows() {
     { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 20, access: 'moderate' } },
     { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 40, access: 'moderate' } },
     { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 14, access: 'difficult' } },
+    { property: { footprint: 2000, bedArea: 7900 }, options: { treeCount: 40, access: 'difficult' } },
   ];
   add('tree_shrub_care', () => rangeRow({
     key: 'tree_shrub_care',
