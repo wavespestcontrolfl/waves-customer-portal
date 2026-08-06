@@ -106,6 +106,40 @@ describe('family-scoped existing-appointment adoption', () => {
     )).toBe(true);
   });
 
+  test('palm visits never stand in for a tree & shrub estimate (codex r3)', () => {
+    const familyKeys = estimateFamilyKeysForAdoption(treeShrubEstimateData);
+    // "Palm Tree Injections" contains the tree token, but palm precedence
+    // keeps it a palm-family row — a T&S accept must go to the slot picker.
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Palm Tree Injections' },
+      familyKeys,
+    )).toBe(false);
+    // Palm-to-palm adoption still works: both sides key palm_injection.
+    const palmData = {
+      result: {
+        recurring: {
+          services: [{
+            name: 'Palm Tree Injections',
+            service: 'palm_injection',
+            selected: true,
+            isSelected: true,
+          }],
+        },
+      },
+    };
+    const palmKeys = estimateFamilyKeysForAdoption(palmData);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Palm Tree Injections' },
+      palmKeys,
+    )).toBe(true);
+    // "Palmetto" never trips the palm rule — palmetto-bug pest rows stay pest.
+    const pestKeys = new Set(['pest_control']);
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Palmetto Bug Pest Control' },
+      pestKeys,
+    )).toBe(true);
+  });
+
   test('rows without a resolvable service family never stand in for a first visit', () => {
     const familyKeys = estimateFamilyKeysForAdoption(treeShrubEstimateData);
     expect(appointmentMatchesEstimateFamily({ service_type: '' }, familyKeys)).toBe(false);

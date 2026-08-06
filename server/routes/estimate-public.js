@@ -470,6 +470,20 @@ function shapeLinkedAppointment(row) {
 const SERVICE_FAMILY_FALLBACK_KEY = 'service';
 
 function serviceFamilyKeyForAdoption(value) {
+  // Palm precedence (codex #3228 r3): serviceKeyFor checks the tree token
+  // before its palm branch, so "Palm Tree Injections" buckets as tree_shrub
+  // there — fine for its cadence defaults, but adoption must never let a
+  // tree & shrub estimate swallow a palm visit (price overwrite + suppressed
+  // T&S series, the exact cross-family failure this guard exists for). Same
+  // palm rule as detectServiceLine / toQualifyingKeys: \bpalms?\b never
+  // matches "palmetto", so palmetto-bug pest names fall through untouched.
+  const raw = String(
+    value?.service || value?.service_key || value?.key || value?.kind
+    || value?.name || value?.label || value?.displayName || value?.service_type || '',
+  ).toLowerCase();
+  if (raw.includes('palm_injection') || /\bpalms?\b/.test(raw.replace(/[_-]+/g, ' '))) {
+    return 'palm_injection';
+  }
   // The CANONICAL scheduled-row classifier (recurring-appointment-seeder), on
   // BOTH the estimate's services and the candidate rows — the duplicate-series
   // guard and follow-up seeding bucket by the same function, so "may this row
@@ -478,7 +492,12 @@ function serviceFamilyKeyForAdoption(value) {
   // "Pest & Rodent Control" is pest-primary there per the seeder, rodent
   // here — codex #3228 r1.)
   const { serviceKeyFor } = require('../services/recurring-appointment-seeder');
-  const key = serviceKeyFor(value || {});
+  // serviceKeyFor's own palm branch is substring-based ("Palmetto Bug Pest
+  // Control" would bucket as palm_injection there). Real palms were consumed
+  // by the word-boundary check above, so strip the palmetto token before
+  // delegating — the remaining words classify the row ("bug pest control" →
+  // pest_control).
+  const key = serviceKeyFor({ name: raw.replace(/palmetto/g, ' ') });
   return key && key !== SERVICE_FAMILY_FALLBACK_KEY ? key : null;
 }
 
