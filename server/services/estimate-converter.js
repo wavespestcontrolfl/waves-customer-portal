@@ -2066,10 +2066,24 @@ const EstimateConverter = {
     // source_estimate_id on the adopted row before conversion runs) keeps
     // the replace semantic: the new quote IS that plan's new price.
     // Fail-safe: any classification doubt → 0 → replace (status quo).
+    // Lock BEFORE reading the rate the classification and ledger derive
+    // from (codex #3245 r5): an admin rate clear committing mid-accept
+    // could otherwise be read stale, parked as unattributed, and undone.
+    // The same lock serializes concurrent accepts and the pre-flip
+    // backfill (which takes customers FOR UPDATE). Locks taken here
+    // persist to the end of the caller's transaction.
+    let effectiveCustomer = customer;
+    if (!suppressRecurringConversion && database.isTransaction) {
+      const lockedCustomerRow = await database('customers')
+        .where({ id: customerId })
+        .forUpdate()
+        .first();
+      if (lockedCustomerRow) effectiveCustomer = lockedCustomerRow;
+    }
     const addOnContext = suppressRecurringConversion
       ? { addOnBase: 0, hadOtherLiveFamilies: false }
       : await classifyAddOnAcceptContext({
-        database, estimateId, estimate, estimateData, customer,
+        database, estimateId, estimate, estimateData, customer: effectiveCustomer,
         adoptedExistingAppointmentId: opts.adoptedExistingAppointmentId || null,
       });
     const addOnPreservedRateBase = addOnContext.addOnBase;
@@ -2087,26 +2101,18 @@ const EstimateConverter = {
       try {
         const PlanRateLedger = require('./plan-rate-ledger');
         const slices = PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate });
-        // Serialize on the customer row for EVERY dual-write, not only
-        // under the authority gate (codex #3245 r3): the pre-flip backfill
-        // takes this same lock (customers FOR UPDATE) and relies on accepts
-        // sharing it — a gate-off accept that skipped the lock could
-        // observe an empty ledger while the backfill's insert is
-        // uncommitted and write components beside a stale full-rate one.
-        // The read-modify-write over components needs it under the gate for
-        // the same interleaving reason (the legacy add-on path used an
-        // atomic SQL increment). Locks taken in a savepoint persist to the
-        // end of the OUTER transaction.
-        if (database.isTransaction) {
-          await database('customers').where({ id: customerId }).forUpdate().first('id');
-        }
+        // The customer row lock was taken BEFORE classification above
+        // (codex r3/r5) — it serializes concurrent accepts and the
+        // pre-flip backfill, and every derived figure below reads the
+        // LOCKED snapshot (effectiveCustomer), never the pre-lock row.
         const ledgerOutcome = await database.transaction((sp) => PlanRateLedger.applyAcceptToLedger(sp, {
           customerId,
           estimateId,
           slices,
-          previousScalar: Number(customer.monthly_rate) || 0,
+          previousScalar: Number(effectiveCustomer.monthly_rate) || 0,
           addOnBase: addOnPreservedRateBase,
           hadOtherLiveFamilies: addOnContext.hadOtherLiveFamilies,
+          customerIsLive: ['active_customer', 'won', 'at_risk'].includes(effectiveCustomer.pipeline_stage),
         }));
         if (PlanRateLedger.planRateLedgerEnabled() && ledgerOutcome && Number(ledgerOutcome.scalar) > 0) {
           ledgerScalar = Math.round(Number(ledgerOutcome.scalar) * 100) / 100;

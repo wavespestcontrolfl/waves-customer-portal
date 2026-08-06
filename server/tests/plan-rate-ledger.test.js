@@ -349,6 +349,59 @@ describe('applyAcceptToLedger', () => {
   });
 });
 
+describe('codex r5 hardening', () => {
+  test('annual-only engine rows (annual/ann, no monthly) still slice per family', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control', annual: 480 },
+              { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', ann: 600 },
+            ],
+          },
+        },
+      },
+      monthlyRate: 90,
+    });
+    expect(slices.pest_control).toBe(40);
+    expect(slices.lawn_care).toBe(50);
+  });
+
+  test('a churned customer\'s components are wiped on re-signup (non-authoritative)', async () => {
+    const db = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 40 },
+      { customer_id: 'cust-1', family_key: 'lawn_care', monthly_rate: 50 },
+    ]);
+    const out = await applyAcceptToLedger(db, {
+      customerId: 'cust-1',
+      estimateId: 'est-1',
+      slices: { pest_control: 45 },
+      previousScalar: 90,
+      addOnBase: 0,
+      customerIsLive: false,
+    });
+    // Legacy replace semantics: cancelled siblings never sum back in.
+    expect(out.scalar).toBe(45);
+    expect(db.store.map((r) => r.family_key)).toEqual(['pest_control']);
+  });
+
+  test('a table-probe FAILURE throws under the authority gate instead of reading as absent', async () => {
+    const db = makeLedgerDb([]);
+    db.schema = { hasTable: async () => { throw new Error('metadata query timeout'); } };
+    // Advisory: absent-equivalent (null scalar, caller keeps legacy).
+    await expect(applyAcceptToLedger(db, {
+      customerId: 'cust-1', slices: { pest_control: 40 }, previousScalar: 0,
+    })).resolves.toEqual({ scalar: null, components: null, reviewNeeded: false });
+    // Authoritative: propagate so the converter's fail-closed machinery runs.
+    featureGates.isEnabled.mockReturnValue(true);
+    await expect(applyAcceptToLedger(db, {
+      customerId: 'cust-1', slices: { pest_control: 40 }, previousScalar: 0,
+    })).rejects.toThrow('metadata query timeout');
+    featureGates.isEnabled.mockReturnValue(false);
+  });
+});
+
 describe('zero-priced accepted families (codex r2)', () => {
   test('an explicitly comped line yields a ZERO slice', () => {
     const slices = estimateFamilySlices({

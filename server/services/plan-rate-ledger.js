@@ -42,7 +42,14 @@ function planRateLedgerEnabled() {
 async function ledgerTableExists(database) {
   try {
     return await database.schema.hasTable('customer_plan_rates');
-  } catch {
+  } catch (probeErr) {
+    // A transient probe FAILURE is not an absent table (codex #3245 r5):
+    // while the ledger has scalar authority, swallowing it would return
+    // the "no ledger" null path and commit a legacy scalar WITHOUT the
+    // stale-component invalidation the converter's error path performs.
+    // Authoritative → propagate (the caller's fail-closed machinery runs);
+    // advisory → absent-equivalent is safe (nothing reads components).
+    if (planRateLedgerEnabled()) throw probeErr;
     return false;
   }
 }
@@ -72,16 +79,33 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
   // must stop billing the Pest slice). Lines with NO price provenance at
   // all stay skipped — absence is not a zero.
   const zeroFamilies = new Set();
+  // Same price-field ladder the converter's recurring resolution admits
+  // (codex #3245 r5 — raw engine lineItems carry `annual` with no monthly
+  // or annualAfterDiscount; rejecting them collapsed a classifiable
+  // multi-family accept into one unattributed blob): post-discount stamps
+  // first, then monthly, then the plain annual forms.
+  const lineMonthly = (line) => {
+    const annualForms = [line?.manualFinalAnnual, line?.annualAfterDiscount, line?.annualAfterCredits];
+    for (const value of annualForms) {
+      const annual = Number(value);
+      if (Number.isFinite(annual) && annual >= 0) return annual / 12;
+    }
+    const monthlyForms = [line?.monthly, line?.mo];
+    for (const value of monthlyForms) {
+      const monthly = Number(value);
+      if (Number.isFinite(monthly) && monthly >= 0) return monthly;
+    }
+    const plainAnnualForms = [line?.annual, line?.ann];
+    for (const value of plainAnnualForms) {
+      const annual = Number(value);
+      if (Number.isFinite(annual) && annual >= 0) return annual / 12;
+    }
+    return null;
+  };
   const addLine = (line) => {
     const family = serviceFamilyKeyForAdoption(line) || UNATTRIBUTED;
-    const manualFinal = Number(line?.manualFinalAnnual);
-    const annualAfter = Number(line?.annualAfterDiscount);
-    const monthly = Number.isFinite(manualFinal) && manualFinal >= 0
-      ? manualFinal / 12
-      : (Number.isFinite(annualAfter) && annualAfter >= 0
-        ? annualAfter / 12
-        : Number(line?.monthly ?? line?.mo));
-    if (!Number.isFinite(monthly) || monthly < 0) return null;
+    const monthly = lineMonthly(line);
+    if (monthly == null || monthly < 0) return null;
     if (monthly === 0) {
       if (family !== UNATTRIBUTED) zeroFamilies.add(family);
       return null;
@@ -187,7 +211,7 @@ async function upsertComponent(database, {
 //    scalar = Σ.
 async function applyAcceptToLedger(database, {
   customerId, estimateId, slices = {}, previousScalar = 0, addOnBase = 0,
-  hadOtherLiveFamilies = false,
+  hadOtherLiveFamilies = false, customerIsLive = true,
 } = {}) {
   // Zero-valued slices are accepted families whose price was explicitly
   // comped — they participate as DELETES so the prior component stops
@@ -200,9 +224,19 @@ async function applyAcceptToLedger(database, {
   if (!(await ledgerTableExists(database))) {
     return { scalar: null, components: null, reviewNeeded: false };
   }
-  const existing = await database('customer_plan_rates')
-    .where({ customer_id: customerId })
-    .select('family_key', 'monthly_rate');
+  // A churned/dormant customer's components describe CANCELLED coverage
+  // (cancellation deliberately retains monthly_rate for churn analytics and
+  // never clears the ledger — codex #3245 r5): on re-signup the legacy
+  // replace path discarded that history, so the ledger must too. Wipe and
+  // start empty; the accept's own slices become the fresh attribution.
+  if (!customerIsLive) {
+    await database('customer_plan_rates').where({ customer_id: customerId }).del();
+  }
+  const existing = customerIsLive
+    ? await database('customer_plan_rates')
+      .where({ customer_id: customerId })
+      .select('family_key', 'monthly_rate')
+    : [];
   const components = new Map(existing.map((row) => [row.family_key, roundMoney(row.monthly_rate)]));
   const prior = roundMoney(previousScalar);
   let reviewNeeded = false;
