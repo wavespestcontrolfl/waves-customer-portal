@@ -2123,7 +2123,7 @@ const AppointmentReminders = {
               entity_type: 'scheduled_service',
               entity_id: scheduledServiceId,
             });
-          }, 'appointment_rescheduled', 'appointment_confirmation');
+          }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
             logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
@@ -2274,6 +2274,21 @@ const AppointmentReminders = {
           .where({ id: record.id, cancellation_notice_state: 'pending' })
           .where('cancellation_notice_at', claimToken)
           .update({ updated_at: new Date() });
+      } else if (!sendNotification) {
+        // Suppression claims terminally IN ONE atomic update (codex r5):
+        // a pending-then-suppress two-step could crash between statements
+        // and leave a pending lease the sweep would later SEND against the
+        // caller's explicit don't-text intent.
+        noticeToken = new Date();
+        claimed = await db('appointment_reminders')
+          .where({ id: record.id })
+          .where(function claimable() {
+            this.whereNull('cancellation_notice_at').orWhere(function staleLease() {
+              this.where('cancellation_notice_state', 'pending')
+                .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"));
+            });
+          })
+          .update({ cancellation_notice_at: noticeToken, cancellation_notice_state: 'suppressed', updated_at: noticeToken });
       } else {
         noticeToken = new Date();
         claimed = await db('appointment_reminders')
@@ -2288,7 +2303,7 @@ const AppointmentReminders = {
       }
 
       if (!sendNotification) {
-        if (claimed) {
+        if (claimToken && claimed) {
           // Fenced: only the claim owner may finalize as suppressed.
           await db('appointment_reminders')
             .where({ id: record.id, cancellation_notice_state: 'pending' })
@@ -2312,7 +2327,7 @@ const AppointmentReminders = {
       // row for THIS visit's cancellation carries a genuine Twilio SID), in
       // which case releasing would let a retry double-text the accepted
       // recipient; the claim finalizes as 'sent' instead.
-      const finalizeClaim = async (sentOk) => {
+      const finalizeClaim = async (sentOk, { retryable = false } = {}) => {
         try {
           let accepted = Boolean(sentOk);
           if (!accepted) {
@@ -2326,6 +2341,16 @@ const AppointmentReminders = {
           // reclaimed while we worked (stale-claim sweep), our finalize
           // matches 0 rows and the current owner's state stands — the
           // evidence check above keeps the reclaimer from double-texting.
+          //
+          // Failure disposition (codex r5): a RETRYABLE failure (thrown
+          // render/provider/transport error) keeps the 'pending' lease so
+          // the 15-minute sweep re-attempts — hook-owned entry points do
+          // not reliably re-trigger, so releasing would restore the
+          // silent-cancellation loss. A deterministic non-delivery
+          // (blocked / opted out / no eligible recipient) releases the
+          // claim: re-attempting cannot change the outcome, and a route
+          // retry stays possible.
+          if (!accepted && retryable) return false;
           await db('appointment_reminders')
             .where({ id: record.id, cancellation_notice_state: 'pending' })
             .where('cancellation_notice_at', noticeToken)
@@ -2377,7 +2402,7 @@ const AppointmentReminders = {
           reportOutcome(false, 'Customer not found');
         }
       } catch (sendErr) {
-        await finalizeClaim(false);
+        await finalizeClaim(false, { retryable: true });
         throw sendErr;
       }
 
@@ -2540,6 +2565,23 @@ const AppointmentReminders = {
           .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
           .update({ cancellation_notice_at: token, updated_at: token });
         if (!reclaimed) continue;
+        // A stale lease can already carry an ACCEPTED cancellation send
+        // (provider acceptance is audited before the claim finalizes — a
+        // crash or failed marker update in that window leaves pending +
+        // accepted). Finalize as sent WITHOUT redispatching (codex r5).
+        const alreadyAccepted = Boolean(await db('messaging_audit_log')
+          .where({ appointment_id: String(row.scheduled_service_id), purpose: 'appointment_cancellation' })
+          .whereNotNull('sent_at')
+          .whereRaw("provider_message_id ~ '^(SM|MM)'")
+          .first('id'));
+        if (alreadyAccepted) {
+          await db('appointment_reminders')
+            .where({ id: row.reminder_id, cancellation_notice_state: 'pending' })
+            .where('cancellation_notice_at', token)
+            .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
+          settled += 1;
+          continue;
+        }
         const delivered = Boolean(await db('messaging_audit_log')
           .where({ appointment_id: String(row.scheduled_service_id) })
           .whereIn('purpose', ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'])
@@ -2583,20 +2625,39 @@ const AppointmentReminders = {
 
       const sendNotification = options.sendNotification !== false;
 
-      // Claim every target's cancellation-notice marker terminally (codex
-      // #3233 r4): the combined series message IS these visits' notice
-      // (or its deliberate suppression) — without the claim, a later
-      // same-status retry through a single-cancel route could take a
-      // target's null marker and send an unwanted per-visit text.
-      // Unclaimed rows only: never clobber an existing terminal state.
+      // Claim every target's cancellation-notice marker (codex #3233 r4):
+      // the combined series message IS these visits' notice (or its
+      // deliberate suppression) — without the claim, a later same-status
+      // retry through a single-cancel route could take a target's null
+      // marker and send an unwanted per-visit text. Suppression claims
+      // terminally in one update; a notifying series claims 'pending' and
+      // finalizes only after the combined send is attempted (r5 — marking
+      // 'sent' upfront made a failed send unretryable). Unclaimed rows
+      // only: never clobber an existing terminal state.
+      const seriesToken = new Date();
       await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
         .whereNull('cancellation_notice_at')
         .update({
-          cancellation_notice_at: new Date(),
-          cancellation_notice_state: sendNotification ? 'sent' : 'suppressed',
-          updated_at: new Date(),
+          cancellation_notice_at: seriesToken,
+          cancellation_notice_state: sendNotification ? 'pending' : 'suppressed',
+          updated_at: seriesToken,
         });
+      // Fenced (token) bulk finalize: sent on acceptance, released for
+      // retry otherwise. Rows another owner reclaimed are left alone.
+      const finalizeSeriesClaims = async (accepted) => {
+        try {
+          await db('appointment_reminders')
+            .whereIn('scheduled_service_id', ids)
+            .where({ cancellation_notice_state: 'pending' })
+            .where('cancellation_notice_at', seriesToken)
+            .update(accepted
+              ? { cancellation_notice_state: 'sent', updated_at: new Date() }
+              : { cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+        } catch (finalizeErr) {
+          logger.warn(`[appt-remind] series notice-claim finalize failed: ${finalizeErr.message}`);
+        }
+      };
       if (!sendNotification) {
         logger.info(`[appt-remind] Series cancellation notices suppressed for ${ids.length} appointment(s)`);
         return { cancelledCount: ids.length };
@@ -2617,6 +2678,7 @@ const AppointmentReminders = {
       if (!record) {
         logger.info(`[appt-remind] Series cancellation: no reminder records for ${ids.length} appointment(s)`);
         reportOutcome(false, 'No reminder records for these visits — no cancellation text was sent');
+        await finalizeSeriesClaims(false);
         return { cancelledCount: ids.length };
       }
 
@@ -2636,10 +2698,12 @@ const AppointmentReminders = {
         if (noticeSent) {
           logger.info(`[appt-remind] Series cancellation notice sent for customer ${record.customer_id} - ${ids.length} appointment(s)`);
         }
+        await finalizeSeriesClaims(Boolean(noticeSent));
         reportOutcome(noticeSent, noticeSent
           ? null
           : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)');
       } else {
+        await finalizeSeriesClaims(false);
         reportOutcome(false, 'Customer not found');
       }
 

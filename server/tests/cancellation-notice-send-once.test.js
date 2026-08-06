@@ -55,12 +55,17 @@ describe('handleCancellation send-once (atomic notice claim)', () => {
     expect(outcome.notificationError).toMatch(/already handled/i);
   });
 
-  test('sendNotification:false claims and finalizes as SUPPRESSED (durable decision)', async () => {
+  test('sendNotification:false claims terminally as SUPPRESSED in ONE atomic update (no pending window)', async () => {
     mockDbState.reminderRow = { id: 'r2', customer_id: 'cu1', cancelled: false, appointment_time: '2026-08-05T13:00:00Z', service_type: 'X' };
     const record = await AppointmentReminders.handleCancellation('svc2', { sendNotification: false });
     expect(record).toBeTruthy();
-    expect(mockDbState.updates.some((u) => u.patch.cancellation_notice_state === 'pending')).toBe(true);
-    expect(mockDbState.updates.some((u) => u.patch.cancellation_notice_state === 'suppressed')).toBe(true);
+    // Direct-to-terminal: a pending-then-suppress two-step could crash
+    // between statements and let the sweep text against the caller's
+    // explicit don't-text intent (codex r5).
+    expect(mockDbState.updates.some((u) => u.patch.cancellation_notice_state === 'pending')).toBe(false);
+    const claim = mockDbState.updates.find((u) => u.patch.cancellation_notice_state === 'suppressed');
+    expect(claim).toBeTruthy();
+    expect(claim.patch.cancellation_notice_at).toBeInstanceOf(Date);
   });
 
   test('failed attempt (customer lookup miss, no provider acceptance) RELEASES the claim', async () => {
