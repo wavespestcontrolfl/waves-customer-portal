@@ -72,7 +72,20 @@ const ESTIMATE = {
     },
   }),
 };
-const LINKED_ROW = { id: 'ss-linked', customer_id: 'cust-1', source_estimate_id: 'est-1' };
+const LINKED_ROW = {
+  id: 'ss-linked',
+  customer_id: 'cust-1',
+  source_estimate_id: 'est-1',
+  service_type: 'Quarterly Pest Control Service',
+};
+// An estimate-linked row of a DIFFERENT family — the r8 gate rejects it so a
+// cross-family selection can't commit and overwrite it.
+const LINKED_ROW_CROSS_FAMILY = {
+  id: 'ss-linked-ts',
+  customer_id: 'cust-1',
+  source_estimate_id: 'est-1',
+  service_type: 'Bi-Monthly Tree & Shrub Care Service',
+};
 const CW_ROW = {
   id: 'ss-anywhere',
   customer_id: 'cust-1',
@@ -189,14 +202,32 @@ describe('findLinkedUpcomingAppointment — customer-wide fallback (gated)', () 
       appointmentId: 'ss-anywhere',
     });
     expect(row).toEqual(CW_ROW);
-    // Both queries pin the requested id (the fallback qualifies its column —
-    // it joins `services`, where a bare `id` would be ambiguous).
+    // Both queries pin the requested id (columns qualified — both join
+    // `services`, where a bare `id` would be ambiguous).
     expect(clauseArgs(conn.queries[0], 'where')).toEqual(
-      expect.arrayContaining([['id', 'ss-anywhere']])
+      expect.arrayContaining([['scheduled_services.id', 'ss-anywhere']])
     );
     expect(clauseArgs(conn.queries[1], 'where')).toEqual(
       expect.arrayContaining([['scheduled_services.id', 'ss-anywhere']])
     );
+  });
+
+  it('a CROSS-FAMILY estimate-linked row is rejected by the family gate (codex r8)', async () => {
+    featureGates.isEnabled.mockReturnValue(false);
+    const conn = makeFakeConn([LINKED_ROW_CROSS_FAMILY]);
+    const row = await findLinkedUpcomingAppointment(ESTIMATE, null, { database: conn });
+    expect(row).toBe(null);
+  });
+
+  it('a linked row is exempt from the family gate when the estimate derives NO families (legacy shapes)', async () => {
+    featureGates.isEnabled.mockReturnValue(false);
+    const conn = makeFakeConn([LINKED_ROW_CROSS_FAMILY]);
+    const row = await findLinkedUpcomingAppointment(
+      { id: 'est-1', customer_id: 'cust-1', estimate_data: '{}' },
+      null,
+      { database: conn }
+    );
+    expect(row).toEqual(LINKED_ROW_CROSS_FAMILY);
   });
 
   it('gate ON: a fallback row that is not the requested id is rejected (id pinning)', async () => {

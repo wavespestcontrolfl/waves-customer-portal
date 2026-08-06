@@ -604,13 +604,43 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     .orderBy('scheduled_services.id', 'asc');
 
   const q = baseQuery()
+    // Catalog identity travels with the linked row too (codex #3228 r8) —
+    // its family gate below must classify the same catalog-first way the
+    // customer-wide fallback does.
+    .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+    .select(
+      'scheduled_services.*',
+      'services.service_key as catalog_service_key',
+      'services.name as catalog_service_name',
+    )
     .where((builder) => {
-      if (linkedId) builder.where('id', linkedId);
-      if (estimate.id) builder.orWhere('source_estimate_id', estimate.id);
+      if (linkedId) builder.where('scheduled_services.id', linkedId);
+      if (estimate.id) builder.orWhere('scheduled_services.source_estimate_id', estimate.id);
     });
 
-  if (requestedId) q.where('id', requestedId);
+  if (requestedId) q.where('scheduled_services.id', requestedId);
   let row = await q.first();
+
+  // The family/mode gate applies to ESTIMATE-LINKED rows too (codex #3228
+  // r8 P1): a mixed estimate whose linked row is a recurring-family visit
+  // must not adopt it when the customer selects a cross-family one-time
+  // option — acceptance would commit the linked row, overwrite its
+  // estimated_price, and the selected one-time service would get no booking.
+  // The gate is scoped by the same serviceMode(s) the caller passed. Legacy
+  // exemption: when the estimate has NO derivable service families under ANY
+  // mode (guarantee-only / invoice-only shapes with no service lists), the
+  // explicit link keeps its historical precedence.
+  const anyModeFamilyKeys = new Set([
+    ...estimateFamilyKeysForAdoption(data, { serviceMode: 'recurring' }),
+    ...estimateFamilyKeysForAdoption(data, { serviceMode: 'one_time' }),
+  ]);
+  const familyKeys = estimateFamilyKeysForAdoption(data, {
+    serviceMode: opts.serviceMode,
+    serviceModes: opts.serviceModes,
+  });
+  if (row && anyModeFamilyKeys.size > 0 && !appointmentMatchesEstimateFamily(row, familyKeys)) {
+    row = null;
+  }
 
   // Customer-wide fallback (gated): a customer who already has an upcoming
   // appointment for the SAME service family shouldn't be pushed through the
@@ -632,10 +662,6 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // cross-family accepts fall through to the standard slot pick.
   if (!row && estimate.customer_id
     && featureGates.isEnabled('estimateExistingApptCustomerWide')) {
-    const familyKeys = estimateFamilyKeysForAdoption(data, {
-      serviceMode: opts.serviceMode,
-      serviceModes: opts.serviceModes,
-    });
     if (familyKeys.size > 0) {
       // Page through the candidate list until a same-family row appears — a
       // fixed pre-filter LIMIT would hide a valid later appointment behind a
