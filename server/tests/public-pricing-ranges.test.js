@@ -98,9 +98,10 @@ describe('public pricing ranges', () => {
       if (s.unit === 'per month') {
         expect(MONTHLY_BILLED_KEYS.has(s.key)).toBe(true);
       }
-      // No per-year units: even the termite bond rides quarterly
-      // applications (owner copy rule: no combined annual totals).
-      expect(s.unit).not.toMatch(/per year/i);
+      // No per-year/annual-total units in any spelling: even the termite
+      // bond rides quarterly applications (owner copy rule: no combined
+      // annual plan totals customer-facing).
+      expect(s.unit).not.toMatch(/per year|annual|12[- ]month/i);
       expect(text).toBeTruthy();
     }
     const pest = payload.services.find((s) => s.key === 'general_pest_quarterly');

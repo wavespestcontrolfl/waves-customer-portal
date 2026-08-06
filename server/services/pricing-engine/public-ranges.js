@@ -82,9 +82,14 @@ function waveGuardBundleValues() {
     for (const lotSqFt of [5000, 8000, 20000]) {
       for (const propertyType of ['single_family', 'condo_upper']) {
         for (const frequency of ['quarterly', 'monthly']) {
+      // Dimensions are TOP-LEVEL generateEstimate inputs (a nested
+      // property object is ignored by the profile builder).
       const est = generateEstimate({
         propertyType,
-        property: { footprint, lotSqFt, lawnSqFt: 6000 },
+        footprint,
+        lotSqFt,
+        lawnSqFt: 6000,
+        features: { shrubs: 'light', complexity: 'simple' },
         services: { lawn: {}, pest: { frequency }, mosquito: {}, treeShrub: {}, termiteBait: {}, palm: { treatmentType: 'nutrition', palmCount: 5 } },
       });
       for (const li of est.lineItems || []) {
@@ -208,11 +213,14 @@ function buildRows() {
 
   add('german_roach_initial', () => rangeRow({
     key: 'german_roach_initial',
-    oneTimePerkKey: 'german_roach_initial',
     name: 'German Roach Initial (3-Visit)',
     unit: 'per application',
-    // Agent-selectable initial series priced per visit by the engine.
-    values: sweepValues(FOOTPRINTS_SQFT, (f) => sp.priceGermanRoachInitial({ footprint: f }, {}), (r) => r.price),
+    // Agent-selectable initial series; the pricer applies the
+    // recurring-customer perk INTERNALLY (excluded from the generic pass),
+    // so sweep the flag rather than using oneTimePerkKey.
+    values: sweepValues([false, true],
+      (isRecurringCustomer) => sp.priceGermanRoachInitial({ isRecurringCustomer }),
+      (r) => r.price),
     notes: '3-visit initial series for German roach activity within a recurring plan; heavy infestations use the cleanout program.',
   }));
 
@@ -365,8 +373,9 @@ function buildRows() {
       [
         { plan: 'standard' },
         { plan: 'unlimited' },
-        // Standard plan with included callbacks exhausted + billable extras.
-        { plan: 'standard', callbacksUsed: 2, extraCallbackCount: 2 },
+        // Standard plan with the configured callback allowance exhausted
+        // plus billable extras (allowance read from live config).
+        { plan: 'standard', callbacksUsed: Number(constants.RODENT.trapping.includedFollowUps) || 2, extraCallbackCount: 2 },
       ],
       (opts) => sp.priceRodentTrapping({}, opts),
       (r) => r.price),
@@ -722,7 +731,9 @@ function buildRows() {
       [0, 30, 60, 120, 200].flatMap((meshLinearFeet) =>
         Object.keys(constants.RODENT.wireMesh.substrates).map((meshSubstrate) => ({ meshLinearFeet, meshSubstrate }))),
       (opts) => sp.priceRodentWireMesh(opts),
-      (r) => (r && !r.customQuoteRecommended ? r.price : NaN)),
+      // customQuoteRecommended only adds a review warning; the priced line
+      // is retained by the estimate path — publish it.
+      (r) => (r ? r.price : NaN)),
     notes: 'Priced per linear foot by substrate, with a job minimum.',
   }));
 
@@ -751,7 +762,7 @@ function buildRows() {
   add('rodent_guarantee', () => rangeRow({
     key: 'rodent_guarantee',
     name: 'Rodent Guarantee',
-    unit: 'per 12-month term',
+    unit: 'per program',
     // Renewable guarantee premium by property tier; eligibility (completed
     // trapping/exclusion/sanitation) is a customer-state flag, not pricing.
     // Tier derives from home size / stories / roof — sweep the property
