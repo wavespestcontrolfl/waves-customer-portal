@@ -119,10 +119,12 @@ describe('public pricing ranges', () => {
     expect(new Date(payload.generatedAt).getTime()).not.toBeNaN();
   });
 
-  test('every call recomputes from current constants (no stale memoization)', () => {
+  test('cache serves between syncs and refreshes when a sync applied', () => {
     const again = computePublicPricingRanges();
-    expect(again).not.toBe(payload);
-    expect(again.services.map((s) => s.key)).toEqual(payload.services.map((s) => s.key));
+    expect(again).toBe(payload); // no sync since — cached payload is current
+    const refreshed = computePublicPricingRanges({ refresh: true });
+    expect(refreshed).not.toBe(payload);
+    expect(refreshed.services.map((s) => s.key)).toEqual(payload.services.map((s) => s.key));
   });
 
   // Gate tests must not depend on the ambient environment: explicitly unset
