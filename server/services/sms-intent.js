@@ -105,7 +105,7 @@ const AWAY_RE = /\b(?:out\s+of\s+town|on\s+vacation|leav(?:e|ing)\s+for\s+vacati
 // Away + permission = a heads-up, not a reschedule ask ("won't be home but
 // here's the gate code" / "exterior only is fine"). Permission only
 // suppresses the AWAY leg — an explicit reschedule/cancel verb still wins.
-const AWAY_PERMISSION_RE = /\b(?:(?:the\s+)?gate\s*code\s+is\b|gate\s*code\b[^.!?]{0,25}?[:#]\s*\d{3,}|(?:i|we)\s+(?:do\s+)?have\s+(?:a|the)\s+gate\s*code\b|(?:here'?s|i'?ll\s+(?:text|send|give|leave)(?:\s+you)?)\s+(?:the\s+)?gate\s*code|(?:can|could|may|feel\s+free\s+to|just|please)\s+use\s+(?:the\s+)?gate\s*code|door\s+(?:is\s+|will\s+be\s+)?(?:open|unlocked)|garage\s+(?:is\s+|will\s+be\s+)?open|no\s+need\s+to\s+(?:be|get|come)\s+in|don'?t\s+need\s+to\s+(?:be|get|come)\s+in|(?:it|that)'?s\s+fine|exterior\s+(?:only\s+)?(?:is\s+)?fine|(?:you|y'?all)\s+can\s+still\s+(?:come|do|spray|treat)|go\s+ahead)\b/i;
+const AWAY_PERMISSION_RE = /\b(?:(?:the\s+)?gate\s*code\s+is\b|gate\s*code\b[^.!?]{0,25}?[:#]\s*\d{3,}|(?:i|we)\s+(?:do\s+)?have\s+(?:a|the)\s+gate\s*code\b|(?:here'?s|i'?ll\s+(?:text|send|give|leave)(?:\s+you)?)\s+(?:the\s+)?gate\s*code|(?:can|could|may|feel\s+free\s+to|just|please)\s+use\s+(?:the\s+)?gate\s*code|door\s+(?:is\s+|will\s+be\s+)?(?:open|unlocked)|garage\s+(?:is\s+|will\s+be\s+)?open|no\s+need\s+to\s+(?:be|get|come)\s+in|don'?t\s+need\s+to\s+(?:be|get|come)\s+in|(?:it|that)'?s\s+fine|exterior\s+(?:only\s+)?(?:is\s+)?fine|(?:you|y'?all)\s+can\s+still\s+(?:come|do|spray|treat)|(?:can|please|okay\s+to|ok\s+to|feel\s+free\s+to|just)\s+go\s+ahead|(?:^|[.!?]\s+)go\s+ahead)\b/i;
 
 // Explicit stand-down asks (codex #3232 r39): "Please don't come
 // tomorrow" is a reschedule-class request even though no move/cancel verb

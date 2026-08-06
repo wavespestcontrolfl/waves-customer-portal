@@ -471,3 +471,12 @@ describe('past-report vetoes and location stand-down exclusion (codex r44)', () 
     expect(hasRescheduleOrAwayIntent("Tomorrow please don't come")).toBe(true);
   });
 });
+
+describe('negated go-ahead stand-down (codex r45)', () => {
+  test('dont go ahead with the service flags away', () => {
+    expect(hasRescheduleOrAwayIntent("I won't be home tomorrow; don't go ahead with the service")).toBe(true);
+  });
+  test('affirmative go ahead still suppresses', () => {
+    expect(hasRescheduleOrAwayIntent("I won't be home tomorrow but you can go ahead and treat the yard")).toBe(false);
+  });
+});

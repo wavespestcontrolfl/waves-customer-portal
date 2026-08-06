@@ -18,7 +18,7 @@ const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
-const { isInternalTestCustomerId } = require('./internal-test-customers');
+const { isInternalTestCustomerId, INTERNAL_TEST_CUSTOMER_IDS } = require('./internal-test-customers');
 const { etDateString } = require('../utils/datetime-et');
 
 const watcherDisabled = () => ['1', 'true', 'on']
@@ -185,7 +185,7 @@ async function loadUnactionedFlags() {
           // COMPLETED after yesterday's 6:53am run must still reach the
           // next digest to emit its "COMPLETED despite the request" line.
           this.whereNotNull('ad.entity_id')
-            .whereRaw("(ss.scheduled_date >= (now() at time zone 'America/New_York')::date OR (ss.status = 'completed' AND ss.scheduled_date >= (now() at time zone 'America/New_York')::date - 1))");
+            .whereRaw("(ss.scheduled_date >= (now() at time zone 'America/New_York')::date OR (ss.status IN ('completed', 'no_show') AND ss.scheduled_date >= (now() at time zone 'America/New_York')::date - 1))");
         })
         // Ambiguous flags carry entity_id NULL by design (multi-visit) —
         // retain them too while ANY of the customer's upcoming visits is
@@ -228,10 +228,17 @@ async function loadUnactionedFlags() {
         // 'completed' stays in the backstop (codex r9): a visit that RAN
         // on the flagged slot despite the request is the incident class
         // itself, not a resolution.
-        this.whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site', 'completed'])
+        this.whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site', 'completed', 'no_show'])
           .whereRaw("LEFT(ad.input_snapshot#>>'{visit,scheduled_date}', 10) = ss.scheduled_date::text")
           .whereRaw("COALESCE(ad.input_snapshot#>>'{visit,window_start}', '') = COALESCE(ss.window_start::text, '')");
       });
+    })
+    // Canonical internal-test exclusion IN the query (codex r45): demo
+    // rows must not inflate COUNT(*) OVER () or consume the LIMIT page.
+    .where(function noDemoRows() {
+      if (INTERNAL_TEST_CUSTOMER_IDS.length) {
+        this.whereNull('ad.customer_id').orWhereNotIn('ad.customer_id', INTERNAL_TEST_CUSTOMER_IDS);
+      }
     })
     // Newest-first (codex r14): oldest-first pinned the same stale prefix
     // while fresh requests hid in the overflow count.
@@ -273,7 +280,7 @@ function composeRescheduleIntentDigest(rows) {
       || (snapTail ? `Shared number …${snapTail.slice(-4)}` : 'Unknown customer');
     const asked = etDateString(new Date(row.created_at));
     const visit = row.scheduled_date
-      ? `visit ${String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date).slice(0, 10)}${row.window_start ? ` ${String(row.window_start).slice(0, 5)}` : ''}${row.service_type ? ` (${row.service_type})` : ''} ${row.visit_status === 'completed' ? 'COMPLETED despite the request' : 'STILL ARMED'}`
+      ? `visit ${String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date).slice(0, 10)}${row.window_start ? ` ${String(row.window_start).slice(0, 5)}` : ''}${row.service_type ? ` (${row.service_type})` : ''} ${row.visit_status === 'completed' ? 'COMPLETED despite the request' : (row.visit_status === 'no_show' ? 'NO-SHOW after the request' : 'STILL ARMED')}`
       : (parseSnapshot(row.input_snapshot).ambiguous
         ? 'multiple upcoming visits — check which one they mean'
         : 'no upcoming visit on the books');

@@ -107,14 +107,11 @@ async function loadCallbackCalls(cutoff = new Date()) {
             AND COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') <> ''
             AND ((LEFT(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', 19))::timestamp AT TIME ZONE 'America/New_York') >= now() - interval '30 days'))
       AND c.updated_at <= :cutoff
-      -- Terminal disposition OR the validated enriched callback signal
-      -- (codex r44): decideDisposition overwrites the recommendation with
-      -- booked/quote outcomes, and the coach skips tasks for booked calls
-      -- — an explicitly agreed later callback must still surface when due.
-      AND (c.disposition = 'callback_task_created'
-        OR (c.v2_extraction_status = 'valid'
-          AND COALESCE(c.ai_extraction_enriched #>> '{scheduling,follow_up_start_at}', '') <> ''
-          AND COALESCE(c.disposition, '') NOT IN ('spam_discarded', 'wrong_number_closed')))
+      -- Disposition-only selection (codex r45, reverting r44):
+      -- scheduling.follow_up_start_at is the SECOND-TREATMENT datetime
+      -- (call-extraction-v1 prompt) and drives visit creation — a booked
+      -- call carrying it is scheduled work, not an unworked callback.
+      AND c.disposition = 'callback_task_created'
       -- Not yet due (codex r37): an explicitly agreed future callback
       -- time (scheduling.follow_up_start_at) is scheduled work, not an
       -- unworked obligation, until that time arrives.
@@ -418,10 +415,14 @@ async function loadUnansweredThreads(cutoff = new Date()) {
   const { rows } = await db.raw(
     `
     WITH last_inbound AS (
-      SELECT DISTINCT ON (peer) peer, message_body, created_at
+      -- Endpoint-scoped (codex r45): conversations are unique per
+      -- (peer, our number) — a later text to the AI number must not
+      -- swallow an unanswered HQ thread from the same phone.
+      SELECT DISTINCT ON (peer, endpoint) peer, endpoint, message_body, created_at
       FROM (
         SELECT message_body, created_at,
-               RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) AS peer
+               RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) AS peer,
+               RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g'), 10) AS endpoint
         FROM sms_log
         -- Rolling 7-day live worklist (codex r15): an unanswered thread
         -- must reappear until answered — the marker window stranded
@@ -439,7 +440,7 @@ async function loadUnansweredThreads(cutoff = new Date()) {
           AND TRIM(COALESCE(message_body, '')) !~* '^(thanks?( you| u)?|thank you( so much| very much)?|ty|tysm|got it|perfect|great|awesome|ok(ay)?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
       ) inbound
       WHERE peer <> ''
-      ORDER BY peer, created_at DESC
+      ORDER BY peer, endpoint, created_at DESC
     )
     SELECT l.peer, l.message_body, l.created_at,
            NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
@@ -479,6 +480,9 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         AND os.status IN ('queued', 'sent', 'delivered')
         AND os.created_at > l.created_at
         AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10) = l.peer
+        -- Same-endpoint reply (codex r45): the conversation model is
+        -- unique per (contact, our number).
+        AND RIGHT(REGEXP_REPLACE(COALESCE(os.from_phone, ''), '\\D', '', 'g'), 10) = l.endpoint
     )
     -- A later STOP ends the thread: an opted-out customer must not be
     -- surfaced as waiting for a reply nobody may send (codex r4).

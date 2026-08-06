@@ -279,6 +279,25 @@ router.post('/sms', async (req, res) => {
       // (The alert is internal to the owner, unaffected by the SMS opt-out.)
       fireEventRescore('sms_opt_out');
 
+      // Opt-out COMBINED with an appointment ask (codex #3232 r45):
+      // "Please don't text me anymore, and cancel tomorrow's service" —
+      // the durable reschedule flag and its INTERNAL bell still persist;
+      // only customer-facing SMS is suppressed by the opt-out.
+      if (customer && Body && rescheduleAsk) {
+        const flagResult = await require('../services/reschedule-intent-flagger')
+          .flagInboundRescheduleIntent({
+            customer,
+            phone: From,
+            body: Body,
+            smsLogId: null,
+            messageSid: MessageSid || null,
+          })
+          .catch(() => null);
+        if (flagResult?.flagged === true && typeof flagResult.fireBell === 'function') {
+          setImmediate(() => { flagResult.fireBell().catch(() => {}); });
+        }
+      }
+
       return res.type('text/xml').send(
         `<Response><Message>You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.</Message></Response>`
       );
@@ -548,23 +567,36 @@ router.post('/sms', async (req, res) => {
       // just as real, so persist an UNLINKED flag rather than dropping the
       // durable guard entirely (codex #3232 r25). Unknown numbers (zero
       // matches) stay in the lead lane.
+      // Reminders go to service contacts too (codex r45): a reschedule
+      // reply from service_contact*_phone must resolve to its customer,
+      // not read as an unknown sender. A UNIQUE match across all phone
+      // slots links the flag; multiple matches persist unlinked.
+      let flagCustomer = customer;
       let flagEligible = Boolean(customer);
       if (!customer) {
         const key = phoneLookupKey(From);
         if (key) {
           const matches = await db('customers')
             .whereNull('deleted_at')
-            .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [key])
+            .where(function anyPhoneSlot() {
+              for (const col of ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone']) {
+                this.orWhereRaw(`RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`, [key]);
+              }
+            })
             .limit(2)
-            .select('id')
             .catch(() => []);
-          flagEligible = matches.length > 1;
+          if (matches.length === 1) {
+            flagCustomer = matches[0];
+            flagEligible = true;
+          } else {
+            flagEligible = matches.length > 1;
+          }
         }
       }
       if (flagEligible) {
         rescheduleFlagResult = await require('../services/reschedule-intent-flagger')
           .flagInboundRescheduleIntent({
-            customer,
+            customer: flagCustomer,
             phone: From,
             body: Body,
             smsLogId: smsLogEntry?.id || null,
