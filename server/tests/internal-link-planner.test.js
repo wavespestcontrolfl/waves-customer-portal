@@ -895,6 +895,26 @@ describe('planForTarget', () => {
     const task = { anchor_text: 'bed bug bites', source_offset: staleOffset, context_snippet: planned };
     expect(placementForTask(body, task).index).toBe(body.indexOf('bed bug bites', body.indexOf('Hotel')));
   });
+  test('relocation prefers occurrences that keep the target keyword terms', () => {
+    const { placementForTask } = planner._internals;
+    // The old planned paragraph was edited in place: it keeps incidental
+    // wording from the persisted context (reader, mentioned, month) but
+    // lost the target terms; the later paragraph carries them.
+    const body = [
+      'A reader mentioned bed bug bites to us last month again.',
+      '',
+      'Comparing bed bug bites against flea bites helps homeowners.',
+    ].join('\n');
+    const task = {
+      anchor_text: 'bed bug bites',
+      source_offset: 9999, // stale — forces relocation
+      target_keyword: 'bed bug bites vs flea bites',
+      context_snippet: 'A reader mentioned bed bug bites and flea bites to us last month.',
+    };
+    // Raw context overlap favors the first (edited) paragraph; the keyword
+    // ranking sees "flea"/"bites" support only in the second.
+    expect(placementForTask(body, task).index).toBe(body.indexOf('bed bug bites', body.indexOf('Comparing')));
+  });
   test('drift relocation compares full paragraphs, not just snippet windows', () => {
     const { placementForTask } = planner._internals;
     const body = [

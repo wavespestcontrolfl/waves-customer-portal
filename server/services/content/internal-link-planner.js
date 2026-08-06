@@ -361,15 +361,14 @@ function placementForTask(body, task) {
       return { index: offset, length: anchor.length, snippet: snippetAround(text, offset, anchor.length), paragraph, anchor };
     }
   }
-  // Drifted file: relocate using the persisted context (the full scored
-  // paragraph) — the planner may have deliberately scanned past a thin
-  // early mention, and a plain first-eligible scan would revive exactly
-  // that occurrence. Among the eligible occurrences, prefer the one whose
-  // paragraph best matches the one scored at plan time.
-  return relocateByContext(text, anchor, task?.context_snippet);
+  // Drifted file: relocate using the persisted target keyword and context
+  // (the full scored paragraph) — the planner may have deliberately scanned
+  // past a thin early mention, and a plain first-eligible scan would revive
+  // exactly that occurrence.
+  return relocateByContext(text, anchor, task?.context_snippet, task?.target_keyword);
 }
 
-function relocateByContext(body, phrase, contextSnippet) {
+function relocateByContext(body, phrase, contextSnippet, targetKeyword) {
   const occurrences = [];
   let fromIndex = 0;
   for (let i = 0; i < MAX_PLACEMENT_SCAN; i++) {
@@ -380,21 +379,31 @@ function relocateByContext(body, phrase, contextSnippet) {
   }
   if (!occurrences.length) return null;
   const contextTokens = snippetTokens(contextSnippet);
-  if (!contextTokens.size) return occurrences[0];
+  const keywordTokens = snippetTokens(targetKeyword);
+  if (!contextTokens.size && !keywordTokens.size) return occurrences[0];
+  // Rank by the TARGET's topical terms first (a relevance proxy available
+  // to every call site from the task row alone — an edited old paragraph
+  // can keep incidental wording, and raw context overlap alone would pick
+  // it over an occurrence that still carries the target terms), then by
+  // full-paragraph context overlap; earliest wins remaining ties.
   let best = occurrences[0];
-  let bestOverlap = -1;
+  let bestKeywordOverlap = -1;
+  let bestContextOverlap = -1;
   for (const occ of occurrences) {
-    let overlap = 0;
-    // Compare against the occurrence's FULL paragraph, not its ±50-char
-    // snippet — the planned paragraph's distinguishing terms can sit beyond
-    // the snippet window, and a snippet-level tie would keep the earlier
-    // thin mention that planning deliberately rejected.
-    for (const token of snippetTokens(occ.paragraph)) {
-      if (contextTokens.has(token)) overlap++;
+    const paragraphTokens = snippetTokens(occ.paragraph);
+    let keywordOverlap = 0;
+    for (const token of keywordTokens) {
+      if (paragraphTokens.has(token)) keywordOverlap++;
     }
-    if (overlap > bestOverlap) {
+    let contextOverlap = 0;
+    for (const token of paragraphTokens) {
+      if (contextTokens.has(token)) contextOverlap++;
+    }
+    if (keywordOverlap > bestKeywordOverlap
+      || (keywordOverlap === bestKeywordOverlap && contextOverlap > bestContextOverlap)) {
       best = occ;
-      bestOverlap = overlap;
+      bestKeywordOverlap = keywordOverlap;
+      bestContextOverlap = contextOverlap;
     }
   }
   return best;
