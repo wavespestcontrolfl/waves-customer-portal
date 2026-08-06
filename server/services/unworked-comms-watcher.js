@@ -255,6 +255,10 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
           AND fe.sent_at IS NOT NULL AND fe.sent_at > t.created_at
           AND (fe.estimate_data #>> '{estimatorEngine,callLogId}' = src.id::text
             OR (fe.customer_phone IS NOT NULL
+              -- Unlinked estimates only (codex r43): the task is unlinked
+              -- because the phone is SHARED — another member's linked
+              -- estimate must not clear this caller's quote.
+              AND fe.customer_id IS NULL
               AND RIGHT(REGEXP_REPLACE(fe.customer_phone, '\\D', '', 'g'), 10)
                 = RIGHT(REGEXP_REPLACE(COALESCE(CASE WHEN src.direction = 'outbound' THEN src.to_phone ELSE src.from_phone END, ''), '\\D', '', 'g'), 10)))
       ))

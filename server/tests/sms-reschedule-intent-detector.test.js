@@ -432,3 +432,24 @@ describe('skip treatment and leading-context stand-downs (codex r42)', () => {
     expect(hasRescheduleOrAwayIntent("For tomorrow's appointment, can you not come?")).toBe(true);
   });
 });
+
+describe('past miss reports and treatment moves (codex r43)', () => {
+  test('missed yesterdays appointment stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent("I missed yesterday's appointment")).toBe(false);
+  });
+  test('have to miss tomorrows appointment still flags', () => {
+    expect(hasRescheduleOrAwayIntent("I have to miss tomorrow's appointment")).toBe(true);
+  });
+  test('move tomorrows treatment flags', () => {
+    expect(hasRescheduleOrAwayIntent("Can we move tomorrow's treatment?")).toBe(true);
+  });
+  test('move my treatment tomorrow flags', () => {
+    expect(hasRescheduleOrAwayIntent('Please move my treatment tomorrow')).toBe(true);
+  });
+  test('push tomorrows service flags', () => {
+    expect(hasRescheduleOrAwayIntent("Can we push tomorrow's service?")).toBe(true);
+  });
+  test('changing treatment plans stays quiet', () => {
+    expect(hasRescheduleOrAwayIntent('We are changing treatment plans with our doctor')).toBe(false);
+  });
+});
