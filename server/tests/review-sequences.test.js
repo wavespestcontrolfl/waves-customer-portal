@@ -1046,6 +1046,50 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan.plan[0].templateKey).toBe('first_treatment_ask');
   });
 
+  test('canonical street keys, stamped-rental vs unstamped-legacy premises, and long-chain exemption (codex #3243 r6)', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // Equivalent formats are ONE premise: "12 Palm Ave" priors "12 Palm Avenue".
+    let mock = makeMock({
+      scheduled_services: [
+        { id: 'cf-1', customer_id: 'cf', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null, service_address_line1: '12 Palm Ave.', service_address_zip: '34205' },
+        { id: 'cf-2', customer_id: 'cf', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3, property_id: null, service_address_line1: '12 Palm Avenue', service_address_zip: '34205-1234' },
+      ],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'cf', scheduledServiceId: 'cf-2' });
+    expect(plan.seriesFinal).toBe(true);
+
+    // A stamped UNMATCHED rental (stamp differs from the on-file primary)
+    // must not adopt an unstamped legacy visit as its prior.
+    mock = makeMock({
+      customers: [{ id: 'sr', first_name: 'Lee', address_line1: '12 Palm Ave', zip: '34205' }],
+      scheduled_services: [
+        { id: 'sr-1', customer_id: 'sr', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null },
+        { id: 'sr-2', customer_id: 'sr', service_id: 'svc-trap', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping', follow_up_interval_days: 3, property_id: null, service_address_line1: '99 Oak St', service_address_zip: '34293' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'sr', scheduledServiceId: 'sr-2' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+
+    // A ~160-day chain of adjacent checks reaches the opener's sequence.
+    const chain = [];
+    for (let i = 0; i < 9; i += 1) {
+      chain.push({ id: `lc-${i}`, customer_id: 'lc', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(160 - i * 20), service_key: 'rodent_trapping_followup' });
+    }
+    chain.push({ id: 'lc-final', customer_id: 'lc', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 });
+    mock = makeMock({
+      scheduled_services: chain,
+      review_sequences: [{ id: 'seq-lc-opener', customer_id: 'lc', scheduled_service_id: 'lc-0', status: 'completed' }],
+    });
+    db.mockImplementation(mock);
+    const exempt = await ReviewService._seriesExemptSequenceIds('lc', { scheduledServiceId: 'lc-final' });
+    expect(exempt).toContain('seq-lc-opener');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);

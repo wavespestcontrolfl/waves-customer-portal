@@ -39,14 +39,21 @@ const TRAPPING_MULTI_TREATMENT_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS, "
 function trappingSeriesKeysFor(serviceKey) {
   return serviceKey === "wildlife_trapping" ? ["wildlife_trapping"] : [...RODENT_TRAPPING_SERIES_KEYS];
 }
-// Normalized stamped-address identity for premise comparison. NULL when the
-// row carries no usable stamp (legacy rows) — callers treat that as
-// "no conflict evidence", not as a match.
-function premiseAddressKey(row) {
-  const line1 = String(row?.service_address_line1 || "").trim().toLowerCase().replace(/\s+/g, " ");
-  if (!line1) return null;
-  const zip = String(row?.service_address_zip || "").trim().slice(0, 5);
-  return `${line1}|${zip}`;
+// Stamped-address conflict for premise comparison — CANONICAL forms via the
+// property-dedup streetKey ("123 Main St." == "123 Main Street", suffixes
+// never stripped) and normalizeZip, the same identity stampedAddressDiverges
+// uses (codex #3243 r6 P1: a parallel whitespace-only rule split equivalent
+// formats into different premises). Each leg requires BOTH sides present —
+// a missing value is unknown, not different.
+function premiseStampConflicts(a, b) {
+  const { streetKey, normalizeZip } = require("./customer-properties");
+  const sa = streetKey(a?.service_address_line1);
+  const sb = streetKey(b?.service_address_line1);
+  if (!sa || !sb) return false;
+  if (sa !== sb) return true;
+  const za = normalizeZip(a?.service_address_zip);
+  const zb = normalizeZip(b?.service_address_zip);
+  return !!(za && zb && za !== zb);
 }
 // Premise predicate for trapping history (codex #3243 r2+r3+r5 P2): a linked
 // NON-primary property (rental, second home) is strict; the primary premise
@@ -63,19 +70,36 @@ function premiseAddressKey(row) {
 // not a guarantee.
 async function trappingPremiseMatcher(customerId, visit) {
   try {
-    const visitAddr = premiseAddressKey(visit);
-    const addrConflicts = (row) => {
-      const rowAddr = premiseAddressKey(row);
-      return !!(visitAddr && rowAddr && rowAddr !== visitAddr);
-    };
     if (visit.property_id) {
       const prop = await db("customer_properties").where({ id: visit.property_id }).select("id", "is_primary").first();
       if (prop && !prop.is_primary) return (row) => row.property_id === visit.property_id;
-      return (row) => !addrConflicts(row) && (row.property_id == null || row.property_id === visit.property_id);
     }
+    // Primary-or-NULL visit. NULL is ambiguous — legacy primary OR an
+    // unmatched caller-stated address (codex #3243 r6 P2; the linkage
+    // migration adds the stamp columns WITHOUT backfilling legacy rows) —
+    // so a lone stamp is judged against the customer's on-file primary
+    // address before the NULL fallback applies.
+    const cust = await db("customers").where({ id: customerId }).select("address_line1", "zip").first();
+    const primaryStamp = { service_address_line1: cust?.address_line1, service_address_zip: cust?.zip };
     const primary = await db("customer_properties").where({ customer_id: customerId, is_primary: true }).select("id").first();
     const primaryId = primary?.id || null;
-    return (row) => !addrConflicts(row) && (row.property_id == null || (primaryId != null && row.property_id === primaryId));
+    if (premiseStampConflicts(visit, primaryStamp)) {
+      // The visit is a stamped UNMATCHED premise (a rental the property
+      // table doesn't know): only rows stamped with the SAME address are
+      // the same series — unstamped legacy rows are the primary, not it.
+      return (row) => {
+        const { streetKey } = require("./customer-properties");
+        return !!streetKey(row?.service_address_line1) && !premiseStampConflicts(row, visit);
+      };
+    }
+    // The visit IS the primary premise: legacy NULL rows and rows carrying
+    // the backfilled primary id match; a row stamped with a DIFFERENT
+    // address than the primary does not, whatever its property_id.
+    return (row) => !premiseStampConflicts(row, primaryStamp)
+      && !premiseStampConflicts(row, visit)
+      && (row.property_id == null
+        || row.property_id === visit.property_id
+        || (primaryId != null && row.property_id === primaryId));
   } catch {
     return () => true;
   }
@@ -3069,7 +3093,12 @@ const ReviewService = {
         const collected = new Set(sourceIds);
         const queue = [visit, ...ancestorRows.filter((r) => r.scheduled_date != null)];
         const walkSelect = ["ps.id", "ps.scheduled_date", "ps.property_id", "ps.service_address_line1", "ps.service_address_zip", "ps.window_start", "ps.created_at"];
-        for (let hops = 0; queue.length && hops < 16; hops += 1) {
+        // Exhaust the queue (codex #3243 r6 P2): a dequeue cap truncated
+        // long chains — each cursor can enqueue several same-window
+        // siblings, starving the path to the opener. Termination is the
+        // seen-set (nothing enqueues twice); the collected-size bound is a
+        // runaway guard sized far above any real program.
+        while (queue.length && collected.size < 300) {
           const c = queue.shift();
           const w = etDayWindow(c.scheduled_date, windowDays);
           const rows = await db("scheduled_services as ps")
