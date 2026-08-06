@@ -2435,6 +2435,12 @@ const AppointmentReminders = {
         return record;
       }
 
+      // Pre-stamp state (codex r23): the retryable revert must restore
+      // pending_notify for caller-owned claims, not plain pending.
+      const preStampState = (await db('appointment_reminders')
+        .where({ id: record.id })
+        .first('cancellation_notice_state'))?.cancellation_notice_state || 'pending';
+
       // Accepted-before-dispatch guard (codex r7): a prior worker can
       // persist provider acceptance and die before finalizing — a
       // reclaimed/adopted lease must recognize that and finalize instead
@@ -2504,7 +2510,7 @@ const AppointmentReminders = {
             await db('appointment_reminders')
               .where({ id: record.id, cancellation_notice_state: 'sent' })
               .where('cancellation_notice_at', noticeToken)
-              .update({ cancellation_notice_state: 'pending', updated_at: new Date() });
+              .update({ cancellation_notice_state: preStampState === 'pending_notify' ? 'pending_notify' : 'pending', updated_at: new Date() });
             // Keep the pending lease ONLY while the sweep runs to settle
             // it — with the gate off there is no sweep, so parking would
             // strand the claim and block an immediate route retry for the
@@ -2560,7 +2566,10 @@ const AppointmentReminders = {
             // reclaim.
             preDispatchCheck: async () => {
               const own = await db('appointment_reminders')
-                .where({ id: record.id }).whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                .where({ id: record.id })
+                // Includes our own pre-dispatch 'sent' stamp so contact
+                // fanout continues (codex r23).
+                .whereIn('cancellation_notice_state', ['pending', 'pending_notify', 'sent'])
                 .where('cancellation_notice_at', noticeToken)
                 .first('id');
               if (!own) return { ok: false, code: 'notice_claim_lost', reason: 'cancellation-notice lease was reclaimed' };
@@ -2900,6 +2909,14 @@ const AppointmentReminders = {
           .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel = 'email')")
           .first('id'));
         if (!delivered) {
+          // Appointment EMAILS audit into customer_interactions (r23).
+          delivered = Boolean(await db('customer_interactions')
+            .where({ interaction_type: 'email_outbound' })
+            .whereRaw("metadata->>'scheduled_service_id' = ANY(?)", [serviceIds])
+            .whereRaw("metadata->>'status' = 'sent'")
+            .first('id'));
+        }
+        if (!delivered) {
           // Legacy-grace (r15): pre-epoch rows have unlinked audits.
           delivered = Boolean(await db('appointment_reminders')
             .whereIn('id', reminderIds)
@@ -3026,6 +3043,14 @@ const AppointmentReminders = {
               .where({ cancellation_notice_state: 'sent' })
               .where('cancellation_notice_at', seriesToken)
               .update({ cancellation_notice_state: 'pending', updated_at: new Date() });
+            const notifyRowIds = seriesSendOutcome.notifyRowIds || [];
+            if (notifyRowIds.length) {
+              await db('appointment_reminders')
+                .whereIn('id', notifyRowIds)
+                .where({ cancellation_notice_state: 'pending' })
+                .where('cancellation_notice_at', seriesToken)
+                .update({ cancellation_notice_state: 'pending_notify', updated_at: new Date() });
+            }
             // Keep the leases REGARDLESS of the gate (r14): a series has
             // no manual retry (the route's target query excludes
             // already-cancelled rows), so releasing strands the
@@ -3139,6 +3164,14 @@ const AppointmentReminders = {
             if (restored) {
               return { ok: false, code: 'appointment_restored', reason: 'a series target is live again' };
             }
+            // Pre-stamp notify set (codex r23): the retryable revert must
+            // restore pending_notify per row.
+            const notifyRows = await db('appointment_reminders')
+              .whereIn('scheduled_service_id', ids)
+              .where({ cancellation_notice_state: 'pending_notify' })
+              .where('cancellation_notice_at', seriesToken)
+              .select('id');
+            seriesSendOutcome.notifyRowIds = notifyRows.map((r) => r.id);
             // Durable pre-dispatch stamp for the group (codex r21/r22):
             // accepts our own prior stamp; zero rows = cleared mid-flight.
             const stamped = await db('appointment_reminders')
@@ -3148,6 +3181,16 @@ const AppointmentReminders = {
               .update({ cancellation_notice_state: 'sent', updated_at: new Date() });
             if (!stamped) {
               return { ok: false, code: 'notice_claim_lost', reason: 'group claims cleared before dispatch' };
+            }
+            // Post-stamp restored re-check (codex r23): a restoration
+            // landing between the status scan and the stamp cleared one
+            // target's claim without failing the multi-row stamp.
+            const restoredLate = await db('scheduled_services')
+              .whereIn('id', ids)
+              .whereNot('status', 'cancelled')
+              .first('id');
+            if (restoredLate) {
+              return { ok: false, code: 'appointment_restored', reason: 'a series target went live after the stamp' };
             }
             seriesSendOutcome.dispatchStarted = true;
             return { ok: true };

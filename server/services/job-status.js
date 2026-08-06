@@ -546,6 +546,15 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
           .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel = 'email')")
           .first('id'));
         if (!delivered) {
+          // Appointment EMAILS audit into customer_interactions, not
+          // messaging_audit_log (codex r23).
+          delivered = Boolean(await db('customer_interactions')
+            .where({ interaction_type: 'email_outbound' })
+            .whereRaw("metadata->>'scheduled_service_id' = ?", [String(jobId)])
+            .whereRaw("metadata->>'status' = 'sent'")
+            .first('id'));
+        }
+        if (!delivered) {
           // Legacy-grace (codex r15): rows created before the linkage
           // epoch have unlinked audits — judge announcement by the
           // reminder flags for that bounded window only.
