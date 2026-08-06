@@ -881,6 +881,14 @@ violations at the severity noted.
   `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
   token, public `Cache-Control`. Consumed by the Astro build and the admin blog
   UI; no PII).
+  `/api/public/pricing-ranges` (read-only engine-derived per-service price
+  ranges — no auth, no token, public `Cache-Control`, no side effects, no PII.
+  Ranges are computed from the live pricing engine (DB-authoritative
+  pricing_config) so the published numbers cannot drift from admin-edited
+  pricing; owner ruling 2026-08-06 approved publishing ranges for all
+  residential services. Consumed by the Astro build for the agent-readable
+  /pricing.md surface and directly by AI agents. Exact per-property pricing
+  stays on POST /api/public/quote/calculate).
   `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
   canonical FDACS / license / insurance numbers — no auth, no token, public
   `Cache-Control`. Consumed by the Astro content build; intentionally public

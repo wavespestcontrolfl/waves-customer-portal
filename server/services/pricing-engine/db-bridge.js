@@ -787,10 +787,42 @@ async function syncPreSlabContainerCostsFromCatalog(db) {
   }
 }
 
-async function syncConstantsFromDB(dbInstance) {
+// Counter, not a boolean: overlapping direct callers (route + admin config
+// + proposal approval) must all be tracked — the first to finish must not
+// clear the flag while another sync is still mutating constants.
+let _syncsInFlight = 0;
+function isSyncInFlight() {
+  return _syncsInFlight > 0;
+}
+
+// Serialize syncs: overlapping direct callers (route, admin config,
+// proposal approval) must not interleave — a later sync's snapshot taken
+// mid-mutation of an earlier one could restore mixed constants on failure.
+let _syncQueue = Promise.resolve();
+let _pendingRun = null;
+function syncConstantsFromDB(dbInstance) {
+  // Coalesce waiters: while a sync is queued-but-not-started, additional
+  // callers share that pending run instead of enqueueing duplicates (N
+  // concurrent readers trigger ONE refresh, not N serial DB reads). A caller
+  // arriving while no run is pending still gets a run that starts after any
+  // active sync — admin post-write callers always see their edit applied.
+  if (_pendingRun) return _pendingRun;
+  const run = _syncQueue.then(() => {
+    _pendingRun = null;
+    return _syncConstantsFromDBUnserialized(dbInstance);
+  });
+  _pendingRun = run;
+  _syncQueue = run.catch(() => {});
+  return run;
+}
+
+async function _syncConstantsFromDBUnserialized(dbInstance) {
   const db = dbInstance || require('../../models/db');
+  _syncsInFlight += 1;
   let constantsSnapshot = null;
 
+  // The finally below is the ONLY decrement — early returns (missing table,
+  // empty config) and throws all pass through it, so the counter can't leak.
   try {
     const hasTable = await db.schema.hasTable('pricing_config');
     if (!hasTable) return false;
@@ -1793,7 +1825,16 @@ async function syncConstantsFromDB(dbInstance) {
     restorePricingConstants(constantsSnapshot);
     console.error('[pricing-engine] DB sync failed, using defaults:', err.message);
     return false;
+  } finally {
+    _syncsInFlight = Math.max(0, _syncsInFlight - 1);
   }
+}
+
+// Exposes when constants last successfully synced — public-ranges keys its
+// payload cache to this so ANY sync (route-triggered or admin proposal
+// approval) invalidates it, never only this module's own callers.
+function getLastSyncAt() {
+  return _lastSync;
 }
 
 function needsSync() {
@@ -1805,6 +1846,8 @@ function invalidatePricingConfigCache() {
 }
 
 module.exports = {
+  getLastSyncAt,
+  isSyncInFlight,
   syncConstantsFromDB,
   needsSync,
   invalidatePricingConfigCache,

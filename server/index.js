@@ -541,6 +541,7 @@ app.use('/api/public/ui-flags', require('./routes/public-ui-flags'));
 app.use('/api/public/social-feed', require('./routes/social-feed-public'));
 app.use('/api/public/automation-preview', require('./routes/public-automation-preview'));
 app.use('/api/public/service-areas', require('./routes/public-service-areas'));
+app.use('/api/public/pricing-ranges', require('./routes/public-pricing-ranges'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
 app.use('/api/public/track', require('./routes/track-public'));
 // Client-side GrowthBook exposure intake (experimentation Phase 2) — gated by
