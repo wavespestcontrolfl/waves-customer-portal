@@ -24,7 +24,7 @@ const FOOTPRINTS_SQFT = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000, 6000];
 const LOTS_SQFT = [5000, 8000, 12000, 20000, 30000];
 // Confirmed measured turf above the 20,000 sq ft table maximum still
 // prices (extrapolated, provenance review only) — sweep through 30,000.
-const LAWNS_SQFT = [2000, 4000, 6000, 8000, 12000, 16000, 20000, 30000];
+const LAWNS_SQFT = [2000, 4000, 6000, 8000, 12000, 16000, 20000, 30000, 40000];
 
 function sweepValues(inputs, fn, pick) {
   const values = [];
@@ -83,14 +83,19 @@ function waveGuardBundleValues() {
       for (const propertyType of ['single_family', 'condo_upper']) {
         for (const frequency of ['quarterly', 'monthly']) {
       // Dimensions are TOP-LEVEL generateEstimate inputs (a nested
-      // property object is ignored by the profile builder).
+      // property object is ignored by the profile builder). Two option
+      // sets: defaults, and the cheapest selectable lawn/tree-shrub combo.
+      for (const optionSet of [
+        { lawnSqFt: 6000, lawn: {}, treeShrub: {} },
+        { lawnSqFt: 1500, lawn: { track: 'bahia', tier: 'premium' }, treeShrub: { tier: 'light' } },
+      ]) {
       const est = generateEstimate({
         propertyType,
         footprint,
         lotSqFt,
-        lawnSqFt: 6000,
+        lawnSqFt: optionSet.lawnSqFt,
         features: { shrubs: 'light', complexity: 'simple' },
-        services: { lawn: {}, pest: { frequency }, mosquito: {}, treeShrub: {}, termiteBait: {}, palm: { treatmentType: 'nutrition', palmCount: 5 } },
+        services: { lawn: optionSet.lawn, pest: { frequency }, mosquito: {}, treeShrub: optionSet.treeShrub, termiteBait: {}, palm: { treatmentType: 'nutrition', palmCount: 5 } },
       });
       for (const li of est.lineItems || []) {
         const ratio = li.annualBeforeDiscount > 0 && Number.isFinite(li.annualAfterDiscount)
@@ -108,6 +113,7 @@ function waveGuardBundleValues() {
         }
       }
         }
+      }
       }
     }
   }
@@ -214,14 +220,14 @@ function buildRows() {
   add('german_roach_initial', () => rangeRow({
     key: 'german_roach_initial',
     name: 'German Roach Initial (3-Visit)',
-    unit: 'per application',
+    unit: 'per program',
     // Agent-selectable initial series; the pricer applies the
     // recurring-customer perk INTERNALLY (excluded from the generic pass),
     // so sweep the flag rather than using oneTimePerkKey.
     values: sweepValues([false, true],
       (isRecurringCustomer) => sp.priceGermanRoachInitial({ isRecurringCustomer }),
       (r) => r.price),
-    notes: '3-visit initial series for German roach activity within a recurring plan; heavy infestations use the cleanout program.',
+    notes: 'One program price covering the 3-visit initial series for German roach activity within a recurring plan; heavy infestations use the cleanout program.',
   }));
 
   add('bed_bug_treatment', () => rangeRow({
@@ -540,7 +546,7 @@ function buildRows() {
           ['standard', 'high'].flatMap((applicationRate) =>
             [0.5, 1, 1.5].flatMap((trenchDepthFt) =>
               ['none', 'one_year_retreat', 'five_year_repair_retreat'].flatMap((warrantyTier) =>
-                [0.2, 0.5].map((concretePct) => ({ perimeterLF, productKey, applicationRate, trenchDepthFt, warrantyTier, concretePct }))))))),
+                [0.2, 0.6].map((concretePct) => ({ perimeterLF, productKey, applicationRate, trenchDepthFt, warrantyTier, concretePct }))))))),
       (opts) => sp.priceTrenching({ footprint: 2500 }, { ...opts, labelConfirmed: true }),
       // Explicit perimeter input always flags measurement-provenance review
       // reasons; that's about verifying footage on site, not a refusal to
@@ -796,7 +802,7 @@ function buildRows() {
       (r) => (r.trapOnlyRetainerBilling === 'annual'
         ? r.trapOnlyRetainerAnnualPrice / 12
         : r.trapOnlyRetainerMonthlyPrice)),
-    notes: 'Monitoring with scheduled visits and included response callbacks; monthly billing, or discounted annual prepay (setup fee waived). A one-time setup fee applies to monthly billing. No structural warranty without exclusion.',
+    notes: `Monitoring with scheduled visits and included response callbacks; monthly billing, or discounted annual prepay (setup fee waived). A one-time $${Math.round(Number(constants.RODENT.trapOnlyRetainer.setupFee) || 0)} setup fee applies to monthly billing, and callbacks beyond the included allowance bill $${Math.round(Number(constants.RODENT.trapOnlyRetainer.extraCallbackRate) || 0)} each. No structural warranty without exclusion.`,
   }));
 
   add('recurring_foam', () => rangeRow({
