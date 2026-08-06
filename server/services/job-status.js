@@ -579,6 +579,16 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
                 });
             })
             .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
+            // Survivor guard IN the stamp (codex #3238 r4): a live
+            // same-customer/same-slot sibling appearing between the
+            // classification read and this update must void the
+            // pending_notify — zero rows stamped leaves the marker
+            // unclaimed for the evidence-gated late-claim.
+            .modify((q) => {
+              if (repairState === 'pending_notify') {
+                q.whereRaw("NOT EXISTS (SELECT 1 FROM appointment_reminders sib2 WHERE sib2.customer_id = appointment_reminders.customer_id AND sib2.appointment_time = appointment_reminders.appointment_time AND sib2.cancelled = false AND sib2.scheduled_service_id IS DISTINCT FROM appointment_reminders.scheduled_service_id)");
+              }
+            })
             .update({ cancellation_notice_at: callerTs, cancellation_notice_state: repairState, updated_at: callerTs });
           return;
         }
