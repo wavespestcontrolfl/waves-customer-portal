@@ -799,8 +799,19 @@ function isSyncInFlight() {
 // proposal approval) must not interleave — a later sync's snapshot taken
 // mid-mutation of an earlier one could restore mixed constants on failure.
 let _syncQueue = Promise.resolve();
+let _pendingRun = null;
 function syncConstantsFromDB(dbInstance) {
-  const run = _syncQueue.then(() => _syncConstantsFromDBUnserialized(dbInstance));
+  // Coalesce waiters: while a sync is queued-but-not-started, additional
+  // callers share that pending run instead of enqueueing duplicates (N
+  // concurrent readers trigger ONE refresh, not N serial DB reads). A caller
+  // arriving while no run is pending still gets a run that starts after any
+  // active sync — admin post-write callers always see their edit applied.
+  if (_pendingRun) return _pendingRun;
+  const run = _syncQueue.then(() => {
+    _pendingRun = null;
+    return _syncConstantsFromDBUnserialized(dbInstance);
+  });
+  _pendingRun = run;
   _syncQueue = run.catch(() => {});
   return run;
 }

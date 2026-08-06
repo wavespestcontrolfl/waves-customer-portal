@@ -20,7 +20,16 @@
 const constants = require('./constants');
 const sp = require('./service-pricing');
 
-const FOOTPRINTS_SQFT = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000, 6000];
+// Base span plus every LIVE pest bracket boundary (and one past the last)
+// so admin bracket edits propagate into the sweep automatically.
+const FOOTPRINTS_BASE = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000, 6000];
+function footprintsFromBrackets() {
+  const boundaries = (constants.PEST.footprintBrackets || [])
+    .map((b) => Number(b.sqft)).filter((v) => Number.isFinite(v) && v > 0);
+  const last = boundaries.length ? Math.max(...boundaries) : 0;
+  return [...new Set([...FOOTPRINTS_BASE, ...boundaries, ...(last ? [last + 500] : [])])];
+}
+const FOOTPRINTS_SQFT = footprintsFromBrackets();
 const LOTS_SQFT = [5000, 8000, 12000, 20000, 30000];
 // Confirmed measured turf above the 20,000 sq ft table maximum still
 // prices (extrapolated, provenance review only) — sweep through 30,000.
@@ -313,6 +322,9 @@ function buildRows() {
           .flatMap((cat) => (Number.isFinite(cat.maxSqFt) ? [cat.maxSqFt + 2000, cat.maxSqFt + 2001] : []))
           .map((treatable) => treatable), // + footprint 2000 passed below
         ...LOTS_SQFT, 45560, 62000,
+        // Deep terminal-anchor sample: the open-ended top category continues
+        // stepping by priceStepSqFt, so sweep well past the last boundary.
+        62000 + (Number(constants.MOSQUITO.priceStepSqFt) || 500) * 40,
       ])].flatMap((lotSqFt) => MOSQUITO_PROFILES.map((p) => ({ lotSqFt, p }))),
       ({ lotSqFt, p }) => sp.priceMosquito({ footprint: 2000, lotSqFt, features: p.features }, { ...p.options, ...p.addOns }),
       // Per-application amount including any station/dunk add-ons amortized
@@ -382,6 +394,7 @@ function buildRows() {
       [...new Set([
         ...FOOTPRINTS_SQFT,
         ...(((constants.SPECIALTY.flea.footprintAdjustments || {}).initial) || []).map((b) => b.at),
+        ...(((constants.SPECIALTY.flea.footprintAdjustments || {}).followUp) || []).map((b) => b.at),
         (((((constants.SPECIALTY.flea.footprintAdjustments || {}).initial) || []).slice(-1)[0] || {}).at || 4000) + 2000,
       ])].flatMap((f) => FLEA_PROFILES.map((p) => ({ f, p }))),
       ({ f, p }) => sp.priceFlea({ footprint: f, ...p }),
@@ -511,7 +524,7 @@ function buildRows() {
       FOOTPRINTS_SQFT.flatMap((f) => TERMITE_BAIT_PROFILES.map((opts) => ({ f, opts }))),
       ({ f, opts }) => sp.priceTermiteBait({ footprint: f }, opts),
       (r) => (r.quoteRequired ? NaN : r.installation && r.installation.price)),
-    notes: 'Priced by home perimeter and structural complexity.',
+    notes: 'Priced by home perimeter and structural complexity — larger measured perimeters extend beyond this range by station count.',
   }));
 
   add('termite_bait_monitoring', () => rangeRow({
