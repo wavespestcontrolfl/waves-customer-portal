@@ -1379,3 +1379,58 @@ describe('codex #3235 r6 — series correlation + personalization gating', () =>
     expect(mock.__state.rows.review_requests[0].template_key).toBe('review_request_email');
   });
 });
+
+describe('codex #3235 r7 — lineage walk + visit-context exemption', () => {
+  test('a 3-visit chain: the final visit exempts the FIRST visit\'s ask through the middle hop', async () => {
+    mockGates.reviewSequences = true;
+    const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'ch-1', first_name: 'Rob', last_name: 'W', phone: '+19410000063', nearest_location_id: 'bradenton' }],
+      review_sequences: [{ id: 'seq-v1', customer_id: 'ch-1', service_record_id: 'sr-v1', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: tenDaysAgo }],
+      review_requests: [{ id: 'rr-v1', customer_id: 'ch-1', sequence_id: 'seq-v1', template_key: 'first_treatment_ask', channel: 'sms', status: 'sent', sms_sent_at: tenDaysAgo, sent_at: tenDaysAgo }],
+      service_records: [
+        { id: 'sr-v1', customer_id: 'ch-1', scheduled_service_id: 'ss-v1' },
+        { id: 'sr-v3', customer_id: 'ch-1', scheduled_service_id: 'ss-v3' },
+      ],
+      scheduled_services: [
+        { id: 'ss-v1', customer_id: 'ch-1', status: 'completed', scheduled_date: d(14) },
+        { id: 'ss-v2', customer_id: 'ch-1', parent_service_id: 'ss-v1', status: 'completed', scheduled_date: d(7) },
+        { id: 'ss-v3', customer_id: 'ch-1', parent_service_id: 'ss-v2', status: 'completed', scheduled_date: d(0) },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'ch-1', serviceRecordId: 'sr-v3', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const seq = mock.__state.rows.review_sequences.find((r) => r.id !== 'seq-v1');
+    expect(JSON.parse(seq.plan)).toHaveLength(3);
+  });
+
+  test('a final visit completed with only a scheduled_services id (no record row) still exempts its series ask', async () => {
+    mockGates.reviewSequences = true;
+    const tenDaysAgo = new Date(Date.now() - 10 * 86400000);
+    const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'nv-1', first_name: 'Mia', last_name: 'X', phone: '+19410000064', nearest_location_id: 'bradenton' }],
+      review_sequences: [{ id: 'seq-n1', customer_id: 'nv-1', service_record_id: 'sr-n1', status: 'completed', stop_reason: 'completed', plan: '[]', started_at: tenDaysAgo }],
+      review_requests: [{ id: 'rr-n1', customer_id: 'nv-1', sequence_id: 'seq-n1', template_key: 'first_treatment_ask', channel: 'sms', status: 'sent', sms_sent_at: tenDaysAgo, sent_at: tenDaysAgo }],
+      service_records: [{ id: 'sr-n1', customer_id: 'nv-1', scheduled_service_id: 'ss-n1' }],
+      scheduled_services: [
+        { id: 'ss-n1', customer_id: 'nv-1', status: 'completed', scheduled_date: d(10) },
+        { id: 'ss-n2', customer_id: 'nv-1', followup_source_service_id: 'ss-n1', status: 'completed', scheduled_date: d(0) },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    // No service_records row for the final visit — only the visit id.
+    const result = await ReviewService.enrollPostService({ customerId: 'nv-1', scheduledServiceId: 'ss-n2', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const seq = mock.__state.rows.review_sequences.find((r) => r.id !== 'seq-n1');
+    expect(JSON.parse(seq.plan)).toHaveLength(3);
+    // The visit identity is persisted for the runner's own lineage walk.
+    expect(seq.scheduled_service_id).toBe('ss-n2');
+  });
+});

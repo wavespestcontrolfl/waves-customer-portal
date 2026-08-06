@@ -99,6 +99,15 @@ const BANNED_RE = new RegExp(
 // compete with the tracked CTA.
 const URL_RE = /(?:https?:\/\/|www\.)|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|io|co|us|biz|info|page|app|gl|ly|me|dev|link|site)\b/i;
 
+// Word-bounded first-name presence (codex #3235 r7 P2): a substring check
+// let "Al" pass on "all"/"always", sending personalized copy that never
+// addresses the recipient. Regex-escaped; \b works for apostrophes/hyphens
+// inside names because the boundary only needs the name's first/last chars.
+function containsNameAsWord(text, firstName) {
+  const escaped = String(firstName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}\\b`, "i").test(String(text));
+}
+
 // Smart punctuation → GSM-7 equivalents so one em dash doesn't flip the whole
 // message to UCS-2 and double the segment count (Codex P2, r1).
 function normalizeSmsPunctuation(text) {
@@ -127,7 +136,7 @@ function verifyDraftBody(body, { firstName } = {}) {
   // Placeholder hygiene: nothing but the link token may survive rendering.
   const stray = withoutPlaceholder.match(/\{[a-z_]+\}/i);
   if (stray) return "stray_placeholder";
-  if (firstName && !text.toLowerCase().includes(String(firstName).toLowerCase())) {
+  if (firstName && !containsNameAsWord(text, firstName)) {
     return "missing_name";
   }
   // Segment gate on the RENDERED preview — what actually leaves Twilio after
@@ -275,7 +284,7 @@ function verifyEmailIntro(body, { firstName } = {}) {
   if (BANNED_RE.test(text)) return "banned_phrase";
   if (URL_RE.test(text)) return "raw_url";
   if (/\{\{?[a-z_]+\}?\}/i.test(text)) return "stray_placeholder";
-  if (firstName && !text.toLowerCase().includes(String(firstName).toLowerCase())) {
+  if (firstName && !containsNameAsWord(text, firstName)) {
     return "missing_name";
   }
   return null;

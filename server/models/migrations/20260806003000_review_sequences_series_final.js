@@ -12,16 +12,31 @@
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('review_sequences'))) return;
-  if (await knex.schema.hasColumn('review_sequences', 'series_final')) return;
-  await knex.schema.alterTable('review_sequences', (t) => {
-    t.boolean('series_final').notNullable().defaultTo(false);
-  });
+  if (!(await knex.schema.hasColumn('review_sequences', 'series_final'))) {
+    await knex.schema.alterTable('review_sequences', (t) => {
+      t.boolean('series_final').notNullable().defaultTo(false);
+    });
+  }
+  // The visit identity backing the series lineage walk — the admin-schedule
+  // completion path can enroll before a service_records row exists, so the
+  // record id alone can't always reach the visit (codex #3235 r7 P1).
+  if (!(await knex.schema.hasColumn('review_sequences', 'scheduled_service_id'))) {
+    await knex.schema.alterTable('review_sequences', (t) => {
+      t.uuid('scheduled_service_id').nullable();
+    });
+  }
 };
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('review_sequences'))) return;
-  if (!(await knex.schema.hasColumn('review_sequences', 'series_final'))) return;
-  await knex.schema.alterTable('review_sequences', (t) => {
-    t.dropColumn('series_final');
-  });
+  if (await knex.schema.hasColumn('review_sequences', 'series_final')) {
+    await knex.schema.alterTable('review_sequences', (t) => {
+      t.dropColumn('series_final');
+    });
+  }
+  if (await knex.schema.hasColumn('review_sequences', 'scheduled_service_id')) {
+    await knex.schema.alterTable('review_sequences', (t) => {
+      t.dropColumn('scheduled_service_id');
+    });
+  }
 };

@@ -281,3 +281,15 @@ describe('draftEmailIntro — step-aware instruction (codex #3235 r1)', () => {
     expect(mockDispatch.mock.calls[0][1].system).toMatch(/final follow-up email/);
   });
 });
+
+describe('name matching is word-bounded (codex #3235 r7)', () => {
+  test('a short name inside another word does not satisfy the name check', () => {
+    expect(Drafter.verifyDraftBody('Hi there, all the ants are gone: {review_url}', { firstName: 'Al' })).toBe('missing_name');
+    expect(Drafter.verifyEmailIntro('We always appreciate you. Reply if anything is off.', { firstName: 'Al' })).toBe('missing_name');
+  });
+
+  test('the name as its own word passes', () => {
+    expect(Drafter.verifyDraftBody('Hi Al, ants gone? Quick review: {review_url} Reply if off.', { firstName: 'Al' })).toBeNull();
+    expect(Drafter.verifyEmailIntro('Hi Al, thanks for having us out. Reply if anything is off.', { firstName: 'Al' })).toBeNull();
+  });
+});

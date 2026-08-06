@@ -655,6 +655,7 @@ const ReviewService = {
       const result = await this.startReviewSequence({
         customerId,
         serviceRecordId,
+        scheduledServiceId,
         serviceType: svcType,
         techName: tName,
         startedBy: "post_service",
@@ -2189,7 +2190,7 @@ const ReviewService = {
    * with an active sequence returns that one instead of starting a second
    * (also enforced by the partial unique index). Fires step 0 immediately.
    */
-  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, firstTouchAt = null, seriesFinal = false }) {
+  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false }) {
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     if (customer.deleted_at) throw new Error("Customer is archived");
@@ -2225,7 +2226,7 @@ const ReviewService = {
     // seriesFinal scopes the first-treatment exemption to THIS series'
     // sequence ids (codex #3235 r4+r6 P1) — see getDeliveredAskStats.
     const enrollExemptIds = seriesFinal
-      ? await this._seriesExemptSequenceIds(customerId, serviceRecordId)
+      ? await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId })
       : [];
     const stats = await this.getDeliveredAskStats(customerId, { exemptSequenceIds: enrollExemptIds });
     if (stats.count >= 3) return { started: false, reason: "at_cap" };
@@ -2284,6 +2285,9 @@ const ReviewService = {
           // exemption deterministically (codex #3235 r5 P1).
           series_final: seriesFinal === true,
           service_record_id: serviceRecordId || null,
+          // Visit identity for the runner's lineage walk — the record row
+          // may not exist on the admin-schedule path (codex #3235 r7 P1).
+          scheduled_service_id: scheduledServiceId || null,
           tech_name: tName,
           service_type: svcType,
           started_by: startedBy || null,
@@ -2400,7 +2404,7 @@ const ReviewService = {
     // of THIS sequence's own series never supersedes or caps its final
     // cadence; any other sequence's ask still does.
     const runnerExemptIds = seq.series_final === true
-      ? await this._seriesExemptSequenceIds(seq.customer_id, seq.service_record_id)
+      ? await this._seriesExemptSequenceIds(seq.customer_id, { serviceRecordId: seq.service_record_id, scheduledServiceId: seq.scheduled_service_id })
       : [];
     const runnerExempt = new Set(runnerExemptIds);
 
@@ -2639,20 +2643,40 @@ const ReviewService = {
    * completed same-service visits in the last 60 days. Fail-open to [] —
    * no exemption means FEWER sends, never more.
    */
-  async _seriesExemptSequenceIds(customerId, serviceRecordId) {
+  async _seriesExemptSequenceIds(customerId, { serviceRecordId = null, scheduledServiceId = null } = {}) {
     try {
-      if (!serviceRecordId) return [];
-      const sr = await db("service_records")
-        .where({ id: serviceRecordId })
-        .select("scheduled_service_id")
-        .first();
-      if (!sr?.scheduled_service_id) return [];
+      let visitId = scheduledServiceId || null;
+      if (!visitId && serviceRecordId) {
+        const sr = await db("service_records")
+          .where({ id: serviceRecordId })
+          .select("scheduled_service_id")
+          .first();
+        visitId = sr?.scheduled_service_id || null;
+      }
+      if (!visitId) return [];
       const visit = await db("scheduled_services")
-        .where({ id: sr.scheduled_service_id })
+        .where({ id: visitId })
         .select("id", "parent_service_id", "followup_source_service_id", "service_id")
         .first();
       if (!visit) return [];
-      let sourceIds = [visit.parent_service_id, visit.followup_source_service_id].filter(Boolean);
+      // Walk the FULL ancestor chain (codex #3235 r7 P1): in a 3+ visit
+      // series the final visit's immediate parent is the middle visit, and
+      // only the chain's first visit carries the exempt ask. Bounded depth
+      // + cycle guard.
+      const seen = new Set([visit.id]);
+      let sourceIds = [];
+      let cursor = visit;
+      for (let depth = 0; depth < 6; depth += 1) {
+        const next = cursor.parent_service_id || cursor.followup_source_service_id;
+        if (!next || seen.has(next)) break;
+        seen.add(next);
+        sourceIds.push(next);
+        cursor = await db("scheduled_services")
+          .where({ id: next })
+          .select("id", "parent_service_id", "followup_source_service_id", "service_id")
+          .first();
+        if (!cursor) break;
+      }
       if (!sourceIds.length && visit.service_id) {
         const priors = await db("scheduled_services")
           .where({ customer_id: customerId, service_id: visit.service_id, status: "completed" })
