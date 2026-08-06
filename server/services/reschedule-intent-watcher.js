@@ -72,7 +72,7 @@ async function resolveActionedFlags() {
             .where(function changed() {
               // 'rescheduled' resolves even when the slot is unchanged —
               // the reschedule path can flip status only (codex r10).
-              this.whereIn('ss.status', ['cancelled', 'rescheduled'])
+              this.whereIn('ss.status', ['cancelled', 'rescheduled', 'skipped'])
                 .orWhereRaw("LEFT(agent_decisions.input_snapshot#>>'{visit,scheduled_date}', 10) <> ss.scheduled_date::text")
                 .orWhereRaw("COALESCE(agent_decisions.input_snapshot#>>'{visit,window_start}', '') <> COALESCE(ss.window_start::text, '')");
             });
@@ -118,7 +118,9 @@ async function loadUnactionedFlags() {
           .whereRaw("COALESCE(ad.input_snapshot#>>'{visit,window_start}', '') = COALESCE(ss.window_start::text, '')");
       });
     })
-    .orderBy('ad.created_at', 'asc')
+    // Newest-first (codex r14): oldest-first pinned the same stale prefix
+    // while fresh requests hid in the overflow count.
+    .orderBy('ad.created_at', 'desc')
     .limit(MAX_ROWS)
     .select(
       db.raw('COUNT(*) OVER () AS total_count'),

@@ -98,3 +98,10 @@ describe('r13 regression cases', () => {
     expect(hasRescheduleOrAwayIntent('Has my appointment been rescheduled?')).toBe(false);
   });
 });
+
+describe('r14 regression cases', () => {
+  test('present-tense away messages flag', () => {
+    expect(hasRescheduleOrAwayIntent("I'm away this week")).toBe(true);
+    expect(hasRescheduleOrAwayIntent("I'm not home tomorrow")).toBe(true);
+  });
+});

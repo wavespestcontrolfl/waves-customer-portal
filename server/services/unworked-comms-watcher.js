@@ -78,10 +78,11 @@ async function loadCallbackCalls(cutoff = new Date()) {
            COUNT(*) OVER () AS total_count
     FROM call_log c
     LEFT JOIN customers cu ON cu.id = c.customer_id
-    -- Windowed by disposition time (updated_at — stamped when the async
-    -- pipeline assigns the disposition), not ring time: a call dispositioned
-    -- after the cutoff belongs to the NEXT digest (codex r10).
-    WHERE c.updated_at >= ${ET_DAY_START_SQL}
+    -- Rolling 7-day live worklist (codex r14): callbacks are stateful —
+    -- an uncleared item must reappear until worked, so no marker boundary
+    -- can strand it (this also moots the mutable-updated_at window
+    -- concern) and overflow beyond the cap resurfaces on later runs.
+    WHERE c.updated_at >= now() - interval '7 days'
       AND c.updated_at <= :cutoff
       AND c.disposition = 'callback_task_created'
       -- Already returned: a later outbound CALL to the same number, or a
