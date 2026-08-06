@@ -78,10 +78,13 @@ function inheritReferenceUnit(row, reference) {
   if (!row || !reference) return row;
   const rowUnit = unitKey(row.service_address_line2) || streetEmbeddedUnitKey(row.service_address_line1);
   if (rowUnit) return row;
-  if (!reference.service_address_line2) return row;
+  // The reference's unit may live in line 2 OR embedded in its street line
+  // ("100 Main St Apt 7" — codex #3243 r13 P2); either form inherits.
+  const refUnit = unitKey(reference.service_address_line2) || streetEmbeddedUnitKey(reference.service_address_line1);
+  if (!refUnit) return row;
   const rs = streetKey(row.service_address_line1);
   if (!rs || rs !== streetKey(reference.service_address_line1)) return row;
-  return { ...row, service_address_line2: reference.service_address_line2 };
+  return { ...row, service_address_line2: reference.service_address_line2 || refUnit };
 }
 // Premise predicate for trapping history (codex #3243 r2+r3+r5 P2): a linked
 // NON-primary property (rental, second home) is strict; the primary premise
@@ -777,7 +780,7 @@ const ReviewService = {
             .where("fs.scheduled_date", ">", anchorStr)
             .where("fs.scheduled_date", "<=", ceilStr)
             .whereIn("fsv.service_key", seriesKeys)
-            .select("fs.id", "fs.status", "fs.property_id", "fs.service_address_line1", "fs.service_address_line2", "fs.service_address_city", "fs.service_address_zip");
+            .select("fs.id", "fs.status", "fs.property_id", "fs.scheduled_date", "fs.window_start", "fs.created_at", "fs.service_address_line1", "fs.service_address_line2", "fs.service_address_city", "fs.service_address_zip");
           // Same-day siblings (codex #3243 r5 P2: trap setup + same-day
           // capture/removal) are invisible to the date-only comparisons —
           // order them by appointment window (then created_at); an
@@ -788,7 +791,7 @@ const ReviewService = {
             .where("ds.id", "!=", svc.id)
             .where("ds.scheduled_date", anchorStr)
             .whereIn("dsv.service_key", seriesKeys)
-            .select("ds.id", "ds.status", "ds.property_id", "ds.service_address_line1", "ds.service_address_line2", "ds.service_address_city", "ds.service_address_zip", "ds.window_start", "ds.created_at");
+            .select("ds.id", "ds.status", "ds.property_id", "ds.scheduled_date", "ds.service_address_line1", "ds.service_address_line2", "ds.service_address_city", "ds.service_address_zip", "ds.window_start", "ds.created_at");
           const sameDayInPremise = sameDayRows.filter((r) => inPremise(r));
           if (!trapPrior) {
             trapPrior = sameDayInPremise.find(
@@ -799,8 +802,30 @@ const ReviewService = {
             ...laterRows.filter((r) => inPremise(r)),
             ...sameDayInPremise.filter((r) => compareSameDayVisits(r, svc) > 0),
           ].filter((r) => !FOLLOWUP_CHILD_INACTIVE_STATUSES.includes(r.status));
-          trapLaterLive = laterInPremise.find((r) => r.status !== "completed") || null;
-          trapLaterCompleted = laterInPremise.find((r) => r.status === "completed") || null;
+          // A later DECLARED initial is a series boundary, not evidence
+          // this series continues (codex #3243 r13 P2): a payment-deferred
+          // old final must not read the new program's opener as its own
+          // later visit. The boundary visit and everything at/after it are
+          // the NEW series.
+          const laterFlags = new Map();
+          for (const r of laterInPremise) {
+            laterFlags.set(r.id, await this._isDeclaredInitialTrapVisit({ scheduledServiceId: r.id }));
+          }
+          let boundedLater = laterInPremise;
+          const laterDeclared = laterInPremise.filter((r) => laterFlags.get(r.id));
+          if (laterDeclared.length) {
+            const earliestBoundary = laterDeclared.reduce((a, b) => (
+              etDayWindow(a.scheduled_date, 0).anchorStr <= etDayWindow(b.scheduled_date, 0).anchorStr ? a : b));
+            const bDay = etDayWindow(earliestBoundary.scheduled_date, 0).anchorStr;
+            boundedLater = laterInPremise.filter((r) => {
+              if (r.id === earliestBoundary.id) return false;
+              const day = etDayWindow(r.scheduled_date, 0).anchorStr;
+              if (day < bDay) return true;
+              return day === bDay && compareSameDayVisits(r, earliestBoundary) < 0;
+            });
+          }
+          trapLaterLive = boundedLater.find((r) => r.status !== "completed") || null;
+          trapLaterCompleted = boundedLater.find((r) => r.status === "completed") || null;
           // A technician-declared initial setup outranks history inference
           // AND structural linkage (codex #3243 r10 P2 + r12 P2): a new
           // program starting inside the window of an old one — even one
@@ -818,13 +843,20 @@ const ReviewService = {
           // rating, submit, or Google click — must not get three more
           // asks. Separate simple queries by design (no OR groups).
           if (trapPrior || svc.parent_service_id || svc.followup_source_service_id) {
-            const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId: svc.id });
+            // strict: a swallowed walk failure here would read as "not
+            // engaged" and over-send (codex #3243 r13 P1) — propagate to
+            // the resolver's retry/plan_resolution_failed path instead.
+            const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId: svc.id, strict: true });
             if (seriesIds.length) {
               const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked"]).first())
                 || (await db("review_requests").whereIn("sequence_id", seriesIds).whereIn("status", ["submitted", "reviewed", "rated"]).first())
                 || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("redirected_at").first())
                 || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("rated_at").first())
-                || (await db("review_requests").whereIn("sequence_id", seriesIds).where({ google_review_clicked: true }).first());
+                || (await db("review_requests").whereIn("sequence_id", seriesIds).where({ google_review_clicked: true }).first())
+                // A NON-PROMOTER draft tap — score + category without a
+                // submit — is engagement too (codex #3243 r13 P1; mirrors
+                // the step runner's own lowDraft predicate).
+                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("score").whereNot("category", "promoter").first());
               trapEngaged = !!engaged;
             }
           }
@@ -3210,19 +3242,23 @@ const ReviewService = {
    * the declaration is an override, not a gate.
    */
   async _isDeclaredInitialTrapVisit({ serviceRecordId = null, scheduledServiceId = null } = {}) {
+    // DB failures PROPAGATE (codex #3243 r13 P1): collapsing them into
+    // "not declared" let a genuine new setup inherit the old program's
+    // position — the resolver's retry/plan_resolution_failed path must see
+    // the error. Only parse/shape problems fall back to inference.
+    let record = null;
+    if (serviceRecordId) {
+      record = await db("service_records").where({ id: serviceRecordId }).select("service_data").first();
+    }
+    if (!record && scheduledServiceId) {
+      record = await db("service_records")
+        .where({ scheduled_service_id: scheduledServiceId })
+        .orderBy("created_at", "desc")
+        .select("service_data")
+        .first();
+    }
+    if (!record?.service_data) return false;
     try {
-      let record = null;
-      if (serviceRecordId) {
-        record = await db("service_records").where({ id: serviceRecordId }).select("service_data").first();
-      }
-      if (!record && scheduledServiceId) {
-        record = await db("service_records")
-          .where({ scheduled_service_id: scheduledServiceId })
-          .orderBy("created_at", "desc")
-          .select("service_data")
-          .first();
-      }
-      if (!record?.service_data) return false;
       const data = typeof record.service_data === "string" ? JSON.parse(record.service_data) : record.service_data;
       const snapshots = [
         data?.typedReportSnapshot,
@@ -3234,7 +3270,7 @@ const ReviewService = {
     }
   },
 
-  async _seriesExemptSequenceIds(customerId, { serviceRecordId = null, scheduledServiceId = null } = {}) {
+  async _seriesExemptSequenceIds(customerId, { serviceRecordId = null, scheduledServiceId = null, strict = false } = {}) {
     try {
       let visitId = scheduledServiceId || null;
       if (!visitId && serviceRecordId) {
@@ -3294,9 +3330,7 @@ const ReviewService = {
         const windowDays = Math.min(60, Math.max(30, intervalDays * 2));
         const seriesKeys = trappingSeriesKeysFor(visit.service_key);
         const inPremise = await trappingPremiseMatcher(customerId, visit);
-        const seedIds = new Set(sourceIds);
         const collectedRows = new Map(); // walk discoveries: id -> row
-        const queue = [visit, ...ancestorRows.filter((r) => r.scheduled_date != null)];
         const walkSelect = ["ps.id", "ps.scheduled_date", "ps.property_id", "ps.service_address_line1", "ps.service_address_line2", "ps.service_address_city", "ps.service_address_zip", "ps.window_start", "ps.created_at"];
         // The declared-opener boundary is GLOBAL across dequeues (codex
         // #3243 r12 P1): later cursors re-open windows behind the opener,
@@ -3310,6 +3344,22 @@ const ReviewService = {
           if (day > bDay) return true;
           return day === bDay && compareSameDayVisits(r, boundOpener) >= 0;
         };
+        // Linked ancestry is cut at the nearest declared initial too (codex
+        // #3243 r13 P1): a stale link THROUGH the opener must not exempt
+        // the previous program's ask. The cut opener seeds the walk's
+        // global bound; ancestry ids without row data (broken chain) are
+        // kept — unknown, not judged.
+        let ancestryRows = ancestorRows;
+        for (let i = 0; i < ancestorRows.length; i += 1) {
+          if (await this._isDeclaredInitialTrapVisit({ scheduledServiceId: ancestorRows[i].id })) {
+            boundOpener = ancestorRows[i];
+            ancestryRows = ancestorRows.slice(0, i + 1);
+            break;
+          }
+        }
+        const keptAncestryIds = new Set(ancestryRows.map((r) => r.id));
+        const seedIds = new Set(sourceIds.filter((id) => keptAncestryIds.has(id) || !ancestorRows.some((r) => r.id === id)));
+        const queue = [visit, ...ancestryRows.filter((r) => r.scheduled_date != null)];
         // Exhaust the queue (codex #3243 r6 P2): a dequeue cap truncated
         // long chains — each cursor can enqueue several same-window
         // siblings, starving the path to the opener. Termination is the
@@ -3398,6 +3448,12 @@ const ReviewService = {
         .select("id");
       return [...new Set([...byRecord, ...byVisit].map((r) => r.id))];
     } catch (err) {
+      // strict = the ENGAGEMENT consumer (codex #3243 r13 P1): a swallowed
+      // failure there reads as "not engaged" and sends three more asks to a
+      // customer who already responded — propagate so the resolver defers.
+      // Non-strict consumers (cap/cooldown exemption) keep the fail-open []
+      // — a missing exemption means FEWER sends, never more.
+      if (strict) throw err;
       logger.warn(`[review] series-exempt lookup failed (customerId=${customerId}): ${err.message} — no exemption`);
       return [];
     }
