@@ -93,7 +93,11 @@ const BANNED_RE = new RegExp(
 // {review_url} placeholder (checked after temporarily removing it), so a URL
 // echoed from history or hallucinated by the model can't ride along
 // (Codex P1, r1).
-const URL_RE = /(?:https?:\/\/|www\.)|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|io|co|us|biz|info)\b/i;
+// TLD list includes the scheme-less Google/short domains grounded history
+// actually carries — g.page, maps.app.goo.gl, bit.ly-alikes (codex #3235
+// r6 P2): an echoed bare "g.page/r/…" would auto-link in mail clients and
+// compete with the tracked CTA.
+const URL_RE = /(?:https?:\/\/|www\.)|\b[a-z0-9][a-z0-9-]*\.(?:com|net|org|io|co|us|biz|info|page|app|gl|ly|me|dev|link|site)\b/i;
 
 // Smart punctuation → GSM-7 equivalents so one em dash doesn't flip the whole
 // message to UCS-2 and double the segment count (Codex P2, r1).

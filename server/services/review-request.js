@@ -423,11 +423,15 @@ const ReviewService = {
         .select("message_body", "created_at");
       const candidates = outbound.filter((r) => looksLikeAsk(String(r.message_body || "")));
       if (!candidates.length) return false;
+      // SMS sends only (codex #3235 r6 P2): correlating against email
+      // sends would let an automated Day-0 EMAIL excuse the owner's hand
+      // TEXT sent minutes later, defeating the standdown.
       const sends = await db("review_requests")
         .where({ customer_id: customerId })
-        .select("sms_sent_at", "sent_at");
+        .whereNotNull("sms_sent_at")
+        .select("sms_sent_at");
       const sentTimes = sends
-        .map((r) => new Date(r.sms_sent_at || r.sent_at).getTime())
+        .map((r) => new Date(r.sms_sent_at).getTime())
         .filter((t) => Number.isFinite(t));
       const TEN_MIN = 10 * 60 * 1000;
       return candidates.some((c) => {
@@ -1885,8 +1889,13 @@ const ReviewService = {
     // account holder (same identity guard as SMS: the account's history must
     // not leak into a tenant/realtor's inbox). The drafted paragraph is
     // persisted on custom_body for retry reuse; the CTA button still carries
-    // the tokenized link — the paragraph never does.
-    if (actualChannel === "email" && !persistedBody && sequenceId != null) {
+    // the tokenized link — the paragraph never does. Only when the ACTIVE
+    // template version actually renders {{intro_paragraph}} (codex #3235 r6
+    // P2): an operator-edited/republished version without the variable would
+    // silently ignore the draft — paying for the LLM call and crediting
+    // control copy to the personalized variant.
+    if (actualChannel === "email" && !persistedBody && sequenceId != null
+      && await this._emailIntroVariableActive()) {
       const recipientIsAccountHolder = !!(emailContact?.email && customer.email
         && String(emailContact.email).trim().toLowerCase() === String(customer.email).trim().toLowerCase());
       if (recipientIsAccountHolder) {
@@ -2213,9 +2222,12 @@ const ReviewService = {
     // let an at-cap / in-cooldown customer through (no .catch → it throws and
     // the route records the customer as not-started). Day 3/4 still bypass cooldown.
     const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
-    // seriesFinal scopes the first-treatment exemption to the final visit of
-    // the ask's own series (codex #3235 r4 P1) — see getDeliveredAskStats.
-    const stats = await this.getDeliveredAskStats(customerId, { forSeriesFinal: seriesFinal });
+    // seriesFinal scopes the first-treatment exemption to THIS series'
+    // sequence ids (codex #3235 r4+r6 P1) — see getDeliveredAskStats.
+    const enrollExemptIds = seriesFinal
+      ? await this._seriesExemptSequenceIds(customerId, serviceRecordId)
+      : [];
+    const stats = await this.getDeliveredAskStats(customerId, { exemptSequenceIds: enrollExemptIds });
     if (stats.count >= 3) return { started: false, reason: "at_cap" };
     if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo.getTime()) {
       return { started: false, reason: "cooldown" };
@@ -2383,17 +2395,25 @@ const ReviewService = {
       .catch(() => null);
     if (clicked) return stop("clicked");
     if (seq.current_step >= plan.length) return stop("completed");
+    // Same-series exemption set, computed once for the cap check AND the
+    // supersession check below (codex #3235 r2+r5+r6 P1s): the visit-1 ask
+    // of THIS sequence's own series never supersedes or caps its final
+    // cadence; any other sequence's ask still does.
+    const runnerExemptIds = seq.series_final === true
+      ? await this._seriesExemptSequenceIds(seq.customer_id, seq.service_record_id)
+      : [];
+    const runnerExempt = new Set(runnerExemptIds);
+
     // Keep the whole cadence within the lifetime 3-ask cap: a customer who had
     // 1-2 prior asks must not reach 4-5 via the cadence. Delivered ask touches
     // (incl. this cadence's own) are counted, so the sequence stops once 3 is hit.
     let askStats;
     try {
-      // The persisted enrollment-time flag (codex #3235 r5 P1): only a
-      // series-final cadence may ignore the first-treatment ask — an
-      // unconditional exemption here let an unrelated cadence 31-179 days
-      // after that ask deliver a 4th touch inside the 180-day cap. The
+      // The persisted enrollment-time flag (codex #3235 r5 P1) gates the
+      // exemption; the exempt set is the SAME-SERIES sequence ids (r6 P1),
+      // so another series' first-treatment ask still counts here. The
       // series-final cadence itself still delivers its full 3 (owner 1+3).
-      askStats = await this.getDeliveredAskStats(seq.customer_id, { forSeriesFinal: seq.series_final === true });
+      askStats = await this.getDeliveredAskStats(seq.customer_id, { exemptSequenceIds: runnerExemptIds });
     } catch {
       // Fail CLOSED: sendOutreachTouch does NOT enforce the lifetime cap, so a
       // stats blip must defer the step (retry next tick), not send a 4th ask.
@@ -2434,17 +2454,16 @@ const ReviewService = {
         .where({ customer_id: seq.customer_id })
         .where("created_at", ">", new Date(Date.now() - 30 * 86400000))
         .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
-        // CAP_TOUCH_SQL, not ASK_TOUCH_SQL (codex #3235 r2 P1): the
-        // multi-treatment first-visit ask is delivered by its own earlier
-        // sequence — counting it here would stop the final-visit cadence as
-        // "superseded" before step 0, every time the visits are <30d apart.
-        .whereRaw(CAP_TOUCH_SQL)
-        .select("sequence_id", "sms_sent_at", "sent_at");
+        .whereRaw(ASK_TOUCH_SQL)
+        .select("sequence_id", "template_key", "sms_sent_at", "sent_at");
     } catch {
       recentAskRows = []; // hygiene check is best-effort; the cap/cooldown guards below still hold
     }
     const externallyAsked = recentAskRows.some(
-      (r) => (r.sms_sent_at || r.sent_at) && r.sequence_id !== seq.id,
+      (r) => (r.sms_sent_at || r.sent_at)
+        && r.sequence_id !== seq.id
+        && !(OUTREACH.CAP_EXEMPT_TEMPLATE_KEYS.includes(r.template_key)
+          && r.sequence_id && runnerExempt.has(r.sequence_id)),
     );
     if (externallyAsked) return stop("superseded");
 
@@ -2585,42 +2604,116 @@ const ReviewService = {
     return { stopped: updated > 0 };
   },
 
+
+  /**
+   * True when the ACTIVE review_request_email version renders the
+   * {{intro_paragraph}} variable — the precondition for drafting/attributing
+   * a personalized email intro (codex #3235 r6 P2). Fail-closed: template
+   * copy sends, no drafting spend, honest analytics.
+   */
+  async _emailIntroVariableActive() {
+    try {
+      const t = await db("email_templates")
+        .where({ template_key: "review_request_email" })
+        .select("active_version_id")
+        .first();
+      if (!t?.active_version_id) return false;
+      const v = await db("email_template_versions")
+        .where({ id: t.active_version_id })
+        .select("blocks")
+        .first();
+      const blocks = typeof v?.blocks === "string" ? v.blocks : JSON.stringify(v?.blocks || "");
+      return blocks.includes("{{intro_paragraph}}");
+    } catch {
+      return false;
+    }
+  },
+
+  /**
+   * Sequence ids whose delivered first-treatment ask belongs to the SAME
+   * treatment series as the given service record (codex #3235 r6 P1): the
+   * cap/cooldown exemption must not blanket-hide every first-treatment ask —
+   * two back-to-back series would otherwise reach 5 asks in the rolling
+   * window. Series lineage: the current visit's parent/followup-source
+   * visit(s), or (named two-treatment packages without linkage) prior
+   * completed same-service visits in the last 60 days. Fail-open to [] —
+   * no exemption means FEWER sends, never more.
+   */
+  async _seriesExemptSequenceIds(customerId, serviceRecordId) {
+    try {
+      if (!serviceRecordId) return [];
+      const sr = await db("service_records")
+        .where({ id: serviceRecordId })
+        .select("scheduled_service_id")
+        .first();
+      if (!sr?.scheduled_service_id) return [];
+      const visit = await db("scheduled_services")
+        .where({ id: sr.scheduled_service_id })
+        .select("id", "parent_service_id", "followup_source_service_id", "service_id")
+        .first();
+      if (!visit) return [];
+      let sourceIds = [visit.parent_service_id, visit.followup_source_service_id].filter(Boolean);
+      if (!sourceIds.length && visit.service_id) {
+        const priors = await db("scheduled_services")
+          .where({ customer_id: customerId, service_id: visit.service_id, status: "completed" })
+          .where("id", "!=", visit.id)
+          .where("scheduled_date", ">=", etDateString(new Date(Date.now() - 60 * 86400000)))
+          .select("id");
+        sourceIds = priors.map((r) => r.id);
+      }
+      if (!sourceIds.length) return [];
+      const records = await db("service_records")
+        .whereIn("scheduled_service_id", sourceIds)
+        .select("id");
+      if (!records.length) return [];
+      const seqs = await db("review_sequences")
+        .whereIn("service_record_id", records.map((r) => r.id))
+        .select("id");
+      return seqs.map((r) => r.id);
+    } catch (err) {
+      logger.warn(`[review] series-exempt lookup failed (customerId=${customerId}): ${err.message} — no exemption`);
+      return [];
+    }
+  },
+
   /**
    * Channel-complete "review asks delivered" stats for one customer — counts
    * every review_requests row actually sent on SMS OR email (audit: the old
    * sms_log-only count missed email asks, so a customer could exceed the cap /
    * dodge the cooldown via email). Used by the cap + 30-day cooldown guards.
    */
-  async getDeliveredAskStats(customerId, { forSeriesFinal = false } = {}) {
+  async getDeliveredAskStats(customerId, { exemptSequenceIds = [] } = {}) {
     // Cap window (owner policy 2026-07-30): the 3-ask cap is a ROLLING
     // 180-day window, not lifetime — a customer who never engages becomes
     // eligible for a fresh cadence every ~6 months. `lastAt` (the 30-day
     // cooldown input) is still all-time.
     //
-    // Exemption scope (codex #3235 r4 P1): the multi-treatment first-visit
-    // ask is invisible to cap/cooldown ONLY when enrolling the final visit
-    // of its own series (forSeriesFinal — owner spec 2026-08-05: 1 after the
-    // first treatment + 3 after the final one). Every other enrollment
-    // counts it like any delivered ask, so an unrelated service completing
-    // days later can't slip past the cooldown into a duplicate ask.
-    const askFilter = forSeriesFinal ? CAP_TOUCH_SQL : ASK_TOUCH_SQL;
-    const windowStart = new Date(Date.now() - ASK_CAP_WINDOW_DAYS * 86400000);
-    const countRow = await db("review_requests")
+    // Exemption scope (codex #3235 r4 P1 + r6 P1): a first-treatment ask is
+    // invisible to cap/cooldown ONLY when it belongs to the series whose
+    // final visit is enrolling — exemptSequenceIds carries that series'
+    // sequence ids (_seriesExemptSequenceIds). A template-key-only filter
+    // would also hide OTHER series' first asks and let back-to-back series
+    // reach 5 asks in the window. Rows are filtered in JS because the
+    // predicate needs the (key, sequence) pair, not a static SQL list.
+    const rows = await db("review_requests")
       .where({ customer_id: customerId })
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
-      .whereRaw("COALESCE(sms_sent_at, sent_at) >= ?", [windowStart])
-      .whereRaw(askFilter)
-      .count("* as count")
-      .first();
-    const recent = await db("review_requests")
-      .where({ customer_id: customerId })
-      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
-      .whereRaw(askFilter)
+      .whereRaw(ASK_TOUCH_SQL)
+      .select("template_key", "sequence_id", "sms_sent_at", "sent_at")
       .orderByRaw("COALESCE(sms_sent_at, sent_at) DESC")
-      .first();
+      .limit(200);
+    const exempt = new Set(exemptSequenceIds);
+    const counted = rows.filter((r) => !(
+      OUTREACH.CAP_EXEMPT_TEMPLATE_KEYS.includes(r.template_key)
+      && r.sequence_id && exempt.has(r.sequence_id)
+    ));
+    const windowStartMs = Date.now() - ASK_CAP_WINDOW_DAYS * 86400000;
+    const times = counted
+      .map((r) => new Date(r.sms_sent_at || r.sent_at).getTime())
+      .filter((t) => Number.isFinite(t));
     return {
-      count: Number(countRow?.count) || 0,
-      lastAt: recent ? recent.sms_sent_at || recent.sent_at : null,
+      count: times.filter((t) => t >= windowStartMs).length,
+      lastAt: times.length ? new Date(Math.max(...times)) : null,
     };
   },
 
