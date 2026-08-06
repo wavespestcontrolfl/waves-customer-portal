@@ -1143,6 +1143,39 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(opener.stop_reason).toBe('superseded_by_series_final');
   });
 
+  test('a re-linked rental matches its pre-linkage stamped visits, never unstamped legacy rows (codex #3243 r8)', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // Opener booked before the rental's property row existed (NULL +
+    // stamp); the follow-up is linked to the later-created row for the
+    // same address → one series, final cadence.
+    let mock = makeMock({
+      customer_properties: [{ id: 'prop-oak', customer_id: 'rl', is_primary: false, address_line1: '99 Oak St', zip: '34293' }],
+      scheduled_services: [
+        { id: 'rl-1', customer_id: 'rl', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null, service_address_line1: '99 Oak Street', service_address_zip: '34293' },
+        { id: 'rl-2', customer_id: 'rl', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3, property_id: 'prop-oak' },
+      ],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'rl', scheduledServiceId: 'rl-2' });
+    expect(plan.seriesFinal).toBe(true);
+
+    // An UNSTAMPED legacy visit (the primary premise) still never priors
+    // the linked rental.
+    mock = makeMock({
+      customer_properties: [{ id: 'prop-oak2', customer_id: 'rl2', is_primary: false, address_line1: '99 Oak St', zip: '34293' }],
+      scheduled_services: [
+        { id: 'rl2-1', customer_id: 'rl2', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null },
+        { id: 'rl2-2', customer_id: 'rl2', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3, property_id: 'prop-oak2' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'rl2', scheduledServiceId: 'rl2-2' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);

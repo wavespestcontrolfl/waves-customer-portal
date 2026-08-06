@@ -85,8 +85,31 @@ async function trappingPremiseMatcher(customerId, visit) {
   // degrades to NO exemption (fewer sends). A customer-wide fallback would
   // instead let another property's visit rewrite this one's cadence.
   if (visit.property_id) {
-    const prop = await db("customer_properties").where({ id: visit.property_id }).select("id", "is_primary").first();
-    if (prop && !prop.is_primary) return (row) => row.property_id === visit.property_id;
+    const prop = await db("customer_properties")
+      .where({ id: visit.property_id })
+      .select("id", "is_primary", "address_line1", "address_line2", "city", "zip")
+      .first();
+    if (prop && !prop.is_primary) {
+      // Accept the property id OR a canonically equal stamp (codex #3243
+      // r8 P2): a rental's earlier visits can PREDATE its property row —
+      // property recording is feature-gated while address stamping is not —
+      // so the opener carries only NULL + the stamped address. Positive
+      // street match against the property's own address is required; an
+      // unstamped legacy row is the primary premise, never the rental.
+      const { streetKey } = require("./customer-properties");
+      const propStamp = {
+        service_address_line1: prop.address_line1,
+        service_address_line2: prop.address_line2,
+        service_address_city: prop.city,
+        service_address_zip: prop.zip,
+      };
+      const propStreet = streetKey(prop.address_line1);
+      return (row) => row.property_id === visit.property_id
+        || (row.property_id == null
+          && !!propStreet
+          && streetKey(row?.service_address_line1) === propStreet
+          && !premiseStampConflicts(row, propStamp));
+    }
   }
   // Primary-or-NULL visit. NULL is ambiguous — legacy primary OR an
   // unmatched caller-stated address (codex #3243 r6 P2; the linkage
