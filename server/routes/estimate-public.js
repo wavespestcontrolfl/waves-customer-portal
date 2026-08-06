@@ -477,6 +477,14 @@ function classifyServiceFamilyText(text) {
   // termite branch claims an intentionally pest-primary series.
   const raw = String(text || '').toLowerCase().replace(/[_-]+/g, ' ').trim();
   if (!raw) return null;
+  // Generic catch-all placeholders have NO family (codex #3228 r21): the
+  // general_appointment catalog row is explicitly an anything-row whose
+  // proper service is still unassigned — serviceKeyFor's "general" token
+  // would file it under pest and let it swallow a pest estimate's booking.
+  // Same names the call-booking generic-row predicate treats as anything-rows.
+  if (/^general appointment$|^waves pest control appointment service$|^waves assessment$|^waves appointment$/.test(raw)) {
+    return null;
+  }
   // Palm precedence (codex #3228 r3): serviceKeyFor checks the tree token
   // before its palm branch, so "Palm Tree Injections" buckets as
   // tree_shrub there — fine for its cadence defaults, but adoption must
@@ -525,7 +533,7 @@ function classifyServiceFamilyText(text) {
   if (/rodent.*trap|trap.*rodent/.test(raw)) return 'rodent_trapping';
   // Wire-mesh/seal wording is exclusion work (codex r19: the supported
   // rodent_wire_mesh catalog key carries no "exclusion" token).
-  if (/rodent.*(?:exclusion|wire\s*mesh|seal)|(?:exclusion|wire\s*mesh|seal).*rodent/.test(raw)) return 'rodent_exclusion';
+  if (/rodent.*(?:exclusion|wire\s*mesh|seal|bird\s*box)|(?:exclusion|wire\s*mesh|seal|bird\s*box).*rodent/.test(raw)) return 'rodent_exclusion';
   if (/rodent.*sanitation|sanitation.*rodent/.test(raw)) return 'rodent_sanitation';
   // Diagnostic inspections are their own identity too (codex r20:
   // priceRodentInspection's standalone rodent_inspection item). \b after
@@ -797,6 +805,15 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     .andWhere((builder) => {
       builder.whereNull('scheduled_services.reservation_expires_at')
         .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+    })
+    // Callback visits are NEVER adoption candidates (codex #3228 r21):
+    // is_callback=true intentionally makes completion treat the visit as
+    // FREE (the covered re-service contract), so adopting one would reprice
+    // a free callback while the sold billable first application is never
+    // represented by a normal appointment.
+    .andWhere((builder) => {
+      builder.whereNull('scheduled_services.is_callback')
+        .orWhere('scheduled_services.is_callback', false);
     })
     .orderBy('scheduled_services.scheduled_date', 'asc')
     .orderBy('scheduled_services.window_start', 'asc')

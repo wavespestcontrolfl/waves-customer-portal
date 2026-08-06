@@ -646,6 +646,28 @@ describe('family-scoped existing-appointment adoption', () => {
     )).toBe(true);
   });
 
+  test('bird-box work is exclusion; generic appointments have no family (codex r21)', () => {
+    const birdBoxData = {
+      result: {
+        oneTime: {
+          items: [{ service: 'rodent_bird_box', name: 'Roof-entry cover / bird box', price: 320 }],
+        },
+      },
+    };
+    const birdKeys = estimateFamilyKeysForAdoption({}, birdBoxData, { serviceMode: 'one_time' });
+    expect(appointmentMatchesEstimateFamily(
+      { service_type: 'Rodent Bait Station Monitoring' },
+      birdKeys,
+    )).toBe(false);
+    // The generic catch-all catalog row never satisfies a pest estimate.
+    const pestKeys = new Set(['pest_control']);
+    expect(appointmentMatchesEstimateFamily({
+      service_type: 'Waves Pest Control Appointment Service',
+      catalog_service_key: 'general_appointment',
+      catalog_service_name: 'Waves Pest Control Appointment Service',
+    }, pestKeys)).toBe(false);
+  });
+
   test('stale service_type slugs never bypass catalog authority (codex r19)', () => {
     const roachData = {
       result: {
