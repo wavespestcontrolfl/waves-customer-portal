@@ -1245,6 +1245,44 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(replacement.status).toBe('active');
   });
 
+  test('the exemption walk stops at a declared opener, and opener engagement stands the final down (codex #3243 r11)', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // Old program's visit sits inside the window, but the declared initial
+    // bounds the series: its own sequence is exempt, the old one is NOT.
+    let mock = makeMock({
+      service_records: [{ id: 'sr-ni', customer_id: 'sw', scheduled_service_id: 'sw-2', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Initial setup' } } }) }],
+      scheduled_services: [
+        { id: 'sw-1', customer_id: 'sw', service_id: 'svc-trap', status: 'completed', scheduled_date: d(25), service_key: 'rodent_trapping' },
+        { id: 'sw-2', customer_id: 'sw', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping' },
+        { id: 'sw-3', customer_id: 'sw', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [
+        { id: 'seq-old-opener', customer_id: 'sw', scheduled_service_id: 'sw-1', status: 'completed' },
+        { id: 'seq-new-opener', customer_id: 'sw', scheduled_service_id: 'sw-2', status: 'completed' },
+      ],
+    });
+    db.mockImplementation(mock);
+    const exempt = await ReviewService._seriesExemptSequenceIds('sw', { scheduledServiceId: 'sw-3' });
+    expect(exempt).toContain('seq-new-opener');
+    expect(exempt).not.toContain('seq-old-opener');
+
+    // Opener engagement (private 3/10 rating on the first ask) suppresses
+    // the final cadence entirely.
+    mock = makeMock({
+      scheduled_services: [
+        { id: 'en-1', customer_id: 'en', service_id: 'svc-trap', status: 'completed', scheduled_date: d(8), service_key: 'rodent_trapping' },
+        { id: 'en-2', customer_id: 'en', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [{ id: 'seq-engaged', customer_id: 'en', scheduled_service_id: 'en-1', status: 'completed' }],
+      review_requests: [{ id: 'req-rated', customer_id: 'en', sequence_id: 'seq-engaged', status: 'rated' }],
+    });
+    db.mockImplementation(mock);
+    const plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'en', scheduledServiceId: 'en-2' });
+    expect(plan.skip).toBe('series_engaged');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);

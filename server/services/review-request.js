@@ -825,6 +825,23 @@ const ReviewService = {
           // the owner-spec first ask.
           if (trapPrior && (trapLaterLive || trapLaterCompleted)) return { skip: "multi_treatment_middle" };
           if (!trapPrior && trapLaterCompleted) return { skip: "series_completed" };
+          if (trapPrior) {
+            // Opener engagement stands the final cadence down (codex #3243
+            // r11 P1): a customer who already responded to this series'
+            // first ask — private rating, submit, or Google click — must
+            // not get three more asks; the new sequence's own response
+            // checks only see its own sequence_id. Separate simple queries
+            // by design (no OR groups).
+            const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId: svc.id });
+            if (seriesIds.length) {
+              const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked"]).first())
+                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereIn("status", ["submitted", "reviewed", "rated"]).first())
+                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("redirected_at").first())
+                || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("rated_at").first())
+                || (await db("review_requests").whereIn("sequence_id", seriesIds).where({ google_review_clicked: true }).first());
+              if (engaged) return { skip: "series_engaged" };
+            }
+          }
           return trapPrior
             ? { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true }
             : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
@@ -3226,7 +3243,11 @@ const ReviewService = {
       // middle visit made sourceIds nonempty, so the unlinked opener's
       // first_treatment_ask stayed unexempted and the cooldown rejected the
       // intended final cadence.
-      if (visit.service_id && TRAPPING_MULTI_TREATMENT_KEYS.has(visit.service_key)) {
+      if (visit.service_id && TRAPPING_MULTI_TREATMENT_KEYS.has(visit.service_key)
+        // A declared initial IS its series' opener — nothing behind it
+        // belongs to this series, so the family walk is skipped entirely
+        // (codex #3243 r11 P1); linked ancestry (if any) stands alone.
+        && !(await this._isDeclaredInitialTrapVisit({ scheduledServiceId: visit.id }))) {
         // Breadth-first opener trace (r3 P2 + r4 P1): every discovered
         // visit anchors its own window — adjacent checks chain past one
         // window's span (days 0/20/40) — and the seeds are the visit PLUS
@@ -3266,12 +3287,35 @@ const ReviewService = {
             .where("ps.scheduled_date", w.anchorStr)
             .whereIn("psv.service_key", seriesKeys)
             .select(...walkSelect);
-          [...rows, ...sameDay.filter((r) => compareSameDayVisits(r, c) < 0)]
-            .filter((r) => r.id !== visit.id && !collected.has(r.id) && inPremise(r))
-            .forEach((r) => {
-              collected.add(r.id);
-              queue.push(r);
+          const fresh = [...rows, ...sameDay.filter((r) => compareSameDayVisits(r, c) < 0)]
+            .filter((r) => r.id !== visit.id && !collected.has(r.id) && inPremise(r));
+          // A declared initial is ITS series' opener (codex #3243 r11 P1):
+          // it stays in the exemption set, but nothing EARLIER than it —
+          // in this window or via further traversal — belongs to this
+          // series; those asks must keep counting toward cap/cooldown.
+          const declaredFlags = new Map();
+          for (const r of fresh) {
+            declaredFlags.set(r.id, await this._isDeclaredInitialTrapVisit({ scheduledServiceId: r.id }));
+          }
+          const declared = fresh.filter((r) => declaredFlags.get(r.id));
+          let bounded = fresh;
+          if (declared.length) {
+            const latest = declared.reduce((a, b) => (
+              etDayWindow(a.scheduled_date, 0).anchorStr >= etDayWindow(b.scheduled_date, 0).anchorStr ? a : b));
+            const latestDay = etDayWindow(latest.scheduled_date, 0).anchorStr;
+            bounded = fresh.filter((r) => {
+              if (r.id === latest.id) return true;
+              const day = etDayWindow(r.scheduled_date, 0).anchorStr;
+              if (day > latestDay) return true;
+              return day === latestDay && compareSameDayVisits(r, latest) >= 0;
             });
+          }
+          for (const r of bounded) {
+            collected.add(r.id);
+            if (!declaredFlags.get(r.id)) {
+              queue.push(r);
+            }
+          }
         }
         sourceIds = [...collected];
       } else if (!sourceIds.length && visit.service_id) {
