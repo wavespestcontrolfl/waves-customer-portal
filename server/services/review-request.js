@@ -52,6 +52,18 @@ function generateToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
+
+// pg DATE columns deserialize as 'YYYY-MM-DD' strings or UTC-midnight Dates;
+// new Date(...) + etDateString would shift them to the PREVIOUS Eastern day
+// (the documented timestamptz trap — AGENTS.md; codex #3235 r12 P1). The
+// drafter's etCalendarDayOf is the single source for reading them literally.
+function etDayWindow(value, backDays) {
+  const { etCalendarDayOf } = require("../utils/datetime-et");
+  const day = etCalendarDayOf(value || new Date());
+  const floorMs = Date.parse(`${day}T00:00:00Z`) - backDays * 86400000;
+  return { anchorStr: day, floorStr: new Date(floorMs).toISOString().slice(0, 10) };
+}
+
 // Rolling window for the 3-delivered-asks cap (owner policy 2026-07-30:
 // a never-engaging customer may get a fresh cadence at most every ~6 months).
 const ASK_CAP_WINDOW_DAYS = 180;
@@ -433,10 +445,22 @@ const ReviewService = {
       const sentTimes = sends
         .map((r) => new Date(r.sms_sent_at).getTime())
         .filter((t) => Number.isFinite(t));
+      // One pipeline send excuses ONE sms_log row (codex #3235 r12 P2): a
+      // hand-sent ask minutes after an automated one must not share the
+      // automated send's timestamp alibi. Greedy nearest-match consumption.
       const TEN_MIN = 10 * 60 * 1000;
+      const unused = [...sentTimes];
       return candidates.some((c) => {
         const t = new Date(c.created_at).getTime();
-        return !sentTimes.some((s) => Math.abs(s - t) <= TEN_MIN);
+        let best = -1;
+        let bestGap = Infinity;
+        unused.forEach((sT, i) => {
+          const gap = Math.abs(sT - t);
+          if (gap <= TEN_MIN && gap < bestGap) { best = i; bestGap = gap; }
+        });
+        if (best === -1) return true; // no unconsumed pipeline send → manual ask
+        unused.splice(best, 1);
+        return false;
       });
     } catch (err) {
       logger.warn(`[review] manual-ask lookup failed (customerId=${customerId}): ${err.message} — enrolling anyway`);
@@ -564,9 +588,7 @@ const ReviewService = {
           // real roach/bed-bug follow-ups run ~14 days.
           const intervalDays = Number(svc.follow_up_interval_days) > 0 ? Number(svc.follow_up_interval_days) : 15;
           const windowDays = Math.min(60, intervalDays * 2);
-          const anchorMs = svc.scheduled_date ? new Date(svc.scheduled_date).getTime() : Date.now();
-          const windowFloor = etDateString(new Date(anchorMs - windowDays * 86400000));
-          const anchorStr = etDateString(new Date(anchorMs));
+          const { anchorStr, floorStr: windowFloor } = etDayWindow(svc.scheduled_date, windowDays);
           const prior = await db("scheduled_services")
             .where({ customer_id: customerId, service_id: svc.service_id, status: "completed" })
             .where("id", "!=", svc.id)
@@ -2056,8 +2078,10 @@ const ReviewService = {
         sequence_id: sequenceId,
         sequence_step: sequenceStep,
         status: "pending",
-        // Sequence touches AND no-link check-ins skip the legacy Day-3 followup.
-        followup_sent: sequenceId || isNoLinkSms ? true : false,
+        // Sequence touches, no-link check-ins AND one-ask-by-design templates
+        // (first_treatment_ask sent manually — codex #3235 r12 P1) skip the
+        // legacy Day-3 followup.
+        followup_sent: sequenceId || isNoLinkSms || (templateId && OUTREACH.CAP_EXEMPT_TEMPLATE_KEYS.includes(templateId)) ? true : false,
         expires_at: expiresAt || new Date(Date.now() + 14 * 86400000).toISOString(),
       })
       .returning("*");
@@ -2828,14 +2852,14 @@ const ReviewService = {
         // Same anchoring as the plan resolver (codex #3235 r10 P1): the
         // series' earlier visits, relative to THIS visit's date — never a
         // now-relative window that payment-deferred enrollment would skew.
-        const anchorMs = visit.scheduled_date ? new Date(visit.scheduled_date).getTime() : Date.now();
         const intervalDays = Number(visit.follow_up_interval_days) > 0 ? Number(visit.follow_up_interval_days) : 15;
         const windowDays = Math.min(60, intervalDays * 2);
+        const w = etDayWindow(visit.scheduled_date, windowDays);
         const priors = await db("scheduled_services")
           .where({ customer_id: customerId, service_id: visit.service_id, status: "completed" })
           .where("id", "!=", visit.id)
-          .where("scheduled_date", "<", etDateString(new Date(anchorMs)))
-          .where("scheduled_date", ">=", etDateString(new Date(anchorMs - windowDays * 86400000)))
+          .where("scheduled_date", "<", w.anchorStr)
+          .where("scheduled_date", ">=", w.floorStr)
           .select("id");
         sourceIds = priors.map((r) => r.id);
       }

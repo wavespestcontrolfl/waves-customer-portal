@@ -1674,3 +1674,59 @@ describe('codex #3235 r11 — completed descendants, package separation, long ch
     expect(JSON.parse(seq.plan)).toHaveLength(3);
   });
 });
+
+describe('codex #3235 r12 — ET dates, 1:1 correlation, manual cap-exempt sends', () => {
+  test('a pg UTC-midnight Date anchor stays on its ET calendar day (window boundaries hold)', async () => {
+    mockGates.reviewSequences = true;
+    const dayStr = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'et-9', first_name: 'Ned', last_name: 'D', phone: '+19410000075', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-et2', customer_id: 'et-9', scheduled_service_id: 'ss-et2' }],
+      scheduled_services: [
+        { id: 'ss-et1', customer_id: 'et-9', service_id: 'svc-roach', status: 'completed', scheduled_date: dayStr(14), service_key: 'cockroach_control', follow_up_interval_days: 14 },
+        // Anchor arrives as a pg-style UTC-midnight Date — 8 PM ET the night
+        // before; a naive ET conversion would shift the window a day back.
+        { id: 'ss-et2', customer_id: 'et-9', service_id: 'svc-roach', status: 'completed', scheduled_date: new Date(`${dayStr(0)}T00:00:00.000Z`), service_key: 'cockroach_control', follow_up_interval_days: 14 },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'et-9', serviceRecordId: 'sr-et2', completedAt: new Date() });
+
+    // Visit 14 days earlier sits INSIDE the 28-day window → final visit.
+    expect(result.started).toBe(true);
+    expect(JSON.parse(mock.__state.rows.review_sequences[0].plan)).toHaveLength(3);
+  });
+
+  test('a hand-sent ask minutes after an automated one is still detected (1:1 correlation)', async () => {
+    mockGates.reviewSequences = true;
+    const base = Date.now() - 2 * 86400000;
+    const mock = makeMock({
+      customers: [{ id: 'oo-1', first_name: 'Pia', last_name: 'E', phone: '+19410000076', nearest_location_id: 'bradenton' }],
+      sms_log: [
+        // The automated pipeline ask…
+        { id: 'sms-a', customer_id: 'oo-1', direction: 'outbound', status: 'sent', message_body: 'Hi Pia! A quick Google review would mean the world: https://portal.test/l/aaa', created_at: new Date(base) },
+        // …and the owner's hand-sent ask 4 minutes later.
+        { id: 'sms-b', customer_id: 'oo-1', direction: 'outbound', status: 'sent', message_body: 'Pia it was great seeing you, review us here: https://g.page/r/waves/review', created_at: new Date(base + 4 * 60000) },
+      ],
+      review_requests: [{ id: 'rr-oo', customer_id: 'oo-1', template_key: 'friendly_ask', channel: 'sms', status: 'sent', sms_sent_at: new Date(base), sent_at: new Date(base) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'oo-1', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('manual_ask_recent');
+  });
+
+  test('a manual (sequence-less) send of a cap-exempt template never triggers the legacy follow-up', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'mx-1', first_name: 'Ugo', last_name: 'F', phone: '+19410000077', nearest_location_id: 'bradenton' }],
+    });
+    db.mockImplementation(mock);
+
+    await ReviewService.sendOutreachTouch({ customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'first_treatment_ask', manageRetryVia: 'cron' });
+
+    expect(mock.__state.rows.review_requests[0].followup_sent).toBe(true);
+  });
+});

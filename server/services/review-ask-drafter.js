@@ -35,7 +35,7 @@ const MODELS = require("../config/models");
 const { dispatchWithFallback } = require("./llm/call");
 const { isEnabled } = require("../config/feature-gates");
 const { redactAccessCodes } = require("./context-aggregator");
-const { etDateString } = require("../utils/datetime-et");
+const { etDateString, etCalendarDayOf: etCalendarDayOfUtil } = require("../utils/datetime-et");
 const { countSegments } = require("./messaging/segment-counter");
 
 const MAX_BODY_CHARS = 145; // pre-render ceiling; the segment gate below is the real bound
@@ -85,6 +85,9 @@ const BANNED_RE = new RegExp(
     "\\bre-?ent(?:ry|er)\\w*\\b",
     "\\bdr(?:y|ies|ied|ying)\\b",
     "\\b\\d+\\s*(?:minutes?|mins?|hours?|hrs?)\\b", // any fixed time interval
+    // …including spelled-out intervals (codex #3235 r12 P1): "wait thirty
+    // minutes" is the same compliance violation as "wait 30 minutes".
+    "\\b(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty|forty[- ]five|sixty|ninety|half|couple(?:\\s+of)?|few|several)\\s+(?:more\\s+)?(?:minutes?|mins?|hours?|hrs?)\\b",
     "\\bguarantee[ds]?\\b", // no invented promises; specifics live on the estimate
   ].join("|"),
   "i",
@@ -154,19 +157,10 @@ function verifyDraftBody(body, { firstName } = {}) {
 // same-day touch as "1 day ago" (Codex P1, r2). Date-only values ARE the ET
 // calendar day — take them literally; only real timestamps go through the ET
 // wall-clock conversion.
+// Canonical implementation now lives in utils/datetime-et (codex #3235
+// r12 promoted it); this alias keeps the drafter's exports/tests stable.
 function etCalendarDayOf(value) {
-  if (typeof value === "string") {
-    const m = value.match(/^(\d{4}-\d{2}-\d{2})(?:$|T00:00:00(?:\.0+)?(?:Z)?$)/);
-    if (m) return m[1];
-  }
-  if (value instanceof Date
-    && value.getUTCHours() === 0 && value.getUTCMinutes() === 0
-    && value.getUTCSeconds() === 0 && value.getUTCMilliseconds() === 0) {
-    // Exactly UTC midnight = a pg DATE deserialized by node-postgres. A real
-    // completion at 00:00:00.000Z (8 PM ET) is not a plausible timestamp.
-    return value.toISOString().slice(0, 10);
-  }
-  return etDateString(value instanceof Date ? value : new Date(value));
+  return etCalendarDayOfUtil(value);
 }
 
 // ET-calendar day difference — a customer-facing "completed N days ago" must
@@ -436,6 +430,7 @@ const ReviewAskDrafter = {
 
   verifyDraftBody,
   verifyEmailIntro,
+  etCalendarDayOf,
   __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind },
 };
 
