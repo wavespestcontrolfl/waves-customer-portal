@@ -511,6 +511,26 @@ router.post('/sms', async (req, res) => {
       }
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
 
+    // Reschedule/away flag persists BEFORE the Twilio ack (codex r13): a
+    // crash before the sms_log persist leaves the SID unacked, Twilio
+    // retries, and the advisory-lock dedupe absorbs the duplicate — so
+    // ordering the flag FIRST closes the row-vs-flag gap (codex r15).
+    // The bell fires post-ack via flagResult.fireBell.
+    let rescheduleFlagResult = null;
+    if (customer && Body && !smsReaction && rescheduleAsk) {
+      rescheduleFlagResult = await require('../services/reschedule-intent-flagger')
+        .flagInboundRescheduleIntent({
+          customer,
+          body: Body,
+          smsLogId: null, // flag precedes the sms_log insert (codex r15)
+          messageSid: MessageSid || null,
+        })
+        .catch((err) => {
+          logger.warn(`[reschedule-intent] flag rejected: ${err.message}`);
+          return null;
+        });
+    }
+
     // Log inbound message
     const messageType = numberConfig.type === 'domain_tracking' ? 'domain_lead'
       : numberConfig.type === 'van_tracking' ? 'van_lead' : 'inbound';
@@ -530,25 +550,6 @@ router.post('/sms', async (req, res) => {
     // The inbound message is now durably recorded — releasing the claim on a
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
-
-    // Reschedule/away flag persists BEFORE the Twilio ack (codex r13): a
-    // deploy between ack and post-ack side effects must not lose the
-    // durable agent_decisions row (Twilio will not retry an acked SID).
-    // The bell fires post-ack via flagResult.fireBell.
-    let rescheduleFlagResult = null;
-    if (customer && Body && !smsReaction && rescheduleAsk) {
-      rescheduleFlagResult = await require('../services/reschedule-intent-flagger')
-        .flagInboundRescheduleIntent({
-          customer,
-          body: Body,
-          smsLogId: smsLogEntry?.id || null,
-          messageSid: MessageSid || null,
-        })
-        .catch((err) => {
-          logger.warn(`[reschedule-intent] flag rejected: ${err.message}`);
-          return null;
-        });
-    }
 
     // Event-driven health rescore for any matched customer (the opt-out branch
     // above already fired for cancellations). Not gated on messageType: an

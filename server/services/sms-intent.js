@@ -120,7 +120,10 @@ function hasRescheduleOrAwayIntent(body) {
     || /\b(?:has|have|had|is|was)\b[^.!?]{0,30}\bbeen\s+re-?schedul/i.test(text)
     // Past/acknowledged changes are not requests: "thanks for
     // rescheduling us", "what day were we rescheduled to?" (codex r9).
-    || /\b(?:thanks?\s+for|thank\s+you\s+for|already|were|was|got)\s+(?:being\s+)?re-?schedul/i.test(text);
+    || (/\b(?:thanks?\s+for|thank\s+you\s+for|already|were|was|got)\s+(?:being\s+)?re-?schedul/i.test(text)
+      // …unless a FRESH request follows the status clause (codex r15):
+      // "I was rescheduled to Friday, but I need to reschedule again."
+      && !/\b(?:need|want|like|have)\s+to\s+re-?schedul|\bre-?schedul\w*(?:\s+\w+){0,2}\s+again\b/i.test(text));
   if (!negated && (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text))) return true;
   if (cancelAsk) return true;
   return AWAY_RE.test(text) && !AWAY_PERMISSION_RE.test(text);

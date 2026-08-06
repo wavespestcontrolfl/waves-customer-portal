@@ -59,6 +59,14 @@ function maskPhone(phone) {
   return digits.length >= 4 ? `…${digits.slice(-4)}` : '(unknown)';
 }
 
+function etDateTime(value) {
+  try {
+    return new Date(value).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
 function etTime(value) {
   try {
     return new Date(value).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
@@ -180,7 +188,10 @@ async function loadUnansweredThreads(cutoff = new Date()) {
         SELECT message_body, created_at,
                RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) AS peer
         FROM sms_log
-        WHERE created_at >= ${ET_DAY_START_SQL}
+        -- Rolling 7-day live worklist (codex r15): an unanswered thread
+        -- must reappear until answered — the marker window stranded
+        -- overflow rows.
+        WHERE created_at >= now() - interval '7 days'
           AND created_at <= :cutoff
           AND direction = 'inbound'
           AND COALESCE(message_type, '') NOT IN ('opt_out', 'opt_in', 'sms_reaction', 'help_request')
@@ -259,10 +270,10 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
 
   if (a.length) {
     sectionText.push('Callbacks requested on calls today (nothing else tracks these):');
-    sectionText.push(...a.map((r) => `- ${etTime(r.created_at)} ${r.customer_name || maskPhone(r.from_phone)}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${String(r.summary).replace(/\s+/g, ' ').trim()}` : ''}`));
+    sectionText.push(...a.map((r) => `- ${etDateTime(r.created_at)} ${r.customer_name || maskPhone(r.from_phone)}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${String(r.summary).replace(/\s+/g, ' ').trim()}` : ''}`));
     sectionText.push(...moreLine(a.length, aTotal));
     sectionText.push('');
-    sectionHtml.push(`<p><strong>Callbacks requested on calls today</strong> (nothing else tracks these):</p><ul style="margin:0 0 12px 18px;padding:0;">${a.map((r) => `<li style="margin:0 0 6px 0;">${esc(etTime(r.created_at))} ${esc(r.customer_name || maskPhone(r.from_phone))}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${esc(String(r.summary).replace(/\s+/g, ' ').trim())}` : ''}</li>`).join('')}</ul>${aTotal > a.length ? `<p>…and ${aTotal - a.length} more not shown</p>` : ''}`);
+    sectionHtml.push(`<p><strong>Callbacks requested on calls today</strong> (nothing else tracks these):</p><ul style="margin:0 0 12px 18px;padding:0;">${a.map((r) => `<li style="margin:0 0 6px 0;">${esc(etDateTime(r.created_at))} ${esc(r.customer_name || maskPhone(r.from_phone))}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${esc(String(r.summary).replace(/\s+/g, ' ').trim())}` : ''}</li>`).join('')}</ul>${aTotal > a.length ? `<p>…and ${aTotal - a.length} more not shown</p>` : ''}`);
   }
   if (b.length) {
     sectionText.push('Follow-up tasks overdue or silently expired today:');
@@ -273,10 +284,10 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   }
   if (c.length) {
     sectionText.push('Texts still waiting on a reply (thread ends inbound):');
-    sectionText.push(...c.map((r) => `- ${etTime(r.created_at)} ${r.customer_name || maskPhone(r.peer)}: "${String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120)}"`));
+    sectionText.push(...c.map((r) => `- ${etDateTime(r.created_at)} ${r.customer_name || maskPhone(r.peer)}: "${String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120)}"`));
     sectionText.push(...moreLine(c.length, cTotal));
     sectionText.push('');
-    sectionHtml.push(`<p><strong>Texts still waiting on a reply</strong> (thread ends inbound):</p><ul style="margin:0 0 12px 18px;padding:0;">${c.map((r) => `<li style="margin:0 0 6px 0;">${esc(etTime(r.created_at))} ${r.customer_id ? `<a href="${esc(adminPortalUrl())}/admin/communications?thread=${esc(r.customer_id)}">${esc(r.customer_name || maskPhone(r.peer))}</a>` : esc(r.customer_name || maskPhone(r.peer))}: &quot;${esc(String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120))}&quot;</li>`).join('')}</ul>${cTotal > c.length ? `<p>…and ${cTotal - c.length} more not shown</p>` : ''}`);
+    sectionHtml.push(`<p><strong>Texts still waiting on a reply</strong> (thread ends inbound):</p><ul style="margin:0 0 12px 18px;padding:0;">${c.map((r) => `<li style="margin:0 0 6px 0;">${esc(etDateTime(r.created_at))} ${r.customer_id ? `<a href="${esc(adminPortalUrl())}/admin/communications?thread=${esc(r.customer_id)}">${esc(r.customer_name || maskPhone(r.peer))}</a>` : esc(r.customer_name || maskPhone(r.peer))}: &quot;${esc(String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120))}&quot;</li>`).join('')}</ul>${cTotal > c.length ? `<p>…and ${cTotal - c.length} more not shown</p>` : ''}`);
   }
 
   const text = [
