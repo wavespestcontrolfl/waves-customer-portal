@@ -41,6 +41,11 @@ exports.up = async (knex) => {
   await knex.raw(
     "CREATE INDEX IF NOT EXISTS idx_job_status_history_cancelled_at ON job_status_history (transitioned_at) WHERE to_status = 'cancelled'",
   );
+  // The terminal-marker repair drives from recent RESTORATIONS
+  // (cancelled -> live) the same way (codex r35).
+  await knex.raw(
+    "CREATE INDEX IF NOT EXISTS idx_job_status_history_restored_at ON job_status_history (transitioned_at) WHERE from_status = 'cancelled'",
+  );
 
   // Seed the reminder-linkage epoch UNSTAMPED (codex r30/r32): this
   // migration runs as preDeployCommand while the OLD instance still owns
@@ -56,6 +61,7 @@ exports.up = async (knex) => {
 
 exports.down = async (knex) => {
   await knex.raw("DELETE FROM ops_email_send_state WHERE email_key = 'cancel-notice-linkage-epoch'");
+  await knex.raw('DROP INDEX IF EXISTS idx_job_status_history_restored_at');
   await knex.raw('DROP INDEX IF EXISTS idx_job_status_history_cancelled_at');
   await knex.raw('DROP INDEX IF EXISTS idx_appt_reminders_cancel_pending');
   await knex.raw('DROP INDEX IF EXISTS idx_messaging_audit_appointment_id');

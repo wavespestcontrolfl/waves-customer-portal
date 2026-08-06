@@ -2456,9 +2456,16 @@ const AppointmentReminders = {
         const current = await db('appointment_reminders')
           .where({ id: record.id })
           .first('cancellation_notice_state');
-        if (current?.cancellation_notice_state === 'sent') {
+        // 'sent' alone is not delivery proof (codex r35): it is also the
+        // in-flight pre-dispatch fence, which a retryable provider failure
+        // later reverts. Report success only on real audit evidence; an
+        // evidence-less 'sent' is "being handled", not "delivered".
+        if (current?.cancellation_notice_state === 'sent' && await acceptedCancellationAudit()) {
           logger.info(`[appt-remind] Cancellation notice already SENT for ${scheduledServiceId} — reconciled as success`);
           reportOutcome(true, null);
+        } else if (current?.cancellation_notice_state === 'sent') {
+          logger.info(`[appt-remind] Cancellation notice for ${scheduledServiceId} is claimed and in flight — not re-sending`);
+          reportOutcome(false, 'A cancellation notice is already being handled for this visit');
         } else {
           logger.info(`[appt-remind] Cancellation notice already handled for ${scheduledServiceId} — not re-sending`);
           reportOutcome(false, 'A cancellation notice was already handled for this visit');
@@ -2872,8 +2879,19 @@ const AppointmentReminders = {
       // Repair pass (codex r22): a restoration whose in-trx marker clear
       // failed leaves a stale terminal marker on a LIVE visit — shed it
       // here so a later real cancellation notices normally.
+      // Driven from RECENT restorations (codex r35), not a scan of every
+      // historical terminal marker: the failure this repairs is an
+      // un-cancel whose in-trx marker clear was swallowed, and that
+      // restoration is a cancelled→live history row. 7 days of ticks is
+      // hundreds of repair chances before the bound ages one out.
       await db('appointment_reminders')
         .whereNotNull('cancellation_notice_state')
+        .whereIn('scheduled_service_id', function recentRestorations() {
+          this.select('h.job_id').from('job_status_history as h')
+            .where('h.from_status', 'cancelled')
+            .whereNot('h.to_status', 'cancelled')
+            .whereRaw("h.transitioned_at >= now() - interval '7 days'");
+        })
         .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status IN ('pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'))")
         .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
 
@@ -3031,13 +3049,23 @@ const AppointmentReminders = {
               SELECT 1 FROM sms_log lsl
               WHERE lsl.customer_id = appointment_reminders.customer_id
                 AND lsl.direction = 'outbound'
-                AND lsl.message_type IN ('reminder_72h', 'appointment_reminder', 'confirmation')
                 AND lsl.twilio_sid ~ '^(SM|MM)'
-                -- Tied to THIS visit's lifetime (codex r31): after its
-                -- registration, before (a day past) its slot — an older
-                -- other-visit confirmation cannot announce a seeded row.
-                AND lsl.created_at >= appointment_reminders.created_at
-                AND lsl.created_at <= appointment_reminders.appointment_time + interval '1 day'
+                -- Per-FLAG correlation (codex r35): a confirmation flag is
+                -- only announced by a confirmation SMS near registration
+                -- (real bookings text within minutes; seeded rows never
+                -- do), a reminder flag only by a reminder SMS inside the
+                -- visit's own reminder window — an overlapping visit's
+                -- SMS months apart can no longer be borrowed.
+                AND (
+                  (appointment_reminders.confirmation_sent = true
+                    AND lsl.message_type = 'confirmation'
+                    AND lsl.created_at BETWEEN appointment_reminders.created_at - interval '5 minutes'
+                                           AND appointment_reminders.created_at + interval '1 hour')
+                  OR ((appointment_reminders.reminder_72h_sent = true OR appointment_reminders.reminder_24h_sent = true)
+                    AND lsl.message_type IN ('reminder_72h', 'appointment_reminder')
+                    AND lsl.created_at BETWEEN appointment_reminders.appointment_time - interval '80 hours'
+                                           AND appointment_reminders.appointment_time)
+                )
             )`)
             .first('id'));
         }

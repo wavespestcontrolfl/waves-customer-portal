@@ -406,6 +406,21 @@ function initScheduledJobs() {
     return;
   }
 
+  // Cancel-notice late-claim rollout boundary (codex #3233 r35): stamped
+  // at BOOT when the hook gate is on, so the boundary necessarily
+  // predates every gated cancellation this deploy processes — a cancel
+  // whose in-trx claim failed before the first 15-minute sweep tick is
+  // still inside the late-claim window. Idempotent (first stamp wins);
+  // the sweep keeps its own stamp as a backstop. Fail-soft: a miss here
+  // only narrows recovery to the sweep's stamp.
+  if (isEnabled('cancelNoticeHook')) {
+    db('ops_email_send_state')
+      .insert({ email_key: 'cancel-notice-hook-enabled-at', last_sent_at: db.fn.now(), updated_at: db.fn.now() })
+      .onConflict('email_key')
+      .ignore()
+      .catch((err) => logger.warn(`[scheduler] cancel-notice boundary stamp failed: ${err.message}`));
+  }
+
   // BOOT (+60s, then EVERY 6H at :23) — SMS draft-route canary: probes the
   // routed reply-drafting providers (gpt mini default / Sonnet save-the-sale)
   // and alerts Adam the moment one stops answering (bad model ID, revoked key,

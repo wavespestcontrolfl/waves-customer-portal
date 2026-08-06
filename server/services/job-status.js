@@ -573,13 +573,23 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
               SELECT 1 FROM sms_log lsl
               WHERE lsl.customer_id = appointment_reminders.customer_id
                 AND lsl.direction = 'outbound'
-                AND lsl.message_type IN ('reminder_72h', 'appointment_reminder', 'confirmation')
                 AND lsl.twilio_sid ~ '^(SM|MM)'
-                -- Tied to THIS visit's lifetime (codex r31): after its
-                -- registration, before (a day past) its slot — an older
-                -- other-visit confirmation cannot announce a seeded row.
-                AND lsl.created_at >= appointment_reminders.created_at
-                AND lsl.created_at <= appointment_reminders.appointment_time + interval '1 day'
+                -- Per-FLAG correlation (codex r35): a confirmation flag is
+                -- only announced by a confirmation SMS near registration
+                -- (real bookings text within minutes; seeded rows never
+                -- do), a reminder flag only by a reminder SMS inside the
+                -- visit's own reminder window — an overlapping visit's
+                -- SMS months apart can no longer be borrowed.
+                AND (
+                  (appointment_reminders.confirmation_sent = true
+                    AND lsl.message_type = 'confirmation'
+                    AND lsl.created_at BETWEEN appointment_reminders.created_at - interval '5 minutes'
+                                           AND appointment_reminders.created_at + interval '1 hour')
+                  OR ((appointment_reminders.reminder_72h_sent = true OR appointment_reminders.reminder_24h_sent = true)
+                    AND lsl.message_type IN ('reminder_72h', 'appointment_reminder')
+                    AND lsl.created_at BETWEEN appointment_reminders.appointment_time - interval '80 hours'
+                                           AND appointment_reminders.appointment_time)
+                )
             )`)
             .first('id'));
         }
