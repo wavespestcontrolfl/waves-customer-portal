@@ -127,7 +127,7 @@ function hasRescheduleOrAwayIntent(body) {
   // whole-message negation/billing vetoes (codex r28): "Please don't
   // cancel autopay. I need to cancel tomorrow's service." Guarded the
   // same way as needAsk — a negated need/want phrase is not fresh.
-  const freshCancelAppt = /\b(?:(?:need|want|like|have)\s+to|please)\s+cancel\s+(?:[\w'’]+\s+){0,2}?(?:appointment|appt|visit|service|treatment)s?\b/i.test(text)
+  const freshCancelAppt = /\b(?:(?:need|want|like|have)\s+to|please)\s+cancel\s+(?:[\w'’]+\s+){0,2}?(?:appointment|appt|visit|service|treatment)s?\b|(?:^|[.!?;]\s*)cancel\s+(?:[\w'’]+\s+){0,2}?(?:appointment|appt|visit|service|treatment)s?\b/i.test(text)
     && !/\b(?:don'?t|do\s+not|doesn'?t|won'?t|not|no|never)\s+(?:\w+\s+){0,2}?(?:need|want|like|have)\s+to\s+cancel/i.test(text);
   // Past-event reports (codex r44): "I had to miss yesterday's
   // appointment" reports history — a clause-scoped past reference next
@@ -197,19 +197,17 @@ function hasRescheduleOrAwayIntent(body) {
     || (!freshApptAsk && /\b(?:autopay|payment|invoice|card|subscription|bill|billing)s?\b[^.!?]{0,30}\b(?:different|another)\s+(?:day|date|time)\b|\b(?:different|another)\s+(?:day|date|time)\b[^.!?]{0,20}\b(?:autopay|payment|invoice|bill|billing)s?\b/i.test(text));
   if (!negated && (RESCHEDULE_DIRECT_RE.test(text) || MOVE_VERB_RE.test(text))) return true;
   if (cancelAsk) return true;
-  // Past absences are history, not a request (codex r17): "we were out
-  // of town last week".
-  // Past inability is history too (codex r37): "I was unable to attend
-  // yesterday's appointment" reports, it doesn't request.
-  const pastAway = /\b(?:were|was|got\s+back|just\s+got\s+back|returned)\b[^.!?]{0,25}\b(?:out\s+of\s+town|on\s+vacation|away)\b|\b(?:out\s+of\s+town|on\s+vacation|away)\b[^.!?]{0,15}\blast\s+(?:week|month|weekend)\b|\b(?:was|were)\s+unable\s+to\s+(?:attend|make)\b|\b(?:couldn'?t|could\s+not)\s+(?:attend|make)\s+(?:it\s+)?(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service|yesterday)\b|\bunable\s+to\s+attend\b[^.!?]{0,20}\byesterday/i.test(text);
   if (DONT_COME_RE.test(text)) return true;
   if (NO_NEED_RE.test(text)) return true;
   // Permission suppresses only the CLAUSE it shares with the away
   // statement (codex r49): "use the gate code for today's service. I
   // won't be home next week" carries a fresh, unpermissioned absence.
-  if (pastAway) return false;
+  const PAST_AWAY_CLAUSE_RE = /\b(?:were|was|got\s+back|just\s+got\s+back|returned)\b[^.!?]{0,25}\b(?:out\s+of\s+town|on\s+vacation|away)\b|\b(?:out\s+of\s+town|on\s+vacation|away)\b[^.!?]{0,15}\blast\s+(?:week|month|weekend)\b|\b(?:was|were)\s+unable\s+to\s+(?:attend|make)\b|\b(?:couldn'?t|could\s+not)\s+(?:attend|make)\s+(?:it\s+)?(?:[\w'\u2019]+\s+){0,2}?(?:appointment|appt|visit|service|yesterday)\b|\bunable\s+to\s+attend\b[^.!?]{0,20}\byesterday/i;
   const clauses = text.split(/[.!?;\n]+/);
   return clauses.some((clause) => {
+    // History vetoes only ITS clause (codex r51): "I was out of town
+    // last week. I won't be home tomorrow" carries a fresh absence.
+    if (PAST_AWAY_CLAUSE_RE.test(clause)) return false;
     const awayMatch = AWAY_RE.exec(clause);
     if (!awayMatch) return false;
     const permMatch = AWAY_PERMISSION_RE.exec(clause);

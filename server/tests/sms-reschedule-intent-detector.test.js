@@ -552,3 +552,15 @@ describe('follow-up asks, conjunction clauses, availability rejections (codex r5
     expect(hasRescheduleOrAwayIntent("Friday won't work")).toBe(true);
   });
 });
+
+describe('per-clause history veto and imperative cancel (codex r51)', () => {
+  test('past trip plus fresh absence flags', () => {
+    expect(hasRescheduleOrAwayIntent("I was out of town last week. I won't be home tomorrow")).toBe(true);
+  });
+  test('billing negation plus imperative service cancel flags', () => {
+    expect(hasRescheduleOrAwayIntent("Don't cancel autopay. Cancel tomorrow's service.")).toBe(true);
+  });
+  test('pure past trip still quiet', () => {
+    expect(hasRescheduleOrAwayIntent('We were out of town last week, sorry we missed you')).toBe(false);
+  });
+});
