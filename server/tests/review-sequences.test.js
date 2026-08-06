@@ -1792,3 +1792,25 @@ describe('codex #3235 r18 — Maps links count as manual asks', () => {
     expect(result.reason).toBe('manual_ask_recent');
   });
 });
+
+describe('codex #3235 r19 — first-send re-resolution failure defers', () => {
+  test('a failed re-resolution defers the touch instead of sending the stale plan', async () => {
+    const threeTouch = JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]);
+    const mock = makeMock({
+      customers: [{ id: 'df-1', first_name: 'Hal', last_name: 'J', phone: '+19410000081', nearest_location_id: 'bradenton' }],
+      review_sequences: [{ id: 'seq-df', customer_id: 'df-1', service_record_id: 'sr-df', status: 'active', current_step: 0, touches_sent: 0, started_by: 'post_service', plan: threeTouch, started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000) }],
+    });
+    db.mockImplementation(mock);
+    const spy = jest.spyOn(ReviewService, 'resolveSequencePlanForEnrollment').mockResolvedValue({ error: true });
+    try {
+      const out = await ReviewService.processReviewSequences();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(out.sent).toBe(0);
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(seq.status).toBe('active');
+      expect(new Date(seq.next_run_at).getTime()).toBeGreaterThan(Date.now());
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});

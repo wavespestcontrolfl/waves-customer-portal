@@ -2495,7 +2495,16 @@ const ReviewService = {
           serviceRecordId: seq.service_record_id,
           scheduledServiceId: seq.scheduled_service_id,
         });
-        if (re.error) throw new Error("plan re-resolution unavailable"); // caught below: enrolled plan stands
+        if (re.error) {
+          // Defer, never send on a possibly-stale plan (codex #3235 r19 P1):
+          // a follow-up booked after enrollment may have flipped this to a
+          // single first-treatment ask, so retry the classification next tick.
+          await db("review_sequences")
+            .where({ id: seq.id, status: "active" })
+            .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+            .catch(() => {});
+          return { ran: false, deferred: true, reason: "plan_reresolution_unavailable" };
+        }
         if (re.skip) {
           await db("review_sequences").where({ id: seq.id }).update({
             status: "stopped",
@@ -2515,7 +2524,15 @@ const ReviewService = {
           plan = re.plan;
           seq.series_final = re.seriesFinal === true;
         }
-      } catch { /* keep the enrolled plan */ }
+      } catch {
+        // Same posture as re.error (codex r19): a blip mid-swap must defer,
+        // not send against a possibly half-updated plan/flag pair.
+        await db("review_sequences")
+          .where({ id: seq.id, status: "active" })
+          .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+          .catch(() => {});
+        return { ran: false, deferred: true, reason: "plan_reresolution_unavailable" };
+      }
     }
 
     const stop = async (reason) => {
