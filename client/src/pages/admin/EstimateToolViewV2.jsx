@@ -125,6 +125,18 @@ const PRE_SLAB_PRODUCT_META = {
   },
 };
 
+// Plan status for the existing-customer chip. The hydrated edit-source
+// payload carries the server's canonical membership verdict (hasActivePlan:
+// sentinel tiers like Commercial are NOT members even with a rate; a
+// rate-only member with a null tier IS one — raw tier truthiness gets both
+// wrong). Customer-search rows don't carry the boolean, so they keep the
+// legacy tier-truthiness reading and their rendering is unchanged.
+function matchHasActivePlan(match) {
+  if (!match) return false;
+  if (typeof match.hasActivePlan === "boolean") return match.hasActivePlan;
+  return !!(match.tier && match.tier !== "null");
+}
+
 function resolvePreSlabJobContextForForm(form) {
   if (form?._preslabJobContextEdited) return form.preslabJobContext || "standalone";
   const volume = String(form?.preslabVolume || "NONE").trim().toUpperCase();
@@ -2818,6 +2830,12 @@ export default function EstimateToolViewV2({
           customerName: d.customerName || "",
           hasInputs: !!d.inputs,
         });
+        // The Customer Lookup panel's only linked-customer visual is this
+        // chip — without seeding it here, an opened estimate always shows
+        // the empty search state even though the row IS linked (and
+        // form.customerId was seeded above). Display-only: pricing inputs
+        // like isRecurringCustomer stay exactly as the estimate saved them.
+        setExistingCustomerMatch(d.customer || null);
       } catch (e) {
         if (!cancelled) {
           setEditMode(null);
@@ -2841,6 +2859,9 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
     setPriceRecomputeNotice(null);
     setGroupAnchorId(null);
+    // Hydration now seeds the linked-customer chip — clear it with the rest
+    // of the edit state or it lingers over the next blank form.
+    setExistingCustomerMatch(null);
   }
 
   const set = useCallback((key, val) => {
@@ -5621,13 +5642,12 @@ export default function EstimateToolViewV2({
                     {existingCustomerMatch.firstName}{" "}
                     {existingCustomerMatch.lastName}
                   </strong>
-                  {existingCustomerMatch.tier &&
-                  existingCustomerMatch.tier !== "null"
+                  {matchHasActivePlan(existingCustomerMatch)
                     ? " · Recurring plan"
                     : " · No active plan"}
-                  {existingCustomerMatch.tier &&
-                  existingCustomerMatch.tier !== "null" &&
-                  existingCustomerMatch.monthlyRate > 0
+                  {matchHasActivePlan(existingCustomerMatch) &&
+                  existingCustomerMatch.monthlyRate > 0 &&
+                  form.isRecurringCustomer === "YES"
                     ? " · 15% loyalty discount applied"
                     : ""}
                 </div>

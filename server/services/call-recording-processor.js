@@ -6652,6 +6652,18 @@ const CallRecordingProcessor = {
               phone,
               email: extracted.email || null,
               address_line1: addrLine || null,
+              // The extraction carries the unit separately — dropping it made
+              // condo/apartment customers unfindable by any unit-bearing
+              // address search and defeated the estimate builder's address
+              // auto-match. DELIBERATELY extracted.address_line2 only, no V2
+              // fallback: adoptV2PrimaryFields already copies a SAFE V2 unit
+              // into `extracted` under primary mode and rejects streetless
+              // V2 address components — reading V2 directly here would glue
+              // a V2 unit onto an unrelated V1 street (audit P1 r3), and in
+              // shadow/kill-switch mode the canonical row must stay fully
+              // V1-driven (audit P1 r2). Same 100-char clamp as the booking
+              // property-linkage path.
+              address_line2: String(extracted.address_line2 || '').trim().slice(0, 100) || null,
               city: addrCity || null,
               state: addrState,
               zip: addrZip || null,

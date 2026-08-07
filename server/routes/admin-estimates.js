@@ -568,6 +568,40 @@ router.get('/:id/edit-source', async (req, res, next) => {
     const engineProfile = estData.engineRequest?.profile && typeof estData.engineRequest.profile === 'object'
       ? estData.engineRequest.profile
       : null;
+    // The builder's Customer Lookup panel has exactly one linked-customer
+    // visual (the existingCustomerMatch chip), and it renders from a live
+    // customer object — without this block every opened estimate shows the
+    // empty search state even when customer_id is set. Shape mirrors the
+    // fields the chip and its setters read from the customer search results.
+    // Best-effort: a lookup failure must not block opening the estimate.
+    // ADMIN ONLY: this router is requireTechOrAdmin and the estimate lookup
+    // is unscoped, so returning the payload to a technician token would leak
+    // contact fields and office-only monthlyRate outside the customer APIs'
+    // assignment gate (codex P1). Technicians get customer:null — the chip
+    // simply doesn't render, which was the pre-PR behavior for everyone.
+    let customer = null;
+    if (estimate.customer_id && req.techRole === 'admin') {
+      const c = await db('customers').where({ id: estimate.customer_id }).first().catch(() => null);
+      if (c) {
+        // hasActivePlan is the canonical membership verdict (admin-customers
+        // hasMembership): sentinel tiers (One-Time/Commercial/…) are NOT
+        // members even with a rate, and a rate-only member (null tier,
+        // monthly_rate > 0) IS one — raw tier truthiness gets both wrong, so
+        // the chip renders plan status from this boolean (codex P2 + P1 r4).
+        // tier/monthlyRate stay raw for display.
+        const { hasMembership } = require('./admin-customers');
+        customer = {
+          id: c.id,
+          firstName: c.first_name || '',
+          lastName: c.last_name || '',
+          phone: c.phone || null,
+          email: c.email || null,
+          tier: c.waveguard_tier,
+          monthlyRate: parseFloat(c.monthly_rate || 0),
+          hasActivePlan: hasMembership(c),
+        };
+      }
+    }
     res.json({
       id: estimate.id,
       status: estimate.status,
@@ -587,6 +621,7 @@ router.get('/:id/edit-source', async (req, res, next) => {
       estimateGroupId: estimate.estimate_group_id || null,
       inputs,
       engineProfile,
+      customer,
     });
   } catch (err) { next(err); }
 });
