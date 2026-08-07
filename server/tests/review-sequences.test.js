@@ -1699,6 +1699,41 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan.plan).toHaveLength(3);
   });
 
+  test('r19: exclusion lineage stops at the program opener, and completed report-less rows are not booking-inferred openers', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // ① Declared follow-up 35d after its exclusion opener: the engagement
+    // lineage stops at that opener — an older exclusion program's rating
+    // does not suppress the current final.
+    let mock = makeMock({
+      service_records: [{ id: 'sr-el', customer_id: 'el', scheduled_service_id: 'el-fin', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Follow-up check' } } }) }],
+      scheduled_services: [
+        { id: 'el-older', customer_id: 'el', service_id: 'svc-excl', status: 'completed', scheduled_date: d(90), service_key: 'rodent_exclusion', follow_up_interval_days: 7 },
+        { id: 'el-open', customer_id: 'el', service_id: 'svc-excl', status: 'completed', scheduled_date: d(35), service_key: 'rodent_exclusion', follow_up_interval_days: 7 },
+        { id: 'el-fin', customer_id: 'el', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [{ id: 'seq-el-older', customer_id: 'el', scheduled_service_id: 'el-older', status: 'completed' }],
+      review_requests: [{ id: 'req-el-older', customer_id: 'el', sequence_id: 'seq-el-older', status: 'rated' }],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'el', serviceRecordId: 'sr-el' });
+    expect(plan.seriesFinal).toBe(true);
+    expect(plan.plan).toHaveLength(3);
+
+    // ② A COMPLETED report-less base-SKU later row is NOT a booking-level
+    // opener: the deferred earlier visit stands down (series moved past).
+    mock = makeMock({
+      scheduled_services: [
+        { id: 'cl-1', customer_id: 'cl', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', follow_up_interval_days: 3 },
+        { id: 'cl-2', customer_id: 'cl', service_id: 'svc-trap', status: 'completed', scheduled_date: d(2), service_key: 'rodent_trapping' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'cl', scheduledServiceId: 'cl-1' });
+    expect(plan.skip).toBe('series_completed');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);

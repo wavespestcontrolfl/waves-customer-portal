@@ -863,7 +863,13 @@ const ReviewService = {
             // because its checks share the base key). A report declaring a
             // follow-up outranks the heuristic.
             const boundary = declaredType === "initial"
+              // Booking-only inference applies to LIVE rows only (codex
+              // #3243 r19 P2): a completed base-SKU row with no report yet
+              // (admin completion before service_records) may be THIS
+              // program's follow-up — completed rows stay with
+              // declaration/history inference.
               || (declaredType == null
+                && r.status !== "completed"
                 && BASE_OPENER_KEYS.has(r.service_key)
                 && !r.parent_service_id
                 && !r.followup_source_service_id);
@@ -980,7 +986,7 @@ const ReviewService = {
               .where("lp.scheduled_date", "<", w180.anchorStr)
               .where("lp.scheduled_date", ">=", w180.floorStr)
               .whereIn("lpv.service_key", trapSeriesKeys)
-              .select("lp.id", "lp.scheduled_date", "lp.property_id", "lp.service_address_line1", "lp.service_address_line2", "lp.service_address_city", "lp.service_address_zip");
+              .select("lp.id", "lp.scheduled_date", "lp.property_id", "lp.parent_service_id", "lp.followup_source_service_id", "lpv.service_key as service_key", "lp.service_address_line1", "lp.service_address_line2", "lp.service_address_city", "lp.service_address_zip");
             // Bounded at the nearest declared initial (codex #3243 r16 P2):
             // an OLDER program's engagement must not suppress the current
             // program's cadence — walk newest-first, stop at (and include)
@@ -991,7 +997,17 @@ const ReviewService = {
             const lineageIds = [];
             for (const r of lineageSorted) {
               lineageIds.push(r.id);
-              if ((await this._declaredTrapVisitType({ scheduledServiceId: r.id })) === "initial") break;
+              const t = await this._declaredTrapVisitType({ scheduledServiceId: r.id });
+              // The nearest opener bounds the lineage (codex #3243 r19
+              // P2): a declared initial, or — for keys that cannot declare
+              // (exclusion; base rodent bookings) — the nearest UNLINKED
+              // base-SKU visit, unless its report declares a follow-up.
+              const boundary = t === "initial"
+                || (t == null
+                  && BASE_OPENER_KEYS.has(r.service_key)
+                  && !r.parent_service_id
+                  && !r.followup_source_service_id);
+              if (boundary) break;
             }
             if (lineageIds.length) {
               const records = await db("service_records").whereIn("scheduled_service_id", lineageIds).select("id");
