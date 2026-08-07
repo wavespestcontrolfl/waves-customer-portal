@@ -722,10 +722,13 @@ class GoogleBusinessService {
   // REVIEW SYNC - GBP Reviews API primary; Places kept for stats/fallback.
   // =========================================================================
   async syncAllReviews() {
-    const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY;
+    // The Maps key powers only the Places stats + review-sample fallback.
+    // GBP Reviews auth is separate (_getClient), so a missing Maps key must
+    // not stop the authoritative GBP loop — that would also silence the
+    // degraded-sync and removal alerts this watchdog exists to emit.
+    const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || null;
     if (!GOOGLE_KEY) {
-      logger.error('[google-business] GOOGLE_MAPS_API_KEY not set - skipping review sync');
-      return { synced: 0, error: 'GOOGLE_MAPS_API_KEY not configured' };
+      logger.error('[google-business] GOOGLE_MAPS_API_KEY not set — Places stats/fallback disabled; continuing GBP review sync');
     }
     let totalSynced = 0, totalNew = 0;
     const errors = [];
@@ -733,9 +736,11 @@ class GoogleBusinessService {
 
     for (const loc of WAVES_LOCATIONS) {
       try {
-        await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
-          logger.warn(`[gbp] Places stats sync failed for ${loc.name}: ${err.message}`);
-        });
+        if (GOOGLE_KEY) {
+          await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
+            logger.warn(`[gbp] Places stats sync failed for ${loc.name}: ${err.message}`);
+          });
+        }
 
         let usedGbp = false;
         let gbpFailure = null;
@@ -773,11 +778,15 @@ class GoogleBusinessService {
             // failure this watchdog exists to detect.
             await this._notifyDegradedSync(loc, gbpFailure || 'no_client');
           }
-          const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY);
-          totalSynced += sample.synced;
-          totalNew += sample.new;
-          sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
-          logger.info(`[gbp] Synced ${sample.synced} review sample rows for ${loc.name} via Places API fallback`);
+          if (GOOGLE_KEY) {
+            const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY);
+            totalSynced += sample.synced;
+            totalNew += sample.new;
+            sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
+            logger.info(`[gbp] Synced ${sample.synced} review sample rows for ${loc.name} via Places API fallback`);
+          } else {
+            sources[loc.id] = 'none';
+          }
         }
       } catch (err) {
         logger.error(`Review sync failed for ${loc.name}: ${err.message}`);

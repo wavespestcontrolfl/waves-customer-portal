@@ -99,7 +99,11 @@ router.get('/', async (req, res, next) => {
       .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
       .where('google_reviews.reviewer_name', '!=', '_stats')
       .whereIn('google_reviews.location_id', activeLocationIds)
-      .modify(qb => { if (!showDismissed) qb.where(function() { this.where('google_reviews.dismissed', false).orWhereNull('google_reviews.dismissed'); }); })
+      // The removed-from-Google filter promises EVERY stamped review is
+      // reachable (it backs the removal-alert support workflow), so it must
+      // not be narrowed by the dismissed exclusion — a review dismissed
+      // before (or after) Google removed it is still removal evidence.
+      .modify(qb => { if (!showDismissed && missing !== 'true') qb.where(function() { this.where('google_reviews.dismissed', false).orWhereNull('google_reviews.dismissed'); }); })
       .select(
         'google_reviews.*',
         'customers.first_name as cust_first', 'customers.last_name as cust_last',
@@ -286,6 +290,13 @@ router.post('/:id/reply', async (req, res, next) => {
 
     const review = await db('google_reviews').where({ id: req.params.id }).first();
     if (!review) return res.status(404).json({ error: 'Review not found' });
+    // A stamped (removed-from-Google) review has no live GBP resource to
+    // reply to. The client disables the editor, but a page loaded BEFORE the
+    // hourly sync stamped the row still has an active editor — reject here so
+    // a stale client gets a clear 409 instead of the GBP 502.
+    if (review.missing_since) {
+      return res.status(409).json({ error: 'This review has been removed from Google — replies are disabled.' });
+    }
 
     // Try to post reply to Google. When GBP is configured, do not mark the
     // review replied locally unless Google accepted the reply.

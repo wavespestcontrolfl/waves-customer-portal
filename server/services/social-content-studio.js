@@ -1500,6 +1500,30 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       return { success: true, mode: effectiveMode, post: saved.post, run: updated, preview: finalPreview };
     }
 
+    // Pre-publish liveness gate (mirrors approveAutonomousRun): the candidate
+    // was selected before the creative render/upload, and the hourly sync can
+    // stamp the review missing inside that window. Re-read the source row so
+    // a removed review never publishes as a "current Google review" — the
+    // post-publish createReviewGraphic re-check is bookkeeping only and its
+    // rejection is swallowed after the post is already live.
+    if (isReviewRun && (await hasTable('google_reviews'))) {
+      const srcReview = await db('google_reviews')
+        .where({ id: plan.reviewGraphic.googleReviewId })
+        .first()
+        .catch(() => null);
+      if (!srcReview || srcReview.missing_since) {
+        const reason = srcReview
+          ? 'source Google review has been removed from Google — testimonial publish blocked'
+          : 'source Google review no longer exists — testimonial publish blocked';
+        await updateAutonomousRun(run?.id, {
+          status: 'failed',
+          preview: finalPreview,
+          skipReason: reason,
+        });
+        return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
+      }
+    }
+
     const guid = `${AUTONOMOUS_SOURCE}_${startedAt.toISOString()}`;
     const publishResult = await SocialMediaService.publishToAll({
       title: plan.topic,

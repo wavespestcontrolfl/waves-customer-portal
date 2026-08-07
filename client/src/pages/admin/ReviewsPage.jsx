@@ -1699,23 +1699,39 @@ export default function ReviewsPage() {
   const [filterResponded, setFilterResponded] = useState("needs-reply");
   const [search, setSearch] = useState("");
   const loadSeqRef = useRef(0);
+  // Server pages at 200 rows; without a pager a large profile wipe would
+  // leave older stamped reviews unreachable from the Removed filter (only
+  // notification metadata would name them). pageRef tracks the last page
+  // appended; hasMore = the last fetch returned a full page.
+  const PAGE_SIZE = 200;
+  const pageRef = useRef(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
-  const loadData = useCallback(() => {
-    const loadSeq = loadSeqRef.current + 1;
-    loadSeqRef.current = loadSeq;
-    setLoading(true);
-    setError(null);
-    const params = new URLSearchParams({ limit: "200" });
+  const buildParams = useCallback((pageNum) => {
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+    if (pageNum > 1) params.set("page", String(pageNum));
     if (filterLocation !== "all") params.set("location", filterLocation);
     if (filterRating !== "all") params.set("rating", filterRating);
     if (filterResponded === "responded") params.set("responded", "true");
     if (filterResponded === "needs-reply") params.set("responded", "false");
     if (filterResponded === "removed") params.set("missing", "true");
     if (search.trim()) params.set("search", search.trim());
-    adminFetch(`/admin/reviews?${params.toString()}`)
+    return params;
+  }, [filterLocation, filterRating, filterResponded, search]);
+
+  const loadData = useCallback(() => {
+    const loadSeq = loadSeqRef.current + 1;
+    loadSeqRef.current = loadSeq;
+    setLoading(true);
+    setError(null);
+    pageRef.current = 1;
+    setHasMore(false);
+    adminFetch(`/admin/reviews?${buildParams(1).toString()}`)
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
         setData(d);
+        setHasMore((d.reviews || []).length === PAGE_SIZE);
         setLoading(false);
       })
       .catch((e) => {
@@ -1723,7 +1739,36 @@ export default function ReviewsPage() {
         setError(e.message);
         setLoading(false);
       });
-  }, [filterLocation, filterRating, filterResponded, search]);
+  }, [buildParams]);
+
+  const loadMore = useCallback(() => {
+    // Capture the sequence so a filter change mid-flight discards this append.
+    const loadSeq = loadSeqRef.current;
+    const nextPage = pageRef.current + 1;
+    setLoadingMore(true);
+    adminFetch(`/admin/reviews?${buildParams(nextPage).toString()}`)
+      .then((d) => {
+        if (loadSeq !== loadSeqRef.current) return;
+        pageRef.current = nextPage;
+        setHasMore((d.reviews || []).length === PAGE_SIZE);
+        setLoadingMore(false);
+        setData((prev) => {
+          if (!prev) return d;
+          // Rows can shift between pages as the hourly sync inserts — dedupe
+          // by id so a shifted row isn't rendered twice.
+          const seen = new Set(prev.reviews.map((r) => r.id));
+          return {
+            ...prev,
+            reviews: [...prev.reviews, ...(d.reviews || []).filter((r) => !seen.has(r.id))],
+          };
+        });
+      })
+      .catch((e) => {
+        if (loadSeq !== loadSeqRef.current) return;
+        setLoadingMore(false);
+        setError(e.message);
+      });
+  }, [buildParams]);
 
   useEffect(() => {
     const t = setTimeout(loadData, search.trim() ? 250 : 0);
@@ -2167,6 +2212,28 @@ export default function ReviewsPage() {
                     onDismiss={handleDismiss}
                   />
                 ))
+              )}
+              {hasMore && (
+                <div style={{ textAlign: "center", marginTop: 12 }}>
+                  <button
+                    onClick={loadMore}
+                    disabled={loadingMore}
+                    style={{
+                      padding: "10px 24px",
+                      background: "transparent",
+                      border: `1px solid ${D.border}`,
+                      color: D.text,
+                      borderRadius: 8,
+                      fontSize: 13,
+                      fontFamily: "Roboto, Arial, sans-serif",
+                      cursor: loadingMore ? "default" : "pointer",
+                      opacity: loadingMore ? 0.5 : 1,
+                      minHeight: 44,
+                    }}
+                  >
+                    {loadingMore ? "Loading..." : "Load more reviews"}
+                  </button>
+                </div>
               )}
             </>
           )}

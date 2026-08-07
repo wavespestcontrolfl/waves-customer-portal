@@ -990,4 +990,41 @@ describe('Google Business review sync', () => {
     expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(0);
     expect((db.__state.rows.notifications || []).some(n => n.title.includes('sync degraded'))).toBe(true);
   });
+
+  test('runs the GBP watchdog when GOOGLE_MAPS_API_KEY is absent (key gates only Places)', async () => {
+    // GBP auth is _getClient, not the Maps key — an env drift on the key
+    // alone must not stop the authoritative pull or the removal watchdog.
+    delete process.env.GOOGLE_MAPS_API_KEY;
+    seedSyncedReview({
+      id: 'gone-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-gone',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone',
+      reviewer_name: 'Vanished Vera',
+    });
+    gbpFeed([]);
+
+    const result = await service.syncAllReviews();
+
+    expect(result.sources).toEqual({ bradenton: 'gbp' });
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'gone-1').missing_since).toBeTruthy();
+    expect((db.__state.rows.notifications || []).some(n => n.title.includes('removed at'))).toBe(true);
+    // No Places request went out without a key.
+    const urls = global.fetch.mock.calls.map(c => String(c[0]));
+    expect(urls.some(u => u.includes('maps.googleapis.com'))).toBe(false);
+  });
+
+  test('still alerts degraded sync when the key is absent AND GBP is down (no Places attempt)', async () => {
+    delete process.env.GOOGLE_MAPS_API_KEY;
+    seedSyncedReview({ id: 'stale-1' });
+    service._getClient = jest.fn(async () => null); // GBP credential gap
+    global.fetch = jest.fn(async () => jsonResponse({}));
+
+    const result = await service.syncAllReviews();
+
+    expect(result.sources).toEqual({ bradenton: 'none' });
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'stale-1').missing_since).toBeNull();
+    expect((db.__state.rows.notifications || []).some(n => n.title.includes('sync degraded'))).toBe(true);
+    const urls = global.fetch.mock.calls.map(c => String(c[0]));
+    expect(urls.some(u => u.includes('maps.googleapis.com'))).toBe(false);
+  });
 });
