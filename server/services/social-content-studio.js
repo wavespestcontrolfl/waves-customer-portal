@@ -1572,6 +1572,11 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // The claim is held through candidate consumption below — releasing it
     // right after the publish would let a second draft run referencing the
     // same review acquire and double-publish in the publish→consume gap.
+    // If consumption FAILS after a live publish, the claim is RETAINED and
+    // its release transfers to the detached recovery loop — the finally must
+    // not release it (an unconsumed candidate plus a cleared claim IS the
+    // double-publish window).
+    let claimRetained = false;
     try {
 
     const post = await db('social_media_posts')
@@ -1587,24 +1592,50 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // failed to render (no CDN/S3 or a sharp/S3 error) the post may still have
     // gone out as text, but consuming the review with a null-image graphic would
     // drop it from the candidate queue forever and it could never be rendered.
+    // Built once — feeds both the inline persist and, on failure, the
+    // detached recovery loop that keeps retrying it under the retained claim.
+    const consumeInput = isReviewRun ? {
+      googleReviewId: plan.reviewGraphic.googleReviewId,
+      privacyMode: plan.reviewGraphic.privacyMode || 'first_name_city',
+      // Follow the visual that actually published (photo card vs SVG card).
+      templateKey: finalPreview.visual?.templateKey || 'waves_clean_square',
+      channels: plan.channels,
+      status: 'approved',
+      imageUrl,
+    } : null;
     if (canPersistGraphic && !SOCIAL_FLAGS.dryRun && publishResult.success && imageUrl) {
-      await persistReviewGraphicWithRetry({
-        googleReviewId: plan.reviewGraphic.googleReviewId,
-        privacyMode: plan.reviewGraphic.privacyMode || 'first_name_city',
-        // Follow the visual that actually published (photo card vs SVG card).
-        templateKey: finalPreview.visual?.templateKey || 'waves_clean_square',
-        channels: plan.channels,
-        status: 'approved',
-        imageUrl,
-      }).catch((err) => {
-        // Bookkeeping only — the post is already live — but a silent
-        // swallow risks a double-publish of the same review later, so it
-        // must be loud in the logs.
-        logger.error(`[studio] review-graphic bookkeeping FAILED after publish (review ${plan.reviewGraphic.googleReviewId}): ${err.message} — candidate NOT consumed; a later run may re-select this review`);
-        return null;
-      });
+      try {
+        await persistReviewGraphicWithRetry(consumeInput);
+      } catch (err) {
+        // The post is already live but nothing durable consumed the
+        // candidate — releasing the claim now would let a later run
+        // re-select and double-publish this review. Retain the claim and
+        // hand its release to the recovery loop, which keeps it renewed
+        // until consumption is recorded (or the review is removed).
+        logger.error(`[studio] review-graphic bookkeeping FAILED after publish (review ${plan.reviewGraphic.googleReviewId}): ${err.message} — candidate NOT consumed; claim retained, recovery loop will record consumption`);
+        claimRetained = true;
+        holdClaimUntilCandidateConsumed({
+          googleReviewId: plan.reviewGraphic.googleReviewId,
+          persistInput: consumeInput,
+          claim: publishOutcome,
+        });
+      }
     } else if (isReviewRun && !canPersistGraphic && !SOCIAL_FLAGS.dryRun && publishResult.success) {
-      logger.error(`[studio] review_graphics table unavailable — published review ${plan.reviewGraphic.googleReviewId} NOT consumed from the candidate queue`);
+      // hasTable read false (missing table or a transient schema-lookup
+      // failure). With a hosted image the exposure is identical to a failed
+      // persist — retain the claim and let the recovery loop record the
+      // consumption once the table is reachable (createReviewGraphic
+      // re-checks it every attempt). Without an image the candidate stays
+      // reselectable BY DESIGN (so the graphic can be rendered later).
+      logger.error(`[studio] review_graphics table unavailable — published review ${plan.reviewGraphic.googleReviewId} NOT consumed from the candidate queue${imageUrl ? '; claim retained, recovery loop will record consumption once the table is reachable' : ''}`);
+      if (imageUrl) {
+        claimRetained = true;
+        holdClaimUntilCandidateConsumed({
+          googleReviewId: plan.reviewGraphic.googleReviewId,
+          persistInput: consumeInput,
+          claim: publishOutcome,
+        });
+      }
     }
 
     const status = SOCIAL_FLAGS.dryRun ? 'dry_run' : publishResult.success ? 'published' : 'failed';
@@ -1626,7 +1657,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       publishResult,
     };
     } finally {
-      await publishOutcome.releaseClaim();
+      if (!claimRetained) await publishOutcome.releaseClaim();
     }
   } catch (err) {
     await updateAutonomousRun(run?.id, {
@@ -1672,17 +1703,21 @@ function cityFromLocationId(locationId) {
  * unexpired claim, so no removal stamp can land mid-publication either.
  * The claim self-expires (PUBLISH_CLAIM_MS) and is cleared best-effort
  * afterwards, so a crashed publisher only defers that row's stamping to
- * the next hourly cycle. Non-review publishes (no sourceReviewId) pass
- * straight through. FAIL CLOSED: no hasTable pre-check — a DB error
- * rejects and the publish fails loudly.
+ * the next hourly cycle. When a LIVE publish cannot get its candidate
+ * consumption recorded, callers retain the claim instead of releasing it
+ * and holdClaimUntilCandidateConsumed owns the release (see its doc).
+ * Non-review publishes (no sourceReviewId) pass straight through.
+ * FAIL CLOSED: no hasTable pre-check — a DB error rejects and the publish
+ * fails loudly.
  */
 const PUBLISH_CLAIM_MS = 10 * 60 * 1000;
 
 const NOOP_RELEASE = async () => {};
+const NOOP_ABANDON = () => {};
 
 async function publishWithReviewLivenessLock(sourceReviewId, publishFn, { rejectConsumed = false } = {}) {
   if (!sourceReviewId) {
-    return { blocked: false, result: await publishFn(), releaseClaim: NOOP_RELEASE };
+    return { blocked: false, result: await publishFn(), releaseClaim: NOOP_RELEASE, abandonClaim: NOOP_ABANDON };
   }
   const source = await db('google_reviews').where({ id: sourceReviewId }).first();
   if (!source || source.missing_since) {
@@ -1698,11 +1733,14 @@ async function publishWithReviewLivenessLock(sourceReviewId, publishFn, { reject
       // Two draft runs can reference the same review (drafts don't insert
       // review_graphics) — once one approval consumed the candidate, a
       // second acquisition must fail permanently, not just while the first
-      // claim is live.
+      // claim is live. FAIL CLOSED: duplicate prevention is the whole point
+      // of this lookup, so a transient DB failure must abort the publish
+      // (the error propagates and the run fails loudly) — swallowing it
+      // would treat "couldn't check" as "not consumed" and re-publish a
+      // testimonial another run already posted.
       const consumedRow = await db('review_graphics')
         .where({ google_review_id: sourceReviewId, status: 'approved' })
-        .first()
-        .catch(() => null);
+        .first();
       if (consumedRow) return { consumed: true };
     }
     const claimed = await db('google_reviews')
@@ -1759,13 +1797,24 @@ async function publishWithReviewLivenessLock(sourceReviewId, publishFn, { reject
       .update({ publish_claimed_until: null })
       .catch(() => null);
   };
+  // Abandon = stop renewing but DELIBERATELY leave the claim standing, so it
+  // self-expires within one TTL. Used when a live external publish could not
+  // get its candidate consumption recorded: actively clearing the claim
+  // would re-open reselection (and double-publish) immediately, while an
+  // expiring claim never blocks the reconcile for longer than one TTL after
+  // the heartbeat stops.
+  const abandonClaim = () => {
+    if (released) return;
+    released = true;
+    clearInterval(heartbeat);
+  };
   try {
     const result = await publishFn();
     // The claim deliberately SURVIVES a successful publish: callers hold it
     // through their post-publish bookkeeping (candidate consumption, local
     // record) and release via releaseClaim() — otherwise a competitor could
     // acquire in the publish→consume gap and double-publish.
-    return { blocked: false, result, releaseClaim };
+    return { blocked: false, result, releaseClaim, abandonClaim };
   } catch (err) {
     await releaseClaim();
     throw err;
@@ -1943,7 +1992,7 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         gbpLocationIds: [gbpLocationId],
         postId: run.social_media_post_id || null,
       }), { rejectConsumed: true })
-      : { blocked: false, result: { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' }, releaseClaim: async () => {} };
+      : { blocked: false, result: { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' }, releaseClaim: async () => {}, abandonClaim: () => {} };
     if (publishOutcome.blocked) {
       return {
         ok: false,
@@ -1959,7 +2008,10 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     }
     const publishResult = publishOutcome.result;
     // Claim held through candidate consumption below (see
-    // publishWithReviewLivenessLock) — released in the finally.
+    // publishWithReviewLivenessLock) — released in the finally UNLESS
+    // consumption failed after a live publish, where the claim is retained
+    // and the detached recovery loop owns its release.
+    let claimRetained = false;
     try {
 
     // A VIDEO approval only finalizes when the video itself posted AND no
@@ -2007,22 +2059,34 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     }
 
     // Consume the review from the candidate queue only after a REAL publish —
-    // same invariants as the autonomous publish path (never on dry-run/failure,
-    // never without a hosted image).
-    if (published && input.reviewGraphic?.googleReviewId && await hasTable('review_graphics')) {
-      await persistReviewGraphicWithRetry({
+    // same invariants as the autonomous publish path (never on dry-run/
+    // failure). No hasTable pre-gate: createReviewGraphic fails loudly when
+    // the table is unreachable, and that failure lands in the same retained-
+    // claim recovery path — a pre-gate would silently skip consumption and
+    // release the claim with the candidate still selectable.
+    if (published && input.reviewGraphic?.googleReviewId) {
+      const consumeInput = {
         googleReviewId: input.reviewGraphic.googleReviewId,
         privacyMode: input.reviewGraphic.privacyMode || 'first_name_city',
         templateKey: preview.visual?.templateKey || 'waves_clean_square',
         channels,
         status: 'approved',
         imageUrl: chosenImageUrl,
-      }).catch((err) => {
-        // Bookkeeping only — the post is already live — but a silent
-        // swallow risks a double-publish of the same review later.
-        logger.error(`[studio] review-graphic bookkeeping FAILED after approval publish (review ${input.reviewGraphic.googleReviewId}): ${err.message} — candidate NOT consumed; a later run may re-select this review`);
-        return null;
-      });
+      };
+      try {
+        await persistReviewGraphicWithRetry(consumeInput);
+      } catch (err) {
+        // The post is already live — retain the claim so a later run can't
+        // re-select this candidate, and let the recovery loop record the
+        // consumption (or release once the review is removed).
+        logger.error(`[studio] review-graphic bookkeeping FAILED after approval publish (review ${input.reviewGraphic.googleReviewId}): ${err.message} — candidate NOT consumed; claim retained, recovery loop will record consumption`);
+        claimRetained = true;
+        holdClaimUntilCandidateConsumed({
+          googleReviewId: input.reviewGraphic.googleReviewId,
+          persistInput: consumeInput,
+          claim: publishOutcome,
+        });
+      }
     }
 
     // Promote the chosen variant to the run's primary visual so the audit list
@@ -2061,7 +2125,7 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
 
     return { ok: true, published, dryRun: SOCIAL_FLAGS.dryRun, publishResult: assessment.mergedPublishResult, run: updated };
     } finally {
-      await publishOutcome.releaseClaim();
+      if (!claimRetained) await publishOutcome.releaseClaim();
     }
     // recordHealth: false — per-run approval lock, not a scheduled job.
   }, { recordHealth: false });
@@ -2233,6 +2297,69 @@ async function persistReviewGraphicWithRetry(input, { attempts = 6, delayMs = 10
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
+}
+
+const CLAIM_RECOVERY_ATTEMPTS = 60;
+const CLAIM_RECOVERY_DELAY_MS = 60 * 1000;
+
+/**
+ * Detached post-publish recovery: the testimonial is LIVE externally but the
+ * review_graphics consumption record failed to persist, so nothing durable
+ * stops a later run from re-selecting and double-publishing the same review.
+ * The caller RETAINS the publish claim (its heartbeat keeps renewing, which
+ * blocks competitor acquisition and defers reconcile stamping) and this loop
+ * owns the claim's release: it keeps retrying the persist until the record
+ * lands, then releases. It releases early when the review is stamped removed
+ * or deleted — stamped rows are excluded from every candidate and approve
+ * surface, so no reselection risk remains. An unreadable review keeps the
+ * claim held (never release on unverifiable state). If recovery exhausts its
+ * attempts (~1h), the claim is ABANDONED rather than cleared: it self-expires
+ * within one TTL, and was never actively released while unconsumed.
+ * Crash caveat (same as the claim design itself): process death here lets
+ * the claim expire with the candidate unconsumed — the error logs are the
+ * operator signal.
+ */
+function holdClaimUntilCandidateConsumed({
+  googleReviewId,
+  persistInput,
+  claim,
+  attempts = CLAIM_RECOVERY_ATTEMPTS,
+  delayMs = CLAIM_RECOVERY_DELAY_MS,
+  // Injectable for tests. attempts:1 — this loop IS the outer retry; a
+  // SYNC_LOCK_BUSY just surfaces and waits the full delayMs instead of
+  // stacking the inner 6×10s ladder on every tick.
+  persist = (input) => persistReviewGraphicWithRetry(input, { attempts: 1 }),
+}) {
+  const loop = async () => {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      await new Promise((resolve) => { const t = setTimeout(resolve, delayMs); t.unref?.(); });
+      let review; let readOk = true;
+      try {
+        review = await db('google_reviews').where({ id: googleReviewId }).first();
+      } catch { readOk = false; }
+      if (readOk && (!review || review.missing_since)) {
+        logger.info(`[studio] claim recovery: review ${googleReviewId} is ${review ? 'stamped removed' : 'deleted'} — excluded from every candidate surface, no reselection risk; releasing claim`);
+        await claim.releaseClaim();
+        return;
+      }
+      if (!readOk) continue; // can't verify liveness — keep holding, retry next tick
+      try {
+        await persist(persistInput);
+        logger.info(`[studio] claim recovery: candidate consumption recorded for review ${googleReviewId} on attempt ${attempt} — releasing claim`);
+        await claim.releaseClaim();
+        return;
+      } catch (err) {
+        logger.warn(`[studio] claim recovery attempt ${attempt}/${attempts} for review ${googleReviewId} failed: ${err.message}`);
+      }
+    }
+    logger.error(`[studio] claim recovery EXHAUSTED for review ${googleReviewId} — abandoning the claim (self-expires within ${Math.round(PUBLISH_CLAIM_MS / 60000)} minutes). The published testimonial's candidate is STILL unconsumed and may be re-selected by a later run — investigate review_graphics persistence`);
+    claim.abandonClaim();
+  };
+  // Detached promise — never let a rejection escape unhandled.
+  return loop().catch((err) => {
+    logger.error(`[studio] claim recovery loop crashed for review ${googleReviewId}: ${err.message} — abandoning the claim`);
+    claim.abandonClaim();
+  });
 }
 
 async function createReviewGraphic(input) {
@@ -2441,6 +2568,7 @@ module.exports = {
   AUTONOMOUS_FLAGS,
   AUTONOMOUS_SOURCE,
   publishWithReviewLivenessLock,
+  holdClaimUntilCandidateConsumed,
   CHANNELS,
   DEFAULT_COMPETITOR_PATTERNS,
   FASTEST_RISER_PROFILES,
