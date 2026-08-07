@@ -719,6 +719,14 @@ describe('listicle_family scoring + action mapping', () => {
       .toBe('do_not_publish');
   });
 
+  test('service inference: plant families resolve to tree-shrub; unrelated families stay null', () => {
+    expect(inferServiceFromQuery('drought tolerant plants florida')).toBe('tree-shrub');
+    // mosquito wins by keyword order — repellent-plant lists stay mosquito content
+    expect(inferServiceFromQuery('plants that repel mosquitoes')).toBe('mosquito');
+    // No Waves service → mineListicleFamily skips the family (off-topic guard)
+    expect(inferServiceFromQuery('types of fish in florida')).toBeNull();
+  });
+
   test('family-summed impressions clear the boost floor that individual variants miss', () => {
     expect(impressionsBoost(48)).toBe(0); // best single variant: below minImpressionsToScore
     expect(impressionsBoost(102)).toBeGreaterThan(0); // family sum: scores

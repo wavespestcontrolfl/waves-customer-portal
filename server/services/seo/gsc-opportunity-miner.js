@@ -73,7 +73,7 @@ const SERVICE_KEYWORDS = [
   { service: 'rodent', re: /\b(rodent|rats?|mice|mouse|exterminator for rodents)\b/i },
   { service: 'mosquito', re: /\b(mosquito|mosquitoes)\b/i },
   { service: 'lawn', re: /\b(lawn|grass|fertiliz|weed control|aeration)\b/i },
-  { service: 'tree-shrub', re: /\b(tree|shrub|palm|ornamental)\b/i },
+  { service: 'tree-shrub', re: /\b(tree|shrub|palm|ornamental|plants?)\b/i },
   { service: 'pest', re: /\b(pest|exterminator|bug|roach|ant|spider|cockroach)\b/i },
 ];
 
@@ -1513,6 +1513,11 @@ class GscOpportunityMiner {
       const rep = fam.variants[0];
       const city = normalizeCity(rep.city_target) || inferCityFromQuery(rep.query);
       const service = rep.service_category || inferServiceFromQuery(rep.query);
+      // No resolvable Waves service (classifier AND inference both blank —
+      // e.g. an incidental "types of fish in florida" family) → skip:
+      // default revenue weight + contentGap would otherwise clear the blog
+      // floor and draft an off-topic hub post. Same rule as mineNoContentYet.
+      if (!service) continue;
       const opp = {
         bucket: 'listicle_family',
         query: rep.query,

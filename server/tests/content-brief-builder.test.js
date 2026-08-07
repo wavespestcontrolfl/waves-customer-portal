@@ -639,3 +639,51 @@ describe('_composeBrief gsc_signal impressions fallback (seasonal_rising fix 202
     expect(compose({ impressions: 0, impressions_recent_14d: 240 }).gsc_signal.impressions).toBe(240);
   });
 });
+
+// ── listicle_family gate-off leak guard (Codex r3 on #3255) ──────────
+
+describe('_composeBrief listicle_family rows keep the overlay even with listicleBriefs off', () => {
+  test('bucket keys the overlay when the gate is disabled (no plain-blog leak)', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false }));
+      const { ContentBriefBuilder: Builder } = require('../services/content/content-brief-builder');
+      const brief = new Builder()._composeBrief({
+        opportunity: {
+          id: 'opp-fam',
+          page_url: null,
+          query: 'drought tolerant plants florida',
+          city: null,
+          service: 'tree-shrub',
+          bucket: 'listicle_family',
+          signal_metadata: { impressions: 300, family_size: 5 },
+        },
+        signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+        decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 60, score_breakdown: {} },
+        existingBriefVersions: 0,
+      });
+      expect(brief.required_sections.some((s) => /numbered H2 per item/i.test(s))).toBe(true);
+    });
+  });
+
+  test('a NON-family row with the gate disabled stays a plain supporting blog', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false }));
+      const { ContentBriefBuilder: Builder } = require('../services/content/content-brief-builder');
+      const brief = new Builder()._composeBrief({
+        opportunity: {
+          id: 'opp-mined',
+          page_url: null,
+          query: 'signs of termite damage in florida',
+          city: null,
+          service: 'termite',
+          bucket: 'no_content_yet',
+          signal_metadata: { impressions: 300 },
+        },
+        signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+        decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 60, score_breakdown: {} },
+        existingBriefVersions: 0,
+      });
+      expect(brief.required_sections.some((s) => /numbered H2 per item/i.test(s))).toBe(false);
+    });
+  });
+});
