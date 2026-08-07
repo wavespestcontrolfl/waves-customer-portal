@@ -600,3 +600,27 @@ describe('ownership lookup failure fails closed', () => {
     expect(result.options).toEqual([]);
   });
 });
+
+// Pre-push P1 on the r4 batch: an INFORMATIVE catalog identity is
+// authoritative even when it owns nothing — no fall-through to stale text.
+describe('non-owning catalog identities under stale service_type', () => {
+  const { ownershipKeysForRow } = require('../services/waveguard-existing-services');
+
+  test('rodent trapping catalog under stale Pest Control owns nothing', () => {
+    expect(ownershipKeysForRow({
+      service_type: 'Pest Control', service_key: 'rodent_trapping', service_name: 'Rodent Trapping',
+    })).toEqual([]);
+  });
+
+  test('palm catalog under stale Tree & Shrub owns nothing', () => {
+    expect(ownershipKeysForRow({
+      service_type: 'Tree & Shrub Care', service_key: 'palm_injection', service_name: 'Palm Tree Injections',
+    })).toEqual([]);
+  });
+
+  test('an uninformative catalog still defers to service_type', () => {
+    expect(ownershipKeysForRow({
+      service_type: 'Lawn Care', service_key: 'premium_home_plan', service_name: 'Premium Home Plan',
+    })).toEqual(['lawn_care']);
+  });
+});

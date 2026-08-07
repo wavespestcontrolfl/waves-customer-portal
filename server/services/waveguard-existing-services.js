@@ -383,13 +383,17 @@ function ownershipKeysForRow(row = {}) {
   const catalogText = [row.service_key, row.service_name]
     .filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
   if (catalogText) {
-    // A RECOGNIZED non-owning catalog product is an authoritative exclusion,
-    // not a fall-through (pre-push P1): a termite_bond_* row with a stale
-    // 'Termite Bait Monitoring' service_type must stay unowned — falling
-    // back to that stale text would resurrect the bond/bait conflation.
-    if (/\btermite\b/i.test(catalogText) && /\bbond\b/i.test(catalogText)) return [];
-    const catalogKeys = ownershipFamiliesFromText(catalogText);
-    if (catalogKeys.length) return catalogKeys;
+    // An INFORMATIVE catalog identity — one naming any service family — is
+    // authoritative even when it resolves to NO owned family (pre-push P1
+    // ×2): termite bonds, rodent trapping/exclusion, palm and other
+    // recognized specialties must stay unowned rather than fall through and
+    // inherit a stale service_type family (a rodent_trapping row under a
+    // stale 'Pest Control' must own NOTHING, not pest). Only a catalog with
+    // no family tokens at all ("Premium Home Plan") defers to service_type.
+    const s = catalogText.toLowerCase();
+    const informative = /\b(pest|lawn|turf|tree|shrub|ornamental|mosquito|termite|palms?)\b/.test(s)
+      || RODENT_TOKEN_RE.test(s);
+    if (informative) return ownershipFamiliesFromText(catalogText);
   }
   return ownershipFamiliesFromText(`${String(row.service_type || '')} ${catalogText}`.trim());
 }
