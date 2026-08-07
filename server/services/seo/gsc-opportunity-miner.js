@@ -2457,15 +2457,39 @@ class GscOpportunityMiner {
       .map((r) => r.dedupe_key));
     const inflightRefreshFamilyKeys = new Set(inflight
       .flatMap((r) => (Array.isArray(r.family_keys) ? r.family_keys : [])));
+    // Non-family conflicts are ALSO re-read inside the transaction: the
+    // mine's fence query ran pre-transaction, and a concurrent producer
+    // (refresh-audit, a manual mine) can enqueue/revive a non-family
+    // refresh in between. READ COMMITTED sees everything committed by now,
+    // narrowing the race to truly-simultaneous uncommitted writes — full
+    // serialization would need a shared advisory lock adopted by EVERY
+    // producer, which is beyond this lane (pre-push audit r24).
+    const nonFamily = await trx('opportunity_queue')
+      .where('action_type', 'refresh_existing_page')
+      .whereNot('bucket', 'listicle_family')
+      .whereIn('status', ['pending', 'claimed', 'pending_review'])
+      .whereNotNull('page_url')
+      .select('page_url', 'query', trx.raw("signal_metadata->'unanswered_queries' as unanswered_queries"));
+    const conflictPages = new Set(nonFamily.map((r) => r.page_url));
+    const conflictQueries = new Set();
+    for (const r of nonFamily) {
+      if (r.query) conflictQueries.add(String(r.query).toLowerCase());
+      for (const u of (Array.isArray(r.unanswered_queries) ? r.unanswered_queries : [])) {
+        if (u && u.query) conflictQueries.add(String(u.query).toLowerCase());
+      }
+    }
     return opportunities.filter((o) => {
       if (o.bucket !== 'listicle_family') return true;
       if (o.action_type === 'refresh_existing_page') {
+        if (conflictPages.has(o.page_url)) return false;
         const keys = Array.isArray(o.signal_metadata?.family_keys) ? o.signal_metadata.family_keys : [];
         return !keys.some((k) => inflightBlogKeys.has(listicleFamilyDedupeKey(k)));
       }
       if (o.action_type === 'new_supporting_blog') {
         const k = o.signal_metadata?.family_key;
-        return !(k && inflightRefreshFamilyKeys.has(k));
+        if (k && inflightRefreshFamilyKeys.has(k)) return false;
+        const queries = Array.isArray(o.signal_metadata?.family_queries) ? o.signal_metadata.family_queries : [];
+        return ![o.query, ...queries].some((q) => q && conflictQueries.has(String(q).toLowerCase()));
       }
       return true;
     });

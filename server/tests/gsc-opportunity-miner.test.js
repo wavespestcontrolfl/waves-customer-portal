@@ -1368,6 +1368,12 @@ describe('listicle_family scoring + action mapping', () => {
     // race the transition nor observe it halfway.
     expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,400}_revalidateFamilyBatch\(trx, allOpportunities\)[\s\S]{0,200}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1100}_sweepStaleFamilyRows\([\s\S]{0,200}trx[\s\S]{0,40}\)/);
     expect(src).toMatch(/\.forUpdate\(\)/);
+    // Non-family conflicts re-read INSIDE the transaction (audit r24) —
+    // the pre-mine fence query alone left a producer race window.
+    const revalSrc = src.slice(src.indexOf('async _revalidateFamilyBatch'), src.indexOf('async _sweepStaleFamilyRows'));
+    expect(revalSrc).toMatch(/whereNot\('bucket', 'listicle_family'\)/);
+    expect(revalSrc).toMatch(/conflictPages\.has\(o\.page_url\)/);
+    expect(revalSrc).toMatch(/conflictQueries\.has\(String\(q\)\.toLowerCase\(\)\)/);
     expect(src).toMatch(/!errors\.listicle_family[\s\S]{0,140}CANONICAL_MINE_PERIOD_DAYS[\s\S]{0,140}isEnabled\('listicleFamilyMining'\) && isEnabled\('listicleBriefs'\)/);
     // Destructive sweeping only under the authoritative window — a manual
     // 7-day mine must not expire valid 28-day rows (Codex r20 P2).
