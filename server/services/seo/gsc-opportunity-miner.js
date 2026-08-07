@@ -1020,6 +1020,7 @@ class GscOpportunityMiner {
   static CANONICAL_MINE_PERIOD_DAYS = 28;
 
   async mineAll({ periodDays = GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS, persist = true } = {}) {
+    this._familyRefreshStateFailed = false;
     const since = sinceDate(periodDays);
     const priorSince = sinceDate(periodDays * 2);
 
@@ -1132,9 +1133,13 @@ class GscOpportunityMiner {
           // FAIL CLOSED (Codex r25 audit): an empty map would disable the
           // one-edit-per-page sequencing entirely — null tells the mine to
           // emit NO refreshes this run (blogs are unaffected; served
-          // families just wait a cycle).
-          logger.warn(`[gsc-opp-miner] family refresh-state lookup failed (${err.message}) — refresh emission suppressed this run`);
+          // families just wait a cycle). The instance flag ALSO suppresses
+          // the destructive sweep: with emission suppressed, pending
+          // refreshes are absent from the batch by construction and the
+          // sweep would retire valid queued work.
+          logger.warn(`[gsc-opp-miner] family refresh-state lookup failed (${err.message}) — refresh emission and sweep suppressed this run`);
           familyRefreshState = null;
+          this._familyRefreshStateFailed = true;
         }
         return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightRefreshQueries, inflightFamily, familyRefreshState });
       }],
@@ -1194,6 +1199,7 @@ class GscOpportunityMiner {
       // upsert succeeded, and a failure rolls back both.
       await db.transaction(async (trx) => {
         const sweepWillRun = !errors.listicle_family
+          && !this._familyRefreshStateFailed
           && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS
           && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs');
         // Lock + revalidate family predecessors FIRST — see
@@ -2511,8 +2517,20 @@ class GscOpportunityMiner {
     const rows = await trx('opportunity_queue')
       .where({ bucket: 'listicle_family' })
       .forUpdate()
-      .select('dedupe_key', 'action_type', 'status', trx.raw("signal_metadata->'family_keys' as family_keys"));
+      .select('dedupe_key', 'action_type', 'status', 'page_url', trx.raw("signal_metadata->'family_keys' as family_keys"));
     if (!hasFamily) return opportunities; // lock taken for the sweep; nothing to filter
+    // One-edit-per-page under the LOCK (Codex r25 audit): a concurrent
+    // mine can insert a different-subgroup refresh for the same page after
+    // the pre-mine state read — with the rows now locked and re-read, a
+    // family refresh whose page carries any OTHER in-flight family refresh
+    // key defers this run.
+    const inflightPageKeys = new Map();
+    for (const r of rows) {
+      if (r.action_type !== 'refresh_existing_page' || !r.page_url) continue;
+      if (!['pending', 'claimed', 'pending_review'].includes(r.status)) continue;
+      if (!inflightPageKeys.has(r.page_url)) inflightPageKeys.set(r.page_url, new Set());
+      inflightPageKeys.get(r.page_url).add(r.dedupe_key);
+    }
     const inflight = rows.filter((r) => r.status === 'claimed' || r.status === 'pending_review');
     const inflightBlogKeys = new Set(inflight
       .filter((r) => r.action_type === 'new_supporting_blog')
@@ -2544,6 +2562,8 @@ class GscOpportunityMiner {
       if (o.bucket !== 'listicle_family') return true;
       if (o.action_type === 'refresh_existing_page') {
         if (conflictPages.has(o.page_url)) return false;
+        const pageKeys = inflightPageKeys.get(o.page_url);
+        if (pageKeys && Array.from(pageKeys).some((k) => k !== o.dedupe_key)) return false;
         const keys = Array.isArray(o.signal_metadata?.family_keys) ? o.signal_metadata.family_keys : [];
         return !keys.some((k) => inflightBlogKeys.has(listicleFamilyDedupeKey(k)));
       }

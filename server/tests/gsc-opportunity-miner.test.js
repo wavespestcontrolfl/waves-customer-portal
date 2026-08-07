@@ -1197,6 +1197,12 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/if \(served\.hit\.unresolved\) continue;/);
     expect(mineSrc).toMatch(/refreshStateAvailable \? refreshGroups\.entries\(\) : \[\]/);
     expect(src).toMatch(/familyRefreshState = null;/);
+    // ...and the failure ALSO suppresses the destructive sweep.
+    expect(src).toMatch(/this\._familyRefreshStateFailed = true;/);
+    expect(src).toMatch(/&& !this\._familyRefreshStateFailed/);
+    // One-edit-per-page re-checked UNDER the transaction lock.
+    expect(src).toMatch(/inflightPageKeys\.get\(o\.page_url\)/);
+    expect(src).toMatch(/k !== o\.dedupe_key/);
     expect(src).toMatch(/lockEvenIfEmpty: sweepWillRun/);
     expect(src).toMatch(/if \(!hasFamily && !lockEvenIfEmpty\) return opportunities;/);
     const gateSrc = require('fs').readFileSync(require.resolve('../services/content/content-quality-gate'), 'utf8');
