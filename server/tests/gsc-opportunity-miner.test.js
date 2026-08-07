@@ -1193,6 +1193,10 @@ describe('listicle_family scoring + action mapping', () => {
     const { extractSpecialtyTopic } = require('../services/seo/gsc-opportunity-miner')._internals;
     expect(extractSpecialtyTopic(['types of wasps in florida'])).toBe('wasp');
     expect(extractSpecialtyTopic(['signs of bed bugs sarasota'])).toBe('bed-bug');
+    // Hyphenated GSC phrasings must hit the same topics (r34 follow-up) —
+    // a miss canonicalizes to the broad service and drops the FAQ block.
+    expect(extractSpecialtyTopic(['signs of bed-bugs sarasota'])).toBe('bed-bug');
+    expect(extractSpecialtyTopic(['lawn-pest-control ideas'])).toBe('lawn-pest-control');
     // r33: derived from the guardrail's FULL vocabulary — collapsed lawn
     // subtopics and plural forms included; ids exclusive to the vocabulary
     // must resolve.

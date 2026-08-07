@@ -159,7 +159,11 @@ function faqTopicPatterns() {
     const ids = Array.from(FAQ_BLOCKED_SERVICES).sort((a, b) => b.length - a.length);
     for (const id of ids) {
       const toks = String(id).split('-').filter(Boolean);
-      const body = toks.map((t) => `${t}(?:s|es)?`).join('\\s*');
+      // Tokens join on whitespace OR hyphens — GSC queries carry both
+      // 'bed bug' and 'bed-bug' phrasings, and a hyphenated miss would
+      // canonicalize to the broad service with no specialty_topic, letting
+      // a blocked FAQ through.
+      const body = toks.map((t) => `${t}(?:s|es)?`).join('[\\s-]*');
       FAQ_TOPIC_PATTERNS.push([id, new RegExp(`\\b${body}\\b`, 'i')]);
     }
   } catch (err) {
