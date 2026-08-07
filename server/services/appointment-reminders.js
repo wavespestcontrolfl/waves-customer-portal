@@ -2968,11 +2968,30 @@ const AppointmentReminders = {
           cancellation_notice_state: db.raw("CASE WHEN NOT (NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id)) THEN 'suppressed' WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') THEN 'pending_notify' ELSE 'pending' END"),
           updated_at: new Date(),
         });
-      // Apply outstanding caller intent to plain 'pending' markers first
-      // (codex r9): the route's own tokenless claim writes plain pending —
-      // if the route then dies, the outbox is the only record of the
-      // operator's notify intent and must upgrade the marker, not be
-      // consumed past it.
+      // Consume outbox rows only once their intent is APPLIED — marker
+      // present and no longer plain 'pending' (codex r8/r9) — and age out
+      // anything past the 72h horizon.
+      // Consume only TERMINALLY SUPPRESSED intent (codex r11/r12): even a
+      // 'pending_notify' marker can be mid-flight — an active sender that
+      // cached plain 'pending' before the upgrade would revert to that
+      // cached state on a retryable failure, and a consumed outbox could
+      // not re-upgrade it. Keys for notify/sent cycles are removed by the
+      // restoration transaction, the live-visit void, or the 72h age-out;
+      // the upgrade pass is idempotent in the meantime.
+      await db.raw(
+        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND (ok.last_sent_at < now() - interval '72 hours' OR EXISTS (SELECT 1 FROM appointment_reminders ar WHERE 'cn-ci-' || ar.scheduled_service_id::text = ok.email_key AND ar.cancellation_notice_state = 'suppressed'))",
+      ).catch(() => {});
+      }
+
+      // Apply outstanding caller intent to plain 'pending' markers BEFORE
+      // ungated settlement (codex r9, ungated by r17): the route's own
+      // tokenless claim writes plain pending — if the route then dies, the
+      // outbox is the only record of the operator's notify intent and must
+      // upgrade the marker, not be consumed past it. This runs OUTSIDE the
+      // gate check: settlement below intentionally settles residue with the
+      // gate off, and durable intent recorded while the gate was on must be
+      // applied before that residue is judged — otherwise a gate-off sweep
+      // could terminally suppress an operator-requested notice.
       try {
         // Outbox-backed rows classify BOTH ways (codex r15): survivor-free
         // upgrades to pending_notify; a live-sibling survivor stamps
@@ -2988,20 +3007,6 @@ const AppointmentReminders = {
         // everything retries in 15 minutes.
         logger.warn(`[appt-remind] outbox upgrade failed — aborting sweep tick: ${upgradeErr.message}`);
         return;
-      }
-      // Consume outbox rows only once their intent is APPLIED — marker
-      // present and no longer plain 'pending' (codex r8/r9) — and age out
-      // anything past the 72h horizon.
-      // Consume only TERMINALLY SUPPRESSED intent (codex r11/r12): even a
-      // 'pending_notify' marker can be mid-flight — an active sender that
-      // cached plain 'pending' before the upgrade would revert to that
-      // cached state on a retryable failure, and a consumed outbox could
-      // not re-upgrade it. Keys for notify/sent cycles are removed by the
-      // restoration transaction, the live-visit void, or the 72h age-out;
-      // the upgrade pass is idempotent in the meantime.
-      await db.raw(
-        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND (ok.last_sent_at < now() - interval '72 hours' OR EXISTS (SELECT 1 FROM appointment_reminders ar WHERE 'cn-ci-' || ar.scheduled_service_id::text = ok.email_key AND ar.cancellation_notice_state = 'suppressed'))",
-      ).catch(() => {});
       }
 
       // Repair pass (codex r22): a restoration whose in-trx marker clear

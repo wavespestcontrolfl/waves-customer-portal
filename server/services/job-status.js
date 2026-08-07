@@ -632,6 +632,13 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             // predates the CURRENT enable boundary; fail-closed when the
             // boundary is absent.
             .whereRaw("COALESCE((SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled'), '-infinity'::timestamptz) >= COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-enabled-at'), 'infinity'::timestamptz)")
+            // Token fence IN the stamp (codex #3238 r17): the ownRow read
+            // above is not atomic with this update — a restore-and-recancel
+            // between them replaces the outbox token, and stamping the old
+            // cycle's callerTs would read as a foreign owner to series
+            // adoption. The claim lands only while the outbox still carries
+            // THIS worker's exact token.
+            .whereRaw('EXISTS (SELECT 1 FROM ops_email_send_state ob WHERE ob.email_key = ? AND ob.last_sent_at = ?)', [`cn-ci-${jobId}`, cancelNoticeOutboxTs])
             // Survivor guard IN the stamp (codex #3238 r4): a live
             // same-customer/same-slot sibling appearing between the
             // classification read and this update must void the
