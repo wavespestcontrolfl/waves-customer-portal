@@ -316,6 +316,30 @@ describe('emit_draft in-loop self-lint (W1)', () => {
     clearDraft('lint-9');
   });
 
+  test('a FULL draft whose meta carries the required {{cityPhone}} token passes — evaluate() scrubs sanctioned meta tokens itself', async () => {
+    registerSessionLint('lint-10', {});
+    const r = await executeBriefTool('emit_draft', {
+      frontmatter: {
+        title: 'Pest Control in Lakewood Ranch, FL | Waves',
+        meta_description: 'Need pest control in Lakewood Ranch? Waves treats common Southwest Florida pest problems. Call {{cityPhone}} for an estimate.',
+      },
+      body: CLEAN_BODY,
+    }, { sessionId: 'lint-10' });
+    expect(r.ok).toBe(true);
+    clearDraft('lint-10');
+  });
+
+  test('the agent prompts PERMIT a second sink call after a rejection — the call-once rule must not strand the redraft', () => {
+    const { WRITER_AGENT_CONFIG } = require('../services/content/agents/writer-agent-config');
+    const { META_REWRITER_CONFIG } = require('../services/content/agents/meta-rewriter-config');
+    const writerText = JSON.stringify(WRITER_AGENT_CONFIG);
+    const metaText = JSON.stringify(META_REWRITER_CONFIG);
+    expect(writerText).toMatch(/draft_rejected/);
+    expect(writerText).toMatch(/call emit_draft(\(\))? again/);
+    expect(metaText).toMatch(/metadata_rejected/);
+    expect(metaText).toMatch(/call emit_metadata_only(\(\))? again/);
+  });
+
   test('sessions without registered lint options capture exactly as before', async () => {
     const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-5' });
     expect(r.ok).toBe(true);

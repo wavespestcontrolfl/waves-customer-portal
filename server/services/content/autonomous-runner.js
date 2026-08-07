@@ -1920,12 +1920,9 @@ class AutonomousRunner {
     const metaGuardResult = metadataGuardrails.evaluate({
       frontmatter: {
         title: protectedTitle ? '' : draft.title,
-        // The REQUIRED {{cityPhone}} token renders via the domains
-        // pipeline, not MDX — scrub it so the .mdx-body expression P0
-        // doesn't false-positive on contract-compliant page metas.
-        meta_description: metadataGuardrails.SANCTIONED_META_TOKEN_RE
-          ? String(draft.meta_description || '').replace(metadataGuardrails.SANCTIONED_META_TOKEN_RE, '')
-          : draft.meta_description,
+        // The REQUIRED {{cityPhone}} token is scrubbed from META fields
+        // inside evaluate() itself — no caller pre-scrub.
+        meta_description: draft.meta_description,
       },
       body: '',
     }, deriveSyncGuardrailOptions(opp, brief));

@@ -2876,6 +2876,11 @@ function preventionPromiseFinding(text) {
 // surface"): no pesticide is ever "safe" (incl. pet-safe/family-safe
 // compounds); "EPA-registered"/"EPA-exempt" is the REQUIRED wording and
 // "EPA-approved" is banned; never a fixed re-entry/drying minute figure.
+// The sanctioned meta token — required by the 2026-07-29 contract in
+// non-blog meta descriptions; renders via the domains pipeline, never MDX.
+// evaluate() scrubs it from META fields before any scan (body unscrubbed).
+const SANCTIONED_META_TOKEN_RE = /\{\{\s*cityPhone\s*\}\}/g;
+
 // The APPROVED idiom is CONDITIONAL: "safe once dry" + technician confirms
 // timing — so a "safe" match governed by a once/when/after-dry condition in
 // the same sentence stays legal, as do negated disclaimers ("no product is
@@ -3174,6 +3179,13 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     .concat(isRefresh ? [] : [frontmatter.hero_image?.alt])
     .filter(Boolean)
     .map(String)
+    // The 2026-07-29 meta contract REQUIRES {{cityPhone}} in non-blog meta
+    // descriptions; it renders through the domains pipeline, not MDX, so
+    // the executable-expression P0 must not see it in META fields (it
+    // exists for .mdx BODIES, which are scanned unscrubbed). Scrubbed HERE
+    // so every caller — gate 3c, the in-loop self-lints, the metadata
+    // handler — inherits one behavior.
+    .map((v) => v.replace(SANCTIONED_META_TOKEN_RE, ''))
     .join('\n\n');
   const publishableText = editableMeta ? `${body}\n\n${editableMeta}` : body;
 
@@ -3303,13 +3315,9 @@ module.exports = {
   stripCitationResidue,
   PAGE_CITY_SLUGS,
   OUT_OF_AREA_CITY_CANDIDATES,
-  // The 2026-07-29 meta contract REQUIRES {{cityPhone}} in non-blog meta
-  // descriptions; it renders through the domains pipeline, not MDX, so the
-  // metadata-only lanes scrub it before running this evaluator (the MDX
-  // expression P0 exists for .mdx BODIES, where any {{ }} crashes the
-  // build). Single-sourced here so the in-loop lint and the runner's
-  // metadata handler scrub identically.
-  SANCTIONED_META_TOKEN_RE: /\{\{\s*cityPhone\s*\}\}/g,
+  // Exported for tests; evaluate() scrubs it from META fields internally,
+  // so callers need no pre-scrub of their own.
+  SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },
 };
