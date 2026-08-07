@@ -127,10 +127,23 @@ else
 fi
 
 if [ "$PUSH_KIND" = "re-push" ] && [ -z "$PUSH_AFTER" ]; then
-  fail "head $LOCAL_SHA was the tip of '$BRANCH' before this push (force-push / hijack recovery) — an existing CI run may predate it and would prove nothing." \
+  fail "head $LOCAL_SHA was the tip of '$BRANCH' before this push (force-push / recovery) — an existing CI run may predate it and would prove nothing." \
     "Re-run with the timestamp captured immediately BEFORE the push so runs can be told apart:" \
     "  VERIFY_PR_PUSH_AFTER=\$(date -u +%Y-%m-%dT%H:%M:%SZ)   # BEFORE git push" \
     "(A normal push of a new commit does not need this — only same-SHA re-pushes do.)"
+fi
+
+# LIMIT OF THIS CHECK, stated rather than papered over: re-push detection reads
+# the LOCAL remote-tracking reflog. In the hijack case the remote can move
+# without that ref being fetched, so pushing the original SHA back may add no
+# second entry and this classifies as "fresh" — accepting the earlier push's
+# run as evidence. Local state cannot rule that out. The procedure carries the
+# requirement instead: after ANY force-push or recovery push, capture
+# VERIFY_PR_PUSH_AFTER before pushing (waves-ship §3). When it is set, run
+# attribution is exact and none of this inference is used.
+ATTRIBUTION="exact (createdAt >= $PUSH_AFTER)"
+if [ -z "$PUSH_AFTER" ]; then
+  ATTRIBUTION="inferred from reflog — set VERIFY_PR_PUSH_AFTER before a recovery push for an exact check"
 fi
 
 RUNS_JSON="[]"
@@ -181,6 +194,7 @@ if [ "$FINAL_HEAD" != "$LOCAL_SHA" ]; then
 fi
 
 echo "✅ verify-pr-checks: PR #$PR_NUMBER head $LOCAL_SHA — mergeable=$MERGEABLE ($MERGE_STATE), push=$PUSH_KIND, $NEW_COUNT tests-workflow run(s) attributable to this push:"
+echo "   run attribution: $ATTRIBUTION"
 printf '%s' "$NEW_JSON" | jq -r '.[] | "   \(.status) \(.conclusion // "-") (\(.event)) \(.url)"'
 echo "   (A run existing ≠ a run passing — wait for green before the merge gate.)"
 exit 0
