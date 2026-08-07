@@ -499,11 +499,41 @@ const SERVICE_HOMONYM_RE = new RegExp([
   String.raw`\bstock\s+tickers?\b`,
 ].join('|'), 'i');
 
+// Order-insensitive companion to SERVICE_HOMONYM_RE: family variants share
+// ONE token set, so 'software types of bugs' must void evidence exactly
+// like 'types of software bugs' — the guard runs at FAMILY scope on token
+// co-occurrence (an ambiguous service token + a homonym-context token
+// anywhere in the family), not per ordered variant (Codex r22 audit).
+const HOMONYM_AMBIGUOUS_TOKENS = new Set(['bug', 'bugs', 'mouse', 'mice', 'palm', 'palms', 'tick', 'ticks', 'rat', 'rats', 'bee', 'bees']);
+const HOMONYM_CONTEXT_TOKENS = new Set([
+  'software', 'computer', 'computers', 'hardware', 'coding', 'programming',
+  'app', 'apps', 'web', 'website', 'websites', 'code', 'game', 'games',
+  'gaming', 'wireless', 'bluetooth', 'usb', 'cursor', 'cursors', 'dpi',
+  'pad', 'pads', 'sensitivity', 'reading', 'reader', 'readers', 'sunday',
+  'oil', 'springs', 'stock', 'stocks', 'ticker', 'tickers', 'beef',
+]);
+function familyHomonymContext(fam) {
+  let ambiguous = false;
+  let context = false;
+  for (const v of fam.variants || []) {
+    for (const t of String(v.query || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+      if (HOMONYM_AMBIGUOUS_TOKENS.has(t)) ambiguous = true;
+      if (HOMONYM_CONTEXT_TOKENS.has(t)) context = true;
+      if (ambiguous && context) return true;
+    }
+  }
+  return false;
+}
+
 function resolveListicleFamilyServiceCity(fam, { canonicalize, inferService, normCity, inferCity, classifierSupported = classifierQuerySupported }) {
   let service = null;
   let city = null;
+  // Family-scope homonym context voids ambiguous-token service evidence
+  // for EVERY variant — reordering must not restore what the ordered
+  // regex rejected.
+  const homonymFamily = familyHomonymContext(fam);
   for (const v of fam.variants) {
-    if (!service && !SERVICE_HOMONYM_RE.test(v.query)) {
+    if (!service && !homonymFamily && !SERVICE_HOMONYM_RE.test(v.query)) {
       const canon = canonicalize(v.service_category);
       // Classifier value only counts with boundary-aware query evidence —
       // see classifierQuerySupported (unbounded classifier patterns tag
@@ -599,7 +629,7 @@ function buildListicleFamilyRefreshOpp(entries) {
   opp.score = total;
   opp.score_breakdown = breakdown;
   opp.action_type = actionForOpportunity(opp);
-  opp.dedupe_key = listicleFamilyRefreshDedupeKey(opp.page_url);
+  opp.dedupe_key = listicleFamilyRefreshDedupeKey(opp.page_url, opp.service, opp.city);
   return opp;
 }
 
@@ -675,14 +705,18 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
   return false;
 }
 
-// Page-stable refresh key: dedupeKey(opp) embeds service/city, which come
-// from the PRIMARY family and can flip between runs while the target URL
-// is unchanged — with the old row frozen (claimed/done/review), the new
-// key would mint a second claimable edit of the same page (Codex r16).
-function listicleFamilyRefreshDedupeKey(pageUrl) {
+// Subgroup-stable refresh key: (page, service, city). Within a subgroup a
+// primary-family flip never changes the key (the r16 duplicate-row bug);
+// ACROSS subgroups the keys differ by design — but the mine emits at most
+// ONE subgroup per page at a time (see the sequenced emission), so two
+// claimable rows can still never coexist for one URL, and a completed
+// (frozen) subgroup rotates emission to the next one instead of starving
+// it behind a page-wide key (Codex r22 audit).
+function listicleFamilyRefreshDedupeKey(pageUrl, service, city) {
   const page = String(pageUrl || '');
-  const digest = crypto.createHash('sha256').update(page).digest('hex').slice(0, 16);
-  return ['listicle_family', 'page', page.slice(0, 120), digest].join('::');
+  const dims = `${page}::${service || '_'}::${String(city || '_').toLowerCase()}`;
+  const digest = crypto.createHash('sha256').update(dims).digest('hex').slice(0, 16);
+  return ['listicle_family', 'page', page.slice(0, 100), digest].join('::');
 }
 
 // Family-stable dedupe key. Deliberately NOT dedupeKey(opp): that keys on
@@ -1038,7 +1072,25 @@ class GscOpportunityMiner {
         } catch (err) {
           logger.warn(`[gsc-opp-miner] in-flight family transition lookup failed: ${err.message}`);
         }
-        return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightFamily });
+        // Every family refresh row by page, ANY status — drives the
+        // sequenced one-subgroup-per-page emission (frozen keys rotate,
+        // in-flight keys make later subgroups wait). Small by construction
+        // (this lane's own rows only). Fail-soft: empty state emits the
+        // dominant subgroup exactly as before.
+        const familyRefreshState = new Map();
+        try {
+          const rows = await db('opportunity_queue')
+            .where({ bucket: 'listicle_family', action_type: 'refresh_existing_page' })
+            .whereNotNull('page_url')
+            .select('page_url', 'dedupe_key', 'status');
+          for (const r of rows) {
+            if (!familyRefreshState.has(r.page_url)) familyRefreshState.set(r.page_url, []);
+            familyRefreshState.get(r.page_url).push({ dedupe_key: r.dedupe_key, status: r.status });
+          }
+        } catch (err) {
+          logger.warn(`[gsc-opp-miner] family refresh-state lookup failed: ${err.message}`);
+        }
+        return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightFamily, familyRefreshState });
       }],
     ];
 
@@ -1088,16 +1140,23 @@ class GscOpportunityMiner {
 
     let persisted = 0;
     if (persist) {
-      persisted = await this.persistAll(allOpportunities);
-      // Family-lane sweep ONLY after the upserts land (a pre-persistence
-      // sweep + failed persist would empty the lane until the next run),
-      // only when the lane actually ran (gates on, no miner error — an
-      // empty bucket then means "didn't run", not "no signal").
-      if (!errors.listicle_family
-        && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS
-        && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs')) {
-        await this._sweepStaleFamilyRows(buckets.listicle_family || [], allOpportunities);
-      }
+      // Upserts + family sweep in ONE transaction: a concurrent runner's
+      // claimNext (FOR UPDATE SKIP LOCKED) must never observe a
+      // blog↔refresh transition halfway — replacement landed, old row
+      // still claimable (Codex r22 audit). Sweep ordering inside the
+      // transaction preserves the r15 contract: it runs only after every
+      // upsert succeeded, and a failure rolls back both.
+      await db.transaction(async (trx) => {
+        persisted = await this.persistAll(allOpportunities, trx);
+        // Family-lane sweep ONLY after the upserts land, only when the
+        // lane actually ran (gates on, no miner error — an empty bucket
+        // then means "didn't run", not "no signal").
+        if (!errors.listicle_family
+          && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS
+          && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs')) {
+          await this._sweepStaleFamilyRows(buckets.listicle_family || [], allOpportunities, trx);
+        }
+      });
     }
 
     return { counts, errors, persisted, opportunities: allOpportunities };
@@ -1980,7 +2039,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() } } = {}) {
+  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() }, familyRefreshState = new Map() } = {}) {
     // BOTH gates required: mining with the brief overlay off would persist
     // listicle_family rows whose briefs come out as ORDINARY supporting
     // blogs — the lane would look enabled while producing none of the
@@ -2196,18 +2255,35 @@ class GscOpportunityMiner {
       opp.dedupe_key = listicleFamilyDedupeKey(fam.key);
       out.push(opp);
     }
-    for (const group of refreshGroups.values()) {
-      const groupSorted = group.entries.slice().sort((a, b) => b.fam.impressions - a.fam.impressions);
-      const primary = groupSorted[0];
-      // One facts contract per brief: the builder loads exactly one
-      // city/service facts pack, so families whose resolved service/city
-      // differ from the primary's are DEFERRED, never merged — the binding
-      // coverage section must not demand edits the refresh agent has no
-      // approved facts for (Codex r22). A page serving cross-service
-      // families handles its dominant classification; the deferred
-      // families' stale rows expire via the sweep and they re-mine.
-      const compatible = groupSorted.filter((e) => e.service === primary.service && e.city === primary.city);
-      out.push(buildListicleFamilyRefreshOpp(compatible));
+    for (const [pageUrl, group] of refreshGroups.entries()) {
+      // One facts contract per brief → SUBGROUPS by (service, city), each
+      // with its own stable key; one subgroup emitted per page at a time,
+      // rotating when the prior completes. This threads three invariants
+      // that a single page-wide key could not: never two claimable rows
+      // for one URL (sequencing), never a coverage demand without its
+      // facts pack (subgroup purity), and no permanent starvation of a
+      // minority classification (rotation past frozen keys) — Codex r22.
+      const subgroups = new Map();
+      for (const e of group.entries) {
+        const sk = `${e.service || '_'}::${String(e.city || '_').toLowerCase()}`;
+        if (!subgroups.has(sk)) subgroups.set(sk, []);
+        subgroups.get(sk).push(e);
+      }
+      const ranked = Array.from(subgroups.values())
+        .map((entries) => ({
+          entries,
+          impressions: entries.reduce((sum, e) => sum + e.fam.impressions, 0),
+          key: listicleFamilyRefreshDedupeKey(pageUrl, entries[0].service, entries[0].city),
+        }))
+        .sort((a, b) => b.impressions - a.impressions);
+      const rowsForPage = familyRefreshState.get(pageUrl) || [];
+      const frozen = new Set(rowsForPage.filter((r) => r.status === 'done' || r.status === 'skipped').map((r) => r.dedupe_key));
+      const pick = ranked.find((g) => !frozen.has(g.key));
+      if (!pick) continue; // every subgroup already completed/dismissed
+      const otherInflight = rowsForPage.some((r) => ['pending', 'claimed', 'pending_review'].includes(r.status)
+        && r.dedupe_key !== pick.key);
+      if (otherInflight) continue; // one subgroup at a time — wait
+      out.push(buildListicleFamilyRefreshOpp(pick.entries));
     }
 
     // Catch-all reconciliation of families that exited every branch above
@@ -2285,7 +2361,8 @@ class GscOpportunityMiner {
     return false;
   }
 
-  async _sweepStaleFamilyRows(familyOpps = [], batch = []) {
+  async _sweepStaleFamilyRows(familyOpps = [], batch = [], trx = null) {
+    const runner = trx || db;
     try {
       // Mirror persistAll's arbitration: a family opp that yielded never
       // persisted, so its key must not protect a stale pending row either.
@@ -2297,7 +2374,7 @@ class GscOpportunityMiner {
           ? minScoreToActFor('new_supporting_blog')
           : minScoreToActFor(o.action_type)))
         .map((o) => o.dedupe_key);
-      await db('opportunity_queue')
+      await runner('opportunity_queue')
         .where({ bucket: 'listicle_family', status: 'pending' })
         .whereNotIn('dedupe_key', persistableKeys)
         .update({ status: 'expired', skip_reason: 'family_signal_gone', updated_at: new Date() });
@@ -2360,7 +2437,8 @@ class GscOpportunityMiner {
 
   // ── persistence ────────────────────────────────────────────────────
 
-  async persistAll(opportunities) {
+  async persistAll(opportunities, trx = null) {
+    const runner = trx || db;
     if (!opportunities.length) return 0;
     let count = 0;
     const now = new Date();
@@ -2406,7 +2484,7 @@ class GscOpportunityMiner {
         // cleanup error must never abort the mining pass.
         if (isTransactionalQuery(o.query)) {
           try {
-            await db('opportunity_queue')
+            await runner('opportunity_queue')
               .where({ dedupe_key: o.dedupe_key, status: 'pending', action_type: 'new_supporting_blog' })
               .update({ status: 'skipped', skip_reason: 'transactional_query_not_blog_material', updated_at: new Date() });
           } catch (err) {
@@ -2449,7 +2527,7 @@ class GscOpportunityMiner {
       // Operator paths that legitimately resurrect a skipped row (review
       // requeue, intercept re-seed) write status='pending' directly and
       // are unaffected by this guard.
-      const result = await db.raw(
+      const result = await runner.raw(
         `INSERT INTO opportunity_queue
            (bucket, action_type, query, page_url, service, city,
             score, score_breakdown, signal_metadata, status,

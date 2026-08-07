@@ -1132,10 +1132,13 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/sum\(position \* impressions\) \/ NULLIF\(sum\(impressions\), 0\) <= \?/);
     expect(mineSrc).toMatch(/THRESHOLDS\.strikingDistancePositionMax/);
     expect(mineSrc).not.toMatch(/\.distinct\('query'\)/); // existence-only check is the inert-lane bug
-    // One facts contract per refresh: families whose service/city differ
-    // from the group's primary are DEFERRED, never merged (Codex r22).
-    expect(mineSrc).toMatch(/e\.service === primary\.service && e\.city === primary\.city/);
-    expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(compatible\)/);
+    // One facts contract per refresh AND no starvation: subgroups by
+    // (service, city) with their own stable keys, ONE emitted per page at
+    // a time — frozen keys rotate to the next subgroup, in-flight keys
+    // make later subgroups wait (Codex r22 + audit).
+    expect(mineSrc).toMatch(/const pick = ranked\.find\(\(g\) => !frozen\.has\(g\.key\)\)/);
+    expect(mineSrc).toMatch(/r\.dedupe_key !== pick\.key/);
+    expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(pick\.entries\)/);
     // Grouped by PAGE alone — mixed-classification families served by one
     // URL must never become multiple claimable rows editing the same page.
     expect(mineSrc).toMatch(/refreshGroups\.get\(served\.hit\.page_url\)/);
@@ -1338,7 +1341,9 @@ describe('listicle_family scoring + action mapping', () => {
     expect(sweepSrc).toMatch(/o\.score >= \(familyFloorActions\.includes\(o\.action_type\)/);
     // Ordering + guards in mineAll: sweep ONLY after a successful
     // persistAll, only when the lane ran (gates on, no miner error).
-    expect(src).toMatch(/persisted = await this\.persistAll\(allOpportunities\);[\s\S]{0,700}_sweepStaleFamilyRows\(buckets\.listicle_family \|\| \[\], allOpportunities\)/);
+    // Transactional (r22 audit): upserts + sweep atomic against concurrent
+    // claimNext; a failure rolls back both.
+    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,200}persisted = await this\.persistAll\(allOpportunities, trx\);[\s\S]{0,900}_sweepStaleFamilyRows\(buckets\.listicle_family \|\| \[\], allOpportunities, trx\)/);
     expect(src).toMatch(/!errors\.listicle_family[\s\S]{0,140}CANONICAL_MINE_PERIOD_DAYS[\s\S]{0,140}isEnabled\('listicleFamilyMining'\) && isEnabled\('listicleBriefs'\)/);
     // Destructive sweeping only under the authoritative window — a manual
     // 7-day mine must not expire valid 28-day rows (Codex r20 P2).
