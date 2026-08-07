@@ -2160,12 +2160,16 @@ async function createReviewGraphic(input) {
   if (await hasColumn('review_graphics', 'image_url')) row.image_url = imageUrl || null;
 
   // The render/upload above can take seconds — long enough for the hourly
-  // sync to stamp the review removed. Re-check and persist ATOMICALLY: the
-  // FOR UPDATE lock on the source row serializes against the sync's stamping
-  // update, so a stamp committed first is seen here (abort), and a stamp
-  // committed after waits for this transaction — the draft it stamps behind
-  // is then caught by the approve endpoints' liveness gates.
-  const graphic = await db.transaction(async (trx) => {
+  // sync to stamp the review removed. Re-check and persist ATOMICALLY under
+  // the per-location sync advisory lock: the row-level FOR UPDATE alone only
+  // serializes against the stamping UPDATE, but a sync cycle that already
+  // FETCHED a snapshot without this review could stamp it right after this
+  // persist commits — and callers can pass status:'approved' directly, so
+  // the persisted row would skip the advisory-locked approve gates. Sharing
+  // gbp-review-sync:<loc> (the lock the sync holds across fetch→reconcile)
+  // closes that window; a stamp committed first is seen here (abort), and a
+  // busy lock defers the persist with a retryable error.
+  const outcome = await runExclusive(`gbp-review-sync:${candidate.locationId}`, async () => db.transaction(async (trx) => {
     const fresh = await trx('google_reviews')
       .where({ id: input.googleReviewId })
       .forUpdate()
@@ -2179,7 +2183,11 @@ async function createReviewGraphic(input) {
       .merge(row)
       .returning('*');
     return saved;
-  });
+  }), { recordHealth: false });
+  if (outcome?.skipped) {
+    throw new Error('Review sync is in progress for this location — retry creating the graphic in a moment');
+  }
+  const graphic = outcome;
   return { ...graphic, image_url: graphic.image_url || imageUrl || null };
 }
 

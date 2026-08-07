@@ -306,13 +306,19 @@ router.get('/', dashboardCache, async (req, res, next) => {
           for (const row of statsRows) {
             try {
               const parsed = JSON.parse(row.review_text);
-              totalFromPlaces += parsed.totalReviews || 0;
-              if (parsed.rating) { ratingSum += parsed.rating; ratingCount++; }
-              // A fresh row counts toward completeness only once its payload
-              // parses — a fresh-but-malformed row otherwise kept the Places
-              // branch selected while its location contributed nothing,
-              // reporting a silently partial total.
-              freshStatsLocationIds.add(row.location_id);
+              // Shape-validated, not just parsed: '"corrupt"' or '{}' is
+              // syntactically valid JSON that contributes nothing — counting
+              // its location as complete would select a silently partial
+              // Places aggregate instead of the live-row fallback. The sync
+              // writer always stores at least one numeric field.
+              if (!parsed || typeof parsed !== 'object'
+                || !(Number.isFinite(parsed.totalReviews) || Number.isFinite(parsed.rating))) {
+                logger.warn(`[admin-dashboard] google_reviews _stats payload has no usable numbers (id=${row.id})`);
+              } else {
+                totalFromPlaces += parsed.totalReviews || 0;
+                if (parsed.rating) { ratingSum += parsed.rating; ratingCount++; }
+                freshStatsLocationIds.add(row.location_id);
+              }
             } catch (parseErr) {
               // Bad JSON in a _stats row would have silently zeroed
               // every Google Rating tile; log so a malformed sync can

@@ -199,12 +199,16 @@ async function executeBITool(toolName, input) {
             for (const row of statsRows) {
               const t = new Date(row.synced_at).getTime();
               if (!(t > 0 && Date.now() - t <= STATS_FRESH_MS)) continue;
-              // A location is complete only when its fresh payload PARSES —
-              // a fresh-but-malformed row otherwise kept this branch
-              // selected while contributing nothing (silent partial total).
+              // A location is complete only when its fresh payload parses
+              // AND carries a usable number — '"corrupt"' or '{}' is valid
+              // JSON that contributes nothing, and counting it would keep
+              // this branch selected on a silently partial total.
               try {
                 const p = JSON.parse(row.review_text);
-                if (p && typeof p === 'object') freshStats[row.location_id] = p;
+                if (p && typeof p === 'object'
+                  && (Number.isFinite(p.totalReviews) || Number.isFinite(p.rating))) {
+                  freshStats[row.location_id] = p;
+                }
               } catch {}
             }
             const statsComplete = WAVES_LOCATIONS.length > 0 && WAVES_LOCATIONS.every((l) => freshStats[l.id]);

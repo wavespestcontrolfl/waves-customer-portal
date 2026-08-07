@@ -256,6 +256,21 @@ describe('BI get_review_snapshot — stamped rows excluded', () => {
     expect(snapshot.rating).toBe('4.0');
   });
 
+  test('fresh _stats with valid-JSON-wrong-shape payload also falls back', async () => {
+    // '{}' parses fine but carries no numbers — syntax alone must not count
+    // the location as complete.
+    state.rows.google_reviews = [
+      statsRow('bradenton', { totalReviews: 500, rating: 4.9, syncedDaysAgo: 0.1 }),
+      { ...statsRow('sarasota', { totalReviews: 300, rating: 4.8, syncedDaysAgo: 0.1 }), review_text: '{}' },
+      liveReview({ id: 'a', star_rating: 4 }),
+    ];
+
+    const snapshot = await executeBITool('get_review_snapshot', {});
+
+    expect(snapshot.totalReviews).toBe(1);
+    expect(snapshot.rating).toBe('4.0');
+  });
+
   test('fresh and complete _stats snapshot is used', async () => {
     state.rows.google_reviews = [
       statsRow('bradenton', { totalReviews: 500, rating: 4.9, syncedDaysAgo: 0.1 }),
