@@ -3006,11 +3006,23 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(registered.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
-  test('the approved CONDITIONAL idiom "safe once dry" stays legal — before or after the claim', () => {
+  test('the approved CONDITIONAL idiom stays legal — dry condition + technician-confirms, condition before or after the claim', () => {
     const r = guardrails.evaluate({
       body: 'The lawn is safe once dry, and your technician confirms timing. Once the application dries, it is safe for kids and pets to return.',
     }, {});
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
+  test('the dry condition ALONE is not the full idiom — without technician-confirms it blocks (both parts required)', () => {
+    const r = guardrails.evaluate({ body: 'The lawn is safe once dry.' }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('attributive "safe pesticides" / "safe treatment options" blocks', () => {
+    const r = guardrails.evaluate({ body: 'We use safe pesticides around your home.' }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const r2 = guardrails.evaluate({ body: 'Ask about our safe treatment options for lawns.' }, {});
+    expect(r2.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
   test('a FIXED re-entry/drying minute figure blocks even with a dry condition nearby', () => {
@@ -3069,6 +3081,16 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
 
   test('the wanted referral disclaimer stays legal', () => {
     const r = guardrails.evaluate({ body: 'We do not offer fumigation — for tenting we refer you to a licensed structural fumigator.' }, {});
+    expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('a bare schedule/book CTA blocks without "with us" — on our pages it presents the topic as our service', () => {
+    const r = guardrails.evaluate({ body: 'Schedule your structural fumigation today and we will handle the rest.' }, {});
+    expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('a schedule CTA directing to a THIRD PARTY stays legal', () => {
+    const r = guardrails.evaluate({ body: 'For severe drywood cases, schedule tenting with a licensed structural fumigator.' }, {});
     expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
   });
 });

@@ -2892,6 +2892,9 @@ const REENTRY_SAFETY_SRCS = [
   "\\bsafe\\s+(?:for|around)\\s+(?:your\\s+)?(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies)|pollinators?|bees?|wildlife)\\b",
   // "pet-safe" / "child-safe" / "kid-safe" / "family-safe" compounds
   "\\b(?:pet|child|kid|family)[-\\s]safe\\b",
+  // Adjective-before-product forms: "safe pesticides", "our safe treatment
+  // options" — the unconditional claim in attributive position.
+  "\\bsafe\\s+(?:pesticides?|products?|treatments?|sprays?|applications?|chemicals?|materials?|solutions?|options?|granules?|baits?|formulas?)\\b",
   // ONLY "EPA-approved" is banned — "EPA-registered"/"EPA-exempt" is the
   // wording AGENTS.md requires.
   "\\bEPA[-\\s]?approved\\b",
@@ -2902,11 +2905,12 @@ const REENTRY_SAFETY_SRCS = [
   "\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+\\d+\\s*(?:minutes?|mins?|hours?|hrs?)\\b",
 ];
 
-// The APPROVED conditional idiom: a "safe" claim explicitly conditioned on
-// dryness ("safe once dry", "safe for pets once the application dries",
-// "once dry, the lawn is safe to walk on") — condition may sit before or
-// after the match, same sentence.
+// The APPROVED conditional idiom has TWO required parts (AGENTS.md): the
+// dry condition ("safe once dry" — condition before or after the claim,
+// same sentence) AND the technician-confirms-timing clause, which may sit
+// in a neighboring sentence.
 const DRY_CONDITION_RE = /\b(?:once|when|after|until)\b[^.!?\n]{0,40}?\bdr(?:y|ies|ied)\b/i;
+const TECH_CONFIRMS_RE = /\b(?:technicians?|techs?|applicators?|pros?)\b[^.!?\n]{0,60}?\b(?:confirms?|will\s+confirm|advises?|verif(?:y|ies)|lets?\s+you\s+know|gives?\s+you\s+the\s+all[-\s]clear)\b|\bconfirms?\s+(?:the\s+)?(?:timing|re-?entry|when\b)/i;
 
 function reentrySafetyClaimFinding(text) {
   const s = String(text || '');
@@ -2924,12 +2928,17 @@ function reentrySafetyClaimFinding(text) {
         continue;
       }
       // The approved CONDITIONAL idiom — only for "safe" claims (a fixed
-      // minute figure is banned even when a dry-condition is nearby).
+      // minute figure is banned even when a dry-condition is nearby). BOTH
+      // parts are required (Codex audit): the dry condition in the same
+      // sentence AND the technician-confirms-timing clause, which may sit
+      // in a neighboring sentence (±240 chars).
       const isSafeClaim = /safe|harmless|risk/i.test(m[0]);
       if (isSafeClaim) {
         const afterMatch = s.slice(m.index + m[0].length, m.index + m[0].length + 60);
         const afterSameSentence = afterMatch.split(/[.!?\n]/)[0];
-        if (DRY_CONDITION_RE.test(sameSentence) || DRY_CONDITION_RE.test(afterSameSentence)) {
+        const neighborhood = s.slice(Math.max(0, m.index - 240), m.index + m[0].length + 240);
+        if ((DRY_CONDITION_RE.test(sameSentence) || DRY_CONDITION_RE.test(afterSameSentence))
+          && TECH_CONFIRMS_RE.test(neighborhood)) {
           if (m.index === re.lastIndex) re.lastIndex += 1;
           continue;
         }
@@ -2960,8 +2969,11 @@ const BANNED_TOPIC_SRCS = [
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
   // "our fumigation/insulation/wildlife-trapping service/program/team"
   `\\bour\\s+${BANNED_TOPIC_SRC}\\s+(?:services?|programs?|teams?|offerings?|packages?|crews?)\\b`,
-  // "schedule/book (your) fumigation with us", "call Waves for fumigation"
-  `\\b(?:schedule|book)\\s+(?:your\\s+|a\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}\\s+(?:with|through)\\s+(?:us|waves)\\b`,
+  // "schedule/book (your) fumigation …" — on OUR pages a bare CTA presents
+  // the topic as our service even without "with us" (Codex audit). A
+  // THIRD-PARTY referral stays legal via the negative lookahead: "schedule
+  // tenting with a licensed structural fumigator" directs elsewhere.
+  `\\b(?:schedule|book)\\s+(?:your\\s+|a\\s+|an\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?))?\\b(?!\\s+(?:with|through)\\s+(?!us\\b|waves\\b))`,
   `\\bcall\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\s+(?:today\\s+)?for\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
 ];
 
