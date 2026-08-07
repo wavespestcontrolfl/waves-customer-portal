@@ -1605,7 +1605,9 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       } catch (err) {
         logger.error(`[studio] testimonial-published stamp FAILED after publish (review ${plan.reviewGraphic.googleReviewId}): ${err.message} — claim retained, recovery loop will write the durable record`);
         claimRetained = true;
-        holdClaimUntilPublishRecorded({
+        // Intentional fire-and-forget — the helper attaches its own terminal
+        // catch and the claim self-expires if the process dies mid-loop.
+        void holdClaimUntilPublishRecorded({
           googleReviewId: plan.reviewGraphic.googleReviewId,
           record: () => recordTestimonialPublished(plan.reviewGraphic.googleReviewId, run?.id),
           claim: publishOutcome,
@@ -2056,7 +2058,9 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       } catch (err) {
         logger.error(`[studio] testimonial-published stamp FAILED after approval publish (review ${input.reviewGraphic.googleReviewId}): ${err.message} — claim retained, recovery loop will write the durable record`);
         claimRetained = true;
-        holdClaimUntilPublishRecorded({
+        // Intentional fire-and-forget — the helper attaches its own terminal
+        // catch and the claim self-expires if the process dies mid-loop.
+        void holdClaimUntilPublishRecorded({
           googleReviewId: input.reviewGraphic.googleReviewId,
           record: () => recordTestimonialPublished(input.reviewGraphic.googleReviewId, run.id),
           claim: publishOutcome,
