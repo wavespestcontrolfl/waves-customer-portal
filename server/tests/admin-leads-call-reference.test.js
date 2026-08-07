@@ -205,16 +205,38 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     expect(recorded.filter((c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892')).toEqual([]);
   });
 
-  test('shared line without a call SID skips the call_log lookup entirely', async () => {
-    const tables = [];
+  // Extract the where-group predicates the call_log query was built with.
+  const recordedCallLogPredicates = () => {
+    const callLogWhereFns = db.mock.calls
+      .map((_, i) => db.mock.results[i])
+      .filter((r) => r.type === 'return')
+      .flatMap((r) => (r.value?.where?.mock ? r.value.where.mock.calls : []))
+      .map((args) => args[0])
+      .filter((arg) => typeof arg === 'function');
+    const recorded = [];
+    const group = {
+      orWhere: (...args) => { recorded.push(['orWhere', ...args]); return group; },
+      orWhereRaw: (...args) => { recorded.push(['orWhereRaw', ...args]); return group; },
+      whereNotNull: (...args) => { recorded.push(['whereNotNull', ...args]); return group; },
+      orWhereNotNull: (...args) => { recorded.push(['orWhereNotNull', ...args]); return group; },
+    };
+    callLogWhereFns.forEach((fn) => fn.call(group));
+    return recorded;
+  };
+
+  test('shared line without a call SID: call_log still queries via the metadata stamp — no phone legs, no sid arm', async () => {
+    // A SID-less lead reused by a phone-less call links ONLY through
+    // call_log.metadata.lead_id — skipping the lookup hid its transcript
+    // and recording from the card (codex P1, PR #3275). The shared-line
+    // safety survives: no phone-leg predicates are added.
     const leadsTable = makeLeadsTable({
       lead: { id: 'lead-1', phone: '+12155848892', twilio_call_sid: null },
       sharedLead: { id: 'lead-other' },
     });
     db.mockImplementation((table) => {
-      tables.push(table);
       if (table === 'leads') return leadsTable();
       if (table === 'lead_activities') return makeBuilder({ rows: [] });
+      if (table === 'call_log') return makeBuilder({ rows: [] });
       throw new Error(`Unexpected table ${table}`);
     });
 
@@ -225,17 +247,19 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
       expect(body.calls).toEqual([]);
     });
 
-    expect(tables).not.toContain('call_log');
+    const recorded = recordedCallLogPredicates();
+    expect(recorded).toContainEqual(['orWhereRaw', "metadata->>'lead_id' = ?", ['lead-1']]);
+    expect(recorded.filter((c) => c[0] === 'orWhere')).toEqual([]);
+    expect(recorded.filter((c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892')).toEqual([]);
   });
 
-  test('lead with no phone and no call SID skips the call_log lookup', async () => {
-    const tables = [];
+  test('lead with no phone and no call SID still queries stamped calls — metadata arm only', async () => {
     db.mockImplementation((table) => {
-      tables.push(table);
       if (table === 'leads') {
         return makeBuilder({ firstResult: { id: 'lead-2', phone: null, twilio_call_sid: null } });
       }
       if (table === 'lead_activities') return makeBuilder({ rows: [] });
+      if (table === 'call_log') return makeBuilder({ rows: [] });
       throw new Error(`Unexpected table ${table}`);
     });
 
@@ -246,7 +270,9 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
       expect(body.calls).toEqual([]);
     });
 
-    expect(tables).not.toContain('call_log');
+    const recorded = recordedCallLogPredicates();
+    expect(recorded).toContainEqual(['orWhereRaw', "metadata->>'lead_id' = ?", ['lead-2']]);
+    expect(recorded.filter((c) => c[0] === 'orWhere')).toEqual([]);
   });
 
   test('call_log failure is non-blocking — lead + activities still return', async () => {

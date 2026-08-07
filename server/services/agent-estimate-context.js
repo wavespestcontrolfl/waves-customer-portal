@@ -148,9 +148,13 @@ async function loadCalls(lead, phoneKey) {
             .orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
         })
         // NULL-safe exclusion of the already-fetched anchor row — a bare
-        // whereNot would also drop rows whose sid is NULL.
+        // whereNot would also drop rows whose sid is NULL. Applied only
+        // when the lead HAS a sid: with a NULL lead sid the <> arm never
+        // matches under SQL NULL semantics and every normal phone-history
+        // row was dropped whenever stamped rows made rows nonempty (codex
+        // P1 r13); stamped-row overlap is handled by the id-dedup below.
         .modify((q) => {
-          if (rows.length) {
+          if (lead.twilio_call_sid && rows.length) {
             q.where(function notAnchor() {
               this.whereNull('twilio_call_sid').orWhereNot('twilio_call_sid', lead.twilio_call_sid);
             });

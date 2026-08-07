@@ -891,7 +891,10 @@ router.get('/:id', async (req, res, next) => {
           .first('id');
         if (shared) ten = null;
       }
-      if (lead.twilio_call_sid || ten) {
+      {
+        // No sid/phone guard around this query: a SID-less web lead without
+        // a phone can still own STAMPED calls (email reuse), and the
+        // metadata arm below is always present (codex P1 r13).
         const rows = await db('call_log')
           .where(function () {
             if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
