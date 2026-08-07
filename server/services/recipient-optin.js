@@ -289,6 +289,10 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
               entry_point: 'recipient_optin_deferred',
               original_block_code: result.code,
               replay_purpose: 'appointment',
+              // Replay-time staleness recheck keys (deferred-replay
+              // registry): the ask only sends if this row is still pending.
+              optin_phone_key: claim.key,
+              optin_customer_id: claim.customerId || null,
             }),
           });
           await db('recipient_optin')

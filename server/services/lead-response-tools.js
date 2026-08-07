@@ -539,4 +539,36 @@ async function executeLeadTool(toolName, input) {
   }
 }
 
-module.exports = { executeLeadTool };
+// Delivery-time bookkeeping for a quiet-hours-deferred auto-reply, invoked
+// by the deferred-replay registry after the scheduled executor's provider
+// accept — the same lifecycle stamps the immediate sent path runs inline:
+// activity log, contacted status + response-time metric, funnel bridge,
+// pipeline first_contact. Guarded on a still-live lead throughout.
+async function recordLeadAutoReplyDelivered({ leadId = null, customerId = null } = {}) {
+  if (leadId) {
+    await db('lead_activities').insert({
+      lead_id: leadId,
+      activity_type: 'sms_sent',
+      description: 'Auto-response sent by lead agent (deferred replay)',
+      performed_by: 'lead_agent',
+      metadata: JSON.stringify({ deferred_replay: true }),
+    }).catch(() => {});
+    const lead = await db('leads').where('id', leadId).whereNull('deleted_at').first();
+    if (lead?.first_contact_at) {
+      const responseMinutes = Math.round((Date.now() - new Date(lead.first_contact_at).getTime()) / 60000);
+      await db('leads').where('id', leadId).whereNull('deleted_at').update({
+        response_time_minutes: responseMinutes,
+        status: 'contacted',
+        updated_at: new Date(),
+      });
+      const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
+      await bridgeLeadFunnelStage(leadId, 'contacted');
+    }
+  }
+  if (customerId) {
+    const PipelineManager = require('./pipeline-manager');
+    await PipelineManager.onEvent(customerId, 'first_contact');
+  }
+}
+
+module.exports = { executeLeadTool, recordLeadAutoReplyDelivered };

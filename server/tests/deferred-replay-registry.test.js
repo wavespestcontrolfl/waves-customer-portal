@@ -1,0 +1,123 @@
+// The deferred-replay registry is the single home for replay-time
+// staleness rechecks, delivery-time finalization, and terminal-block
+// obligation handoff for quiet-hours-deferred SMS. These tests pin the
+// contract the executor depends on: unknown entry points are inert (null),
+// read failures fail CLOSED as retryable, reply-ended sequences suppress
+// while naturally-completed ones do not, and the durable-finalize set is
+// derived from the registry itself.
+
+jest.mock('../models/db', () => {
+  const mockDb = jest.fn();
+  mockDb.raw = jest.fn((expr) => expr);
+  mockDb.fn = { now: jest.fn(() => 'NOW()') };
+  return mockDb;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const db = require('../models/db');
+const {
+  recheckDeferredReplay,
+  finalizeDeferredReplay,
+  onTerminalDeferredReplay,
+  requiresDurableFinalize,
+  DURABLE_FINALIZE_ENTRY_POINTS,
+} = require('../services/messaging/deferred-replay-registry');
+
+function firstChain(row) {
+  const q = {};
+  for (const m of ['where', 'whereNull', 'whereIn']) q[m] = jest.fn(() => q);
+  q.first = jest.fn(async () => row);
+  return q;
+}
+
+function throwChain() {
+  const q = {};
+  for (const m of ['where', 'whereNull', 'whereIn']) q[m] = jest.fn(() => q);
+  q.first = jest.fn(async () => { throw new Error('db down'); });
+  return q;
+}
+
+describe('deferred-replay registry', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('unregistered entry points are inert', async () => {
+    expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', {})).toBeNull();
+    expect(await finalizeDeferredReplay('voicemail_lead_sms_deferred', {}, {})).toBeNull();
+    await expect(onTerminalDeferredReplay('voicemail_lead_sms_deferred', {})).resolves.toBeUndefined();
+    expect(requiresDurableFinalize('voicemail_lead_sms_deferred')).toBe(false);
+  });
+
+  test('durable set is registry-derived and covers the finalizing entry points', () => {
+    expect(DURABLE_FINALIZE_ENTRY_POINTS).toEqual(expect.arrayContaining([
+      'dispatch_completion_deferred',
+      'invoice_send_deferred',
+      'lead_response_auto_reply_deferred',
+    ]));
+    for (const ep of DURABLE_FINALIZE_ENTRY_POINTS) {
+      expect(requiresDurableFinalize(ep)).toBe(true);
+    }
+  });
+
+  test('cancellation-save: reply-ended sequences suppress, natural completion does not', async () => {
+    db.mockReturnValueOnce(firstChain({ status: 'converted' }));
+    const ended = await recheckDeferredReplay('cancellation_save_deferred', { sequence_id: 'seq-1' });
+    expect(ended.eligible).toBe(false);
+    expect(ended.reason).toBe('sequence-converted');
+
+    db.mockReturnValueOnce(firstChain({ status: 'completed' }));
+    const completed = await recheckDeferredReplay('cancellation_save_deferred', { sequence_id: 'seq-1' });
+    expect(completed.eligible).toBe(true);
+  });
+
+  test('lead menu: advanced intake suppresses, awaiting_service passes', async () => {
+    db.mockReturnValueOnce(firstChain({ lead_intake_status: 'awaiting_address' }));
+    const advanced = await recheckDeferredReplay('lead_webhook_auto_reply_deferred', { customer_id: 'c1' });
+    expect(advanced.eligible).toBe(false);
+
+    db.mockReturnValueOnce(firstChain({ lead_intake_status: 'awaiting_service' }));
+    const waiting = await recheckDeferredReplay('lead_webhook_auto_reply_deferred', { customer_id: 'c1' });
+    expect(waiting.eligible).toBe(true);
+  });
+
+  test('prep: cancelled or past visits suppress', async () => {
+    db.mockReturnValueOnce(firstChain({ status: 'cancelled', scheduled_date: '2099-01-01' }));
+    const cancelled = await recheckDeferredReplay('appointment_tagger_prep_deferred', { scheduled_service_id: 's1' });
+    expect(cancelled.eligible).toBe(false);
+
+    db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2001-01-01' }));
+    const past = await recheckDeferredReplay('appointment_tagger_prep_deferred', { scheduled_service_id: 's1' });
+    expect(past.eligible).toBe(false);
+    expect(past.reason).toBe('visit-past');
+  });
+
+  test('document reminder: signed/terminal contracts suppress', async () => {
+    db.mockReturnValueOnce(firstChain({ status: 'signed', signed_at: null }));
+    const signed = await recheckDeferredReplay('document_request_reminder_deferred', { contract_id: 'ct1' });
+    expect(signed.eligible).toBe(false);
+
+    db.mockReturnValueOnce(firstChain({ status: 'sent', signed_at: null }));
+    const open = await recheckDeferredReplay('document_request_reminder_deferred', { contract_id: 'ct1' });
+    expect(open.eligible).toBe(true);
+  });
+
+  test('read failures fail CLOSED as retryable, never eligible', async () => {
+    db.mockReturnValueOnce(throwChain());
+    const res = await recheckDeferredReplay('cancellation_save_deferred', { sequence_id: 'seq-1' });
+    expect(res.eligible).toBe(false);
+    expect(res.retryable).toBe(true);
+  });
+
+  test('lead-menu finalize stamps real sids and releases sentinel outcomes', async () => {
+    const stamp = firstChain(null);
+    stamp.update = jest.fn(async () => 1);
+    db.mockReturnValueOnce(stamp);
+    await finalizeDeferredReplay('lead_webhook_auto_reply_deferred', { lead_auto_reply_phone_digits: '5551234567' }, { providerMessageId: 'SM123' });
+    expect(stamp.update).toHaveBeenCalledWith({ twilio_sid: 'SM123' });
+
+    const release = firstChain(null);
+    release.del = jest.fn(async () => 1);
+    db.mockReturnValueOnce(release);
+    await finalizeDeferredReplay('lead_webhook_auto_reply_deferred', { lead_auto_reply_phone_digits: '5551234567' }, { providerMessageId: 'owner-silence' });
+    expect(release.del).toHaveBeenCalled();
+  });
+});

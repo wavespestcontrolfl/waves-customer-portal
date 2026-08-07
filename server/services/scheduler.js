@@ -121,6 +121,8 @@ function scheduledSmsAttemptSql() {
 async function recoverStaleScheduledSmsClaims(now) {
   const staleBefore = new Date(now.getTime() - SCHEDULED_SMS_STALE_CLAIM_MS);
   const attemptsSql = scheduledSmsAttemptSql();
+  const { DURABLE_FINALIZE_ENTRY_POINTS } = require('./messaging/deferred-replay-registry');
+  const DURABLE_FINALIZE_PLACEHOLDERS = DURABLE_FINALIZE_ENTRY_POINTS.map(() => '?').join(', ') || "''";
 
   // Settle stale claims whose send PROVABLY happened first: the provider
   // path writes a sibling sms_log row tagged with scheduled_sms_log_id when
@@ -137,14 +139,15 @@ async function recoverStaleScheduledSmsClaims(now) {
           'queued_at', s.created_at,
           'scheduled_sms_recovered_sent_at', ?::timestamptz
         )
-        -- Deferred completion/invoice rows settled here crashed BETWEEN
-        -- Twilio's accept and the normal settlement, so their delivery-time
-        -- finalization (invoice flip, review mark, receipt claim) never ran
-        -- and the normal path's finalize_pending stamp was never written.
-        -- Stamp it now so the stranded-finalization sweep converts them to
-        -- finalize_only retries.
+        -- Deferred replays settled here crashed BETWEEN Twilio's accept and
+        -- the normal settlement, so their delivery-time finalization
+        -- (invoice flip, review mark, lead stamps, claim settlement) never
+        -- ran and the normal path's finalize_pending stamp was never
+        -- written. Stamp it now so the stranded-finalization sweep converts
+        -- them to finalize_only retries. The entry-point list comes from
+        -- the deferred-replay registry (durableFinalize entries).
         || CASE
-          WHEN s.metadata->>'entry_point' IN ('dispatch_completion_deferred', 'invoice_send_deferred')
+          WHEN s.metadata->>'entry_point' IN (${DURABLE_FINALIZE_PLACEHOLDERS})
             THEN jsonb_build_object('finalize_pending', true)
           ELSE '{}'::jsonb
         END
@@ -159,7 +162,7 @@ async function recoverStaleScheduledSmsClaims(now) {
           AND p.status IN ('queued', 'sent', 'delivered')
       )
     RETURNING s.id, s.metadata, s.message_body, s.admin_user_id
-  `, [now, now, now, now, staleBefore]);
+  `, [now, now, now, ...DURABLE_FINALIZE_ENTRY_POINTS, now, staleBefore]);
 
   const settledRows = settled.rows || [];
   if (settledRows.length > 0) {
@@ -2382,13 +2385,8 @@ function initScheduledJobs() {
           if (claimMeta.finalize_only === true) {
             const completedAt = new Date();
             const finalizeAttempts = Number(claimMeta.finalize_attempts) || 1;
-            let fin = { ok: false };
-            try {
-              const { finalizeDeferredCompletionSend } = require('./dispatch-completion-deferred');
-              fin = await finalizeDeferredCompletionSend(claimMeta, { retry: true });
-            } catch (finErr) {
-              logger.warn(`[scheduled-sms] finalize-only retry threw for ${msg.id}: ${finErr.message}`);
-            }
+            const { finalizeDeferredReplay } = require('./messaging/deferred-replay-registry');
+            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id })) || { ok: true };
             if (fin.ok || finalizeAttempts >= SCHEDULED_SMS_MAX_ATTEMPTS) {
               // finalize_pending clears on BOTH outcomes or the stranded-
               // finalization sweep would convert this row forever.
@@ -2415,92 +2413,36 @@ function initScheduledJobs() {
           // email leg, or replied — states the immediate sender suppresses
           // via safetyGate. Re-run that same gate before dispatching the
           // stale touch (the helper fails open on read errors).
-          if (claimMeta.entry_point === 'estimate_follow_up_deferred' && claimMeta.estimate_id) {
-            const { deferredFollowupStillEligible } = require('./estimate-follow-up');
-            const elig = await deferredFollowupStillEligible(claimMeta.estimate_id);
-            if (!elig.eligible) {
-              if (elig.retryable && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
-                // Recheck read failed — fail closed but retryable: hold the
-                // row for the next pass rather than sending unverified or
-                // discarding a possibly-valid touch.
+          // Deferred-replay staleness recheck (messaging/deferred-replay-
+          // registry.js): the world moves between a night enqueue and the
+          // 8 AM dispatch — estimates get accepted, invoices paid, visits
+          // cancelled, leads advance, contracts signed, sequences ended by
+          // a reply. Each deferral entry point registers its own recheck;
+          // a read failure is retryable-ineligible (fail closed on both
+          // sides of the attempt cap — never send unverified state).
+          {
+            const { recheckDeferredReplay, onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
+            const recheck = await recheckDeferredReplay(claimMeta.entry_point, claimMeta);
+            if (recheck && recheck.eligible === false) {
+              if (recheck.retryable && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'scheduled',
                   scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
                   updated_at: new Date(),
                 });
-                logger.warn(`[scheduled-sms] deferred estimate follow-up ${msg.id} eligibility unverifiable — held for retry`);
+                logger.warn(`[scheduled-sms] deferred replay ${msg.id} (${claimMeta.entry_point}) state unverifiable — held for retry`);
               } else {
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'blocked',
                   updated_at: new Date(),
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?)", [`stale_followup:${elig.reason}`]),
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?)", [`stale_replay:${recheck.reason || 'unknown'}`]),
                 });
-                logger.info(`[scheduled-sms] deferred estimate follow-up ${msg.id} suppressed at replay: ${elig.reason}`);
+                logger.info(`[scheduled-sms] deferred replay ${msg.id} (${claimMeta.entry_point}) suppressed: ${recheck.reason || 'recheck-exhausted'}`);
+                // A suppressed replay will never deliver — same obligation
+                // handoff as a terminal provider block (claim releases,
+                // fallback arms, status flips into the admin lane).
+                await onTerminalDeferredReplay(claimMeta.entry_point, claimMeta);
               }
-              continue;
-            }
-          }
-          // Deferred invoice replays (pay links + dunning touches): the
-          // invoice can be paid or voided — and a dunning sequence stopped —
-          // between the night enqueue and the 8 AM dispatch. Re-read the
-          // live state before sending payment copy; same fail-closed
-          // retryable shape as the estimate recheck above.
-          if ((claimMeta.entry_point === 'invoice_send_deferred'
-            || claimMeta.entry_point === 'invoice_followup_deferred')
-            && claimMeta.invoice_id) {
-            let staleReason = null;
-            let recheckFailed = false;
-            try {
-              const { isTerminalInvoice } = require('./invoice-followups');
-              const inv = await db('invoices').where({ id: claimMeta.invoice_id }).first();
-              if (!inv) staleReason = 'invoice-missing';
-              else if (isTerminalInvoice(inv)) staleReason = `invoice-terminal:${inv.status}`;
-              if (!staleReason && claimMeta.followup_sequence_id) {
-                const seq = await db('invoice_followup_sequences')
-                  .where({ id: claimMeta.followup_sequence_id })
-                  .first('status');
-                // 'stopped' only — NOT 'completed': the FINAL touch's own
-                // advance marks the sequence completed right after queueing
-                // its held SMS leg, so suppressing on completed would block
-                // that queued final message every time. A payment stop
-                // flows through 'stopped' (and the invoice-terminal check
-                // above catches paid/void regardless).
-                if (seq && String(seq.status || '') === 'stopped') {
-                  staleReason = 'sequence-stopped';
-                }
-              }
-            } catch (invErr) {
-              recheckFailed = true;
-              logger.warn(`[scheduled-sms] deferred invoice recheck failed for ${msg.id}: ${invErr.message}`);
-            }
-            if (recheckFailed) {
-              // Fail closed on BOTH sides of the attempt cap: while
-              // attempts remain, hold for a re-check; on the final
-              // attempt, block rather than sending payment/dunning copy
-              // whose invoice state could not be confirmed.
-              if ((Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
-                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                  status: 'scheduled',
-                  scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
-                  updated_at: new Date(),
-                });
-              } else {
-                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                  status: 'blocked',
-                  updated_at: new Date(),
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', 'stale_invoice:recheck-exhausted')"),
-                });
-                logger.error(`[scheduled-sms] deferred invoice message ${msg.id} BLOCKED — invoice state unverifiable after ${SCHEDULED_SMS_MAX_ATTEMPTS} attempts`);
-              }
-              continue;
-            }
-            if (staleReason) {
-              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                status: 'blocked',
-                updated_at: new Date(),
-                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?)", [`stale_invoice:${staleReason}`]),
-              });
-              logger.info(`[scheduled-sms] deferred invoice message ${msg.id} suppressed at replay: ${staleReason}`);
               continue;
             }
           }
@@ -2796,8 +2738,8 @@ function initScheduledJobs() {
             // finalization — a crash between this update and the hook below
             // must leave durable evidence, which the executor's stranded-
             // finalization sweep converts to a finalize_only retry.
-            const owesFinalization = claimMeta.entry_point === 'dispatch_completion_deferred'
-              || claimMeta.entry_point === 'invoice_send_deferred';
+            const { requiresDurableFinalize, finalizeDeferredReplay: finalizeReplay, onTerminalDeferredReplay: onTerminalReplay } = require('./messaging/deferred-replay-registry');
+            const owesFinalization = requiresDurableFinalize(claimMeta.entry_point);
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'sent',
               created_at: completedAt,
@@ -2808,71 +2750,33 @@ function initScheduledJobs() {
             });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
 
-            // Deferred lead-menu replay: settle the once-ever
-            // lead_auto_reply_sends claim the webhook left unresolved when
-            // it queued this row. A real provider sid stamps the claim (the
-            // phone got its one menu); a sentinel/suppressed sid deletes
-            // the null-sid claim so a later form submission re-arms.
-            // Best-effort — a settlement failure leaves the claim
-            // fail-closed, matching the webhook's own contract.
-            if (claimMeta.entry_point === 'lead_webhook_auto_reply_deferred' && claimMeta.lead_auto_reply_phone_digits) {
-              try {
-                const sid = String(smsResult.providerMessageId || '');
-                if (/^(SM|MM)/.test(sid)) {
-                  await db('lead_auto_reply_sends')
-                    .where({ phone_digits: claimMeta.lead_auto_reply_phone_digits })
-                    .whereNull('twilio_sid')
-                    .update({ twilio_sid: sid });
+            // Deferred-replay finalization (registry): the state
+            // transitions the immediate path would have run inline —
+            // invoice draft→sent, review delivered mark, lead lifecycle
+            // stamps, once-ever claim settlement — deliberately AFTER the
+            // provider accepted. Non-durable entries run best-effort;
+            // durable entries (finalize_pending stamped with the
+            // settlement above) convert failures into bounded
+            // finalize_only retries that never resend.
+            {
+              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
+              if (fin && owesFinalization) {
+                if (fin.ok) {
+                  await db('sms_log').where({ id: msg.id }).update({
+                    metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('finalize_pending', false)"),
+                  }).catch((clearErr) => logger.warn(`[scheduled-sms] finalize_pending clear failed for ${msg.id}: ${clearErr.message}`));
                 } else {
-                  await db('lead_auto_reply_sends')
-                    .where({ phone_digits: claimMeta.lead_auto_reply_phone_digits })
-                    .whereNull('twilio_sid')
-                    .del();
-                }
-              } catch (claimErr) {
-                logger.warn(`[scheduled-sms] lead auto-reply claim settlement failed for ${msg.id} (claim stays, fail closed): ${claimErr.message}`);
-              }
-            }
-            // Deferred completion/invoice replay delivered: run the
-            // finalization the immediate path does inline (invoice
-            // draft→sent, bundled review delivered mark, combined-receipt
-            // claim, record notes — each step no-ops when its ref is
-            // absent, so invoice_send_deferred rows only flip the invoice)
-            // — deliberately AFTER the provider accepted, mirroring the
-            // deposit-receipt pattern of message-type-specific hooks here.
-            if (claimMeta.entry_point === 'dispatch_completion_deferred'
-              || claimMeta.entry_point === 'invoice_send_deferred') {
-              let fin = { ok: false };
-              try {
-                const { finalizeDeferredCompletionSend } = require('./dispatch-completion-deferred');
-                fin = await finalizeDeferredCompletionSend({ ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null });
-              } catch (finalizeErr) {
-                logger.warn(`[scheduled-sms] deferred-completion finalization failed for ${msg.id}: ${finalizeErr.message}`);
-              }
-              // Finalization succeeded — clear the pending stamp so the
-              // stranded-finalization sweep doesn't re-run it. Best-effort:
-              // a failed clear just causes one idempotent re-run.
-              if (fin.ok) {
-                await db('sms_log').where({ id: msg.id }).update({
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('finalize_pending', false)"),
-                }).catch((clearErr) => logger.warn(`[scheduled-sms] finalize_pending clear failed for ${msg.id}: ${clearErr.message}`));
-              }
-              // Durability: the SMS is delivered and this row is 'sent', so
-              // a transient finalization failure has no natural retry —
-              // convert the row into a bounded finalize_only obligation
-              // (the branch above) that re-runs the idempotent state steps
-              // WITHOUT resending. If even this conversion fails, log loud.
-              if (!fin.ok) {
-                try {
-                  await db('sms_log').where({ id: msg.id, status: 'sent' }).update({
-                    status: 'scheduled',
-                    scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
-                    updated_at: new Date(),
-                    metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('finalize_only', true, 'finalize_attempts', 1, 'customer_id', ?::text)", [msg.customer_id || null]),
-                  });
-                  logger.warn(`[scheduled-sms] deferred-completion finalization incomplete for ${msg.id} — converted to finalize-only retry`);
-                } catch (convErr) {
-                  logger.error(`[scheduled-sms] deferred-completion finalization failed AND retry conversion failed for ${msg.id}: ${convErr.message} — invoice/review state may need manual sync`);
+                  try {
+                    await db('sms_log').where({ id: msg.id, status: 'sent' }).update({
+                      status: 'scheduled',
+                      scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
+                      updated_at: new Date(),
+                      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('finalize_only', true, 'finalize_attempts', 1, 'customer_id', ?::text)", [msg.customer_id || null]),
+                    });
+                    logger.warn(`[scheduled-sms] deferred-replay finalization incomplete for ${msg.id} — converted to finalize-only retry`);
+                  } catch (convErr) {
+                    logger.error(`[scheduled-sms] deferred-replay finalization failed AND retry conversion failed for ${msg.id}: ${convErr.message} — state may need manual sync`);
+                  }
                 }
               }
             }
@@ -2981,33 +2885,15 @@ function initScheduledJobs() {
             } else {
               await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
               logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-              // Terminal block on a deferred completion carrying a bundled
-              // review link: the completion text (and its review ask) will
-              // never deliver, so arm the standalone review sender now —
-              // armed ONLY here, never on a timer, so it can't race a
-              // still-retryable replay into a double ask.
-              if (claimMeta.entry_point === 'dispatch_completion_deferred' && claimMeta.bundled_review_request_id) {
-                try {
-                  const ReviewService = require('./review-request');
-                  await ReviewService.markInlineRetryable(
-                    claimMeta.bundled_review_request_id,
-                    new Date(Date.now() + 5 * 60 * 1000),
-                  );
-                  logger.info(`[scheduled-sms] deferred completion ${msg.id} terminally blocked — standalone review fallback armed for ${claimMeta.bundled_review_request_id}`);
-                } catch (reviewErr) {
-                  logger.warn(`[scheduled-sms] review fallback arm failed for ${msg.id}: ${reviewErr.message}`);
-                }
-              }
-              // Terminal block on a deferred lead menu: release the
-              // once-ever claim so this phone's NEXT form submission can
-              // re-arm — otherwise the null-sid claim suppresses the menu
-              // forever after a replay that never delivered.
-              if (claimMeta.entry_point === 'lead_webhook_auto_reply_deferred' && claimMeta.lead_auto_reply_phone_digits) {
-                await db('lead_auto_reply_sends')
-                  .where({ phone_digits: claimMeta.lead_auto_reply_phone_digits })
-                  .whereNull('twilio_sid')
-                  .del()
-                  .catch((relErr) => logger.warn(`[scheduled-sms] lead auto-reply claim release failed for ${msg.id}: ${relErr.message}`));
+              // Terminal block on a deferred replay: the message provably
+              // never delivered — hand the obligation off per the entry
+              // point's registry hook (release once-ever claims, arm the
+              // standalone review fallback, flip referral/report state into
+              // the admin retry lane). Armed ONLY here, never on timers,
+              // so fallbacks can't race a still-retryable replay.
+              {
+                const { onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
+                await onTerminalDeferredReplay(claimMeta.entry_point, claimMeta);
               }
               // The customer was never answered — used + parked cards return.
               const blockedMeta = await readFreshMeta();
@@ -3033,15 +2919,15 @@ function initScheduledJobs() {
             const failedAt = new Date();
             if (providerRow) {
               // Same finalize_pending stamp as the normal settlement: a
-              // deferred completion/invoice row settled through THIS crash
-              // path also delivered without its finalization running — the
+              // deferred replay settled through THIS crash path also
+              // delivered without its finalization running — the
               // stranded-finalization sweep picks the stamp up. (claimMeta
               // is scoped to the try above — re-parse from the row here.)
               const crashMeta = typeof msg.metadata === 'string'
                 ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
                 : (msg.metadata || {});
-              const crashOwesFinalization = crashMeta.entry_point === 'dispatch_completion_deferred'
-                || crashMeta.entry_point === 'invoice_send_deferred';
+              const { requiresDurableFinalize: crashDurable } = require('./messaging/deferred-replay-registry');
+              const crashOwesFinalization = crashDurable(crashMeta.entry_point);
               await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                 status: 'sent',
                 created_at: failedAt,
