@@ -7751,6 +7751,28 @@ const CallRecordingProcessor = {
                   .whereNotIn('status', TERMINAL_LEAD_STATUSES)
                   .whereNull('converted_at');
               }
+              if (existingLead) {
+                // The lookup's POSITIVE name corroboration must hold at
+                // write time too — an admin correcting the candidate's name
+                // between lookup and write means the row may no longer be
+                // this caller's (audit P1 r8). Reuse only ever happened with
+                // both first names present and matching, so the equality
+                // predicate is well-defined here; a pass-2 recovery row
+                // passes it (its names ARE this extraction's). Fresh inserts
+                // skip this block — a name-less caller's own new row must
+                // not fail its own enrichment.
+                enrichmentWrite = enrichmentWrite.whereRaw(
+                  'LOWER(TRIM(first_name)) = ?',
+                  [String(extracted.first_name || '').trim().toLowerCase()],
+                );
+                const statedLastLc = String(extracted.last_name || '').trim().toLowerCase();
+                if (statedLastLc) {
+                  enrichmentWrite = enrichmentWrite.whereRaw(
+                    "(last_name IS NULL OR TRIM(last_name) = '' OR LOWER(TRIM(last_name)) = ?)",
+                    [statedLastLc],
+                  );
+                }
+              }
             }
             enriched = await enrichmentWrite.update(leadUpdates);
             if (!enriched && existingLead && !customerId && !phone && !raceRecovered) {
