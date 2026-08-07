@@ -585,6 +585,18 @@ async function applyCustomerRepair(repair) {
           updateQuery = updateQuery.where('billing_mode', repair.customer.billing_mode);
         }
       }
+    } else if (repair.customerUpdates.monthly_rate !== undefined) {
+      // Rate-bearing member repairs CAS too (local codex #3245 r21 P0): the
+      // minted rate was computed from a pre-lock snapshot whose monthly_rate
+      // was <= 0 (the backfill lane's precondition). If a concurrent accept
+      // committed a real rate while this transaction waited on the row lock,
+      // writing the stale repair would overwrite the accepted rate and the
+      // seed below would clobber its fresh attribution. Re-assert the
+      // precondition under the lock — zero matched rows skips the whole
+      // stale repair (the next run recomputes from live data).
+      updateQuery = updateQuery.where(function notPayingRate() {
+        this.whereNull('monthly_rate').orWhere('monthly_rate', '<=', 0);
+      });
     }
     const count = await updateQuery.update(repair.customerUpdates);
     if (count && repair.customerUpdates.monthly_rate !== undefined

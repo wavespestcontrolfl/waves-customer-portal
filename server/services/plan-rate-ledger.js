@@ -55,8 +55,9 @@ function planRateLedgerEnabled() {
 }
 
 async function ledgerTableExists(database) {
+  let exists;
   try {
-    return await database.schema.hasTable('customer_plan_rates');
+    exists = await database.schema.hasTable('customer_plan_rates');
   } catch (probeErr) {
     // A transient probe FAILURE is not an absent table (codex #3245 r5):
     // while the ledger has scalar authority, swallowing it would return
@@ -67,6 +68,16 @@ async function ledgerTableExists(database) {
     if (planRateLedgerEnabled()) throw probeErr;
     return false;
   }
+  // A genuinely ABSENT table under scalar authority is the same hazard as a
+  // failed probe (local codex #3245 r21 P0): every caller treats false as
+  // "no ledger" and quietly commits legacy whole-scalar semantics — an
+  // authoritative accept or scalar edit would underbill a multi-plan
+  // customer with zero telemetry. Gate on + no table = misconfiguration;
+  // fail the caller's write. Advisory mode keeps absence as a no-op.
+  if (!exists && planRateLedgerEnabled()) {
+    throw new Error('customer_plan_rates table is absent while GATE_PLAN_RATE_LEDGER is enabled — refusing legacy scalar fallback');
+  }
+  return exists;
 }
 
 // Per-family monthly slices for an accepted estimate. Line preference is

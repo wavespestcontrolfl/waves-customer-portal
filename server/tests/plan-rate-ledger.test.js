@@ -576,6 +576,19 @@ describe('codex r5 hardening', () => {
     })).rejects.toThrow('metadata query timeout');
     featureGates.isEnabled.mockReturnValue(false);
   });
+
+  test('a genuinely ABSENT table throws under the authority gate instead of legacy fallback (codex r21)', async () => {
+    // Gate on + no table = misconfiguration: every caller reads false as
+    // "no ledger" and would silently commit whole-scalar replacement.
+    featureGates.isEnabled.mockReturnValue(true);
+    await expect(applyAcceptToLedger(makeLedgerDb([], { hasTable: false }), {
+      customerId: 'cust-1', slices: { pest_control: 40 }, previousScalar: 0,
+    })).rejects.toThrow('customer_plan_rates table is absent');
+    const resetDb = makeLedgerDb([], { hasTable: false });
+    await expect(resetLedgerToScalar(resetDb, 'cust-1', 75, { source: 'admin_edit' }))
+      .rejects.toThrow('customer_plan_rates table is absent');
+    featureGates.isEnabled.mockReturnValue(false);
+  });
 });
 
 describe('zero-priced accepted families (codex r2)', () => {
