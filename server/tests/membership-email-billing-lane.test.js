@@ -216,6 +216,19 @@ describe('membership.started billing-lane gate', () => {
     expect(payload.billing_cadence).toBe('per application');
   });
 
+  test("an add-on accept quotes THIS acceptance's amount, never the preserved old fee", async () => {
+    // Codex #3271 r2: an established per-application customer accepting an
+    // add-on keeps their customer-level fee (the original series must not be
+    // re-priced), but the welcome email lists the NEWLY accepted services —
+    // the explicit accepted amount must win over the stale row fee.
+    const payload = await startedPayload(
+      { ...BASE, billing_mode: 'per_application', per_application_fee: 109 },
+      { billingLane: 'per_application', perApplicationAmount: 91, monthlyRate: 30.33 },
+    );
+    expect(payload.monthly_rate).toBe('$91.00');
+    expect(payload.billing_cadence).toBe('per application');
+  });
+
   test('an OMITTED fee argument still falls back to the customer row fee', async () => {
     // Only undefined (the admin-route callers, which never pass the key)
     // rides the row fallback — distinct from the converter's explicit null.
@@ -271,8 +284,33 @@ describe('membership.started billing-lane gate', () => {
     expect(payload.billing_cadence).toBe('billed after each service');
   });
 
-  test('HARD RULE: no lane ever renders the phrase "per visit"', async () => {
-    for (const lane of ['per_application', 'annual_prepay', 'per_visit', 'one_time', 'monthly_membership']) {
+  // Codex #3271 r2: a one_time lane means NO recurring billing relationship
+  // — a real tier alone (hasMembership is tier-only) must not welcome the
+  // customer to a membership that doesn't exist. The suppression lives in
+  // the lane gate itself so the admin create, the profile editor, and the
+  // converter all inherit one decision.
+  test('an EXPLICIT one_time lane never sends a membership welcome', async () => {
+    stubCustomer({ ...BASE, billing_mode: 'one_time', pipeline_stage: 'active_customer' });
+    const res = await sendMembershipStarted({
+      customerId: 'c1',
+      billingLane: 'one_time',
+      membershipTier: 'Bronze',
+      monthlyRate: 45,
+    });
+    expect(res).toMatchObject({ ok: false, skipped: true, reason: 'one_time_lane' });
+    expect(sentTemplates).toHaveLength(0);
+  });
+
+  test('a row-resolved one_time lane (no explicit param) is suppressed too', async () => {
+    stubCustomer({ ...BASE, billing_mode: 'one_time' });
+    const res = await sendMembershipStarted({ customerId: 'c1', monthlyRate: 45 });
+    expect(res).toMatchObject({ ok: false, skipped: true, reason: 'one_time_lane' });
+    expect(sentTemplates).toHaveLength(0);
+  });
+
+  test('HARD RULE: no sending lane ever renders the phrase "per visit"', async () => {
+    // one_time is absent by design — it never sends at all (gate above).
+    for (const lane of ['per_application', 'annual_prepay', 'per_visit', 'monthly_membership']) {
       sentTemplates.length = 0;
       const payload = await startedPayload(
         { ...BASE, billing_mode: lane === 'monthly_membership' ? 'monthly_membership' : null },

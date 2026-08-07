@@ -2773,7 +2773,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
     void LeadScorer.calculateScore(customer.id)
       .catch(err => logger.warn(`[customers:${customer.id}] lead score failed: ${err.message}`));
     await auditCustomerMutation(req, 'customer.create', customer.id, {
-      fields: ['first_name', 'last_name', 'phone', 'email', 'address', 'tier', 'monthly_rate', 'lead_source', 'pipeline_stage', 'tags'],
+      fields: ['first_name', 'last_name', 'phone', 'email', 'address', 'tier', 'monthly_rate', 'lead_source', 'pipeline_stage', 'tags', 'billing_mode'],
+      // Initial billing lane + provenance (codex #3271 r2): billing_mode is
+      // a sensitive audited field on updates, but the create audit omitted
+      // it — once the lane later changed, the lane the customer was BORN in
+      // (and whether the caller chose it or the stamp inferred it) could not
+      // be reconstructed from the audit trail.
+      billingMode: billingModeForCreate || null,
+      billingModeSource: explicitBillingMode ? 'explicit' : (impliedLaneStamp ? 'inferred' : null),
     });
 
     // Fire-and-forget geocoding (don't block the create response)
@@ -2800,6 +2807,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // hasMembership is tier-only, so a one_time create with a real tier
+    // passes it — sendMembershipStarted's lane gate suppresses the welcome
+    // for the one_time lane (codex #3271 r2: no recurring billing
+    // relationship means no "membership is active" email), and the explicit
+    // billingLane below is what that gate reads.
     if (hasMembership(normalized)) {
       void AccountMembershipEmail.sendMembershipStarted({
         customerId: customer.id,

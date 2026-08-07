@@ -499,6 +499,25 @@ async function sendMembershipStarted({
   const lane = (billingLane && BILLING_MODES.includes(billingLane))
     ? billingLane
     : resolveBillingLane(customer).mode;
+  // A one_time lane means NO recurring billing relationship — "your Waves
+  // membership is active" is false no matter what tier value rides the row
+  // (codex #3271 r2: an admin create with billingMode 'one_time' plus a real
+  // tier passed the tier-only hasMembership check and welcomed the customer
+  // to a membership that doesn't exist). Suppress HERE, in the lane gate all
+  // callers already flow through, so the create route, the profile editor,
+  // and any future caller inherit one decision. per_visit deliberately still
+  // sends: a real tier + invoice-on-complete billing IS an ongoing plan.
+  if (lane === 'one_time') {
+    await logLifecycleEmailAttempt({
+      customerId: customer.id,
+      templateKey: 'membership.started',
+      eventType: 'membership.started',
+      status: 'skipped',
+      failureReason: 'one_time_lane',
+      metadata: { source_id: sourceId, billing_lane: lane },
+    });
+    return { ok: false, skipped: true, reason: 'one_time_lane' };
+  }
   const payload = membershipPayload(customer, {
     membershipTier,
     monthlyRate,
@@ -530,8 +549,9 @@ async function sendMembershipStarted({
   } else if (lane === 'annual_prepay') {
     payload.monthly_rate = '';
     payload.billing_cadence = '12 months prepaid';
-  } else if (lane === 'per_visit' || lane === 'one_time') {
-    // Invoice-on-complete lanes: the stored monthly_rate is not a charge.
+  } else if (lane === 'per_visit') {
+    // Invoice-on-complete lane: the stored monthly_rate is not a charge.
+    // (one_time never reaches here — suppressed at the lane gate above.)
     payload.monthly_rate = '';
     payload.billing_cadence = 'billed after each service';
   }

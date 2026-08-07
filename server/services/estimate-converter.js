@@ -54,6 +54,33 @@ function acceptedBillingLaneForConversion({
   }).mode;
 }
 
+// The per-application figure the WELCOME EMAIL quotes — the price that
+// applies to WHAT WAS JUST ACCEPTED (codex #3271 r2). This deliberately
+// DIVERGES from stampedPerApplicationFee for one audience: an
+// already-per_application customer accepting an add-on keeps their
+// customer-level fee (preserving it is intentional — the fee is the
+// completion fallback for EVERY per-app visit without a row price, so
+// overwriting it would re-price the ORIGINAL series), but the add-on's own
+// scheduled rows carry THIS estimate's amount, and the email lists exactly
+// the newly accepted services — quoting them at the OLD plan's fee told the
+// customer the wrong price. Same derivation as the stamp's new-customer
+// branch: a single-recurring-unit accept quotes this estimate's exact
+// cadence amount (monthly-rate fallback when no cadence resolved); a
+// multi-service accept returns an EXPLICIT null — no single per-application
+// figure exists, and sendMembershipStarted keeps an explicit null blank so
+// the row drops (round-1 fix) instead of resurrecting a stale row fee.
+function emailPerApplicationAmountForConversion({
+  recurringUnitCount,
+  billingCadence,
+  perApplicationAmount,
+  monthlyRate,
+}) {
+  if (recurringUnitCount === 1 && billingCadence && Number(billingCadence.amount) > 0) {
+    return Number(perApplicationAmount);
+  }
+  return (recurringUnitCount === 1 && Number(monthlyRate) > 0) ? Number(monthlyRate) : null;
+}
+
 function findGrassTypeDeep(node, depth = 6) {
   if (depth < 0 || node == null || typeof node !== 'object') return null;
   for (const k of ['grassType', 'grass_type']) {
@@ -2258,8 +2285,12 @@ const EstimateConverter = {
     // (rodent bait) makes the plan multi-row even with ONE
     // recurring line — a customer-level whole-plan fee would bill
     // the full package on BOTH rows' completions.
-    // Hoisted so the customers-row stamp below and the membership.started
-    // email payload render the SAME fee — one authority, no drift.
+    // CUSTOMER-LEVEL fee only (the completion-billing fallback). The
+    // membership.started email quotes THIS acceptance's own amount instead
+    // (emailPerApplicationAmountForConversion, codex #3271 r2): for an
+    // established per-application customer's add-on accept the two
+    // deliberately differ — the stamp preserves the original series' fee,
+    // the email prices what was just accepted.
     const stampedPerApplicationFee = preservesExistingMembership
       ? (customer.per_application_fee ?? null)
       : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
@@ -3745,8 +3776,11 @@ const EstimateConverter = {
       // rows on the lane, and the explicit params are REQUIRED here — this
       // send can race the uncommitted accept transaction, so the email
       // service's row-fallback could resolve the stale pre-accept lane.
-      // The fee is the SAME value stamped on customers.per_application_fee
-      // (NULL on multi-service accepts — the email row blanks and drops).
+      // The fee is THIS acceptance's per-application amount (codex #3271
+      // r2), which may deliberately differ from the preserved customer-level
+      // stamp on an add-on accept — see
+      // emailPerApplicationAmountForConversion. NULL on multi-service
+      // accepts (the email row blanks and drops).
       billingLane: acceptedBillingLaneForConversion({
         billingTerm,
         preservesExistingMembership,
@@ -3754,7 +3788,12 @@ const EstimateConverter = {
         waveguardTier: commercialOnlyRecurring ? 'Commercial' : (tier === 'none' ? null : tier),
         monthlyRate: convertedMonthlyRate,
       }),
-      perApplicationAmount: stampedPerApplicationFee,
+      perApplicationAmount: emailPerApplicationAmountForConversion({
+        recurringUnitCount,
+        billingCadence,
+        perApplicationAmount,
+        monthlyRate,
+      }),
       includedServices: recurringServicesForConversion
         .map((svc) => svc.name || svc.serviceName || svc.service_name || svc.label)
         .filter(Boolean)
@@ -4041,3 +4080,4 @@ module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
 module.exports.visitsPerYearForRecurringService = visitsPerYearForRecurringService;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
 module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;
+module.exports.emailPerApplicationAmountForConversion = emailPerApplicationAmountForConversion;
