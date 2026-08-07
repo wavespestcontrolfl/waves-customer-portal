@@ -3055,6 +3055,14 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(dryingTimeIs.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const hyphenated = guardrails.evaluate({ body: 'Expect a 30-minute drying period.' }, {});
     expect(hyphenated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const fractional = guardrails.evaluate({ body: 'Wait half an hour before re-entering.' }, {});
+    expect(fractional.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // Adverbial "safely" without BOTH idiom parts blocks; with dry-condition
+    // AND technician confirmation it is the approved idiom.
+    const adverbBare = guardrails.evaluate({ body: 'You can safely re-enter once dry.' }, {});
+    expect(adverbBare.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const adverbFull = guardrails.evaluate({ body: 'You can safely re-enter once dry — your technician confirms the timing.' }, {});
+    expect(adverbFull.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
     const directClaim = guardrails.evaluate({ body: 'Our pesticides are completely safe.' }, {});
     expect(directClaim.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     // No figure, label-directed — legal.
@@ -3148,5 +3156,12 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
   test('a schedule CTA directing to a THIRD PARTY stays legal', () => {
     const r = guardrails.evaluate({ body: 'For severe drywood cases, schedule tenting with a licensed structural fumigator.' }, {});
     expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('species-specific removal CTAs block — "Book raccoon removal today"', () => {
+    const r = guardrails.evaluate({ body: 'Book raccoon removal today and sleep better tonight.' }, {});
+    expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const referral = guardrails.evaluate({ body: 'Book raccoon removal with a licensed wildlife operator.' }, {});
+    expect(referral.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
   });
 });

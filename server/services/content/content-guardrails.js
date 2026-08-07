@@ -2885,12 +2885,16 @@ const SANCTIONED_META_TOKEN_RE = /\{\{\s*cityPhone\s*\}\}/g;
 // timing — so a "safe" match governed by a once/when/after-dry condition in
 // the same sentence stays legal, as do negated disclaimers ("no product is
 // completely safe…"), via the prevention section's negation guards.
-// A "figure" is a digit, a range, or a common spelled number, with its unit.
-const REENTRY_DURATION_SRC = "(?:\\d+(?:\\s*[-–—]\\s*\\d+)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:\\s*[-–—]\\s*\\w+)?)\\s*(?:minutes?|mins?|hours?|hrs?)";
+// A "figure" is a digit, a range, a common spelled number with its unit, or
+// a fractional/article form ("half an hour", "an hour").
+const REENTRY_DURATION_SRC = "(?:(?:\\d+(?:\\s*[-–—]\\s*\\d+)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:\\s*[-–—]\\s*\\w+)?)\\s*(?:minutes?|mins?|hours?|hrs?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour)";
 const REENTRY_SAFETY_SRCS = [
   // "safe to re-enter / return / go back inside", "re-entry is safe",
   // "safe for kids and pets to return"
   "\\bsafe\\s+(?:for\\s+(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies))\\s+(?:and\\s+(?:kids?|children|pets?|dogs?|cats?)\\s+)?)?to\\s+(?:re-?enter|return|go\\s+back|come\\s+back|walk\\s+on|play\\s+on|be\\s+(?:in|on|inside|around))\\b",
+  // Adverbial form: "you can safely re-enter/return/walk" — same claim,
+  // same conditional-idiom exemption path (contains "safe").
+  "\\bsafely\\s+(?:re-?enter\\w*|return\\w*|go\\s+back|walk\\w*|play\\w*|be\\s+(?:in|on|inside|around))\\b",
   "\\bre-?entry\\s+(?:is|becomes?|will\\s+be)\\s+(?:completely\\s+|totally\\s+|perfectly\\s+)?(?:safe|harmless|risk[-\\s]?free)\\b",
   "\\bsafe\\s+(?:for\\s+)?re-?entry\\b",
   // "the treatment/product/pesticide/lawn is safe (for kids/pets/around …)"
@@ -2984,7 +2988,7 @@ function reentrySafetyClaimFinding(text) {
 // fumigation" carries no first-person service anchor). The first-person
 // filler is negation-guarded, so the wanted disclaimer ("we do not offer
 // fumigation — we refer you to…") stays legal too.
-const BANNED_TOPIC_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|insulation|wildlife\\s+(?:trapping|removal|control)|animal\\s+(?:trapping|removal)|door[-\\s]?to[-\\s]?door)";
+const BANNED_TOPIC_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|insulation|wildlife\\s+(?:trapping|removal|control)|animal\\s+(?:trapping|removal)|(?:raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\s+(?:removal|trapping|eviction|exclusion)|door[-\\s]?to[-\\s]?door)";
 // The object gap between the service verb and the topic must be
 // negation-guarded exactly like the pre-verb filler — otherwise "We do NOT
 // offer fumigation" matches through the bare "do" verb with "not offer"
