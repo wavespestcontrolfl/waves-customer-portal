@@ -477,3 +477,55 @@ describe('bond catalog identity under stale bait service_type', () => {
     })).toEqual([]);
   });
 });
+
+// Pre-push P1 on the r3 batch: ownership shares the qualifying loader's
+// lifecycle evidence (gated) — callbacks / past phantoms / one-time booking
+// sources are not live obligations and must not block quotes.
+describe('ownership lifecycle evidence (gated)', () => {
+  // The gate is read through a LAZY require at call time, so isolateModules
+  // can't scope it — set the env and reset the registry so the next lazy
+  // require re-evaluates, then undo both so later suites stay gate-off.
+  beforeAll(() => {
+    process.env.GATE_AUTO_WAVEGUARD_TIER = 'true';
+    jest.resetModules();
+  });
+  afterAll(() => {
+    delete process.env.GATE_AUTO_WAVEGUARD_TIER;
+    jest.resetModules();
+  });
+  const loadOwnedGated = () => {
+    const { loadOwnedRecurringServiceKeys } = require('../services/waveguard-existing-services');
+    return loadOwnedRecurringServiceKeys;
+  };
+
+  test('a callback row is not ownership evidence; a live upcoming row is', async () => {
+    const loadOwned = loadOwnedGated();
+    const mk = (rows) => dbForTables({
+      customers: [{ id: 'cust-gated', active: true, waveguard_tier: 'Bronze', monthly_rate: 55 }],
+      scheduled_services: rows,
+    });
+    const callbackOnly = await loadOwned(mk([{
+      id: 'svc-cb', service_type: 'Rodent Monitoring', scheduled_date: '2027-01-01',
+      status: 'scheduled', is_recurring: true, is_callback: true,
+    }]), 'cust-gated');
+    expect(callbackOnly).toEqual([]);
+
+    const live = await loadOwned(mk([{
+      id: 'svc-live', service_type: 'Rodent Monitoring', scheduled_date: '2027-01-01',
+      status: 'scheduled', is_recurring: true,
+    }]), 'cust-gated');
+    expect(live).toEqual(['rodent_bait']);
+  });
+
+  test('a past-only row is not ownership evidence', async () => {
+    const loadOwned = loadOwnedGated();
+    const owned = await loadOwned(dbForTables({
+      customers: [{ id: 'cust-past', active: true, waveguard_tier: 'Bronze', monthly_rate: 55 }],
+      scheduled_services: [{
+        id: 'svc-past', service_type: 'Lawn Care', scheduled_date: '2025-01-01',
+        status: 'scheduled', is_recurring: true,
+      }],
+    }), 'cust-past');
+    expect(owned).toEqual([]);
+  });
+});
