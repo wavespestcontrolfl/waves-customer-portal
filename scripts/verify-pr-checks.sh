@@ -27,6 +27,7 @@
 set -u
 
 REPO_SLUG="wavespestcontrolfl/waves-customer-portal"
+BASE_BRANCH="main"
 WORKFLOW_FILE="tests.yml"
 MERGEABLE_TRIES="${VERIFY_PR_MERGEABLE_TRIES:-6}"      # x5s while UNKNOWN
 WORKFLOW_TRIES="${VERIFY_PR_WORKFLOW_TRIES:-10}"       # x15s for trigger lag
@@ -58,12 +59,22 @@ if [ "$REMOTE_SHA" != "$LOCAL_SHA" ]; then
 fi
 
 # 2. Open PR for the branch, head == pushed SHA.
-PR_JSON="$(gh pr list --repo "$REPO_SLUG" --head "$BRANCH" --state open \
-  --json number,headRefOid 2>/dev/null)" \
+#    --head filters the head branch ONLY, so --base pins the target: a PR of
+#    this branch into some other base would otherwise be selected and its
+#    mergeability reported as if it were against main (and tests.yml runs on
+#    PRs to every base, so it can supply a qualifying run too).
+PR_JSON="$(gh pr list --repo "$REPO_SLUG" --head "$BRANCH" --base "$BASE_BRANCH" \
+  --state open --json number,headRefOid,baseRefName 2>/dev/null)" \
   || fail "gh pr list failed — check gh auth."
+PR_COUNT="$(printf '%s' "$PR_JSON" | jq -r 'length')"
+if [ "${PR_COUNT:-0}" -gt 1 ]; then
+  fail "$PR_COUNT open PRs from '$BRANCH' into '$BASE_BRANCH' — this gate cannot tell which one it is verifying." \
+    "Close or retarget the duplicates, then re-run:  gh pr list --head $BRANCH --state open"
+fi
 PR_NUMBER="$(printf '%s' "$PR_JSON" | jq -r '.[0].number // empty')"
-[ -n "$PR_NUMBER" ] || fail "no OPEN PR found for branch '$BRANCH'." \
-  "Open one first: gh pr create --head $BRANCH --base main"
+[ -n "$PR_NUMBER" ] || fail "no OPEN PR from '$BRANCH' into '$BASE_BRANCH' found." \
+  "Open one first: gh pr create --head $BRANCH --base $BASE_BRANCH" \
+  "(A PR of this branch into a different base does not satisfy the portal merge gate.)"
 PR_HEAD="$(printf '%s' "$PR_JSON" | jq -r '.[0].headRefOid // empty')"
 if [ "$PR_HEAD" != "$LOCAL_SHA" ]; then
   fail "PR #$PR_NUMBER headRefOid $PR_HEAD != pushed $LOCAL_SHA — GitHub hasn't seen your push (or the branch moved)." \
