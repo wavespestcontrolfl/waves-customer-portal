@@ -86,10 +86,24 @@ const NOTE_SHORTENER_RE = /(?:^|[^a-z0-9-])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co
 // A blocklist of shortener hosts can never be complete (codex r2 P1:
 // tiny.one, v.gd, …), so the real rule is: NO URL of any kind in a note.
 // The moved SMS already carries the tokenized /reschedule link — a note
-// has no legitimate need for another one. Catches scheme'd URLs, www.
-// forms, and bare host/path tokens ("tiny.one/x"); the named-shortener
-// regex above stays as an extra layer for naked hosts without a path.
-const NOTE_URL_RE = /(?:https?:\/\/|www\.)\S+|(?:^|[^a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S/i;
+// has no legitimate need for another one. Four clickable families, each
+// its own alternative (codex r3 P1 widened this beyond http/www + path):
+//   1. any scheme:// URL (https, ftp, anything)
+//   2. www.-prefixed hosts
+//   3. host.tld immediately followed by a path/query/fragment
+//   4. bare host on a common/link TLD with NO path ("tiny.one") — the TLD
+//      set is deliberately short of English words ("ok.At 3pm" is a typo,
+//      not a link, so at/to/me/us are excluded)
+//   5. IPv4 with optional port/path
+// The named-shortener regex above stays as an extra layer for naked
+// shortener hosts. Prose stays prose: "2 p.m. sharp", "gate. Code 4482".
+const NOTE_URL_RE = new RegExp([
+  '\\b[a-z][a-z0-9+.-]*://\\S+',
+  '(?:^|[^a-z0-9.-])www\\.\\S+',
+  '(?:^|[^a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\\.[a-z0-9-]+)*\\.[a-z]{2,}[/?#]\\S',
+  '(?:^|[^a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\\.[a-z0-9-]+)*\\.(?:com|net|org|io|co|ly|gl|gd|cc|one|info|biz|app|dev|link)(?=$|[^a-z0-9-])',
+  '(?:^|[^0-9.])(?:\\d{1,3}\\.){3}\\d{1,3}(?:[:/?#]\\S*)?(?=$|[^0-9])',
+].join('|'), 'i');
 
 // The regex is textual, so hosts hidden behind encodings that a URL parser
 // (or a tapping thumb) canonicalizes back to the real hostname would slip

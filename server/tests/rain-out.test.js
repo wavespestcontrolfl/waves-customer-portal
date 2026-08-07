@@ -1432,8 +1432,16 @@ describe('rain-out service', () => {
       expect(sanitize()('go https://v.gd/x')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()('see www.example.com for details')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()('pay at waves.com/pay please')).toEqual({ error: 'note_link_blocked' });
+      // No-path clickable forms (codex r3 P1): bare common-TLD host,
+      // query-only, non-HTTP scheme, IPv4.
+      expect(sanitize()('go to tiny.one now')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('example.com?x=1 has it')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('grab ftp://files.example.io/x')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('open 192.168.4.20/pay')).toEqual({ error: 'note_link_blocked' });
       // Plain prose with dots/times must NOT false-positive.
       expect(sanitize()('Arriving 12:30. See you at 2 p.m. sharp')).toEqual({ note: 'Arriving 12:30. See you at 2 p.m. sharp' });
+      expect(sanitize()('Back gate. Code 4482 works. Thanks')).toEqual({ note: 'Back gate. Code 4482 works. Thanks' });
+      expect(sanitize()('Running late.Be there at 3')).toEqual({ note: 'Running late.Be there at 3' });
     });
 
     test('sanitizer: mirrors the outbound sms-guard so the note fails BEFORE the move, not the send after', () => {
@@ -1451,11 +1459,18 @@ describe('rain-out service', () => {
       // fire after the reschedule committed — move done, customer silent.
       expect(sanitize()('See you Friday 👍')).toEqual({ error: 'note_emoji_blocked' });
       expect(sanitize()('Rain check ☔ sorry!')).toEqual({ error: 'note_emoji_blocked' });
+      // Flags (regional indicators) and keycaps are emoji too — neither is
+      // Extended_Pictographic, both now covered by the shared validator
+      // (codex r3 P1).
+      expect(sanitize()('See you 🇺🇸')).toEqual({ error: 'note_emoji_blocked' });
+      expect(sanitize()('Press 1️⃣ to confirm')).toEqual({ error: 'note_emoji_blocked' });
       // Smart punctuation is NOT emoji — same line the voice validator draws.
       expect(sanitize()('Friday — we’ll be there')).toEqual({ note: 'Friday — we’ll be there' });
       expect(sanitize()(42)).toEqual({ error: 'note_invalid' });
-      // Lookalike words that merely CONTAIN a shortener host must pass.
-      expect(sanitize()('a habit.ly no wait, a habit truly')).toEqual({ note: 'a habit.ly no wait, a habit truly' });
+      // "habit.ly" is a REAL registrable .ly host, so the no-URL rule now
+      // correctly blocks it; dot-joined words off the TLD set still pass.
+      expect(sanitize()('a habit.ly no wait')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('an orbit.lyric moment, truly')).toEqual({ note: 'an orbit.lyric moment, truly' });
     });
 
     test('commit appends the note after the rendered template body', async () => {

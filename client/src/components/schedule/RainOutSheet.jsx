@@ -115,12 +115,21 @@ const ERROR_COPY = {
 const NOTE_MAX_CHARS = 200;
 const NOTE_SHORTENER_RE = /(?:^|[^a-z0-9-])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[^a-z0-9-])/i;
 // No URL of ANY kind in a note (shortener blocklists can't be complete) —
-// the moved SMS already carries the tokenized reschedule link.
-const NOTE_URL_RE = /(?:https?:\/\/|www\.)\S+|(?:^|[^a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S/i;
+// the moved SMS already carries the tokenized reschedule link. Mirrors the
+// server: scheme://, www., host.tld+path, bare host on a common/link TLD,
+// IPv4.
+const NOTE_URL_RE = new RegExp([
+  '\\b[a-z][a-z0-9+.-]*://\\S+',
+  '(?:^|[^a-z0-9.-])www\\.\\S+',
+  '(?:^|[^a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\\.[a-z0-9-]+)*\\.[a-z]{2,}[/?#]\\S',
+  '(?:^|[^a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\\.[a-z0-9-]+)*\\.(?:com|net|org|io|co|ly|gl|gd|cc|one|info|biz|app|dev|link)(?=$|[^a-z0-9-])',
+  '(?:^|[^0-9.])(?:\\d{1,3}\\.){3}\\d{1,3}(?:[:/?#]\\S*)?(?=$|[^0-9])',
+].join('|'), 'i');
 // Customer-facing SMS are emoji-free (messaging validator EMOJI_FOR_CUSTOMER)
 // — catching it here keeps the move from committing with a text that the
-// send layer would then block.
-const NOTE_EMOJI_RE = /\p{Extended_Pictographic}/u;
+// send layer would then block. Same three families the server detects:
+// pictographic, regional-indicator flags, keycap sequences.
+const NOTE_EMOJI_RE = /\p{Extended_Pictographic}|[\u{1F1E6}-\u{1F1FF}]|[0-9#*]\uFE0F?\u20E3/u;
 // Mirror of the outbound sms-guard (server/services/sms-guard.js): bodies
 // containing unsubstituted {vars} or broken-render markers are rejected at
 // send time, AFTER the move would have committed.

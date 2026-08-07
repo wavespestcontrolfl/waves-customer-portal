@@ -18,10 +18,13 @@
 // support /\p{Extended_Pictographic}/u (Node 12 and older).
 let EMOJI_REGEX;
 try {
-  EMOJI_REGEX = new RegExp('\\p{Extended_Pictographic}', 'u');
+  // Extended_Pictographic alone misses two customer-visible emoji families:
+  // regional-indicator flags (🇺🇸 = two RI code points) and keycap
+  // sequences (1️⃣ = digit + optional VS16 + U+20E3). Cover them explicitly.
+  EMOJI_REGEX = new RegExp('\\p{Extended_Pictographic}|[\\u{1F1E6}-\\u{1F1FF}]|[0-9#*]\\uFE0F?\\u20E3', 'u');
 } catch {
   // Fallback: detect any code point in common emoji ranges
-  EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F1FF}]/u;
+  EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F1FF}]|[0-9#*]\uFE0F?\u20E3/u;
 }
 
 /**
