@@ -515,8 +515,15 @@ async function sendMembershipStarted({
   if (lane === 'per_application') {
     // The acceptance-stamped per-visit charge. A multi-service accept
     // intentionally carries NO customer-level fee (whole-plan fee on every
-    // row's completion = overbill) — the row stays blank and drops.
-    const fee = perApplicationAmount ?? customer.per_application_fee;
+    // row's completion = overbill) — the converter passes an EXPLICIT null,
+    // which must stay blank: this fire-and-forget send can race the accept
+    // transaction, so falling back to customer.per_application_fee could
+    // resurrect a stale pre-accept fee the conversion is clearing. Only a
+    // genuinely OMITTED argument (undefined — the admin-route callers)
+    // rides the row fallback.
+    const fee = perApplicationAmount === undefined
+      ? customer.per_application_fee
+      : perApplicationAmount;
     payload.monthly_rate = money(fee);
     // HARD RULE: "per application", never "per visit".
     payload.billing_cadence = 'per application';

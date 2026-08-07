@@ -202,6 +202,31 @@ describe('membership.started billing-lane gate', () => {
     expect(payload.billing_cadence).toBe('per application');
   });
 
+  test('an EXPLICIT null fee is preserved even over a stale positive row fee', async () => {
+    // Codex #3271: the send races the accept transaction, so the pool read
+    // can still see a pre-accept row carrying an old per-application fee
+    // (e.g. a per_visit/one_time customer converting via a multi-service
+    // accept that CLEARS the fee). An explicitly passed null must not fall
+    // back to that obsolete amount — the row stays blank and drops.
+    const payload = await startedPayload(
+      { ...BASE, billing_mode: 'per_visit', per_application_fee: 91 },
+      { billingLane: 'per_application', perApplicationAmount: null, monthlyRate: 150 },
+    );
+    expect(payload.monthly_rate).toBe('');
+    expect(payload.billing_cadence).toBe('per application');
+  });
+
+  test('an OMITTED fee argument still falls back to the customer row fee', async () => {
+    // Only undefined (the admin-route callers, which never pass the key)
+    // rides the row fallback — distinct from the converter's explicit null.
+    const payload = await startedPayload(
+      { ...BASE, billing_mode: 'per_application', per_application_fee: 91 },
+      { billingLane: 'per_application', monthlyRate: 150 },
+    );
+    expect(payload.monthly_rate).toBe('$91.00');
+    expect(payload.billing_cadence).toBe('per application');
+  });
+
   test('without an explicit lane, the fee falls back to the customer row', async () => {
     const payload = await startedPayload(
       { ...BASE, billing_mode: 'per_application', per_application_fee: 109 },
