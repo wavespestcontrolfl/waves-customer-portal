@@ -205,21 +205,34 @@ router.post('/review-graphics/:id/approve', requireStudioEnabled, async (req, re
     // Liveness gate, mirroring the autonomous-run approval: the source review
     // can be stamped removed between draft creation and this approval, and
     // approving would publish a removed review as a current testimonial.
-    if (existing.google_review_id) {
-      const src = await db('google_reviews').where({ id: existing.google_review_id }).first().catch(() => null);
-      if (!src || src.missing_since) {
-        return res.status(409).json({ error: 'source Google review has been removed from Google — the graphic cannot be approved' });
+    // Check and approval run in ONE transaction with the source row locked
+    // (same shape as createReviewGraphic / publishWithReviewLivenessLock):
+    // the reconcile's stamping UPDATE queues behind the lock, so it cannot
+    // stamp between this read and the status write.
+    let outcome = null;
+    await db.transaction(async (trx) => {
+      if (existing.google_review_id) {
+        const src = await trx('google_reviews')
+          .where({ id: existing.google_review_id })
+          .forUpdate()
+          .first();
+        if (!src || src.missing_since) {
+          outcome = { status: 409, error: 'source Google review has been removed from Google — the graphic cannot be approved' };
+          return;
+        }
       }
-    }
-    const [graphic] = await db('review_graphics')
-      .where({ id: req.params.id })
-      .update({
-        status: 'approved',
-        approved_at: new Date(),
-        updated_at: new Date(),
-      })
-      .returning('*');
-    res.json({ success: true, graphic });
+      const [graphic] = await trx('review_graphics')
+        .where({ id: req.params.id })
+        .update({
+          status: 'approved',
+          approved_at: new Date(),
+          updated_at: new Date(),
+        })
+        .returning('*');
+      outcome = { status: 200, graphic };
+    });
+    if (outcome.status !== 200) return res.status(outcome.status).json({ error: outcome.error });
+    res.json({ success: true, graphic: outcome.graphic });
   } catch (err) { next(err); }
 });
 
