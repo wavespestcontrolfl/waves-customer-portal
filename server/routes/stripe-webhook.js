@@ -1,6 +1,5 @@
 const express = require('express');
 const Sentry = require('@sentry/node');
-const { scrubSentryText } = require('../utils/sentry-scrub');
 const router = express.Router();
 const Stripe = require('stripe');
 const db = require('../models/db');
@@ -800,25 +799,30 @@ router.post(
 
       // Winston is console-only (Railway's rotating logs) and the ledger's
       // error column is purged at 90 days — Sentry is the only durable,
-      // operator-visible record of a handler failure. Identifiers only:
-      // event id/type are not PII, and the payload is never attached.
-      // The exception TEXT is scrubbed first — Knex prefixes the failing
-      // SQL onto err.message (customer names/emails as quoted literals)
-      // and provider errors echo phones/emails (AGENTS.md PII rule);
-      // instrument.js's beforeSend strips request data only, so the
-      // exception value must be scrubbed at the capture site. Capture a
-      // scrubbed synthetic error (original name + scrubbed stack keeps
-      // Sentry grouping intact). Signature failures above are deliberately
-      // NOT captured (public endpoint — attack-surface noise, not app
-      // failure).
-      const scrubbedErr = new Error(
-        scrubSentryText(err.message) || `stripe-webhook handler failure (${event.type})`
-      );
-      scrubbedErr.name = err.name || 'Error';
-      scrubbedErr.stack = scrubSentryText(err.stack);
-      Sentry.captureException(scrubbedErr, {
+      // operator-visible record of a handler failure. No part of the
+      // original message or stack goes to Sentry: Knex prefixes the failing
+      // SQL onto err.message and provider errors echo request payloads, and
+      // no scrub regex can recognize every PII form (an unquoted customer
+      // name or street address passes any allowlist of patterns — AGENTS.md
+      // PII rule). Capture FIXED generic text plus safe identifiers only
+      // (event id/type and error name/code are not PII; the payload is
+      // never attached); an explicit fingerprint keeps grouping stable
+      // without a stack. The full message/stack stay in the ledger error
+      // column (90d) and the Railway console log above. Signature failures
+      // above are deliberately NOT captured (public endpoint —
+      // attack-surface noise, not app failure).
+      const syntheticErr = new Error(`stripe-webhook handler failure (${event.type})`);
+      syntheticErr.name = err.name || 'Error';
+      // A synthetic stack would point at THIS catch block for every
+      // failure — misleading noise, so send none.
+      syntheticErr.stack = `${syntheticErr.name}: ${syntheticErr.message}`;
+      const safeErrorCode = (typeof err.code === 'string' && err.code.length <= 64) || typeof err.code === 'number'
+        ? err.code
+        : undefined;
+      Sentry.captureException(syntheticErr, {
         tags: { area: 'stripe-webhook' },
-        extra: { eventType: event.type, eventId: event.id },
+        extra: { eventType: event.type, eventId: event.id, errorName: syntheticErr.name, errorCode: safeErrorCode },
+        fingerprint: ['stripe-webhook-handler', event.type, syntheticErr.name],
       });
 
       // Record error and return 500 so Stripe retries (handlers are idempotent)

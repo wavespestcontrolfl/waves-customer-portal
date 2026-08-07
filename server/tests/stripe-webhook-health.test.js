@@ -2,12 +2,16 @@
  * stripe-webhook-health — daily dead-letter check over stripe_webhook_events
  * plus the Stripe-side delivery probe. Contracts pinned here:
  *
- *  - nonzero ledger failures (error set OR abandoned claim, lookback
- *    window) → one FIX: email listing event types + ids + sanitized error
- *    snippets;
+ *  - nonzero ledger failures (error set OR abandoned claim, NO time
+ *    window — dead letters repeat until fixed or purged) → one FIX: email
+ *    listing event types + ids + sanitized error snippets;
  *  - zero ledger failures AND Stripe-side clean → no email at all
  *    (exception-based: a quiet day is silent);
  *  - Stripe-side failures alone still email (they never reach the ledger);
+ *  - a broken CHECK with a quiet ledger also emails (job_health has no
+ *    automatic notifier — the digest is the only operator rail that says
+ *    Stripe-side delivery status is UNKNOWN) and still surfaces the
+ *    blocking stripeCheckError;
  *  - Stripe-side results are reconciled against the local ledger: an event
  *    id we already hold was delivered to OUR endpoint, so its account-wide
  *    delivery_success=false flag is another integration's failure — never
@@ -21,9 +25,10 @@
  *    "too fresh to judge" at one tick still alerts at the next;
  *  - missing STRIPE_SECRET_KEY in deployed production is a BLOCKING check
  *    failure (fail closed), while dev/test/preview keeps the benign skip;
- *  - a failed ledger query / failed Stripe-side probe returns the blocking
- *    skip codes the scheduler wrapper converts into a job_health failure —
- *    the check never swallows its own breakage;
+ *  - a failed ledger query returns the blocking query_failed skip; a failed
+ *    Stripe-side probe emails AND carries stripeCheckError so the scheduler
+ *    wrapper converts it into a job_health failure — the check never
+ *    swallows its own breakage;
  *  - error snippets never carry emails or long digit runs (payloads are
  *    never read at all — the loader selects identifiers + error only);
  *  - the ops_email_send_state marker dedupes a deploy-overlap double tick's
@@ -98,7 +103,7 @@ describe('composeWebhookHealthDigest', () => {
       stripeSide: null,
       stripeCheckError: null,
     });
-    expect(composed.subject).toBe('FIX: 2 Stripe webhook events failed/unprocessed in last 48h');
+    expect(composed.subject).toBe('FIX: 2 unresolved Stripe webhook events failed/unprocessed');
     expect(composed.text).toContain('evt_dead_1 (payment_intent.succeeded)');
     expect(composed.text).toContain('error: update failed: relation locked');
     expect(composed.text).toContain('evt_dead_2 (charge.refunded)');
@@ -162,6 +167,19 @@ describe('composeWebhookHealthDigest', () => {
     expect(composed.text).toContain('could NOT be reconciled');
     expect(composed.text).toContain('possible failures only');
   });
+
+  test('a broken check with everything else quiet still composes a FIX email (status UNKNOWN, never silent)', () => {
+    const composed = composeWebhookHealthDigest({
+      ledger: { total: 0, rows: [] },
+      stripeSide: null,
+      stripeCheckError: 'STRIPE_SECRET_KEY is not set in deployed production — Stripe-side delivery check cannot run',
+    });
+    expect(composed.subject).toBe('FIX: Stripe webhook delivery check FAILED — Stripe-side status unknown');
+    expect(composed.text).toContain('Stripe-side delivery status is UNKNOWN');
+    expect(composed.text).toContain('Stripe-side delivery check itself FAILED');
+    expect(composed.text).toContain('STRIPE_SECRET_KEY');
+    expect(composed.count).toBe(0);
+  });
 });
 
 describe('runStripeWebhookHealthCheck', () => {
@@ -197,14 +215,18 @@ describe('runStripeWebhookHealthCheck', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
-  test('failed Stripe-side probe with a quiet ledger is a blocking failure, not a silent pass', async () => {
+  test('failed Stripe-side probe with a quiet ledger EMAILS (status unknown) and still surfaces the blocking stripeCheckError', async () => {
+    // job_health has no automatic notifier — if this only failed job_health
+    // the operator would never learn the check broke.
     const opts = baseOpts({
       stripeOpsTools: { getStripeWebhookFailures: jest.fn(async () => { throw new Error('Stripe API timed out after 15s'); }) },
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.skipped).toBe('stripe_check_failed');
+    expect(result.sent).toBe(true);
     expect(result.stripeCheckError).toContain('timed out');
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    const mail = sendgrid.sendOne.mock.calls[0][0];
+    expect(mail.subject).toBe('FIX: Stripe webhook delivery check FAILED — Stripe-side status unknown');
+    expect(mail.text).toContain('Stripe-side delivery status is UNKNOWN');
   });
 
   test('failed Stripe-side probe with ledger findings still emails AND surfaces stripeCheckError', async () => {
@@ -246,16 +268,16 @@ describe('runStripeWebhookHealthCheck', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
-  test('a capped (non-exhaustive) Stripe scan with nothing found is a blocking failure, not a silent pass', async () => {
+  test('a capped (non-exhaustive) Stripe scan with nothing found EMAILS and blocks — never a silent pass', async () => {
     const opts = baseOpts({
       stripeOpsTools: {
         getStripeWebhookFailures: jest.fn(async () => ({ undelivered_events: [], total_undelivered: 0, scan_exhaustive: false })),
       },
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result.skipped).toBe('stripe_check_failed');
+    expect(result.sent).toBe(true);
     expect(result.stripeCheckError).toContain('scan cap');
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne.mock.calls[0][0].text).toContain('scan cap');
   });
 
   test('non-internal recipient fails closed', async () => {
@@ -291,7 +313,7 @@ describe('runStripeWebhookHealthCheck', () => {
     expect(probe).not.toHaveBeenCalled();
   });
 
-  test('missing STRIPE_SECRET_KEY in deployed production is a BLOCKING failure, never a benign skip', async () => {
+  test('missing STRIPE_SECRET_KEY in deployed production EMAILS and blocks — never a benign skip', async () => {
     const probe = jest.fn();
     const opts = baseOpts({
       stripeConfigured: false,
@@ -299,11 +321,25 @@ describe('runStripeWebhookHealthCheck', () => {
       stripeOpsTools: { getStripeWebhookFailures: probe },
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    // stripe_check_failed is on the scheduler wrapper's blocking list →
-    // job_health failure, not nothing_found.
-    expect(result.skipped).toBe('stripe_check_failed');
+    // stripeCheckError on the result is the scheduler wrapper's blocking
+    // signal → job_health failure; the email is the operator notification
+    // (job_health has none of its own).
+    expect(result.sent).toBe(true);
     expect(result.stripeCheckError).toContain('STRIPE_SECRET_KEY');
     expect(probe).not.toHaveBeenCalled();
+    const mail = sendgrid.sendOne.mock.calls[0][0];
+    expect(mail.subject).toBe('FIX: Stripe webhook delivery check FAILED — Stripe-side status unknown');
+    expect(mail.text).toContain('STRIPE_SECRET_KEY');
+  });
+
+  test('a deduped tick with ONLY a broken check still surfaces stripeCheckError (recent_send never masks it)', async () => {
+    const opts = baseOpts({
+      sentRecently: jest.fn(async () => true),
+      stripeOpsTools: { getStripeWebhookFailures: jest.fn(async () => { throw new Error('Stripe API timed out after 15s'); }) },
+    });
+    const result = await runStripeWebhookHealthCheck(opts);
+    expect(result.skipped).toBe('recent_send');
+    expect(result.stripeCheckError).toContain('timed out');
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 

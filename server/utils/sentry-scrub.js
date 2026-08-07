@@ -1,17 +1,22 @@
 'use strict';
 
-// Scrubs exception text before it reaches Sentry (a third-party system).
-// Handler/provider/Knex error messages can embed customer PII: Twilio errors
-// echo phone numbers, Stripe messages can quote a receipt email, and Knex
-// prefixes its failing SQL onto err.message — where raw/interpolated queries
-// carry customer names and emails as quoted string literals. Same masking
-// discipline as cron-lock's sanitizeJobError and stripe-webhook-health's
-// sanitizeErrorSnippet (AGENTS.md: no customer PII in logs/third-party
-// sinks), plus quoted-SQL-literal redaction and a hard length cap.
+// Best-effort masking of exception text. Handler/provider/Knex error
+// messages can embed customer PII: Twilio errors echo phone numbers, Stripe
+// messages can quote a receipt email, and Knex prefixes its failing SQL onto
+// err.message — where raw/interpolated queries carry customer names and
+// emails as quoted string literals. Same masking discipline as cron-lock's
+// sanitizeJobError (AGENTS.md: no customer PII in logs/third-party sinks),
+// plus quoted-SQL-literal redaction and a hard length cap.
 //
-// Used at PII-risky captureException call sites (scrub message+stack, then
-// capture the scrubbed synthetic error) AND as the defense-in-depth backstop
-// on exception values inside instrument.js's beforeSend.
+// ⚠️ This pattern allowlist is NOT sufficient as the primary rail to a
+// third-party sink: an UNQUOTED customer name or street address matches
+// none of these patterns and passes through (codex on #3268). Sentry
+// capture sites must therefore send FIXED generic text + safe identifiers
+// (see stripe-webhook.js's handler catch) — this scrubber is only (a) the
+// defense-in-depth backstop on exception values inside instrument.js's
+// beforeSend, and (b) snippet masking for the owner-internal health email
+// (stripe-webhook-health's sanitizeErrorSnippet, recipient fail-closed to
+// internal addresses).
 
 const MAX_SCRUBBED_LENGTH = 2000;
 

@@ -11,10 +11,14 @@
  *    area:stripe-webhook tag and eventType/eventId extras (identifiers
  *    only — the payload never leaves the process), and still records the
  *    ledger error + returns 500 so Stripe retries;
- *  - the exception TEXT is scrubbed BEFORE capture: Knex/provider messages
- *    can embed customer emails/phones/SQL literals, and instrument.js's
- *    beforeSend only strips request data — so no PII may appear anywhere in
- *    the capture payload (message or stack);
+ *  - the capture payload carries FIXED generic text + safe identifiers
+ *    (event type/id, error name/code) — NEVER any part of the original
+ *    message or stack. Scrub regexes cannot recognize every PII form (an
+ *    unquoted customer name or street address passes any pattern
+ *    allowlist — codex on #3268), so nothing derived from the original
+ *    error text may appear anywhere in the payload; the full detail lives
+ *    in the ledger error column and the Railway console log. An explicit
+ *    fingerprint keeps grouping stable without a stack;
  *  - a signature-verification failure does NOT capture (public endpoint —
  *    attack traffic would be Sentry-quota noise, not app failure) and
  *    returns 400 as before.
@@ -115,8 +119,9 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-test('handler-path exception captures to Sentry with area tag and event identifiers, records the ledger error, and 500s', async () => {
+test('handler-path exception captures generic text + identifiers to Sentry, records the ledger error, and 500s', async () => {
   const boom = new Error('handler exploded');
+  boom.code = 'ECONNRESET';
   const update = jest.fn()
     .mockRejectedValueOnce(boom) // mark-processed → throws into the catch
     .mockResolvedValue(1); // catch's error-record write succeeds
@@ -138,23 +143,35 @@ test('handler-path exception captures to Sentry with area tag and event identifi
   expect(Sentry.captureException).toHaveBeenCalledTimes(1);
   const [capturedErr, context] = Sentry.captureException.mock.calls[0];
   expect(capturedErr).toBeInstanceOf(Error);
-  expect(capturedErr.message).toBe('handler exploded');
+  // Fixed generic text — the original message never reaches the payload.
+  expect(capturedErr.message).toBe('stripe-webhook handler failure (waves.test_event)');
   expect(context).toEqual({
     tags: { area: 'stripe-webhook' },
-    extra: { eventType: 'waves.test_event', eventId: 'evt_test_1' },
+    extra: {
+      eventType: 'waves.test_event',
+      eventId: 'evt_test_1',
+      errorName: 'Error',
+      errorCode: 'ECONNRESET',
+    },
+    fingerprint: ['stripe-webhook-handler', 'waves.test_event', 'Error'],
   });
 
-  // The existing ledger error-record contract survives the capture.
+  // The existing ledger error-record contract survives the capture — the
+  // DB-internal ledger keeps the ORIGINAL message (that is where the
+  // operator reads the real failure).
   expect(update).toHaveBeenCalledWith({ error: 'handler exploded' });
 });
 
-test('PII-bearing handler error is scrubbed before it reaches the Sentry capture payload', async () => {
-  // Synthetic fixture only — the shapes Knex/providers actually produce:
-  // failing SQL with quoted literals, a receipt email, a phone number.
+test('PII-bearing handler error never reaches the Sentry capture payload — not even in scrubber-proof forms', async () => {
+  // Synthetic fixture only. Includes PII shapes a scrub regex CANNOT
+  // recognize (an unquoted name, a street address) alongside the quoted
+  // SQL-literal/email/phone shapes — the contract is that NONE of the
+  // original text survives, not that patterns were masked.
   const boom = new Error(
-    "update \"customers\" set \"name\" = 'Jane Q Fixture', \"email\" = 'jane.fixture@example.com' where \"phone\" = '+19415550100' - relation locked; notify jane.fixture@example.com or +1 (941) 555-0100"
+    "update \"customers\" set \"name\" = 'Jane Q Fixture' where id = 7 - relation locked; customer Jane Q Fixture at 123 Palmetto Fixture Ln could not be notified at jane.fixture@example.com or +1 (941) 555-0100"
   );
-  boom.stack = 'Error: SMS to +19415550100 for jane.fixture@example.com bounced\n    at handler (/app/server/routes/stripe-webhook.js:800:11)';
+  boom.stack = 'Error: SMS to +19415550100 for Jane Q Fixture bounced\n    at handler (/app/server/routes/stripe-webhook.js:800:11)';
+  boom.code = { nested: 'not a safe short token' }; // must be dropped, not serialized
   const update = jest.fn()
     .mockRejectedValueOnce(boom) // mark-processed → throws into the catch
     .mockResolvedValue(1); // catch's error-record write succeeds
@@ -175,21 +192,27 @@ test('PII-bearing handler error is scrubbed before it reaches the Sentry capture
 
   expect(Sentry.captureException).toHaveBeenCalledTimes(1);
   const [capturedErr, context] = Sentry.captureException.mock.calls[0];
-  const payload = JSON.stringify({ message: capturedErr.message, stack: capturedErr.stack, context });
+  const payload = JSON.stringify({ message: capturedErr.message, stack: capturedErr.stack, name: capturedErr.name, context });
   expect(payload).not.toContain('jane.fixture@example.com');
   expect(payload).not.toContain('Jane Q Fixture');
+  expect(payload).not.toContain('Palmetto Fixture');
   expect(payload).not.toContain('9415550100');
   expect(payload).not.toContain('555-0100');
-  expect(capturedErr.message).toContain('[redacted');
-  expect(capturedErr.stack).toContain('[redacted');
-  // Grouping-relevant fields survive: same name, stack still points at the
-  // real frame.
+  // Fixed generic text; the stack is frame-less (a synthetic stack would
+  // point at the catch block for every failure).
+  expect(capturedErr.message).toBe('stripe-webhook handler failure (waves.test_event)');
+  expect(capturedErr.stack).toBe('Error: stripe-webhook handler failure (waves.test_event)');
   expect(capturedErr.name).toBe('Error');
-  expect(capturedErr.stack).toContain('stripe-webhook.js:800');
-  expect(context.extra).toEqual({ eventType: 'waves.test_event', eventId: 'evt_test_pii' });
+  expect(context.extra).toEqual({
+    eventType: 'waves.test_event',
+    eventId: 'evt_test_pii',
+    errorName: 'Error',
+    errorCode: undefined, // non-token err.code dropped
+  });
+  expect(context.fingerprint).toEqual(['stripe-webhook-handler', 'waves.test_event', 'Error']);
 
   // The ledger error record (DB-internal, 90d purge) keeps the original
-  // message — only the third-party Sentry sink is scrubbed.
+  // message — that is where the real failure text lives.
   expect(update).toHaveBeenCalledWith({ error: boom.message });
 });
 
