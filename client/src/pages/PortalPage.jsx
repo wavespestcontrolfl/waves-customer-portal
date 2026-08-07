@@ -7330,13 +7330,21 @@ function LearnTab({ customer }) {
           marginTop: 22,
         }}>
           {[
-            { label: 'Blog Posts', value: sortedBlogPosts.length, sub: 'wavespestcontrol.com' },
-            { label: 'Expert Sources', value: expertPosts.length, sub: 'UF/IFAS and references' },
+            // "Recent Posts", not "Blog Posts": the value is the feed's
+            // most-recent slice (capped at 6 by /feed/blog), NOT the size of
+            // the blog library — the old label undersold a 150+ post archive.
+            { label: 'Recent Posts', value: sortedBlogPosts.length, sub: 'wavespestcontrol.com' },
+            { label: 'Expert Articles', value: expertPosts.length, sub: 'UF/IFAS and references' },
             { label: 'FAQ Answers', value: totalFaqQuestions, sub: 'Service and lawn topics' },
             {
               label: 'Latest',
               value: latestDate && !isNaN(latestDate) ? latestDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'None',
-              sub: latestContent?.title || 'No articles loaded yet',
+              // Latest pools Waves posts + UF/IFAS + LOCAL NEWS — name the
+              // source so a Tampa Bay Times headline sitting beside the
+              // wavespestcontrol.com tile can't read as a Waves post.
+              sub: latestContent
+                ? [latestContent.sourceName, latestContent.title].filter(Boolean).join(' · ')
+                : 'No articles loaded yet',
             },
           ].map(item => (
             <div key={item.label} style={{
