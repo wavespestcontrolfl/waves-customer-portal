@@ -837,7 +837,7 @@ class GoogleBusinessService {
         .map(r => `${r.reviewer_name || 'Anonymous'} (${Number(r.star_rating) || 0}-star)`)
         .join(', ');
       const suffix = gone.length > 15 ? ` and ${gone.length - 15} more` : '';
-      await NotificationService.notifyAdmin(
+      const notif = await NotificationService.notifyAdmin(
         'review',
         `${gone.length} Google review${gone.length === 1 ? '' : 's'} removed at ${loc.name}`,
         `Google no longer returns these reviews for ${loc.name}: ${names}${suffix}. The full text is kept in the portal. If they are legitimate customer reviews caught in a spam sweep, file a missing-reviews case with Google Business Profile support and escalate by replying in-thread.`,
@@ -847,6 +847,16 @@ class GoogleBusinessService {
           metadata: { locationId: loc.id, reason: 'reviews_missing', count: gone.length, reviewIds: gone.map(r => r.id) },
         },
       );
+      // notifyAdmin swallows insert errors and returns null; the claim is
+      // one-shot (stamped rows are excluded from every later reconcile), so
+      // a lost insert would silence the alert forever. Release the claim and
+      // let the next hourly run re-claim and re-notify. Intentional
+      // suppression returns a truthy sentinel and keeps the stamp.
+      if (!notif) {
+        await db('google_reviews').whereIn('id', gone.map(r => r.id)).update({ missing_since: null });
+        logger.warn(`[gbp] Removal alert insert failed for ${loc.name} — released ${gone.length} missing_since claim(s) for retry next sync`);
+        return;
+      }
       // Count only — reviewer display names are PII and ride in the admin
       // notification, not the plaintext log.
       logger.warn(`[gbp] ${gone.length} review(s) at ${loc.name} disappeared from the GBP feed — stamped missing_since, admin notified`);

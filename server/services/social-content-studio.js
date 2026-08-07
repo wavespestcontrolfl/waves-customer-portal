@@ -1949,6 +1949,8 @@ async function listReviewGraphicCandidates({ limit = 30 } = {}) {
       .where('gr.star_rating', 5)
       .whereNotNull('gr.review_text')
       .whereRaw("TRIM(gr.review_text) <> ''")
+      // Never offer a review Google has removed as marketing material.
+      .whereNull('gr.missing_since')
       .select('gr.id', 'gr.location_id', 'gr.reviewer_name', 'gr.star_rating', 'gr.review_text', 'gr.review_created_at')
       .orderBy('gr.review_created_at', 'desc')
       .limit(safeLimit);
@@ -1987,8 +1989,11 @@ async function createReviewGraphic(input) {
   // graphic from a lower-rated, blank, or stats-sentinel review.
   if (Number(review.star_rating) !== 5
     || !String(review.review_text || '').trim()
-    || review.reviewer_name === '_stats') {
-    throw new Error('Review is not eligible for a 5-star graphic (requires star_rating=5 and non-empty review text)');
+    || review.reviewer_name === '_stats'
+    // Mirror the candidate query: a review Google removed must not become a
+    // "current Google review" marketing card, even by direct ID.
+    || review.missing_since) {
+    throw new Error('Review is not eligible for a 5-star graphic (requires star_rating=5, non-empty review text, and the review still live on Google)');
   }
   const candidate = buildReviewGraphicCandidate(review, input);
   // image_url is persisted then rendered as an <a href>/<img src> in the admin

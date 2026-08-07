@@ -835,6 +835,33 @@ describe('Google Business review sync', () => {
     expect(alert.link).toBe('/admin/reviews');
   });
 
+  test('releases the missing_since claim when the removal alert fails to persist (retries next sync)', async () => {
+    seedSyncedReview({
+      id: 'gone-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-gone',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone',
+      reviewer_name: 'Vanished Vera',
+    });
+    gbpFeed([]);
+    const NotificationService = require('../services/notification-service');
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValueOnce(null);
+
+    await service.syncAllReviews();
+
+    // Claim released: the row is re-claimable, and no alert row exists.
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'gone-1').missing_since).toBeNull();
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(0);
+
+    // Next hourly run: notifyAdmin works again → stamp + alert.
+    db.__state.rows.google_reviews.find(r => r.id === 'gone-1').synced_at =
+      new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'gone-1').missing_since).toBeTruthy();
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(1);
+    spy.mockRestore();
+  });
+
   test('never stamps a Places-sampled row without an authoritative GBP identity', async () => {
     // An edited review moves the Places timestamp; the GBP feed may carry it
     // under its resource name while the orphaned sample row goes stale —
