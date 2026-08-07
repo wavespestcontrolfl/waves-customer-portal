@@ -13,9 +13,13 @@ class ReferralNudge {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer || !customer.phone) return null;
 
-    // 90-day cooldown on referral nudges
+    // 90-day cooldown on referral nudges. Delivered-or-pending rows only:
+    // a deferred replay that terminally blocked never reached the customer,
+    // and counting it would silence every later positive-review trigger
+    // for three months over a text that never sent.
     const recentNudge = await db('sms_log')
       .where({ customer_id: customerId, message_type: 'referral_nudge' })
+      .whereIn('status', ['queued', 'sent', 'delivered', 'scheduled', 'sending'])
       .where('created_at', '>', db.raw("NOW() - INTERVAL '90 days'"))
       .first();
 

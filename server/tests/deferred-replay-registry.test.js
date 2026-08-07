@@ -41,10 +41,10 @@ describe('deferred-replay registry', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('unregistered entry points are inert', async () => {
-    expect(await recheckDeferredReplay('voicemail_lead_sms_deferred', {})).toBeNull();
-    expect(await finalizeDeferredReplay('voicemail_lead_sms_deferred', {}, {})).toBeNull();
-    await expect(onTerminalDeferredReplay('voicemail_lead_sms_deferred', {})).resolves.toBeUndefined();
-    expect(requiresDurableFinalize('voicemail_lead_sms_deferred')).toBe(false);
+    expect(await recheckDeferredReplay('some_future_unregistered_deferred', {})).toBeNull();
+    expect(await finalizeDeferredReplay('some_future_unregistered_deferred', {}, {})).toBeNull();
+    await expect(onTerminalDeferredReplay('some_future_unregistered_deferred', {})).resolves.toBeUndefined();
+    expect(requiresDurableFinalize('some_future_unregistered_deferred')).toBe(false);
   });
 
   test('durable set is registry-derived and covers the finalizing entry points', () => {

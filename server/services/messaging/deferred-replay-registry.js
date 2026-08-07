@@ -259,6 +259,41 @@ const REGISTRY = {
     },
   },
 
+  voicemail_lead_sms_deferred: {
+    async recheck(meta) {
+      // The quote link is a speed play for a fresh voicemail — a lead
+      // deleted, converted, or already contacted overnight makes the 8 AM
+      // bearer link stale (and possibly wrong-audience).
+      try {
+        if (!meta.lead_id) return { eligible: true };
+        const lead = await db('leads').where({ id: meta.lead_id }).whereNull('deleted_at').first('id', 'status');
+        if (!lead) return { eligible: false, reason: 'lead-deleted' };
+        const status = String(lead.status || '').toLowerCase();
+        if (status && !['new', 'pending', 'started'].includes(status)) {
+          return { eligible: false, reason: `lead-${status}` };
+        }
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('voicemail-text-back', meta.lead_id, err);
+      }
+    },
+    async finalize(meta) {
+      const { _deferredClaims } = require('../voicemail-lead-sms');
+      if (meta.lead_id) await _deferredClaims.stampStatus(meta.lead_id, 'sent');
+      if (meta.voicemail_phone) await _deferredClaims.stampPhoneClaim(meta.voicemail_phone, 'sent');
+      return { ok: true };
+    },
+    async onTerminal(meta) {
+      // The text-back provably never delivered — release BOTH one-shot
+      // claims so a repeat caller (or the suppressed-replay path) can
+      // re-arm instead of the phone staying consumed with no text sent.
+      const { _deferredClaims } = require('../voicemail-lead-sms');
+      if (meta.lead_id) await _deferredClaims.clearLeadClaim(meta.lead_id);
+      if (meta.voicemail_phone) await _deferredClaims.releasePhoneClaim(meta.voicemail_phone);
+      logger.info(`[deferred-replay] voicemail text-back for lead ${meta.lead_id || 'unknown'} terminally blocked — claims released`);
+    },
+  },
+
   appointment_card_request_deferred: {
     async recheck(meta) {
       // A bearer card link must not replay if the card was captured, a

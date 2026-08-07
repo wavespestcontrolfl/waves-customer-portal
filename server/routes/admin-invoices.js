@@ -1384,7 +1384,7 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
       // recordActivity:false because this route writes its own activity_log
       // row below with the memo and channel mix.
       try {
-        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both' });
+        const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', operatorInitiated: true });
         smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
       } catch (err) {
         smsResult = { ok: false, error: err.message };
@@ -1668,7 +1668,7 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       }
       if (via === 'sms' || via === 'both') {
         try {
-          const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both' });
+          const r = await InvoiceService.sendReceipt(id, { force: true, recordActivity: false, hasEmailLeg: via === 'both', operatorInitiated: true });
           smsResult = r?.sent ? { ok: true } : { ok: false, error: r?.reason || r?.code || 'not-sent' };
         } catch (err) {
           smsResult = { ok: false, error: err.message };

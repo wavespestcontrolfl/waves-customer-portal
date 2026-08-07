@@ -2793,7 +2793,7 @@ const InvoiceService = {
     return { amount, cardLine, receiptUrl };
   },
 
-  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false } = {}) {
+  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
       return { sent: false, reason: "not-paid" };
@@ -2857,6 +2857,10 @@ const InvoiceService = {
       customerId: customer.id,
       invoiceId,
       entryPoint: "invoice_receipt_sms",
+      // Send-window operator marker: only the admin manual-resend routes
+      // set it (an operator chose to text THIS receipt now); the
+      // automated receipt paths stay fenced and ride the receipt queue.
+      ...(operatorInitiated ? { operatorInitiated: true } : {}),
       metadata: { original_message_type: "receipt" },
       // Caller-declared (see the sendReceipt option doc above) — only flows
       // that actually pair this SMS with a sendReceiptEmail sidecar opt in.

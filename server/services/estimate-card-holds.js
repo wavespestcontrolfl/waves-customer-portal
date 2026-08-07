@@ -1149,7 +1149,27 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   if (!receiptOptOut && (smsChannel || (channel === 'email' && emailDeterministicMiss && !smsOptedOut))) {
     try {
       await require('./invoice').sendReceipt(invoice.id);
-    } catch (e) { logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message }); }
+    } catch (e) {
+      // Send-window hold: the money and paid invoice are already committed
+      // and this path has no retry — hand the receipt to the durable
+      // receipt-delivery queue at the window open (idempotent per invoice)
+      // so an SMS-only customer still gets their no-show fee receipt.
+      if (e.code === 'QUIET_HOURS_HOLD' && e.nextAllowedAt) {
+        try {
+          const { enqueueReceiptDelivery } = require('./receipt-delivery-queue');
+          const queued = await enqueueReceiptDelivery({
+            invoiceId: invoice.id,
+            source: 'no_show_fee_window_hold',
+            nextAttemptAt: new Date(e.nextAllowedAt),
+          });
+          logger.info('[estimate-card-holds] no-show fee receipt held (send window) — handed to the receipt queue', { invoiceId: invoice.id, enqueued: queued.enqueued, deduped: queued.deduped });
+        } catch (queueErr) {
+          logger.error('[estimate-card-holds] held no-show receipt enqueue failed', { invoiceId: invoice.id, error: queueErr.message });
+        }
+      } else {
+        logger.warn('[estimate-card-holds] no-show fee receipt SMS failed', { error: e.message });
+      }
+    }
   }
   // sendReceiptEmail does NOT stamp receipt_sent_at (only the SMS sendReceipt
   // does) — stamp off a delivered email AFTER the SMS attempt: stamping

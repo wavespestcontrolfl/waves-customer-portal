@@ -890,7 +890,13 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
       // notice permanently on a blip.
       || result.code === 'PRE_DISPATCH_CHECK_FAILED'
       || result.code === 'CONSENT_LOOKUP_FAILED';
-    sendOutcome.blockedCode = result.code || null;
+    // QUIET_HOURS_HOLD is STICKY across the contact fanout (like
+    // retryable/providerAccepted): a later opted-out contact's block must
+    // not erase the evidence that an eligible contact was held at the
+    // boundary — the callers' defer-don't-close decision reads this code.
+    sendOutcome.blockedCode = sendOutcome.blockedCode === 'QUIET_HOURS_HOLD'
+      ? 'QUIET_HOURS_HOLD'
+      : (result.code || null);
   }
   if (result.blocked || result.sent === false) {
     logger.warn(`[appt-remind] SMS blocked for customer ${customerId}: ${result.code || 'unknown'} ${result.reason || ''}`);

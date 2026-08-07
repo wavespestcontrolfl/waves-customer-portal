@@ -351,6 +351,11 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
         metadata: JSON.stringify({
           entry_point: 'voicemail_lead_sms_deferred',
           lead_id: leadId,
+          // Replay lifecycle keys (deferred-replay registry): finalize
+          // stamps both claims 'sent'; onTerminal releases them so a
+          // repeat caller can re-arm. The phone already lives in the
+          // row's to_phone column — this copy just reaches the hooks.
+          voicemail_phone: phone,
           call_sid: call.twilio_call_sid || null,
           original_block_code: result.code || null,
           // The scheduled-SMS cron replays this row through sendCustomerMessage,
@@ -502,3 +507,6 @@ async function handleUndeliveredQuoteLink({ sid, status, errorCode, to } = {}) {
 }
 
 module.exports = { sendVoicemailQuoteLink, handleUndeliveredQuoteLink, MESSAGE_TYPE };
+// Deferred-replay registry hooks — settle the lead/phone claims when the
+// scheduled executor delivers or terminally fails the queued text-back.
+module.exports._deferredClaims = { stampStatus, stampPhoneClaim, clearLeadClaim, releasePhoneClaim };

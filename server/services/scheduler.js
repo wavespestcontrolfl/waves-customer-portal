@@ -2994,12 +2994,32 @@ function initScheduledJobs() {
               }
               logger.warn(`[scheduled-sms] Settled ${msg.id} as sent after post-accept error`);
             } else {
-              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: failedAt });
+              // Pre-accept exception (no provider row proves a send): the
+              // text never left, so retry on the bounded rail while
+              // attempts remain; at exhaustion, run the registry terminal
+              // hook so deferred obligations (review fallbacks, once-ever
+              // claims, referral/report state) hand off instead of
+              // silently dying with the row — parallel to the
+              // provider-result terminal paths.
               const failedMeta = await readFreshMeta().catch(() => ({}));
-              await require('./sms-suggest-mode').reopenScheduledSuggestions({
-                decisionIds: [failedMeta.agent_decision_id, ...(Array.isArray(failedMeta.parked_decision_ids) ? failedMeta.parked_decision_ids : [])],
-                reason: 'Scheduled send failed — suggestion reopened.',
-              });
+              if ((Number(failedMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'scheduled',
+                  scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
+                  updated_at: failedAt,
+                });
+                logger.warn(`[scheduled-sms] Pre-accept exception on ${msg.id} — rescheduled for retry`);
+              } else {
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: failedAt });
+                if (failedMeta.entry_point) {
+                  const { onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
+                  await onTerminalDeferredReplay(failedMeta.entry_point, failedMeta);
+                }
+                await require('./sms-suggest-mode').reopenScheduledSuggestions({
+                  decisionIds: [failedMeta.agent_decision_id, ...(Array.isArray(failedMeta.parked_decision_ids) ? failedMeta.parked_decision_ids : [])],
+                  reason: 'Scheduled send failed — suggestion reopened.',
+                });
+              }
             }
           } catch (recoverErr) {
             // Leave the row in 'sending' — recoverStaleScheduledSmsClaims
