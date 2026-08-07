@@ -467,7 +467,20 @@ function buildListicleFamilyRefreshOpp(entries, service, city) {
       family_count: sorted.length,
       family_key: primary.fam.key,
       family_keys: sorted.map((e) => e.fam.key),
-      family_variants: allVariants.slice(0, 5).map(({ query, impressions }) => ({ query, impressions })),
+      // At least one variant from EVERY merged family, then fill by
+      // impressions — a five-big-variant family A must not erase family B
+      // from the only row that can carry it (Codex r12).
+      family_variants: (() => {
+        const reps = sorted.map((e) => e.fam.variants[0]);
+        const chosen = new Set(reps);
+        for (const v of allVariants) {
+          if (chosen.size >= Math.max(5, reps.length)) break;
+          chosen.add(v);
+        }
+        return Array.from(chosen)
+          .sort((a, b) => b.impressions - a.impressions)
+          .map(({ query, impressions }) => ({ query, impressions }));
+      })(),
       source: 'listicle_family',
     },
   };
@@ -480,6 +493,25 @@ function buildListicleFamilyRefreshOpp(entries, service, city) {
   opp.action_type = actionForOpportunity(opp);
   opp.dedupe_key = dedupeKey(opp);
   return opp;
+}
+
+// Can a query-level bucket ACTUALLY emit this representative? Service
+// resolution alone is not enough (Codex r12): striking_distance takes any
+// ≥50-imp query ranking 4-15 regardless of the own-page map, while
+// no_content_yet takes >15 ONLY when no own page exists for the
+// service+city — a rep at position 20 whose service+city has any own page
+// is emitted by NEITHER, so excluding its family would lose the demand to
+// no bucket at all. Top-3 reps are irrelevant here: family admission drops
+// them as won intent regardless.
+function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thresholds = THRESHOLDS) {
+  if (!rep) return false;
+  const service = canonicalizeServiceCategory(rep.service_category) || inferServiceFromQuery(rep.query);
+  if (!service) return false;
+  const pos = rep.position || 0;
+  if (pos >= thresholds.strikingDistancePositionMin && pos <= thresholds.strikingDistancePositionMax) return true;
+  if (pos <= thresholds.strikingDistancePositionMax) return false;
+  const city = normalizeCity(rep.city_target) || inferCityFromQuery(rep.query);
+  return !ownPagesByServiceCity.get(ownPageKey(service, city));
 }
 
 // Family-stable dedupe key. Deliberately NOT dedupeKey(opp): that keys on
@@ -782,7 +814,7 @@ class GscOpportunityMiner {
       ['no_content_yet', () => this.mineNoContentYet(since, ownPagesByServiceCity)],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
       ['answer_gap', () => this.mineAnswerGap(since)],
-      ['listicle_family', () => this.mineListicleFamily(since, { mutateQueue: persist })],
+      ['listicle_family', () => this.mineListicleFamily(since, { mutateQueue: persist, ownPagesByServiceCity })],
     ];
 
     for (const [name, fn] of runs) {
@@ -1628,7 +1660,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineListicleFamily(since, { mutateQueue = true } = {}) {
+  async mineListicleFamily(since, { mutateQueue = true, ownPagesByServiceCity = new Map() } = {}) {
     // BOTH gates required: mining with the brief overlay off would persist
     // listicle_family rows whose briefs come out as ORDINARY supporting
     // blogs — the lane would look enabled while producing none of the
@@ -1653,13 +1685,11 @@ class GscOpportunityMiner {
       .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as avg_position'))
       .groupBy('query', 'service_category', 'city_target');
 
-    const fams = clusterListicleFamilies(rows).filter((f) => {
-      const rep = f.variants[0];
-      const repQualifiesQueryBucket = !!(rep
-        && (canonicalizeServiceCategory(rep.service_category) || inferServiceFromQuery(rep.query)));
-      return listicleFamilyEligible(f, THRESHOLDS, { repQualifiesQueryBucket });
-    });
-    if (!fams.length) return [];
+    // No early return on empty fams: the end-of-mine sweep must still run
+    // so stale queue rows expire when every family went ineligible.
+    const fams = clusterListicleFamilies(rows).filter((f) => listicleFamilyEligible(f, THRESHOLDS, {
+      repQualifiesQueryBucket: listicleFamilyRepReachable(f.variants[0], ownPagesByServiceCity),
+    }));
 
     // A variant is SERVED when some owned page ranks within striking
     // distance for it (best page-level weighted position ≤
@@ -1852,6 +1882,26 @@ class GscOpportunityMiner {
     for (const group of refreshGroups.values()) {
       out.push(buildListicleFamilyRefreshOpp(group.entries, group.service, group.city));
     }
+
+    // Catch-all reconciliation: any pending family row NOT re-emitted by
+    // THIS mine is stale — the family went ineligible (rep reached top-3,
+    // sum fell under the floor, single variant left), lost its resolvable
+    // service, or became hubless-cityless. The targeted transitions above
+    // carry specific reasons; this sweep covers every other exit so a dead
+    // family can't stay claimable for 14 days (Codex r12). Revivable
+    // 'expired' as always — if the signal returns, the upsert revives it.
+    // Runs only after a full successful enumeration (gates on, no throw),
+    // so a transient data gap self-heals on the next mine.
+    if (mutateQueue) {
+      try {
+        await db('opportunity_queue')
+          .where({ bucket: 'listicle_family', status: 'pending' })
+          .whereNotIn('dedupe_key', out.map((o) => o.dedupe_key))
+          .update({ status: 'expired', skip_reason: 'family_signal_gone', updated_at: new Date() });
+      } catch (err) {
+        logger.warn(`[gsc-opp-miner] listicle_family: stale-family sweep failed: ${err.message}`);
+      }
+    }
     return out;
   }
 
@@ -2035,6 +2085,10 @@ class GscOpportunityMiner {
                service = EXCLUDED.service,
                city = EXCLUDED.city,
                status = 'pending',
+               -- A revived row is pending again — a lingering automatic
+               -- retirement reason (family_intent_now_served etc.) would
+               -- read as false provenance on operator/audit surfaces.
+               skip_reason = NULL,
                updated_at = now()
            -- Frozen rows (claimed / done / pending_review / skipped) skip
            -- this update ENTIRELY — not just identity: score, breakdown,
@@ -2101,6 +2155,7 @@ module.exports._internals = {
   listicleFamilyDedupeKey,
   listicleFamilyEligible,
   resolveListicleFamilyServiceCity,
+  listicleFamilyRepReachable,
   buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
   answerGapStem,

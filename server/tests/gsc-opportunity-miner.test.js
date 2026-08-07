@@ -34,6 +34,7 @@ const {
   listicleFamilyDedupeKey,
   listicleFamilyEligible,
   resolveListicleFamilyServiceCity,
+  listicleFamilyRepReachable,
   buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
@@ -866,11 +867,35 @@ describe('listicle_family scoring + action mapping', () => {
       impressions: 100,
       position: 18,
     };
-    // Default (rep resolves a service): excluded — query buckets reach it.
+    // Default (rep reachable): excluded — query buckets reach it.
     expect(listicleFamilyEligible(fam)).toBe(false);
-    // Rep unresolvable (mineNoContentYet would skip it at !service): the
-    // family stays eligible or its demand reaches NO bucket at all.
+    // Rep unreachable: the family stays eligible or its demand reaches NO
+    // bucket at all.
     expect(listicleFamilyEligible(fam, undefined, { repQualifiesQueryBucket: false })).toBe(true);
+  });
+
+  test('rep reachability mirrors the REAL query-bucket admission conditions (Codex r12)', () => {
+    const rep = (over = {}) => ({
+      query: 'drought tolerant plants florida',
+      impressions: 51,
+      position: 20,
+      service_category: null,
+      city_target: null,
+      ...over,
+    });
+    // No resolvable service → unreachable (mineNoContentYet skips !service).
+    expect(listicleFamilyRepReachable(rep({ query: 'types of fish in florida' }), new Map())).toBe(false);
+    // Striking-distance window (4-15) → reachable regardless of own-page map.
+    expect(listicleFamilyRepReachable(rep({ position: 8 }), new Map([['tree-shrub::', 'https://x/']]))).toBe(true);
+    // Beyond 15 with NO own page for the service+city → no_content_yet reaches it.
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map())).toBe(true);
+    // Beyond 15 but an own page EXISTS for the service+city (ownPageKey =
+    // 'service::city', empty city as '') → no_content_yet skips it and
+    // striking_distance is out of window: NO bucket emits the rep, so the
+    // family must stay eligible.
+    expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map([['tree-shrub::', 'https://x/']]))).toBe(false);
+    // Position 0 (no data) → not reachable through either window.
+    expect(listicleFamilyRepReachable(rep({ position: 0 }), new Map())).toBe(false);
   });
 
   test('served families route to a page refresh, never a drop and never map-existence (query-page map)', () => {
@@ -966,6 +991,32 @@ describe('listicle_family scoring + action mapping', () => {
     expect(opp.signal_metadata.avg_position).toBe(6.1);
   });
 
+  test('every merged family keeps at least one variant in family_variants (Codex r12)', () => {
+    const big = (i) => ({ query: `variant ${i} drought tolerant plants florida`, impressions: 40 - i, position: 12 });
+    const famA = {
+      key: 'a+family',
+      impressions: 180,
+      variants: [big(0), big(1), big(2), big(3), big(4)], // five variants, all larger than B's
+    };
+    const famB = {
+      key: 'b+family',
+      impressions: 20,
+      variants: [
+        { query: 'types of native plants florida', impressions: 12, position: 11 },
+        { query: 'florida native plants types', impressions: 8, position: 13 },
+      ],
+    };
+    const page = 'https://wavespestcontrol.com/blog/florida-native-plants/';
+    const opp = buildListicleFamilyRefreshOpp([
+      { fam: famA, served: { variant: famA.variants[0], hit: { page_url: page, position: 9 } } },
+      { fam: famB, served: { variant: famB.variants[0], hit: { page_url: page, position: 9 } } },
+    ], 'tree-shrub', null);
+    const queries = opp.signal_metadata.family_variants.map((v) => v.query);
+    // Without the per-family guarantee, A's five variants fill the top-5
+    // and B vanishes from the only row that can carry it.
+    expect(queries).toContain('types of native plants florida');
+  });
+
   test('served-family refresh clears the persistAll floor via the family exception (Codex r10)', async () => {
     const db = require('../models/db');
     const calls = [];
@@ -1022,21 +1073,26 @@ describe('listicle_family scoring + action mapping', () => {
     // Automatic transitions retire to REVIVABLE 'expired', never sticky
     // 'skipped' — one ranking oscillation must not permanently suppress the
     // lane (the upsert revives expired rows by contract; Codex r11).
-    expect((mineSrc.match(/status: 'expired', skip_reason: 'family_/g) || []).length).toBe(3);
+    expect((mineSrc.match(/status: 'expired', skip_reason: 'family_/g) || []).length).toBe(4);
     expect(mineSrc).not.toMatch(/status: 'skipped', skip_reason: 'family_/);
     // Page-keyed refresh rows: a CHANGED serving page or a top-3 win must
     // expire the now-stale refresh target (all targets on a win — the
     // whereNot page filter only applies in the 4-15 refresh case).
     expect(mineSrc).toMatch(/skip_reason: 'family_refresh_target_stale'/);
     expect(mineSrc).toMatch(/stale = stale\.whereNot\('page_url', served\.hit\.page_url\)/);
+    // Catch-all: a pending family row NOT re-emitted by this mine (family
+    // went ineligible / unresolvable / hubless-cityless) expires instead of
+    // staying claimable for 14 days (Codex r12).
+    expect(mineSrc).toMatch(/skip_reason: 'family_signal_gone'/);
+    expect(mineSrc).toMatch(/whereNotIn\('dedupe_key', out\.map\(\(o\) => o\.dedupe_key\)\)/);
     // Both cleanups touch ONLY pending rows — frozen states stay records.
     expect(mineSrc).toMatch(/status: 'pending',\s*\n\s*action_type: 'new_supporting_blog'/);
     // And both are mutateQueue-guarded: mineAll({ persist: false }) is a
     // READ-ONLY preview (--no-persist, facts-population analysis) and must
     // never retire live queue work just for being inspected.
-    expect(src).toMatch(/async mineListicleFamily\(since, \{ mutateQueue = true \} = \{\}\)/);
-    expect(src).toMatch(/this\.mineListicleFamily\(since, \{ mutateQueue: persist \}\)/);
-    expect((mineSrc.match(/if \(mutateQueue\) \{/g) || []).length).toBe(3);
+    expect(src).toMatch(/async mineListicleFamily\(since, \{ mutateQueue = true, ownPagesByServiceCity = new Map\(\) \} = \{\}\)/);
+    expect(src).toMatch(/this\.mineListicleFamily\(since, \{ mutateQueue: persist, ownPagesByServiceCity \}\)/);
+    expect((mineSrc.match(/if \(mutateQueue\) \{/g) || []).length).toBe(4);
   });
 
   test('service resolves across EVERY variant, not just the representative (Codex r9)', () => {

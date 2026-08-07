@@ -66,6 +66,10 @@ describe('miner upsert: skipped is sticky, expired revives', () => {
     // expired must revive to pending on a fresh mine of the same signal
     expect(guard[1]).not.toContain("'expired'");
     expect(sql).toMatch(/status = 'pending'/);
+    // ...and a revived row clears its automatic retirement reason — a
+    // lingering family_* skip_reason on a pending row reads as false
+    // provenance on operator/audit surfaces (Codex r12 P2).
+    expect(sql).toMatch(/skip_reason = NULL/);
   });
 
   test('the metadata refresh preserves the runner gate_retry marker (one-shot redraft survives the morning mine)', async () => {
