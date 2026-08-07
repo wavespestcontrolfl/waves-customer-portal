@@ -1698,7 +1698,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       scheduled_services: [
         { id: 'bf-1', customer_id: 'bf', service_id: 'svc-trap', status: 'completed', scheduled_date: d(8), service_key: 'rodent_trapping' },
         { id: 'bf-2', customer_id: 'bf', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
-        { id: 'bf-3', customer_id: 'bf', service_id: 'svc-trap', status: 'scheduled', scheduled_date: inFive, service_key: 'rodent_trapping' },
+        { id: 'bf-3', customer_id: 'bf', service_id: 'svc-combo', status: 'scheduled', scheduled_date: inFive, service_key: 'rodent_trapping_exclusion' },
       ],
     });
     db.mockImplementation(mock);
@@ -1902,6 +1902,48 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     });
     db.mockImplementation(mock);
     const plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'tb', scheduledServiceId: 'tb-fin' });
+    expect(plan.seriesFinal).toBe(true);
+    expect(plan.plan).toHaveLength(3);
+  });
+
+  test('r23: plain-base future checks are not boundaries, and lineage same-day ties break by appointment order', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+    const inFive = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+
+    // ③ A booked future PLAIN rodent_trapping visit may be this program's
+    // own check — it is NOT a booking-level boundary, so the middle visit
+    // stands down.
+    let mock = makeMock({
+      scheduled_services: [
+        { id: 'pb-1', customer_id: 'pb', service_id: 'svc-trap', status: 'completed', scheduled_date: d(8), service_key: 'rodent_trapping' },
+        { id: 'pb-2', customer_id: 'pb', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+        { id: 'pb-3', customer_id: 'pb', service_id: 'svc-trap', status: 'scheduled', scheduled_date: inFive, service_key: 'rodent_trapping' },
+      ],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'pb', scheduledServiceId: 'pb-2' });
+    expect(plan.skip).toBe('multi_treatment_middle');
+
+    // ① Lineage same-day tie: the current program's declared opener (1pm)
+    // shares a date with the old program's rated final (9am) — the opener
+    // sorts first and bounds the walk, so the old rating does not suppress
+    // the current final.
+    mock = makeMock({
+      service_records: [
+        { id: 'sr-lt1', customer_id: 'lt', scheduled_service_id: 'lt-open', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Initial setup' } } }) },
+        { id: 'sr-lt2', customer_id: 'lt', scheduled_service_id: 'lt-fin', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Follow-up check' } } }) },
+      ],
+      scheduled_services: [
+        { id: 'lt-oldfin', customer_id: 'lt', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(35), service_key: 'rodent_trapping_followup', window_start: '09:00' },
+        { id: 'lt-open', customer_id: 'lt', service_id: 'svc-trap', status: 'completed', scheduled_date: d(35), service_key: 'rodent_trapping', window_start: '13:00' },
+        { id: 'lt-fin', customer_id: 'lt', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [{ id: 'seq-lt-oldfin', customer_id: 'lt', scheduled_service_id: 'lt-oldfin', status: 'completed' }],
+      review_requests: [{ id: 'req-lt-oldfin', customer_id: 'lt', sequence_id: 'seq-lt-oldfin', status: 'rated' }],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'lt', serviceRecordId: 'sr-lt2' });
     expect(plan.seriesFinal).toBe(true);
     expect(plan.plan).toHaveLength(3);
   });

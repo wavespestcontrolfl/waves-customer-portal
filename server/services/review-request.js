@@ -37,6 +37,11 @@ const TRAPPING_MULTI_TREATMENT_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS, "
 // booking level, before any report exists to declare it (codex #3243 r18
 // P2). Wildlife is excluded — its checks share the base key.
 const BASE_OPENER_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS].filter((k) => k !== "rodent_trapping_followup"));
+// ...but plain rodent_trapping ALSO covers trap-check visits (the schema
+// makes the tech's trap_visit_type authoritative — codex #3243 r23 P2), so
+// booking-level opener inference is conclusive only for the combo packages
+// (sold as initial programs) and undeclarable exclusion.
+const BOOKING_OPENER_KEYS = new Set([...BASE_OPENER_KEYS].filter((k) => k !== "rodent_trapping"));
 // Types whose reports genuinely CANNOT declare a position (no
 // trap_visit_type on the schema): only these bound completed history as
 // booking-level openers — a report-less base rodent row may simply be a
@@ -840,13 +845,13 @@ const ReviewService = {
             // follow-up outranks the heuristic.
             const boundary = declaredType === "initial"
               // Booking-only inference applies to LIVE rows only (codex
-              // #3243 r19 P2): a completed base-SKU row with no report yet
-              // (admin completion before service_records) may be THIS
-              // program's follow-up — completed rows stay with
-              // declaration/history inference.
+              // #3243 r19 P2) and to keys where a booking conclusively
+              // means a new program (r23 P2 — a plain rodent_trapping
+              // booking may be this program's own check): combo packages
+              // and exclusion.
               || (declaredType == null
                 && r.status !== "completed"
-                && BASE_OPENER_KEYS.has(r.service_key)
+                && BOOKING_OPENER_KEYS.has(r.service_key)
                 && !r.parent_service_id
                 && !r.followup_source_service_id);
             laterFlags.set(r.id, boundary);
@@ -975,14 +980,22 @@ const ReviewService = {
               .where("lp.scheduled_date", "<", w180.anchorStr)
               .where("lp.scheduled_date", ">=", w180.floorStr)
               .whereIn("lpv.service_key", trapSeriesKeys)
-              .select("lp.id", "lp.scheduled_date", "lp.property_id", "lp.parent_service_id", "lp.followup_source_service_id", "lpv.service_key as service_key", "lp.service_address_line1", "lp.service_address_line2", "lp.service_address_city", "lp.service_address_zip");
+              .select("lp.id", "lp.scheduled_date", "lp.window_start", "lp.created_at", "lp.property_id", "lp.parent_service_id", "lp.followup_source_service_id", "lpv.service_key as service_key", "lp.service_address_line1", "lp.service_address_line2", "lp.service_address_city", "lp.service_address_zip");
             // Bounded at the nearest declared initial (codex #3243 r16 P2):
             // an OLDER program's engagement must not suppress the current
             // program's cadence — walk newest-first, stop at (and include)
             // the first declared opener.
             const lineageSorted = lineageRows
               .filter((r) => trapInPremise(r))
-              .sort((a, b) => (etDayWindow(b.scheduled_date, 0).anchorStr < etDayWindow(a.scheduled_date, 0).anchorStr ? -1 : 1));
+              .sort((a, b) => {
+                const dayA = etDayWindow(a.scheduled_date, 0).anchorStr;
+                const dayB = etDayWindow(b.scheduled_date, 0).anchorStr;
+                // Newest first; same-date ties break by appointment order
+                // (codex #3243 r23 P2) — DB row order must not let the old
+                // program's final precede the opener boundary.
+                if (dayA !== dayB) return dayB < dayA ? -1 : 1;
+                return compareSameDayVisits(b, a) < 0 ? -1 : 1;
+              });
             const lineageIds = [];
             for (const r of lineageSorted) {
               lineageIds.push(r.id);
@@ -2822,7 +2835,8 @@ const ReviewService = {
                 // firstTouchAt; completed_at records the parking time for
                 // the 24h age cap.
                 const existingPark = await db("review_sequences")
-                  .where({ customer_id: customerId, status: "deferred" })
+                  .where({ customer_id: customerId })
+                  .whereIn("status", ["deferred", "redeeming"])
                   .first();
                 if (!existingPark) {
                   await db("review_sequences").insert({
@@ -2866,9 +2880,9 @@ const ReviewService = {
       const priorForRecord = await db("review_sequences")
         .where({ service_record_id: serviceRecordId })
         .whereRaw("stop_reason IS DISTINCT FROM 'start_failed'")
-        // Parked deferred enrollments are not deliveries (codex #3243 r21
-        // P2) — they must not dedupe-block a real enrollment.
-        .whereNot("status", "deferred")
+        // Parked/redeeming deferred enrollments are not deliveries (codex
+        // #3243 r21 P2) — they must not dedupe-block a real enrollment.
+        .whereNotIn("status", ["deferred", "redeeming"])
         .first();
       if (priorForRecord) {
         return { started: false, reason: "service_record_enrolled", sequence: priorForRecord };
@@ -2882,7 +2896,7 @@ const ReviewService = {
       const priorForVisit = await db("review_sequences")
         .where({ scheduled_service_id: scheduledServiceId })
         .whereRaw("stop_reason IS DISTINCT FROM 'start_failed'")
-        .whereNot("status", "deferred")
+        .whereNotIn("status", ["deferred", "redeeming"])
         .first();
       if (priorForVisit) {
         return { started: false, reason: "service_record_enrolled", sequence: priorForVisit };
@@ -3344,18 +3358,31 @@ const ReviewService = {
    * cap); any other non-start (dedupe, cap, engagement) is terminal.
    */
   async _sweepDeferredEnrollments() {
+    // Claim WITHOUT deleting (codex #3243 r23 P2): the parking row is the
+    // one-shot final's only durable retry, and an outage that fails the
+    // start would likely fail a restore-insert too. The lease is a status
+    // flip ('redeeming'); the row is removed only on a successful or
+    // terminal result, and a crash mid-redeem is reclaimed after 15
+    // minutes via the stale leg.
     const due = await db("review_sequences")
       .where({ status: "deferred" })
       .whereNotNull("next_run_at")
       .where("next_run_at", "<=", new Date())
       .limit(10);
+    const stale = await db("review_sequences")
+      .where({ status: "redeeming" })
+      .where("updated_at", "<=", new Date(Date.now() - 15 * 60 * 1000))
+      .limit(10);
     let redeemed = 0;
-    for (const row of due) {
-      const claimed = await db("review_sequences").where({ id: row.id, status: "deferred" }).del();
+    for (const row of [...due, ...stale]) {
+      const claimed = await db("review_sequences")
+        .where({ id: row.id, status: row.status })
+        .update({ status: "redeeming", updated_at: new Date() });
       if (!claimed) continue;
       const parkedAt = row.completed_at ? new Date(row.completed_at).getTime() : 0;
       if (parkedAt && Date.now() - parkedAt > 24 * 3600000) {
         logger.warn(`[review] deferred final expired unredeemed (customerId=${row.customer_id})`);
+        await db("review_sequences").where({ id: row.id }).del();
         continue;
       }
       let result = null;
@@ -3374,63 +3401,36 @@ const ReviewService = {
         });
       } catch (err) {
         logger.error(`[review] deferred enrollment redeem failed (customerId=${row.customer_id} errType=${err?.name || "Error"})`);
-        // The parking row IS the one-shot final's durable retry (codex
-        // #3243 r22 P2) — a transient throw must not consume it. Restore
-        // it with backoff, preserving the original parking time.
-        try {
-          await db("review_sequences").insert({
-            customer_id: row.customer_id,
-            location_id: row.location_id,
-            status: "deferred",
-            stop_reason: "opener_in_flight",
-            plan: row.plan,
-            current_step: 0,
-            touches_sent: 0,
-            next_run_at: new Date(Date.now() + 30 * 60 * 1000),
-            series_final: row.series_final === true,
-            service_record_id: row.service_record_id,
-            scheduled_service_id: row.scheduled_service_id,
-            tech_name: row.tech_name,
-            service_type: row.service_type,
-            started_by: row.started_by,
-            started_at: row.started_at,
-            completed_at: row.completed_at || new Date(),
-          });
-        } catch (restoreErr) {
-          logger.error(`[review] deferred enrollment restore failed (customerId=${row.customer_id}): ${restoreErr.message}`);
-        }
+        // Release the lease with backoff — the row survives the outage.
+        await db("review_sequences")
+          .where({ id: row.id, status: "redeeming" })
+          .update({ status: "deferred", next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+          .catch(() => {});
         continue;
       }
       if (result?.started) {
         redeemed += 1;
+        await db("review_sequences").where({ id: row.id, status: "redeeming" }).del();
         continue;
       }
       if (result?.reason === "already_active") {
-        await db("review_sequences").insert({
-          customer_id: row.customer_id,
-          location_id: row.location_id,
-          status: "deferred",
-          stop_reason: "opener_in_flight",
-          plan: row.plan,
-          current_step: 0,
-          touches_sent: 0,
-          next_run_at: new Date(Date.now() + 30 * 60 * 1000),
-          series_final: row.series_final === true,
-          service_record_id: row.service_record_id,
-          scheduled_service_id: row.scheduled_service_id,
-          tech_name: row.tech_name,
-          service_type: row.service_type,
-          started_by: row.started_by,
-          started_at: row.started_at,
-          completed_at: row.completed_at || new Date(),
-        });
-      } else if (result?.reason === "deferred_inflight") {
-        // startReviewSequence re-parked with a fresh birth — restore the
-        // original so the age cap stays honest.
+        // Opener still active — release with backoff.
+        await db("review_sequences")
+          .where({ id: row.id, status: "redeeming" })
+          .update({ status: "deferred", next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() });
+        continue;
+      }
+      if (result?.reason === "deferred_inflight") {
+        // startReviewSequence parked a FRESH row — drop this one and carry
+        // the original parking time onto it so the age cap stays honest.
+        await db("review_sequences").where({ id: row.id, status: "redeeming" }).del();
         await db("review_sequences")
           .where({ customer_id: row.customer_id, status: "deferred" })
           .update({ completed_at: row.completed_at || new Date() });
+        continue;
       }
+      // Terminal (dedupe, cap, engagement, resolver skip) — done with it.
+      await db("review_sequences").where({ id: row.id, status: "redeeming" }).del();
     }
     return { redeemed };
   },
