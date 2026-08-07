@@ -11788,6 +11788,10 @@ async function transferGroupFollowupOwnership(estimate) {
          estimate_data = COALESCE(o.estimate_data, '{}'::jsonb) || jsonb_build_object(
            'followupOwnershipFrom', jsonb_build_object(
              'anchorId', ?::text,
+             'anchorIds', COALESCE(
+               (SELECT a.estimate_data->'followupOwnershipFrom'->'anchorIds' FROM estimates a WHERE a.id = ?),
+               '[]'::jsonb
+             ) || to_jsonb(?::text),
              'copied', jsonb_build_object(
                'followup_unviewed_sent', ?::boolean,
                'followup_viewed_sent', ?::boolean,
@@ -11816,6 +11820,12 @@ async function transferGroupFollowupOwnership(estimate) {
         anchorFlags.followup_viewed_sent === true,
         anchorFlags.followup_final_sent === true,
         anchorFlags.followup_expiring_sent === true,
+        String(estimate.id),
+        // Chained transfers (codex #3248 r4): A→B→C inside A's in-flight
+        // window must let releaseStage(A) still find C — the anchorIds
+        // array carries every ancestor claim holder, seeded from the
+        // terminal row's OWN chain plus itself.
+        String(estimate.id),
         String(estimate.id),
         anchorFlags.followup_unviewed_sent === true,
         anchorFlags.followup_viewed_sent === true,

@@ -671,15 +671,22 @@ router.post('/:id/send', async (req, res, next) => {
     // The scheduled-send cron and lead-auto-send already pre-claim before
     // calling sendEstimateNow, so the claim happens here only for immediate
     // sends. A crashed immediate send is recovered by the stale-claim sweep.
-    const claimed = await db('estimates')
-      .where({ id: estimate.id })
-      .whereNull('price_locked_at')
-      .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
-      .update({ status: 'sending', updated_at: db.fn.now() });
-    if (!claimed) {
-      return res.status(409).json({
-        error: 'This estimate is being sent or is locked right now. Wait a moment and retry.',
-      });
+    // Grouped estimates claim their anchor INSIDE the group advisory lock
+    // (codex #3248 r4): pre-claiming here let two concurrent sends of
+    // different members each mark their own row 'sending' before either
+    // took the lock — both then saw the other mid-send and both aborted,
+    // delivering nothing. Ungrouped sends keep the standalone claim.
+    if (!estimate.estimate_group_id) {
+      const claimed = await db('estimates')
+        .where({ id: estimate.id })
+        .whereNull('price_locked_at')
+        .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
+        .update({ status: 'sending', updated_at: db.fn.now() });
+      if (!claimed) {
+        return res.status(409).json({
+          error: 'This estimate is being sent or is locked right now. Wait a moment and retry.',
+        });
+      }
     }
     const releaseSendClaim = () => db('estimates')
       .where({ id: estimate.id, status: 'sending' })
@@ -688,7 +695,11 @@ router.post('/:id/send', async (req, res, next) => {
 
     let result;
     try {
-      result = await sendEstimateNow({ ...estimate, status: 'sending' }, sendMethod, { idempotencyKey, engineReviewAcknowledged });
+      result = await sendEstimateNow(
+        estimate.estimate_group_id ? estimate : { ...estimate, status: 'sending' },
+        sendMethod,
+        { idempotencyKey, engineReviewAcknowledged },
+      );
     } catch (e) {
       await releaseSendClaim();
       throw e;
@@ -747,6 +758,21 @@ async function claimGroupSiblingsForPublish(estimate) {
       const err = new Error('Another send is publishing this multi-property group — wait a moment and retry.');
       err.statusCode = 409;
       throw err;
+    }
+    // Claim the ANCHOR here too, under the same lock (codex #3248 r4) —
+    // unless a pre-claiming caller (scheduled cron, lead auto-send) already
+    // moved it to 'sending' before calling.
+    if (String(estimate.status || '') !== 'sending') {
+      const anchorClaimed = await trx('estimates')
+        .where({ id: estimate.id, status: estimate.status })
+        .whereNull('price_locked_at')
+        .whereNotIn('status', ['accepted', 'declined', 'expired'])
+        .update({ status: 'sending', updated_at: trx.fn.now() });
+      if (!anchorClaimed) {
+        const err = new Error('This estimate is being sent or is locked right now. Wait a moment and retry.');
+        err.statusCode = 409;
+        throw err;
+      }
     }
     const siblings = await trx('estimates')
       .where({ estimate_group_id: estimate.estimate_group_id })

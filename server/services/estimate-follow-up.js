@@ -224,7 +224,10 @@ async function releaseStage(estId, flag) {
         .whereNot({ id: estId })
         .whereIn('status', ['sent', 'viewed'])
         .whereNull('archived_at')
-        .whereRaw("estimate_data->'followupOwnershipFrom'->>'anchorId' = ?", [String(estId)])
+        // anchorIds array match (codex #3248 r4): a chained transfer A→B→C
+        // keeps A in C's ancestor list, so A's failed in-flight release
+        // still reaches the current owner.
+        .whereRaw("estimate_data->'followupOwnershipFrom'->'anchorIds' @> to_jsonb(?::text)", [String(estId)])
         .whereRaw("(estimate_data->'followupOwnershipFrom'->'copied'->>?)::boolean IS TRUE", [flag])
         .update({ [flag]: false });
     }
