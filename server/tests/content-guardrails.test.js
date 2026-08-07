@@ -3159,6 +3159,18 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(required.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
+  test('denied EPA approval is accurate negated copy, not an approval claim (Codex PR r7)', () => {
+    const denied = guardrails.evaluate({ body: "The product's approval was denied by the EPA." }, {});
+    expect(denied.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
+  test('go-inside/go-into re-entry instructions carry the figure too (Codex PR r7)', () => {
+    const inside = guardrails.evaluate({ body: 'Do not go inside the treated home for 30 minutes.' }, {});
+    expect(inside.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const into = guardrails.evaluate({ body: 'Do not go into the treated room for 30 minutes.' }, {});
+    expect(into.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('treatment-separated drying figures block (Codex PR r6)', () => {
     for (const body of [
       'Drying the treatment takes 30 minutes.',
@@ -3509,6 +3521,10 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     }
     const photos = guardrails.evaluate({ body: 'We can provide photos of attic insulation during the inspection.' }, {});
     expect(photos.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    // Insulation as a LOCATION for installed objects is not an offering
+    // (Codex PR r7).
+    const traps = guardrails.evaluate({ body: 'Our technicians install traps above attic insulation.' }, {});
+    expect(traps.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
   });
 
   test('info nouns extend to information/reports/glossaries (Codex PR r6)', () => {

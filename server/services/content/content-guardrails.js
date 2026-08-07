@@ -2955,8 +2955,10 @@ const REENTRY_SAFETY_SRCS = [
   // approved"), and noun form ("carries EPA approval").
   "\\bEPA[-\\s]?approved\\b",
   // Bounded qualification between the verb and the agency (Codex PR r6):
-  // "approved for residential use by (the) EPA".
-  "\\bapprov\\w+\\b[^.!?\\n]{0,40}?\\bby\\s+(?:the\\s+)?EPA\\b",
+  // "approved for residential use by (the) EPA". The gap refuses
+  // denial/negation words (Codex PR r7): "approval was denied by the EPA"
+  // is accurate negated copy, not an approval claim.
+  "\\bapprov\\w+\\b(?:(?!\\b(?:denied|denies|deny|refused|refuses|rejected|rejects|revoked|revokes|withdrawn|withdrew|withheld|not|never)\\b)[^.!?\\n]){0,40}?\\bby\\s+(?:the\\s+)?EPA\\b",
   "\\b(?:the\\s+)?EPA\\s+(?:has\\s+|have\\s+|had\\s+)?(?:approv\\w+|grant\\w+\\s+(?:its\\s+)?approval)\\b",
   "\\bEPA\\s+approvals?\\b",
   // "received/carries approval from the EPA" (Codex PR r6).
@@ -2995,7 +2997,9 @@ const REENTRY_SAFETY_SRCS = [
   `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
   `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
-  `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*)\\b[^.!?\\n]{0,30}?\\b(?:for|until|after)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  // go-inside/go-into count as the entry action too (Codex PR r7: "Do not
+  // go inside the treated home for 30 minutes").
+  `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*|go\\s+(?:back|inside|into|in)\\b)[^.!?\\n]{0,30}?\\b(?:for|until|after)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "needs 30 minutes to dry", "30 minutes of drying" — treatment context
   // required (Codex PR r5).
   { src: `\\b${REENTRY_DURATION_SRC}\\s+(?:to\\s+dry|of\\s+drying)\\b`, needsTreatmentContext: true },
@@ -3138,7 +3142,10 @@ const BANNED_TOPIC_ACTION_FILLER_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b|partners?\
 // The insulation object gap must not match THROUGH inspection artifacts
 // (Codex PR r6): "we can provide photos of attic insulation during the
 // inspection" is rodent-inspection copy, not an insulation offering.
-const BANNED_TOPIC_INSULATION_GAP_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b|photos?\\b|pictures?\\b|images?\\b|reports?\\b|records?\\b|observations?\\b|documentation\\b|videos?\\b|footage\\b|notes?\\b|evidence\\b)[\\w'’-]+\\s+){0,3}?`;
+// Nor through installable OBJECTS or location prepositions (Codex PR r7):
+// "our technicians install traps above attic insulation" installs traps —
+// insulation is merely the location.
+const BANNED_TOPIC_INSULATION_GAP_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b|photos?\\b|pictures?\\b|images?\\b|reports?\\b|records?\\b|observations?\\b|documentation\\b|videos?\\b|footage\\b|notes?\\b|evidence\\b|traps?\\b|stations?\\b|monitors?\\b|baits?\\b|barriers?\\b|above\\b|below\\b|under\\b|underneath\\b|beneath\\b|behind\\b|over\\b|near\\b|around\\b|beside\\b|atop\\b|inside\\b|into\\b|onto\\b|within\\b)[\\w'’-]+\\s+){0,3}?`;
 const BANNED_TOPIC_SRCS = [
   // "we/Waves/our team|services offer(s)/include(s)/help(s) with … <topic>"
   // — CORE topics only for the BROAD verbs (see BANNED_TOPIC_CORE_SRC).
