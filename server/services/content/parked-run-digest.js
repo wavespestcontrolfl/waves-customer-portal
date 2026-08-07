@@ -25,8 +25,11 @@
  * can't go quiet forever). No parks at all → never send.
  *
  * Buckets:
- *  - active: latest parked run per opportunity whose opportunity_queue row
- *    is still status='pending_review' — genuinely awaiting a decision.
+ *  - active: every opportunity_queue row at status='pending_review', paired
+ *    with its latest non-shadow run (the portal review queue's own read
+ *    model) — genuinely awaiting a decision WHATEVER outcome the run
+ *    finalized with (fail-closed paths park with skipped_gate_fail, not
+ *    completed_pending_review, and still route to pending_review).
  *    astro_pr_pending_merge runs are excluded: those were ALREADY approved
  *    (the opportunity deliberately stays pending_review while the PR poller
  *    owns them) and are not awaiting the owner.
@@ -39,6 +42,10 @@
  * when the redactor reports 'low' confidence it deliberately returns the
  * ORIGINAL text (its heuristics were blind, e.g. all-lowercase prose), so
  * such values are WITHHELD from the email entirely rather than emailed raw.
+ * On top of that, email-strict mode withholds any value with a STRUCTURED
+ * finding (phone/email/address/…): such text is customer contact material,
+ * and the redactor can miss a short lowercase name right next to the
+ * redacted token while still reporting an emailable confidence.
  * reviewer_notes matter here because autonomous-runner embeds generated
  * copy (which can repeat customer names/addresses from the brief) in them.
  * Over-redaction is acceptable in this internal visibility email.
@@ -108,10 +115,23 @@ const NOTE_WITHHELD = '[note withheld — could not redact confidently]';
 function redactForEmail(value) {
   if (!value) return null;
   try {
-    const { text, confidence } = piiRedactor.redact(String(value));
+    const { text, confidence, findings } = piiRedactor.redact(String(value));
     // Fail closed on the redactor's own uncertainty signal: withhold the
     // value rather than emailing text the heuristics were blind to.
     if (!EMAILABLE_CONFIDENCE.has(confidence)) return null;
+    // Email-strict mode (Codex r4): confidence alone does not establish the
+    // no-customer-PII contract. Any STRUCTURED finding (phone/email/address/
+    // card/…) proves the value is customer contact material, and the
+    // redactor's lowercase-name pass can miss a short name sitting right
+    // next to the redacted token while still reporting an emailable
+    // confidence ("jane doe, call [phone]" → high) — so removal of the
+    // neighbors cannot be established and the whole value is withheld.
+    // Name-only findings remain emailable: there the finding IS the
+    // completed redaction ([name] substituted), and the standalone
+    // capitalized-pair heuristic fires on ordinary Title-Case draft titles
+    // ("Termite Damage [name] for Sarasota Homes") — withholding on it
+    // would blank nearly every title in the digest.
+    if (findings.some((f) => f.type !== 'name')) return null;
     return text;
   } catch {
     return null; // redactor failure → omit, never emit raw
@@ -153,6 +173,30 @@ function parkedAt(item) {
   return value ? new Date(value) : null;
 }
 
+function latestDate(...values) {
+  let best = null;
+  for (const value of values) {
+    if (!value) continue;
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime()) && (!best || d > best)) best = d;
+  }
+  return best;
+}
+
+// When an ACTIVE item became digest-eligible — the moment the row entered
+// its CURRENT review state, not the run's original completion. The
+// named-competitor janitor converts a stuck publish back into an actionable
+// review item by rewriting outcome/skip_reason/updated_at while deliberately
+// preserving the run's old completed_at (autonomous-runner janitor) — dating
+// the converted item to its original approval request would land it behind
+// the watermark and keep the interruption silent until Sunday (Codex r4).
+// run/opp updated_at both stamp that transition; take the latest.
+function activeParkedAt(run, opp) {
+  return latestDate(run?.updated_at, opp?.updated_at)
+    || (run?.completed_at ? new Date(run.completed_at) : null)
+    || (run?.created_at ? new Date(run.created_at) : null);
+}
+
 // ---------------------------------------------------------------------------
 // Watermark (ops_email_send_state) — the digest's ONLY write.
 // ---------------------------------------------------------------------------
@@ -185,7 +229,37 @@ async function advanceWatermark(sentAt) {
 // ---------------------------------------------------------------------------
 
 async function loadParkedSet() {
-  const rows = await db('autonomous_runs as r')
+  // ACTIVE — mirror the portal review queue's read model
+  // (autonomous-review-queue.listReviewItems): every opportunity sitting at
+  // status='pending_review', paired with its LATEST non-shadow run
+  // (claimed_at desc, the queue's latest-run rule), whatever outcome that
+  // run finalized with. Keying the active set off
+  // outcome='completed_pending_review' alone silently dropped the
+  // fail-closed engine paths that park with outcome='skipped_gate_fail'
+  // (claims-ledger/guardrails unavailable, refresh-load failures) yet still
+  // route the opportunity to pending_review via _pendingReviewClaimOrThrow
+  // (Codex r4).
+  const activeOpps = await db('opportunity_queue')
+    .where('status', 'pending_review')
+    .orderBy('updated_at', 'asc')
+    .select('id', 'status', 'skip_reason', 'query', 'updated_at');
+  const runsByOpp = new Map();
+  if (activeOpps.length) {
+    const runRows = await db('autonomous_runs')
+      .whereIn('opportunity_id', activeOpps.map((o) => o.id))
+      .where('shadow_mode', false)
+      .orderBy('claimed_at', 'desc')
+      .select('id', 'opportunity_id', 'skip_reason', 'reviewer_notes', 'draft_payload', 'created_at', 'completed_at', 'updated_at');
+    for (const row of runRows) {
+      if (!runsByOpp.has(row.opportunity_id)) runsByOpp.set(row.opportunity_id, row);
+    }
+  }
+
+  // STALE — parked runs whose opportunity is gone or already decided
+  // (done/skipped/expired/requeued): the run row parked forever with
+  // nothing waiting on it. Pending-review opportunities are the active
+  // path's territory and are excluded here.
+  const staleRows = await db('autonomous_runs as r')
     .leftJoin('opportunity_queue as o', 'o.id', 'r.opportunity_id')
     .where('r.outcome', 'completed_pending_review')
     .where('r.shadow_mode', false)
@@ -198,6 +272,9 @@ async function loadParkedSet() {
         .where('r2.outcome', 'completed_pending_review')
         .where('r2.shadow_mode', false)
         .whereRaw('r2.created_at > r.created_at');
+    })
+    .where(function oppGoneOrDecided() {
+      this.whereNull('o.id').orWhereNot('o.status', 'pending_review');
     })
     .orderBy('r.created_at', 'asc')
     .select(
@@ -215,7 +292,10 @@ async function loadParkedSet() {
 
   // page_type lives on the latest content_brief per opportunity (same
   // latest-by-composed_at rule as autonomous-review-queue.listReviewItems).
-  const oppIds = [...new Set(rows.map((r) => r.opportunity_id).filter(Boolean))];
+  const oppIds = [...new Set([
+    ...activeOpps.map((o) => o.id),
+    ...staleRows.map((r) => r.opportunity_id).filter(Boolean),
+  ])];
   const pageTypes = new Map();
   if (oppIds.length) {
     try {
@@ -233,34 +313,47 @@ async function loadParkedSet() {
   }
 
   const active = [];
-  const stale = [];
-  for (const row of rows) {
+  for (const opp of activeOpps) {
+    const run = runsByOpp.get(opp.id) || null;
+    const skipReason = run?.skip_reason || opp.skip_reason || 'unspecified';
     // Approvable kinds are email-approvals' territory (per-item approval
-    // emails) — excluded BEFORE the active/stale split, so a dismissed or
-    // decided approvable run can't resurface here as a stale entry and
-    // double-notify one decision (Codex r2).
+    // emails) — one decision, one notification (Codex r1/r2).
+    if (isApprovableKind(skipReason)) continue;
+    // Already approved in the portal — the PR poller owns it, not the
+    // owner's review decision; it is not "awaiting a decision".
+    if (skipReason === 'astro_pr_pending_merge') continue;
+    active.push({
+      run_id: run ? run.id : null,
+      opportunity_id: opp.id,
+      skip_reason: skipReason,
+      title: run ? redactForEmail(draftTitle(run.draft_payload)) : null,
+      query: redactForEmail(opp.query || null),
+      page_type: pageTypes.get(opp.id) || null,
+      parked_at: activeParkedAt(run, opp),
+      note: run ? noteExcerpt(run.reviewer_notes) : null,
+    });
+  }
+
+  const stale = [];
+  for (const row of staleRows) {
+    // Same approvable exclusion on the stale side: a dismissed or decided
+    // approvable run must not resurface here and double-notify one
+    // decision (Codex r2).
     if (isApprovableKind(row.skip_reason)) continue;
-    const item = {
+    stale.push({
       run_id: row.run_id,
       opportunity_id: row.opportunity_id,
       skip_reason: row.skip_reason || 'unspecified',
       title: redactForEmail(draftTitle(row.draft_payload)),
       query: redactForEmail(row.query || null),
       page_type: row.opportunity_id ? pageTypes.get(row.opportunity_id) || null : null,
+      // Stale rows keep the run's own park time — updated_at gets bumped by
+      // decision stamps, and dating a dismissed run to its dismissal would
+      // resurface it as "new" stale right after every portal decision.
       parked_at: row.completed_at || row.created_at || null,
       note: noteExcerpt(row.reviewer_notes),
-    };
-    if (row.opp_id && row.opp_status === 'pending_review') {
-      // Already approved in the portal — the PR poller owns it, not the
-      // owner's review decision; it is not "awaiting a decision".
-      if (row.skip_reason === 'astro_pr_pending_merge') continue;
-      active.push(item);
-    } else {
-      // Opportunity gone or already decided (done/skipped/expired/requeued):
-      // the run row parked forever with nothing waiting on it.
-      item.opp_status = row.opp_id ? row.opp_status : 'gone';
-      stale.push(item);
-    }
+      opp_status: row.opp_id ? row.opp_status : 'gone',
+    });
   }
   return { active, stale };
 }
@@ -413,5 +506,5 @@ async function runParkedRunDigest(opts = {}) {
 module.exports = {
   runParkedRunDigest,
   loadParkedSet,
-  _private: { composeParkedRunDigest, noteExcerpt, groupBySkipReason, reviewQueueUrl, redactForEmail, NOTE_WITHHELD, SEND_MARKER_KEY },
+  _private: { composeParkedRunDigest, noteExcerpt, groupBySkipReason, reviewQueueUrl, redactForEmail, activeParkedAt, NOTE_WITHHELD, SEND_MARKER_KEY },
 };

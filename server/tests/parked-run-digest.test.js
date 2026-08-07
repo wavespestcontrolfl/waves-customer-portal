@@ -135,12 +135,11 @@ describe('composeParkedRunDigest', () => {
 });
 
 describe('note excerpts (no PII)', () => {
-  test('email addresses and phone shapes are scrubbed', () => {
+  test('notes carrying email/phone shapes are withheld entirely (structured PII = email-strict withhold)', () => {
     const scrubbed = noteExcerpt('Call adam.b@example.com or (941) 555-1234 about this');
+    expect(scrubbed).toBe(NOTE_WITHHELD);
     expect(scrubbed).not.toContain('example.com');
     expect(scrubbed).not.toContain('555-1234');
-    expect(scrubbed).toContain('[email]');
-    expect(scrubbed).toContain('[phone]');
   });
 
   test('excerpt truncates to 120 chars with an ellipsis', () => {
@@ -165,13 +164,12 @@ describe('Codex r3: low-confidence redactions are withheld, never emailed raw', 
     expect(redactForEmail(lowered)).toBeNull();
   });
 
-  test('acceptable-confidence text passes through REDACTED', () => {
-    const out = redactForEmail('Call from John Smith at 941-555-1234 about ants');
+  test('name-only redactions pass through REDACTED (Title-Case furniture must not blank every title)', () => {
+    const out = redactForEmail('Termite Damage Repair Guide for Sarasota Homes');
     expect(out).not.toBeNull();
-    expect(out).not.toContain('941-555-1234');
-    expect(out).not.toContain('John Smith');
-    expect(out).toContain('[name]');
-    expect(out).toContain('[phone]');
+    expect(out).toContain('[name]'); // the cap-pair heuristic fired and redacted
+    const clean = redactForEmail('palmetto bug vs roach');
+    expect(clean).toBe('palmetto bug vs roach');
   });
 
   test('a throwing redactor omits the value (fail closed)', () => {
@@ -186,15 +184,15 @@ describe('Codex r3: low-confidence redactions are withheld, never emailed raw', 
     }
   });
 
-  test('reviewer notes go through the canonical redactor: names and street addresses never reach the email', () => {
+  test('reviewer notes carrying a street address are withheld entirely, never partially redacted', () => {
     // Synthetic fixture — generated copy echoed into reviewer_notes can
-    // repeat a name + street address from the brief; the old hand-written
-    // email/phone scrub let both through verbatim.
+    // repeat a name + street address from the brief. An address is a
+    // structured finding, so email-strict mode withholds the whole note
+    // (a lowercase name beside the redacted token could survive).
     const excerpt = noteExcerpt('Draft mentions Jane Doe at 4867 Maple Street repeatedly; validation failed.');
+    expect(excerpt).toBe(NOTE_WITHHELD);
     expect(excerpt).not.toContain('Jane Doe');
     expect(excerpt).not.toContain('4867 Maple Street');
-    expect(excerpt).toContain('[name]');
-    expect(excerpt).toContain('[address]');
   });
 
   test('a low-confidence note is replaced by the neutral placeholder, not the raw text', () => {
@@ -399,12 +397,12 @@ describe('Codex r1: approvable exclusion, stale once-only, Sunday actionable-onl
 describe('Codex r2: pre-split approvable exclusion + PII redaction', () => {
   test('a decided approvable run never lands in the stale bucket', async () => {
     const { loadParkedSet } = require('../services/content/parked-run-digest');
-    // Source-level pin: the exclusion runs BEFORE the active/stale split.
+    // Source-level pin: the approvable exclusion guards BOTH buckets — the
+    // active builder (skipReason from the latest run or the opportunity)
+    // and the stale loop — so a dismissed approvable run can't resurface.
     const src = require('fs').readFileSync(require.resolve('../services/content/parked-run-digest'), 'utf8');
-    const splitIdx = src.indexOf("opp_status === 'pending_review'");
-    const exclIdx = src.indexOf('isApprovableKind(row.skip_reason)');
-    expect(exclIdx).toBeGreaterThan(-1);
-    expect(exclIdx).toBeLessThan(splitIdx);
+    expect(src).toMatch(/isApprovableKind\(skipReason\)/); // active side
+    expect(src).toMatch(/isApprovableKind\(row\.skip_reason\)/); // stale side
     expect(typeof loadParkedSet).toBe('function');
   });
 
@@ -416,7 +414,69 @@ describe('Codex r2: pre-split approvable exclusion + PII redaction', () => {
     const digest = require('../services/content/parked-run-digest');
     const redactForEmail = digest._private?.redactForEmail;
     if (redactForEmail) {
-      expect(redactForEmail('call from John Smith at 941-555-1234')).not.toMatch(/941-555-1234/);
+      // Phone = structured finding → the whole value is withheld (r4).
+      expect(redactForEmail('call from John Smith at 941-555-1234')).toBeNull();
     }
+  });
+});
+
+// ── Codex r4 behaviors: portal-mirrored active set, transition timestamps,
+// structured-PII withholding ───────────────────────────────────────────────
+
+describe('Codex r4: email-strict redaction withholds structured-PII values entirely', () => {
+  test("the exact r4 counter-examples are withheld despite 'high'/'medium' confidence", () => {
+    // redact() reports these emailable (phone → high, address → medium)
+    // while the lowercase names beside the redacted tokens survive — the
+    // digest must withhold the whole value, not trust confidence alone.
+    expect(redactForEmail('jane doe, call 941-555-1234')).toBeNull();
+    expect(redactForEmail('john smith at 4867 maple street')).toBeNull();
+  });
+
+  test('clean lowercase SEO queries still flow through untouched', () => {
+    expect(redactForEmail('lawn fungus treatment bradenton')).toBe('lawn fungus treatment bradenton');
+  });
+
+  test('source pin: the strict gate withholds on any non-name finding', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/content/parked-run-digest'), 'utf8');
+    expect(src).toMatch(/findings\.some\(\(f\) => f\.type !== 'name'\)/);
+  });
+});
+
+describe('Codex r4: active set mirrors the portal queue; janitor conversions get transition timestamps', () => {
+  const digest = require('../services/content/parked-run-digest');
+  const { activeParkedAt } = digest._private;
+
+  test('a janitor-converted run is dated by its transition, not its original completion', () => {
+    // The janitor rewrites outcome/skip_reason/updated_at but deliberately
+    // preserves completed_at — watermark classification must use the
+    // transition time or the converted item hides behind the watermark.
+    const run = {
+      completed_at: '2026-08-01T10:00:00Z', // original approval-request park
+      created_at: '2026-08-01T09:00:00Z',
+      updated_at: '2026-08-06T02:00:00Z', // janitor conversion
+    };
+    const opp = { updated_at: '2026-08-01T10:00:00Z' };
+    expect(activeParkedAt(run, opp)).toEqual(new Date('2026-08-06T02:00:00Z'));
+  });
+
+  test('an opportunity transitioned by the janitor (opp bumped, run stale) also uses the transition time', () => {
+    const run = { completed_at: '2026-08-01T10:00:00Z', created_at: '2026-08-01T09:00:00Z', updated_at: '2026-08-01T10:00:00Z' };
+    const opp = { updated_at: '2026-08-06T02:00:00Z' };
+    expect(activeParkedAt(run, opp)).toEqual(new Date('2026-08-06T02:00:00Z'));
+  });
+
+  test('a pending_review opportunity with no run at all still gets a timestamp from the opportunity', () => {
+    expect(activeParkedAt(null, { updated_at: '2026-08-05T10:00:00Z' })).toEqual(new Date('2026-08-05T10:00:00Z'));
+  });
+
+  test('source pin: the active set derives from opportunity_queue pending_review state, not a single run outcome', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/content/parked-run-digest'), 'utf8');
+    // Active query starts from the queue's pending-review state…
+    expect(src).toMatch(/db\('opportunity_queue'\)\s*\n\s*\.where\('status', 'pending_review'\)/);
+    // …and the run outcome filter survives ONLY on the stale side.
+    const activeIdx = src.indexOf("db('opportunity_queue')");
+    const outcomeIdx = src.indexOf("where('r.outcome', 'completed_pending_review')");
+    expect(activeIdx).toBeGreaterThan(-1);
+    expect(outcomeIdx).toBeGreaterThan(activeIdx);
   });
 });
