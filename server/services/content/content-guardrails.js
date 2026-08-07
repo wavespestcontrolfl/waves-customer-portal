@@ -2909,7 +2909,7 @@ const REENTRY_SAFETY_SRCS = [
   // "environmentally safe", "perfectly pet safe") count as the same claim;
   // the qualifier gap is negation-guarded so "is not safe" stays a
   // disclaimer handled by the polarity guards.
-  `\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b`,
+  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?|surfaces?|rooms?|turf|grass|homes?|houses?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b`,
   // "safe for/around kids, pets, pollinators…" — PESTICIDE context
   // required (Codex PR r2): "the repaired screen is safe for pets" and
   // "plants that are safe for pollinators" are legal educational copy; the
@@ -2947,9 +2947,13 @@ const REENTRY_SAFETY_SRCS = [
   // timing advice, not a re-entry figure (Codex PR r1).
   `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:for\\s+)?(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry|dry\\w*|drying)`,
   `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:for\\s+)?(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:enter\\w*|return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*)\\b[^.!?\\n]{0,50}?\\b(?:treated|treatment|application|sprayed|lawn|yard|turf|grass|inside|indoors|home|house)\\b`,
-  // Object-first drying: "allow the spray to dry for 30 minutes", "needs to
-  // dry for 30 minutes" (Codex PR r3).
-  `\\b(?:to\\s+dry|dry(?:ing)?)\\s+for\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  // Object-first drying: "allow the spray to dry for 30 minutes" — a
+  // TREATMENT noun is required in the clause (Codex PR r4: "allow the caulk
+  // to dry" is home-maintenance advice, not a pesticide figure).
+  `\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?)\\b[^.!?\\n]{0,40}?\\b(?:to\\s+dry|dry(?:ing)?)\\s+for\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  // Plain ENTER with treated context: "you can enter the treated room after
+  // 30 minutes" (Codex PR r4).
+  `\\benter\\w*\\b[^.!?\\n]{0,40}?\\b(?:treated|sprayed|application)\\b[^.!?\\n]{0,30}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
   `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
   `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
@@ -3037,7 +3041,7 @@ function reentrySafetyClaimFinding(text) {
 // only flags with installation/sale/service context (the install pattern,
 // the possessive-service pattern, and the CTA/sales patterns, which are
 // service-context by construction).
-const BANNED_TOPIC_CORE_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|wildlife\\s+(?:trapping|removal|control)|animal\\s+(?:trapping|removal)|(?:raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\s+(?:removal|trapping|eviction|exclusion)|door[-\\s]?to[-\\s]?door)";
+const BANNED_TOPIC_CORE_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|wildlife\\s+(?:trapping|removal|control)|animal\\s+(?:trapping|removal)|(?:raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\s+(?:removal|trapping|eviction|exclusion|control)|door[-\\s]?to[-\\s]?door)";
 const BANNED_TOPIC_SRC = `(?:${BANNED_TOPIC_CORE_SRC}|insulation)`;
 // The object gap between the service verb and the topic must be
 // negation-guarded exactly like the pre-verb filler — otherwise "We do NOT

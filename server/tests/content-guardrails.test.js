@@ -3045,6 +3045,21 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(waitFor.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('drying durations require a TREATMENT noun; plain-enter with treated context blocks (Codex PR r4)', () => {
+    // Home-maintenance drying advice stays legal.
+    const caulk = guardrails.evaluate({ body: 'Allow the caulk to dry for 30 minutes before inspecting the gap.' }, {});
+    expect(caulk.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    const plainEnter = guardrails.evaluate({ body: 'You can enter the treated room after 30 minutes.' }, {});
+    expect(plainEnter.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('treated-surface subjects reach the idiom check — incomplete idiom blocks (Codex PR r4)', () => {
+    const surfaces = guardrails.evaluate({ body: 'Treated surfaces are safe once dry.' }, {});
+    expect(surfaces.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const rooms = guardrails.evaluate({ body: 'Treated rooms are safe once dry, and your technician confirms the timing.' }, {});
+    expect(rooms.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
   test('safe-for claims about NON-pesticide objects stay legal (Codex PR r2 false positive)', () => {
     for (const body of [
       'The repaired screen is safe for pets.',
@@ -3321,6 +3336,13 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(getFrom.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
     const choose = guardrails.evaluate({ body: 'Choose Waves for wildlife trapping in Bradenton.' }, {});
     expect(choose.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('species-specific CONTROL offerings block — "our bat control service", "we offer raccoon control" (Codex PR r4)', () => {
+    const bat = guardrails.evaluate({ body: 'Our bat control service protects your attic year-round.' }, {});
+    expect(bat.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const raccoon = guardrails.evaluate({ body: 'We offer raccoon control throughout Sarasota.' }, {});
+    expect(raccoon.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('species-specific removal CTAs block — "Book raccoon removal today"', () => {
