@@ -347,9 +347,15 @@ class AppointmentTagger {
       // duplicate; the queued row owns the obligation from here (bounded
       // retries + phone refresh at send time).
       if (prepResult.code === 'QUIET_HOURS_HOLD' && prepResult.deferred && prepResult.nextAllowedAt) {
-        try {
+        // Queue row + dedupe marker commit ATOMICALLY: if the sms_log row
+        // committed but the marker insert failed, a booking-hook replay
+        // would see no marker and enqueue a second row — two prep texts at
+        // 8:00 AM. The standalone path already runs inside its advisory-
+        // lock transaction (dbh is the trx); the companion path opens its
+        // own transaction here.
+        const enqueueDeferredPrep = async (trx) => {
           const TWILIO_NUMBERS = require('../config/twilio-numbers');
-          await dbh('sms_log').insert({
+          await trx('sms_log').insert({
             customer_id: service.customer_id,
             direction: 'outbound',
             from_phone: TWILIO_NUMBERS.getOutboundNumber(),
@@ -367,15 +373,22 @@ class AppointmentTagger {
               refresh_customer_phone: true,
             }),
           });
-          await dbh('customer_interactions').insert({
+          await trx('customer_interactions').insert({
             customer_id: service.customer_id, interaction_type: 'sms_outbound',
             subject: `${pestType} prep info sent`,
             body: `Prep SMS held outside the 8AM-8PM ET send window — queued for ${new Date(prepResult.nextAllowedAt).toISOString()}.`,
           });
+        };
+        try {
+          if (dbh === db) {
+            await db.transaction((trx) => enqueueDeferredPrep(trx));
+          } else {
+            await enqueueDeferredPrep(dbh);
+          }
           logger.info(`[appointment-tagger] Prep SMS for customer ${service.customer_id} deferred to ${prepResult.nextAllowedAt} (send window)`);
         } catch (queueErr) {
-          // Marker not written on a failed enqueue — a later replay of the
-          // booking hook retries the whole prep flow.
+          // Neither row committed — a later replay of the booking hook
+          // retries the whole prep flow.
           logger.error(`[appointment-tagger] Prep SMS requeue failed for customer ${service.customer_id}: ${queueErr.message}`);
         }
         return;

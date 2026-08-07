@@ -43,6 +43,9 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   // own purpose, not fall through to conversational, so the policy re-check at
   // dispatch keeps a re-queued row honest.
   if (type.includes('voicemail') || type.includes('missed_call')) return 'missed_call_followup';
+  // Quiet-hours-held estimate follow-up legs replay under the same purpose
+  // the immediate dual-channel send enforced.
+  if (type.includes('estimate')) return 'estimate_followup';
   return 'conversational';
 }
 
@@ -2615,6 +2618,36 @@ function initScheduledJobs() {
                 reviewedBy: msg.admin_user_id || 'Admin',
               });
             }
+          } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
+            // Send-window hold: a validator deferral, not a delivery
+            // attempt — no provider send was tried. Handled BEFORE the
+            // bounded-attempt branch and with the claimed attempt REFUNDED
+            // (mirroring the receipt queue's markJobRetry), otherwise a
+            // hold landing on the final allowed attempt would fall through
+            // to the terminal 'blocked' branch and a run of overnight
+            // cron passes could burn the whole ladder without ever
+            // reaching Twilio. Reschedules at the window open.
+            const holdRetryAt = new Date(smsResult.nextAllowedAt);
+            await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+              status: 'scheduled',
+              scheduled_for: holdRetryAt,
+              updated_at: completedAt,
+              metadata: db.raw(`
+                COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                  'quiet_hours_hold_at', ?::timestamptz,
+                  'scheduled_sms_attempts',
+                  GREATEST(
+                    CASE
+                      WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                        THEN (metadata->>'scheduled_sms_attempts')::int - 1
+                      ELSE 0
+                    END,
+                    0
+                  )
+                )
+              `, [completedAt]),
+            });
+            logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
           } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
             // Transient provider failure (Twilio 429/5xx/timeout) or a DB

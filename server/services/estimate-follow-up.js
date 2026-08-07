@@ -306,7 +306,7 @@ async function mintStageLinks(est, purpose, { query = null, emailOnly = false } 
 // claimStage() flag is still primary; idempotency is belt-and-suspenders.
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
-  let smsHeld = false;
+  let smsHold = null;
   if (est.customer_phone && sms) {
     try {
       const result = await sendCustomerMessage({
@@ -335,11 +335,11 @@ async function sendDualChannel(est, { sms, email }) {
           `[est-followup] SMS blocked for estimate ${est.id}: ${result.code || "unknown"} ${result.reason || ""}`,
         );
         // Send-window hold (this cron ticks at night too): not a delivery
-        // failure — defer the WHOLE touch below rather than letting the
-        // email leg mark the stage attempted, which would finalize the
-        // claim with the SMS leg permanently unsent.
-        if (result.code === "QUIET_HOURS_HOLD" && result.deferred) {
-          smsHeld = true;
+        // failure — the held SMS leg is requeued durably below rather than
+        // letting the email leg mark the stage attempted with the SMS leg
+        // permanently unsent.
+        if (result.code === "QUIET_HOURS_HOLD" && result.deferred && result.nextAllowedAt) {
+          smsHold = result;
         }
       } else {
         attempted = true;
@@ -350,17 +350,51 @@ async function sendDualChannel(est, { sms, email }) {
       );
     }
   }
-  // A held SMS leg defers the whole dual-channel touch: return false so the
-  // caller releases its stage claim and the next cron tick re-fires the
-  // stage inside the window — both legs then go out together at 8:00 AM.
-  // Sending the email now instead would return attempted=true, the claim
-  // would finalize, and the SMS leg would never send. Safe to re-fire: the
-  // email idempotencyKey dedupes if a prior partial attempt did send it.
-  if (smsHeld) {
-    logger.info(
-      `[est-followup] SMS for estimate ${est.id} held — outside 8AM-8PM ET send window; touch deferred to the window open`,
-    );
-    return false;
+  // A held SMS leg is persisted on the scheduled-SMS rail (the same rail
+  // the deferred voicemail text-back uses) and the email leg proceeds NOW.
+  // Releasing the claim to "re-fire at 8 AM" instead would silently drop
+  // touches: stage candidates live in bounded age windows (24-48h /
+  // 48-72h), so a nighttime candidate near its upper bound can be
+  // ineligible by morning — losing BOTH legs. With the row queued, the
+  // stage finalizes (attempted=true) and the executor sends the text at
+  // the window open with bounded retries + a fresh phone read. If the
+  // enqueue fails, fall back to releasing the claim — the next tick
+  // retries the whole touch while the candidate is still eligible.
+  if (smsHold) {
+    try {
+      const TWILIO_NUMBERS = require("../config/twilio-numbers");
+      await db("sms_log").insert({
+        customer_id: est.customer_id || null,
+        direction: "outbound",
+        from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+        to_phone: est.customer_phone,
+        message_body: sms,
+        status: "scheduled",
+        scheduled_for: new Date(smsHold.nextAllowedAt),
+        message_type: "estimate_followup",
+        metadata: JSON.stringify({
+          entry_point: "estimate_follow_up_deferred",
+          estimate_id: est.id,
+          followup_stage: email?.stage || null,
+          original_block_code: smsHold.code,
+          // Customer rows re-read the live phone at send time; anonymous
+          // lead rows persist the transactional consent basis the
+          // immediate send ran under (same as the voicemail deferral).
+          ...(est.customer_id
+            ? { refresh_customer_phone: true }
+            : { consent_basis: { status: "transactional_allowed", source: "estimate_follow_up" } }),
+        }),
+      });
+      attempted = true;
+      logger.info(
+        `[est-followup] SMS for estimate ${est.id} held — outside 8AM-8PM ET send window; queued for ${smsHold.nextAllowedAt}`,
+      );
+    } catch (queueErr) {
+      logger.error(
+        `[est-followup] Held SMS requeue failed for estimate ${est.id}: ${queueErr.message} — releasing the stage claim for a full retry`,
+      );
+      return false;
+    }
   }
   if (est.customer_email && email?.templateKey) {
     // Optional lifecycle suffix (codex 2736 r10): a stage that can
