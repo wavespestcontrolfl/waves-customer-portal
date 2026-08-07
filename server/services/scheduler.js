@@ -145,10 +145,20 @@ async function recoverStaleScheduledSmsClaims(now) {
         -- ran and the normal path's finalize_pending stamp was never
         -- written. Stamp it now so the stranded-finalization sweep converts
         -- them to finalize_only retries. The entry-point list comes from
-        -- the deferred-replay registry (durableFinalize entries).
+        -- the deferred-replay registry (durableFinalize entries). The
+        -- provider row's accepted SID rides along: finalizers that settle
+        -- once-ever claims key on it, and a SID-less retry would release
+        -- a claim for a message Twilio already accepted.
         || CASE
           WHEN s.metadata->>'entry_point' IN (${DURABLE_FINALIZE_PLACEHOLDERS})
-            THEN jsonb_build_object('finalize_pending', true)
+            THEN jsonb_build_object('finalize_pending', true, 'provider_message_id', (
+              SELECT p.twilio_sid FROM sms_log p
+              WHERE p.metadata->>'scheduled_sms_log_id' = s.id::text
+                AND p.direction = 'outbound'
+                AND p.status IN ('queued', 'sent', 'delivered')
+              ORDER BY p.created_at DESC
+              LIMIT 1
+            ))
           ELSE '{}'::jsonb
         END
     WHERE s.status = 'sending'
@@ -2394,7 +2404,12 @@ function initScheduledJobs() {
             const completedAt = new Date();
             const finalizeAttempts = Number(claimMeta.finalize_attempts) || 1;
             const { finalizeDeferredReplay } = require('./messaging/deferred-replay-registry');
-            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id })) || { ok: true };
+            // provider_message_id was stamped with the settlement (or
+            // recovered from the provider log by the crash/stale paths):
+            // finalizers that settle once-ever claims key on the accepted
+            // SID, and retrying without it would release a claim for a
+            // message Twilio already delivered.
+            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id, providerMessageId: claimMeta.provider_message_id || null })) || { ok: true };
             if (fin.ok || finalizeAttempts >= SCHEDULED_SMS_MAX_ATTEMPTS) {
               // finalize_pending clears on BOTH outcomes or the stranded-
               // finalization sweep would convert this row forever.
@@ -2791,9 +2806,14 @@ function initScheduledJobs() {
               status: 'sent',
               created_at: completedAt,
               updated_at: completedAt,
-              metadata: db.raw(owesFinalization
-                ? "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at, 'finalize_pending', true)"
-                : "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
+              // provider_message_id rides the durable stamp so a
+              // finalize_only retry can re-run finalization with the REAL
+              // accepted SID — the lead-menu finalizer reads a missing SID
+              // as non-delivery and releases its once-ever claim, which
+              // would re-arm a duplicate menu for an SMS Twilio accepted.
+              metadata: owesFinalization
+                ? db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at, 'finalize_pending', true, 'provider_message_id', ?::text)", [smsResult.providerMessageId || null])
+                : db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
             });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
 
@@ -2962,7 +2982,7 @@ function initScheduledJobs() {
               .where({ direction: 'outbound' })
               .whereIn('status', ['queued', 'sent', 'delivered'])
               .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(msg.id)])
-              .first('id');
+              .first('id', 'twilio_sid');
             const failedAt = new Date();
             // The provider log is best-effort (TwilioService.sendSMS
             // swallows its own insert failure), so its absence proves
@@ -2984,13 +3004,17 @@ function initScheduledJobs() {
                 : (msg.metadata || {});
               const { requiresDurableFinalize: crashDurable } = require('./messaging/deferred-replay-registry');
               const crashOwesFinalization = crashDurable(crashMeta.entry_point);
+              // Recover the accepted SID for the finalize_only retry
+              // (provider log first, then the outcome the throw carried) —
+              // same contract as the normal settlement's stamp.
+              const crashProviderSid = providerRow?.twilio_sid || err?.providerOutcome?.providerMessageId || null;
               await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                 status: 'sent',
                 created_at: failedAt,
                 updated_at: failedAt,
-                metadata: db.raw(crashOwesFinalization
-                  ? "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at, 'finalize_pending', true)"
-                  : "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
+                metadata: crashOwesFinalization
+                  ? db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at, 'finalize_pending', true, 'provider_message_id', ?::text)", [crashProviderSid])
+                  : db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
               });
               const recoveredMeta = await readFreshMeta();
               const suggest = require('./sms-suggest-mode');

@@ -4332,19 +4332,22 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
     .where('updated_at', '<', olderThan)
     .orderBy('updated_at', 'asc')
     .limit(limit)
-    .select('id', 'stripe_payment_intent_id', 'invoice_number');
+    .select('id', 'stripe_payment_intent_id', 'invoice_number', 'total', 'credit_applied');
   for (const row of rows) {
     const priorEmailAttempt = await db('email_messages')
       .whereRaw('idempotency_key LIKE ?', [`payment.ach_processing:${row.id}:%`])
       .first('id')
       .catch(() => ({ id: 'probe-failed' }));
+    // The processing transition restored `total` to the GROSS amount
+    // (cash + applied credit) — subtract the credit back out so the
+    // email states the actual bank transfer, never an overstated total
+    // (sendAchProcessing's own fallback is the gross total).
+    const cashAmount = Math.round((Number(row.total || 0) - Number(row.credit_applied || 0)) * 100) / 100;
     logger.warn(`[stripe-webhook] ACH ack sweep re-running acknowledgment for invoice ${row.invoice_number || row.id} (claim was released or never taken; email ${priorEmailAttempt ? 'already attempted — SMS-only' : 'never attempted — both legs'})`);
     await dispatchAchProcessingAcknowledgment({
       invoiceId: row.id,
       piId: row.stripe_payment_intent_id,
-      // sendAchProcessing falls back to the invoice total when the PI's
-      // validated cash amount isn't available (sweep context has no event).
-      amount: null,
+      amount: cashAmount > 0 ? cashAmount : null,
       eventCreated: null,
       eventId: null,
       smsOnly: !!priorEmailAttempt,
