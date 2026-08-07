@@ -174,8 +174,18 @@ function createDbMock(initialRows = {}) {
           .filter(row => !this._whereNull || row[this._whereNull] == null)
           .filter(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value));
         rows.forEach(row => {
-          Object.assign(row, record);
-          state.updates.push({ table, id: row.id, record });
+          const rec = { ...record };
+          // GREATEST(COALESCE(col, epoch), ?) — the monotonic liveness
+          // write: apply the bound value only when it advances the column.
+          for (const [key, val] of Object.entries(rec)) {
+            if (val && typeof val === 'object' && typeof val.__raw === 'string' && val.__raw.includes('GREATEST')) {
+              const bound = new Date(val.__bindings?.[0] || 0);
+              const cur = row[key] ? new Date(row[key]) : new Date(0);
+              rec[key] = bound > cur ? val.__bindings[0] : row[key];
+            }
+          }
+          Object.assign(row, rec);
+          state.updates.push({ table, id: row.id, record: rec });
         });
         if (returning) {
           return rows.map(row => Object.fromEntries(returning.map(col => [col, row[col]])));
@@ -198,6 +208,7 @@ function createDbMock(initialRows = {}) {
   // Real Date, not a sentinel string — the missing-review reconcile compares
   // synced_at against the sync start time.
   db.fn = { now: jest.fn(() => new Date()) };
+  db.raw = (sql, bindings = []) => ({ __raw: sql, __bindings: bindings });
   // Snapshot-rollback transaction: a throw inside the callback restores all
   // table state, mirroring the claim+alert atomicity under test.
   db.transaction = async (fn) => {
@@ -1031,6 +1042,32 @@ describe('Google Business review sync', () => {
       r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-copycat',
     );
     expect(copycat).toBeTruthy();
+  });
+
+  test('an older overlapping runner cannot regress a newer synced_at token', async () => {
+    // Runner B (newer fetch start) refreshed the row; runner A (older start,
+    // slower feed processing) upserts the same review afterwards. A's write
+    // must not move synced_at backwards — B's reconcile would then see
+    // `synced_at < B.syncStart` and stamp a review both feeds returned.
+    const newerToken = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    seedSyncedReview({ id: 'overlap-1', synced_at: newerToken });
+    const olderStart = new Date(Date.now() - 60 * 60 * 1000);
+
+    await service._upsertGbpReview({
+      google_review_id: 'accounts/1/locations/2/reviews/rev-keep',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-keep',
+      location_id: 'bradenton',
+      reviewer_name: 'John Doe',
+      reviewer_photo_url: null,
+      star_rating: 5,
+      review_text: 'Great work',
+      review_created_at: '2026-05-25T12:00:00Z',
+      owner_reply: null,
+      owner_reply_updated_at: null,
+    }, olderStart);
+
+    const row = db.__state.rows.google_reviews.find(r => r.id === 'overlap-1');
+    expect(new Date(row.synced_at).toISOString()).toBe(newerToken);
   });
 
   test('Places fallback: uncorroborated same-name+content match cannot mutate a stamped evidence row', async () => {

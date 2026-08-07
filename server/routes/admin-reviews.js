@@ -407,7 +407,19 @@ router.post('/:id/reply', async (req, res, next) => {
 // POST /api/admin/reviews/:id/dismiss — dismiss a review from dashboard
 router.post('/:id/dismiss', async (req, res, next) => {
   try {
-    await db('google_reviews').where({ id: req.params.id }).update({ dismissed: true });
+    // Stamped rows are removal evidence, not inbox items: the Removed filter
+    // deliberately ignores the dismissed flag, so dismissing one only plants
+    // a trap — if Google reinstates the review, the stamp clears while
+    // `dismissed` remains and the live review vanishes from every normal
+    // view. Conditional update + 409 (the client hides the button; this
+    // guards stale pages, same as the reply lockout).
+    const updated = await db('google_reviews')
+      .where({ id: req.params.id })
+      .whereNull('missing_since')
+      .update({ dismissed: true });
+    if ((Array.isArray(updated) ? updated.length : updated) === 0) {
+      return res.status(409).json({ error: 'This review has been removed from Google — it is retained as evidence and cannot be dismissed.' });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -417,8 +429,13 @@ router.post('/dismiss-batch', async (req, res, next) => {
   try {
     const { ids } = req.body;
     if (!ids?.length) return res.status(400).json({ error: 'No IDs provided' });
-    await db('google_reviews').whereIn('id', ids).update({ dismissed: true });
-    res.json({ success: true, dismissed: ids.length });
+    // Stamped rows are skipped, not 409'd — a batch may legitimately mix in
+    // a row the hourly sync stamped since the page loaded.
+    const dismissed = await db('google_reviews')
+      .whereIn('id', ids)
+      .whereNull('missing_since')
+      .update({ dismissed: true });
+    res.json({ success: true, dismissed: Array.isArray(dismissed) ? dismissed.length : dismissed });
   } catch (err) { next(err); }
 });
 

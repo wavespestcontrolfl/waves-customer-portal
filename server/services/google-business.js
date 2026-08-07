@@ -558,9 +558,17 @@ class GoogleBusinessService {
       synced_at: syncStart ? new Date(syncStart).toISOString() : db.fn.now(),
       ...replyFields,
     };
+    // Monotonic liveness: an older overlapping runner must never regress a
+    // newer runner's synced_at — writing its earlier fetch start over a
+    // fresher token would make the newer runner's reconcile see
+    // `synced_at < syncStart` and falsely stamp a review both feeds
+    // returned. GREATEST makes the write a no-op unless it advances.
+    const monotonicSyncedAt = syncStart
+      ? db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [new Date(syncStart).toISOString()])
+      : db.fn.now();
     let result;
     if (existing) {
-      await db('google_reviews').where({ id: existing.id }).update(row);
+      await db('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
       result = { id: existing.id, inserted: false };
     } else {
       try {
@@ -590,6 +598,7 @@ class GoogleBusinessService {
             };
         await db('google_reviews').where({ id: winner.id }).update({
           ...providerRow,
+          synced_at: monotonicSyncedAt,
           customer_id: customerId || winner.customer_id || null,
           ...winnerReplyFields,
         });
@@ -760,8 +769,11 @@ class GoogleBusinessService {
         // as the stamp clear.
         // Fetch-start timestamp, not db.fn.now() — synced_at is an ordering
         // token compared against runner fetch starts (Node clock); see
-        // _upsertGbpReview for the skew rationale.
-        if (identityCorroborated) upd.synced_at = sampleSyncStart.toISOString();
+        // _upsertGbpReview for the skew rationale. GREATEST keeps it
+        // monotonic against a newer overlapping runner's token.
+        if (identityCorroborated) {
+          upd.synced_at = db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [sampleSyncStart.toISOString()]);
+        }
         if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
           upd.review_reply = ownerReply;
           upd.reply_updated_at = db.fn.now();
