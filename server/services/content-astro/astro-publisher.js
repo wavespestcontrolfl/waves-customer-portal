@@ -154,7 +154,7 @@ function syncDraftPublishTarget(draft, frontmatter) {
   return draft;
 }
 
-const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
+const { POST_CATEGORIES } = require('./blog-categories');
 const POST_TYPES = new Set(['diagnostic', 'seasonal', 'by-grass-type', 'protocol', 'cost', 'comparison', 'case-study', 'location', 'decision']);
 const SCHEMA_TYPES = new Set(['Article', 'BlogPosting', 'FAQPage', 'BreadcrumbList', 'HowTo', 'Service', 'Review']);
 const SERVICE_AREAS = new Set(['Bradenton', 'Lakewood Ranch', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
@@ -2994,6 +2994,9 @@ module.exports = {
   publishOrUpdatePage,
   publishMetadataRewrite,
   publishRefresh,
+  // Canonical blog category set (re-exported from ./blog-categories, the
+  // dependency-free single source the runner's slug repair also requires).
+  POST_CATEGORIES,
   getLiveFrontmatter,
   isBlogTarget,
   loadExistingPageBody,

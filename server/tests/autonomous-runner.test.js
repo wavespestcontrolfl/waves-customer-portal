@@ -813,6 +813,17 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     expect(JSON.stringify(draft)).toBe(before);
   });
 
+  test('a pin with a NON-CANONICAL category parks — publish-time normalization would rewrite the route (Codex r6)', () => {
+    for (const badPin of ['/pest/example-post/', '/unknown/example-post/']) {
+      const draft = driftedDraft();
+      const before = JSON.stringify(draft);
+      const result = applyOperatorSlugRepair(operatorBrief(badPin), draft);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/not a canonical post category/);
+      expect(JSON.stringify(draft)).toBe(before);
+    }
+  });
+
   test('repairs drift in place: slug forced to the pin, canonical repointed, body self-links rewritten, repair recorded', () => {
     const draft = driftedDraft();
     const result = applyOperatorSlugRepair(operatorBrief(), draft);
@@ -894,7 +905,8 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     const draft = driftedDraft({
       body: [
         'See [our checklist](/fall-lawn-mistakes-southwest-florida/) and',
-        '[the absolute form](https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/).',
+        '[the absolute form](https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/) and',
+        '[the bare-host form](https://wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/).',
         'A citation: [report](https://source.example/fall-lawn-mistakes-southwest-florida/report) and',
         '[an exact foreign path](https://source.example/fall-lawn-mistakes-southwest-florida/) plus',
         '[a longer internal route](/fall-lawn-mistakes-southwest-florida/archive/) and',
@@ -905,9 +917,13 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     });
     const result = applyOperatorSlugRepair(operatorBrief(), draft);
     expect(result.ok).toBe(true);
-    expect(result.repair.body_self_link_rewrites).toBe(2);
+    expect(result.repair.body_self_link_rewrites).toBe(3);
     expect(draft.body).toContain(`(${PINNED})`);
     expect(draft.body).toContain(`https://www.wavespestcontrol.com${PINNED}`);
+    // The bare-host hub form is the writer's own drifted route too (Codex
+    // r6) — repaired AND normalized to the configured www origin.
+    expect(draft.body).not.toContain('https://wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/');
+    expect(draft.body).not.toContain(`https://wavespestcontrol.com${PINNED}`);
     expect(draft.body).toContain('https://source.example/fall-lawn-mistakes-southwest-florida/report');
     expect(draft.body).toContain('[an exact foreign path](https://source.example/fall-lawn-mistakes-southwest-florida/)');
     expect(draft.body).toContain('(/fall-lawn-mistakes-southwest-florida/archive/)');

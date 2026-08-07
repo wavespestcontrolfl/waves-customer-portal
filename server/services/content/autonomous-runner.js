@@ -3394,6 +3394,9 @@ function normalizeSlugPath(slug) {
 // The binding blog-schema slug shape (packages/blog-schema/schema.json):
 // /segment/segment/…/ with lowercase [a-z0-9-] segments only.
 const PINNED_SLUG_PATTERN = /^\/[a-z0-9-]+(\/[a-z0-9-]+)*\/$/;
+// Canonical category set shared with the publisher (dependency-free module —
+// requirable here without the publisher's full module graph).
+const { POST_CATEGORIES: BLOG_POST_CATEGORIES } = require('../content-astro/blog-categories');
 
 /**
  * applyOperatorSlugRepair(brief, draft) — the operator-pinned slug is
@@ -3456,6 +3459,18 @@ function applyOperatorSlugRepair(brief, draft) {
     };
   }
   const pinCategory = pinSegments.slice(0, -1).join('/');
+  // The pin category must be a CANONICAL post category: anything else
+  // (e.g. "pest", "unknown") gets rewritten by normalizeAutonomousCategory
+  // at publish time, so an "accepted" repair would still publish a route the
+  // operator never pinned (Codex r6). Single-sourced from the publisher's
+  // dependency-free blog-categories module — never a parallel list here.
+  if (!BLOG_POST_CATEGORIES.has(pinCategory)) {
+    return {
+      ok: false,
+      reason: `pinned slug "${rawPin}" uses category "${pinCategory}", which is not a canonical post category — the publisher would normalize it to a different route`,
+      mismatch: { expected_slug: rawPin, draft_slug: draft?.frontmatter?.slug || null },
+    };
+  }
   // Drift detection is EXACT, not normalized (Codex r4): operatorSlugMismatch
   // lowercases both sides, so a case-drifted writer slug (/Lawn-Care/… vs
   // pin /lawn-care/…) would read as "no drift", reach the publisher uncased,
@@ -3527,6 +3542,17 @@ function applyOperatorSlugRepair(brief, draft) {
   // self-link, and survives verbatim.
   if (typeof draft.body === 'string') {
     const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // The publisher treats hub hosts with and without `www.` as equivalent,
+    // so absolute self-links on EITHER host form are the writer's own drifted
+    // route and must be repaired (Codex r6). Rewrites normalize the prefix to
+    // the configured hub origin.
+    const hubUrl = (() => { try { return new URL(hub); } catch { return null; } })();
+    const hubOrigins = hubUrl
+      ? [...new Set([hubUrl.host, hubUrl.host.startsWith('www.') ? hubUrl.host.slice(4) : `www.${hubUrl.host}`])]
+        .map((h) => `${hubUrl.protocol}//${h}`)
+      : [hub];
+    const hubOriginSet = new Set(hubOrigins);
+    const hubAlternation = hubOrigins.map(escapeRe).join('|');
     let occurrences = 0;
     for (const oldSlugPath of oldSlugPaths) {
       if (!draft.body.includes(oldSlugPath)) continue;
@@ -3537,8 +3563,11 @@ function applyOperatorSlugRepair(brief, draft) {
       // terminate here (close-paren/quote/whitespace/fragment/query/EOF), so
       // child routes with non-alphanumeric next segments (/old-slug/.well-known/,
       // /old-slug/%61rchive/) are different pathnames and survive (Codex r5).
-      const selfLinkRe = new RegExp(`(${escapeRe(hub)}|[\\s("'<\`]|^)${escapeRe(oldSlugPath)}(?=[)"'\\s<>\`#?]|$)`, 'g');
-      draft.body = draft.body.replace(selfLinkRe, (m, pre) => { occurrences += 1; return `${pre}${pinned}`; });
+      const selfLinkRe = new RegExp(`(${hubAlternation}|[\\s("'<\`]|^)${escapeRe(oldSlugPath)}(?=[)"'\\s<>\`#?]|$)`, 'g');
+      draft.body = draft.body.replace(selfLinkRe, (m, pre) => {
+        occurrences += 1;
+        return `${hubOriginSet.has(pre) ? hub : pre}${pinned}`;
+      });
     }
     repair.body_self_link_rewrites = occurrences;
   }
