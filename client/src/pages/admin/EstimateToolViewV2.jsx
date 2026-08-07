@@ -556,6 +556,16 @@ const RODENT_GUARANTEE_ELIGIBILITY_KEYS = [
   "rgNoActivityAfterFinalCheck",
 ];
 
+// Per-job eligibility confirmations that must never survive a property/
+// customer identity change or a "next estimate" reset: the rodent-guarantee
+// flags plus the bermuda-suppression add-on (its cultivar / season / turf-
+// stress / %-infestation eligibility is verified per lawn, never carried to
+// another property).
+const PER_JOB_ELIGIBILITY_KEYS = [
+  ...RODENT_GUARANTEE_ELIGIBILITY_KEYS,
+  "bermudaSuppression",
+];
+
 const MOSQUITO_PROTOCOL_STEPS = [
   "Inspect shaded foliage, fence lines, lanai perimeter, pool cage edges, drains, planters, and any standing-water source before treatment.",
   "Use a gas-powered backpack sprayer for a directed barrier application to mosquito resting zones. Keep applications off blooms and avoid pollinator activity windows.",
@@ -2359,13 +2369,15 @@ export default function EstimateToolViewV2({
     initialServiceInterest,
   ]);
 
-  // Rodent-guarantee eligibility confirmations are per-job. A rep can change the
+  // Per-job eligibility confirmations (rodent-guarantee flags + the bermuda-
+  // suppression add-on) never survive an identity change. A rep can change the
   // property/customer identity through many paths (prefill props, address
   // autocomplete, property lookup, customer search, manual edits) that each call
   // setForm directly, so enforce the reset centrally: whenever the address or
-  // customer identity changes, drop the four rg* flags so the guarantee can't be
-  // re-priced for a new property without fresh confirmation. (toggle() still
-  // clears them when the guarantee is switched off; nextEstimate resets too.)
+  // customer identity changes, drop the flags so neither the guarantee nor the
+  // cultivar/season-gated suppression program can be re-priced for a new
+  // property without fresh confirmation. (toggle() still clears the rg* flags
+  // when the guarantee is switched off; nextEstimate resets everything.)
   const rgIdentityKey = `${form.address || ""}|${form.customerId || ""}|${form.customerName || ""}|${form.customerEmail || ""}`;
   const rgIdentityRef = useRef(rgIdentityKey);
   useEffect(() => {
@@ -2373,10 +2385,10 @@ export default function EstimateToolViewV2({
     rgIdentityRef.current = rgIdentityKey;
     // Only act when confirmations were actually set, so a plain address/contact
     // edit on a non-guarantee estimate never needlessly wipes a valid quote.
-    if (!RODENT_GUARANTEE_ELIGIBILITY_KEYS.some((k) => form[k])) return;
+    if (!PER_JOB_ELIGIBILITY_KEYS.some((k) => form[k])) return;
     setForm((f) => {
       const next = { ...f };
-      for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
+      for (const k of PER_JOB_ELIGIBILITY_KEYS) next[k] = false;
       return next;
     });
     // The generated estimate baked the (now-reset) flags into its engineRequest;
@@ -4668,7 +4680,7 @@ export default function EstimateToolViewV2({
       _boracareSqftAuto: false,
       _preslabSqftAuto: false,
       // Guarantee eligibility is per-job; the next property must re-confirm.
-      ...Object.fromEntries(RODENT_GUARANTEE_ELIGIBILITY_KEYS.map((k) => [k, false])),
+      ...Object.fromEntries(PER_JOB_ELIGIBILITY_KEYS.map((k) => [k, false])),
     }));
     // Starting the next customer's quote ends any in-place edit — otherwise
     // Save changes would still PUT the new quote over the estimate that was

@@ -88,6 +88,28 @@ describe("bermudagrass suppression add-on checkbox", () => {
       expect(findCheckboxByLabel(container, /Bermudagrass suppression/)).toBeNull();
     });
 
+    // Identity change wipes the confirmation: the add-on's eligibility
+    // (cultivar / season / turf stress / %-infestation) is per-lawn, so a
+    // checked box must never carry over to a different property.
+    fireEvent.change(grassSelect, { target: { value: "st_augustine" } });
+    const bsAgain = await waitFor(() => {
+      const el = findCheckboxByLabel(container, /Bermudagrass suppression/);
+      expect(el).toBeTruthy();
+      return el;
+    });
+    if (!bsAgain.checked) fireEvent.click(bsAgain);
+    expect(bsAgain.checked).toBe(true);
+    const addressInput = Array.from(container.querySelectorAll("input")).find(
+      (el) => /^Start typing an address/.test(el.placeholder || ""),
+    );
+    expect(addressInput).toBeTruthy();
+    fireEvent.change(addressInput, { target: { value: "123 Different Property Ln" } });
+    await waitFor(() => {
+      const el = findCheckboxByLabel(container, /Bermudagrass suppression/);
+      expect(el).toBeTruthy();
+      expect(el.checked).toBe(false);
+    });
+
     // And deselecting the lawn service removes it too (back on St. Augustine).
     fireEvent.change(grassSelect, { target: { value: "st_augustine" } });
     await waitFor(() => {
