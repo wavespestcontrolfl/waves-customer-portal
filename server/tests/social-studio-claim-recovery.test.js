@@ -1,13 +1,17 @@
 /**
- * Round-21 claim hardening on the testimonial publish path:
- *  1. rejectConsumed FAIL CLOSED — a DB failure on the review_graphics
- *     consumed-lookup aborts the publish instead of being read as "not
- *     consumed" (which would re-publish a testimonial another run posted).
- *  2. Claim retention — when a live publish can't get its candidate
- *     consumption recorded, the claim is retained and the detached recovery
- *     loop (holdClaimUntilCandidateConsumed) owns its release: release only
- *     once consumption is recorded or the review is removed; on exhaustion
- *     ABANDON (self-expiring) rather than actively clearing the claim.
+ * Round-21 hardening of the testimonial publish path:
+ *  1. rejectConsumed FAIL CLOSED — a DB failure on either consumed-lookup
+ *     (review_graphics row OR the durable published stamp) aborts the
+ *     publish instead of being read as "not consumed".
+ *  2. Durable published stamp — recordTestimonialPublished writes a
+ *     first-win marker on google_reviews the moment any external post
+ *     succeeds; the consumed check rejects foreign stamps but lets the
+ *     OWNING run retry its remaining channels (partial-publish ownership).
+ *  3. Claim retention — when the stamp cannot be written after a live
+ *     publish, the claim is retained and holdClaimUntilPublishRecorded
+ *     owns its release: release only once the durable record lands or the
+ *     review is removed; on exhaustion ABANDON (self-expiring) rather than
+ *     actively clearing the claim.
  */
 
 jest.mock('../models/db', () => {
@@ -45,7 +49,7 @@ jest.mock('../utils/cron-lock', () => ({
 const db = require('../models/db');
 const Studio = require('../services/social-content-studio');
 
-const LIVE_REVIEW = { id: 'rev-1', location_id: 'loc-1', missing_since: null };
+const LIVE_REVIEW = { id: 'rev-1', location_id: 'loc-1', missing_since: null, testimonial_published_at: null };
 
 const updateCalls = (table) => db.__state.calls.filter((c) => c.op === 'update' && c.table === table);
 
@@ -75,6 +79,41 @@ describe('publishWithReviewLivenessLock — rejectConsumed fails closed', () => 
     expect(out).toEqual({ blocked: true, consumed: true });
     expect(publishFn).not.toHaveBeenCalled();
   });
+
+  test('a durable published stamp from ANOTHER run blocks even with no review_graphics row', async () => {
+    db.__state.firstHandlers.google_reviews = async () => ({
+      ...LIVE_REVIEW,
+      testimonial_published_at: '2026-08-07T12:00:00Z',
+      testimonial_published_run: 'run-other',
+    });
+    db.__state.firstHandlers.review_graphics = async () => undefined;
+    const publishFn = jest.fn();
+    const out = await Studio.publishWithReviewLivenessLock('rev-1', publishFn, {
+      rejectConsumed: true,
+      allowConsumedByRunId: 'run-mine',
+    });
+    expect(out).toEqual({ blocked: true, consumed: true });
+    expect(publishFn).not.toHaveBeenCalled();
+  });
+
+  test('the OWNING run passes its own stamp and publishes its remaining channels', async () => {
+    db.__state.firstHandlers.google_reviews = async () => ({
+      ...LIVE_REVIEW,
+      testimonial_published_at: '2026-08-07T12:00:00Z',
+      testimonial_published_run: 'run-mine',
+    });
+    db.__state.firstHandlers.review_graphics = async () => undefined;
+    db.__state.updateHandlers.google_reviews = async () => 1; // claim acquired
+    const publishFn = jest.fn(async () => 'ok');
+    const out = await Studio.publishWithReviewLivenessLock('rev-1', publishFn, {
+      rejectConsumed: true,
+      allowConsumedByRunId: 'run-mine',
+    });
+    expect(out.blocked).toBe(false);
+    expect(out.result).toBe('ok');
+    expect(publishFn).toHaveBeenCalledTimes(1);
+    out.abandonClaim(); // stop the heartbeat for test hygiene
+  });
 });
 
 describe('publishWithReviewLivenessLock — abandonClaim', () => {
@@ -91,72 +130,94 @@ describe('publishWithReviewLivenessLock — abandonClaim', () => {
   });
 });
 
-describe('holdClaimUntilCandidateConsumed', () => {
+describe('recordTestimonialPublished', () => {
+  test('stamps first-win with the owning run token', async () => {
+    db.__state.updateHandlers.google_reviews = async (ctx, patch) => {
+      expect(ctx.whereNull).toContain('testimonial_published_at');
+      expect(patch.testimonial_published_run).toBe('run-1');
+      expect(typeof patch.testimonial_published_at).toBe('string');
+      return 1;
+    };
+    await Studio.recordTestimonialPublished('rev-1', 'run-1');
+    expect(updateCalls('google_reviews')).toHaveLength(1);
+  });
+
+  test('an existing own-run stamp is idempotent success (no throw)', async () => {
+    db.__state.updateHandlers.google_reviews = async () => 0;
+    db.__state.firstHandlers.google_reviews = async () => ({
+      ...LIVE_REVIEW,
+      testimonial_published_at: '2026-08-07T12:00:00Z',
+      testimonial_published_run: 'run-1',
+    });
+    await expect(Studio.recordTestimonialPublished('rev-1', 'run-1')).resolves.toBeUndefined();
+  });
+
+  test('a DB failure propagates (caller retains the claim)', async () => {
+    db.__state.updateHandlers.google_reviews = async () => { throw new Error('db down'); };
+    await expect(Studio.recordTestimonialPublished('rev-1', 'run-1')).rejects.toThrow('db down');
+  });
+});
+
+describe('holdClaimUntilPublishRecorded', () => {
   const makeClaim = () => ({ releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() });
 
-  test('retries persistence and releases the claim once consumption is recorded', async () => {
+  test('retries the record and releases the claim once it lands', async () => {
     db.__state.firstHandlers.google_reviews = async () => ({ ...LIVE_REVIEW });
     const claim = makeClaim();
-    const persist = jest.fn()
-      .mockRejectedValueOnce(new Error('review sync in progress'))
-      .mockResolvedValueOnce({ id: 'g1' });
-    await Studio.holdClaimUntilCandidateConsumed({
-      googleReviewId: 'rev-1',
-      persistInput: { googleReviewId: 'rev-1' },
-      claim,
-      persist,
-      delayMs: 1,
-      attempts: 5,
+    const record = jest.fn()
+      .mockRejectedValueOnce(new Error('db hiccup'))
+      .mockResolvedValueOnce(undefined);
+    await Studio.holdClaimUntilPublishRecorded({
+      googleReviewId: 'rev-1', record, claim, delayMs: 1, attempts: 5,
     });
-    expect(persist).toHaveBeenCalledTimes(2);
-    expect(persist).toHaveBeenCalledWith({ googleReviewId: 'rev-1' });
+    expect(record).toHaveBeenCalledTimes(2);
     expect(claim.releaseClaim).toHaveBeenCalledTimes(1);
     expect(claim.abandonClaim).not.toHaveBeenCalled();
   });
 
-  test('releases without persisting when the review was stamped removed (no reselection risk)', async () => {
+  test('releases without recording when the review was stamped removed (no reselection risk)', async () => {
     db.__state.firstHandlers.google_reviews = async () => ({ ...LIVE_REVIEW, missing_since: '2026-08-07T12:00:00Z' });
     const claim = makeClaim();
-    const persist = jest.fn();
-    await Studio.holdClaimUntilCandidateConsumed({
-      googleReviewId: 'rev-1', persistInput: {}, claim, persist, delayMs: 1, attempts: 5,
+    const record = jest.fn();
+    await Studio.holdClaimUntilPublishRecorded({
+      googleReviewId: 'rev-1', record, claim, delayMs: 1, attempts: 5,
     });
-    expect(persist).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
     expect(claim.releaseClaim).toHaveBeenCalledTimes(1);
     expect(claim.abandonClaim).not.toHaveBeenCalled();
   });
 
-  test('releases without persisting when the review row is gone entirely', async () => {
+  test('releases without recording when the review row is gone entirely', async () => {
     db.__state.firstHandlers.google_reviews = async () => undefined;
     const claim = makeClaim();
-    const persist = jest.fn();
-    await Studio.holdClaimUntilCandidateConsumed({
-      googleReviewId: 'rev-1', persistInput: {}, claim, persist, delayMs: 1, attempts: 5,
+    const record = jest.fn();
+    await Studio.holdClaimUntilPublishRecorded({
+      googleReviewId: 'rev-1', record, claim, delayMs: 1, attempts: 5,
     });
-    expect(persist).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
     expect(claim.releaseClaim).toHaveBeenCalledTimes(1);
   });
 
   test('exhaustion ABANDONS the claim (self-expiring) instead of releasing it', async () => {
     db.__state.firstHandlers.google_reviews = async () => ({ ...LIVE_REVIEW });
     const claim = makeClaim();
-    const persist = jest.fn().mockRejectedValue(new Error('review_graphics table is not available'));
-    await Studio.holdClaimUntilCandidateConsumed({
-      googleReviewId: 'rev-1', persistInput: {}, claim, persist, delayMs: 1, attempts: 3,
+    const record = jest.fn().mockRejectedValue(new Error('still down'));
+    await Studio.holdClaimUntilPublishRecorded({
+      googleReviewId: 'rev-1', record, claim, delayMs: 1, attempts: 3,
     });
-    expect(persist).toHaveBeenCalledTimes(3);
+    expect(record).toHaveBeenCalledTimes(3);
     expect(claim.releaseClaim).not.toHaveBeenCalled();
     expect(claim.abandonClaim).toHaveBeenCalledTimes(1);
   });
 
-  test('an unreadable review never persists blind and never releases blind — holds, then abandons', async () => {
+  test('an unreadable review never records blind and never releases blind — holds, then abandons', async () => {
     db.__state.firstHandlers.google_reviews = async () => { throw new Error('db down'); };
     const claim = makeClaim();
-    const persist = jest.fn();
-    await Studio.holdClaimUntilCandidateConsumed({
-      googleReviewId: 'rev-1', persistInput: {}, claim, persist, delayMs: 1, attempts: 3,
+    const record = jest.fn();
+    await Studio.holdClaimUntilPublishRecorded({
+      googleReviewId: 'rev-1', record, claim, delayMs: 1, attempts: 3,
     });
-    expect(persist).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
     expect(claim.releaseClaim).not.toHaveBeenCalled();
     expect(claim.abandonClaim).toHaveBeenCalledTimes(1);
   });

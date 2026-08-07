@@ -297,9 +297,14 @@ router.get('/', dashboardCache, async (req, res, next) => {
           // drop that location's whole count — require a fresh row for
           // EVERY configured location or use the live-row fallback.
           const { WAVES_LOCATIONS: dashLocations } = require('../config/locations');
+          const dashLocationIds = dashLocations.map((l) => l.id);
           const statsFreshCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          // Configured locations only — _stats rows from retired/renamed
+          // GBPs would otherwise inflate the total and average even though
+          // completeness is judged against the CURRENT location list.
           const statsRows = await db('google_reviews')
             .where({ reviewer_name: '_stats' })
+            .whereIn('location_id', dashLocationIds)
             .where('synced_at', '>', statsFreshCutoff);
           const freshStatsLocationIds = new Set();
           let totalFromPlaces = 0, ratingSum = 0, ratingCount = 0;
@@ -344,10 +349,15 @@ router.get('/', dashboardCache, async (req, res, next) => {
           }
           // Fallback to actual review rows — live rows only: the Rating tile
           // reports current Google state, and rows Google removed are
-          // retained evidence, not part of the current rating/total.
+          // retained evidence, not part of the current rating/total. Scoped
+          // to configured locations (rows with no location stamp are kept —
+          // legacy imports belong to the business, not a retired GBP).
           return await db('google_reviews')
             .where('reviewer_name', '!=', '_stats')
             .whereNull('missing_since')
+            .where(function scopeConfiguredLocations() {
+              this.whereIn('location_id', dashLocationIds).orWhereNull('location_id');
+            })
             .select(
               db.raw('COUNT(*) as total'),
               db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
@@ -1361,12 +1371,18 @@ router.get('/review-trend', dashboardCache, async (req, res, next) => {
       window.push({ ym, label });
     }
 
+    const { WAVES_LOCATIONS: trendLocations } = require('../config/locations');
+    const trendLocationIds = trendLocations.map(l => l.id);
     const rows = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
       // Live rows only — the chart sits next to the live total/rating, and a
       // removed review counted in its posting month would make the trend
-      // disagree with the adjacent current metrics.
+      // disagree with the adjacent current metrics. Configured locations
+      // only (unstamped legacy rows kept), matching the totals below.
       .whereNull('missing_since')
+      .where(function scopeConfiguredLocations() {
+        this.whereIn('location_id', trendLocationIds).orWhereNull('location_id');
+      })
       .select(db.raw("to_char(review_created_at AT TIME ZONE 'America/New_York','YYYY-MM') as ym"))
       .count('* as n')
       .avg('star_rating as avg')
@@ -1402,11 +1418,10 @@ router.get('/review-trend', dashboardCache, async (req, res, next) => {
     // fresh (24h) _stats row whose payload carries a usable number — stale,
     // partial, or malformed rows otherwise kept this card on a wrong total
     // while the corrected headline metrics sat right next to it.
-    const { WAVES_LOCATIONS: trendLocations } = require('../config/locations');
     const statsFreshCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const statsRows = await db('google_reviews')
       .where({ reviewer_name: '_stats' })
-      .whereIn('location_id', trendLocations.map(l => l.id))
+      .whereIn('location_id', trendLocationIds)
       .where('synced_at', '>', statsFreshCutoff);
     const freshStatsLocationIds = new Set();
     let placesTotal = 0, ratingSum = 0, ratingCount = 0;
@@ -1434,7 +1449,11 @@ router.get('/review-trend', dashboardCache, async (req, res, next) => {
         .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
         // Live rows only — removed reviews are retained evidence and must
         // not inflate the card total (matches every other overview surface).
+        // Configured locations only, same scope as the trend buckets above.
         .whereNull('missing_since')
+        .where(function scopeConfiguredLocations() {
+          this.whereIn('location_id', trendLocationIds).orWhereNull('location_id');
+        })
         .count('* as total')
         .avg('star_rating as avg')
         .first();

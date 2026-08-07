@@ -222,9 +222,14 @@ async function executeBITool(toolName, input) {
             }
             if (total > 0) return { total, rating: cnt > 0 ? (ratingSum / cnt).toFixed(1) : '5.0' };
             // Fallback aggregates report current Google state, so rows
-            // Google removed (missing_since stamped) are excluded.
+            // Google removed (missing_since stamped) are excluded, and only
+            // configured locations count (retired/renamed GBPs' rows would
+            // inflate the total; unstamped legacy rows are kept).
             const fallback = await db('google_reviews').where('reviewer_name', '!=', '_stats')
               .whereNull('missing_since')
+              .where(function scopeConfiguredLocations() {
+                this.whereIn('location_id', WAVES_LOCATIONS.map((l) => l.id)).orWhereNull('location_id');
+              })
               .select(db.raw('COUNT(*) as total'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as rating')).first();
             return { total: parseInt(fallback?.total || 0), rating: fallback?.rating || '0' };
           } catch { return { total: 0, rating: '0' }; }

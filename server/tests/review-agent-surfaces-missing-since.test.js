@@ -40,6 +40,8 @@ jest.mock('../models/db', () => {
           const branches = [];
           const groupApi = {
             whereNull(col) { branches.push((r) => r[col] == null); return groupApi; },
+            orWhereNull(col) { branches.push((r) => r[col] == null); return groupApi; },
+            whereIn(col, vals) { branches.push((r) => vals.includes(r[col])); return groupApi; },
             orWhere(col, op, val) {
               if (op === 'like') {
                 const prefix = String(val).replace(/%$/, '');
