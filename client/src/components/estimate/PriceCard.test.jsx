@@ -513,29 +513,17 @@ describe('PriceCard — applications-per-year line under the price (owner 2026-0
     expect(screen.getByText('WaveGuard Silver')).toBeInTheDocument();
   });
 
-  // Annual total rides the same line (owner 2026-08-07): the per-application
-  // headline is close across lawn cadences by design, so the yearly commitment
-  // is what actually distinguishes the three programs on the card.
-  it('glass single-row card shows the annual commitment alongside the count', () => {
+  // Customer-facing estimate surfaces never show combined plan totals
+  // ("$X/mo" / "$X/yr") — owner rule 2026-07-23, AGENTS.md. An annual figure
+  // briefly rode this line during the 2026-08-07 cadence-discount work and was
+  // removed on review (codex #3274 P1); this guard keeps it out.
+  it('never renders a combined annual dollar total on the cadence line', () => {
     setGlassDefault(true);
     const { container } = render(<PriceCard frequency={lawnRowFrequency()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
 
-    expect(container.textContent).toMatch(/9 applications per year · \$482\.22 per year/);
-  });
-
-  it('suppresses the annual commitment while showing a low-confidence range', () => {
-    setGlassDefault(true);
-    const { container } = render(
-      <PriceCard
-        frequency={{ ...lawnRowFrequency(), lowConfidenceRangePct: 0.15 }}
-        waveGuardTier="Silver"
-        waveGuardDiscountPct={0.1}
-        showTierBadge={false}
-        preferPerApplicationPrice
-      />,
-    );
-
-    expect(container.textContent).not.toMatch(/per year · \$/);
+    expect(container.textContent).toMatch(/9 applications per year/);
+    expect(container.textContent).not.toMatch(/\$[\d,.]+\s*per year/);
+    expect(container.textContent).not.toMatch(/\$[\d,.]+\s*\/\s*yr/);
   });
 
   it('non-glass card keeps the count in the row sub-label (no header line)', () => {
