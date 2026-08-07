@@ -2430,7 +2430,13 @@ function initScheduledJobs() {
           // sides of the attempt cap — never send unverified state).
           {
             const { recheckDeferredReplay, onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
-            const recheck = await recheckDeferredReplay(claimMeta.entry_point, claimMeta);
+            // Same enrichment the finalize call gets below: several
+            // enqueue sites store the customer only on sms_log.customer_id
+            // (not in metadata), and a recheck that keys on customer state
+            // — the lead-menu intake status, quiet-hours prefs — would
+            // silently pass as eligible without it.
+            const recheckMeta = { ...claimMeta, customer_id: claimMeta.customer_id || msg.customer_id || null };
+            const recheck = await recheckDeferredReplay(claimMeta.entry_point, recheckMeta);
             if (recheck && recheck.eligible === false) {
               // A recheck that names its own retry time (a customer quiet
               // window with a known end) reschedules straight to it and
@@ -2477,7 +2483,7 @@ function initScheduledJobs() {
                 // A suppressed replay will never deliver — same obligation
                 // handoff as a terminal provider block (claim releases,
                 // fallback arms, status flips into the admin lane).
-                await onTerminalDeferredReplay(claimMeta.entry_point, claimMeta);
+                await onTerminalDeferredReplay(claimMeta.entry_point, recheckMeta);
               }
               continue;
             }

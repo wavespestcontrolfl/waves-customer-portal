@@ -167,6 +167,31 @@ describe('deferred-replay registry', () => {
     expect(legacy.eligible).toBe(true);
   });
 
+  test('ach processing ack (r14 audit): eligible while THIS PI still processes, stale otherwise', async () => {
+    // 'processing' sits in the shared terminal list, so the generic
+    // collectibility recheck would suppress every replay of the one
+    // notice whose live state IS processing.
+    db.mockReturnValueOnce(firstChain({ status: 'processing', stripe_payment_intent_id: 'pi_1' }));
+    const live = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'ach_payment_processing', invoice_id: 'inv-1', stripe_payment_intent_id: 'pi_1',
+    });
+    expect(live.eligible).toBe(true);
+
+    db.mockReturnValueOnce(firstChain({ status: 'paid', stripe_payment_intent_id: 'pi_1' }));
+    const cleared = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'ach_payment_processing', invoice_id: 'inv-1', stripe_payment_intent_id: 'pi_1',
+    });
+    expect(cleared.eligible).toBe(false);
+    expect(cleared.reason).toBe('invoice-paid');
+
+    db.mockReturnValueOnce(firstChain({ status: 'processing', stripe_payment_intent_id: 'pi_2' }));
+    const superseded = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'ach_payment_processing', invoice_id: 'inv-1', stripe_payment_intent_id: 'pi_1',
+    });
+    expect(superseded.eligible).toBe(false);
+    expect(superseded.reason).toBe('pi-superseded');
+  });
+
   test('card request (r14): finalize delivers the email twin via the extracted leg', async () => {
     const { sendDeferredInvitationEmailLeg } = require('../services/appointment-card-request');
     const meta = { scheduled_service_id: 'ss-1', card_secure_url: 'https://s', card_template_key: 'secure_appointment_card' };

@@ -4294,13 +4294,24 @@ async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, ev
 // the worker runs again), and any in-process timer dies with a restart —
 // but the released claim itself is durable state: status='processing' +
 // ach_processing_notified_at NULL. This sweep (scheduler, every 15 min)
-// re-runs the worker from that state, SMS-only. The age floor lets the
-// inline setImmediate worker finish first; the 3-day ceiling matches the
-// ACH decision window and keeps the sweep off legacy/stuck processing
+// re-runs the worker from that state. The age floor lets the inline
+// setImmediate worker finish first; the 3-day ceiling matches the ACH
+// decision window and keeps the sweep off legacy/stuck processing
 // invoices that predate the acknowledgment claim (texting "we got your
 // bank transfer" about a weeks-old anomaly would be wrong, not late).
 // Re-claiming goes through the worker's own atomic UPDATE, so a webhook
 // racing the sweep still yields at-most-once.
+//
+// Email leg: a NULL claim covers two histories — the enqueue-failure
+// release (inline pass already attempted the email under the event-id
+// idempotency key) and a worker that never ran at all (crash after the
+// webhook ack; email-only customers got NOTHING). The durable
+// email_messages ledger distinguishes them: any prior
+// payment.ach_processing attempt for this invoice → SMS-only (a swept
+// email under the (invoice, PI) fallback key would bypass the event-id
+// dedupe and double-send); no prior attempt → run the email leg too.
+// The probe fails CLOSED to SMS-only — never risk a duplicate email on
+// an unreadable ledger.
 async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
   const youngerThan = new Date(Date.now() - 3 * 24 * 3600 * 1000);
   const olderThan = new Date(Date.now() - 10 * 60 * 1000);
@@ -4318,14 +4329,20 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
     .limit(limit)
     .select('id', 'stripe_payment_intent_id', 'invoice_number');
   for (const row of rows) {
-    logger.warn(`[stripe-webhook] ACH ack sweep re-running acknowledgment for invoice ${row.invoice_number || row.id} (claim was released or never taken)`);
+    const priorEmailAttempt = await db('email_messages')
+      .whereRaw('idempotency_key LIKE ?', [`payment.ach_processing:${row.id}:%`])
+      .first('id')
+      .catch(() => ({ id: 'probe-failed' }));
+    logger.warn(`[stripe-webhook] ACH ack sweep re-running acknowledgment for invoice ${row.invoice_number || row.id} (claim was released or never taken; email ${priorEmailAttempt ? 'already attempted — SMS-only' : 'never attempted — both legs'})`);
     await dispatchAchProcessingAcknowledgment({
       invoiceId: row.id,
       piId: row.stripe_payment_intent_id,
+      // sendAchProcessing falls back to the invoice total when the PI's
+      // validated cash amount isn't available (sweep context has no event).
       amount: null,
       eventCreated: null,
       eventId: null,
-      smsOnly: true,
+      smsOnly: !!priorEmailAttempt,
     }).catch((err) => {
       logger.error(`[stripe-webhook] ACH ack sweep failed for invoice ${row.id}: ${err.message}`);
     });

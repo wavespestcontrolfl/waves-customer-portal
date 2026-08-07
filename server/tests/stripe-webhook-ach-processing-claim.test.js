@@ -70,13 +70,14 @@ function resetMockState() {
     failSmsLogInsert: false,
     failRelease: false,
     sweepRows: [],
+    emailAttemptRow: null,
     updates: [], // { table, wheres, patch }
   });
 }
 
 function mockMakeBuilder(table) {
   const b = { _wheres: [] };
-  ['where', 'andWhere', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'select'].forEach((name) => {
+  ['where', 'andWhere', 'whereNot', 'whereIn', 'whereNotIn', 'whereRaw', 'orderBy', 'select'].forEach((name) => {
     b[name] = (...args) => {
       if (args.length && typeof args[0] === 'object') b._wheres.push(args[0]);
       else if (args.length) b._wheres.push({ [name]: args });
@@ -91,6 +92,7 @@ function mockMakeBuilder(table) {
   b.first = async () => {
     if (table === 'invoices') return mockState.invoiceRow;
     if (table === 'customers') return mockState.customer;
+    if (table === 'email_messages') return mockState.emailAttemptRow || null;
     return null;
   };
   b.update = async (patch) => {
@@ -214,7 +216,23 @@ test('smsOnly (r14): claims and sends the SMS but never repeats the email leg', 
   expect(PaymentLifecycleEmail.sendAchProcessing).not.toHaveBeenCalled();
 });
 
-test('sweep (r14): re-runs a released/never-taken claim SMS-only through the atomic claim', async () => {
+test('sweep (r14): released claim with a prior email attempt re-runs SMS-only', async () => {
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  mockState.sweepRows = [{ id: 'inv-1', stripe_payment_intent_id: 'pi_1', invoice_number: 'WPC-2026-0091' }];
+  // The inline pass already attempted the email (event-id idempotency key
+  // in the durable ledger) — a swept email under the fallback key would
+  // bypass that dedupe and double-send.
+  mockState.emailAttemptRow = { id: 'em-1' };
+
+  const result = await sweepAcks();
+
+  expect(result.candidates).toBe(1);
+  expect(claimUpdates()).toHaveLength(1);
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(PaymentLifecycleEmail.sendAchProcessing).not.toHaveBeenCalled();
+});
+
+test('sweep (r14): never-taken claim (no prior email attempt) runs BOTH legs', async () => {
   sendCustomerMessage.mockResolvedValue({ sent: true });
   mockState.sweepRows = [{ id: 'inv-1', stripe_payment_intent_id: 'pi_1', invoice_number: 'WPC-2026-0091' }];
 
@@ -223,7 +241,9 @@ test('sweep (r14): re-runs a released/never-taken claim SMS-only through the ato
   expect(result.candidates).toBe(1);
   expect(claimUpdates()).toHaveLength(1);
   expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-  expect(PaymentLifecycleEmail.sendAchProcessing).not.toHaveBeenCalled();
+  // Crash-before-worker: the inline email never ran, so an email-only
+  // customer would otherwise never hear about the transfer at all.
+  expect(PaymentLifecycleEmail.sendAchProcessing).toHaveBeenCalledTimes(1);
 });
 
 test('sweep (r14): a worker failure is contained per invoice, never rejects the sweep', async () => {

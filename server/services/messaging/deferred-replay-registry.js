@@ -286,6 +286,24 @@ const REGISTRY = {
             .first('id');
           invoiceId = inv?.id || null;
         }
+        // ACH processing acknowledgment: 'processing' is this notice's LIVE
+        // state, but it sits in the shared terminal list — the generic
+        // collectibility check below would suppress EVERY replay while the
+        // consumed one-shot claim blocks any other attempt. Eligible
+        // exactly while the invoice still processes THIS payment intent;
+        // any other state (cleared, failed-and-reset, superseded PI) has
+        // its own notice and makes this one stale.
+        if (invoiceId && meta.original_message_type === 'ach_payment_processing') {
+          const inv = await db('invoices')
+            .where({ id: invoiceId })
+            .first('status', 'stripe_payment_intent_id');
+          if (!inv) return { eligible: false, reason: 'invoice-missing' };
+          if (String(inv.status) !== 'processing') return { eligible: false, reason: `invoice-${inv.status}` };
+          if (meta.stripe_payment_intent_id && inv.stripe_payment_intent_id !== meta.stripe_payment_intent_id) {
+            return { eligible: false, reason: 'pi-superseded' };
+          }
+          return { eligible: true };
+        }
         if (!invoiceId) {
           if (meta.original_message_type === 'bank_verification_failed' && meta.waves_customer_id) {
             const verified = await db('payment_methods')
