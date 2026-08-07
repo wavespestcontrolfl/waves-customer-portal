@@ -675,6 +675,28 @@ async function markEstimateManuallyAccepted({
   const warnings = [];
 
   if (shouldRunDownstream) {
+    // Multi-property linkage (post-commit, best-effort, gated on
+    // GATE_CUSTOMER_PROPERTIES) — same hook as the public accept route:
+    // resolve/create the customer_properties row for the accepted address,
+    // link estimates.property_id, stamp the booked visits, refresh
+    // has_multi_home. The helper never throws.
+    {
+      // Manual accept is a terminal event for the group's comms owner too
+      // (codex #3244 r7) — same ownership transfer as the public accept.
+      try {
+        await require('../routes/estimate-public').transferGroupFollowupOwnership(acceptedEstimate);
+      } catch (e) {
+        logger.warn(`[manual-acceptance] follow-up ownership transfer failed for estimate ${acceptedEstimate.id}: ${e.message}`);
+      }
+      const linkageCustomerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
+      if (linkageCustomerId) {
+        await require('./estimate-property-linkage').linkAcceptedEstimateProperty({
+          estimateId: acceptedEstimate.id,
+          customerId: linkageCustomerId,
+        });
+      }
+    }
+
     try {
       await leadLinkService.markLinkedLeadEstimateAccepted({
         estimateId: acceptedEstimate.id,

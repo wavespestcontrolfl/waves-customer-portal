@@ -2643,6 +2643,93 @@ export default function EstimateToolViewV2({
   const [editMode, setEditMode] = useState(null);
   const [editLoadError, setEditLoadError] = useState(null);
 
+  // Multi-property group: anchor id set when the operator chains "Add another
+  // property" off a saved estimate (the next save joins the anchor's group via
+  // groupWithEstimateId), plus the sibling list the group strip renders.
+  const [groupAnchorId, setGroupAnchorId] = useState(null);
+  const [groupEstimates, setGroupEstimates] = useState([]);
+  const groupSourceId = savedId || editMode?.id || groupAnchorId;
+  useEffect(() => {
+    if (!groupSourceId) {
+      setGroupEstimates([]);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/admin/estimates/${groupSourceId}/group`, {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          },
+        });
+        if (!r.ok) return;
+        const d = await r.json().catch(() => ({}));
+        if (!cancelled) {
+          setGroupEstimates(Array.isArray(d.estimates) ? d.estimates : []);
+        }
+      } catch {
+        /* the group strip is informational — never block the builder */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [groupSourceId]);
+
+  // Call-intake tie-in: when this estimate is being built from a lead whose
+  // call extraction captured ADDITIONAL properties ("my home and my rental"),
+  // surface them so the operator can chain grouped estimates instead of the
+  // extra addresses dying in leads.extracted_data.
+  const [leadAdditionalProperties, setLeadAdditionalProperties] = useState([]);
+  const activeLeadId = form.leadId || initialLeadId || "";
+  useEffect(() => {
+    if (!activeLeadId) {
+      // Mid-group chaining drops form.leadId (the sibling draft must not
+      // re-link the lead), but the extracted address list must survive so a
+      // 3+ property call can keep chaining (codex #3244 r3). Only a true
+      // context reset (no group in progress) clears it.
+      if (!groupAnchorId) setLeadAdditionalProperties([]);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/admin/leads/${activeLeadId}`, {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          },
+        });
+        if (!r.ok) return;
+        const d = await r.json().catch(() => ({}));
+        let extracted = d?.lead?.extracted_data;
+        if (typeof extracted === "string") {
+          try {
+            extracted = JSON.parse(extracted);
+          } catch {
+            extracted = null;
+          }
+        }
+        const list = Array.isArray(extracted?.additional_properties)
+          ? extracted.additional_properties.filter(
+            (p) => p && String(p.address_line1 || "").trim(),
+          )
+          : [];
+        if (!cancelled) setLeadAdditionalProperties(list);
+      } catch {
+        /* informational only — never block the builder */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // groupAnchorId is a dependency so a group RESET (anchor cleared with no
+    // lead active) reruns the empty-ID branch and clears the extracted list —
+    // otherwise a previous lead's addresses could chain onto the next
+    // customer's group (codex #3244 r4).
+  }, [activeLeadId, groupAnchorId]);
+
   useEffect(() => {
     if (!editEstimateId) return undefined;
     let cancelled = false;
@@ -2730,6 +2817,7 @@ export default function EstimateToolViewV2({
     setSavedId(null);
     setSavedViewUrl(null);
     setPriceRecomputeNotice(null);
+    setGroupAnchorId(null);
   }
 
   const set = useCallback((key, val) => {
@@ -3117,6 +3205,9 @@ export default function EstimateToolViewV2({
     setExistingCustomerMatch(null);
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
+    // A fresh lead/customer prefill is a new job — never chain it into a
+    // previous customer's multi-property group.
+    setGroupAnchorId(null);
   }, [
     initialAddress,
     initialCustomerEmail,
@@ -3239,6 +3330,54 @@ export default function EstimateToolViewV2({
       manualDiscountValue: isCustomDiscountTemplate(d) ? "" : String(d.amount || 0),
       manualDiscountLabel: d.name,
     }));
+  }
+
+  // "Add another property": chain a sibling estimate for the same customer —
+  // keeps the contact identity, clears the property/services/quote, and links
+  // the next save into the anchor's group (groupWithEstimateId). The catalog
+  // Multi-Home Discount is pre-selected on the new draft (owner decision
+  // 2026-08-06: the 10% applies to EVERY property in a multi-property group —
+  // add it to the first estimate too via Edit if it was saved without one).
+  // The lead link is NOT carried over: a lead attaches to one estimate.
+  function addAnotherProperty(prefill = {}) {
+    const anchorId = savedId || editMode?.id;
+    if (!anchorId) return;
+    setGroupAnchorId(anchorId);
+    setEditMode(null);
+    setEditLoadError(null);
+    const multiHome = discountPresets.find((x) => x.discount_key === "multi_home");
+    setForm((f) => ({
+      ...buildDefaultEstimateForm({
+        customerId: f.customerId,
+        customerName: f.customerName,
+        customerPhone: f.customerPhone,
+        customerEmail: f.customerEmail,
+        address: prefill.address || "",
+      }),
+      // Account-level facts survive the property reset (codex #3244 r7):
+      // the recurring-customer 15% one-time perk belongs to the PERSON —
+      // resetting it silently overcharges a member's second property, and
+      // the new address's lookup can't rediscover membership keyed to the
+      // primary address.
+      isRecurringCustomer: f.isRecurringCustomer,
+      ...(multiHome
+        ? {
+          manualDiscountPreset: "multi_home",
+          manualDiscountType: manualDiscountTypeForCatalogRow(multiHome),
+          manualDiscountValue: String(multiHome.amount || 0),
+          manualDiscountLabel: multiHome.name,
+        }
+        : {}),
+    }));
+    setEnrichedProfile(null);
+    setSatelliteData(null);
+    setSatelliteStatus({ type: "", msg: "" });
+    setLookupStatus({ type: "", msg: "" });
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+    setPriceRecomputeNotice(null);
+    setShowSendForm(false);
   }
 
   function toggleServiceSpecificDiscount(key) {
@@ -4231,6 +4370,12 @@ export default function EstimateToolViewV2({
         satelliteUrl: satelliteData?.imageUrl || null,
         showOneTimeOption: !!form.showOneTimeOption,
         billByInvoice: !!form.billByInvoice,
+        // Multi-property chain: a create started via "Add another property"
+        // joins (or starts) the anchor estimate's group server-side. Never
+        // sent on a revise — the row keeps its stored group linkage.
+        ...(!isEditRevision && groupAnchorId
+          ? { groupWithEstimateId: groupAnchorId }
+          : {}),
       };
       // Edit mode publishes on save (same id + token — the customer's link
       // starts showing the updated quote), so a server-side reprice must be
@@ -4397,10 +4542,18 @@ export default function EstimateToolViewV2({
               ? "Email sent"
               : `Email failed: ${d.channels.email.error}`,
           );
+        if (d.groupPublicationFailures > 0) {
+          parts.push(
+            `${d.groupPublicationFailures} grouped propert${d.groupPublicationFailures === 1 ? "y" : "ies"} could NOT be published — they were returned to unsent; re-send them so the customer's link shows every property`,
+          );
+        }
         const anyFail =
           (d.channels.sms && !d.channels.sms.ok) ||
-          (d.channels.email && !d.channels.email.ok);
+          (d.channels.email && !d.channels.email.ok) ||
+          d.groupPublicationFailures > 0;
         alert((anyFail ? "Send had issues: " : "Sent: ") + parts.join(" / "));
+      } else if (d.groupPublicationFailures > 0) {
+        alert(`Estimate sent via ${label}, but ${d.groupPublicationFailures} grouped propert${d.groupPublicationFailures === 1 ? "y" : "ies"} could NOT be published — re-send them so the customer's link shows every property.`);
       } else {
         alert(`Estimate sent via ${label}!`);
       }
@@ -4411,6 +4564,11 @@ export default function EstimateToolViewV2({
   }
 
   function nextEstimate() {
+    // A fresh estimate is OUTSIDE any group build: a stale anchor would make
+    // the next unrelated save carry groupWithEstimateId and 400 on the
+    // same-customer guard (codex #3244 r5). Clearing it also lets the
+    // intake-list effect clear extracted addresses.
+    setGroupAnchorId(null);
     setForm((f) => ({
       ...f,
       address: "",
@@ -4989,6 +5147,122 @@ export default function EstimateToolViewV2({
               Exit edit mode
             </Button>
           </div>
+        )}
+        {(groupEstimates.length > 1 || groupAnchorId) && (
+          <Card className="p-4 mb-5">
+            <PanelTitle description="One customer, several service addresses. Sending any estimate in the group delivers a single link that shows every property; each is accepted on its own.">
+              Multi-Property Group
+            </PanelTitle>
+            <div className="flex flex-col">
+              {groupEstimates.map((g) => (
+                <div
+                  key={g.id}
+                  className="flex items-center gap-3 py-2 border-b-hairline border-zinc-200 last:border-b-0"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-14 text-zinc-900 truncate">
+                      {g.address || "(no address)"}
+                    </div>
+                    <div className="text-12 text-ink-secondary">
+                      {g.monthlyTotal != null && g.monthlyTotal > 0
+                        ? `$${Number(g.monthlyTotal).toFixed(2)}/mo`
+                        : g.onetimeTotal != null && g.onetimeTotal > 0
+                          ? `$${Number(g.onetimeTotal).toFixed(2)} one-time`
+                          : "no total yet"}
+                    </div>
+                  </div>
+                  <Badge>{g.status}</Badge>
+                  {editMode?.id === g.id || savedId === g.id ? (
+                    <span className="text-12 text-ink-secondary">
+                      on screen
+                    </span>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        navigate(`/admin/estimates?editEstimateId=${g.id}`)
+                      }
+                    >
+                      Edit
+                    </Button>
+                  )}
+                </div>
+              ))}
+              {groupAnchorId && !savedId && (
+                <div className="flex items-center gap-3 py-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-14 text-zinc-900 truncate">
+                      {form.address || "New property — enter address"}
+                    </div>
+                    <div className="text-12 text-ink-secondary">
+                      current draft, not saved yet
+                    </div>
+                  </div>
+                  <Badge>unsaved</Badge>
+                </div>
+              )}
+            </div>
+            <div className="text-12 text-ink-secondary mt-2">
+              The 10% Multi-Home Discount applies to ADDED properties only —
+              it is pre-selected on each new draft here. The first property
+              stays full price (owner ruling 2026-08-06); do not add the
+              discount to the anchor estimate.
+            </div>
+          </Card>
+        )}
+        {leadAdditionalProperties.length > 0 && (
+          <Card className="p-4 mb-5">
+            <PanelTitle description="The call for this lead mentioned more than one service address. Quote each as its own estimate — chained estimates group under one customer link.">
+              Caller Mentioned Additional Properties
+            </PanelTitle>
+            <div className="flex flex-col">
+              {leadAdditionalProperties.map((p, i) => {
+                const composedAddress = [
+                  [p.address_line1, p.address_line2].filter(Boolean).join(" "),
+                  p.city,
+                  [p.state || "FL", p.zip].filter(Boolean).join(" "),
+                ]
+                  .filter(Boolean)
+                  .join(", ");
+                return (
+                  <div
+                    key={`${p.address_line1}-${i}`}
+                    className="flex items-center gap-3 py-2 border-b-hairline border-zinc-200 last:border-b-0"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="text-14 text-zinc-900 truncate">
+                        {composedAddress}
+                      </div>
+                      <div className="text-12 text-ink-secondary">
+                        {[
+                          p.is_rental ? "rental" : null,
+                          p.property_type || null,
+                          p.notes || null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ") || "no extra details from the call"}
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={!savedId && !editMode?.id}
+                      onClick={() => addAnotherProperty({ address: composedAddress })}
+                    >
+                      Quote next
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+            {!savedId && !editMode?.id && (
+              <div className="text-12 text-ink-secondary mt-2">
+                Save the current estimate first — then each of these can be
+                quoted as the next property in the group.
+              </div>
+            )}
+          </Card>
         )}
         <div className="grid gap-7 grid-cols-1 lg:grid-cols-[440px_1fr]">
           {/* ═══ LEFT COLUMN: FORM ═══ */}
@@ -7597,6 +7871,16 @@ export default function EstimateToolViewV2({
                   ? "Changes saved — the customer's link now shows the updated estimate. Resend to notify them."
                   : `Saved — ID #${savedId}.`}
               </div>
+            )}
+            {(savedId || editMode?.id) && (
+              <Button
+                variant="secondary"
+                size="md"
+                className="mt-2"
+                onClick={() => addAnotherProperty()}
+              >
+                Add another property for this customer
+              </Button>
             )}
 
             {priceRecomputeNotice && (

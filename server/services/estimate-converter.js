@@ -596,6 +596,9 @@ async function classifyAddOnAcceptContext({
       .select(
         'scheduled_services.service_type',
         'scheduled_services.is_callback',
+        'scheduled_services.service_address_line1',
+        'scheduled_services.service_address_line2',
+        'scheduled_services.source_estimate_id',
         'services.service_key as catalog_service_key',
         'services.name as catalog_service_name',
       )
@@ -629,7 +632,37 @@ async function classifyAddOnAcceptContext({
     if (rowFamilies.some((family) => !family)) {
       return { addOnBase: 0, hadOtherLiveFamilies };
     }
-    if (!planRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
+    // Grouped accept (codex #3244 r2): a same-family plan at ANOTHER property
+    // is a true ADD-ON — property #1's pest plan must not classify property
+    // #2's pest plan as a re-quote (which would REPLACE monthly_rate with
+    // one property's rate and under-bill a monthly member). Replace evidence
+    // is scoped to rows at THIS estimate's address: stamped rows compare by
+    // service_address_line1, unstamped rows resolve via their creating
+    // estimate's address, then the customer's primary street; rows that
+    // still can't be located keep their replace vote (fail closed). Only
+    // grouped estimates take this path — ungrouped accepts are byte-identical.
+    let replaceEvidenceRows = planRows;
+    if (estimate?.estimate_group_id && estimate.address) {
+      const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
+      const estimateStreet = normalizedEstimateStreet(estimate.address);
+      if (estimateStreet) {
+        replaceEvidenceRows = await database.transaction(async (sp) => {
+          const customerPrimaryStreet = normalizedStampedStreet(customer?.address_line1, customer?.address_line2);
+          const kept = [];
+          for (const row of planRows) {
+            let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2);
+            if (!street && row.source_estimate_id) {
+              const src = await sp('estimates').where({ id: row.source_estimate_id }).first('address');
+              street = normalizedEstimateStreet(src?.address);
+            }
+            street = street || customerPrimaryStreet;
+            if (!street || street === estimateStreet) kept.push(row);
+          }
+          return kept;
+        });
+      }
+    }
+    if (!replaceEvidenceRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
       return { addOnBase: existingMonthlyRate, hadOtherLiveFamilies };
     }
     return { addOnBase: 0, hadOtherLiveFamilies };
@@ -2359,6 +2392,25 @@ const EstimateConverter = {
     let termStartDate = null;
     let firstScheduledServiceId = null;
     const deferredFollowUpReminderRows = [];
+    // Per-property duplicate-series scope (codex #3244 r1): a grouped
+    // estimate's accept resolves to the same customer as its siblings, so the
+    // customer+family guard alone would read the FIRST property's series as a
+    // duplicate and skip seeding the second property's schedule. Scoped to
+    // grouped estimates only — ungrouped accepts keep the exact legacy guard.
+    let seriesAddressScope = null;
+    if (estimate?.estimate_group_id && estimate.address) {
+      // normalizedEstimateStreet keeps the whole street portion (unit lines
+      // survive) — a naive split(',')[0] mis-scoped "Unit 4, 100 Beach Rd"
+      // (codex #3244 r5).
+      const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
+      const estimateStreet = normalizedEstimateStreet(estimate.address);
+      let customerPrimaryStreet = '';
+      try {
+        const custRow = await database('customers').where({ id: customerId }).first('address_line1', 'address_line2');
+        customerPrimaryStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2);
+      } catch { /* scope falls back to stamped addresses only */ }
+      if (estimateStreet) seriesAddressScope = { estimateStreet, customerPrimaryStreet };
+    }
     // Series-seeding transaction wrapper (P0: check-then-insert race). Every
     // converter path that can CREATE a recurring series runs its duplicate-
     // series re-check (checkActiveSeriesLocked — advisory lock per
@@ -2667,6 +2719,7 @@ const EstimateConverter = {
                 customerId,
                 serviceId: standaloneRow.service_id || null,
                 serviceType: standaloneRow.service_type,
+                serviceAddressScope: seriesAddressScope,
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
               if (matches.length > 0) return { kept: matches[0] };
@@ -2828,6 +2881,7 @@ const EstimateConverter = {
                 serviceId: reservedStart.service_id || null,
                 serviceType: reservedStart.service_type || null,
                 excludeParentId: reservedStart.id,
+                serviceAddressScope: seriesAddressScope,
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
               if (matches.length > 0) return { kept: matches[0] };
@@ -2988,6 +3042,7 @@ const EstimateConverter = {
                 customerId,
                 serviceId: combinedServiceId,
                 serviceType: serviceName,
+                serviceAddressScope: seriesAddressScope,
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
               if (matches.length > 0) return { kept: matches[0] };
@@ -3206,6 +3261,7 @@ const EstimateConverter = {
           // accept): the credit line exists IFF the ledger consumed exactly
           // that amount, or the whole accept rolls back — never an accepted
           // prepay beside an unconsumed deposit row.
+          let appliedPrepayDepositCredit = 0;
           const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
           let prepayDepositCredit;
           try {
@@ -3251,7 +3307,7 @@ const EstimateConverter = {
           // void the just-created invoice on a no-caller-transaction run
           // (accept-path runs ride the caller trx and roll back wholesale).
           draftInvoiceId = inv?.id || null;
-          const appliedPrepayDepositCredit = Number(inv?.applied_deposit_credit) || 0;
+          appliedPrepayDepositCredit = Number(inv?.applied_deposit_credit) || 0;
           if (inv?.id && appliedPrepayDepositCredit > 0) {
             const allocated = await consumeDepositCredit({
               estimateId,
