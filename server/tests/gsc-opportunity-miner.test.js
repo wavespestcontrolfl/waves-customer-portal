@@ -981,6 +981,13 @@ describe('listicle_family scoring + action mapping', () => {
     expect(classifierQuerySupported('specialty', 'pest', 'types of important documents florida')).toBe(false);
     // Prefix semantics survive the boundary wrap ('termit' → termite).
     expect(classifierQuerySupported('termite', 'termite', 'signs of termite damage')).toBe(true);
+    // Inflection-bounded tail (r18): word-start service tokens inside
+    // unrelated words must not validate.
+    expect(classifierQuerySupported('pest', 'pest', 'types of antique furniture florida')).toBe(false);
+    expect(classifierQuerySupported('rodent', 'rodent', 'best rating for lawn companies')).toBe(false);
+    expect(classifierQuerySupported('specialty', 'pest', 'beef prices florida')).toBe(false);
+    // Legit inflections still validate ('fertiliz' stem → fertilizer).
+    expect(classifierQuerySupported('lawn', 'lawn', 'types of lawn fertilizer florida')).toBe(true);
     // Resolver integration: unsupported classifier + no inference → null.
     const helpers = {
       canonicalize: canonicalizeServiceCategory,
@@ -1045,6 +1052,11 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/if \(pos < THRESHOLDS\.strikingDistancePositionMin\) continue;/);
     // No second won-intent classifier inside the served branch.
     expect(mineSrc).not.toMatch(/if \(served\.hit\.position >= THRESHOLDS\.strikingDistancePositionMin\)/);
+    // An answer_gap refresh already targeting the page fences the family
+    // refresh — one claimable edit per page per cycle (Codex r18); the
+    // fence set is floor-filtered where mineAll builds it.
+    expect(mineSrc).toMatch(/if \(answerGapPages\.has\(served\.hit\.page_url\)\) continue;/);
+    expect(src).toMatch(/answerGapPages: new Set\(\(buckets\.answer_gap \|\| \[\]\)[\s\S]{0,200}minScoreToActFor\(o\.action_type\)/);
   });
 
   test('a served family becomes a striking_distance refresh of the mapped page with family provenance (Codex r9)', () => {
@@ -1313,6 +1325,12 @@ describe('vendor synonyms excluded from listicle families (Codex r7 on #3255)', 
     // must not resurrect it via the noun fallback, or the overlay mandates
     // exactly seven H2 items for a 7-day treatment query (Codex r16).
     expect(isListicleQuery('7 day termite treatment checklist')).toBe(false);
+    // Hyphenated cadence must ENTER the guard, not skirt into the noun
+    // fallback (Codex r18).
+    expect(isListicleQuery('7-day termite treatment checklist')).toBe(false);
+    expect(isListicleQuery('24-hour pest checklist')).toBe(false);
+    // A hyphenated non-cadence count still reads as a listicle.
+    expect(isListicleQuery('10-step termite prevention checklist')).toBe(true);
     // Noun fallback without a leading count is untouched.
     expect(isListicleQuery('termite treatment checklist')).toBe(true);
   });

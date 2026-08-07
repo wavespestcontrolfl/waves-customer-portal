@@ -113,9 +113,14 @@ function classifierValidationRes() {
   try {
     const { SERVICE_PATTERNS } = require('./search-console-v2')._internals;
     for (const [cat, re] of Object.entries(SERVICE_PATTERNS)) {
+      // Inflections only — a bare [a-z]* tail accepted 'antique' (ant),
+      // 'rating' (rat), 'beef' (bee). The set covers plurals plus the
+      // stems the sync uses as prefixes ('termit'→termite/termites,
+      // 'fertiliz'→fertilizer/fertilization); 'ing'/'ed' stay excluded
+      // (rating/rated must not read as rodent evidence).
       const alts = re.source
         .split('|')
-        .map((alt) => `\\b(?:${alt})[a-z]*\\b`)
+        .map((alt) => `\\b(?:${alt})(?:e|es|s|er|ers|ation|ations)?\\b`)
         .join('|');
       CLASSIFIER_VALIDATION_RES.set(cat, new RegExp(alts, 'i'));
     }
@@ -951,7 +956,18 @@ class GscOpportunityMiner {
       ['no_content_yet', () => this.mineNoContentYet(since, ownPagesByServiceCity)],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
       ['answer_gap', () => this.mineAnswerGap(since)],
-      ['listicle_family', () => this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays })],
+      // Runs AFTER answer_gap by list order: its persistable refresh pages
+      // fence the family refreshes — two buckets must not queue
+      // independently claimable edits of one page (their dedupe keys
+      // differ by construction).
+      ['listicle_family', () => this.mineListicleFamily(since, {
+        ownPagesByServiceCity,
+        periodDays,
+        answerGapPages: new Set((buckets.answer_gap || [])
+          .filter((o) => o.score >= minScoreToActFor(o.action_type))
+          .map((o) => o.page_url)
+          .filter(Boolean)),
+      })],
     ];
 
     for (const [name, fn] of runs) {
@@ -1890,7 +1906,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28 } = {}) {
+  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set() } = {}) {
     // BOTH gates required: mining with the brief overlay off would persist
     // listicle_family rows whose briefs come out as ORDINARY supporting
     // blogs — the lane would look enabled while producing none of the
@@ -2040,6 +2056,13 @@ class GscOpportunityMiner {
         // emits, so the post-persist sweep expires it. Retiring here,
         // BEFORE persistAll, was non-atomic: a failed upsert left the old
         // work retired while its replacement never queued (Codex r15).
+        // An answer_gap refresh already targeting this page this run makes
+        // a family refresh a SECOND claimable edit of the same URL (their
+        // keys differ by construction) — the answer-gap brief covers the
+        // unanswered queries, which are exactly these variants; the family
+        // re-mines next cycle if the page still serves it, and the sweep
+        // expires any stale pending family refresh meanwhile (Codex r18).
+        if (answerGapPages.has(served.hit.page_url)) continue;
         // Accumulate — families sharing a serving page merge into ONE
         // refresh row (emitted after the loop) so no family's demand is
         // dropped. Grouped by PAGE alone: families classified under

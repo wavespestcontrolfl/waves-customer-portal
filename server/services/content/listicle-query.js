@@ -16,7 +16,10 @@
 // digit followed by a time/cadence unit ("24 hour pest control", "7 day
 // treatment plan") is service phrasing, not an item count — excluded.
 const LISTICLE_TIME_UNIT_RE = /^(hour|hr|day|week|month|year|minute|min|am|pm)s?\b/i;
-const LISTICLE_LEADING_COUNT_RE = /^\s*\d{1,2}\s+(\S+)/;
+// Hyphen accepted between the number and the next token: '7-day' and
+// '24-hour' are cadence phrasings that must ENTER the guard, not skirt it
+// into the noun fallback.
+const LISTICLE_LEADING_COUNT_RE = /^\s*\d{1,2}[\s-]+(\S+)/;
 const LISTICLE_NOUN_RE = /\b(signs?|symptoms|ways|tips|ideas|mistakes|myths|types|kinds|reasons|steps|plants|checklist)\b/i;
 // Vendor/roundup intent ("10 best pest control companies", "top exterminators")
 // must never receive the treatment: the overlay's voice notes forbid ranking
