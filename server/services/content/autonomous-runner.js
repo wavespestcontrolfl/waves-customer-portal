@@ -3439,13 +3439,45 @@ function applyOperatorSlugRepair(brief, draft) {
       mismatch: { expected_slug: rawPin, draft_slug: draft?.frontmatter?.slug || null },
     };
   }
-  const mismatch = operatorSlugMismatch(brief, draft);
-  if (!mismatch) return null;
+  if (pinned == null) return null;
+  // The publisher derives the final blog route as `${category}/${slug leaf}`
+  // (categoryRouteSlug), so the pin is authoritative for the WHOLE route —
+  // category segment included. A single-segment pin cannot survive that
+  // derivation (any category would prepend a segment), so it is
+  // unrepairable: keep the park (Codex r4).
+  const pinSegments = pinned.replace(/^\/+|\/+$/g, '').split('/');
+  if (pinSegments.length < 2) {
+    return {
+      ok: false,
+      reason: `pinned slug "${rawPin}" has no category segment — the publisher derives blog routes as category/leaf, so this pin cannot be honored mechanically`,
+      mismatch: { expected_slug: rawPin, draft_slug: draft?.frontmatter?.slug || null },
+    };
+  }
+  const pinCategory = pinSegments.slice(0, -1).join('/');
+  // Drift detection is EXACT, not normalized (Codex r4): operatorSlugMismatch
+  // lowercases both sides, so a case-drifted writer slug (/Lawn-Care/… vs
+  // pin /lawn-care/…) would read as "no drift", reach the publisher uncased,
+  // and fail schema validation instead of publishing the pinned route.
+  // Category drift is repaired for the same reason even when the slug
+  // matches exactly — the writer's category would otherwise override the
+  // pin's segment in the published route.
+  const draftSlugRaw = typeof draft?.frontmatter?.slug === 'string' ? draft.frontmatter.slug.trim() : null;
+  const draftCategory = typeof draft?.frontmatter?.category === 'string' ? draft.frontmatter.category.trim() : null;
+  if (draftSlugRaw === pinned && draftCategory === pinCategory) return null;
+  const mismatch = { expected_slug: rawPin, draft_slug: draft?.frontmatter?.slug ?? null };
   if (!draft || typeof draft !== 'object' || !draft.frontmatter || typeof draft.frontmatter !== 'object' || Array.isArray(draft.frontmatter)) {
     return { ok: false, reason: 'draft has no frontmatter object to repair', mismatch };
   }
 
-  const oldSlugPath = mismatch.draft_slug ? normalizeSlugPath(mismatch.draft_slug) : null;
+  // Body self-links may carry the writer's slug in EITHER its literal casing
+  // or the normalized form — rewrite both candidate paths (Codex r4).
+  const rawDraftPath = (typeof mismatch.draft_slug === 'string' && mismatch.draft_slug.trim())
+    ? `/${mismatch.draft_slug.trim().replace(/^\/+|\/+$/g, '')}/`
+    : null;
+  const oldSlugPaths = [...new Set([
+    mismatch.draft_slug ? normalizeSlugPath(mismatch.draft_slug) : null,
+    rawDraftPath,
+  ].filter(Boolean))].filter((p) => p !== pinned);
   const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
   const repair = {
     repaired_at: new Date().toISOString(),
@@ -3456,6 +3488,11 @@ function applyOperatorSlugRepair(brief, draft) {
   };
 
   draft.frontmatter.slug = pinned;
+
+  if (draftCategory !== pinCategory) {
+    draft.frontmatter.category = pinCategory;
+    repair.category_repaired = { from: draftCategory, to: pinCategory };
+  }
 
   const newCanonical = `${hub}${pinned}`;
   const oldCanonical = typeof draft.frontmatter.canonical === 'string' ? draft.frontmatter.canonical.trim() : '';
@@ -3486,14 +3523,17 @@ function applyOperatorSlugRepair(brief, draft) {
   // foreign-host citation like https://source.example/old-slug/report or a
   // longer internal route /old-slug/archive/ is someone else's URL, not a
   // self-link, and survives verbatim.
-  if (oldSlugPath && oldSlugPath !== pinned && typeof draft.body === 'string' && draft.body.includes(oldSlugPath)) {
+  if (typeof draft.body === 'string') {
     const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // `=` and `,` are NOT destination starts: a query value like
-    // `?return=/old-slug/` or a srcset entry embeds the old path inside a
-    // DIFFERENT destination whose pathname is not the post route (Codex r2).
-    const selfLinkRe = new RegExp(`(${escapeRe(hub)}|[\\s("'<\`]|^)${escapeRe(oldSlugPath)}(?![a-z0-9-])`, 'g');
     let occurrences = 0;
-    draft.body = draft.body.replace(selfLinkRe, (m, pre) => { occurrences += 1; return `${pre}${pinned}`; });
+    for (const oldSlugPath of oldSlugPaths) {
+      if (!draft.body.includes(oldSlugPath)) continue;
+      // `=` and `,` are NOT destination starts: a query value like
+      // `?return=/old-slug/` or a srcset entry embeds the old path inside a
+      // DIFFERENT destination whose pathname is not the post route (Codex r2).
+      const selfLinkRe = new RegExp(`(${escapeRe(hub)}|[\\s("'<\`]|^)${escapeRe(oldSlugPath)}(?![a-z0-9-])`, 'g');
+      draft.body = draft.body.replace(selfLinkRe, (m, pre) => { occurrences += 1; return `${pre}${pinned}`; });
+    }
     repair.body_self_link_rewrites = occurrences;
   }
 

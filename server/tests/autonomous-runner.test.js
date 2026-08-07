@@ -762,10 +762,45 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     };
   }
 
-  test('returns null (no-op) when the draft already matches the pin', () => {
-    const draft = driftedDraft({ frontmatter: { slug: PINNED, canonical: `https://www.wavespestcontrol.com${PINNED}` } });
+  test('returns null (no-op) when the draft already matches the pin — slug AND category', () => {
+    const draft = driftedDraft({ frontmatter: { slug: PINNED, canonical: `https://www.wavespestcontrol.com${PINNED}`, category: 'lawn-care' } });
     const before = JSON.stringify(draft);
     expect(applyOperatorSlugRepair(operatorBrief(), draft)).toBeNull();
+    expect(JSON.stringify(draft)).toBe(before);
+  });
+
+  test('a CASE-drifted draft slug is repaired — normalized equality must not skip the repair (Codex r4)', () => {
+    // operatorSlugMismatch lowercases both sides, so /Lawn-Care/… vs the pin
+    // reads as "no drift" — but the publisher would keep the uppercase leaf
+    // and schema-fail instead of publishing the pinned route.
+    const draft = driftedDraft({
+      frontmatter: { slug: '/Lawn-Care/Fall-Lawn-Mistakes-Swfl/', category: 'lawn-care' },
+      body: 'See [our checklist](/Lawn-Care/Fall-Lawn-Mistakes-Swfl/) for details.',
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+    expect(draft.body).toContain(`(${PINNED})`);
+    expect(result.repair.body_self_link_rewrites).toBe(1);
+  });
+
+  test('a drifted CATEGORY is forced to the pin even when the slug matches — the publisher derives the route from category (Codex r4)', () => {
+    const draft = driftedDraft({
+      frontmatter: { slug: PINNED, canonical: `https://www.wavespestcontrol.com${PINNED}`, category: 'pest-control' },
+      body: 'No self links here.',
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.category).toBe('lawn-care');
+    expect(result.repair.category_repaired).toEqual({ from: 'pest-control', to: 'lawn-care' });
+  });
+
+  test('a single-segment pin is unrepairable — the publisher would prepend a category and change the route (Codex r4)', () => {
+    const draft = driftedDraft();
+    const before = JSON.stringify(draft);
+    const result = applyOperatorSlugRepair(operatorBrief('/fall-lawn-mistakes-swfl/'), draft);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/no category segment/);
     expect(JSON.stringify(draft)).toBe(before);
   });
 
