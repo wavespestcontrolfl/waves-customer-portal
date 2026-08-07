@@ -2762,6 +2762,39 @@ const ReviewService = {
    * with an active sequence returns that one instead of starting a second
    * (also enforced by the partial unique index). Fires step 0 immediately.
    */
+  /**
+   * Park a series-final enrollment durably while its opener's send is in
+   * flight (codex #3243 r21 P2): a 'deferred' row (outside the one-active
+   * index) that the sequence cron redeems once the opener settles.
+   * started_at carries the intended firstTouchAt; completed_at records the
+   * parking time for the 24h age cap. Write failures propagate.
+   */
+  async _parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal }) {
+    const existingPark = await db("review_sequences")
+      .where({ customer_id: customerId })
+      .whereIn("status", ["deferred", "redeeming"])
+      .first();
+    if (existingPark) return;
+    await db("review_sequences").insert({
+      customer_id: customerId,
+      location_id: locationId || customer?.nearest_location_id || null,
+      status: "deferred",
+      stop_reason: "opener_in_flight",
+      plan: JSON.stringify(Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN),
+      current_step: 0,
+      touches_sent: 0,
+      next_run_at: new Date(Date.now() + 10 * 60 * 1000),
+      series_final: seriesFinal === true,
+      service_record_id: serviceRecordId || null,
+      scheduled_service_id: scheduledServiceId || null,
+      tech_name: techName || null,
+      service_type: serviceType || null,
+      started_by: startedBy || null,
+      started_at: firstTouchAt || null,
+      completed_at: new Date(),
+    });
+  },
+
   // In-flight supersession re-check spacing — a knob so tests don't wait
   // real provider-settle seconds.
   _SUPERSEDE_RETRY_DELAY_MS: 1500,
@@ -2834,39 +2867,10 @@ const ReviewService = {
         }
       }
       if (parkFinal) {
-        // A provider call can outlive the bounded wait (codex #3243 r21
-        // P2 — dispatchToProvider has no matching timeout), and a
-        // single-trigger final has no natural retry. PARK the enrollment
-        // durably: a 'deferred' row (outside the one-active index) that
-        // the sequence cron redeems once the opener settles. started_at
-        // carries the intended firstTouchAt; completed_at records the
-        // parking time for the 24h age cap. Deliberately OUTSIDE the
-        // proof's catch (r26 P2): a parking-write failure must propagate
-        // to the caller, never degrade into already_active with no retry.
-        const existingPark = await db("review_sequences")
-          .where({ customer_id: customerId })
-          .whereIn("status", ["deferred", "redeeming"])
-          .first();
-        if (!existingPark) {
-          await db("review_sequences").insert({
-            customer_id: customerId,
-            location_id: locationId || customer.nearest_location_id || null,
-            status: "deferred",
-            stop_reason: "opener_in_flight",
-            plan: JSON.stringify(Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN),
-            current_step: 0,
-            touches_sent: 0,
-            next_run_at: new Date(Date.now() + 10 * 60 * 1000),
-            series_final: seriesFinal === true,
-            service_record_id: serviceRecordId || null,
-            scheduled_service_id: scheduledServiceId || null,
-            tech_name: techName || null,
-            service_type: serviceType || null,
-            started_by: startedBy || null,
-            started_at: firstTouchAt || null,
-            completed_at: new Date(),
-          });
-        }
+        // Deliberately OUTSIDE the proof's catch (r26 P2): a parking-write
+        // failure must propagate to the caller, never degrade into
+        // already_active with no retry.
+        await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal });
         return { started: false, reason: "deferred_inflight", deferred: true };
       }
       if (!supersedeOpenerId && !proceedFresh) return { started: false, reason: "already_active", sequence: active };
@@ -3014,6 +3018,13 @@ const ReviewService = {
         // already_active; NO active sequence means the final's cadence must
         // still be created — retry once without the stop.
         const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
+        if (existing && existing.id === supersedeOpenerId && existing.next_run_at == null) {
+          // The cron CLAIMED the opener between the proof and the commit
+          // (codex #3243 r27 P2) — its send is now in flight, so the final
+          // parks durably instead of vanishing into already_active.
+          await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal });
+          return { started: false, reason: "deferred_inflight", deferred: true };
+        }
         if (existing) return { started: false, reason: "already_active", sequence: existing };
         supersedeOpenerId = null;
         try {

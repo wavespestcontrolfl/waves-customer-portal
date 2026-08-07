@@ -2069,6 +2069,42 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(threw).toBe(true);
   });
 
+  test('r27: a cron claim landing mid-supersession parks the final instead of already_active', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+    const base = makeMock({
+      customers: [{ id: 'mc', first_name: 'Kay', last_name: 'T', phone: '+19410000071', nearest_location_id: 'bradenton' }],
+      scheduled_services: [
+        { id: 'mc-1', customer_id: 'mc', service_id: 'svc-wt', status: 'completed', scheduled_date: d(2), service_key: 'wildlife_trapping' },
+        { id: 'mc-2', customer_id: 'mc', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+      ],
+      review_sequences: [{ id: 'seq-claimrace', customer_id: 'mc', scheduled_service_id: 'mc-1', status: 'active', current_step: 0, next_run_at: new Date(Date.now() + 3600000), plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]) }],
+    });
+    // Simulate the cron claiming the opener between the proof and the
+    // transactional stop: the first review_requests probe (the zero-sent
+    // check inside the proof) flips next_run_at to null.
+    const claimConn = jest.fn((tbl) => {
+      if (String(tbl) === 'review_requests') {
+        const opener = base.__state.rows.review_sequences.find((r) => r.id === 'seq-claimrace');
+        if (opener && opener.status === 'active') opener.next_run_at = null;
+      }
+      return base(tbl);
+    });
+    claimConn.__state = base.__state;
+    db.mockImplementation(claimConn);
+    const res = await ReviewService.startReviewSequence({
+      customerId: 'mc',
+      plan: [{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }],
+      seriesFinal: true,
+      scheduledServiceId: 'mc-2',
+    });
+    expect(res.reason).toBe('deferred_inflight');
+    const parked = base.__state.rows.review_sequences.find((r) => r.status === 'deferred');
+    expect(parked).toBeTruthy();
+    const opener = base.__state.rows.review_sequences.find((r) => r.id === 'seq-claimrace');
+    expect(opener.status).toBe('active');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
