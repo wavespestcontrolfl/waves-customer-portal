@@ -217,14 +217,42 @@ describe('send-boundary gate for persisted suppression estimates', () => {
     else process.env.GATE_BERMUDA_SUPPRESSION = prevGate;
   });
 
-  test('detector recognizes all three persisted carriers (and nothing else)', () => {
+  test('detector recognizes every persisted carrier (and nothing else)', () => {
     expect(estimateDataCarriesBermudaSuppression({ engineRequest: { options: { bermudaSuppression: true } } })).toBe(true);
     expect(estimateDataCarriesBermudaSuppression({ engineInputs: { services: { lawn: { bermudaSuppression: true } } } })).toBe(true);
+    // The mapped envelope nests the meta under result.results.lawnMeta.
+    expect(estimateDataCarriesBermudaSuppression({ result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } } })).toBe(true);
     expect(estimateDataCarriesBermudaSuppression({ result: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } })).toBe(true);
     expect(estimateDataCarriesBermudaSuppression(JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }))).toBe(true);
-    expect(estimateDataCarriesBermudaSuppression({ engineRequest: { options: {} }, result: { lawnMeta: { bermudaSuppression: null } } })).toBe(false);
+    expect(estimateDataCarriesBermudaSuppression({ engineRequest: { options: {} }, result: { results: { lawnMeta: { bermudaSuppression: null } } } })).toBe(false);
     expect(estimateDataCarriesBermudaSuppression('not json')).toBe(false);
     expect(estimateDataCarriesBermudaSuppression(null)).toBe(false);
+  });
+
+  test('detector works on an ACTUAL engine-mapped result (result-only persistence)', () => {
+    const prev = process.env.GATE_BERMUDA_SUPPRESSION;
+    process.env.GATE_BERMUDA_SUPPRESSION = 'true';
+    try {
+      const pricingEngine = require('../services/pricing-engine');
+      const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+      const v1 = pricingEngine.generateEstimate({
+        turfSf: 5000,
+        homeSqFt: 2000,
+        services: { lawn: { track: 'st_augustine', tier: 'enhanced', bermudaSuppression: true } },
+      });
+      const mapped = mapV1ToLegacyShape(v1);
+      expect(estimateDataCarriesBermudaSuppression({ result: mapped })).toBe(true);
+
+      const v1Plain = pricingEngine.generateEstimate({
+        turfSf: 5000,
+        homeSqFt: 2000,
+        services: { lawn: { track: 'st_augustine', tier: 'enhanced' } },
+      });
+      expect(estimateDataCarriesBermudaSuppression({ result: mapV1ToLegacyShape(v1Plain) })).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION;
+      else process.env.GATE_BERMUDA_SUPPRESSION = prev;
+    }
   });
 
   test('a persisted suppression estimate is NOT sendable while the gate is off', () => {

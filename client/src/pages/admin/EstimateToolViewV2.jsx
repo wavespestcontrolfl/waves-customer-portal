@@ -2398,6 +2398,16 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
   }, [rgIdentityKey, form]);
 
+  // Leaving the St. Augustine track clears the suppression confirmation too —
+  // hiding the checkbox alone would let a track round-trip restore it checked
+  // and price the add-on without fresh cultivar/season verification (same
+  // per-job rule as the lawn-deselect / identity / next-estimate resets).
+  useEffect(() => {
+    if (form.grassType !== "st_augustine" && form.bermudaSuppression) {
+      setForm((f) => ({ ...f, bermudaSuppression: false }));
+    }
+  }, [form.grassType, form.bermudaSuppression]);
+
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
     const commercialDetected = isCommercialEstimateInput(form);

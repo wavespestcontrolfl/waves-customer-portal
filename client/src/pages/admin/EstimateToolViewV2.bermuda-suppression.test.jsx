@@ -104,9 +104,21 @@ describe("bermudagrass suppression add-on checkbox", () => {
       expect(container.textContent).toMatch(/ProVista\/Captiva excluded/);
     });
 
-    // Switching off the St. Augustine track removes the option entirely.
+    // Switching off the St. Augustine track removes the option entirely AND
+    // clears the confirmation — a track round-trip must never restore a
+    // checked add-on without fresh cultivar/season verification.
     const grassSelect = findGrassTypeSelect(container);
     expect(grassSelect).toBeTruthy();
+    fireEvent.change(grassSelect, { target: { value: "bermuda" } });
+    await waitFor(() => {
+      expect(findCheckboxByLabel(container, /Bermudagrass suppression/)).toBeNull();
+    });
+    fireEvent.change(grassSelect, { target: { value: "st_augustine" } });
+    await waitFor(() => {
+      const el = findCheckboxByLabel(container, /Bermudagrass suppression/);
+      expect(el).toBeTruthy();
+      expect(el.checked).toBe(false);
+    });
     fireEvent.change(grassSelect, { target: { value: "bermuda" } });
     await waitFor(() => {
       expect(findCheckboxByLabel(container, /Bermudagrass suppression/)).toBeNull();

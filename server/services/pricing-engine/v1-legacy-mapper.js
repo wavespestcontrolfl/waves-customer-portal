@@ -1186,6 +1186,11 @@ function estimateDataCarriesBermudaSuppression(estimateDataRaw) {
   if (!d || typeof d !== 'object') return false;
   return d.engineRequest?.options?.bermudaSuppression === true
     || d.engineInputs?.services?.lawn?.bermudaSuppression === true
+    // The mapped envelope nests the meta at result.results.lawnMeta (the
+    // `results: R` wrapper above — codex #3272 r4 caught the flat path
+    // checking a level that doesn't exist); the flat variant is kept for
+    // callers holding a bare R.
+    || !!d.result?.results?.lawnMeta?.bermudaSuppression
     || !!d.result?.lawnMeta?.bermudaSuppression;
 }
 
