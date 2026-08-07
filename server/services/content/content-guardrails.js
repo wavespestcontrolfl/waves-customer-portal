@@ -2896,7 +2896,13 @@ const REENTRY_SPELLED_NUM_SRC = "(?:(?:twenty|thirty|forty|fifty|sixty|seventy|e
 // "two and a half" compound form. BOTH range endpoints use the full
 // spelled-number grammar (Codex PR r5): "twenty-one to twenty-four hours"
 // is a figure — a single-word endpoint would drop the compound half.
-const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}(?:${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?|\\w+))?)\\s*(?:minutes?|mins?|hours?|hrs?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour)`;
+// Seconds/days/weeks are figures too (Codex PR r8 audit): "do not
+// re-enter for 90 seconds", "keep pets off for one day".
+const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}(?:${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?|\\w+))?)\\s*(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour|a\\s+(?:day|week)\\b)`;
+// Copular/modal predicate grammar shared by the safety-subject patterns
+// (Codex PR r8 audit): "will be safe", "becomes safe", "should be safe"
+// are the same unconditional claim as "is safe".
+const REENTRY_LINKING_VERB_SRC = "(?:is|are|remains?|stays?|becomes?|(?:will|can|could|should|would|may|might|must)\\s+(?:be|remain|stay|become))";
 // Drying-duration forms with no intrinsic re-entry word require PESTICIDE
 // context in the sentence (Codex PR r5): "Paint drying takes 30 minutes"
 // and "the caulk needs 30 minutes to dry" are home-maintenance advice —
@@ -2924,19 +2930,19 @@ const REENTRY_SAFETY_SRCS = [
   // "safe FROM <hazard>" is protection-from-harm phrasing, never the
   // pesticide-safety claim (Codex PR r6: "the home is safe from termite
   // damage after repairs" is legal educational copy).
-  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?|surfaces?|rooms?|turf|grass|homes?|houses?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`,
+  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?|surfaces?|rooms?|turf|grass|homes?|houses?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)\\s+(?:\\w+\\s+){0,2}?${REENTRY_LINKING_VERB_SRC}\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`,
   // Abstract service nouns (service/program/plan) only count as pesticide
   // subjects with treatment context in the sentence (Codex PR r6: "your
   // service plan is safe from price increases" is not a pesticide claim;
   // "our pest-control program is safe" stays caught by the direct
   // subjects above).
-  { src: `\\b(?:services?|programs?|plans?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`, needsTreatmentContext: true },
+  { src: `\\b(?:services?|programs?|plans?)\\s+(?:\\w+\\s+){0,2}?${REENTRY_LINKING_VERB_SRC}\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`, needsTreatmentContext: true },
   // Pronoun subjects with a treatment ANTECEDENT (Codex PR r5): "We apply
   // a granular treatment. It is safe once dry." is the same claim with the
   // noun one sentence back. Only it/they — never that/this, which appear as
   // relative pronouns in legal copy ("plants that are safe for
   // pollinators"). "safe to say/assume/bet" idioms are not safety claims.
-  { src: `\\b(?:it|they)\\s+(?:is|are|remains?|stays?|becomes?|will\\s+be)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe\\b(?!\\s+to\\s+(?:say|assume|bet|call))|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`, needsTreatmentAntecedent: true },
+  { src: `\\b(?:it|they)\\s+${REENTRY_LINKING_VERB_SRC}\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe\\b(?!\\s+to\\s+(?:say|assume|bet|call))|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`, needsTreatmentAntecedent: true },
   // "safe for/around kids, pets, pollinators…" — PESTICIDE context
   // required (Codex PR r2): "the repaired screen is safe for pets" and
   // "plants that are safe for pollinators" are legal educational copy; the
@@ -3024,8 +3030,8 @@ const REENTRY_SAFETY_SRCS = [
   // Attributive figures, hyphenated or not: "a 30 minute re-entry
   // interval", "a 45-minute re-entry window" — the re-entry/wait tails are
   // intrinsic; the drying tail needs treatment context (Codex PR r5).
-  "\\b(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)[-‑\\s]\\s?(?:minute|min|hour|hr)\\s+(?:re-?entry|wait(?:ing)?)\\b",
-  { src: "\\b(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)[-‑\\s]\\s?(?:minute|min|hour|hr)\\s+dry(?:ing)?\\b", needsTreatmentContext: true },
+  "\\b(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+(?:re-?entry|wait(?:ing)?)\\b",
+  { src: "\\b(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+dry(?:ing)?\\b", needsTreatmentContext: true },
 ];
 
 // The APPROVED conditional idiom has TWO required parts (AGENTS.md): the
@@ -3084,7 +3090,7 @@ function reentrySafetyClaimFinding(text) {
       // A DURATION finding is prohibited in EVERY polarity — "Do not
       // re-enter after 30 minutes" IS the banned fixed figure, so the
       // disclaimer exemptions below must not shield it (Codex audit).
-      const isDurationFinding = /\b(?:minutes?|mins?|hours?|hrs?|hour)\b/i.test(m[0]);
+      const isDurationFinding = /\b(?:minutes?|mins?|hours?|hrs?|hour|seconds?|secs?|days?|weeks?|day|week)\b/i.test(m[0]);
       // "no product is completely safe", "we never call a treatment safe",
       // "isn't safe to re-enter until dry" — honest disclaimers, keep.
       if (!isDurationFinding

@@ -3190,6 +3190,24 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('modal/copular predicates are the same safety claim (Codex PR r8 audit)', () => {
+    for (const body of [
+      'The product will be safe once dry.',
+      'The pesticide becomes safe after drying.',
+      'The spray should be safe around pets.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+  });
+
+  test('seconds and days are fixed figures too (Codex PR r8 audit)', () => {
+    const seconds = guardrails.evaluate({ body: 'Do not re-enter the treated room for 90 seconds.' }, {});
+    expect(seconds.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const day = guardrails.evaluate({ body: 'Keep pets off the treated lawn for one day.' }, {});
+    expect(day.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('go-inside/go-into re-entry instructions carry the figure too (Codex PR r7)', () => {
     const inside = guardrails.evaluate({ body: 'Do not go inside the treated home for 30 minutes.' }, {});
     expect(inside.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
