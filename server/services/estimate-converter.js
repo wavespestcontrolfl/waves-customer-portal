@@ -2313,8 +2313,10 @@ const EstimateConverter = {
     // A one-time accept CLEARS the scalar (waveguard_tier 'One-Time',
     // monthly_rate null) — the attribution clears with it (codex #3245 r8),
     // or a later recurring accept would sum obsolete components back in.
-    // Gate-aware error policy lives in the helper.
-    if (suppressRecurringConversion) {
+    // Gate-aware error policy lives in the helper. (`=== true` keeps this
+    // branch textually distinct from the unit-processing branch the
+    // series-lock pre-pass source guard anchors on.)
+    if (suppressRecurringConversion === true) {
       await require('./plan-rate-ledger')
         .syncScalarWriteToLedger(database, customerId, null, { source: 'one_time_accept' });
     }
