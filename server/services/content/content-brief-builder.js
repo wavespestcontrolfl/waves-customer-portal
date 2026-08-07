@@ -679,9 +679,25 @@ class ContentBriefBuilder {
       signals.customer_signal?.service,
       signals.customer_signal?.topic,
     ]);
-    const { requiredSections, schemaTypes } = faqBlocked
+    let { requiredSections, schemaTypes } = faqBlocked
       ? stripFaqRequirements({ requiredSections: layered.requiredSections, schemaTypes: layered.schemaTypes })
       : { requiredSections: layered.requiredSections, schemaTypes: layered.schemaTypes };
+
+    // Family-refresh actionability (Codex r21): merged families ride in
+    // gsc_signal, but the refresh agent's contract has no family mode —
+    // without a BINDING section per retained variant, secondary families
+    // would be silently dropped while the frozen page-key blocks them from
+    // ever queueing separately. Mirrors the answer-gap pattern: the data
+    // in gsc_signal, the requirement in required_sections.
+    const familyVariants = opportunity.signal_metadata?.family_variants;
+    if (decision.action_type === 'refresh_existing_page'
+      && opportunity.signal_metadata?.source === 'listicle_family'
+      && Array.isArray(familyVariants) && familyVariants.length) {
+      requiredSections = [
+        ...requiredSections,
+        `family coverage: the refreshed page must directly address EVERY fragmented phrasing of this intent — ${familyVariants.map((v) => `"${v.query}"`).join(', ')} — extend an existing section or add one (FAQ acceptable where allowed) for any phrasing the page does not already answer`,
+      ];
+    }
 
     // Operator-authored intercept brief: the seeded payload is injected
     // VERBATIM — the operator's outline becomes the content plan, sources

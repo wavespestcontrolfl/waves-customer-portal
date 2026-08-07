@@ -486,15 +486,29 @@ function listicleFamilyEligible(fam, thresholds = THRESHOLDS, { repQualifiesQuer
 // florida' resolves tree-shrub — and whichever has one more impression is
 // the representative. Any variant's supported classification keeps the
 // family; a family where NO variant resolves stays off-topic-rejected.
+// Known service-homonym contexts: FULL-WORD service evidence that is
+// semantically about something else entirely ('software bugs', 'computer
+// mouse', 'palm reading'). Word-sense disambiguation can't be perfect in
+// regex — this list rejects the recurring GSC classes and errs narrow:
+// 'mouse trap' and 'palm tree' stay service evidence (Codex r21).
+const SERVICE_HOMONYM_RE = new RegExp([
+  String.raw`\b(?:software|computer|hardware|coding|programming|apps?|web(?:site)?|video\s*game|gaming|wireless|bluetooth|usb)\s+(?:bugs?|mice|mouse)\b`,
+  String.raw`\b(?:bugs?)\s+(?:in|on)\s+(?:software|code|computers?|apps?|websites?)\b`,
+  String.raw`\bmouse\s+(?:pads?|cursors?|dpi|sensitivity)\b`,
+  String.raw`\bpalm\s+(?:reading|readers?|springs?|sunday|oil|of\s+your\s+hand)\b`,
+  String.raw`\bstock\s+tickers?\b`,
+].join('|'), 'i');
+
 function resolveListicleFamilyServiceCity(fam, { canonicalize, inferService, normCity, inferCity, classifierSupported = classifierQuerySupported }) {
   let service = null;
   let city = null;
   for (const v of fam.variants) {
-    if (!service) {
+    if (!service && !SERVICE_HOMONYM_RE.test(v.query)) {
       const canon = canonicalize(v.service_category);
       // Classifier value only counts with boundary-aware query evidence —
       // see classifierQuerySupported (unbounded classifier patterns tag
-      // off-topic queries); inference is already contextual.
+      // off-topic queries); inference is already contextual. A homonym
+      // context (above) voids the variant's service evidence entirely.
       service = (canon && classifierSupported(v.service_category, canon, v.query) ? canon : null)
         || inferService(v.query);
     }
@@ -2231,20 +2245,37 @@ class GscOpportunityMiner {
     } catch (err) {
       logger.warn(`[gsc-opp-miner] refresh arbitration frozen-key lookup failed: ${err.message}`);
     }
-    return new Set(candidates
-      .filter((o) => !frozenKeys.has(o.dedupe_key))
-      .map((o) => o.page_url));
+    const live = candidates.filter((o) => !frozenKeys.has(o.dedupe_key));
+    return {
+      pages: new Set(live.map((o) => o.page_url)),
+      // Their queries too: a family BLOG whose variant one of these
+      // refreshes targets is the same intent under a different key — a
+      // boosted ordinary refresh and a family blog must not both persist
+      // (Codex r21).
+      queries: new Set(live.map((o) => String(o.query || '').toLowerCase()).filter(Boolean)),
+    };
+  }
+
+  // Does this family opp lose page/query arbitration to another bucket?
+  static familyOppYields(o, arbitrated) {
+    if (o.bucket !== 'listicle_family') return false;
+    if (o.action_type === 'refresh_existing_page') return arbitrated.pages.has(o.page_url);
+    if (o.action_type === 'new_supporting_blog') {
+      const variants = Array.isArray(o.signal_metadata?.family_variants) ? o.signal_metadata.family_variants : [];
+      return [o.query, ...variants.map((v) => v.query)]
+        .some((q) => q && arbitrated.queries.has(String(q).toLowerCase()));
+    }
+    return false;
   }
 
   async _sweepStaleFamilyRows(familyOpps = [], batch = []) {
     try {
-      // Mirror persistAll's one-refresh-per-page yield: a family refresh
-      // that yielded to another bucket's refresh never persisted, so its
-      // key must not protect a stale pending row either.
-      const otherRefreshPages = await this._arbitratedRefreshPages(batch);
+      // Mirror persistAll's arbitration: a family opp that yielded never
+      // persisted, so its key must not protect a stale pending row either.
+      const arbitrated = await this._arbitratedRefreshPages(batch);
       const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
       const persistableKeys = familyOpps
-        .filter((o) => !(o.action_type === 'refresh_existing_page' && otherRefreshPages.has(o.page_url)))
+        .filter((o) => !GscOpportunityMiner.familyOppYields(o, arbitrated))
         .filter((o) => o.score >= (familyFloorActions.includes(o.action_type)
           ? minScoreToActFor('new_supporting_blog')
           : minScoreToActFor(o.action_type)))
@@ -2318,13 +2349,11 @@ class GscOpportunityMiner {
     const now = new Date();
     const expiresAt = new Date(Date.now() + 14 * 86400_000);
 
-    // One refresh per page per batch — see _arbitratedRefreshPages.
-    const otherRefreshPages = await this._arbitratedRefreshPages(opportunities);
-    const admitted = opportunities.filter((o) => !(
-      o.bucket === 'listicle_family'
-      && o.action_type === 'refresh_existing_page'
-      && otherRefreshPages.has(o.page_url)
-    ));
+    // One edit per page/intent per batch — see _arbitratedRefreshPages
+    // and familyOppYields (family refreshes yield by PAGE, family blogs
+    // by QUERY intent).
+    const arbitrated = await this._arbitratedRefreshPages(opportunities);
+    const admitted = opportunities.filter((o) => !GscOpportunityMiner.familyOppYields(o, arbitrated));
 
     // Group by dedupe_key, keep highest-score entry per key.
     const winners = new Map();

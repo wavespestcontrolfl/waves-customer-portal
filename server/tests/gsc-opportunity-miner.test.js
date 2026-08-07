@@ -557,6 +557,21 @@ describe('persistAll upsert binding integrity (07-31 regression)', () => {
     calls.length = 0;
     expect(await miner.persistAll([fam])).toBe(1);
     expect(calls[0].bindings[12]).toBe('listicle_family::page::x');
+    // Family BLOG arbitration (r21): a floor-clearing ordinary refresh
+    // whose query is one of the family's variants suppresses the family
+    // blog too — same intent, different keys.
+    calls.length = 0;
+    const famBlog = {
+      bucket: 'listicle_family', action_type: 'new_supporting_blog',
+      query: 'signs of termites florida', page_url: null, service: 'termite', city: null,
+      score: 60, score_breakdown: {},
+      signal_metadata: { family_variants: [{ query: 'termite signs', impressions: 30 }] },
+      dedupe_key: 'listicle_family::fam::y',
+    };
+    const blogPersisted = await miner.persistAll([famBlog, boosted]);
+    expect(blogPersisted).toBe(1);
+    expect(calls.length).toBe(1);
+    expect(calls[0].bindings[12]).toBe('striking_distance::t::_::x');
     // Frozen-aware arbitration (r20): the lookup lives in
     // _arbitratedRefreshPages — a candidate whose dedupe row is done or
     // skipped lands nothing and must not suppress the family refresh.
@@ -1028,6 +1043,29 @@ describe('listicle_family scoring + action mapping', () => {
     expect(classifierQuerySupported('specialty', 'pest', 'beef prices florida')).toBe(false);
     // Legit inflections still validate ('fertiliz' stem → fertilizer).
     expect(classifierQuerySupported('lawn', 'lawn', 'types of lawn fertilizer florida')).toBe(true);
+    // Homonym contexts void the variant's service evidence entirely in the
+    // resolver (r21): full-word matches about something else.
+    const homonymHelpers = {
+      canonicalize: canonicalizeServiceCategory,
+      inferService: inferServiceFromQuery,
+      normCity: (c) => c || null,
+      inferCity: () => null,
+    };
+    for (const q of ['types of software bugs', 'computer mouse types explained', 'palm reading signs meaning']) {
+      expect(resolveListicleFamilyServiceCity({
+        variants: [
+          { query: q, service_category: 'pest', city_target: null },
+          { query: `${q} florida`, service_category: 'pest', city_target: null },
+        ],
+      }, homonymHelpers).service).toBeNull();
+    }
+    // Narrowness: real service homonym-adjacent queries stay evidence.
+    expect(resolveListicleFamilyServiceCity({
+      variants: [{ query: 'best mouse trap placement attic', service_category: 'rodent', city_target: null }],
+    }, homonymHelpers).service).toBe('rodent');
+    expect(resolveListicleFamilyServiceCity({
+      variants: [{ query: 'palm tree fertilizer schedule', service_category: 'tree_shrub', city_target: null }],
+    }, homonymHelpers).service).toBe('tree-shrub');
     // Per-token inflections (r19): generic suffixes validated 'rates'
     // (rat+es) and 'tickers' (tick+ers) — the default is plural-s only.
     expect(classifierQuerySupported('rodent', 'rodent', 'reasons interest rates change')).toBe(false);

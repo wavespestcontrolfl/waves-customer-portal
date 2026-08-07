@@ -594,6 +594,62 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
   });
 });
 
+describe('_composeBrief family-refresh coverage section (Codex r21 on #3255)', () => {
+  test('a family refresh gains a BINDING section enumerating every retained variant', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-fam-refresh',
+        bucket: 'listicle_family',
+        query: 'drought tolerant plants florida',
+        page_url: 'https://wavespestcontrol.com/blog/florida-native-plants/',
+        service: 'tree-shrub',
+        city: null,
+        signal_metadata: {
+          source: 'listicle_family',
+          impressions: 166,
+          family_variants: [
+            { query: 'drought tolerant plants florida', impressions: 48 },
+            { query: 'types of native plants florida', impressions: 40 },
+          ],
+        },
+      },
+      signals: {},
+      decision: { page_type: 'refresh', action_type: 'refresh_existing_page', final_score: 60, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    // The refresh agent has no family mode — without a binding section the
+    // secondary families' demand dies with the frozen page-key.
+    const familySection = brief.required_sections.find((sec) => /family coverage/i.test(sec));
+    expect(familySection).toBeTruthy();
+    expect(familySection).toContain('drought tolerant plants florida');
+    expect(familySection).toContain('types of native plants florida');
+  });
+
+  test('a family BLOG (no page) gets no family-coverage section', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-fam-blog',
+        bucket: 'listicle_family',
+        query: 'drought tolerant plants sarasota',
+        page_url: null,
+        service: 'tree-shrub',
+        city: 'Sarasota',
+        signal_metadata: {
+          source: 'listicle_family',
+          impressions: 102,
+          family_variants: [{ query: 'drought tolerant plants sarasota', impressions: 48 }],
+        },
+      },
+      signals: {},
+      decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 60, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    expect(brief.required_sections.some((sec) => /family coverage/i.test(sec))).toBe(false);
+  });
+});
+
 describe('_composeBrief gsc_signal impressions fallback (seasonal_rising fix 2026-08-01)', () => {
   // seasonal_rising was the ONE bucket that never wrote the canonical
   // `impressions` key, so every draft from it hard-failed the quality gate's
