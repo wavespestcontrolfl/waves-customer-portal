@@ -453,7 +453,10 @@ class AutonomousRunner {
       // their guard options need the async live-page hydration (prior body,
       // live meta) the in-loop lint deliberately skips; gate 3c covers them
       // unchanged.
-      selfLintOptions: brief.action_type === 'refresh_existing_page'
+      // Kill switch (house rule: every lane keeps one): default ON; set
+      // AUTONOMOUS_WRITER_SELF_LINT=false to disarm the in-loop lint — the
+      // authoritative run-level gates are untouched either way.
+      selfLintOptions: (brief.action_type === 'refresh_existing_page' || !envBool('AUTONOMOUS_WRITER_SELF_LINT', true))
         ? null
         : deriveSyncGuardrailOptions(opp, brief),
     }).catch((err) => ({
