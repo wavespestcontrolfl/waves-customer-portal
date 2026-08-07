@@ -274,6 +274,15 @@ const LAWN_PRICING_V2 = {
   callbackReservePerVisitDefault: 2,
   laborMinutesBase: 12,
   laborMinutesPer1000Sqft: 2.5,
+  // Bermuda-in-St.-Augustine suppression add-on (Recognition + Fusilade II
+  // FL 2(ee) tank mix, max 2 applications per growing season): a per-
+  // application adder baked into the lawn per-app price (owner ruling
+  // 2026-08-07 "a number baked into the per application"). St. Augustine
+  // track only; requested per estimate via services.lawn.bermudaSuppression
+  // behind GATE_BERMUDA_SUPPRESSION. Both knobs are DB-editable on the
+  // pricing_config lawn_pricing_v2 row (deepMerge); adder =
+  // perAppBase + perAppPer1000Sqft * (turf sqft / 1000).
+  bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2 },
   defaultRouteDensity: 'DENSE',
   routeDensityMinutes: {
     DENSE: 5,

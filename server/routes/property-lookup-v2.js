@@ -3219,6 +3219,14 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       track,
       tier: lawnTier,
       lawnFreq: Number(o.lawnFreq) || 9,
+      // Bermuda-in-St.-Augustine suppression adder (dark behind
+      // GATE_BERMUDA_SUPPRESSION; kill switch = leave/flip the gate off).
+      // Operator-selected in the admin builder only — deliberately NOT in
+      // PUBLIC_QUOTE_SERVICE_KEYS passthrough or the estimator-MCP intent
+      // schema (eligibility is a manual call: cultivar, %-bermuda, season).
+      ...(process.env.GATE_BERMUDA_SUPPRESSION === 'true' && o.bermudaSuppression === true
+        ? { bermudaSuppression: true }
+        : {}),
       useLawnCostFloor: o.useLawnCostFloor != null ? !!o.useLawnCostFloor : undefined,
       targetLawnGrossMargin: o.targetLawnGrossMargin,
       routeDriveMinutes: o.routeDriveMinutes,

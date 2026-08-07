@@ -2170,6 +2170,7 @@ export default function EstimateToolViewV2({
     roachFeeOverride: "",
     standaloneRoachFeeOverride: "",
     lawnFreq: "9",
+    bermudaSuppression: false,
     measuredTurfSf: "",
     pestFreq: "4",
     plugArea: "",
@@ -3925,6 +3926,9 @@ export default function EstimateToolViewV2({
       const options = {
         grassType: form.grassType || "st_augustine",
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
+        ...(form.svcLawn && form.grassType === "st_augustine" && form.bermudaSuppression
+          ? { bermudaSuppression: true }
+          : {}),
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
         manualDiscount,
         serviceSpecificDiscounts,
@@ -6004,6 +6008,27 @@ export default function EstimateToolViewV2({
                       />
                     </FieldV2>
                   </div>{" "}
+                  {/* Bermuda-in-St.-Augustine suppression add-on — dark behind
+                      GATE_BERMUDA_SUPPRESSION server-side (the option is
+                      stripped while the gate is off). St. Augustine track only. */}
+                  {form.grassType === "st_augustine" && (
+                    <div className="mt-3">
+                      <CheckboxV2
+                        k="bermudaSuppression"
+                        label="Bermudagrass suppression add-on (baked into per-application price)"
+                      />
+                      {form.bermudaSuppression && (
+                        <div className="ml-7 mb-1 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-12 text-zinc-600">
+                          Recognition + Fusilade II tank mix under the FL 2(ee) — max 2 applications
+                          per growing season, spring only. Verify before quoting: cultivar
+                          (ProVista/Captiva excluded; Seville do-not-treat; CitraBlue or unknown
+                          cultivar needs a test area first), lawn is not already mostly bermuda
+                          (recommend renovation instead), turf unstressed. Torpedograss is
+                          suppression-only — never sell as removal.
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               {hasTurfPricedSelection && (

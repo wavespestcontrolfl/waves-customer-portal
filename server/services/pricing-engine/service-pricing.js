@@ -1978,6 +1978,11 @@ function priceLawnCare(property, options = {}) {
     // must not inherit the recurring program minimum). NOT wired to
     // estimate-engine input — sold recurring plans always get the floor.
     applyProgramMinimum = true,
+    // Bermuda-in-St.-Augustine suppression add-on: per-application adder
+    // baked into every tier's per-app price (owner ruling 2026-08-07).
+    // St. Augustine track only — the Recognition + Fusilade II 2(ee) is a
+    // remove-bermuda-FROM-St.-Augustine program.
+    bermudaSuppression = false,
   } = options;
 
   const normalizedTrack = normalizeGrassType(track);
@@ -2026,6 +2031,19 @@ function priceLawnCare(property, options = {}) {
     && Number.isFinite(programMinimumMonthly) && programMinimumMonthly > 0
     ? Math.round(programMinimumMonthly * 12 * 100) / 100
     : 0;
+  // Bermuda suppression adder: eligibility is the St. Augustine track only.
+  // The adder rides INSIDE the lawn line (annual/monthly recomputed from the
+  // raised per-app), so WaveGuard discounting, plan-rate sum semantics, and
+  // the audit shape all see one lawn price. Suppression materials are not in
+  // the cost-floor model (floors are disarmed; margin stays reporting-only).
+  const bsCfg = LAWN_PRICING_V2.bermudaSuppression || {};
+  const bermudaSuppressionEligible = normalizedTrack === 'st_augustine';
+  const bermudaSuppressionPerApp = bermudaSuppression === true && bermudaSuppressionEligible
+    ? Math.round((
+      (Number.isFinite(Number(bsCfg.perAppBase)) ? Number(bsCfg.perAppBase) : 0)
+      + (Number.isFinite(Number(bsCfg.perAppPer1000Sqft)) ? Number(bsCfg.perAppPer1000Sqft) : 0) * (lawnSqFt / 1000)
+    ) * 100) / 100
+    : 0;
   const allTiers = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
@@ -2043,8 +2061,12 @@ function priceLawnCare(property, options = {}) {
     let ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
     const programMinimumApplied = programMinimumAnnual > 0 && ann < programMinimumAnnual;
     if (programMinimumApplied) ann = Math.ceil(programMinimumAnnual / tc.freq) * tc.freq;
+    // Bermuda suppression bakes into the per-app AFTER floor/minimum
+    // resolution — the adder is add-on revenue, never a way to satisfy them.
+    if (bermudaSuppressionPerApp > 0) ann = Math.round((ann + bermudaSuppressionPerApp * tc.freq) * 100) / 100;
     const perApp = Math.round(ann / tc.freq * 100) / 100;
     return {
+      bermudaSuppressionPerApp: bermudaSuppressionPerApp > 0 ? bermudaSuppressionPerApp : null,
       tier: t,
       index: tc.index,
       visits: tc.freq,
@@ -2104,9 +2126,20 @@ function priceLawnCare(property, options = {}) {
     pricingBasis: selected.pricingBasis,
     pricingSource: selected.pricingSource,
     customQuoteFlag,
-    notes: customQuoteFlag
-      ? [`Turf area exceeds ${LAWN_TABLE_MAX_SQFT.toLocaleString()} sq ft. Pricing was extrapolated and requires field verification/custom quote.`]
-      : [],
+    bermudaSuppression: bermudaSuppressionPerApp > 0
+      ? {
+        perApp: bermudaSuppressionPerApp,
+        annual: Math.round(bermudaSuppressionPerApp * (LAWN_TIERS[selected.tier]?.freq ?? tierConfig.freq) * 100) / 100,
+      }
+      : null,
+    notes: [
+      ...(customQuoteFlag
+        ? [`Turf area exceeds ${LAWN_TABLE_MAX_SQFT.toLocaleString()} sq ft. Pricing was extrapolated and requires field verification/custom quote.`]
+        : []),
+      ...(bermudaSuppression === true && !bermudaSuppressionEligible
+        ? ['Bermudagrass suppression applies to St. Augustine lawns only — not included in this price.']
+        : []),
+    ],
     marketMonthly: selected.marketMonthly,
     marketAnnual: selected.marketAnnual,
     // Lawn V2 is cost-floor authoritative; the bracket table is reference-only.

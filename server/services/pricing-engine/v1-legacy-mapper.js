@@ -464,6 +464,7 @@ function mapV1ToLegacyShape(v1Result) {
         costFloorAnnual: t.costFloorAnnual ?? null,
         programMinimumApplied: !!t.programMinimumApplied,
         programMinimumMonthly: t.programMinimumMonthly ?? null,
+        bermudaSuppressionPerApp: t.bermudaSuppressionPerApp ?? null,
         margin: t.costFloorDetails && Number(t.annual) > 0
           ? Math.round((1 - t.costFloorDetails.annualCost / t.annual) * 1000) / 1000
           : null,
@@ -491,6 +492,7 @@ function mapV1ToLegacyShape(v1Result) {
       costFloorApplied: !!lawnLI.costFloorApplied,
       programMinimumApplied: !!lawnLI.programMinimumApplied,
       programMinimumMonthly: lawnLI.programMinimumMonthly ?? null,
+      bermudaSuppression: lawnLI.bermudaSuppression || null,
       costs: lawnLI.costs || null,
       margin: lawnLI.margin ?? null,
     };
@@ -664,7 +666,7 @@ function mapV1ToLegacyShape(v1Result) {
       ...measurementMetadataFields(li), ...extra,
     });
   };
-  svcAdd('Lawn Care', lawnLI, {
+  svcAdd(lawnLI && lawnLI.bermudaSuppression ? 'Lawn Care + Bermudagrass Suppression' : 'Lawn Care', lawnLI, {
     service: 'lawn_care',
     discountable: true,
     discountEligible: true,
