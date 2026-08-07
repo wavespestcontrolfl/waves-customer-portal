@@ -334,10 +334,13 @@ function clusterListicleFamilies(rows) {
       existing.position = merged
         ? (existing.position * existing.impressions + pos * imp) / merged
         : 0;
-      // Higher-impression classification wins the merged variant.
-      if (imp > existing.impressions) {
+      // Highest-INDIVIDUAL-impression classification wins the merged
+      // variant — compared against the winner's own row impressions, not
+      // the cumulative sum (30+25 then 40 must let the 40-row win).
+      if (imp > existing.classificationImp) {
         existing.service_category = r.service_category || null;
         existing.city_target = r.city_target || null;
+        existing.classificationImp = imp;
       }
       existing.impressions = merged;
     } else {
@@ -350,6 +353,8 @@ function clusterListicleFamilies(rows) {
         position: pos,
         service_category: r.service_category || null,
         city_target: r.city_target || null,
+        // Row impressions backing the current classification (merge tiebreak).
+        classificationImp: imp,
       };
       fam.variants.push(variant);
       fam.byQuery.set(r.query, variant);
@@ -1709,12 +1714,16 @@ class GscOpportunityMiner {
         dedupe_key: o.dedupe_key,
       };
 
-      // ON CONFLICT (dedupe_key) DO UPDATE — keeps latest score + mined_at,
-      // resets status back to pending unless the row is claimed, done,
-      // waiting on autonomous review, or SKIPPED. Skipped is sticky here:
-      // it records a decision — an operator dismissal (manual_dismiss:*),
-      // a human-closed PR (astro_pr_closed_unmerged), an exhausted attempt
-      // budget — and skip()'s own contract is "won't be retried". The
+      // ON CONFLICT (dedupe_key) DO UPDATE — refreshes score + mined_at and
+      // revives the row to pending, but ONLY for mutable rows: the WHERE
+      // guard skips claimed, done, pending_review, and skipped rows
+      // ENTIRELY, leaving score/metadata/identity exactly as processed. A
+      // claimed row must not change beneath its worker, done/reviewed rows
+      // are records of what WAS processed (a listicle_family representative
+      // swap would otherwise pair old identity with new provenance), and
+      // skipped is sticky by contract: it records a decision — an operator
+      // dismissal (manual_dismiss:*), a human-closed PR
+      // (astro_pr_closed_unmerged), an exhausted attempt budget — and the
       // daily mine re-emitting the same dedupe_key must not overturn it
       // (it did: every dismissal came back the next morning and burned a
       // fresh runner dispatch). Deliberate contrast: 'expired' DOES revive
@@ -1722,7 +1731,7 @@ class GscOpportunityMiner {
       // the same signal is a fresh opportunity with a fresh expires_at.
       // Operator paths that legitimately resurrect a skipped row (review
       // requeue, intercept re-seed) write status='pending' directly and
-      // are unaffected by this CASE.
+      // are unaffected by this guard.
       const result = await db.raw(
         `INSERT INTO opportunity_queue
            (bucket, action_type, query, page_url, service, city,
@@ -1762,27 +1771,18 @@ class GscOpportunityMiner {
                -- classification while its score/metadata came from the new
                -- representative (internally inconsistent; facts checks could
                -- run against a stale service/city).
-               -- ...but ONLY for mutable rows: a claimed row's identity must
-               -- not shift beneath its worker, and done/reviewed/skipped rows
-               -- are records of what WAS processed. Same frozen-status list
-               -- as the status CASE below.
-               query = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'skipped')
-                            THEN opportunity_queue.query
-                            ELSE EXCLUDED.query
-                       END,
-               service = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'skipped')
-                              THEN opportunity_queue.service
-                              ELSE EXCLUDED.service
-                         END,
-               city = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'skipped')
-                           THEN opportunity_queue.city
-                           ELSE EXCLUDED.city
-                      END,
-               status = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'skipped')
-                             THEN opportunity_queue.status
-                             ELSE 'pending'
-                        END,
+               query = EXCLUDED.query,
+               service = EXCLUDED.service,
+               city = EXCLUDED.city,
+               status = 'pending',
                updated_at = now()
+           -- Frozen rows (claimed / done / pending_review / skipped) skip
+           -- this update ENTIRELY — not just identity: score, breakdown,
+           -- metadata, action, and timestamps all derive from the CURRENT
+           -- representative, and pairing them with a frozen row's processed
+           -- identity would corrupt the record (and mutate a claimed row
+           -- beneath its worker).
+           WHERE opportunity_queue.status NOT IN ('claimed', 'done', 'pending_review', 'skipped')
         `,
         [
           row.bucket, row.action_type, row.query, row.page_url, row.service, row.city,

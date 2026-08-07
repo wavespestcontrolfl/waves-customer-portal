@@ -513,17 +513,13 @@ describe('persistAll upsert binding integrity (07-31 regression)', () => {
     const placeholders = (calls[0].sql.match(/\?/g) || []).length;
     expect(placeholders).toBe(calls[0].bindings.length);
 
-    // Identity refresh (query/service/city from EXCLUDED, added for
-    // listicle_family representative churn) must be guarded by the SAME
-    // frozen-status list as the status CASE: a claimed row's identity must
-    // not shift beneath its worker, and done/reviewed/skipped rows are
-    // records of what WAS processed (pre-push r7).
-    const frozen = "IN \\('claimed', 'done', 'pending_review', 'skipped'\\)";
-    for (const field of ['query', 'service', 'city']) {
-      expect(calls[0].sql).toMatch(new RegExp(
-        `${field} = CASE WHEN opportunity_queue\\.status ${frozen}\\s+THEN opportunity_queue\\.${field}\\s+ELSE EXCLUDED\\.${field}`
-      ));
-    }
+    // Frozen rows (claimed/done/pending_review/skipped) must skip the
+    // conflict-update ENTIRELY — identity AND score/metadata/action all
+    // derive from the CURRENT representative, and pairing them with a
+    // frozen row's processed identity corrupts the record (pre-push r7).
+    expect(calls[0].sql).toMatch(
+      /DO UPDATE[\s\S]*WHERE opportunity_queue\.status NOT IN \('claimed', 'done', 'pending_review', 'skipped'\)/
+    );
   });
 });
 
@@ -737,6 +733,21 @@ describe('clusterListicleFamilies', () => {
     expect(fams[0].impressions).toBe(70);
     // A single distinct query can never clear the ≥2-variant rule.
     expect(listicleFamilyEligible(fams[0])).toBe(false);
+  });
+
+  test('classification winner compares INDIVIDUAL row impressions, not the cumulative sum', () => {
+    // 30 + 25 merge first (cumulative 55); a later 40-row still wins the
+    // classification because 40 is the highest individual row.
+    const fams = clusterListicleFamilies([
+      { query: 'kinds of ants in florida', impressions: 30, avg_position: 10, service_category: 'pest', city_target: null },
+      { query: 'kinds of ants in florida', impressions: 25, avg_position: 12, service_category: 'lawn', city_target: null },
+      { query: 'kinds of ants in florida', impressions: 40, avg_position: 14, service_category: 'tree_shrub', city_target: 'venice' },
+    ]);
+    expect(fams).toHaveLength(1);
+    expect(fams[0].variants).toHaveLength(1);
+    expect(fams[0].variants[0].impressions).toBe(95);
+    expect(fams[0].variants[0].service_category).toBe('tree_shrub');
+    expect(fams[0].variants[0].city_target).toBe('venice');
   });
 });
 
