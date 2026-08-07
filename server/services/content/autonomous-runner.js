@@ -3397,6 +3397,9 @@ const PINNED_SLUG_PATTERN = /^\/[a-z0-9-]+(\/[a-z0-9-]+)*\/$/;
 // Canonical category set shared with the publisher (dependency-free module —
 // requirable here without the publisher's full module graph).
 const { POST_CATEGORIES: BLOG_POST_CATEGORIES } = require('../content-astro/blog-categories');
+// Spoke fleet keys shared with the publisher's isFleetCanonicalHost — also a
+// dependency-free module (content-guardrails already requires it).
+const { SPOKE_SITE_KEYS: FLEET_SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 /**
  * applyOperatorSlugRepair(brief, draft) — the operator-pinned slug is
@@ -3497,12 +3500,24 @@ function applyOperatorSlugRepair(brief, draft) {
   ].filter(Boolean))].filter((p) => p !== pinned);
   const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
   // Hub host equivalence (apex ≡ www) — mirrors the publisher's
-  // isFleetCanonicalHost contract. Shared by the canonical foreign-check and
-  // the body self-link rewrite so the two never diverge (Codex r7).
+  // isFleetCanonicalHost contract. The body self-link rewrite uses the hub
+  // variants; the canonical foreign-check uses the FULL fleet set — both
+  // derive from this one block so the classifiers never diverge (Codex r7).
   const hubUrl = (() => { try { return new URL(hub); } catch { return null; } })();
   const hubHostVariants = hubUrl
     ? [...new Set([hubUrl.host, hubUrl.host.startsWith('www.') ? hubUrl.host.slice(4) : `www.${hubUrl.host}`])]
     : [];
+  // "Foreign" for a canonical means OFF-FLEET (Codex r8): the publisher's
+  // isFleetCanonicalHost accepts the hub AND every spoke host
+  // (www-insensitive), so a spoke-host canonical "preserved" here would pass
+  // the publisher's host check but fail its leaf check and park a finished
+  // draft. Rewriting any fleet-host canonical to hub+pin is safe — the
+  // publisher derives the binding, origin-correct canonical from the slug
+  // regardless.
+  const fleetCanonicalHosts = new Set([
+    ...(hubUrl ? [hubUrl.hostname.toLowerCase().replace(/^www\./, '')] : []),
+    ...FLEET_SPOKE_SITE_KEYS.map((key) => String(key).toLowerCase()),
+  ]);
   const repair = {
     repaired_at: new Date().toISOString(),
     from_slug: mismatch.draft_slug || null,
@@ -3532,14 +3547,12 @@ function applyOperatorSlugRepair(brief, draft) {
     // repair over it (Codex r2).
     try {
       const parsed = new URL(oldCanonical.startsWith('//') ? `https:${oldCanonical}` : oldCanonical);
-      // Apex and www are the SAME hub (Codex r7): an exact-host comparison
-      // would misclassify an apex-host canonical as foreign, preserve the
-      // stale old-leaf canonical, and the publisher would then park a draft
-      // whose repair should have succeeded (fleet host accepted, old leaf
-      // rejected).
-      canonicalIsForeign = hubHostVariants.length
-        ? !hubHostVariants.includes(parsed.host)
-        : parsed.host !== new URL(hub).host;
+      // Fleet membership, www-insensitive (Codex r7/r8): an exact- or
+      // hub-only host comparison misclassifies an apex-host (r7) or
+      // spoke-host (r8) canonical as foreign, preserves the stale old-leaf
+      // canonical, and the publisher then parks a draft whose repair should
+      // have succeeded (fleet host accepted, old leaf rejected).
+      canonicalIsForeign = !fleetCanonicalHosts.has(parsed.hostname.toLowerCase().replace(/^www\./, ''));
     } catch { canonicalIsForeign = false; }
   }
   if (!canonicalIsForeign && oldCanonical !== newCanonical) {

@@ -952,6 +952,24 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     expect(result.repair.canonical_rewritten).toBe(true);
   });
 
+  test('a SPOKE-host canonical is a valid FLEET URL — repaired, not preserved as foreign (Codex r8)', () => {
+    // The publisher's isFleetCanonicalHost accepts every spoke host, so a
+    // hub-only check here would preserve the stale old-leaf canonical; the
+    // publisher would then accept the host but reject the leaf, parking a
+    // finished spoke draft. Stamping the hub canonical is safe — the
+    // publisher derives the binding, origin-correct canonical from the slug.
+    for (const spokeCanonical of [
+      'https://www.sarasotaflpestcontrol.com/fall-lawn-mistakes-southwest-florida/',
+      'https://sarasotaflpestcontrol.com/fall-lawn-mistakes-southwest-florida/',
+    ]) {
+      const draft = driftedDraft({ frontmatter: { canonical: spokeCanonical } });
+      const result = applyOperatorSlugRepair(operatorBrief(), draft);
+      expect(result.ok).toBe(true);
+      expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+      expect(result.repair.canonical_rewritten).toBe(true);
+    }
+  });
+
   test('an off-site canonical is PRESERVED for the publisher guard — repair must not mask the unsafe input (Codex r1; protocol-relative r2)', () => {
     for (const foreignCanonical of ['https://competitor.example/their-page/', '//competitor.example/their-page/']) {
       const draft = driftedDraft({
