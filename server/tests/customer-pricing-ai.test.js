@@ -659,3 +659,36 @@ describe('r5 regressions', () => {
     expect(result.code).not.toBe('PRICING_UNAVAILABLE');
   });
 });
+
+// Codex #3253 r7: a visit still en_route/on_site across ET midnight is the
+// customer's plan (same precedent as billed-plan logic, #3241 r5) — the
+// ownership date cutoff must not drop it.
+describe('live in-progress rows survive the ownership date cutoff', () => {
+  const { loadOwnedRecurringServiceKeys } = require('../services/waveguard-existing-services');
+  const mk = (rows) => dbForTables({
+    customers: [{ id: 'cust-live', active: true, waveguard_tier: 'Bronze', monthly_rate: 55 }],
+    scheduled_services: rows,
+  });
+
+  test('a past-dated on_site row is still owned; a past-dated scheduled row is not', async () => {
+    const onSite = await loadOwnedRecurringServiceKeys(mk([{
+      id: 'svc-onsite', service_type: 'Lawn Care', scheduled_date: '2025-01-01',
+      status: 'on_site', is_recurring: true,
+    }]), 'cust-live');
+    expect(onSite).toEqual(['lawn_care']);
+
+    const stale = await loadOwnedRecurringServiceKeys(mk([{
+      id: 'svc-stale', service_type: 'Lawn Care', scheduled_date: '2025-01-01',
+      status: 'scheduled', is_recurring: true,
+    }]), 'cust-live');
+    expect(stale).toEqual([]);
+  });
+
+  test('a live in-progress callback still never counts', async () => {
+    const owned = await loadOwnedRecurringServiceKeys(mk([{
+      id: 'svc-live-cb', service_type: 'Lawn Care', scheduled_date: '2025-01-01',
+      status: 'en_route', is_recurring: true, is_callback: true,
+    }]), 'cust-live');
+    expect(owned).toEqual([]);
+  });
+});

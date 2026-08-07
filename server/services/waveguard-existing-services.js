@@ -122,7 +122,10 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   if (hasIsRecurring) {
     query = query.where({ is_recurring: true });
   }
-  const selectCols = ['id', 'service_type', 'scheduled_date'];
+  // status: filtered in SQL (whereNotIn TERMINAL) but also read row-side by
+  // the ownership lifecycle filter (live en_route/on_site rows bypass the
+  // date cutoff — codex #3253 r7).
+  const selectCols = ['id', 'service_type', 'scheduled_date', 'status'];
   if (cols.estimated_price) selectCols.push('estimated_price');
   if (cols.annual_prepay_term_id) selectCols.push('annual_prepay_term_id');
   // Carried for the gated qualifying-row filter below — additive for every
@@ -174,10 +177,16 @@ function qualifyingRowDateKey(value) {
   return null;
 }
 
+// One callback-truthiness predicate — the gated pricing evidence AND the
+// ownership lifecycle filter both read it; a second copy would drift.
+function isCallbackRow(row) {
+  return row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true';
+}
+
 function rowPassesGatedPricingEvidence(row, today) {
   const rowDate = qualifyingRowDateKey(row.scheduled_date);
   if (!rowDate || rowDate < today) return false;
-  if (row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true') return false;
+  if (isCallbackRow(row)) return false;
   // Lazy require: self-booking-plan-sync requires this module at load time,
   // so a top-level require back at it would be a cycle.
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
@@ -428,9 +437,19 @@ async function loadOwnedRecurringServiceKeys(database, customerId, { streetScope
   // to keep the QUALIFYING path byte-identical when off — does not apply.
   // Only the lifecycle predicate is shared; the qualifying loader's
   // commercial/rodent exclusions are qualification-only.
+  // EXCEPT live in-progress rows (codex #3253 r7, same precedent as the
+  // billed-plan logic per #3241 r5): a visit still en_route/on_site across
+  // ET midnight is the customer's plan all the same — those bypass the date
+  // cutoff but never the callback/one-time exclusions.
   const { etDateString } = require('../utils/datetime-et');
+  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
+  const LIVE_IN_PROGRESS_STATUSES = new Set(['en_route', 'on_site', 'in_progress']);
   const today = etDateString();
-  joined = joined.filter((r) => rowPassesGatedPricingEvidence(r, today));
+  joined = joined.filter((r) => (
+    LIVE_IN_PROGRESS_STATUSES.has(String(r.status || '').toLowerCase())
+      ? (!isCallbackRow(r) && !isOneTimeBookingSource(r.source))
+      : rowPassesGatedPricingEvidence(r, today)
+  ));
   const scoped = await filterRowsToStreet(database, joined, streetScope);
   const keys = new Set();
   for (const row of scoped) ownershipKeysForRow(row).forEach((key) => keys.add(key));
