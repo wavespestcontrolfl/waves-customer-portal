@@ -1679,7 +1679,14 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       review_sequences: [{ id: 'seq-inflight', customer_id: 'if', scheduled_service_id: 'if-1', status: 'active', current_step: 0, next_run_at: null, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]) }],
     });
     db.mockImplementation(mock);
-    const res = await ReviewService.enrollPostService({ customerId: 'if', serviceRecordId: 'sr-if', completedAt: new Date() });
+    const prevDelay = ReviewService._SUPERSEDE_RETRY_DELAY_MS;
+    ReviewService._SUPERSEDE_RETRY_DELAY_MS = 1;
+    let res;
+    try {
+      res = await ReviewService.enrollPostService({ customerId: 'if', serviceRecordId: 'sr-if', completedAt: new Date() });
+    } finally {
+      ReviewService._SUPERSEDE_RETRY_DELAY_MS = prevDelay;
+    }
     expect(res.started).toBe(false);
     const inflight = mock.__state.rows.review_sequences.find((r) => r.id === 'seq-inflight');
     expect(inflight.status).toBe('active');
@@ -1732,6 +1739,73 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     db.mockImplementation(mock);
     plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'cl', scheduledServiceId: 'cl-1' });
     expect(plan.skip).toBe('series_completed');
+  });
+
+  test('r20: report-less base rows never truncate the lineage, settled openers release the final, declared boundaries leave structural children', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // ① A completed report-less base rodent row between the final and its
+    // engaged out-of-window opener does NOT truncate the lineage — the
+    // rating still stands the cadence down.
+    let mock = makeMock({
+      service_records: [{ id: 'sr-nt', customer_id: 'nt', scheduled_service_id: 'nt-fin', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Follow-up check' } } }) }],
+      scheduled_services: [
+        { id: 'nt-open', customer_id: 'nt', service_id: 'svc-trap', status: 'completed', scheduled_date: d(45), service_key: 'rodent_trapping' },
+        { id: 'nt-mid', customer_id: 'nt', service_id: 'svc-trap', status: 'completed', scheduled_date: d(20), service_key: 'rodent_trapping' },
+        { id: 'nt-fin', customer_id: 'nt', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [{ id: 'seq-nt-open', customer_id: 'nt', scheduled_service_id: 'nt-open', status: 'completed' }],
+      review_requests: [{ id: 'req-nt-open', customer_id: 'nt', sequence_id: 'seq-nt-open', status: 'rated' }],
+    });
+    db.mockImplementation(mock);
+    let plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'nt', serviceRecordId: 'sr-nt' });
+    expect(plan.skip).toBe('series_engaged');
+
+    // ② An in-flight opener that settles to completed during the wait
+    // releases the final: the fresh cadence enrolls.
+    const base = makeMock({
+      customers: [{ id: 'st', first_name: 'Ora', last_name: 'Z', phone: '+19410000067', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-st', customer_id: 'st', scheduled_service_id: 'st-2' }],
+      scheduled_services: [
+        { id: 'st-1', customer_id: 'st', service_id: 'svc-wt', status: 'completed', scheduled_date: d(2), service_key: 'wildlife_trapping' },
+        { id: 'st-2', customer_id: 'st', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+      ],
+      review_sequences: [{ id: 'seq-settle', customer_id: 'st', scheduled_service_id: 'st-1', status: 'active', current_step: 0, next_run_at: null, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]) }],
+    });
+    db.mockImplementation(base);
+    const opener = base.__state.rows.review_sequences.find((r) => r.id === 'seq-settle');
+    const settleTimer = setTimeout(() => {
+      opener.status = 'completed';
+      opener.stop_reason = 'completed';
+    }, 25);
+    const prev = ReviewService._SUPERSEDE_RETRY_DELAY_MS;
+    ReviewService._SUPERSEDE_RETRY_DELAY_MS = 15;
+    let res;
+    try {
+      res = await ReviewService.enrollPostService({ customerId: 'st', serviceRecordId: 'sr-st', completedAt: new Date() });
+    } finally {
+      ReviewService._SUPERSEDE_RETRY_DELAY_MS = prev;
+      clearTimeout(settleTimer);
+    }
+    expect(res.started).toBe(true);
+    expect(opener.stop_reason).toBe('completed');
+
+    // ③ A LINKED later visit whose report declares 'Initial setup' does not
+    // read as this series' structural child — the deferred final keeps its
+    // cadence instead of series_completed.
+    mock = makeMock({
+      service_records: [{ id: 'sr-nb2', customer_id: 'nb2', scheduled_service_id: 'nb2-new', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Initial setup' } } }) }],
+      scheduled_services: [
+        { id: 'nb2-open', customer_id: 'nb2', service_id: 'svc-trap', status: 'completed', scheduled_date: d(12), service_key: 'rodent_trapping' },
+        { id: 'nb2-fin', customer_id: 'nb2', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(6), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+        { id: 'nb2-new', customer_id: 'nb2', service_id: 'svc-trap', status: 'completed', scheduled_date: d(1), service_key: 'rodent_trapping', parent_service_id: 'nb2-fin' },
+      ],
+    });
+    db.mockImplementation(mock);
+    plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'nb2', scheduledServiceId: 'nb2-fin' });
+    expect(plan.seriesFinal).toBe(true);
+    expect(plan.plan).toHaveLength(3);
   });
 
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {

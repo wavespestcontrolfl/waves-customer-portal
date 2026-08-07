@@ -37,6 +37,11 @@ const TRAPPING_MULTI_TREATMENT_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS, "
 // booking level, before any report exists to declare it (codex #3243 r18
 // P2). Wildlife is excluded — its checks share the base key.
 const BASE_OPENER_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS].filter((k) => k !== "rodent_trapping_followup"));
+// Types whose reports genuinely CANNOT declare a position (no
+// trap_visit_type on the schema): only these bound completed history as
+// booking-level openers — a report-less base rodent row may simply be a
+// follow-up whose report doesn't exist yet (codex #3243 r20 P1).
+const UNDECLARABLE_OPENER_KEYS = new Set(["rodent_exclusion"]);
 // Series position crosses keys only within ONE service line (codex #3243 r2
 // P2): a wildlife job must not read as a rodent program's prior/next visit.
 // Wildlife has a single catalog row, so it matches only itself; the rodent
@@ -770,16 +775,32 @@ const ReviewService = {
         //   visit must not classify as final.
         //   OUTSTANDING — is a child still coming (non-dead AND not
         //   completed)? That decides first-visit ask vs stand-down.
+        const isTrappingSeries = TRAPPING_MULTI_TREATMENT_KEYS.has(svc.service_key);
         const childQuery = (col, statuses) => db("scheduled_services")
           .where({ [col]: svc.id })
           .whereNotIn("status", statuses)
-          .first();
+          .select("id", "status");
+        // A linked child whose report declares 'Initial setup' is a NEW
+        // series' opener with a stale/cross-series link (codex #3243 r20
+        // P2) — it must not read as this series' structural child, or a
+        // payment-deferred final would stand down as series_completed.
+        const withoutNewSeries = async (rows) => {
+          if (!isTrappingSeries || !rows.length) return rows;
+          const kept = [];
+          for (const r of rows) {
+            if ((await this._declaredTrapVisitType({ scheduledServiceId: r.id })) === "initial") continue;
+            kept.push(r);
+          }
+          return kept;
+        };
         const liveStatuses = [...FOLLOWUP_CHILD_INACTIVE_STATUSES, "completed"];
-        const liveChild = (await childQuery("followup_source_service_id", liveStatuses))
-          || (await childQuery("parent_service_id", liveStatuses));
+        const liveChild = (await withoutNewSeries(await childQuery("followup_source_service_id", liveStatuses)))[0]
+          || (await withoutNewSeries(await childQuery("parent_service_id", liveStatuses)))[0]
+          || null;
         const anyChild = liveChild
-          || (await childQuery("followup_source_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES))
-          || (await childQuery("parent_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES));
+          || (await withoutNewSeries(await childQuery("followup_source_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES)))[0]
+          || (await withoutNewSeries(await childQuery("parent_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES)))[0]
+          || null;
         // Trapping position resolves BEFORE the structural returns (codex
         // #3243 r3 P1): a program can mix linkage styles — a linked visit 2
         // with an unlinked booked visit 3, or an unlinked opener with a
@@ -790,7 +811,6 @@ const ReviewService = {
         // trappingPremiseMatcher, window floored at 30 days (catalog
         // intervals are 1-7 days but a program's checks stretch across
         // weeks; a far-future booking is a new series).
-        const isTrappingSeries = TRAPPING_MULTI_TREATMENT_KEYS.has(svc.service_key);
         let trapPrior = null;
         let trapLaterLive = null;
         let trapLaterCompleted = null;
@@ -998,13 +1018,16 @@ const ReviewService = {
             for (const r of lineageSorted) {
               lineageIds.push(r.id);
               const t = await this._declaredTrapVisitType({ scheduledServiceId: r.id });
-              // The nearest opener bounds the lineage (codex #3243 r19
-              // P2): a declared initial, or — for keys that cannot declare
-              // (exclusion; base rodent bookings) — the nearest UNLINKED
-              // base-SKU visit, unless its report declares a follow-up.
+              // The nearest opener bounds the lineage (codex #3243 r19 P2,
+              // narrowed by r20 P1): a declared initial, or an UNLINKED
+              // visit of a type that genuinely CANNOT declare its position
+              // (plain exclusion — its reports carry no trap_visit_type).
+              // A report-less base rodent row may be a follow-up whose
+              // report just doesn't exist yet — it never truncates the
+              // walk toward the engaged opener.
               const boundary = t === "initial"
                 || (t == null
-                  && BASE_OPENER_KEYS.has(r.service_key)
+                  && UNDECLARABLE_OPENER_KEYS.has(r.service_key)
                   && !r.parent_service_id
                   && !r.followup_source_service_id);
               if (boundary) break;
@@ -2757,6 +2780,10 @@ const ReviewService = {
    * with an active sequence returns that one instead of starting a second
    * (also enforced by the partial unique index). Fires step 0 immediately.
    */
+  // In-flight supersession re-check spacing — a knob so tests don't wait
+  // real provider-settle seconds.
+  _SUPERSEDE_RETRY_DELAY_MS: 1500,
+
   async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false }) {
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
@@ -2782,21 +2809,47 @@ const ReviewService = {
       // step runner's atomic claim NULLs next_run_at while sendOutreachTouch
       // awaits the provider, and stopping the row would not cancel that
       // call — the opener ask could still deliver alongside the
-      // replacement's. Only a scheduled, unclaimed opener yields.
-      if (seriesFinal && active.next_run_at != null) {
+      // replacement's. Only a scheduled, unclaimed opener yields. But a
+      // single-trigger final must not be permanently lost either (codex
+      // #3243 r20 P2): the provider call settles in seconds, so wait
+      // briefly and re-check — supersede a still-zero-sent opener, or
+      // enroll fresh once it completed.
+      let proceedFresh = false;
+      if (seriesFinal) {
         try {
           const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId });
           if (seriesIds.includes(active.id)) {
-            const delivered = await db("review_requests")
-              .where({ sequence_id: active.id, status: "sent" })
-              .first();
-            if (!delivered) supersedeOpenerId = active.id;
+            if (active.next_run_at != null) {
+              const delivered = await db("review_requests")
+                .where({ sequence_id: active.id, status: "sent" })
+                .first();
+              if (!delivered) supersedeOpenerId = active.id;
+            } else {
+              for (let attempt = 0; attempt < 4 && !supersedeOpenerId && !proceedFresh; attempt += 1) {
+                await new Promise((resolve) => { setTimeout(resolve, this._SUPERSEDE_RETRY_DELAY_MS); });
+                const refreshed = await db("review_sequences").where({ id: active.id }).first();
+                if (!refreshed || refreshed.status !== "active") {
+                  // The opener settled (completed/stopped) — the one-active
+                  // constraint is gone; enroll the final fresh. Its sent
+                  // ask stays cap-exempt via the series walk (owner 1+3).
+                  proceedFresh = true;
+                } else if (refreshed.next_run_at != null) {
+                  // Send settled back into a schedule (failed/retrying) —
+                  // a still-zero-sent opener yields normally.
+                  const delivered = await db("review_requests")
+                    .where({ sequence_id: active.id, status: "sent" })
+                    .first();
+                  if (!delivered) supersedeOpenerId = active.id;
+                  break;
+                }
+              }
+            }
           }
         } catch (err) {
           logger.warn(`[review] opener-supersede check failed (customerId=${customerId}): ${err.message} — keeping already_active`);
         }
       }
-      if (!supersedeOpenerId) return { started: false, reason: "already_active", sequence: active };
+      if (!supersedeOpenerId && !proceedFresh) return { started: false, reason: "already_active", sequence: active };
     }
 
     // One cadence per SERVICE RECORD, ever (codex #3235 r3 P1): the legacy
