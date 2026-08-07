@@ -169,7 +169,14 @@ router.get('/', async (req, res, next) => {
     for (const row of statsRows) {
       try {
         const parsed = JSON.parse(row.review_text);
-        googleStats[row.location_id] = { rating: parsed.rating, totalReviews: parsed.totalReviews, syncedAt: row.synced_at };
+        // Shape-validated (matches the dashboard + BI gates): '"corrupt"'
+        // or '{}' parses as valid JSON but contributes nothing — letting it
+        // into googleStats would count its location toward
+        // googleStatsComplete and expose a silently partial Google total.
+        if (parsed && typeof parsed === 'object'
+          && (Number.isFinite(parsed.totalReviews) || Number.isFinite(parsed.rating))) {
+          googleStats[row.location_id] = { rating: parsed.rating, totalReviews: parsed.totalReviews, syncedAt: row.synced_at };
+        }
       } catch { /* ignore */ }
     }
 

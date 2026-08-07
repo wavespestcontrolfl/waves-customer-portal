@@ -1633,20 +1633,20 @@ function cityFromLocationId(locationId) {
  * live" and "published" are one atomic decision — a stamp that loses the
  * race lands after commit, where it is a genuinely concurrent removal (the
  * watchdog alert still fires and stamped rows drop off every surface).
- * The row lock alone is not enough: it serializes against the reconcile's
- * stamping UPDATE, but a sync cycle that has already FETCHED a snapshot
- * without this review could stamp it moments after a row-lock-only publish
- * commits. The liveness decision therefore also takes the same
- * per-location advisory lock the sync holds across its whole
- * fetch→reconcile cycle (gbp-review-sync:<loc>) — while a cycle is in
- * flight the publish is deferred (lockBusy, retryable), and while the
- * publish holds it the sync tick skips the location and the next tick
- * covers it. publishFn must not touch google_reviews (it writes social
- * tables on its own connections). Non-review publishes (no sourceReviewId)
- * pass straight through. FAIL CLOSED: no hasTable pre-check here — a
- * sourceReviewId implies the table existed at draft time, and swallowing a
- * transient schema-lookup failure would publish a possibly-removed review
- * unchecked. A DB error inside the transaction rejects, and the publish
+ * The liveness decision takes the same per-location advisory lock the sync
+ * holds across its whole fetch→reconcile cycle (gbp-review-sync:<loc>) —
+ * while a cycle is in flight the publish is deferred (lockBusy,
+ * retryable), and while the publish holds it the sync tick skips the
+ * location and the next tick covers it. Under that lock no stamping can
+ * occur for the location (the reconcile is the only stamp writer and runs
+ * inside the same lock), so a plain re-read is authoritative — publishing
+ * runs WITHOUT an open DB transaction or row lock, because the external
+ * multi-provider calls are slow and holding a trx + FOR UPDATE across them
+ * risks pool exhaustion and long-lived transactions. Non-review publishes
+ * (no sourceReviewId) pass straight through. FAIL CLOSED: no hasTable
+ * pre-check here — a sourceReviewId implies the table existed at draft
+ * time, and swallowing a transient schema-lookup failure would publish a
+ * possibly-removed review unchecked; a DB error rejects and the publish
  * fails loudly instead.
  */
 async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
@@ -1658,19 +1658,11 @@ async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
     return { blocked: true, missing: !source };
   }
   const outcome = await runExclusive(`gbp-review-sync:${source.location_id}`, async () => {
-    let inner = null;
-    await db.transaction(async (trx) => {
-      const src = await trx('google_reviews')
-        .where({ id: sourceReviewId })
-        .forUpdate()
-        .first();
-      if (!src || src.missing_since) {
-        inner = { blocked: true, missing: !src };
-        return;
-      }
-      inner = { blocked: false, result: await publishFn() };
-    });
-    return inner;
+    const fresh = await db('google_reviews').where({ id: sourceReviewId }).first();
+    if (!fresh || fresh.missing_since) {
+      return { blocked: true, missing: !fresh };
+    }
+    return { blocked: false, result: await publishFn() };
   }, { recordHealth: false });
   if (outcome?.skipped) {
     return { blocked: true, lockBusy: true };
