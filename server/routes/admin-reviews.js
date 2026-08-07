@@ -168,7 +168,10 @@ router.get('/', async (req, res, next) => {
         db.raw('COUNT(*) as total'),
         db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
       ).first(),
-      reviewsOnly.clone().modify(whereNeedsRealReply).modify(whereNotDismissed).count('* as count').first(),
+      // Stamped (removed-from-Google) rows are excluded from the actionable
+      // reply metrics: every reply path rejects them, so counting them would
+      // permanently degrade the No Portal Reply card and response rate.
+      reviewsOnly.clone().modify(whereNeedsRealReply).modify(whereNotDismissed).whereNull('missing_since').count('* as count').first(),
       reviewsOnly.clone().modify(whereHasRealReply).count('* as count').first(),
       reviewsOnly.clone().where('review_created_at', '>=', startOfETMonth().toISOString()).count('* as count').first(),
       reviewsOnly.clone().select('location_id')
@@ -206,7 +209,7 @@ router.get('/', async (req, res, next) => {
     // without contributing to the total, breaking `total - unresponded`.
     const ratedLocationIds = Object.keys(googleStats).filter(id => (googleStats[id]?.totalReviews || 0) > 0);
     const unrespondedInRatedRow = ratedLocationIds.length > 0
-      ? await reviewsOnly.clone().whereIn('location_id', ratedLocationIds).modify(whereNeedsRealReply).modify(whereNotDismissed).count('* as count').first()
+      ? await reviewsOnly.clone().whereIn('location_id', ratedLocationIds).modify(whereNeedsRealReply).modify(whereNotDismissed).whereNull('missing_since').count('* as count').first()
       : { count: 0 };
     const avgGoogleRating = Object.values(googleStats).length > 0
       ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)

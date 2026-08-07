@@ -175,7 +175,9 @@ async function getReviewStats() {
 
   const [totals, unresponded, thisMonth, perLocation, breakdown] = await Promise.all([
     reviews.clone().select(db.raw('COUNT(*) as total'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating')).first(),
-    reviews.clone().whereNotNull('review_text').modify(whereNeedsRealReply).count('* as count').first(),
+    // Stamped (removed) rows are rejected by every reply path — they are not
+    // actionable, so they must not degrade the unresponded count either.
+    reviews.clone().whereNotNull('review_text').modify(whereNeedsRealReply).whereNull('missing_since').count('* as count').first(),
     reviews.clone().where('review_created_at', '>=', startOfETMonth().toISOString()).count('* as count').first(),
     reviews.clone().select('location_id', db.raw('COUNT(*) as count'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating')).groupBy('location_id'),
     reviews.clone().select('star_rating', db.raw('COUNT(*) as count')).groupBy('star_rating').orderBy('star_rating', 'desc'),

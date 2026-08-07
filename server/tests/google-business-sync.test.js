@@ -139,10 +139,25 @@ function createDbMock(initialRows = {}) {
         // dedupe reads it back.
         const row = { id: record.id || `${table}-${state.inserts.length + 1}`, created_at: new Date(), ...record };
         state.rows[table] = state.rows[table] || [];
-        state.rows[table].push(row);
-        state.inserts.push({ table, row });
+        // Mirror the google_reviews.google_review_id unique constraint: a
+        // plain insert of a duplicate id fails with Postgres 23505 (the
+        // overlapping-runner race under test); onConflict().merge() keeps
+        // its upsert semantics.
+        const duplicate = table === 'google_reviews' && record.google_review_id
+          && state.rows[table].some(r => r.google_review_id === record.google_review_id);
+        if (!duplicate) {
+          state.rows[table].push(row);
+          state.inserts.push({ table, row });
+        }
         return {
-          returning: async () => [{ id: row.id }],
+          returning: async () => {
+            if (duplicate) {
+              const err = new Error('duplicate key value violates unique constraint "google_reviews_google_review_id_unique"');
+              err.code = '23505';
+              throw err;
+            }
+            return [{ id: row.id }];
+          },
           onConflict: () => ({
             merge: async (mergeRecord = {}) => {
               const existing = state.rows[table].find(r => r.google_review_id === row.google_review_id);
@@ -891,7 +906,10 @@ describe('Google Business review sync', () => {
           author_name: 'Jackie Lopez',
           rating: 5,
           text: 'Edited text',
-          time: 1779307832,
+          // Corroborates the seeded review_created_at (2026-05-25T12:00:00Z):
+          // an unedited review's Places `time` is its creation time — the
+          // identity requirement for clearing a removal stamp.
+          time: Math.floor(new Date('2026-05-25T12:00:00Z').getTime() / 1000),
         }] } }) };
       }
       return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
@@ -900,6 +918,38 @@ describe('Google Business review sync', () => {
     await service.syncAllReviews();
 
     expect(db.__state.rows.google_reviews.find(r => r.id === 'back-via-places').missing_since).toBeNull();
+  });
+
+  test('Places fallback does NOT revive a stamped review on an uncorroborated same-name match', async () => {
+    // Same display name + same generic content from a DIFFERENT account: the
+    // dedup merge may still match, but the Places `time` (a fresh creation
+    // date) does not corroborate the stored review_created_at — the removal
+    // stamp must survive until the authoritative GBP feed decides.
+    const stamp = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    seedSyncedReview({
+      id: 'stamped-ambig',
+      reviewer_name: 'Jackie Lopez',
+      review_text: 'Great service',
+      star_rating: 5,
+      review_created_at: '2025-11-01T12:00:00Z',
+      missing_since: stamp,
+    });
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Jackie Lopez',
+          rating: 5,
+          text: 'Great service',
+          time: Math.floor(new Date('2026-05-25T12:00:00Z').getTime() / 1000),
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'stamped-ambig').missing_since).toBe(stamp);
   });
 
   test('never stamps a Places-sampled row without an authoritative GBP identity', async () => {
@@ -1033,5 +1083,28 @@ describe('Google Business review sync', () => {
     expect(degraded.body).not.toContain('Places sample');
     const urls = global.fetch.mock.calls.map(c => String(c[0]));
     expect(urls.some(u => u.includes('maps.googleapis.com'))).toBe(false);
+  });
+
+  test('an insert race between overlapping runners does not ring the degraded alert', async () => {
+    seedSyncedReview({ id: 'keep-1' });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+    // The losing runner's existence check raced the winner's insert and saw
+    // nothing — its upsert takes the insert path and hits the unique
+    // constraint. That must recover as an update, not surface as a GBP
+    // failure.
+    const spy = jest.spyOn(service, '_findExistingReview').mockResolvedValueOnce(null);
+
+    const result = await service.syncAllReviews();
+
+    expect(result.sources).toEqual({ bradenton: 'gbp' });
+    expect((db.__state.rows.notifications || []).some(n => n.title.includes('sync degraded'))).toBe(false);
+    expect(db.__state.rows.google_reviews.filter(r => r.google_review_id === 'accounts/1/locations/2/reviews/rev-keep')).toHaveLength(1);
+    spy.mockRestore();
   });
 });

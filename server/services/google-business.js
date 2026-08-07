@@ -551,8 +551,22 @@ class GoogleBusinessService {
       await db('google_reviews').where({ id: existing.id }).update(row);
       result = { id: existing.id, inserted: false };
     } else {
-      const [insertedReview] = await db('google_reviews').insert(row).returning('id');
-      result = { id: insertedReview?.id || insertedReview, inserted: true };
+      try {
+        const [insertedReview] = await db('google_reviews').insert(row).returning('id');
+        result = { id: insertedReview?.id || insertedReview, inserted: true };
+      } catch (err) {
+        // Overlapping runners (hourly job vs manual sync vs deploy instance)
+        // can both miss the existence check for a newly arrived review; the
+        // loser hits the google_review_id unique constraint. That's a
+        // healthy sync racing itself, not a GBP failure — letting it bubble
+        // would ring the degraded-sync alert. Convert to the update path on
+        // the winner's row.
+        if (err?.code !== '23505') throw err;
+        const winner = await db('google_reviews').where({ google_review_id: normalized.google_review_id }).first();
+        if (!winner) throw err;
+        await db('google_reviews').where({ id: winner.id }).update(row);
+        result = { id: winner.id, inserted: false };
+      }
     }
     if (row.customer_id) {
       // A matched review means the customer left one — stop asking them.
@@ -655,17 +669,27 @@ class GoogleBusinessService {
       const ownerReply = review.owner_response?.text || null;
       const customerId = await this._findCustomerIdByReviewerName(reviewerName);
       if (existing) {
+        // A row in Google's CURRENT Places sample is proof a review is live —
+        // but proof about THIS row only when the identity corroborates.
+        // Display names aren't unique across accounts, so the same-name
+        // same-content merge above can be a different reviewer; clearing a
+        // removal stamp on that evidence would revive the removed review for
+        // the testimonial/marketing surfaces. The Places `time` of an
+        // unedited review is its creation time — require it to match the
+        // stored review_created_at (24h tolerance, the same convention as
+        // the GBP reply resolver) before clearing; otherwise keep the stamp
+        // and let the authoritative GBP feed resolve it on recovery.
+        const placesMs = review.time ? review.time * 1000 : null;
+        const createdMs = existing.review_created_at ? new Date(existing.review_created_at).getTime() : null;
+        const identityCorroborated = !existing.missing_since
+          || (placesMs && createdMs && Math.abs(placesMs - createdMs) <= 24 * 60 * 60 * 1000);
         const upd = {
           star_rating: review.rating || 0,
           review_text: review.text || null,
           reviewer_photo_url: review.profile_photo_url || null,
           customer_id: customerId || existing.customer_id,
           synced_at: db.fn.now(),
-          // This row is in Google's CURRENT Places sample — positive proof
-          // the review is live. Clear a missing stamp here too, or during a
-          // GBP credential outage a reinstated review stays labeled and
-          // suppressed until the authoritative feed recovers.
-          missing_since: null,
+          missing_since: identityCorroborated ? null : existing.missing_since,
         };
         if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
           upd.review_reply = ownerReply;
