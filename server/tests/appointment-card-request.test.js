@@ -979,6 +979,9 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(bells[0][1]).toContain('without a price');
     expect(bells[0][3]).toMatchObject({
       metadata: {
+        // customerId is what notification-service's internal-test-account
+        // suppression keys on — omit it and the demo account rings.
+        customerId: REQUEST.customer_id,
         scheduledServiceId: REQUEST.scheduled_service_id,
         appointmentCardRequestId: REQUEST.id,
         reason: 'no_price_displayed',

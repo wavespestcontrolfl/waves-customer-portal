@@ -1396,6 +1396,9 @@ async function loadSecureCardPageData(token) {
         {
           link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
           metadata: {
+            // customerId feeds the internal-test-account suppression in
+            // notification-service.js — without it the demo account rings.
+            customerId: request.customer_id,
             scheduledServiceId: request.scheduled_service_id,
             appointmentCardRequestId: request.id,
             reason: 'no_price_displayed',
