@@ -1809,7 +1809,7 @@ const InvoiceService = {
   /**
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
-  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null } = {}) {
+  async sendViaSMS(invoiceId, { allowClaimed = false, payUrlParams = null, operatorInitiated = false } = {}) {
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, which applies credit
     // before its own claim — so apply it here too, or those pay links bill the
@@ -2046,6 +2046,10 @@ const InvoiceService = {
         customerId: customer.id,
         invoiceId,
         entryPoint: "invoice_send_via_sms",
+        // Send-window operator marker: this shared path serves both the
+        // admin send click and automated resends — only the authenticated
+        // routes pass operatorInitiated (see validators/send-window.js).
+        ...(operatorInitiated ? { operatorInitiated: true } : {}),
         // Preserve the legacy messageType so the admin-sms-templates
         // 'invoice' template kill switch (invoice → invoice_sent) still
         // applies. If ops disables the invoice template to halt broken

@@ -66,6 +66,12 @@ function checkSendWindow(input, policy, contactState, now = new Date()) {
   if (input.channel !== 'sms') return { ok: true };
   if (!['customer', 'lead'].includes(input.audience)) return { ok: true };
   if (input.purpose === 'conversational') return { ok: true };
+  // Explicit operator-origin marker for SHARED services (invoice sends,
+  // card requests) whose entry point serves both operator clicks and
+  // automation. Only authenticated admin/IB routes may set it — an
+  // automated caller passing operatorInitiated:true defeats the window
+  // and is a review-blocking bug.
+  if (input.operatorInitiated === true) return { ok: true };
   if (OPERATOR_ENTRY_POINTS.has(String(input.entryPoint || ''))) return { ok: true };
   if (resolveTrustLevel(input, contactState) === 'admin_operator') return { ok: true };
   if (isWithinSendWindowET(now)) return { ok: true };

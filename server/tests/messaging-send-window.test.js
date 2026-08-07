@@ -125,6 +125,12 @@ describe('checkSendWindow validator', () => {
     expect(checkSendWindow({ ...SMS, entryPoint: 'scheduled_sms_cron' }, null, null, EVENING_ET)).toEqual({ ok: true });
   });
 
+  test('explicit operatorInitiated marker passes shared entry points at night', () => {
+    expect(checkSendWindow({ ...SMS, entryPoint: 'invoice_send_via_sms', operatorInitiated: true }, null, null, EVENING_ET)).toEqual({ ok: true });
+    const res = checkSendWindow({ ...SMS, entryPoint: 'invoice_send_via_sms' }, null, null, EVENING_ET);
+    expect(res.ok).toBe(false);
+  });
+
   test('booking side-effect and automation entry points stay fenced', () => {
     for (const entryPoint of ['admin_recurring_appointment_created', 'appointment_reminder_cron', 'invoice_followup_sequence']) {
       const res = checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET);

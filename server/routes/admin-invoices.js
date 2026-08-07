@@ -689,7 +689,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             // invoices keep the existing SMS-only immediate send.
             sendResult = invoice.payer_id
               ? await InvoiceService.sendViaSMSAndEmail(invoice.id)
-              : await InvoiceService.sendViaSMS(invoice.id);
+              : await InvoiceService.sendViaSMS(invoice.id, { operatorInitiated: true });
           } catch (sendErr) {
             logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
             sendResult = { sent: false, error: sendErr.message };

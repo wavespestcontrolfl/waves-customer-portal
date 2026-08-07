@@ -656,6 +656,11 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         purpose: 'card_request',
         customerId: visit.customer_id,
         identityTrustLevel: 'phone_matches_customer',
+        // trigger 'admin' = the schedule page's explicit "request card"
+        // click; every other trigger (previsit sweep, call pipeline,
+        // outbound confirm, booking) is automation and stays fenced by
+        // the send window.
+        ...(trigger === 'admin' ? { operatorInitiated: true } : {}),
         metadata: {
           scheduled_service_id: visit.id,
           trigger,
