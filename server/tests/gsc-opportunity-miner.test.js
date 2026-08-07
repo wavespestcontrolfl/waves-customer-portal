@@ -855,17 +855,24 @@ describe('listicle_family scoring + action mapping', () => {
     expect(listicleFamilyEligible(fam({ position: 0 }))).toBe(true);
   });
 
-  test('families with an owned page already ranking for a variant are excluded (query-page map)', () => {
+  test('families with an owned page ranking in striking distance for a variant are excluded (query-page map)', () => {
     // Position alone cannot see an owned page ranking 4+ for the family —
     // that page is refresh territory for the page-anchored buckets, and a
     // new post would cannibalize it. mineListicleFamily must consult
-    // gsc_query_page_map (the existing query→own-page mechanism) and drop
-    // families where ANY variant is already served.
+    // gsc_query_page_map and drop families where ANY variant has an owned
+    // page within strikingDistancePositionMax. Crucially the test is
+    // page-level RANKING, not map-row existence: every GSC impression maps
+    // to whatever page happened to show, so existence alone would kill
+    // nearly every family and leave the lane inert.
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
     const mineSrc = src.slice(src.indexOf('async mineListicleFamily'), src.indexOf('async mineNoContentYet'));
     expect(mineSrc).toMatch(/gsc_query_page_map/);
     expect(mineSrc).toMatch(/whereIn\('query', variantQueries\)/);
+    expect(mineSrc).toMatch(/groupByRaw\(CANON_URL_SQL\)/); // per owned PAGE, not per query
+    expect(mineSrc).toMatch(/sum\(position \* impressions\) \/ NULLIF\(sum\(impressions\), 0\) <= \?/);
+    expect(mineSrc).toMatch(/THRESHOLDS\.strikingDistancePositionMax/);
+    expect(mineSrc).not.toMatch(/\.distinct\('query'\)/); // existence-only check is the inert-lane bug
     expect(mineSrc).toMatch(/fam\.variants\.some\(\(v\) => servedQueries\.has\(v\.query\)\)/);
   });
 

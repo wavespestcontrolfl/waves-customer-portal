@@ -54,6 +54,7 @@ describe('minScoreToActFor', () => {
 function chainResolving(rows) {
   const q = {
     where: jest.fn(() => q),
+    whereNot: jest.fn(() => q),
     whereRaw: jest.fn(() => q),
     orderBy: jest.fn(() => q),
     limit: jest.fn(() => q),

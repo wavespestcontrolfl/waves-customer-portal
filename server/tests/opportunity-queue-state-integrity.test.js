@@ -305,6 +305,7 @@ describe('resurrection paths reset the lifetime claim budget (Codex round 1)', (
     const q = {
       _filters: [],
       where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+      whereNot: jest.fn(function (...args) { q._filters.push(['not', ...args]); return q; }),
       whereRaw: jest.fn(function (...args) { q._filters.push(['raw', ...args]); return q; }),
       orderBy: jest.fn(() => q),
       limit: jest.fn(() => q),
@@ -317,6 +318,80 @@ describe('resurrection paths reset the lifetime claim budget (Codex round 1)', (
     expect(q._filters).toEqual(expect.arrayContaining([
       ['attempt_count', '<', 5],
     ]));
+  });
+});
+
+describe('listicle_family lane fence (kill-switch contract)', () => {
+  // With either lane gate off, family rows must be unclaimable — they sit
+  // pending and age out via expireStale rather than drafting plain blogs
+  // (brief overlay off) or publishing listicles after the kill switch.
+  // Gates are dev-open, so the off state is simulated via spy;
+  // listicleFamilyLaneOpen re-destructures isEnabled on every call, which
+  // is what makes the spy visible to the lazy require. The gates module is
+  // required INSIDE each test: an earlier test calls jest.resetModules(),
+  // so a describe-scope reference would be a stale instance the queue's
+  // lazy require never consults.
+  const peekChain = () => {
+    const q = {
+      _filters: [],
+      where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+      whereNot: jest.fn(function (...args) { q._filters.push(['not', ...args]); return q; }),
+      whereRaw: jest.fn(function (...args) { q._filters.push(['raw', ...args]); return q; }),
+      orderBy: jest.fn(() => q),
+      limit: jest.fn(() => q),
+      select: jest.fn(() => Promise.resolve([])),
+    };
+    return q;
+  };
+
+  test('claimNext excludes listicle_family rows while either lane gate is off', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockReturnValue(false);
+    try {
+      db.mockImplementation(() => chain());
+      db.raw.mockResolvedValue({ rows: [] });
+
+      await queue.claimNext({});
+
+      const [sql] = db.raw.mock.calls[0];
+      expect(sql).toContain(`AND bucket <> 'listicle_family'`);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('with both gates on, claimNext does not fence the bucket', async () => {
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+
+    await queue.claimNext({}); // dev-open gates: lane open
+
+    const [sql] = db.raw.mock.calls[0];
+    expect(sql).not.toContain(`bucket <> 'listicle_family'`);
+  });
+
+  test('peek mirrors the fence (previews show exactly what the runner could claim)', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockReturnValue(false);
+    try {
+      const q = peekChain();
+      db.mockImplementation(() => q);
+
+      await queue.peek({});
+
+      expect(q._filters).toEqual(expect.arrayContaining([
+        ['not', 'bucket', 'listicle_family'],
+      ]));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('the fence fails CLOSED — unreadable gates shut the lane', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/content/opportunity-queue'), 'utf8');
+    expect(src).toMatch(/isEnabled\('listicleFamilyMining'\) === true && isEnabled\('listicleBriefs'\) === true/);
+    expect(src).toMatch(/function listicleFamilyLaneOpen\(\) \{[\s\S]*?catch \(_\) \{\s*return false;/);
   });
 });
 

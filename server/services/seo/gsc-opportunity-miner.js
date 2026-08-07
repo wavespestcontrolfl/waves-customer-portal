@@ -1564,18 +1564,27 @@ class GscOpportunityMiner {
     const fams = clusterListicleFamilies(rows).filter((f) => listicleFamilyEligible(f));
     if (!fams.length) return [];
 
-    // An owned page already ranking for any of the family's variants means
-    // the intent is served — improving that page belongs to the
-    // page-anchored buckets (striking_distance / ctr_rewrite / answer_gap),
-    // and a new post would cannibalize it. gsc_query_page_map is the
-    // existing query→own-page mechanism; position alone can't see this
-    // (a page at 4+ passes the top-3 exclusion).
+    // A variant is SERVED when some owned page ranks within striking
+    // distance for it (best page-level weighted position ≤
+    // strikingDistancePositionMax) — improving that page belongs to the
+    // page-anchored buckets (striking_distance / ctr_rewrite), and a new
+    // post would cannibalize it. Mere map-row EXISTENCE is deliberately
+    // NOT the test: every GSC impression maps to whatever owned page
+    // happened to show, so existence alone would kill nearly every family
+    // and leave the lane inert. Weak-ranking coverage (page beyond
+    // striking distance) is exactly the gap this bucket mines.
     const variantQueries = Array.from(new Set(fams.flatMap((f) => f.variants.map((v) => v.query))));
     const mappedRows = await db('gsc_query_page_map')
       .where('domain', 'wavespestcontrol.com')
       .where('date_from', '>=', since)
       .whereIn('query', variantQueries)
-      .distinct('query');
+      .select('query')
+      .groupBy('query')
+      .groupByRaw(CANON_URL_SQL)
+      .havingRaw(
+        'sum(position * impressions) / NULLIF(sum(impressions), 0) <= ?',
+        [THRESHOLDS.strikingDistancePositionMax]
+      );
     const servedQueries = new Set(mappedRows.map((r) => r.query));
 
     const out = [];

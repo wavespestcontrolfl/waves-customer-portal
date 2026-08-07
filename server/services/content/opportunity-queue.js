@@ -27,6 +27,21 @@ const { THRESHOLDS, minScoreToActFor } = require('./scoring-config');
 const STALE_CLAIM_MS = 30 * 60 * 1000; // 30 minutes
 const DEFAULT_FETCH_LIMIT = 20;
 
+// Kill-switch contract for the listicle_family lane: rows are claimable
+// ONLY while BOTH lane gates are on. Turning either off must stop queued
+// rows from being consumed at all — they sit pending and age out via
+// expireStale (≤14d) — rather than leaking through as plain supporting
+// blogs (brief overlay off) or continuing to publish listicles after the
+// kill switch. Fail CLOSED: unreadable gates = lane shut.
+function listicleFamilyLaneOpen() {
+  try {
+    const { isEnabled } = require('../../config/feature-gates');
+    return isEnabled('listicleFamilyMining') === true && isEnabled('listicleBriefs') === true;
+  } catch (_) {
+    return false;
+  }
+}
+
 // Lifetime claim budget per opportunity. A row that keeps failing returns
 // to pending (release / stale-claim recovery) and, as the top-scored row,
 // gets re-claimed by the daily batch forever — one wasted LLM dispatch per
@@ -75,6 +90,9 @@ class OpportunityQueue {
         .where('attempt_count', '<', maxClaimAttempts())
         .orderBy('score', 'desc')
         .limit(limit);
+      // Same lane fence as claimNext (peek is consumed as "what the runner
+      // can claim" — see listicleFamilyLaneOpen).
+      if (!listicleFamilyLaneOpen()) q = q.whereNot('bucket', 'listicle_family');
       if (minScore != null) {
         // Same action-aware floor as claimNext, so previews show exactly
         // what the runner would claim.
@@ -119,6 +137,8 @@ class OpportunityQueue {
     // every iteration instead of letting the rest of the queue advance.
     const exclude = Array.isArray(excludeIds) ? excludeIds.filter((id) => id != null) : [];
     const whereExclude = exclude.length ? `AND NOT (id = ANY(?))` : '';
+    // See listicleFamilyLaneOpen — gate-off family rows are unclaimable.
+    const whereFamilyGate = listicleFamilyLaneOpen() ? '' : `AND bucket <> 'listicle_family'`;
 
     const result = await db.raw(
       `UPDATE opportunity_queue
@@ -144,6 +164,7 @@ class OpportunityQueue {
            AND score >= CASE WHEN action_type = 'new_supporting_blog' THEN ?::numeric ELSE ?::numeric END
            ${whereActionType}
            ${whereExclude}
+           ${whereFamilyGate}
          ORDER BY score DESC, mined_at ASC
          FOR UPDATE SKIP LOCKED
          LIMIT 1

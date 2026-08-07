@@ -153,6 +153,7 @@ describe('seedAll', () => {
 function chainResolving(rows) {
   const q = {
     where: jest.fn(() => q),
+    whereNot: jest.fn(() => q),
     whereRaw: jest.fn(() => q),
     whereNull: jest.fn(() => q),
     orWhere: jest.fn(() => q),

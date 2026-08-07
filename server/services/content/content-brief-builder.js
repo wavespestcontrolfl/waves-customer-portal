@@ -652,12 +652,14 @@ class ContentBriefBuilder {
     // Overlay the citable-listicle architecture on list-shaped supporting-blog
     // queries (gated; applied on top of the AEO overlay so both can coexist).
     const layered = applyListicleTreatment({
-      // listicle_family rows exist ONLY to produce listicle-shaped posts
-      // (both gates were on when they were mined) — if listicleBriefs is
-      // later turned off, leftover queued rows must still receive the
-      // overlay rather than leak through as ordinary supporting blogs.
-      // Killing the lane = GATE_LISTICLE_FAMILY_MINING off (stops new rows;
-      // queued rows expire in ≤14 days, formatted as intended meanwhile).
+      // listicle_family rows exist ONLY to produce listicle-shaped posts,
+      // and the queue's claim fence (listicleFamilyLaneOpen in
+      // opportunity-queue.js) means one can only be claimed while BOTH lane
+      // gates are on — turning either gate off makes queued rows
+      // unclaimable until they expire. The bucket key here covers the one
+      // remaining window: a row claimed while the gates were on whose brief
+      // composes after a mid-flight gate flip still keeps the listicle
+      // architecture instead of leaking through as an ordinary blog.
       enabled: isEnabled('listicleBriefs') || opportunity.bucket === 'listicle_family',
       actionType: decision.action_type,
       pageType,
