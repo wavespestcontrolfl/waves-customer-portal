@@ -3013,12 +3013,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // surface a review notification after commit. A save carrying an
     // explicit billingMode (even a clear-to-NULL, which the guard above
     // already vetted) is the operator's own lane decision — never restamp.
+    // The decision itself is made UNDER the row lock inside the
+    // transaction below (pre-push codex P0): deciding from the
+    // pre-transaction snapshot could overwrite an explicit lane a
+    // concurrent save committed between our read and the lock.
     let impliedLaneStamp = null;
-    if (req.body.billingMode === undefined && updates.billing_mode === undefined) {
-      const { impliedMonthlyStampForWrite } = require('../services/billing-lane');
-      impliedLaneStamp = impliedMonthlyStampForWrite(before, { ...before, ...updates });
-      if (impliedLaneStamp) updates.billing_mode = impliedLaneStamp;
-    }
+    const laneStampEligible = req.body.billingMode === undefined && updates.billing_mode === undefined;
     if (Object.keys(updates).length) {
       const contactConflict = await findCrossAccountContactConflict(
         req.params.id,
@@ -3060,6 +3060,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // editor would no longer match snapshots the first edit already
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
+          // Implied-monthly stamp (#3140), decided from the LOCKED row: only
+          // when this lane-less save still transitions the locked state into
+          // the inferred-monthly shape — a concurrent explicit lane
+          // committed before our lock leaves billing_mode set and the stamp
+          // off. Mutating `updates` here also rides into lockedAfter and the
+          // UPDATE below; `changed`/`after` are patched post-commit.
+          if (laneStampEligible) {
+            const { impliedMonthlyStampForWrite } = require('../services/billing-lane');
+            impliedLaneStamp = impliedMonthlyStampForWrite(lockedBefore, { ...lockedBefore, ...updates });
+            if (impliedLaneStamp) updates.billing_mode = impliedLaneStamp;
+          }
           const lockedAfter = { ...lockedBefore, ...updates };
           // Assigning an email serializes against a customer-merge UNDO
           // checking whether that address is claimed (customer-dedupe.js
@@ -3148,6 +3159,13 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           });
         }
         return next(e);
+      }
+      if (impliedLaneStamp && !changed.includes('billing_mode')) {
+        // The stamp was decided under the lock, after `changed`/`after`
+        // were snapshotted — patch both so the sensitive audit records the
+        // lane write and the membership-email logic sees the real outcome.
+        changed.push('billing_mode');
+        after.billing_mode = impliedLaneStamp;
       }
       if (emailSync?.heldNewsletterResume) {
         // Deferred held-newsletter DOI (2026-07-30 lane) — execute now that

@@ -995,11 +995,17 @@ describe('admin customer writes stamp the implied monthly lane (source pins)', (
     expect(src).toMatch(/const billingModeForCreate = explicitBillingMode \|\| impliedLaneStamp;/);
   });
 
-  test('the update path stamps only lane-less saves that create the inferred shape', () => {
-    // Never restamp over an operator's own lane decision in the same save.
-    expect(src).toContain("if (req.body.billingMode === undefined && updates.billing_mode === undefined) {");
-    expect(src).toContain('impliedLaneStamp = impliedMonthlyStampForWrite(before, { ...before, ...updates });');
+  test('the update path stamps only lane-less saves, decided UNDER the row lock', () => {
+    // Never restamp over an operator's own lane decision in the same save…
+    expect(src).toContain('const laneStampEligible = req.body.billingMode === undefined && updates.billing_mode === undefined;');
+    // …and the decision reads the LOCKED row (pre-push codex P0): a
+    // concurrent explicit-lane save that commits before our lock must not
+    // be overwritten by the stamp.
+    expect(src).toContain('impliedLaneStamp = impliedMonthlyStampForWrite(lockedBefore, { ...lockedBefore, ...updates });');
     expect(src).toContain('if (impliedLaneStamp) updates.billing_mode = impliedLaneStamp;');
+    // The stamp lands after changed/after were snapshotted — both are
+    // patched post-commit so the sensitive audit records the lane write.
+    expect(src).toContain("changed.push('billing_mode');");
   });
 
   test('both stamp sites surface an owner review notification', () => {

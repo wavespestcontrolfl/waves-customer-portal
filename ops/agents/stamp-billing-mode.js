@@ -22,6 +22,13 @@
 //   pinned value, (3) pipeline_stage is a real customer stage
 //   (active_customer / won / at_risk). Any failed precondition skips that
 //   customer with a printed reason — never a partial write.
+// - Lane prerequisites mirror the profile editor's guards
+//   (routes/admin-customers.js PUT /:id): monthly_membership needs a
+//   positive rate, per_application a positive per_application_fee,
+//   annual_prepay a live paid term covering today, per_visit/one_time no
+//   unpriced future billable visits. Checked in the dry run and re-asserted
+//   under the lock; a failed check — or a check ERROR — blocks the row
+//   (fail closed).
 // - The write is billing_mode ONLY (+ updated_at) plus an audit_log row.
 //   monthly_rate is NEVER touched, so the plan-rate ledger's Sigma==scalar
 //   invariant is preserved by construction and the 7:25a watch stays green.
@@ -37,14 +44,18 @@ const { Client } = require(path.join(__dirname, '..', '..', 'node_modules', 'pg'
 
 const EXECUTE = process.argv.includes('--execute');
 
-// One lane taxonomy — the runtime module (see backfill-plan-rate-ledger.js
-// for the same abort-don't-diverge rule).
+// One lane taxonomy + one always-free classifier — the runtime modules (see
+// backfill-plan-rate-ledger.js for the same abort-don't-diverge rule).
 let BILLING_MODES;
+let isAlwaysFreeServiceType;
 try {
   ({ BILLING_MODES } = require(path.join(__dirname, '..', '..', 'server', 'services', 'billing-lane')));
-  if (!Array.isArray(BILLING_MODES) || !BILLING_MODES.length) throw new Error('BILLING_MODES missing');
+  ({ isAlwaysFreeServiceType } = require(path.join(__dirname, '..', '..', 'server', 'services', 'no-cost-visit-types')));
+  if (!Array.isArray(BILLING_MODES) || !BILLING_MODES.length || typeof isAlwaysFreeServiceType !== 'function') {
+    throw new Error('runtime exports missing');
+  }
 } catch (loadErr) {
-  console.error(`ABORT: billing-lane module unavailable (${loadErr.message}) — run via \`railway run\` from the repo root so server modules can load.`);
+  console.error(`ABORT: billing-lane / no-cost-visit-types modules unavailable (${loadErr.message}) — run via \`railway run\` from the repo root so server modules can load.`);
   process.exit(1);
 }
 
@@ -113,6 +124,59 @@ if (EXECUTE) {
 
 const cents = (rate) => Math.round((Number(rate) || 0) * 100);
 
+// Lane prerequisites — the SAME rules the profile editor enforces
+// (routes/admin-customers.js PUT /:id, pre-push codex P0): a stamp must not
+// move a customer into a lane whose visits or dues then complete unbilled.
+// Checked in the dry run AND re-asserted under the FOR UPDATE lock before
+// writing. Unlike the route (which fails open so a save can't hard-lock),
+// this direct prod write fails CLOSED: a query error blocks the row.
+async function lanePrerequisiteProblems(client, row, lane) {
+  const problems = [];
+  if (lane === 'monthly_membership' && !(cents(row.monthly_rate) > 0)) {
+    problems.push('monthly_membership needs a positive monthly_rate — dues cannot collect at $0');
+  }
+  if (lane === 'per_application' && !(Number(row.per_application_fee) > 0)) {
+    problems.push('per_application needs a positive per_application_fee — visits would complete unbilled');
+  }
+  if (lane === 'annual_prepay') {
+    // Must have a live PAID term covering today (ET) — status active /
+    // renewal_pending, term window inclusive of the ET date.
+    const { rows } = await client.query(
+      `SELECT id FROM annual_prepay_terms
+        WHERE customer_id = $1
+          AND status IN ('active', 'renewal_pending')
+          AND term_start <= (now() AT TIME ZONE 'America/New_York')::date
+          AND term_end >= (now() AT TIME ZONE 'America/New_York')::date
+        LIMIT 1`,
+      [row.id],
+    );
+    if (!rows.length) problems.push('annual_prepay needs a PAID term covering today');
+  }
+  if (lane === 'per_visit' || lane === 'one_time') {
+    // These lanes bill each visit's OWN price — unpriced future
+    // pending/confirmed visits would complete unbilled. Callbacks,
+    // always-free types, and prepaid-stamped visits are exempt (they
+    // complete without an invoice by design in every lane).
+    const { rows } = await client.query(
+      `SELECT id, service_type, is_callback, scheduled_date::text AS scheduled_date
+         FROM scheduled_services
+        WHERE customer_id = $1
+          AND status IN ('pending', 'confirmed')
+          AND scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date
+          AND (estimated_price IS NULL OR estimated_price <= 0)
+          AND (prepaid_amount IS NULL OR prepaid_amount <= 0)
+        ORDER BY scheduled_date ASC
+        LIMIT 100`,
+      [row.id],
+    );
+    const billable = rows.filter((r) => !r.is_callback && !isAlwaysFreeServiceType(r.service_type));
+    if (billable.length) {
+      problems.push(`${lane} would leave ${billable.length} unpriced future visit(s) (first ${billable[0].scheduled_date}) to complete unbilled — price or cancel them first`);
+    }
+  }
+  return problems;
+}
+
 async function main() {
   const url = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
   if (!url) {
@@ -138,6 +202,11 @@ async function main() {
       if (row.billing_mode != null) problems.push(`billing_mode already '${row.billing_mode}'`);
       if (!REAL_STAGES.includes(row.pipeline_stage)) problems.push(`pipeline_stage '${row.pipeline_stage}' is not a real customer stage`);
       if (row.deleted_at != null) problems.push('row is soft-deleted');
+      try {
+        problems.push(...await lanePrerequisiteProblems(client, row, lane));
+      } catch (err) {
+        problems.push(`prerequisite check failed (${err.message}) — fail closed`);
+      }
       const rateCents = cents(row.monthly_rate);
 
       if (!EXECUTE) {
@@ -155,7 +224,7 @@ async function main() {
       await client.query('BEGIN');
       try {
         const locked = (await client.query(
-          'SELECT id, billing_mode, monthly_rate, pipeline_stage, deleted_at FROM customers WHERE id = $1 FOR UPDATE',
+          'SELECT id, billing_mode, monthly_rate, per_application_fee, pipeline_stage, deleted_at FROM customers WHERE id = $1 FOR UPDATE',
           [id],
         )).rows[0];
         const lockedProblems = [];
@@ -165,6 +234,9 @@ async function main() {
           if (cents(locked.monthly_rate) !== expectRate.get(id)) lockedProblems.push(`monthly_rate moved (${cents(locked.monthly_rate)}c != pinned ${expectRate.get(id)}c)`);
           if (!REAL_STAGES.includes(locked.pipeline_stage)) lockedProblems.push(`pipeline_stage '${locked.pipeline_stage}' is not a real customer stage`);
           if (locked.deleted_at != null) lockedProblems.push('row is soft-deleted');
+          // Lane prerequisites re-asserted under the lock (codex P0) —
+          // fail closed on any check error.
+          lockedProblems.push(...await lanePrerequisiteProblems(client, locked, lane));
         }
         if (lockedProblems.length) {
           await client.query('ROLLBACK');
