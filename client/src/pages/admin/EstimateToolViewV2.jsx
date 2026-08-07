@@ -3980,8 +3980,13 @@ export default function EstimateToolViewV2({
         // while the availability probe is still in flight — is ALWAYS
         // forwarded, and the server's live gate rejects it loudly if off.
         // Silently dropping it here priced an ordinary lawn ladder under a
-        // checked box (codex #3272 r2).
+        // checked box (codex #3272 r2). Commercial estimates are excluded:
+        // the engine's commercial branch ignores the option, so forwarding
+        // it would stamp a suppression-bearing engineRequest onto an
+        // ordinary commercial quote and falsely trip the send/accept gate
+        // later (codex #3272 r5).
         ...(form.svcLawn && form.grassType === "st_augustine" && form.bermudaSuppression
+          && !isCommercialEstimateInput(form)
           ? { bermudaSuppression: true }
           : {}),
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
@@ -6082,7 +6087,10 @@ export default function EstimateToolViewV2({
                           (ProVista/Captiva excluded; Seville do-not-treat; CitraBlue or unknown
                           cultivar needs a test area first), lawn is not already mostly bermuda
                           (recommend renovation instead), turf unstressed. Torpedograss is
-                          suppression-only — never sell as removal.
+                          suppression-only — never sell as removal. Pricing is plan-spread by
+                          design (owner ruling): the adder raises every application, annualizing
+                          a program that includes up to 2 suppression treatments each spring
+                          plus the follow-up inspection.
                         </div>
                       )}
                     </div>

@@ -2090,6 +2090,17 @@ function priceLawnCare(property, options = {}) {
     if (programMinimumApplied) ann = Math.ceil(programMinimumAnnual / tc.freq) * tc.freq;
     // Bermuda suppression bakes into the per-app AFTER floor/minimum
     // resolution — the adder is add-on revenue, never a way to satisfy them.
+    // INTENTIONAL plan-spread pricing (owner ruling 2026-08-07, "a number
+    // baked into the per application"): the adder raises EVERY application's
+    // price, annualizing the program — the plan then INCLUDES up to 2
+    // suppression treatments per growing season (the label ceiling) plus the
+    // week-5-6 inspection, the same way plan pricing already spreads
+    // seasonal work (pre-emergent, fungicide windows) across level
+    // payments. It is NOT a per-treatment fee: on a 12x plan the owner
+    // chose +adder x 12/yr as the program's annual price, with material
+    // cost ~$6.54/1,000 sqft per treatment x2 covered by it. Display and
+    // completion billing agree by construction — both read the same raised
+    // per-app.
     if (bermudaSuppressionPerApp > 0) ann = Math.round((ann + bermudaSuppressionPerApp * tc.freq) * 100) / 100;
     const perApp = Math.round(ann / tc.freq * 100) / 100;
     return {

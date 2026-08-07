@@ -540,6 +540,52 @@ describe('estimate manual acceptance', () => {
     expect(result.warnings).toEqual([]);
   });
 
+  test('blocks manual acceptance of a suppression estimate while GATE_BERMUDA_SUPPRESSION is off', async () => {
+    const prev = process.env.GATE_BERMUDA_SUPPRESSION;
+    delete process.env.GATE_BERMUDA_SUPPRESSION;
+    try {
+      const estimate = {
+        id: 'estimate-bermuda-gated',
+        status: 'sent',
+        estimate_data: JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }),
+      };
+      const { database, updates } = makeDb(estimate);
+      await expect(markEstimateManuallyAccepted({
+        estimateId: estimate.id,
+        adminUserId: 1,
+        database,
+      })).rejects.toMatchObject({ statusCode: 409 });
+      expect(updates).toHaveLength(0);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION;
+      else process.env.GATE_BERMUDA_SUPPRESSION = prev;
+    }
+  });
+
+  test('gate on: a suppression estimate passes the gate (fails later on the missing customer link instead)', async () => {
+    const prev = process.env.GATE_BERMUDA_SUPPRESSION;
+    process.env.GATE_BERMUDA_SUPPRESSION = 'true';
+    try {
+      const estimate = {
+        id: 'estimate-bermuda-live',
+        status: 'sent',
+        estimate_data: JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }),
+      };
+      const { database } = makeDb(estimate);
+      let thrown;
+      try {
+        await markEstimateManuallyAccepted({ estimateId: estimate.id, adminUserId: 1, database });
+      } catch (err) {
+        thrown = err;
+      }
+      // Whatever this minimal fixture fails on, it is NOT the suppression gate.
+      if (thrown) expect(thrown.message).not.toMatch(/bermudagrass-suppression/);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION;
+      else process.env.GATE_BERMUDA_SUPPRESSION = prev;
+    }
+  });
+
   test('rejects non-delivered estimates', async () => {
     const estimate = { id: 'estimate-3', status: 'draft' };
     const { database, updates, inserts } = makeDb(estimate);
