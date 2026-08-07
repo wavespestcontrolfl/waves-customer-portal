@@ -1161,6 +1161,11 @@ describe('listicle_family scoring + action mapping', () => {
     // decay_refresh signal) but its still-open edit must not race a family
     // refresh (Codex r19/r20).
     expect(src).toMatch(/whereNot\('bucket', 'listicle_family'\)[\s\S]{0,120}whereIn\('status', \['pending', 'claimed', 'pending_review'\]\)[\s\S]{0,120}whereNotNull\('page_url'\)/);
+    // The fence retains QUERIES too, and family blogs defer on them.
+    expect(src).toMatch(/inflightRefreshQueries\.add\(String\(r\.query\)\.toLowerCase\(\)\)/);
+    expect(mineSrc).toMatch(/inflightRefreshQueries\.has\(String\(v\.query \|\| ''\)\.toLowerCase\(\)\)/);
+    // The sweep re-throws under a transaction (rollback beats half-state).
+    expect(src).toMatch(/if \(trx\) throw err;/);
     // Blog↔refresh transitions defer while the family's prior work is
     // claimed or in review (Codex r20).
     expect(mineSrc).toMatch(/inflightFamily\.blogKeys\.has\(listicleFamilyDedupeKey\(fam\.key\)\)/);

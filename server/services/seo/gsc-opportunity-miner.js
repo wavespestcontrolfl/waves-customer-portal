@@ -1040,14 +1040,22 @@ class GscOpportunityMiner {
         // families against candidates whose frozen rows land nothing
         // (pre-push audit r21).
         const answerGapPages = new Set();
+        // Their QUERIES too: an unserved family must not mint a blog while
+        // a non-family refresh for one of its exact variants is still open
+        // but absent from this batch (miner failure / signal change) —
+        // same-batch arbitration cannot see it (pre-push audit r22).
+        const inflightRefreshQueries = new Set();
         try {
           const inflight = await db('opportunity_queue')
             .where('action_type', 'refresh_existing_page')
             .whereNot('bucket', 'listicle_family')
             .whereIn('status', ['pending', 'claimed', 'pending_review'])
             .whereNotNull('page_url')
-            .select('page_url');
-          for (const r of inflight) answerGapPages.add(r.page_url);
+            .select('page_url', 'query');
+          for (const r of inflight) {
+            answerGapPages.add(r.page_url);
+            if (r.query) inflightRefreshQueries.add(String(r.query).toLowerCase());
+          }
         } catch (err) {
           logger.warn(`[gsc-opp-miner] in-flight refresh fence lookup failed: ${err.message}`);
         }
@@ -1090,7 +1098,7 @@ class GscOpportunityMiner {
         } catch (err) {
           logger.warn(`[gsc-opp-miner] family refresh-state lookup failed: ${err.message}`);
         }
-        return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightFamily, familyRefreshState });
+        return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightRefreshQueries, inflightFamily, familyRefreshState });
       }],
     ];
 
@@ -2039,7 +2047,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() }, familyRefreshState = new Map() } = {}) {
+  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightRefreshQueries = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() }, familyRefreshState = new Map() } = {}) {
     // BOTH gates required: mining with the brief overlay off would persist
     // listicle_family rows whose briefs come out as ORDINARY supporting
     // blogs — the lane would look enabled while producing none of the
@@ -2218,6 +2226,11 @@ class GscOpportunityMiner {
       // review — the blog transition waits for it to complete (Codex r20).
       if (inflightFamily.refreshFamilyKeys.has(fam.key)) continue;
 
+      // An open NON-family refresh for one of this family's exact variants
+      // (absent from this batch) also blocks the blog — one claimable
+      // action per intent (pre-push audit r22).
+      if (fam.variants.some((v) => inflightRefreshQueries.has(String(v.query || '').toLowerCase()))) continue;
+
       // Cityless family on a hubless service can never publish (see above).
       if (!city && (!hublessServices || hublessServices.has(service))) continue;
 
@@ -2364,6 +2377,7 @@ class GscOpportunityMiner {
   async _sweepStaleFamilyRows(familyOpps = [], batch = [], trx = null) {
     const runner = trx || db;
     try {
+      // (Errors re-throw under a transaction — see catch below.)
       // Mirror persistAll's arbitration: a family opp that yielded never
       // persisted, so its key must not protect a stale pending row either.
       const arbitrated = await this._arbitratedRefreshPages(batch);
@@ -2379,6 +2393,12 @@ class GscOpportunityMiner {
         .whereNotIn('dedupe_key', persistableKeys)
         .update({ status: 'expired', skip_reason: 'family_signal_gone', updated_at: new Date() });
     } catch (err) {
+      // Inside mineAll's transaction the sweep is load-bearing: swallowing
+      // a failure would leave old and replacement rows both claimable (and
+      // a Postgres statement error aborts the transaction anyway) — roll
+      // the whole persist back and surface the failed mine. Fail-soft only
+      // for non-transactional callers (pre-push audit r22).
+      if (trx) throw err;
       logger.warn(`[gsc-opp-miner] listicle_family: stale-family sweep failed: ${err.message}`);
     }
   }
