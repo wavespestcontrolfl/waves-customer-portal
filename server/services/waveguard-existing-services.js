@@ -69,6 +69,13 @@ async function isActivePlanCustomer(database, customerId) {
 // rodent-LED; ownership below must not).
 const RODENT_TOKEN_RE = /\b(rodent|rats?|mouse|mice)\b/;
 
+// Rodent-LED text: a rodent token that is not the rodent half of an explicit
+// pest-primary combined name ("Pest & Rodent Control"). Single definition —
+// toQualifyingKeys and ownershipKeysForRow both read it.
+function isRodentLedText(s) {
+  return RODENT_TOKEN_RE.test(s) && !/\bpest\b.*\brodent\b/.test(s);
+}
+
 function toQualifyingKeys(raw) {
   const s = String(raw || '').toLowerCase();
   if (!s) return [];
@@ -82,7 +89,7 @@ function toQualifyingKeys(raw) {
   // canonical label) are rodent service rows, not pest coverage. Mirror
   // detectServiceLine / recurring-appointment-seeder's serviceKeyFor: only a
   // "pest ... rodent" combined name ("Pest & Rodent Control") is pest-primary.
-  const rodentService = RODENT_TOKEN_RE.test(s) && !/\bpest\b.*\brodent\b/.test(s);
+  const rodentService = isRodentLedText(s);
   if (s.includes('pest') && !rodentService) keys.add('pest_control');
   if (s.includes('lawn') || s.includes('turf')) keys.add('lawn_care');
   // A palm token ("Palm Tree Injections") names the non-qualifying palm
@@ -312,6 +319,14 @@ async function filterRowsToStreet(database, rows, streetScope) {
 // rodent family that toQualifyingKeys deliberately excludes; qualification
 // itself stays untouched.
 function ownershipKeysForRow(row = {}) {
+  // Catalog authority first (pre-push P1 #2): a rodent-led CATALOG identity
+  // (rodent_monitoring linked under a stale generic 'Pest Control'
+  // service_type) owns RODENT only — letting qualifyingKeysForRow fall back
+  // to the combined text would inherit pest from the stale service_type and
+  // falsely block a valid pest quote.
+  const catalogText = [row.service_key, row.service_name]
+    .filter(Boolean).join(' ').replace(/[_-]+/g, ' ').toLowerCase();
+  if (catalogText && isRodentLedText(catalogText)) return ['rodent_bait'];
   const keys = qualifyingKeysForRow(row);
   // The rodent COMPONENT, not just rodent-LED rows (pre-push P1): a combined
   // "Pest & Rodent Control" / pest_rodent_* plan is pest-primary for

@@ -353,3 +353,33 @@ describe('combined pest & rodent ownership', () => {
     expect(result.currentServices).toContain('Pest Control');
   });
 });
+
+// Pre-push P1 #2: ownership classification must be catalog-authoritative for
+// rodent identities — pinned at the classifier level (the end-to-end path is
+// behind autoWaveguardTierEnroll).
+describe('ownershipKeysForRow catalog authority', () => {
+  const { ownershipKeysForRow } = require('../services/waveguard-existing-services');
+
+  test('rodent catalog identity under a stale generic service_type owns rodent only', () => {
+    expect(ownershipKeysForRow({
+      service_type: 'Pest Control',
+      service_key: 'rodent_monitoring',
+      service_name: 'Rodent Monitoring',
+    })).toEqual(['rodent_bait']);
+  });
+
+  test('explicit combined pest & rodent plan owns both', () => {
+    expect(ownershipKeysForRow({ service_type: 'Pest & Rodent Control' }).sort())
+      .toEqual(['pest_control', 'rodent_bait']);
+    expect(ownershipKeysForRow({
+      service_type: 'Pest Control',
+      service_key: 'pest_rodent_quarterly',
+      service_name: 'Pest & Rodent Control',
+    }).sort()).toEqual(['pest_control', 'rodent_bait']);
+  });
+
+  test('plain rows keep legacy classification', () => {
+    expect(ownershipKeysForRow({ service_type: 'Rodent Monitoring' })).toEqual(['rodent_bait']);
+    expect(ownershipKeysForRow({ service_type: 'Quarterly Pest Control' })).toEqual(['pest_control']);
+  });
+});
