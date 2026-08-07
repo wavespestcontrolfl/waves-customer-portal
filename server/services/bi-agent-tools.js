@@ -198,14 +198,22 @@ async function executeBITool(toolName, input) {
             const freshStats = {};
             for (const row of statsRows) {
               const t = new Date(row.synced_at).getTime();
-              if (t > 0 && Date.now() - t <= STATS_FRESH_MS) freshStats[row.location_id] = row;
+              if (!(t > 0 && Date.now() - t <= STATS_FRESH_MS)) continue;
+              // A location is complete only when its fresh payload PARSES —
+              // a fresh-but-malformed row otherwise kept this branch
+              // selected while contributing nothing (silent partial total).
+              try {
+                const p = JSON.parse(row.review_text);
+                if (p && typeof p === 'object') freshStats[row.location_id] = p;
+              } catch {}
             }
             const statsComplete = WAVES_LOCATIONS.length > 0 && WAVES_LOCATIONS.every((l) => freshStats[l.id]);
             let total = 0, ratingSum = 0, cnt = 0;
             if (statsComplete) {
               for (const loc of WAVES_LOCATIONS) {
-                const row = freshStats[loc.id];
-                try { const p = JSON.parse(row.review_text); total += p.totalReviews || 0; if (p.rating) { ratingSum += p.rating; cnt++; } } catch {}
+                const p = freshStats[loc.id];
+                total += p.totalReviews || 0;
+                if (p.rating) { ratingSum += p.rating; cnt++; }
               }
             }
             if (total > 0) return { total, rating: cnt > 0 ? (ratingSum / cnt).toFixed(1) : '5.0' };

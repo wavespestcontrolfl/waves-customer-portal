@@ -243,6 +243,19 @@ describe('BI get_review_snapshot — stamped rows excluded', () => {
     expect(snapshot.rating).toBe('5.0');
   });
 
+  test('fresh but malformed _stats payload falls back to live rows', async () => {
+    state.rows.google_reviews = [
+      statsRow('bradenton', { totalReviews: 500, rating: 4.9, syncedDaysAgo: 0.1 }),
+      { ...statsRow('sarasota', { totalReviews: 300, rating: 4.8, syncedDaysAgo: 0.1 }), review_text: '{not json' },
+      liveReview({ id: 'a', star_rating: 4 }),
+    ];
+
+    const snapshot = await executeBITool('get_review_snapshot', {});
+
+    expect(snapshot.totalReviews).toBe(1);
+    expect(snapshot.rating).toBe('4.0');
+  });
+
   test('fresh and complete _stats snapshot is used', async () => {
     state.rows.google_reviews = [
       statsRow('bradenton', { totalReviews: 500, rating: 4.9, syncedDaysAgo: 0.1 }),

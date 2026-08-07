@@ -301,14 +301,18 @@ router.get('/', dashboardCache, async (req, res, next) => {
           const statsRows = await db('google_reviews')
             .where({ reviewer_name: '_stats' })
             .where('synced_at', '>', statsFreshCutoff);
-          const freshStatsLocationIds = new Set(statsRows.map(r => r.location_id));
-          const statsComplete = dashLocations.every(l => freshStatsLocationIds.has(l.id));
+          const freshStatsLocationIds = new Set();
           let totalFromPlaces = 0, ratingSum = 0, ratingCount = 0;
           for (const row of statsRows) {
             try {
               const parsed = JSON.parse(row.review_text);
               totalFromPlaces += parsed.totalReviews || 0;
               if (parsed.rating) { ratingSum += parsed.rating; ratingCount++; }
+              // A fresh row counts toward completeness only once its payload
+              // parses — a fresh-but-malformed row otherwise kept the Places
+              // branch selected while its location contributed nothing,
+              // reporting a silently partial total.
+              freshStatsLocationIds.add(row.location_id);
             } catch (parseErr) {
               // Bad JSON in a _stats row would have silently zeroed
               // every Google Rating tile; log so a malformed sync can
@@ -316,6 +320,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
               logger.warn(`[admin-dashboard] google_reviews _stats parse failed (id=${row.id}): ${parseErr.message}`);
             }
           }
+          const statsComplete = dashLocations.every(l => freshStatsLocationIds.has(l.id));
           if (statsComplete && totalFromPlaces > 0) {
             // Dismissed reviews are deliberately left unreplied — keep them
             // out of the actionable count (matches /admin/reviews stats).

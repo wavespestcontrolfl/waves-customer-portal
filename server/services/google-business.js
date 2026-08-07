@@ -855,6 +855,16 @@ class GoogleBusinessService {
 
     for (const loc of WAVES_LOCATIONS) {
       try {
+        // Serialize each location's pull/reconcile/fallback cycle across
+        // overlapping runners (hourly job vs manual sync vs deploy overlap).
+        // The ordering tokens close the update-side races, but an INSERT
+        // has no prior row to order against: an older runner pausing after
+        // its fetch can insert a review AFTER a newer reconcile proved it
+        // absent, leaving an unstamped ghost row with no removal alert.
+        // pg_try_advisory_lock is non-blocking — the loser skips the
+        // location and the holder's cycle (or the next hourly tick) covers
+        // it; a skipped location must NOT ring the degraded alert.
+        const cycle = await runExclusive(`gbp-review-sync:${loc.id}`, async () => {
         if (GOOGLE_KEY) {
           await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
             logger.warn(`[gbp] Places stats sync failed for ${loc.name}: ${err.message}`);
@@ -906,6 +916,12 @@ class GoogleBusinessService {
           } else {
             sources[loc.id] = 'none';
           }
+        }
+        return { done: true };
+        }, { recordHealth: false });
+        if (cycle?.skipped) {
+          sources[loc.id] = 'concurrent_skip';
+          logger.info(`[gbp] Review sync for ${loc.name} skipped — another runner holds the location lock (${cycle.reason})`);
         }
       } catch (err) {
         logger.error(`Review sync failed for ${loc.name}: ${err.message}`);

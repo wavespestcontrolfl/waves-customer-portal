@@ -1634,10 +1634,14 @@ function cityFromLocationId(locationId) {
  * publishFn must not touch google_reviews (it writes social tables on its
  * own connections); the lock is held for the duration of the external
  * posting, which only delays the hourly reconcile for that window.
- * Non-review publishes (no sourceReviewId) pass straight through.
+ * Non-review publishes (no sourceReviewId) pass straight through. FAIL
+ * CLOSED: no hasTable pre-check here — a sourceReviewId implies the table
+ * existed at draft time, and swallowing a transient schema-lookup failure
+ * would publish a possibly-removed review unchecked. A DB error inside the
+ * transaction rejects, and the publish fails loudly instead.
  */
 async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
-  if (!sourceReviewId || !(await hasTable('google_reviews'))) {
+  if (!sourceReviewId) {
     return { blocked: false, result: await publishFn() };
   }
   let outcome = null;
