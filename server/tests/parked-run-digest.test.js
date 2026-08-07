@@ -26,7 +26,7 @@ const email = require('../services/email');
 const { isEnabled } = require('../config/feature-gates');
 const {
   runParkedRunDigest,
-  _private: { composeParkedRunDigest, sanitizeNote, noteExcerpt },
+  _private: { composeParkedRunDigest, noteExcerpt, redactForEmail, NOTE_WITHHELD },
 } = require('../services/content/parked-run-digest');
 
 // 2026-08-06 is a Thursday; 2026-08-09 is a Sunday (both at 8am ET).
@@ -136,7 +136,7 @@ describe('composeParkedRunDigest', () => {
 
 describe('note excerpts (no PII)', () => {
   test('email addresses and phone shapes are scrubbed', () => {
-    const scrubbed = sanitizeNote('call adam.b@example.com or (941) 555-1234 about this');
+    const scrubbed = noteExcerpt('Call adam.b@example.com or (941) 555-1234 about this');
     expect(scrubbed).not.toContain('example.com');
     expect(scrubbed).not.toContain('555-1234');
     expect(scrubbed).toContain('[email]');
@@ -144,7 +144,7 @@ describe('note excerpts (no PII)', () => {
   });
 
   test('excerpt truncates to 120 chars with an ellipsis', () => {
-    const excerpt = noteExcerpt('x'.repeat(300));
+    const excerpt = noteExcerpt('Gate finding: '.repeat(30));
     expect(excerpt.length).toBe(121);
     expect(excerpt.endsWith('…')).toBe(true);
   });
@@ -152,6 +152,74 @@ describe('note excerpts (no PII)', () => {
   test('empty notes excerpt to null', () => {
     expect(noteExcerpt('   ')).toBeNull();
     expect(noteExcerpt(null)).toBeNull();
+  });
+});
+
+// ── Codex r3 behaviors: fail-closed confidence gate + canonical note redaction ──
+
+describe('Codex r3: low-confidence redactions are withheld, never emailed raw', () => {
+  test("redactForEmail omits text the redactor flags 'low' (all-lowercase prose it is blind to)", () => {
+    // The redactor deliberately returns this ORIGINAL text with
+    // confidence 'low' — the digest must withhold it, not email it.
+    const lowered = 'john smith needs roach control at his rental property immediately';
+    expect(redactForEmail(lowered)).toBeNull();
+  });
+
+  test('acceptable-confidence text passes through REDACTED', () => {
+    const out = redactForEmail('Call from John Smith at 941-555-1234 about ants');
+    expect(out).not.toBeNull();
+    expect(out).not.toContain('941-555-1234');
+    expect(out).not.toContain('John Smith');
+    expect(out).toContain('[name]');
+    expect(out).toContain('[phone]');
+  });
+
+  test('a throwing redactor omits the value (fail closed)', () => {
+    const piiRedactor = require('../services/content/pii-redactor');
+    const spy = jest.spyOn(piiRedactor, 'redact').mockImplementation(() => {
+      throw new Error('redactor exploded');
+    });
+    try {
+      expect(redactForEmail('Anything at all, even benign text')).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('reviewer notes go through the canonical redactor: names and street addresses never reach the email', () => {
+    // Synthetic fixture — generated copy echoed into reviewer_notes can
+    // repeat a name + street address from the brief; the old hand-written
+    // email/phone scrub let both through verbatim.
+    const excerpt = noteExcerpt('Draft mentions Jane Doe at 4867 Maple Street repeatedly; validation failed.');
+    expect(excerpt).not.toContain('Jane Doe');
+    expect(excerpt).not.toContain('4867 Maple Street');
+    expect(excerpt).toContain('[name]');
+    expect(excerpt).toContain('[address]');
+  });
+
+  test('a low-confidence note is replaced by the neutral placeholder, not the raw text', () => {
+    const raw = 'jane doe on maple street complained about ants again and again';
+    const excerpt = noteExcerpt(raw);
+    expect(excerpt).toBe(NOTE_WITHHELD);
+    expect(excerpt).not.toContain('jane doe');
+  });
+
+  test('a note the redactor throws on is also withheld', () => {
+    const piiRedactor = require('../services/content/pii-redactor');
+    const spy = jest.spyOn(piiRedactor, 'redact').mockImplementation(() => {
+      throw new Error('redactor exploded');
+    });
+    try {
+      expect(noteExcerpt('Quality gate: 2 findings')).toBe(NOTE_WITHHELD);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('source pin: the hand-written note sanitizer is gone — notes use the canonical redactForEmail path', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/content/parked-run-digest'), 'utf8');
+    expect(src).not.toMatch(/sanitizeNote/);
+    expect(src).toMatch(/EMAILABLE_CONFIDENCE\.has\(confidence\)/);
   });
 });
 

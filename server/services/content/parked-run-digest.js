@@ -34,9 +34,14 @@
  *    (done/skipped/expired/requeued) — probably dismissible, listed so the
  *    historical backlog is visible once instead of never.
  *
- * NO customer PII: items carry titles/queries/reasons only. reviewer_notes
- * are machine-written gate summaries (autonomous-runner), but excerpts are
- * defensively scrubbed of email/phone shapes anyway before the 120-char cut.
+ * NO customer PII: titles, queries, AND reviewer_note excerpts all pass
+ * through the canonical pii-redactor with a fail-closed confidence gate —
+ * when the redactor reports 'low' confidence it deliberately returns the
+ * ORIGINAL text (its heuristics were blind, e.g. all-lowercase prose), so
+ * such values are WITHHELD from the email entirely rather than emailed raw.
+ * reviewer_notes matter here because autonomous-runner embeds generated
+ * copy (which can repeat customer names/addresses from the brief) in them.
+ * Over-redaction is acceptable in this internal visibility email.
  *
  * Gate: parkedRunDigest (GATE_PARKED_RUN_DIGEST=true) — explicit opt-in in
  * EVERY environment, same posture as contentEmailApprovals: a dev server
@@ -89,27 +94,46 @@ function esc(value) {
   ));
 }
 
-/**
- * Defensive PII scrub for reviewer_notes excerpts. Notes are machine-written
- * gate summaries today, but a note that ever carries a contact shape must
- * not reach the email — scrub before truncating.
- */
-function sanitizeNote(text) {
-  return String(text || '')
-    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]')
-    .replace(/(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g, '[phone]');
-}
+// Confidences whose redacted text may be emailed. 'low' is the redactor's
+// fail-closed signal that its heuristics could NOT be trusted on this text —
+// for all-lowercase prose ("john smith needs roach control at his rental…")
+// redact() intentionally returns the ORIGINAL text with confidence 'low', so
+// emailing .text without checking would break the no-customer-PII contract.
+const EMAILABLE_CONFIDENCE = new Set(['high', 'medium']);
 
-function noteExcerpt(notes) {
-  const clean = sanitizeNote(notes).replace(/\s+/g, ' ').trim();
-  if (!clean) return null;
-  return clean.length > NOTE_EXCERPT_CHARS ? `${clean.slice(0, NOTE_EXCERPT_CHARS)}…` : clean;
-}
+// Neutral placeholder when a reviewer note exists but cannot be confidently
+// redacted — the owner still sees that a note is waiting in the portal.
+const NOTE_WITHHELD = '[note withheld — could not redact confidently]';
 
 function redactForEmail(value) {
-  if (!value) return value;
-  try { return piiRedactor.redact(String(value)).text; }
-  catch { return null; } // redactor failure → omit, never emit raw
+  if (!value) return null;
+  try {
+    const { text, confidence } = piiRedactor.redact(String(value));
+    // Fail closed on the redactor's own uncertainty signal: withhold the
+    // value rather than emailing text the heuristics were blind to.
+    if (!EMAILABLE_CONFIDENCE.has(confidence)) return null;
+    return text;
+  } catch {
+    return null; // redactor failure → omit, never emit raw
+  }
+}
+
+/**
+ * Reviewer_notes excerpts go through the SAME canonical redactor + confidence
+ * gate as queries/titles — autonomous-runner embeds generated copy (which can
+ * repeat customer names and street addresses from the brief) in
+ * reviewer_notes, and the old hand-written email/phone scrub missed those
+ * shapes. Low confidence or a redactor throw → neutral placeholder, never the
+ * raw note.
+ */
+function noteExcerpt(notes) {
+  const raw = String(notes || '').trim();
+  if (!raw) return null;
+  const redacted = redactForEmail(raw);
+  if (redacted === null) return NOTE_WITHHELD;
+  const clean = redacted.replace(/\s+/g, ' ').trim();
+  if (!clean) return null;
+  return clean.length > NOTE_EXCERPT_CHARS ? `${clean.slice(0, NOTE_EXCERPT_CHARS)}…` : clean;
 }
 
 function draftTitle(draftPayload) {
@@ -389,5 +413,5 @@ async function runParkedRunDigest(opts = {}) {
 module.exports = {
   runParkedRunDigest,
   loadParkedSet,
-  _private: { composeParkedRunDigest, sanitizeNote, noteExcerpt, groupBySkipReason, reviewQueueUrl, redactForEmail, SEND_MARKER_KEY },
+  _private: { composeParkedRunDigest, noteExcerpt, groupBySkipReason, reviewQueueUrl, redactForEmail, NOTE_WITHHELD, SEND_MARKER_KEY },
 };
