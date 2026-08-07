@@ -7741,7 +7741,14 @@ const CallRecordingProcessor = {
               enrichmentWrite = enrichmentWrite.whereNull('customer_id');
             }
             enriched = await enrichmentWrite.update(leadUpdates);
-            if (!enriched && !customerId && !phone && !raceRecovered) {
+            if (!enriched && existingLead && !customerId && !phone && !raceRecovered) {
+              // Recovery is for REUSED email-matched candidates only (hence
+              // the existingLead gate): a 0-row write on a lead THIS call
+              // just inserted means an admin legitimately claimed our own
+              // fresh row mid-flight — it is still this call's lead, so the
+              // enrichment is simply skipped (same as the customer-attached
+              // branch), never re-minted and re-notified as a duplicate
+              // (pre-push audit P1 r6).
               // The email-matched lead was claimed between lookup and the
               // guarded write (0 rows). leadId must not keep pointing at a
               // lead someone else now owns — downstream writers (triage
