@@ -10,6 +10,7 @@ const {
 const SocialCardRenderer = require('./social-card-renderer');
 const CreativeEngine = require('./social-creative-engine');
 const { runExclusive } = require('../utils/cron-lock');
+const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
 
 const FASTEST_RISER_PROFILES = [
@@ -1405,7 +1406,14 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     let gbpImageUrl = null;
     let finalPreview = preview;
     const wantsGbp = Array.isArray(plan.channels) && plan.channels.includes('gbp');
-    const isReviewRun = !!plan.reviewGraphic?.googleReviewId && await hasTable('review_graphics');
+    // Liveness protection derives from the source review id ALONE: hasTable
+    // swallows transient schema-lookup failures as false, and letting it
+    // into this classification reclassified a testimonial as an ordinary
+    // campaign — skipping every source-liveness check on the publish path.
+    // The fallible schema gate only decides whether the graphic can be
+    // PERSISTED after a successful publish.
+    const isReviewRun = !!plan.reviewGraphic?.googleReviewId;
+    const canPersistGraphic = isReviewRun && await hasTable('review_graphics');
 
     // Creative engine first (AI photo scene + deterministic brand overlay,
     // gated by SOCIAL_CREATIVE_ENGINE_ENABLED). An empty result — engine off,
@@ -1572,8 +1580,8 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // failed to render (no CDN/S3 or a sharp/S3 error) the post may still have
     // gone out as text, but consuming the review with a null-image graphic would
     // drop it from the candidate queue forever and it could never be rendered.
-    if (isReviewRun && !SOCIAL_FLAGS.dryRun && publishResult.success && imageUrl) {
-      await createReviewGraphic({
+    if (canPersistGraphic && !SOCIAL_FLAGS.dryRun && publishResult.success && imageUrl) {
+      await persistReviewGraphicWithRetry({
         googleReviewId: plan.reviewGraphic.googleReviewId,
         privacyMode: plan.reviewGraphic.privacyMode || 'first_name_city',
         // Follow the visual that actually published (photo card vs SVG card).
@@ -1581,7 +1589,15 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         channels: plan.channels,
         status: 'approved',
         imageUrl,
-      }).catch(() => null);
+      }).catch((err) => {
+        // Bookkeeping only — the post is already live — but a silent
+        // swallow risks a double-publish of the same review later, so it
+        // must be loud in the logs.
+        logger.error(`[studio] review-graphic bookkeeping FAILED after publish (review ${plan.reviewGraphic.googleReviewId}): ${err.message} — candidate NOT consumed; a later run may re-select this review`);
+        return null;
+      });
+    } else if (isReviewRun && !canPersistGraphic && !SOCIAL_FLAGS.dryRun && publishResult.success) {
+      logger.error(`[studio] review_graphics table unavailable — published review ${plan.reviewGraphic.googleReviewId} NOT consumed from the candidate queue`);
     }
 
     const status = SOCIAL_FLAGS.dryRun ? 'dry_run' : publishResult.success ? 'published' : 'failed';
@@ -1633,21 +1649,21 @@ function cityFromLocationId(locationId) {
  * live" and "published" are one atomic decision — a stamp that loses the
  * race lands after commit, where it is a genuinely concurrent removal (the
  * watchdog alert still fires and stamped rows drop off every surface).
- * The liveness decision takes the same per-location advisory lock the sync
- * holds across its whole fetch→reconcile cycle (gbp-review-sync:<loc>) —
- * while a cycle is in flight the publish is deferred (lockBusy,
- * retryable), and while the publish holds it the sync tick skips the
- * location and the next tick covers it. Under that lock no stamping can
- * occur for the location (the reconcile is the only stamp writer and runs
- * inside the same lock), so a plain re-read is authoritative — publishing
- * runs WITHOUT an open DB transaction or row lock, because the external
- * multi-provider calls are slow and holding a trx + FOR UPDATE across them
- * risks pool exhaustion and long-lived transactions. Non-review publishes
- * (no sourceReviewId) pass straight through. FAIL CLOSED: no hasTable
- * pre-check here — a sourceReviewId implies the table existed at draft
- * time, and swallowing a transient schema-lookup failure would publish a
- * possibly-removed review unchecked; a DB error rejects and the publish
- * fails loudly instead.
+ * The liveness DECISION runs under the per-location advisory lock the sync
+ * holds across its whole fetch→reconcile cycle (gbp-review-sync:<loc>):
+ * while the lock is held no cycle is in flight and no stamp is pending
+ * (the reconcile is the only stamp writer and runs inside the same lock),
+ * so the re-read is authoritative and no already-observed absence can
+ * predate the decision. The lock — and its pooled connection — is released
+ * BEFORE the slow multi-provider publish: holding it across provider
+ * stalls pinned a pool connection per in-flight publish (two, counting the
+ * callers' own outer locks) and could starve unrelated queries. A sync
+ * cycle that starts after the decision and stamps the review mid-publish
+ * is the same genuinely-concurrent-removal class as a stamp landing right
+ * after a held-lock publish committed: the watchdog alert still fires and
+ * stamped rows drop off every surface. Non-review publishes (no
+ * sourceReviewId) pass straight through. FAIL CLOSED: no hasTable
+ * pre-check — a DB error rejects and the publish fails loudly.
  */
 async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
   if (!sourceReviewId) {
@@ -1657,17 +1673,17 @@ async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
   if (!source || source.missing_since) {
     return { blocked: true, missing: !source };
   }
-  const outcome = await runExclusive(`gbp-review-sync:${source.location_id}`, async () => {
+  const decision = await runExclusive(`gbp-review-sync:${source.location_id}`, async () => {
     const fresh = await db('google_reviews').where({ id: sourceReviewId }).first();
-    if (!fresh || fresh.missing_since) {
-      return { blocked: true, missing: !fresh };
-    }
-    return { blocked: false, result: await publishFn() };
+    return { blocked: !fresh || !!fresh.missing_since, missing: !fresh };
   }, { recordHealth: false });
-  if (outcome?.skipped) {
+  if (decision?.skipped) {
     return { blocked: true, lockBusy: true };
   }
-  return outcome;
+  if (decision.blocked) {
+    return decision;
+  }
+  return { blocked: false, result: await publishFn() };
 }
 
 function runVariants(preview = {}) {
@@ -1903,14 +1919,19 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     // same invariants as the autonomous publish path (never on dry-run/failure,
     // never without a hosted image).
     if (published && input.reviewGraphic?.googleReviewId && await hasTable('review_graphics')) {
-      await createReviewGraphic({
+      await persistReviewGraphicWithRetry({
         googleReviewId: input.reviewGraphic.googleReviewId,
         privacyMode: input.reviewGraphic.privacyMode || 'first_name_city',
         templateKey: preview.visual?.templateKey || 'waves_clean_square',
         channels,
         status: 'approved',
         imageUrl: chosenImageUrl,
-      }).catch(() => null);
+      }).catch((err) => {
+        // Bookkeeping only — the post is already live — but a silent
+        // swallow risks a double-publish of the same review later.
+        logger.error(`[studio] review-graphic bookkeeping FAILED after approval publish (review ${input.reviewGraphic.googleReviewId}): ${err.message} — candidate NOT consumed; a later run may re-select this review`);
+        return null;
+      });
     }
 
     // Promote the chosen variant to the run's primary visual so the audit list
@@ -2099,6 +2120,27 @@ async function listReviewGraphicCandidates({ limit = 30 } = {}) {
   };
 }
 
+/**
+ * Post-publish bookkeeping wrapper: createReviewGraphic consumes the review
+ * from the candidate queue, and a swallowed failure here means the
+ * testimonial is live externally with nothing consuming the candidate — a
+ * later autonomous run would publish the SAME review again. Lock contention
+ * (a sync cycle holding the location lock right after publish) is the
+ * expected transient, so retry through it; sync cycles run seconds, not
+ * minutes. Non-busy errors propagate to the caller's handling.
+ */
+async function persistReviewGraphicWithRetry(input, { attempts = 6, delayMs = 10000 } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await createReviewGraphic(input);
+    } catch (err) {
+      if (err?.code !== 'SYNC_LOCK_BUSY' || attempt >= attempts) throw err;
+      logger.info(`[studio] review-graphic persist deferred by location sync lock (attempt ${attempt}/${attempts}) — retrying in ${delayMs / 1000}s`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 async function createReviewGraphic(input) {
   if (!(await hasTable('review_graphics'))) throw new Error('review_graphics table is not available');
   const review = await db('google_reviews').where({ id: input.googleReviewId }).first();
@@ -2177,7 +2219,9 @@ async function createReviewGraphic(input) {
     return saved;
   }), { recordHealth: false });
   if (outcome?.skipped) {
-    throw new Error('Review sync is in progress for this location — retry creating the graphic in a moment');
+    const busy = new Error('Review sync is in progress for this location — retry creating the graphic in a moment');
+    busy.code = 'SYNC_LOCK_BUSY';
+    throw busy;
   }
   const graphic = outcome;
   return { ...graphic, image_url: graphic.image_url || imageUrl || null };

@@ -1393,23 +1393,44 @@ router.get('/review-trend', dashboardCache, async (req, res, next) => {
     // by ET month.
     let total = 0;
     let avgRating = null;
-    const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
+    // Same validity gate as the Rating tile and /admin/reviews overview:
+    // trust the Places snapshot only when EVERY configured location has a
+    // fresh (24h) _stats row whose payload carries a usable number — stale,
+    // partial, or malformed rows otherwise kept this card on a wrong total
+    // while the corrected headline metrics sat right next to it.
+    const { WAVES_LOCATIONS: trendLocations } = require('../config/locations');
+    const statsFreshCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const statsRows = await db('google_reviews')
+      .where({ reviewer_name: '_stats' })
+      .whereIn('location_id', trendLocations.map(l => l.id))
+      .where('synced_at', '>', statsFreshCutoff);
+    const freshStatsLocationIds = new Set();
     let placesTotal = 0, ratingSum = 0, ratingCount = 0;
     for (const row of statsRows) {
       try {
         const parsed = JSON.parse(row.review_text);
+        if (!parsed || typeof parsed !== 'object'
+          || !(Number.isFinite(parsed.totalReviews) || Number.isFinite(parsed.rating))) {
+          logger.warn(`[admin-dashboard] review-trend _stats payload has no usable numbers (id=${row.id})`);
+          continue;
+        }
         placesTotal += parsed.totalReviews || 0;
         if (parsed.rating) { ratingSum += parsed.rating; ratingCount += 1; }
+        freshStatsLocationIds.add(row.location_id);
       } catch (parseErr) {
         logger.warn(`[admin-dashboard] review-trend _stats parse failed (id=${row.id}): ${parseErr.message}`);
       }
     }
-    if (placesTotal > 0) {
+    const statsComplete = trendLocations.every(l => freshStatsLocationIds.has(l.id));
+    if (statsComplete && placesTotal > 0) {
       total = placesTotal;
       avgRating = ratingCount > 0 ? Math.round((ratingSum / ratingCount) * 10) / 10 : null;
     } else {
       const totals = await db('google_reviews')
         .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
+        // Live rows only — removed reviews are retained evidence and must
+        // not inflate the card total (matches every other overview surface).
+        .whereNull('missing_since')
         .count('* as total')
         .avg('star_rating as avg')
         .first();
