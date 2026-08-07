@@ -303,6 +303,23 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
   return updates;
 }
 
+// Per-plan components for a rate repair (codex #3245 r13): a scalar minted
+// AFTER the one-time ledger backfill must carry attribution, or the
+// customer's first gate-on same-family re-quote reaches the empty-ledger
+// whole-scalar replace and drops sibling plans. Keys aggregate under the
+// CANONICAL adoption family, mirroring self-booking-plan-sync.
+function planRateComponentsForRepair(detectedKeys) {
+  const { serviceFamilyKeyForAdoption } = require('../routes/estimate-public');
+  const components = {};
+  for (const key of representativePlanKeys(detectedKeys)) {
+    const rate = moneyNumber(SERVICE_PLANS[key]?.monthlyRate);
+    if (!(rate > 0)) continue;
+    const family = serviceFamilyKeyForAdoption({ service: key }) || key;
+    components[family] = (components[family] || 0) + rate;
+  }
+  return components;
+}
+
 // --enroll-no-plan updates: waveguard_tier ONLY, and only for a customer who
 // is NOT already a member (fail-closed via the shared membership predicate —
 // members are re-aligned by buildCustomerUpdates, never double-handled here).
@@ -562,6 +579,17 @@ async function applyCustomerRepair(repair) {
     }
   }
   const updatedCount = await updateQuery.update(repair.customerUpdates);
+  if (updatedCount && repair.customerUpdates.monthly_rate !== undefined
+    && Number(repair.customerUpdates.monthly_rate) > 0) {
+    // Seed the repaired rate's per-family attribution (codex #3245 r13) —
+    // gate-aware error policy lives in the helper.
+    await require('../services/plan-rate-ledger').seedLedgerComponents(
+      db,
+      repair.customer.id,
+      planRateComponentsForRepair(repair.detectedKeys),
+      { source: 'alignment_repair' },
+    );
+  }
   if (isEnrollment && !updatedCount) {
     console.error(`enrollment skipped for customer ${repair.customer.id} — customer changed since candidate read`);
     return;
