@@ -551,6 +551,46 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(directives.join(' ')).toContain('FAQ');
   });
 
+  test('every frequent gate code from the prod audit maps to a specific corrective instruction, not the generic fallback', () => {
+    const codes = [
+      'HARDCODED_PRICE', 'FAQ_BLOCKED_SERVICE', 'DISALLOWED_EXTERNAL_LINK',
+      'UNKNOWN_INTERNAL_ROUTE', 'CITATION_TOKEN_RESIDUE', 'OFF_FOOTPRINT_CITY_CLAIM',
+      'PRODUCT_CLAIM', 'PREVENTION_PROMISE',
+      'COMPARISON_RIGGED_RANKING', 'COMPARISON_COMPETITOR_IN_PROSE',
+      'COMPARISON_UNKNOWN_COMPETITOR', 'COMPARISON_DISPARAGEMENT', 'COMPARISON_UNCLASSIFIED_OPTION',
+    ];
+    const directives = buildRetryDirectives({
+      findings: codes.map((code) => ({ severity: 'P0', code, message: 'gate text' })),
+    });
+    expect(directives).toHaveLength(codes.length + 1); // header + one per code
+    for (const d of directives.slice(1)) {
+      // The generic fallback echoes "Previous draft failed <code>" — every
+      // audited code must carry a real corrective instruction instead.
+      expect(d).not.toContain('Previous draft failed');
+    }
+  });
+
+  test('new retry instructions tell the writer what to DO, in gate-accurate terms', () => {
+    const directive = (code) => buildRetryDirectives({ findings: [{ severity: 'P0', code }] })[1];
+    expect(directive('UNKNOWN_INTERNAL_ROUTE')).toContain('internal_links_to_add');
+    expect(directive('UNKNOWN_INTERNAL_ROUTE')).toMatch(/never link a guessed/);
+    expect(directive('CITATION_TOKEN_RESIDUE')).toContain('<cite');
+    expect(directive('CITATION_TOKEN_RESIDUE')).toMatch(/plain prose/);
+    expect(directive('OFF_FOOTPRINT_CITY_CLAIM')).toMatch(/outside the Waves footprint/);
+    expect(directive('OFF_FOOTPRINT_CITY_CLAIM')).toMatch(/educational mention/);
+    expect(directive('PRODUCT_CLAIM')).toMatch(/INFORMATIONAL TOPIC/);
+    expect(directive('PRODUCT_CLAIM')).toMatch(/keep the brief.s target keyword and title intact/);
+    expect(directive('PREVENTION_PROMISE')).toMatch(/REDUCED recurrence/);
+    expect(directive('COMPARISON_RIGGED_RANKING')).toMatch(/#1/);
+    expect(directive('COMPARISON_RIGGED_RANKING')).toMatch(/neutral trade-offs/);
+    expect(directive('COMPARISON_COMPETITOR_IN_PROSE')).toMatch(/ONLY inside the <ComparisonTable>/);
+    expect(directive('COMPARISON_COMPETITOR_IN_PROSE')).toMatch(/SPECIFIC competitor/);
+    expect(directive('COMPARISON_COMPETITOR_IN_PROSE')).toMatch(/operator brief itself names[\s\S]{0,60}MUST stay as briefed/);
+    expect(directive('OFF_FOOTPRINT_CITY_CLAIM')).toMatch(/list introduction[\s\S]{0,60}table header/);
+    expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/get_competitor_facts/);
+    expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/never invent a business name/);
+  });
+
   test('unknown codes fall back to the finding text and duplicates collapse', () => {
     const directives = buildRetryDirectives({
       findings: [
@@ -561,6 +601,31 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(directives).toHaveLength(2); // header + one deduped directive
     expect(directives[1]).toContain('SOMETHING_NEW');
     expect(directives[1]).toContain('novel failure');
+  });
+
+  test('canonical directives carry the gate finding text so the redraft knows the OFFENDING entity (Codex r4)', () => {
+    const directives = buildRetryDirectives({
+      findings: [{
+        severity: 'P1',
+        code: 'COMPARISON_COMPETITOR_IN_PROSE',
+        message: 'Names competitor "Terminix" in prose/title/meta, outside the comparison table',
+      }],
+    });
+    expect(directives[1]).toContain('Terminix'); // the name the writer must act on
+    expect(directives[1]).toMatch(/ONLY inside the <ComparisonTable>/); // canonical instruction retained
+  });
+
+  test('PREVENTION_PROMISE retry scopes free re-treatment to eligible recurring coverage (Codex r5)', () => {
+    const directive = (code) => buildRetryDirectives({ findings: [{ severity: 'P0', code }] })[1];
+    expect(directive('PREVENTION_PROMISE')).toMatch(/REDUCED recurrence/);
+    expect(directive('PREVENTION_PROMISE')).toMatch(/ONLY if the piece concerns recurring WaveGuard plan coverage/);
+    expect(directive('PREVENTION_PROMISE')).toMatch(/WITHOUT promising a callback/);
+  });
+
+  test('COMPARISON_UNKNOWN_COMPETITOR retry preserves operator-briefed names in prose while evicting them from the table (Codex r4)', () => {
+    const directive = (code) => buildRetryDirectives({ findings: [{ severity: 'P0', code }] })[1];
+    expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/operator brief itself names[\s\S]{0,80}MUST stay in prose\/title\/meta/);
+    expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/remove it only from the <ComparisonTable>/);
   });
 
   test('composed brief carries retry_directives inside voice_constraints when gate_retry is present', () => {

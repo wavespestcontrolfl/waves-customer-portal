@@ -2689,3 +2689,143 @@ describe('top-level title/meta on the TABLE path (Codex round 11)', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
   });
 });
+
+// ── operator authorization on the TABLE path (Codex r2 on #3256) ─────
+
+describe('operator-authorized prose mentions on table-backed drafts', () => {
+  const D1_BRIEF = [
+    'TruGreen Alternatives in Sarasota: What to Weigh',
+    'trugreen alternative sarasota',
+    'Why homeowners look beyond TruGreen, with a trade-off comparison table',
+  ].join('\n');
+  const D1_TABLE = `<ComparisonTable
+  columns={["What to weigh","National chain","Local SWFL company","DIY"]}
+  rows={[
+    { label: "Knows SWFL turf", values: ["Generic playbook","Yes","No"] },
+    { label: "Re-treat guarantee", values: ["Varies","Common","None"] }
+  ]}
+  highlight={1}
+  caption="Trade-offs to weigh for Sarasota lawns." />`;
+
+  test('operator-named competitor in title/prose + mandated table → passes to human review, no IN_PROSE finding', () => {
+    const r = gate.evaluate({
+      body: `# Guide\n\nMany homeowners start with TruGreen and later want a local option; here is what to weigh.\n\n${D1_TABLE}\n\nClosing prose.`,
+      frontmatter: { title: 'TruGreen Alternatives in Sarasota: What to Weigh' },
+    }, { namedCompetitorEnabled: true, operatorBriefText: D1_BRIEF });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+  });
+
+  test('a competitor the operator did NOT name still flags IN_PROSE on the table path', () => {
+    const r = gate.evaluate({
+      body: `# Guide\n\nTruGreen plans are annual, and Terminix offers similar contracts.\n\n${D1_TABLE}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: true, operatorBriefText: D1_BRIEF });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE' && /Terminix/.test(f.message))).toBe(true);
+  });
+
+  test('table CELLS keep full curated strictness — operator authorship never verifies a cell claim', () => {
+    const t = D1_TABLE.replace('National chain', 'TruGreen');
+    const r = gate.evaluate({
+      body: `# Guide\n\nIntro prose.\n\n${t}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: true, operatorBriefText: D1_BRIEF });
+    // TruGreen named in a table whose cells state non-curated facts with no
+    // sourced caption → the known-competitor findings still fire;
+    // authorization changed nothing about cell validation.
+    expect(r.pass).toBe(false);
+  });
+
+  test('mined drafts (no operator text) on the table path are unchanged', () => {
+    const r = gate.evaluate({
+      body: `# Guide\n\nMany homeowners start with TruGreen and later want a local option.\n\n${D1_TABLE}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+  });
+});
+
+describe('operator authorization: detection-only unknowns + feature-flag exemption on table drafts (Codex r3 on #3256)', () => {
+  const B3_BRIEF = [
+    "Aptive's Cancellation Fee, Explained",
+    'aptive cancellation fee',
+    "What Aptive's contract actually costs, with a trade-off comparison table",
+  ].join('\n');
+  const NEUTRAL_TABLE = `<ComparisonTable
+  columns={["What to weigh","National chain","Local SWFL company","DIY"]}
+  rows={[
+    { label: "Contract length", values: ["Often annual","Month-to-month common","N/A"] }
+  ]}
+  highlight={1}
+  caption="Contract trade-offs to weigh." />`;
+
+  test('detection-only operator-named competitor in prose + table → review, no UNKNOWN_COMPETITOR', () => {
+    const r = gate.evaluate({
+      body: `# Guide\n\nAptive contracts run annual terms; here is what cancelling involves.\n\n${NEUTRAL_TABLE}\n\nClosing prose.`,
+      frontmatter: { title: "Aptive's Cancellation Fee, Explained" },
+    }, { namedCompetitorEnabled: true, operatorBriefText: B3_BRIEF });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(false);
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+  });
+
+  test('the same detection-only name INSIDE a table cell stays fail-closed regardless of authorization', () => {
+    const t = NEUTRAL_TABLE.replace('National chain', 'Aptive');
+    const r = gate.evaluate({
+      body: `# Guide\n\nIntro prose.\n\n${t}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: true, operatorBriefText: B3_BRIEF });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
+  });
+
+  test('feature flag OFF: operator-authorized prose-only known parks to review instead of NAMED_COMPETITOR_DISABLED', () => {
+    const D1_BRIEF = 'TruGreen Alternatives in Sarasota\ntrugreen alternative sarasota';
+    const r = gate.evaluate({
+      body: `# Guide\n\nMany homeowners start with TruGreen and later want a local option.\n\n${NEUTRAL_TABLE}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: false, operatorBriefText: D1_BRIEF });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(false);
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+  });
+
+  test('feature flag OFF: a known named IN the table still requires the flag', () => {
+    const t = NEUTRAL_TABLE.replace('National chain', 'TruGreen');
+    const r = gate.evaluate({
+      body: `# Guide\n\nIntro prose.\n\n${t}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: false, operatorBriefText: 'TruGreen Alternatives\ntrugreen alternative' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(true);
+  });
+
+  test('feature flag OFF: an ALIAS in the table still requires the flag — canonical-name substring must not exempt it (Codex r4)', () => {
+    // Block says "Massey"; findBusinessMentions canonicalizes to "Massey
+    // Services", which a raw substring scan of the block would never find.
+    const t = NEUTRAL_TABLE.replace('National chain', 'Massey');
+    const r = gate.evaluate({
+      body: `# Guide\n\nIntro prose.\n\n${t}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: false, operatorBriefText: 'Massey Alternatives in Sarasota\nmassey alternative sarasota' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(true);
+  });
+
+  test('feature flag OFF: a competitor cited only in a sources URL does NOT count as a table occurrence (Codex r5)', () => {
+    // The generic table cites trugreen.com as its source; TruGreen appears
+    // in prose under operator authorization. Attribution is not a table
+    // claim — the prose-only exemption must survive.
+    const t = NEUTRAL_TABLE.replace(
+      'caption="Contract trade-offs to weigh."',
+      'caption="Attributes as of June 2026, per each company\'s public website." sources={["https://www.trugreen.com/terms"]}',
+    );
+    const r = gate.evaluate({
+      body: `# Guide\n\nMany homeowners start with TruGreen and later want a local option.\n\n${t}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: false, operatorBriefText: 'TruGreen Alternatives in Sarasota\ntrugreen alternative sarasota' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(false);
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+  });
+
+  test('feature flag OFF: operator-authorized known referenced ONLY via a link destination parks to review, never silently passes (Codex r4)', () => {
+    const r = gate.evaluate({
+      body: `# Guide\n\nCompare [their published terms](https://www.trugreen.com/terms) with a local plan.\n\n${NEUTRAL_TABLE}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: false, operatorBriefText: 'TruGreen Alternatives in Sarasota\ntrugreen alternative sarasota' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(false);
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+  });
+});
