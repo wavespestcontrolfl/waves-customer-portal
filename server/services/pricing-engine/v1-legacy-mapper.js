@@ -492,7 +492,14 @@ function mapV1ToLegacyShape(v1Result) {
       costFloorApplied: !!lawnLI.costFloorApplied,
       programMinimumApplied: !!lawnLI.programMinimumApplied,
       programMinimumMonthly: lawnLI.programMinimumMonthly ?? null,
-      bermudaSuppression: lawnLI.bermudaSuppression || null,
+      // Cadence-INDEPENDENT provenance only: the per-app adder is identical on
+      // every tier, while an annual figure stamped for the generated tier goes
+      // stale when the customer accepts a different cadence
+      // (applySelectedLawnTierToEstimateData never rewrites lawnMeta). Annual
+      // is always perApp x the accepted tier's visits.
+      bermudaSuppression: lawnLI.bermudaSuppression
+        ? { perApp: lawnLI.bermudaSuppression.perApp }
+        : null,
       costs: lawnLI.costs || null,
       margin: lawnLI.margin ?? null,
     };

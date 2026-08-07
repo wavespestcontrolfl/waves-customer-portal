@@ -518,7 +518,12 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     try {
       v1Input = translate(req.profile, Array.isArray(req.selectedServices) ? req.selectedServices : [], req.options || {});
       source = 'ENGINE_REQUEST';
-    } catch (_) {
+    } catch (err) {
+      // failClosed = a policy rejection (e.g. a gated add-on in the replayed
+      // request), never engine breakage: swallowing it here would fall through
+      // to NO_INPUTS → CLIENT_FALLBACK and persist the very thing the
+      // validation rejected (codex #3272 r1). Propagate; the save 400s.
+      if (err && err.failClosed === true) throw err;
       v1Input = null;
     }
   }
@@ -663,6 +668,10 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   try {
     result = await recomputeFn(estimateData, { now, priorQualifyingServices, recurringCustomer });
   } catch (error) {
+    // Fail-open is for BROKEN engines only. A failClosed policy rejection
+    // (gated/invalid add-on in the replay) must block the save outright —
+    // stamping it CLIENT_FALLBACK would persist and send the rejected price.
+    if (error && error.failClosed === true) throw error;
     result = { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
 

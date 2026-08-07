@@ -117,9 +117,20 @@ describe("bermudagrass suppression add-on checkbox", () => {
     });
     const lawnCheckbox = findCheckboxByLabel(container, /^\s*Lawn Care\s*$/);
     expect(lawnCheckbox).toBeTruthy();
+    const bsBeforeDeselect = findCheckboxByLabel(container, /Bermudagrass suppression/);
+    if (!bsBeforeDeselect.checked) fireEvent.click(bsBeforeDeselect);
     fireEvent.click(lawnCheckbox);
     await waitFor(() => {
       expect(findCheckboxByLabel(container, /Bermudagrass suppression/)).toBeNull();
+    });
+
+    // Reselecting Lawn Care must restore the option UNCHECKED — deselecting
+    // the service clears the per-job confirmation (no silent carry-back).
+    fireEvent.click(lawnCheckbox);
+    await waitFor(() => {
+      const el = findCheckboxByLabel(container, /Bermudagrass suppression/);
+      expect(el).toBeTruthy();
+      expect(el.checked).toBe(false);
     });
   });
 });

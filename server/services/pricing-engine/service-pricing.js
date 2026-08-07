@@ -2038,12 +2038,25 @@ function priceLawnCare(property, options = {}) {
   // the cost-floor model (floors are disarmed; margin stays reporting-only).
   const bsCfg = LAWN_PRICING_V2.bermudaSuppression || {};
   const bermudaSuppressionEligible = normalizedTrack === 'st_augustine';
-  const bermudaSuppressionPerApp = bermudaSuppression === true && bermudaSuppressionEligible
-    ? Math.round((
-      (Number.isFinite(Number(bsCfg.perAppBase)) ? Number(bsCfg.perAppBase) : 0)
-      + (Number.isFinite(Number(bsCfg.perAppPer1000Sqft)) ? Number(bsCfg.perAppPer1000Sqft) : 0) * (lawnSqFt / 1000)
-    ) * 100) / 100
-    : 0;
+  let bermudaSuppressionPerApp = 0;
+  if (bermudaSuppression === true && bermudaSuppressionEligible) {
+    // A selected add-on must price POSITIVE or fail the calculation — a
+    // malformed admin edit to the DB knobs (missing key, non-numeric, zero)
+    // silently zeroing the adder would return a successful unchanged lawn
+    // price for a checked option (codex #3272 r1). Fail closed instead;
+    // persistence rethrows failClosed errors rather than CLIENT_FALLBACK.
+    const base = Number(bsCfg.perAppBase);
+    const per1000 = Number(bsCfg.perAppPer1000Sqft);
+    const adder = Math.round((base + per1000 * (lawnSqFt / 1000)) * 100) / 100;
+    if (!Number.isFinite(base) || base < 0 || !Number.isFinite(per1000) || per1000 < 0 || !(adder > 0)) {
+      const err = new Error('Bermudagrass suppression pricing knobs are invalid (lawn_pricing_v2.bermudaSuppression) — fix perAppBase/perAppPer1000Sqft; a selected add-on never silently prices $0.');
+      err.statusCode = 400;
+      err.code = 'BERMUDA_SUPPRESSION_KNOBS_INVALID';
+      err.failClosed = true;
+      throw err;
+    }
+    bermudaSuppressionPerApp = adder;
+  }
   const allTiers = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
@@ -2126,11 +2139,11 @@ function priceLawnCare(property, options = {}) {
     pricingBasis: selected.pricingBasis,
     pricingSource: selected.pricingSource,
     customQuoteFlag,
+    // Cadence-independent by design: the per-app adder is the same on every
+    // tier, and a tier-stamped annual would go stale when the customer accepts
+    // a different cadence (annual = perApp x accepted tier's visits).
     bermudaSuppression: bermudaSuppressionPerApp > 0
-      ? {
-        perApp: bermudaSuppressionPerApp,
-        annual: Math.round(bermudaSuppressionPerApp * (LAWN_TIERS[selected.tier]?.freq ?? tierConfig.freq) * 100) / 100,
-      }
+      ? { perApp: bermudaSuppressionPerApp }
       : null,
     notes: [
       ...(customQuoteFlag

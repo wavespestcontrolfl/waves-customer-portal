@@ -2884,6 +2884,12 @@ export default function EstimateToolViewV2({
       if (key === "svcRodentGuarantee" && f.svcRodentGuarantee) {
         for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
       }
+      // Same per-job rule for the bermuda-suppression confirmation: deselecting
+      // Lawn Care clears it, so reselecting never restores a checked add-on
+      // without fresh verification.
+      if (key === "svcLawn" && f.svcLawn) {
+        next.bermudaSuppression = false;
+      }
       if (key === "svcInjection" && !f.svcInjection && String(f.palmTreatmentCount || "").trim() === "") {
         next.palmTreatmentCount = f.palmCount || "";
       }

@@ -25,7 +25,10 @@ describe('priceLawnCare bermudaSuppression adder', () => {
       track: 'st_augustine', tier: 'enhanced', bermudaSuppression: true,
     });
 
-    expect(withAddon.bermudaSuppression).toEqual({ perApp: ADDER_5K, annual: ADDER_5K * 9 });
+    // Cadence-independent provenance: perApp only — annual is always
+    // perApp x the ACCEPTED tier's visits, so a stamped annual would go
+    // stale on cadence selection.
+    expect(withAddon.bermudaSuppression).toEqual({ perApp: ADDER_5K });
     for (const tier of withAddon.tiers) {
       const baseTier = base.tiers.find((t) => t.tier === tier.tier);
       expect(baseTier).toBeTruthy();
@@ -43,8 +46,30 @@ describe('priceLawnCare bermudaSuppression adder', () => {
     const withAddon = priceLawnCare(PROPERTY_10K, {
       track: 'st_augustine', tier: 'premium', bermudaSuppression: true,
     });
-    expect(withAddon.bermudaSuppression.perApp).toBe(ADDER_10K);
-    expect(withAddon.bermudaSuppression.annual).toBeCloseTo(ADDER_10K * 12, 2);
+    expect(withAddon.bermudaSuppression).toEqual({ perApp: ADDER_10K });
+  });
+
+  test('invalid DB knobs FAIL the calculation for a selected add-on (never a silent $0)', () => {
+    const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
+    const saved = LAWN_PRICING_V2.bermudaSuppression;
+    try {
+      LAWN_PRICING_V2.bermudaSuppression = { perAppBase: 'oops' };
+      let thrown;
+      try {
+        priceLawnCare(PROPERTY_5K, { track: 'st_augustine', tier: 'enhanced', bermudaSuppression: true });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeTruthy();
+      expect(thrown.code).toBe('BERMUDA_SUPPRESSION_KNOBS_INVALID');
+      expect(thrown.failClosed).toBe(true);
+      // Unselected add-on is untouched by broken knobs — no drift for
+      // every normal lawn quote even with a malformed config row.
+      const plain = priceLawnCare(PROPERTY_5K, { track: 'st_augustine', tier: 'enhanced' });
+      expect(plain.bermudaSuppression).toBeNull();
+    } finally {
+      LAWN_PRICING_V2.bermudaSuppression = saved;
+    }
   });
 
   test('non-St.-Augustine tracks are ineligible: price unchanged + note', () => {
@@ -68,6 +93,34 @@ describe('priceLawnCare bermudaSuppression adder', () => {
     expect(explicitOff.bermudaSuppression).toBeNull();
     expect(base.bermudaSuppression).toBeNull();
     expect(base.tiers.every((t) => t.bermudaSuppressionPerApp === null)).toBe(true);
+  });
+});
+
+describe('save-replay failClosed propagation', () => {
+  const { resolveServerAuthoritativePricing } = require('../services/admin-estimate-persistence');
+  const clientPreview = { annualTotal: 500 };
+
+  test('a failClosed policy rejection BLOCKS the save (no CLIENT_FALLBACK)', async () => {
+    const gateErr = new Error('gated');
+    gateErr.failClosed = true;
+    await expect(resolveServerAuthoritativePricing({
+      estimateData: { engineRequest: { profile: {} } },
+      clientPreview,
+      quoteRequired: false,
+      now: new Date(),
+      recompute: async () => { throw gateErr; },
+    })).rejects.toBe(gateErr);
+  });
+
+  test('an ordinary engine error still fails OPEN to CLIENT_FALLBACK', async () => {
+    const { audit } = await resolveServerAuthoritativePricing({
+      estimateData: { engineRequest: { profile: {} } },
+      clientPreview,
+      quoteRequired: false,
+      now: new Date(),
+      recompute: async () => { throw new Error('engine broke'); },
+    });
+    expect(audit.pricing_authority).toBe('CLIENT_FALLBACK');
   });
 });
 

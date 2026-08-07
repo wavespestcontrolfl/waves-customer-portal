@@ -3070,6 +3070,11 @@ function requireBermudaSuppressionGate() {
   const err = new Error('Bermudagrass suppression is not enabled on this environment (GATE_BERMUDA_SUPPRESSION) — uncheck the add-on or flip the gate.');
   err.statusCode = 400;
   err.code = 'BERMUDA_SUPPRESSION_GATED';
+  // Policy rejection, not engine breakage: the save-replay pipeline fails
+  // OPEN (CLIENT_FALLBACK) on engine errors by design, but a gated add-on
+  // must never ride that fallback into a persisted estimate — persistence
+  // rethrows errors carrying this marker (codex #3272 r1).
+  err.failClosed = true;
   throw err;
 }
 
