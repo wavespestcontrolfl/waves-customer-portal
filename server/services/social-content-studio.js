@@ -1551,13 +1551,16 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         noAiImage: true, // brand card only — never a literal AI image
         gbpLocationIds: finalPreview.inputs?.locationId ? [finalPreview.inputs.locationId] : [locationForCity(plan.city).id],
       }),
+      { rejectConsumed: true },
     );
     if (publishOutcome.blocked) {
       const reason = publishOutcome.lockBusy
         ? 'review sync in progress for this location — testimonial publish deferred, retry the run'
-        : publishOutcome.missing
-          ? 'source Google review no longer exists — testimonial publish blocked'
-          : 'source Google review has been removed from Google — testimonial publish blocked';
+        : publishOutcome.consumed
+          ? 'source Google review was already published as a testimonial — candidate consumed'
+          : publishOutcome.missing
+            ? 'source Google review no longer exists — testimonial publish blocked'
+            : 'source Google review has been removed from Google — testimonial publish blocked';
       await updateAutonomousRun(run?.id, {
         status: 'failed',
         preview: finalPreview,
@@ -1566,6 +1569,10 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
     }
     const publishResult = publishOutcome.result;
+    // The claim is held through candidate consumption below — releasing it
+    // right after the publish would let a second draft run referencing the
+    // same review acquire and double-publish in the publish→consume gap.
+    try {
 
     const post = await db('social_media_posts')
       .where({ source_guid: guid })
@@ -1618,6 +1625,9 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       preview: finalPreview,
       publishResult,
     };
+    } finally {
+      await publishOutcome.releaseClaim();
+    }
   } catch (err) {
     await updateAutonomousRun(run?.id, {
       status: 'failed',
@@ -1668,9 +1678,11 @@ function cityFromLocationId(locationId) {
  */
 const PUBLISH_CLAIM_MS = 10 * 60 * 1000;
 
-async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
+const NOOP_RELEASE = async () => {};
+
+async function publishWithReviewLivenessLock(sourceReviewId, publishFn, { rejectConsumed = false } = {}) {
   if (!sourceReviewId) {
-    return { blocked: false, result: await publishFn() };
+    return { blocked: false, result: await publishFn(), releaseClaim: NOOP_RELEASE };
   }
   const source = await db('google_reviews').where({ id: sourceReviewId }).first();
   if (!source || source.missing_since) {
@@ -1678,10 +1690,21 @@ async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
   }
   // The claimed-until value doubles as the ownership token: acquisition is
   // serialized under the advisory lock, so exactly one publisher can win a
-  // given claim window — and the finally-clear below releases ONLY a claim
-  // this invocation owns, never a successor's.
+  // given claim window — and releaseClaim below releases ONLY a claim this
+  // invocation owns, never a successor's.
   const claimUntil = new Date(Date.now() + PUBLISH_CLAIM_MS).toISOString();
   const decision = await runExclusive(`gbp-review-sync:${source.location_id}`, async () => {
+    if (rejectConsumed) {
+      // Two draft runs can reference the same review (drafts don't insert
+      // review_graphics) — once one approval consumed the candidate, a
+      // second acquisition must fail permanently, not just while the first
+      // claim is live.
+      const consumedRow = await db('review_graphics')
+        .where({ google_review_id: sourceReviewId, status: 'approved' })
+        .first()
+        .catch(() => null);
+      if (consumedRow) return { consumed: true };
+    }
     const claimed = await db('google_reviews')
       .where({ id: sourceReviewId })
       .whereNull('missing_since')
@@ -1695,6 +1718,9 @@ async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
   if (decision?.skipped) {
     return { blocked: true, lockBusy: true };
   }
+  if (decision.consumed) {
+    return { blocked: true, consumed: true };
+  }
   if (!decision.claimed) {
     // Zero rows: stamped/deleted, or another publisher holds a live claim.
     const fresh = await db('google_reviews').where({ id: sourceReviewId }).first();
@@ -1707,9 +1733,9 @@ async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
   // publish could outlive the claim TTL and let the reconcile stamp the
   // review mid-publication. Renew the OWNED claim (token-matched, so a
   // successor's claim is never touched) at a third of the TTL. If a
-  // renewal is still in flight when the finally-clear runs, the clear can
-  // miss the rotated token — that orphan self-expires within one TTL and
-  // only defers that row's stamping by one cycle.
+  // renewal is still in flight when the release runs, the clear can miss
+  // the rotated token — that orphan self-expires within one TTL and only
+  // defers that row's stamping by one cycle.
   let currentClaim = claimUntil;
   const heartbeat = setInterval(async () => {
     try {
@@ -1722,15 +1748,27 @@ async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
     } catch { /* best-effort — the TTL still bounds the window */ }
   }, Math.floor(PUBLISH_CLAIM_MS / 3));
   heartbeat.unref?.();
-  try {
-    return { blocked: false, result: await publishFn() };
-  } finally {
+  let released = false;
+  const releaseClaim = async () => {
+    if (released) return;
+    released = true;
     clearInterval(heartbeat);
     await db('google_reviews')
       .where({ id: sourceReviewId })
       .where('publish_claimed_until', currentClaim)
       .update({ publish_claimed_until: null })
       .catch(() => null);
+  };
+  try {
+    const result = await publishFn();
+    // The claim deliberately SURVIVES a successful publish: callers hold it
+    // through their post-publish bookkeeping (candidate consumption, local
+    // record) and release via releaseClaim() — otherwise a competitor could
+    // acquire in the publish→consume gap and double-publish.
+    return { blocked: false, result, releaseClaim };
+  } catch (err) {
+    await releaseClaim();
+    throw err;
   }
 }
 
@@ -1904,20 +1942,25 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         noAiImage: true, // stored visual only — never a fresh literal AI image
         gbpLocationIds: [gbpLocationId],
         postId: run.social_media_post_id || null,
-      }))
-      : { blocked: false, result: { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' } };
+      }), { rejectConsumed: true })
+      : { blocked: false, result: { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' }, releaseClaim: async () => {} };
     if (publishOutcome.blocked) {
       return {
         ok: false,
         status: 409,
         error: publishOutcome.lockBusy
           ? 'review sync is in progress for this location — approve again in a moment'
-          : publishOutcome.missing
-            ? 'source Google review no longer exists — testimonial cannot be published'
-            : 'source Google review has been removed from Google — testimonial cannot be published',
+          : publishOutcome.consumed
+            ? 'this review was already published as a testimonial by another run'
+            : publishOutcome.missing
+              ? 'source Google review no longer exists — testimonial cannot be published'
+              : 'source Google review has been removed from Google — testimonial cannot be published',
       };
     }
     const publishResult = publishOutcome.result;
+    // Claim held through candidate consumption below (see
+    // publishWithReviewLivenessLock) — released in the finally.
+    try {
 
     // A VIDEO approval only finalizes when the video itself posted AND no
     // requested Meta channel is left attempted-but-failed (see
@@ -2017,6 +2060,9 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     });
 
     return { ok: true, published, dryRun: SOCIAL_FLAGS.dryRun, publishResult: assessment.mergedPublishResult, run: updated };
+    } finally {
+      await publishOutcome.releaseClaim();
+    }
     // recordHealth: false — per-run approval lock, not a scheduled job.
   }, { recordHealth: false });
 
@@ -2394,6 +2440,7 @@ async function createCompetitorPost(input) {
 module.exports = {
   AUTONOMOUS_FLAGS,
   AUTONOMOUS_SOURCE,
+  publishWithReviewLivenessLock,
   CHANNELS,
   DEFAULT_COMPETITOR_PATTERNS,
   FASTEST_RISER_PROFILES,

@@ -375,20 +375,54 @@ router.post('/:id/reply', async (req, res, next) => {
       }
 
       if (resourceName) {
-        // Revalidate liveness immediately before the external post — the
-        // hourly reconcile can stamp the row after the snapshot read at the
-        // top of this handler, and Google may still accept replies on a
-        // filtered-but-not-deleted review.
-        const fresh = await db('google_reviews').where({ id: req.params.id }).select('missing_since').first();
-        if (fresh?.missing_since) {
-          return res.status(409).json({ error: 'This review has been removed from Google — replies are disabled.' });
-        }
+        // Liveness decision + external post + local record run under the
+        // per-location publish-claim mechanism (publishWithReviewLivenessLock):
+        // the claim is acquired under the sync advisory lock (so no in-flight
+        // cycle has already observed this review absent), the reconcile
+        // defers stamping claimed rows, and the local save below happens
+        // INSIDE the claim window — Google accepting a reply on a
+        // mid-removal review can no longer leave an external side effect
+        // with no local record.
+        const { publishWithReviewLivenessLock } = require('../services/social-content-studio');
+        let outcome = null;
         try {
-          await gbp.replyToReview(resourceName, replyText, review.location_id);
-          googlePosted = true;
+          outcome = await publishWithReviewLivenessLock(req.params.id, async () => {
+            await gbp.replyToReview(resourceName, replyText, review.location_id);
+            return true;
+          });
         } catch (e) {
           googleError = e.message;
           logger.error(`Google reply failed: ${e.message}`);
+        }
+        if (outcome) {
+          if (outcome.blocked) {
+            return res.status(409).json({
+              error: outcome.lockBusy
+                ? 'Review sync is in progress for this location — try again in a moment.'
+                : 'This review has been removed from Google — replies are disabled.',
+            });
+          }
+          try {
+            googlePosted = true;
+            const updated = await db('google_reviews')
+              .where({ id: req.params.id })
+              .whereNull('missing_since')
+              .update({ review_reply: replyText, reply_updated_at: db.fn.now() });
+            if ((Array.isArray(updated) ? updated.length : updated) === 0) {
+              // Defensive only — unreachable while the claim defers stamping.
+              return res.status(409).json({
+                error: 'This review was removed from Google while replying — the reply was not recorded locally.',
+                googlePosted,
+              });
+            }
+            await db('activity_log').insert({
+              admin_user_id: req.technicianId, action: 'review_replied',
+              description: `Replied to ${review.star_rating}-star review from ${review.reviewer_name} on ${review.location_id}`,
+            });
+            return res.json({ success: true, googlePosted });
+          } finally {
+            await outcome.releaseClaim();
+          }
         }
       } else {
         logger.warn(`No GBP resource name for review ${req.params.id} — reply not saved locally`);
