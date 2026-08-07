@@ -31,11 +31,15 @@ function isListicleQuery(query) {
   if (!q) return false;
   if (LISTICLE_VENDOR_RE.test(q)) return false;
   const count = q.match(LISTICLE_LEADING_COUNT_RE);
-  // A numeric second token is punctuation-stripped cadence ("24 7 pest
-  // control" = 24/7 emergency phrasing — GSC strips the slash), never an
-  // item count: a 24-item listicle brief for an emergency-service query
-  // would be self-contradictory.
-  if (count && !LISTICLE_TIME_UNIT_RE.test(count[1]) && !/^\d/.test(count[1])) return true;
+  if (count) {
+    // A time-unit or numeric second token ("7 day …", "24 7 pest control" —
+    // GSC strips the slash from 24/7) marks the leading number as CADENCE,
+    // and that verdict is final: falling through to the noun matcher would
+    // let "7 day termite treatment checklist" mandate a 7-item listicle
+    // for a cadence query.
+    if (LISTICLE_TIME_UNIT_RE.test(count[1]) || /^\d/.test(count[1])) return false;
+    return true;
+  }
   return LISTICLE_NOUN_RE.test(q);
 }
 

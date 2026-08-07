@@ -34,6 +34,8 @@ const {
   listicleFamilyDedupeKey,
   listicleFamilyEligible,
   resolveListicleFamilyServiceCity,
+  classifierQuerySupported,
+  listicleFamilyRefreshDedupeKey,
   listicleFamilyRepReachable,
   buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
@@ -890,10 +892,13 @@ describe('listicle_family scoring + action mapping', () => {
     // Beyond 15 with no resolvable service (raw AND inferred blank) →
     // unreachable: mineNoContentYet skips !service.
     expect(listicleFamilyRepReachable(rep({ query: 'types of fish in florida' }), new Map())).toBe(false);
-    // Striking-distance window (4-15) → reachable regardless of own-page
-    // map AND regardless of service (that miner has no service guard).
-    expect(listicleFamilyRepReachable(rep({ position: 8 }), new Map([['tree-shrub::', 'https://x/']]))).toBe(true);
-    expect(listicleFamilyRepReachable(rep({ position: 8, query: 'types of fish in florida' }), new Map())).toBe(true);
+    // Striking-distance window (4-15): SQL admission alone is NOT
+    // reachability (Codex r16) — the mirrored candidate must also clear
+    // persistAll's action-aware floor, and at these signal levels a
+    // striking_distance row scores ~32 (refresh floor 75 with a page,
+    // blog floor 45 without): the family keeps the demand.
+    expect(listicleFamilyRepReachable(rep({ position: 8 }), new Map([['tree-shrub::', 'https://x/']]))).toBe(false);
+    expect(listicleFamilyRepReachable(rep({ position: 8, query: 'types of fish in florida' }), new Map())).toBe(false);
     // Beyond 15 with NO own page for the service+city → no_content_yet reaches it.
     expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map())).toBe(true);
     // Beyond 15 but an own page EXISTS for the service+city →
@@ -945,14 +950,47 @@ describe('listicle_family scoring + action mapping', () => {
       ],
     };
     expect(listicleFamilyRepReachable(split, new Map())).toBe(false);
-    // One tuple over the floor and in-window → striking_distance emits it.
+    // In-window tuple over the SQL floor — but the mirrored candidate
+    // scores ~32, under its persistence floor, so the query bucket would
+    // mine-and-drop it: the family keeps the demand (Codex r16).
     const inWindow = {
       query: 'drought tolerant plants florida',
       impressions: 60,
       position: 8,
       tuples: [{ impressions: 60, plainPosition: 8, service_category: null, city_target: null }],
     };
-    expect(listicleFamilyRepReachable(inWindow, new Map())).toBe(true);
+    expect(listicleFamilyRepReachable(inWindow, new Map())).toBe(false);
+  });
+
+  test('classifier values need boundary-aware query evidence; refresh keys are page-stable (Codex r16)', () => {
+    // The sync classifier's unbounded 'ant' tags "types of important
+    // documents florida" as pest — revalidation rejects it, and with no
+    // contextual inference either, the family dies at the !service guard.
+    expect(classifierQuerySupported('pest', 'pest', 'types of important documents florida')).toBe(false);
+    expect(classifierQuerySupported('pest', 'pest', 'kinds of ants in florida')).toBe(true); // \bants?\b
+    // specialty→pest canonicalization validates against the SPECIALTY
+    // terms — a flea family must not regress to unsupported.
+    expect(classifierQuerySupported('specialty', 'pest', 'signs of fleas in sarasota')).toBe(true);
+    expect(classifierQuerySupported('specialty', 'pest', 'types of important documents florida')).toBe(false);
+    // Resolver integration: unsupported classifier + no inference → null.
+    const helpers = {
+      canonicalize: canonicalizeServiceCategory,
+      inferService: inferServiceFromQuery,
+      normCity: (c) => c || null,
+      inferCity: () => null,
+    };
+    expect(resolveListicleFamilyServiceCity({
+      variants: [
+        { query: 'types of important documents florida', service_category: 'pest', city_target: null },
+        { query: 'florida types of important documents', service_category: 'pest', city_target: null },
+      ],
+    }, helpers).service).toBeNull();
+    // Page-stable refresh key: a primary-family flip (service/city churn)
+    // must not mint a second claimable edit of the same URL.
+    const page = 'https://wavespestcontrol.com/blog/florida-native-plants/';
+    expect(listicleFamilyRefreshDedupeKey(page)).toBe(listicleFamilyRefreshDedupeKey(page));
+    expect(listicleFamilyRefreshDedupeKey(page)).toContain('listicle_family::page::');
+    expect(listicleFamilyRefreshDedupeKey(page)).not.toBe(listicleFamilyRefreshDedupeKey('https://wavespestcontrol.com/blog/other/'));
   });
 
   test('served families route to a page refresh, never a drop and never map-existence (query-page map)', () => {
@@ -1022,8 +1060,8 @@ describe('listicle_family scoring + action mapping', () => {
     expect(opp.signal_metadata.source).toBe('listicle_family');
     expect(opp.signal_metadata.family_size).toBe(3);
     expect(opp.action_type).toBe('refresh_existing_page'); // refresh, not a competing post
-    // Page-keyed dedupe: two families served by the same page merge.
-    expect(opp.dedupe_key).toContain('listicle_family::');
+    // Page-STABLE dedupe (r16): service/city churn can't mint a second key.
+    expect(opp.dedupe_key).toContain('listicle_family::page::');
     expect(opp.dedupe_key).toContain(served.hit.page_url.slice(0, 60));
     // Router anchoring contract this bucket relies on.
     const routerSrc = require('fs').readFileSync(require.resolve('../services/content/decision-router'), 'utf8');
@@ -1250,5 +1288,11 @@ describe('vendor synonyms excluded from listicle families (Codex r7 on #3255)', 
     expect(isListicleQuery('24 7 pest control')).toBe(false);
     expect(isListicleQuery('24 hour pest control')).toBe(false);
     expect(isListicleQuery('7 signs of termite damage')).toBe(true);
+    // The cadence verdict is FINAL — an enumerable noun later in the query
+    // must not resurrect it via the noun fallback, or the overlay mandates
+    // exactly seven H2 items for a 7-day treatment query (Codex r16).
+    expect(isListicleQuery('7 day termite treatment checklist')).toBe(false);
+    // Noun fallback without a leading count is untouched.
+    expect(isListicleQuery('termite treatment checklist')).toBe(true);
   });
 });

@@ -77,7 +77,10 @@ const SERVICE_KEYWORDS = [
   // "plants" only in horticultural context — a bare noun match would let
   // "types of house plants" / "power plants" resolve to a Waves service.
   { service: 'tree-shrub', re: /\b(tree|shrub|palm|ornamental)\b|\b(?:drought|heat|salt|cold|shade|sun)[\s-]*(?:tolerant|resistant)\b[^,.;]{0,30}\bplants?\b|\bplants?\s+that\s+(?:repel|grow|thrive|attract|survive)\b/i },
-  { service: 'pest', re: /\b(pest|exterminator|bug|roach|ant|spider|cockroach)\b/i },
+  // Plurals matter with word boundaries: \bant\b matches neither 'ants'
+  // nor (correctly) 'important' — the optional s keeps the boundary and
+  // the coverage.
+  { service: 'pest', re: /\b(pests?|exterminators?|bugs?|roach(?:es)?|ants?|spiders?|cockroach(?:es)?)\b/i },
 ];
 
 function inferServiceFromQuery(query) {
@@ -86,6 +89,27 @@ function inferServiceFromQuery(query) {
     if (re.test(query)) return service;
   }
   return null;
+}
+
+// The sync's 'specialty' bucket canonicalizes to 'pest', but its topics
+// (fleas, wasps…) don't match the pest keyword list — validated separately
+// so revalidation doesn't regress those families.
+const SPECIALTY_TERMS_RE = /\b(bed\s*bugs?|fleas?|ticks?|wasps?|hornets?|fire\s*ants?|no[\s-]*see[\s-]*ums?|scorpions?|silverfish|earwigs?)\b/i;
+
+// Family admission must not trust the stored GSC classifier blindly: its
+// patterns are unbounded substring tests ('ant' inside "important"), so
+// "types of important documents florida" arrives classified 'pest'. A
+// classifier value counts only when the query contains boundary-aware
+// evidence FOR THAT SERVICE (the miner's own keyword list, or the
+// specialty terms for specialty→pest); otherwise resolution falls to the
+// contextual inference, and an off-topic family dies at the !service guard.
+function classifierQuerySupported(rawCategory, canonicalService, query) {
+  if (!canonicalService) return false;
+  if (String(rawCategory || '').toLowerCase().trim() === 'specialty') {
+    return SPECIALTY_TERMS_RE.test(String(query || ''));
+  }
+  const entry = SERVICE_KEYWORDS.find((k) => k.service === canonicalService);
+  return !!(entry && entry.re.test(String(query || '')));
 }
 
 // The GSC sync's classifier (search-console-v2 SERVICE_PATTERNS) stores
@@ -424,11 +448,18 @@ function listicleFamilyEligible(fam, thresholds = THRESHOLDS, { repQualifiesQuer
 // florida' resolves tree-shrub — and whichever has one more impression is
 // the representative. Any variant's supported classification keeps the
 // family; a family where NO variant resolves stays off-topic-rejected.
-function resolveListicleFamilyServiceCity(fam, { canonicalize, inferService, normCity, inferCity }) {
+function resolveListicleFamilyServiceCity(fam, { canonicalize, inferService, normCity, inferCity, classifierSupported = classifierQuerySupported }) {
   let service = null;
   let city = null;
   for (const v of fam.variants) {
-    if (!service) service = canonicalize(v.service_category) || inferService(v.query);
+    if (!service) {
+      const canon = canonicalize(v.service_category);
+      // Classifier value only counts with boundary-aware query evidence —
+      // see classifierQuerySupported (unbounded classifier patterns tag
+      // off-topic queries); inference is already contextual.
+      service = (canon && classifierSupported(v.service_category, canon, v.query) ? canon : null)
+        || inferService(v.query);
+    }
     if (!city) city = normCity(v.city_target) || inferCity(v.query);
     if (service && city) break;
   }
@@ -512,7 +543,7 @@ function buildListicleFamilyRefreshOpp(entries) {
   opp.score = total;
   opp.score_breakdown = breakdown;
   opp.action_type = actionForOpportunity(opp);
-  opp.dedupe_key = dedupeKey(opp);
+  opp.dedupe_key = listicleFamilyRefreshDedupeKey(opp.page_url);
   return opp;
 }
 
@@ -546,19 +577,56 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
   for (const t of tuples) {
     if ((t.impressions || 0) < thresholds.minImpressionsToScore) continue;
     const pos = t.plainPosition || 0;
-    // striking_distance has NO service guard — the window alone admits.
-    if (pos >= thresholds.strikingDistancePositionMin && pos <= thresholds.strikingDistancePositionMax) return true;
+    // Both branches build the candidate the way its miner would and then
+    // check it against persistAll's action-aware floor: SQL admission
+    // alone is not reachability — a striking_distance row scoring ~22
+    // never persists, so excluding the family on its account would leave
+    // the demand claimable NOWHERE (Codex r16).
+    const service = t.service_category || inferServiceFromQuery(rep.query);
+    const city = normalizeCity(t.city_target) || inferCityFromQuery(rep.query);
+    if (pos >= thresholds.strikingDistancePositionMin && pos <= thresholds.strikingDistancePositionMax) {
+      // striking_distance mirror (no service guard; page attach optional).
+      const cand = {
+        bucket: 'striking_distance',
+        query: rep.query,
+        page_url: ownPagesByServiceCity.get(ownPageKey(service, city)) || null,
+        service,
+        city,
+      };
+      cand.action_type = actionForOpportunity(cand);
+      const { total } = scoreOpportunity(cand, { position: pos, impressions: t.impressions });
+      if (total >= minScoreToActFor(cand.action_type)) return true;
+      continue;
+    }
     if (pos <= thresholds.strikingDistancePositionMax) continue;
     // no_content_yet mirror, including its RAW-classifier-first service
     // lookup: the own-page map keys raw classifier values (tree_shrub), so
     // canonicalizing here made the lookup miss and BOTH buckets dropped
     // the demand (Codex r13).
-    const ncService = t.service_category || inferServiceFromQuery(rep.query);
-    if (!ncService) continue;
-    const city = normalizeCity(t.city_target) || inferCityFromQuery(rep.query);
-    if (!ownPagesByServiceCity.get(ownPageKey(ncService, city))) return true;
+    if (!service) continue;
+    if (ownPagesByServiceCity.get(ownPageKey(service, city))) continue;
+    const cand = {
+      bucket: 'no_content_yet',
+      query: rep.query,
+      page_url: null,
+      service,
+      city,
+    };
+    cand.action_type = actionForOpportunity(cand);
+    const { total } = scoreOpportunity(cand, { position: pos, impressions: t.impressions });
+    if (total >= minScoreToActFor(cand.action_type)) return true;
   }
   return false;
+}
+
+// Page-stable refresh key: dedupeKey(opp) embeds service/city, which come
+// from the PRIMARY family and can flip between runs while the target URL
+// is unchanged — with the old row frozen (claimed/done/review), the new
+// key would mint a second claimable edit of the same page (Codex r16).
+function listicleFamilyRefreshDedupeKey(pageUrl) {
+  const page = String(pageUrl || '');
+  const digest = crypto.createHash('sha256').update(page).digest('hex').slice(0, 16);
+  return ['listicle_family', 'page', page.slice(0, 120), digest].join('::');
 }
 
 // Family-stable dedupe key. Deliberately NOT dedupeKey(opp): that keys on
@@ -1054,7 +1122,21 @@ class GscOpportunityMiner {
     for (const r of recent) {
       const priorImp = priorMap.get(tupleKey(r.query, r.service_category, r.city_target)) || 0;
       if (priorImp < THRESHOLDS.minImpressionsToScore) continue;
-      if ((parseInt(r.impressions, 10) - priorImp) / priorImp >= 0.5) out.add(r.query);
+      const recentImp = parseInt(r.impressions, 10);
+      if ((recentImp - priorImp) / priorImp < 0.5) continue;
+      // Emittable also means PERSISTABLE — mirror mineSeasonalRising's
+      // scoring (position 8 anchor) against the action-aware floor, same
+      // rule as the other reachability branches.
+      const cand = {
+        bucket: 'seasonal_rising',
+        query: r.query,
+        page_url: null,
+        service: r.service_category || inferServiceFromQuery(r.query),
+        city: normalizeCity(r.city_target) || inferCityFromQuery(r.query),
+      };
+      cand.action_type = actionForOpportunity(cand);
+      const { total } = scoreOpportunity(cand, { position: 8, impressions: recentImp });
+      if (total >= minScoreToActFor(cand.action_type)) out.add(r.query);
     }
     return out;
   }
@@ -2239,6 +2321,8 @@ module.exports._internals = {
   listicleFamilyDedupeKey,
   listicleFamilyEligible,
   resolveListicleFamilyServiceCity,
+  classifierQuerySupported,
+  listicleFamilyRefreshDedupeKey,
   listicleFamilyRepReachable,
   buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
