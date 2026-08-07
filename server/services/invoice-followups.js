@@ -933,7 +933,38 @@ async function stopOnPayment(invoiceId) {
             metadata: { original_message_type: 'invoice_thank_you' },
           });
           if (sendResult.blocked || sendResult.sent === false) {
-            logger.warn(`[invoice-followups] thank-you SMS blocked for invoice ${invoiceId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+            // Send-window hold: this is event-driven (the payment just
+            // landed) and the sequence is already marked completed —
+            // nothing retries, so queue the thank-you for 8:00 AM. A paid
+            // invoice's acknowledgment can't go stale, so no recheck.
+            if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
+              try {
+                const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                await db('sms_log').insert({
+                  customer_id: customer.id,
+                  direction: 'outbound',
+                  from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                  to_phone: customer.phone,
+                  message_body: body,
+                  status: 'scheduled',
+                  scheduled_for: new Date(sendResult.nextAllowedAt),
+                  message_type: 'invoice_thank_you',
+                  metadata: JSON.stringify({
+                    entry_point: 'invoice_followup_thank_you_deferred',
+                    invoice_id: invoiceId,
+                    original_block_code: sendResult.code,
+                    replay_purpose: 'payment_receipt',
+                    refresh_customer_phone: true,
+                    resolve_from_by_customer: true,
+                  }),
+                });
+                logger.info(`[invoice-followups] thank-you SMS for invoice ${invoiceId} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
+              } catch (queueErr) {
+                logger.error(`[invoice-followups] held thank-you requeue failed for invoice ${invoiceId}: ${queueErr.message}`);
+              }
+            } else {
+              logger.warn(`[invoice-followups] thank-you SMS blocked for invoice ${invoiceId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
+            }
           }
         }
       }

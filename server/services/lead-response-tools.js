@@ -564,7 +564,10 @@ async function recordLeadAutoReplyDelivered({ leadId = null, customerId = null }
       await db('leads')
         .where('id', leadId)
         .whereNull('deleted_at')
-        .where((q) => q.whereIn('status', ['new', 'pending', 'started', 'contacted']).orWhereNull('status'))
+        // Pre-contact states ONLY — an existing 'contacted' stamp belongs
+        // to whoever contacted first (their response_time must not be
+        // overwritten by a replay landing seconds later).
+        .where((q) => q.whereIn('status', ['new', 'pending', 'started']).orWhereNull('status'))
         .update({
           response_time_minutes: responseMinutes,
           status: 'contacted',

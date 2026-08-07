@@ -165,12 +165,19 @@ const REGISTRY = {
 
   lead_response_auto_reply_deferred: {
     async recheck(meta) {
-      // Mirror the immediate path's liveness gate: an admin-deleted lead
-      // must not be texted at 8:00 AM.
+      // Mirror the immediate path's liveness gate — and suppress once the
+      // lead ADVANCED overnight: an operator contact or a pipeline move
+      // past the pre-contact states makes the queued opening auto-reply
+      // redundant (and its finalizer's response-time stamp would record a
+      // phantom first-contact).
       try {
         if (!meta.lead_id) return { eligible: true };
-        const lead = await db('leads').where({ id: meta.lead_id }).whereNull('deleted_at').first('id');
+        const lead = await db('leads').where({ id: meta.lead_id }).whereNull('deleted_at').first('id', 'status');
         if (!lead) return { eligible: false, reason: 'lead-deleted' };
+        const status = String(lead.status || '').toLowerCase();
+        if (status && !['new', 'pending', 'started'].includes(status)) {
+          return { eligible: false, reason: `lead-${status}` };
+        }
         return { eligible: true };
       } catch (err) {
         return failClosed('lead-response', meta.lead_id, err);
