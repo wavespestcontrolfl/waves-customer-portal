@@ -108,7 +108,19 @@ router.get('/', async (req, res, next) => {
       // reachable (it backs the removal-alert support workflow), so it must
       // not be narrowed by the dismissed exclusion — a review dismissed
       // before (or after) Google removed it is still removal evidence.
-      .modify(qb => { if (!showDismissed && missing !== 'true') qb.where(function() { this.where('google_reviews.dismissed', false).orWhereNull('google_reviews.dismissed'); }); })
+      .modify(qb => {
+        if (!showDismissed && missing !== 'true') {
+          qb.where(function () {
+            this.where('google_reviews.dismissed', false)
+              .orWhereNull('google_reviews.dismissed')
+              // Stamped rows pass regardless of dismissal: the removal
+              // alert links to the DEFAULT view, and a review dismissed
+              // before Google removed it is still removal evidence — the
+              // dismissed exclusion must not hide it there.
+              .orWhereNotNull('google_reviews.missing_since');
+          });
+        }
+      })
       .select(
         'google_reviews.*',
         'customers.first_name as cust_first', 'customers.last_name as cust_last',
