@@ -127,6 +127,32 @@ const bondTermSwitchLimiter = rateLimit({
   message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
 });
 
+// Estimate tokens are 15-32 char url-safe (prod-verified 2026-08-07: all
+// 656 live tokens; upper bound 64 leaves room for a future hex mint).
+// Malformed tokens 404 before any DB lookup, with the same generic body as
+// an unknown token. router.param covers every /:token route in this file.
+const ESTIMATE_TOKEN_RE = /^[A-Za-z0-9_-]{15,64}$/;
+router.param('token', (req, res, next, token) => {
+  if (!ESTIMATE_TOKEN_RE.test(String(token))) return res.status(404).json({ error: 'Estimate not found' });
+  next();
+});
+
+// Accept/decline are the two heaviest public money-adjacent writes on this
+// router and had no per-route limiter (security review 2026-08-07). Keyed
+// per IP+token: the threat this addresses is hammering a KNOWN estimate's
+// accept/decline (race probing, bell spam) — a real customer accepts once,
+// maybe retries on flaky mobile, so 10/hr per token is generous. Cross-token
+// enumeration is already priced by the 15+-char url-safe token space and
+// the global /api/ limiter.
+const acceptDeclineLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${require('../middleware/rate-limit-key').rateLimitKey(req)}:${req.params.token}`,
+  message: { error: 'Too many attempts. Please wait a moment and try again, or call our office.' },
+});
+
 // Token-holder toggle endpoints (tier picker, preference switches): every
 // call is a DB write and select-tier used to ring an admin bell per call —
 // a looping client could spam bells and writes. 30/hr comfortably covers a
@@ -8174,7 +8200,7 @@ function commercialAcceptDepositExempt({ isCommercialAccept = false, siteConfirm
 // transaction — customer_id gets linked, reservation_expires_at cleared.
 // Paths without slotId behave exactly as pre-PR-B.1 (EstimateConverter
 // creates scheduled_services post-transaction).
-router.put('/:token/accept', async (req, res, next) => {
+router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -11872,7 +11898,7 @@ async function transferGroupFollowupOwnership(estimate) {
 }
 
 // PUT /api/estimates/:token/decline
-router.put('/:token/decline', async (req, res, next) => {
+router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     const guard = resolveEstimateDeclineGuard(estimate);

@@ -26,6 +26,22 @@ const {
 // unexpected paths (/l/favicon.ico etc) and short-circuits obvious bots.
 const CODE_RE = /^[a-z0-9-]{3,80}$/;
 
+// /l mounts OUTSIDE the global /api/ limiter — until now the code space was
+// probeable at line speed (security review 2026-08-07). 120/min per key is
+// far above any human click rate while making enumeration of even the
+// legacy 5-char space impractical; the key collapses IPv6 /64s so subnet
+// rotation doesn't reset the budget. Kept deliberately high because
+// carrier-NAT IPs aggregate many customers.
+const shortlinkLimiter = require('express-rate-limit')({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').unauthenticatedAuthLimitKey,
+  handler: (req, res) => res.status(429).type('html').send(notFoundPage()),
+});
+router.use(shortlinkLimiter);
+
 router.get('/:code', async (req, res) => {
   const code = (req.params.code || '').toLowerCase();
   if (!CODE_RE.test(code)) return res.status(404).type('html').send(notFoundPage());

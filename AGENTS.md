@@ -77,11 +77,11 @@ finding and warns on P1. Reviewers must return JSON matching
   without the others is a P0.
 - **Terminal handoff burn must stay atomic.** The single
   `UPDATE terminal_handoff_tokens SET used_at = now() WHERE jti = ? AND used_at IS NULL AND expires_at > now()`
-  in `server/routes/stripe-terminal.js:281-286` is the burn. Splitting this
+  in `server/routes/stripe-terminal.js:418-423` is the burn. Splitting this
   into `SELECT` + `UPDATE`, removing the `WHERE used_at IS NULL` clause, or
   moving the burn after the Stripe `paymentIntents.create` call lets two
   iOS devices share one mint and double-charge. The belt-and-suspenders
-  claim/DB comparison at lines 330–350 must also stay — it catches
+  claim/DB comparison immediately after the burn must also stay — it catches
   cross-environment replay if the JWT secret leaks.
 - **Handoff mint rate limit must be DB-enforced.** Per the comment at
   `stripe-terminal.js:26-46`, the per-tech mint ceiling is enforced in
@@ -519,9 +519,25 @@ violations at the severity noted.
   for tracker state and the en-route SMS fire.
 - **Auth.** `server/middleware/admin-auth.js` exports `adminAuthenticate`
   + `requireAdmin` / `requireTechOrAdmin`. Every `admin-*.js` route file
-  applies them at `router.use(...)` on line 1 of the router. JWT secret
-  is `config.jwt.secret` (env: `JWT_SECRET`).
-- **Public-by-token routes (no auth, by design).** `/api/pay/:token`,
+  applies `adminAuthenticate` at `router.use(...)` on line 1 of the router
+  (verified across all 207 mounted routers, 2026-08-07: none lacks auth
+  entirely; `adminAuthenticate` itself enforces active staff role ∈
+  {admin, technician}, rejects terminal-scope JWTs, and checks
+  token-version revocation). The ROLE half is NOT universal: known files
+  applying `adminAuthenticate` without a role middleware are
+  `admin-health.js`, `admin-knowledge-bridge.js`,
+  `admin-pricing-strategy.js` (imports requireTechOrAdmin, never uses it),
+  and `tool-health.js` — technician-level reach into admin-intended pages,
+  a consistency defect rather than an unauthenticated hole. New admin
+  routers must pair both. JWT secret is `config.jwt.secret`
+  (env: `JWT_SECRET`).
+- **Public-by-token routes (no auth, by design).** `/api/pay/:token`
+  (+ `/setup`, `/quote`, `/finalize`, `/confirm`, `/consent`,
+  `/capture-setup`, `/setup-complete`, `/update-amount`, `/error`,
+  `/invoice.pdf`, `/attachments/:id` — the invoice pay surface; router-wide
+  60/min limiter + url-safe 20-64 token format gate with generic 404,
+  mirroring pay-statement.js; legacy 25-32 char invoice tokens remain
+  valid),
   `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
   statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
   64-hex `payer_statements.token` format gate + public-route rate limit; resolves
@@ -535,8 +551,11 @@ violations at the severity noted.
   the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
   only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
   same noindex/no-referrer/no-store headers as `/report/:token`),
-  `/api/stripe/webhook`, `/api/twilio/*-webhook`, `/api/bouncie-webhook`,
-  `/api/sendgrid-webhook`, `/api/lead-webhook`,
+  `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound),
+  `/api/bouncie` + `/api/webhooks/bouncie`, `/api/webhooks/sendgrid`,
+  `/api/webhooks/resend` (Svix-signed), `/api/webhooks/lead`
+  (+ `POST /api/leads`, an alias accepting the same pair with identical
+  semantics),
   `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
   posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
   feedback/:token/:reaction, e/:token/:eventId (event click-through:
@@ -812,7 +831,8 @@ violations at the severity noted.
   Also accepts an OPTIONAL `prefill_lead_id` + `prefill_token` pair — the
   lead-prefill HMAC below — which, when valid, makes the lead capture UPDATE
   that existing open call-pipeline lead instead of inserting a new row; the
-  same pair is accepted by `/api/lead-webhook` with identical semantics).
+  same pair is accepted by `/api/webhooks/lead` and its `/api/leads` alias
+  with identical semantics).
   `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
   swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
   lead's own contact fields — first/last name, email, phone, address, city,
@@ -897,7 +917,38 @@ violations at the severity noted.
   automation step's HTML body with SAMPLE merge values only — no real customer
   data — for operator preview/share. Token in path, `noindex`).
   `/l/:code` (short-link resolver for every customer-facing short URL — 302 to
-  target / 410 on expired / generic 404 with no enumeration leak; `noindex`).
+  target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
+  mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
+  per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07,
+  legacy 5-char codes still resolve).
+  `/r/:code` (referral click-track + redirect to the marketing site; also
+  OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
+  url-safe 4-32 code format gate before any DB read; every hit below the
+  gate writes a `referral_clicks` row, malformed/unknown codes redirect
+  home without touching the DB).
+  `/api/estimates/:token` core family (GET view + `/data`, PUT `/accept`,
+  `/decline`, `/select-tier`, `/preferences`, POST `/bundle-inquiry`, GET
+  `/pdf` — the customer estimate surface behind every estimate link.
+  Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
+  against all live tokens 2026-08-07); accept/decline carry a 10/hr
+  limiter — the two heaviest public money-adjacent writes; select-tier/
+  preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+  `/api/documents/shared/:token` (read-only shared-document fetch incl.
+  on-the-fly service-report PDFs — customer PII by design; 64-hex format
+  gate, 24h expiry with 410, access-count audit, 30/15min limiter,
+  `no-store`).
+  `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
+  the 60s single-use handoff JWT — the token IS the auth; see the atomic
+  burn rule above).
+  `/api/admin/push/vapid-key` (GET; deliberate — the VAPID public key is
+  public by protocol).
+  `/api/health` (GET; liveness probe, no data).
+  `/api/integrations/*-worker` mounts (hermes workers; each authenticates
+  via its own HMAC-signed header check inside the router — an
+  unauthenticated internal route here is P0).
+  The auth/OAuth login family (`/api/auth/login`, refresh, OAuth
+  callbacks) is public by definition and rate-limited via
+  `unauthenticatedAuthLimitKey`.
   `/.well-known/apple-app-site-association` + `/.well-known/assetlinks.json`
   (static universal-link association JSON for the native app shell — no auth,
   no PII, no request-derived content. **Both 404 behind GATE_UNIVERSAL_LINKS**;
@@ -1031,7 +1082,10 @@ violations at the severity noted.
   `/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
   `/:token/generate-review`, `/:token/go`) (review-gate; token-scoped customer
   rating flow from a review-request link — high → the nearest GBP
-  write-a-review URL, low → private feedback capture. `/:token/go` is the
+  write-a-review URL, low → private feedback capture. Router-wide url-safe
+  32-64 token param gate (generic 404; malformed tokens on `/go` degrade to
+  the /rate page per its every-failure-lands-somewhere contract); the page
+  GET and score/submit writes carry a 30/min limiter. `/:token/go` is the
   GATE_REVIEW_DIRECT_LINK tracked redirect: 64-hex token format gate, 30
   req/min per-IP limit, stamps open/click on the review_requests row, stops
   the customer's active review cadence, and 302s to the location's GBP review

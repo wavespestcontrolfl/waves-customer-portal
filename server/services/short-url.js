@@ -22,7 +22,11 @@ const { isBotUserAgent } = require('../utils/bot-ua');
 // SMS and occasionally gets read over the phone to support.
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
 
-function generateCode(length = 5) {
+// 10 chars over the 31-char alphabet ≈ 49.5 bits — unguessable at any
+// polite request rate (5 chars was ~24.8 bits ≈ 28.6M, enumerable; security
+// review 2026-08-07). Old 5-char codes still resolve — lookups are by DB
+// value, never by shape.
+function generateCode(length = 10) {
   const bytes = crypto.randomBytes(length);
   let out = '';
   for (let i = 0; i < length; i++) out += ALPHABET[bytes[i] % ALPHABET.length];
@@ -111,7 +115,7 @@ async function createShortCode(targetUrl, opts = {}) {
   const prefix = sanitizeCodePart(opts.codePrefix || '', 58);
 
   for (let attempt = 0; attempt < 8; attempt++) {
-    const length = attempt < 5 ? 5 : 6;
+    const length = attempt < 5 ? 10 : 11;
     const randomPart = generateCode(length);
     const code = prefix ? `${prefix}-${randomPart}` : randomPart;
     try {
