@@ -4112,6 +4112,11 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
         // row's credit_applied back IN SQL so total stays the real value — else the
         // succeeded handler recomputes amount due off the collapsed total.
         total: db.raw('ROUND((? + COALESCE(credit_applied, 0))::numeric, 2)', [amount]),
+        // The unacknowledged-ack sweep ages candidates on updated_at; an
+        // old invoice whose ACH began today must date from THIS
+        // transition, or the 3-day ceiling silently excludes it and a
+        // crash-lost acknowledgment never recovers.
+        updated_at: new Date(),
       });
     if (!invoiceRowsUpdated) {
       throw new Error(`ACH processing PI ${piId} could not bind invoice ${lockedInvoice.id}; retry webhook`);
