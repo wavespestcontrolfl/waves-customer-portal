@@ -687,3 +687,31 @@ describe('_composeBrief listicle_family rows keep the overlay even with listicle
     });
   });
 });
+
+describe('_composeBrief listicle_family provenance rides gsc_signal (Codex r5 on #3255)', () => {
+  test('family_size / family_variants / family_avg_position carried; sum labeled by presence', () => {
+    const brief = new ContentBriefBuilder()._composeBrief({
+      opportunity: {
+        id: 'opp-fam-prov',
+        page_url: null,
+        query: 'drought tolerant plants florida',
+        city: null,
+        service: 'tree-shrub',
+        bucket: 'listicle_family',
+        signal_metadata: {
+          impressions: 450,
+          family_size: 12,
+          family_avg_position: 18.3,
+          family_variants: [{ query: 'drought tolerant plants florida', impressions: 48 }],
+        },
+      },
+      signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+      decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 60, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    expect(brief.gsc_signal.impressions).toBe(450);
+    expect(brief.gsc_signal.family_size).toBe(12);
+    expect(brief.gsc_signal.family_avg_position).toBe(18.3);
+    expect(brief.gsc_signal.family_variants[0].impressions).toBe(48);
+  });
+});

@@ -770,6 +770,13 @@ class ContentBriefBuilder {
         // so the refresh agent writes self-contained answer blocks without
         // re-deriving the gaps (refresh-agent-config ANSWER-GAP MODE).
         unanswered_queries: opportunity.signal_metadata?.unanswered_queries || null,
+        // listicle_family rows: `impressions` above is the FAMILY SUM, not
+        // the representative query's own volume — carry the provenance so
+        // the writer and reviewers see the aggregation instead of reading
+        // 450 impressions as a single-query metric.
+        family_size: opportunity.signal_metadata?.family_size ?? null,
+        family_variants: opportunity.signal_metadata?.family_variants || null,
+        family_avg_position: opportunity.signal_metadata?.family_avg_position ?? null,
       },
       customer_signal: signals.customer_signal
         ? {

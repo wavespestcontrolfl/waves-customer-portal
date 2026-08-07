@@ -1718,6 +1718,18 @@ class GscOpportunityMiner {
                mined_at = EXCLUDED.mined_at,
                expires_at = EXCLUDED.expires_at,
                action_type = EXCLUDED.action_type,
+               -- Identity refresh: for every OTHER bucket these are no-ops
+               -- (their dedupe keys EMBED service::city::query, so a conflict
+               -- implies identical values) — but listicle_family keys on the
+               -- stable family token-set precisely so close variants can
+               -- trade the representative slot between runs. Without this,
+               -- a pending family row kept the OLD target keyword and
+               -- classification while its score/metadata came from the new
+               -- representative (internally inconsistent; facts checks could
+               -- run against a stale service/city).
+               query = EXCLUDED.query,
+               service = EXCLUDED.service,
+               city = EXCLUDED.city,
                status = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'skipped')
                              THEN opportunity_queue.status
                              ELSE 'pending'
