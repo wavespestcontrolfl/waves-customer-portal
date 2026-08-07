@@ -193,6 +193,10 @@ function rowPassesGatedPricingEvidence(row, today) {
 // Bronze-stamped customer at Silver. Best-effort: where the catalog is
 // absent (older environments) the filter degrades to service_type-only,
 // exactly the legacy behavior.
+// Returns null on failure — NOT an empty Map — so callers can distinguish
+// "no catalog rows" from "the join failed" (codex #3253 r4: a hidden join
+// failure misclassifies generic service rows). The qualifying caller keeps
+// its legacy degrade-to-empty behavior; the ownership caller fails closed.
 async function loadCatalogFieldsByRowId(database, customerId) {
   try {
     const catalogRows = await database('scheduled_services as s')
@@ -201,7 +205,7 @@ async function loadCatalogFieldsByRowId(database, customerId) {
       .select('s.id', 'svc.service_key', 'svc.name as service_name');
     return new Map(catalogRows.map((row) => [row.id, row]));
   } catch {
-    return new Map();
+    return null;
   }
 }
 
@@ -223,7 +227,9 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
   // excluded from pricing evidence exactly as tier derivation excludes it —
   // otherwise pricing counts a family the tier does not).
   const { isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
-  const catalogById = await loadCatalogFieldsByRowId(database, customerId);
+  // Legacy degrade: a failed join classifies on service_type alone here,
+  // exactly the pre-null-return behavior (ownership fails closed instead).
+  const catalogById = (await loadCatalogFieldsByRowId(database, customerId)) || new Map();
   const today = etDateString();
   // The kept rows are returned ENRICHED with their catalog identity (Codex
   // #3011 r11 P1): downstream reducers (qualifyingKeysFromRows and the
@@ -396,8 +402,11 @@ async function loadOwnedRecurringServiceKeys(database, customerId, { streetScope
   const rows = await loadActiveRecurringServiceRows(database, customerId);
   // Same catalog join as the qualifying loader: a generic service_type
   // ("Pest Control") whose catalog identity is rodent must classify as
-  // rodent here too, not as owned pest coverage.
+  // rodent here too, not as owned pest coverage. FAIL CLOSED on a join
+  // failure (codex #3253 r4) — classifying on service_type alone could
+  // misread what the customer owns, so the caller must not price at all.
   const catalogById = await loadCatalogFieldsByRowId(database, customerId);
+  if (!catalogById) throw new Error('ownership catalog join failed');
   let joined = rows.map((r) => ({ ...r, ...(catalogById.get(r.id) || {}) }));
   // Same lifecycle evidence as the qualifying loader, applied
   // UNCONDITIONALLY (pre-push P1 ×2): a past phantom row, a callback, or a

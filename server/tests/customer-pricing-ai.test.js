@@ -11,6 +11,7 @@ function dbForTables(tables = {}) {
       where() { return q; },
       whereNotIn() { return q; },
       orWhereNull() { return q; },
+      leftJoin() { return q; },
       select() { return rows; },
       limit() { return rows; },
       first() { return rows[0] || null; },
@@ -573,5 +574,29 @@ describe('r4 regressions', () => {
     expect(result.alreadyIncluded).toContain('Lawn Care');
     expect(result.options).toEqual([]);
     expect(lookupSpy).not.toHaveBeenCalled();
+  });
+});
+
+// Codex #3253 r4 P1 follow-on: unknown ownership FAILS CLOSED — no prices.
+describe('ownership lookup failure fails closed', () => {
+  test('a failed catalog join withholds pricing entirely', async () => {
+    const base = activePlanDb('cust-failclosed', ['Quarterly Pest Control'], 'Bronze');
+    const db = (table) => {
+      const q = base(table);
+      if (table === 'scheduled_services as s') {
+        q.select = () => { throw new Error('join exploded'); };
+      }
+      return q;
+    };
+    const result = await buildCustomerPricingResponse({
+      db,
+      propertyLookup: null,
+      prompt: 'I am interested in adding lawn care',
+      customer: propertyCustomer({ id: 'cust-failclosed' }),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe('PRICING_UNAVAILABLE');
+    expect(result.options).toEqual([]);
   });
 });

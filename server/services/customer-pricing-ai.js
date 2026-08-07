@@ -286,18 +286,23 @@ async function loadCurrentServiceKeys(db, customer) {
       logger.warn(`[customer-pricing-ai] qualifying service lookup skipped: ${err.message}`);
     }
     let ownedServiceKeys = [];
+    let ownershipLookupFailed = false;
     try {
       // Ownership is BROADER than qualification (codex #3253 r2): recurring
       // rodent bait monitoring never raises a tier but absolutely means the
       // customer has rodent service — the never-re-price rule must see it.
       ownedServiceKeys = (await loadOwnedRecurringServiceKeys(db, customer.id, { streetScope })).map(mapKey);
     } catch (err) {
-      logger.warn(`[customer-pricing-ai] ownership lookup skipped: ${err.message}`);
+      // FAIL CLOSED (codex #3253 r4): unknown ownership must not price —
+      // the caller returns manual review instead of a fresh quote the
+      // customer may already be paying a different rate for.
+      ownershipLookupFailed = true;
+      logger.warn(`[customer-pricing-ai] ownership lookup failed — pricing withheld: ${err.message}`);
     }
-    return { currentServiceKeys, ownedServiceKeys };
+    return { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed };
   } catch (err) {
-    logger.warn(`[customer-pricing-ai] active service lookup skipped: ${err.message}`);
-    return { currentServiceKeys: [], ownedServiceKeys: [] };
+    logger.warn(`[customer-pricing-ai] active service lookup failed — pricing withheld: ${err.message}`);
+    return { currentServiceKeys: [], ownedServiceKeys: [], ownershipLookupFailed: true };
   }
 }
 
@@ -545,7 +550,22 @@ function ownedAndNotRepeatable(serviceKey, currentSet) {
 
 async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, propertyLookup }) {
   const text = String(prompt || '').trim();
-  const { currentServiceKeys, ownedServiceKeys } = await loadCurrentServiceKeys(db, customer);
+  const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer);
+  // FAIL CLOSED (codex #3253 r4): if what the customer owns could not be
+  // established, no price may be generated — a fresh quote for a service
+  // they already pay a (possibly different) rate for is the exact dispute
+  // this module exists to prevent. Manual review instead.
+  if (ownershipLookupFailed) {
+    return {
+      ok: false,
+      code: 'PRICING_UNAVAILABLE',
+      message: 'I could not verify your current services just now, so I did not generate prices. Send Waves a request and we will price it with you.',
+      currentServices: currentServiceKeys.map(toKeyLabel),
+      requestedServices: [],
+      alreadyIncluded: [],
+      options: [],
+    };
+  }
   // Two sets on purpose (codex #3253 r2): currentServiceKeys (WaveGuard
   // qualifying) keeps modeling the baseline plan/tier exactly as before;
   // ownedSet is the superset every never-re-price decision reads, so a
