@@ -391,6 +391,10 @@ app.use('/api/admin/auth', ...staffAuthBodyParsers);
 // auth above; unauthenticated callers must not force big JSON parse work.
 app.use('/api/mcp', ...require('./routes/mcp').mcpPreParsers);
 
+// Public MCP endpoint (anonymous agents): gate + rate limit BEFORE any body
+// parsing, then a 64kb capped parse — dark (404) until GATE_MCP_PUBLIC flips.
+app.use('/api/public/mcp', ...require('./routes/public-mcp').publicMcpPreParsers);
+
 // Base64 media payloads (service/job photos, call-recording snippets, the
 // photo lead magnets' customer uploads) only travel on the staff surfaces and
 // the two public photo-analyze funnels — mount the big parser there ONLY.
@@ -542,6 +546,9 @@ app.use('/api/public/social-feed', require('./routes/social-feed-public'));
 app.use('/api/public/automation-preview', require('./routes/public-automation-preview'));
 app.use('/api/public/service-areas', require('./routes/public-service-areas'));
 app.use('/api/public/pricing-ranges', require('./routes/public-pricing-ranges'));
+// Public MCP read-only tool surface for AI agents — gated (404 when off),
+// rate-limited, read-only registry; see routes/public-mcp.js.
+app.use('/api/public/mcp', require('./routes/public-mcp'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
 app.use('/api/public/track', require('./routes/track-public'));
 // Client-side GrowthBook exposure intake (experimentation Phase 2) — gated by
