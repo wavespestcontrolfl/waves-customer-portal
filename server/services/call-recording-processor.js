@@ -7401,53 +7401,6 @@ const CallRecordingProcessor = {
           await notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadSourceRow, call });
         }
 
-        // Marketing call lead (matched a tracking number), NEW or reused -> surface
-        // it in the PPC funnel (ad_service_attribution) so it buckets into the same
-        // channel as a web-form lead from that source. attributionForSourceType maps
-        // the lead_sources.source_type to the funnel channel key + paid flag: PAID
-        // numbers (google_ads/facebook) stay paid; ORGANIC marketing sources (spoke
-        // domains -> domain_website, hub city pages -> waves_website, GBP ->
-        // google_business) are is_paid=false so they show as their own no-spend
-        // channels instead of being invisible (an organic call otherwise makes a
-        // lead but no funnel row, hiding whole channels from the LTV:CAC surfaces).
-        // Offline / word-of-mouth sources map to null and get no row. campaign_id is
-        // null here (the Google call-reporting bridge backfills it later for paid
-        // Google). recordCallPpcAttribution dedupes by lead_id and respects
-        // first-touch (a web-attributed lead keeps its source), so no double-count.
-        // EXCEPTION: the Google Ads call-bridge target number is SHARED (organic hub
-        // + paid Google call-extension), resolved by the bridge AFTER the fact — so
-        // never pre-attribute THAT one number (it would lock the row before the
-        // bridge can mark the call paid). Only that single number is suppressed; the
-        // other main_site city-page numbers attribute organic normally.
-        // NOTE: stays gated on customerId, so a customer-less recovery lead gets no
-        // ad_service_attribution row yet — the lead keeps its lead_source_id and is
-        // attributed when it converts to a customer. Lead-only PPC attribution needs
-        // schema work on the customer-keyed table; deferred out of this PR.
-        const callAttr = leadSourceRow
-          ? require('./ads/call-attribution').attributionForSourceType(leadSourceRow.source_type)
-          : null;
-        const isBridgeTarget = leadSourceRow
-          && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
-        if (leadId && customerId && callAttr && !isBridgeTarget) {
-          require('./ads/call-attribution').recordCallPpcAttribution({
-            customerId,
-            leadId,
-            leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
-            isPaid: callAttr.isPaid,
-            leadSourceDetail: leadSourceRow.name || 'inbound call',
-            // service_interest isn't on the lead row yet (enrichment writes it
-            // later) — pass the PRIMARY matched service, NOT the composed
-            // multi-service label: attribution derives a single service_line
-            // via inferServiceLine, whose keyword order (lawn before pest)
-            // would bucket a pest-primary "… + Lawn Care Service" composite
-            // as lawn and skew paid/organic ROI (codex r3). The secondary
-            // families live on the lead's service_interest; the single-line
-            // funnel field carries the primary by design.
-            serviceInterest: extracted.matched_service || extracted.requested_service || null,
-            leadDate: call.created_at || null, // date by the actual call
-          }).catch(() => {});
-        }
-
         // Dropped-call detector, phase 1 of 2 (owner directive 2026-08-01): a
         // LIVE inbound intake conversation that ran MIN_CALL_SECONDS+, ended
         // with no farewell in the transcript tail, and captured no service
@@ -7902,6 +7855,60 @@ const CallRecordingProcessor = {
               logger.warn(`[call-proc] quote-promised admin notify failed: ${notifyErr.message}`);
             }
           }
+        }
+
+        // Marketing call lead (matched a tracking number), NEW or reused -> surface
+        // it in the PPC funnel (ad_service_attribution) so it buckets into the same
+        // channel as a web-form lead from that source. attributionForSourceType maps
+        // the lead_sources.source_type to the funnel channel key + paid flag: PAID
+        // numbers (google_ads/facebook) stay paid; ORGANIC marketing sources (spoke
+        // domains -> domain_website, hub city pages -> waves_website, GBP ->
+        // google_business) are is_paid=false so they show as their own no-spend
+        // channels instead of being invisible (an organic call otherwise makes a
+        // lead but no funnel row, hiding whole channels from the LTV:CAC surfaces).
+        // Offline / word-of-mouth sources map to null and get no row. campaign_id is
+        // null here (the Google call-reporting bridge backfills it later for paid
+        // Google). recordCallPpcAttribution dedupes by lead_id and respects
+        // first-touch (a web-attributed lead keeps its source), so no double-count.
+        // EXCEPTION: the Google Ads call-bridge target number is SHARED (organic hub
+        // + paid Google call-extension), resolved by the bridge AFTER the fact — so
+        // never pre-attribute THAT one number (it would lock the row before the
+        // bridge can mark the call paid). Only that single number is suppressed; the
+        // other main_site city-page numbers attribute organic normally.
+        // NOTE: stays gated on customerId, so a customer-less recovery lead gets no
+        // ad_service_attribution row yet — the lead keeps its lead_source_id and is
+        // attributed when it converts to a customer. Lead-only PPC attribution needs
+        // schema work on the customer-keyed table; deferred out of this PR.
+        // Runs AFTER the enrichment/claim-race block above so the funnel row
+        // targets the FINAL leadId — attribution kicked off before recovery
+        // could land on a lead the race rejected, leaving the replacement
+        // lead unattributed and reporting pointing at the wrong row
+        // (codex P1 r11). Fire-and-forget stays fine here: nothing after
+        // this consumes its result.
+        const callAttr = leadSourceRow
+          ? require('./ads/call-attribution').attributionForSourceType(leadSourceRow.source_type)
+          : null;
+        const isBridgeTarget = leadSourceRow
+          && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
+        if (leadId && customerId && callAttr && !isBridgeTarget) {
+          require('./ads/call-attribution').recordCallPpcAttribution({
+            customerId,
+            leadId,
+            leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
+            isPaid: callAttr.isPaid,
+            leadSourceDetail: leadSourceRow.name || 'inbound call',
+            // Pass the PRIMARY matched service, NOT the composed
+            // multi-service label (and not the lead row's service_interest,
+            // which enrichment may have just written as the composite):
+            // attribution derives a single service_line via inferServiceLine,
+            // whose keyword order (lawn before pest) would bucket a
+            // pest-primary "… + Lawn Care Service" composite as lawn and
+            // skew paid/organic ROI (codex r3). The secondary families live
+            // on the lead's service_interest; the single-line funnel field
+            // carries the primary by design.
+            serviceInterest: extracted.matched_service || extracted.requested_service || null,
+            leadDate: call.created_at || null, // date by the actual call
+          }).catch(() => {});
         }
 
         // Voicemail lead text-back (Layer 3): text the prospect a prefilled
