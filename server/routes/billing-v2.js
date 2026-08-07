@@ -89,7 +89,11 @@ router.get('/', async (req, res, next) => {
     } else {
       const rows = await db('payments')
         .where({ customer_id: req.customerId })
-        .select('metadata');
+        // Every field isPayerLinked reads — metadata alone under-counts the
+        // exclusion for rows payer-linked only through their PaymentIntent or
+        // invoice-number description, leaving `total` above the number of
+        // rows pagination will ever serve (pre-push P1).
+        .select('metadata', 'stripe_payment_intent_id', 'description');
       total = rows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
     }
 
