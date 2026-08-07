@@ -518,6 +518,48 @@ describe('review incentives', () => {
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
   });
 
+  test('a removal stamp landing after the snapshot read cannot earn money', async () => {
+    // The hourly scan and direct callers pass previously loaded review
+    // objects; the reconcile can stamp the row while attribution resolves.
+    // insertPayout re-reads the CURRENT row immediately before money moves.
+    const daysAgo = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const conn = createDbMock({
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-1',
+        technician_id: 'tech-1',
+        service_date: daysAgo(12).slice(0, 10),
+      }],
+      // The DB row is ALREADY stamped…
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: 'customer-1',
+        reviewer_name: 'Customer One',
+        star_rating: 5,
+        review_created_at: daysAgo(10),
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/abc',
+        missing_since: daysAgo(1),
+      }],
+    });
+    // …but the caller holds a stale snapshot read before the stamp landed.
+    const staleSnapshot = {
+      id: 'google-1',
+      customer_id: 'customer-1',
+      reviewer_name: 'Customer One',
+      star_rating: 5,
+      review_created_at: daysAgo(10),
+      location_id: 'sarasota',
+      google_review_id: 'accounts/1/locations/2/reviews/abc',
+      missing_since: null,
+    };
+
+    const result = await ReviewIncentives.createPayoutForGoogleReview(staleSnapshot, { conn, policy });
+
+    expect(result).toMatchObject({ created: false, skipped: true, reason: 'removed_from_google' });
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+  });
+
   test('attribution queue and dashboard counts exclude removed reviews', async () => {
     const daysAgo = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const stamped = {

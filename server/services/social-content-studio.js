@@ -1550,6 +1550,13 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         gbpImageBranded: true, // deterministic card render — chrome carries the logo
         noAiImage: true, // brand card only — never a literal AI image
         gbpLocationIds: finalPreview.inputs?.locationId ? [finalPreview.inputs.locationId] : [locationForCity(plan.city).id],
+        // Durable stamp at the FIRST provider success — a crash or stall in a
+        // later provider call can no longer outlive the claim TTL with the
+        // testimonial live externally but unrecorded. First-win: the
+        // post-publish stamp below becomes a no-op backstop.
+        onFirstPlatformSuccess: isReviewRun && !SOCIAL_FLAGS.dryRun
+          ? () => recordTestimonialPublished(plan.reviewGraphic.googleReviewId, run?.id)
+          : null,
       }),
       { rejectConsumed: true },
     );
@@ -2000,6 +2007,11 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         noAiImage: true, // stored visual only — never a fresh literal AI image
         gbpLocationIds: [gbpLocationId],
         postId: run.social_media_post_id || null,
+        // Durable stamp at the FIRST provider success — mirrors the
+        // autonomous path; the post-publish stamp below is the no-op backstop.
+        onFirstPlatformSuccess: input.reviewGraphic?.googleReviewId && !SOCIAL_FLAGS.dryRun
+          ? () => recordTestimonialPublished(input.reviewGraphic.googleReviewId, run.id)
+          : null,
       // allowConsumedByRunId: a PARTIAL prior attempt stamps this run as the
       // owner of the testimonial — only this run's retry may publish the
       // remaining channels past its own stamp; every other run is consumed.

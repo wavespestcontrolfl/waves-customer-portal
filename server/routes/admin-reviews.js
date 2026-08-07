@@ -1225,6 +1225,7 @@ router.get('/stats', async (req, res, next) => {
     // --- Avg response time (review_created_at to reply_updated_at) ---
     const responseTimes = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .modify(whereHasRealReply)
       .whereNotNull('reply_updated_at')
       .whereNotNull('review_created_at')
@@ -1251,6 +1252,7 @@ router.get('/stats', async (req, res, next) => {
     sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
     const monthlyCounts = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .where('review_created_at', '>=', sixMonthsAgo.toISOString())
       .select(
         db.raw("TO_CHAR(review_created_at, 'YYYY-MM') as month"),
@@ -1286,6 +1288,7 @@ router.get('/stats', async (req, res, next) => {
     // --- Rating breakdown ---
     const breakdown = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .select('star_rating')
       .count('* as count')
       .groupBy('star_rating')

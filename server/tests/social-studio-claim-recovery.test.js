@@ -222,3 +222,29 @@ describe('holdClaimUntilPublishRecorded', () => {
     expect(claim.abandonClaim).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('durable stamp at FIRST provider success (r22)', () => {
+  // publishToAll posts providers sequentially; the multi-provider call can
+  // stall or die between providers, and the expiring claim alone would let a
+  // later run republish. Source contracts pin the wiring — the posting
+  // functions are lexical module-privates, so the loops aren't unit-hookable
+  // without a service refactor.
+  const fs = require('fs');
+  const path = require('path');
+  const studioSource = fs.readFileSync(path.join(__dirname, '../services/social-content-studio.js'), 'utf8');
+  const socialSource = fs.readFileSync(path.join(__dirname, '../services/social-media.js'), 'utf8');
+
+  test('both testimonial publishToAll call sites wire onFirstPlatformSuccess to the durable stamp', () => {
+    const wirings = studioSource.split('onFirstPlatformSuccess:').slice(1);
+    expect(wirings).toHaveLength(2);
+    for (const wiring of wirings) {
+      expect(wiring.slice(0, 300)).toContain('recordTestimonialPublished');
+    }
+  });
+
+  test('publishToAll awaits the hook inside BOTH posting loops, once, on a success result only', () => {
+    expect(socialSource.split('await fireFirstPlatformSuccess()')).toHaveLength(3); // platform loop + GBP loop
+    expect(socialSource).toContain("if (firstSuccessFired || typeof onFirstPlatformSuccess !== 'function') return;");
+    expect(socialSource).toContain('platformResults.find((r) => r.success === true)');
+  });
+});

@@ -285,6 +285,21 @@ async function existingPayoutForSource({ reviewRequestId, googleReviewId, servic
 }
 
 async function insertPayout(attrs, conn = db) {
+  // Money boundary: never create (or correct) a payout for a review Google
+  // has removed. Callers pre-check liveness, but attribution resolution runs
+  // after their snapshot read — the hourly scan even passes rows loaded
+  // before the per-location sync lock released — so re-read the current row
+  // here, immediately before money moves. Fail closed on a vanished row too.
+  if (attrs.googleReviewId) {
+    const liveRow = await conn('google_reviews')
+      .where({ id: attrs.googleReviewId })
+      .whereNull('missing_since')
+      .first();
+    if (!liveRow) {
+      return { created: false, skipped: true, reason: 'removed_from_google' };
+    }
+  }
+
   const existing = await existingPayoutForSource(attrs, conn);
   if (existing) return { payout: existing, created: false, reason: 'duplicate' };
 

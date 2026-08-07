@@ -1851,7 +1851,7 @@ const SocialMediaService = {
   // videoUrl: a hosted MP4 (creative-engine Reel). FB posts it as a page video
   // and IG as a Reel; GBP has no video ingestion, so it keeps the image params
   // (imageUrl/gbpImageUrl are the still fallback alongside a video).
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, gbpImageBranded = false, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, gbpImageBranded = false, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false, onFirstPlatformSuccess = null }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -1881,6 +1881,27 @@ const SocialMediaService = {
     }
 
     const platformResults = [];
+    // Durable-marker hook: awaited the moment the FIRST platform reports
+    // success, BEFORE any later provider call runs. The testimonial path
+    // passes its first-win published stamp here — posting continues
+    // sequentially after this returns, so a crash or stall in a later
+    // provider can no longer leave an externally-published post with no
+    // durable record (the expiring claim alone would let a later run
+    // republish it). Hook failure never fails a publish that already
+    // succeeded externally — the caller's post-publish stamp + recovery
+    // loop remain the backstop.
+    let firstSuccessFired = false;
+    const fireFirstPlatformSuccess = async () => {
+      if (firstSuccessFired || typeof onFirstPlatformSuccess !== 'function') return;
+      const win = platformResults.find((r) => r.success === true);
+      if (!win) return;
+      firstSuccessFired = true;
+      try {
+        await onFirstPlatformSuccess(win);
+      } catch (err) {
+        logger.warn(`[social] onFirstPlatformSuccess hook failed (${win.platform}): ${err.message}`);
+      }
+    };
     const requestedPlatforms = normalizePublishChannels(channels);
     const requestedGbpLocations = normalizeGbpLocationIds(gbpLocationIds);
     // Only an https URL counts as a video — Meta fetches it server-side, so a
@@ -2245,6 +2266,7 @@ const SocialMediaService = {
         logger.error(`[social] ${p.key} post failed: ${err.message}`);
         platformResults.push({ platform: p.key, success: false, error: err.message });
       }
+      await fireFirstPlatformSuccess();
     }
 
     // Post to all 4 GBP locations
@@ -2332,6 +2354,7 @@ const SocialMediaService = {
       } catch (err) {
         platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: err.message });
       }
+      await fireFirstPlatformSuccess();
     }
 
     // Log to database
