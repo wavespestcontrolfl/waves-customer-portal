@@ -5673,21 +5673,30 @@ function BillingTab({ customer }) {
                 Text / Email / Text & Email, so hardcoded "texts" copy read as
                 false the moment a customer picked Email. */}
             <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>
-              {paymentConfirmationChannel === 'email' || (paymentConfirmationChannel === 'both' && !paymentSmsEnabled)
-                ? 'Payment confirmation emails'
-                : paymentConfirmationChannel === 'both'
-                  ? 'Payment confirmations'
-                  : 'Payment confirmation texts'}
+              {(() => {
+                // The toggle beside this row turns the TEXT leg off on its own,
+                // for any channel — copy must never promise a text the customer
+                // just disabled (codex r4 P2 extends the Both-only fix).
+                const emailLeg = paymentConfirmationChannel === 'email' || paymentConfirmationChannel === 'both';
+                const textLeg = paymentConfirmationChannel !== 'email' && paymentSmsEnabled;
+                if (textLeg && emailLeg) return 'Payment confirmations';
+                if (emailLeg) return 'Payment confirmation emails';
+                if (textLeg) return 'Payment confirmation texts';
+                return 'Payment confirmations';
+              })()}
             </div>
             <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
               {/* The toggle beside this row can switch the text leg off while
                   the channel stays Text & Email — the copy must not keep
                   promising a text the customer just disabled (codex r1 P2). */}
-              {paymentConfirmationChannel === 'email' || (paymentConfirmationChannel === 'both' && !paymentSmsEnabled)
-                ? 'Get an email when your payment processes.'
-                : paymentConfirmationChannel === 'both'
-                  ? 'Get a text and an email when your payment processes.'
-                  : 'Get a text when your payment processes.'}
+              {(() => {
+                const emailLeg = paymentConfirmationChannel === 'email' || paymentConfirmationChannel === 'both';
+                const textLeg = paymentConfirmationChannel !== 'email' && paymentSmsEnabled;
+                if (textLeg && emailLeg) return 'Get a text and an email when your payment processes.';
+                if (emailLeg) return 'Get an email when your payment processes.';
+                if (textLeg) return 'Get a text when your payment processes.';
+                return 'Payment confirmations are off.';
+              })()}
             </div>
           </div>
           {(() => {
