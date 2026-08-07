@@ -46,7 +46,7 @@ const WINDOW_OPEN = new Date('2026-08-07T12:00:00.000Z'); // 8:00 AM ET
 
 function chain({ rows, returning, first, updateCount = 1 } = {}) {
   const q = {};
-  for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'orWhere', 'orderBy', 'limit', 'update', 'insert']) {
+  for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'update', 'insert']) {
     q[m] = jest.fn(() => q);
   }
   q.select = jest.fn(async () => rows || []);
@@ -272,6 +272,7 @@ describe('processScheduledSends send-window handling', () => {
         .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
         .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
         .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
+        .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
         .mockReturnValueOnce(requeueInsert) // held-SMS scheduled-rail insert
         .mockReturnValueOnce(chain()) // finalize update
         .mockReturnValueOnce(chain({ first: null })); // lead-conversion read (permissive)

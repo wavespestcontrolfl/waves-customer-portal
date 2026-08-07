@@ -1401,9 +1401,10 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // it through mergeRecordNotesKeys instead.
     expect((source.match(/structured_notes: serializeJsonb\(/g) || []).length).toBe(5);
     // And the converted side-effect writers all go through the merge helper.
-    // 12th writer 2026-08-07: the send-window deferred-completion branch
-    // (completionSmsStatus 'deferred' + completionSmsDeferredTo).
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(12);
+    // (The send-window deferred-completion marker commits inside the queue
+    // row's transaction with its own key-merge raw — same jsonb || shape,
+    // not a whole-column write — so it does not appear in this count.)
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(11);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {

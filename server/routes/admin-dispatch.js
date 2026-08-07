@@ -10270,7 +10270,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             && smsResult.nextAllowedAt) {
             try {
               const TWILIO_NUMBERS = require('../config/twilio-numbers');
-              await db('sms_log').insert({
+              // Queue row + 'deferred' notes marker commit ATOMICALLY: the
+              // marker is what the re-completion idempotency guard reads
+              // (completionSmsAlreadyHandled), so a committed queue row
+              // without it would let a later re-completion send a second
+              // completion text while the first still sits queued.
+              const deferredDelta = {
+                completionSmsStatus: 'deferred',
+                completionSmsDeferredTo: smsResult.nextAllowedAt,
+              };
+              await db.transaction(async (trx) => {
+                await trx('sms_log').insert({
                 customer_id: svc.customer_id,
                 direction: 'outbound',
                 from_phone: TWILIO_NUMBERS.getOutboundNumber(),
@@ -10305,7 +10315,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                     ? { stamp_receipt_invoice_id: invoice.id }
                     : {}),
                 }),
+                });
+                await trx('service_records').where({ id: record.id }).update({
+                  structured_notes: trx.raw(
+                    "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+                    [JSON.stringify(deferredDelta)],
+                  ),
+                });
               });
+              Object.assign(smsNotesDelta, deferredDelta);
               completionHoldQueued = true;
               // Safety net for the bundled review ask: arm the standalone
               // inline-retry rail for shortly AFTER the queued completion
@@ -10329,13 +10347,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }
           }
           if (completionHoldQueued) {
-            Object.assign(smsNotesDelta, {
-              completionSmsStatus: 'deferred',
-              completionSmsDeferredTo: smsResult.nextAllowedAt,
-            });
-            const deferredNotes = { ...sendingNotes, ...smsNotesDelta };
-            await mergeRecordNotesKeys(record.id, smsNotesDelta);
-            record.structured_notes = deferredNotes;
+            // Notes marker already committed atomically with the queue row
+            // above — only sync the in-memory snapshot here.
+            record.structured_notes = { ...sendingNotes, ...smsNotesDelta };
             logger.info(`[dispatch] Completion SMS for customer ${svc.customer_id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
           } else if (!smsResult.sent) {
             Object.assign(smsNotesDelta, {

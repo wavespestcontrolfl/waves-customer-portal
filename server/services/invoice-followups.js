@@ -766,6 +766,40 @@ async function fireTouch(row) {
         if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.nextAllowedAt) {
           const at = new Date(sendResult.nextAllowedAt);
           if (!Number.isNaN(at.getTime())) smsDeferUntil = at;
+          // Email already carried this touch: the no-channel defer below
+          // won't run and step_index advances, so the held SMS leg must be
+          // persisted NOW or it is never retried. Queue the exact rendered
+          // body on the scheduled-SMS rail for the window open — one
+          // enqueue per touch fire (the step advances right after, so this
+          // can't loop). Enqueue failure just loses the SMS leg loudly;
+          // the email still delivered the touch.
+          if (smsDeferUntil && emailResult.ok) {
+            try {
+              const TWILIO_NUMBERS = require('../config/twilio-numbers');
+              await db('sms_log').insert({
+                customer_id: customer.id,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                to_phone: customer.phone,
+                message_body: body,
+                status: 'scheduled',
+                scheduled_for: smsDeferUntil,
+                message_type: 'invoice_followup',
+                metadata: JSON.stringify({
+                  entry_point: 'invoice_followup_deferred',
+                  invoice_id: row.invoice_id,
+                  followup_sequence_id: row.id,
+                  original_block_code: sendResult.code,
+                  replay_purpose: 'payment_link',
+                  refresh_customer_phone: true,
+                  resolve_from_by_customer: true,
+                }),
+              });
+              logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held outside the 8AM-8PM ET send window — queued for ${smsDeferUntil.toISOString()} (email leg delivered)`);
+            } catch (queueErr) {
+              logger.error(`[invoice-followups] Held SMS requeue failed for sequence ${row.id}: ${queueErr.message} — SMS leg lost, email delivered`);
+            }
+          }
         }
         logger.warn(`[invoice-followups] SMS blocked for sequence ${row.id}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
       } else {

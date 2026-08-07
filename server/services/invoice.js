@@ -2255,27 +2255,41 @@ const InvoiceService = {
       && sms.heldBody
       && sms.heldToPhone) {
       try {
-        const TWILIO_NUMBERS = require("../config/twilio-numbers");
-        await db("sms_log").insert({
-          customer_id: claim.invoice.customer_id,
-          direction: "outbound",
-          from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-          to_phone: sms.heldToPhone,
-          message_body: sms.heldBody,
-          status: "scheduled",
-          scheduled_for: new Date(sms.nextAllowedAt),
-          message_type: "invoice",
-          metadata: JSON.stringify({
-            entry_point: "invoice_send_deferred",
-            invoice_id: invoiceId,
-            original_block_code: sms.code,
-            replay_purpose: "payment_link",
-            refresh_customer_phone: true,
-            resolve_from_by_customer: true,
-          }),
-        });
-        sms.scheduled = true;
-        logger.info(`[invoice] Pay-link SMS for invoice ${invoiceId} held outside the 8AM-8PM ET send window — queued for ${sms.nextAllowedAt}`);
+        // Retry-idempotent: when the email leg fails, this method restores
+        // the send claim and callers legitimately retry — a second pass
+        // must adopt the already-queued row, not enqueue a duplicate that
+        // double-texts the pay link at 8:00 AM.
+        const existingQueued = await db("sms_log")
+          .whereIn("status", ["scheduled", "sending"])
+          .whereRaw("metadata->>'entry_point' = 'invoice_send_deferred'")
+          .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
+          .first("id");
+        if (existingQueued) {
+          sms.scheduled = true;
+          logger.info(`[invoice] Pay-link SMS for invoice ${invoiceId} already queued for the window open (${existingQueued.id}) — not re-queued`);
+        } else {
+          const TWILIO_NUMBERS = require("../config/twilio-numbers");
+          await db("sms_log").insert({
+            customer_id: claim.invoice.customer_id,
+            direction: "outbound",
+            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+            to_phone: sms.heldToPhone,
+            message_body: sms.heldBody,
+            status: "scheduled",
+            scheduled_for: new Date(sms.nextAllowedAt),
+            message_type: "invoice",
+            metadata: JSON.stringify({
+              entry_point: "invoice_send_deferred",
+              invoice_id: invoiceId,
+              original_block_code: sms.code,
+              replay_purpose: "payment_link",
+              refresh_customer_phone: true,
+              resolve_from_by_customer: true,
+            }),
+          });
+          sms.scheduled = true;
+          logger.info(`[invoice] Pay-link SMS for invoice ${invoiceId} held outside the 8AM-8PM ET send window — queued for ${sms.nextAllowedAt}`);
+        }
       } catch (queueErr) {
         logger.error(`[invoice] Held pay-link SMS requeue FAILED for invoice ${invoiceId}: ${queueErr.message} — SMS leg may be lost (email leg proceeds)`);
       }
