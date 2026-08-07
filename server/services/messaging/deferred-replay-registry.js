@@ -241,6 +241,59 @@ const REGISTRY = {
     },
   },
 
+  appointment_card_request_deferred: {
+    async recheck(meta) {
+      // A bearer card link must not replay if the card was captured, a
+      // newer claim took over texting, or the visit died overnight.
+      try {
+        if (!meta.scheduled_service_id) return { eligible: true };
+        const svc = await db('scheduled_services')
+          .where({ id: meta.scheduled_service_id })
+          .first('status', 'card_link_sent_at');
+        if (!svc) return { eligible: false, reason: 'visit-missing' };
+        const status = String(svc.status || '').toLowerCase();
+        if (['cancelled', 'completed', 'skipped'].includes(status)) {
+          return { eligible: false, reason: `visit-${status}` };
+        }
+        if (meta.card_claim_stamp) {
+          const stampMs = new Date(meta.card_claim_stamp).getTime();
+          const currentMs = svc.card_link_sent_at ? new Date(svc.card_link_sent_at).getTime() : null;
+          if (currentMs !== stampMs) return { eligible: false, reason: 'claim-superseded' };
+        }
+        if (meta.card_row_token) {
+          const row = await db('appointment_card_requests')
+            .where({ scheduled_service_id: meta.scheduled_service_id, token: meta.card_row_token })
+            .first('status', 'stripe_setup_intent_id');
+          if (!row) return { eligible: false, reason: 'card-row-missing' };
+          if (String(row.status) !== 'pending' || row.stripe_setup_intent_id) {
+            return { eligible: false, reason: 'card-captured' };
+          }
+        }
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('card-request', meta.scheduled_service_id, err);
+      }
+    },
+    async onTerminal(meta) {
+      // The link provably never delivered — release the stamp-guarded
+      // one-text claim and the owned pending row so a later trigger (or
+      // the previsit backstop) can retry with a fresh link.
+      if (!meta.scheduled_service_id) return;
+      if (meta.card_claim_stamp) {
+        await db('scheduled_services')
+          .where({ id: meta.scheduled_service_id, card_link_sent_at: new Date(meta.card_claim_stamp) })
+          .update({ card_link_sent_at: null, updated_at: new Date() });
+      }
+      if (meta.card_row_token) {
+        await db('appointment_card_requests')
+          .where({ scheduled_service_id: meta.scheduled_service_id, status: 'pending', token: meta.card_row_token })
+          .whereNull('stripe_setup_intent_id')
+          .del();
+      }
+      logger.info(`[deferred-replay] card request for visit ${meta.scheduled_service_id} terminally blocked — claim released for retry`);
+    },
+  },
+
   estimate_accept_onetime_booking_deferred: {
     async recheck(meta) {
       // The acceptance email carried the same booking link, so the

@@ -370,6 +370,11 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             }),
           });
           logger.info(`[requests] confirmation SMS held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+          // The queued row durably owns the confirmation — count it as
+          // sent for the route's SMS-or-fallback contract, or the
+          // cancellation email fallback below would fire tonight AND the
+          // text would follow at 8:00 AM (duplicate confirmations).
+          confirmationSmsSent = true;
         } catch (queueErr) {
           logger.error(`[requests] confirmation held-SMS requeue failed: ${queueErr.message}`);
         }

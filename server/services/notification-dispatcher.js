@@ -41,9 +41,13 @@ function inCustomerQuietHours(prefs, at = new Date()) {
   const currentTime = `${String(et.hour).padStart(2, '0')}:${String(et.minute).padStart(2, '0')}`;
   const start = prefs.quiet_hours_start.substring(0, 5);
   const end = prefs.quiet_hours_end.substring(0, 5);
+  // End EXCLUSIVE: quiet hours "until 08:00" reopen AT 08:00 — the same
+  // boundary shape as the global send window, and the minute the deferred
+  // rail schedules replays for (an inclusive end held every 08:00 replay
+  // for wraparound windows like 21:00-08:00).
   return start <= end
-    ? (currentTime >= start && currentTime <= end)
-    : (currentTime >= start || currentTime <= end);
+    ? (currentTime >= start && currentTime < end)
+    : (currentTime >= start || currentTime < end);
 }
 
 // Replay-time preference recheck for a quiet-hours-deferred notification
@@ -66,7 +70,10 @@ async function deferredNotificationStillWanted(notificationType, customerId) {
       return { eligible: false, reason: `channel_${channel}` };
     }
     if (inCustomerQuietHours(prefs)) {
-      return { eligible: false, reason: 'customer_quiet_hours' };
+      // Still wanted, just not YET — retryable so the executor holds the
+      // row (bounded) instead of permanently blocking a notification the
+      // customer's own quiet window merely postpones.
+      return { eligible: false, reason: 'customer_quiet_hours', retryable: true };
     }
     return { eligible: true };
   } catch (err) {

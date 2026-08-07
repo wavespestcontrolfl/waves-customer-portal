@@ -2615,6 +2615,11 @@ function initScheduledJobs() {
             } else {
               await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
               logger.warn(`[scheduled-sms] Blocked scheduled SMS ${msg.id}: customer phone unverifiable after ${SCHEDULED_SMS_MAX_ATTEMPTS} attempts`);
+              // Terminal for this row's obligation too — same registry
+              // handoff as a terminal provider block (release once-ever
+              // claims, arm fallbacks, flip state into the admin lane).
+              const { onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
+              await onTerminalDeferredReplay(claimMeta.entry_point, claimMeta);
             }
             continue;
           }

@@ -694,6 +694,51 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         await markSendOutcome();
         return skip('send_outcome_uncertain');
       }
+      // Send-window hold: the one-shot automation triggers
+      // (ai_call_pipeline, outbound_review_confirm, booking) never retry,
+      // and the previsit backstop is independent — a released claim here
+      // would just drop the card request. Queue the exact link SMS on the
+      // scheduled rail; the ONE-TEXT claim stays consumed (the queued row
+      // now owns the single bearer-link text — releasing would let a later
+      // trigger double-text) and the maybe-sent marker is stamped so the
+      // stale-claim lease can't re-text either. The registry's recheck
+      // suppresses if the card gets captured or the visit dies overnight,
+      // and its onTerminal releases the stamp-guarded claim + owned row so
+      // a later trigger can retry.
+      if (result?.code === 'QUIET_HOURS_HOLD' && result?.deferred && result?.nextAllowedAt) {
+        try {
+          const TWILIO_NUMBERS = require('../config/twilio-numbers');
+          await db('sms_log').insert({
+            customer_id: visit.customer_id,
+            direction: 'outbound',
+            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+            to_phone: smsTo,
+            message_body: body,
+            status: 'scheduled',
+            scheduled_for: new Date(result.nextAllowedAt),
+            message_type: usedTemplateKey,
+            metadata: JSON.stringify({
+              entry_point: 'appointment_card_request_deferred',
+              scheduled_service_id: visit.id,
+              trigger,
+              original_block_code: result.code,
+              replay_purpose: 'card_request',
+              refresh_customer_phone: true,
+              resolve_from_by_customer: true,
+              card_claim_stamp: stamp.toISOString(),
+              // Token only when THIS call owns the pending row (the body
+              // already carries the tokenized link, so no new exposure);
+              // a reused /book row must never be deleted by onTerminal.
+              ...(reuseToken ? {} : { card_row_token: token }),
+            }),
+          });
+          await markSendOutcome();
+          logger.info(`[appt-card-request] card-link SMS for visit ${visit.id} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt}`);
+          return skip('send_deferred_window');
+        } catch (queueErr) {
+          logger.error(`[appt-card-request] held card-link requeue failed for visit ${visit.id}: ${queueErr.message} — releasing for a later trigger`);
+        }
+      }
       // A definitive not-sent RESULT (policy block, hard provider
       // rejection): the text never left, so the claim and the fresh
       // pending row release — a later trigger may retry once.
