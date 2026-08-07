@@ -1412,6 +1412,9 @@ describe('rain-out service', () => {
       expect(sanitize()('x'.repeat(201))).toEqual({ error: 'note_too_long' });
       expect(sanitize()('details here bit.ly/abc')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()('see t.co/xyz')).toEqual({ error: 'note_link_blocked' });
+      // Trailing root dot is a valid FQDN spelling of the same host —
+      // must not slip the guard (codex pre-push P1).
+      expect(sanitize()('go to https://bit.ly./abc now')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()(42)).toEqual({ error: 'note_invalid' });
       // Lookalike words that merely CONTAIN a shortener host must pass.
       expect(sanitize()('a habit.ly no wait, a habit truly')).toEqual({ note: 'a habit.ly no wait, a habit truly' });

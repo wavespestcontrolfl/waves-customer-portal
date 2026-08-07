@@ -111,7 +111,7 @@ const ERROR_COPY = {
 // advisory here so the dispatcher sees the problem before tapping Move;
 // the server is the enforcer.
 const NOTE_MAX_CHARS = 200;
-const NOTE_SHORTENER_RE = /(?:^|[\s/.@])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[\s/:])/i;
+const NOTE_SHORTENER_RE = /(?:^|[\s/.@])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[\s/:.])/i;
 
 // Sentinel selection key for the custom-time option (distinct from the preset
 // keys, which are `${kind}:${date}:${start}`).

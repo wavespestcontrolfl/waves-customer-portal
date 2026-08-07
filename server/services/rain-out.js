@@ -75,7 +75,9 @@ function isValidReason(reasonCode) {
 // On a route-scope move the same note goes to EVERY texted customer, so
 // the sheet warns the dispatcher when scope=route.
 const CUSTOMER_NOTE_MAX_CHARS = 200;
-const NOTE_SHORTENER_RE = /(?:^|[\s/.@])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[\s/:])/i;
+// Trailing char class includes '.' — `bit.ly./abc` is a VALID FQDN form
+// (trailing root dot) that would otherwise slip the guard (codex pre-push P1).
+const NOTE_SHORTENER_RE = /(?:^|[\s/.@])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[\s/:.])/i;
 function sanitizeCustomerNote(raw) {
   if (raw == null) return { note: null };
   if (typeof raw !== 'string') return { error: 'note_invalid' };
