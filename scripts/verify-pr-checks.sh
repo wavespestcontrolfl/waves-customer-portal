@@ -105,28 +105,46 @@ fi
 #    appears afterwards is provably new. Set VERIFY_PR_PUSH_AFTER to an ISO8601
 #    timestamp taken immediately BEFORE the push to use createdAt instead —
 #    needed when GitHub creates the run before this script starts.
+#    Whether an existing run counts depends on how this SHA reached the tip:
+#      fresh head  — the SHA was never the branch tip before, so ANY run for it
+#                    can only have been created by this push. Accept it.
+#      re-push     — the SHA was already the tip earlier (force-push / hijack
+#                    recovery), so an old run may predate this push and proves
+#                    nothing. Require VERIFY_PR_PUSH_AFTER (ISO8601 taken before
+#                    the push) to disambiguate by createdAt.
+#    The remote-tracking reflog is the evidence; it is written by the push
+#    itself, so no timestamp comparison and no workflow change is needed.
 PUSH_AFTER="${VERIFY_PR_PUSH_AFTER:-}"
 RUN_FIELDS="status,conclusion,event,url,databaseId,createdAt,headSha"
 
-list_runs() {
-  gh run list --repo "$REPO_SLUG" --workflow "$WORKFLOW_FILE" \
-    --commit "$LOCAL_SHA" --json "$RUN_FIELDS" 2>/dev/null
-}
+REFLOG_SHAS="$(git log -g --format='%H' "origin/$BRANCH" 2>/dev/null)"
+if [ -z "$REFLOG_SHAS" ]; then
+  PUSH_KIND="unknown"
+elif [ "$(printf '%s\n' "$REFLOG_SHAS" | grep -c "^$LOCAL_SHA$")" -gt 1 ]; then
+  PUSH_KIND="re-push"
+else
+  PUSH_KIND="fresh"
+fi
 
-BASE_JSON="$(list_runs)" || fail "gh run list failed — check gh auth."
-BASE_IDS="$(printf '%s' "$BASE_JSON" | jq -r '[.[].databaseId] | sort | @json')"
+if [ "$PUSH_KIND" = "re-push" ] && [ -z "$PUSH_AFTER" ]; then
+  fail "head $LOCAL_SHA was the tip of '$BRANCH' before this push (force-push / hijack recovery) — an existing CI run may predate it and would prove nothing." \
+    "Re-run with the timestamp captured immediately BEFORE the push so runs can be told apart:" \
+    "  VERIFY_PR_PUSH_AFTER=\$(date -u +%Y-%m-%dT%H:%M:%SZ)   # BEFORE git push" \
+    "(A normal push of a new commit does not need this — only same-SHA re-pushes do.)"
+fi
 
 RUNS_JSON="[]"
 NEW_JSON="[]"
 try=0
 while [ "$try" -lt "$WORKFLOW_TRIES" ]; do
-  RUNS_JSON="$(list_runs)" || fail "gh run list failed — check gh auth."
+  RUNS_JSON="$(gh run list --repo "$REPO_SLUG" --workflow "$WORKFLOW_FILE" \
+    --commit "$LOCAL_SHA" --json "$RUN_FIELDS" 2>/dev/null)" \
+    || fail "gh run list failed — check gh auth."
   if [ -n "$PUSH_AFTER" ]; then
     NEW_JSON="$(printf '%s' "$RUNS_JSON" \
       | jq -r --arg after "$PUSH_AFTER" '[.[] | select(.createdAt >= $after)]')"
   else
-    NEW_JSON="$(printf '%s' "$RUNS_JSON" \
-      | jq -r --argjson base "$BASE_IDS" '[.[] | select(.databaseId as $i | $base | index($i) | not)]')"
+    NEW_JSON="$RUNS_JSON"
   fi
   [ "$(printf '%s' "$NEW_JSON" | jq -r 'length')" -gt 0 ] && break
   try=$((try + 1))
@@ -134,14 +152,13 @@ while [ "$try" -lt "$WORKFLOW_TRIES" ]; do
 done
 
 NEW_COUNT="$(printf '%s' "$NEW_JSON" | jq -r 'length')"
-STALE_COUNT="$(printf '%s' "$BASE_JSON" | jq -r 'length')"
+TOTAL_COUNT="$(printf '%s' "$RUNS_JSON" | jq -r 'length')"
 if [ "${NEW_COUNT:-0}" -eq 0 ]; then
-  if [ "${STALE_COUNT:-0}" -gt 0 ] && [ -z "$PUSH_AFTER" ]; then
-    fail "no NEW '$WORKFLOW_FILE' run appeared for head $LOCAL_SHA (waited ~$((WORKFLOW_TRIES * 15))s) — only $STALE_COUNT run(s) that already existed before this check." \
-      "A pre-existing run does NOT prove this push triggered CI (same-SHA re-push, e.g. hijack recovery)." \
-      "If GitHub created the run before this script started, re-run with the push timestamp:" \
-      "  VERIFY_PR_PUSH_AFTER=\$(date -u +%Y-%m-%dT%H:%M:%SZ)   # taken BEFORE the push" \
-      "Otherwise CI really is silent — check mergeable ($MERGEABLE/$MERGE_STATE) and the Actions tab."
+  if [ -n "$PUSH_AFTER" ] && [ "${TOTAL_COUNT:-0}" -gt 0 ]; then
+    fail "no '$WORKFLOW_FILE' run created after $PUSH_AFTER for head $LOCAL_SHA (waited ~$((WORKFLOW_TRIES * 15))s) — only $TOTAL_COUNT older run(s)." \
+      "On a same-SHA re-push an older run does NOT prove this push triggered CI." \
+      "Check mergeable ($MERGEABLE/$MERGE_STATE) and the Actions tab; if the PR conflicts, merge origin/main and push again." \
+      "If VERIFY_PR_PUSH_AFTER was captured AFTER the push, re-take it before a fresh push."
   fi
   fail "the '$WORKFLOW_FILE' workflow NEVER TRIGGERED for head $LOCAL_SHA (waited ~$((WORKFLOW_TRIES * 15))s) — CI is silent." \
     "Most likely cause: the PR was CONFLICTING when the push landed (mergeable above: $MERGEABLE/$MERGE_STATE)." \
@@ -163,7 +180,7 @@ if [ "$FINAL_HEAD" != "$LOCAL_SHA" ]; then
     "Re-run this script against the current head before trusting any check state."
 fi
 
-echo "✅ verify-pr-checks: PR #$PR_NUMBER head $LOCAL_SHA — mergeable=$MERGEABLE ($MERGE_STATE), $NEW_COUNT new tests-workflow run(s) for this head:"
+echo "✅ verify-pr-checks: PR #$PR_NUMBER head $LOCAL_SHA — mergeable=$MERGEABLE ($MERGE_STATE), push=$PUSH_KIND, $NEW_COUNT tests-workflow run(s) attributable to this push:"
 printf '%s' "$NEW_JSON" | jq -r '.[] | "   \(.status) \(.conclusion // "-") (\(.event)) \(.url)"'
 echo "   (A run existing ≠ a run passing — wait for green before the merge gate.)"
 exit 0
