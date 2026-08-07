@@ -10585,6 +10585,11 @@ router.put('/:token/accept', async (req, res, next) => {
                   capturedAt: new Date().toISOString(),
                 },
                 entryPoint: 'estimate_accept_onetime_booking',
+                // Send-window live-request provenance: the customer just
+                // clicked Accept and is ON the page (which also shows the
+                // booking link) — the SMS is a mid-session convenience copy,
+                // the self-service class the window never defers.
+                conversationalContext: true,
                 metadata: { original_message_type: 'estimate_accepted_onetime' },
               });
               if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
@@ -10732,6 +10737,9 @@ router.put('/:token/accept', async (req, res, next) => {
                 capturedAt: new Date().toISOString(),
               },
               entryPoint: 'estimate_accept_annual_prepay',
+              // Send-window live-request provenance — same accept-session
+              // rationale as the one-time booking SMS above.
+              conversationalContext: true,
               metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
             });
             if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);

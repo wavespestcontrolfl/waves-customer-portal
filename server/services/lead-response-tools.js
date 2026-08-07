@@ -242,6 +242,41 @@ async function executeLeadTool(toolName, input) {
         metadata: { original_message_type: 'lead_response' },
       });
 
+      // Send-window hold: the lead agent is a fenced automation (house
+      // precedent: dropped-call/voicemail/lead-webhook speed plays all
+      // respect 8-8), but the reply must not be LOST — requeue it on the
+      // scheduled-SMS rail so the lead still hears back at 8:00 AM. The
+      // lead stays un-contacted in the pipeline until the replay actually
+      // delivers (phantom-contact rule below).
+      if (!result.sent
+        && result.code === 'QUIET_HOURS_HOLD'
+        && result.deferred
+        && result.nextAllowedAt) {
+        try {
+          const TWILIO_NUMBERS = require('../config/twilio-numbers');
+          await db('sms_log').insert({
+            customer_id: customer.id,
+            direction: 'outbound',
+            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+            to_phone: customer.phone,
+            message_body: input.message,
+            status: 'scheduled',
+            scheduled_for: new Date(result.nextAllowedAt),
+            message_type: 'lead_response',
+            metadata: JSON.stringify({
+              entry_point: 'lead_response_auto_reply_deferred',
+              lead_id: input.lead_id || null,
+              original_block_code: result.code,
+              refresh_customer_phone: true,
+              resolve_from_by_customer: true,
+            }),
+          });
+          logger.info(`[lead-response] Auto-reply for lead ${input.lead_id || customer.id} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt}`);
+        } catch (queueErr) {
+          logger.error(`[lead-response] Held auto-reply requeue failed for lead ${input.lead_id || customer.id}: ${queueErr.message}`);
+        }
+      }
+
       // Activity log captures EVERY attempt (sent / blocked / failed) for
       // operator triage. But the lead-status / pipeline transition only
       // advances on an actual successful send — a wrapper-policy block

@@ -116,6 +116,40 @@ const NotificationDispatcher = {
         if (smsResult.sent) {
           results.sms = 'sent';
           sent = true;
+        } else if (smsResult.code === 'QUIET_HOURS_HOLD'
+          && smsResult.deferred
+          && smsResult.nextAllowedAt) {
+          // Send-window hold: this dispatcher's callers stamp "notified"
+          // off `sent` and never retry, so a held notification must be
+          // durably queued for the window open — the queued row owns
+          // delivery, so it counts as sent for the caller's stamp.
+          try {
+            const TWILIO_NUMBERS = require('../config/twilio-numbers');
+            await db('sms_log').insert({
+              customer_id: customer.id,
+              direction: 'outbound',
+              from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+              to_phone: customer.phone,
+              message_body: smsMessage,
+              status: 'scheduled',
+              scheduled_for: new Date(smsResult.nextAllowedAt),
+              message_type: notificationType,
+              metadata: JSON.stringify({
+                entry_point: 'notification_dispatcher_deferred',
+                notification_type: notificationType,
+                original_block_code: smsResult.code,
+                replay_purpose: purpose,
+                refresh_customer_phone: true,
+                resolve_from_by_customer: true,
+              }),
+            });
+            results.sms = 'scheduled';
+            sent = true;
+            logger.info(`[notify] ${notificationType} SMS for ${customerId} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+          } catch (queueErr) {
+            results.sms = `blocked: ${smsResult.code}`;
+            logger.error(`[notify] Held SMS requeue failed for ${customerId}: ${queueErr.message}`);
+          }
         } else {
           results.sms = `blocked: ${smsResult.code || smsResult.reason || 'unknown'}`;
           logger.warn(`[notify] SMS blocked/failed for ${customerId}: ${smsResult.code || smsResult.reason || 'unknown'}`);

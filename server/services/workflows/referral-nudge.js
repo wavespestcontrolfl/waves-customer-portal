@@ -78,6 +78,35 @@ class ReferralNudge {
           },
         });
         if (!smsResult.sent) {
+          // Send-window hold: the 4-hour post-review delay can land after
+          // 8 PM, and the 90-day cooldown reads sms_log — nothing would
+          // re-fire a dropped nudge. Queue it for the window open.
+          if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred && smsResult.nextAllowedAt) {
+            try {
+              const TWILIO_NUMBERS = require('../../config/twilio-numbers');
+              await db('sms_log').insert({
+                customer_id: customerId,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                to_phone: customer.phone,
+                message_body: body,
+                status: 'scheduled',
+                scheduled_for: new Date(smsResult.nextAllowedAt),
+                message_type: 'referral_nudge',
+                metadata: JSON.stringify({
+                  entry_point: 'referral_nudge_deferred',
+                  original_block_code: smsResult.code,
+                  replay_purpose: 'referral',
+                  refresh_customer_phone: true,
+                  resolve_from_by_customer: true,
+                }),
+              });
+              logger.info(`Referral nudge for customer ${customerId} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+            } catch (queueErr) {
+              logger.error(`Held referral nudge requeue failed for customer ${customerId}: ${queueErr.message}`);
+            }
+            return;
+          }
           logger.warn(`Referral nudge blocked/failed for customer ${customerId}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           return;
         }

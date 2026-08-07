@@ -19,7 +19,7 @@ function cancellationTemplateKey(step, reason) {
   return `cancellation_save_step${step}_${cancellationReasonKey(reason)}`;
 }
 
-async function sendCancellationSms(customer, body, metadata = {}) {
+async function sendCancellationSms(customer, body, metadata = {}, { conversationalContext = false } = {}) {
   const result = await sendCustomerMessage({
     to: customer.phone,
     body,
@@ -29,6 +29,9 @@ async function sendCancellationSms(customer, body, metadata = {}) {
     customerId: customer.id,
     identityTrustLevel: 'phone_matches_customer',
     entryPoint: 'cancellation_save',
+    // Reply-handler sends answer the customer's own 1/2/CANCEL text and
+    // carry inbound-reply provenance; sequence steps never set this.
+    ...(conversationalContext ? { conversationalContext: true } : {}),
     metadata: {
       original_message_type: 'cancellation_save',
       customerLocationId: customer.location_id,
@@ -36,6 +39,39 @@ async function sendCancellationSms(customer, body, metadata = {}) {
     },
   });
   if (!result.sent) {
+    // Send-window hold: steps 2/3 ride raw setTimeouts, so they land at
+    // whatever hour the cancellation happened — a night step would
+    // otherwise be lost and the highest-value retention sequence would
+    // stall silently. Queue the step on the scheduled-SMS rail and report
+    // { scheduled: true } so callers advance the sequence bookkeeping —
+    // the queued row durably owns delivery at 8:00 AM.
+    if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
+      try {
+        const TWILIO_NUMBERS = require('../../config/twilio-numbers');
+        await db('sms_log').insert({
+          customer_id: customer.id,
+          direction: 'outbound',
+          from_phone: TWILIO_NUMBERS.getOutboundNumber(customer.location_id),
+          to_phone: customer.phone,
+          message_body: body,
+          status: 'scheduled',
+          scheduled_for: new Date(result.nextAllowedAt),
+          message_type: 'cancellation_save',
+          metadata: JSON.stringify({
+            entry_point: 'cancellation_save_deferred',
+            ...metadata,
+            original_block_code: result.code,
+            replay_purpose: 'support_resolution',
+            refresh_customer_phone: true,
+            resolve_from_by_customer: true,
+          }),
+        });
+        logger.info(`[cancellation-save] Step SMS for customer ${customer.id} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt}`);
+        return { ...result, scheduled: true };
+      } catch (queueErr) {
+        logger.error(`[cancellation-save] Held step requeue failed for customer ${customer.id}: ${queueErr.message}`);
+      }
+    }
     logger.warn(`[cancellation-save] SMS blocked/failed for customer ${customer.id}: ${result.code || result.reason || 'unknown'}`);
   }
   return result;
@@ -99,7 +135,7 @@ class CancellationSave {
         });
 
         const result = await sendCancellationSms(customer, step2Body, { sequence_id: sequence.id, step: 2 });
-        if (!result.sent) return;
+        if (!result.sent && !result.scheduled) return;
 
         await db('sms_sequences').where({ id: sequence.id }).update({ current_step: 2 });
       } catch (err) {
@@ -123,7 +159,7 @@ class CancellationSave {
         });
 
         const result = await sendCancellationSms(customer, step3Body, { sequence_id: sequence.id, step: 3 });
-        if (!result.sent) return;
+        if (!result.sent && !result.scheduled) return;
 
         await db('sms_sequences').where({ id: sequence.id })
           .update({ current_step: 3, status: 'completed' });
@@ -161,7 +197,7 @@ class CancellationSave {
         entity_type: 'sms_sequence',
         entity_id: sequence.id,
       });
-      await sendCancellationSms(customer, body, { sequence_id: sequence.id, reply_action: 'accepted_offer' });
+      await sendCancellationSms(customer, body, { sequence_id: sequence.id, reply_action: 'accepted_offer' }, { conversationalContext: true });
 
       await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
         `SAVE WON: ${customer.first_name} ${customer.last_name} accepted the retention offer. Follow up to finalize.`,
@@ -186,7 +222,7 @@ class CancellationSave {
         entity_type: 'sms_sequence',
         entity_id: sequence.id,
       });
-      await sendCancellationSms(customer, body, { sequence_id: sequence.id, reply_action: 'callback_requested' });
+      await sendCancellationSms(customer, body, { sequence_id: sequence.id, reply_action: 'callback_requested' }, { conversationalContext: true });
 
       return { action: 'callback_requested' };
     }
@@ -201,7 +237,7 @@ class CancellationSave {
         entity_type: 'sms_sequence',
         entity_id: sequence.id,
       });
-      await sendCancellationSms(customer, body, { sequence_id: sequence.id, reply_action: 'cancelled' });
+      await sendCancellationSms(customer, body, { sequence_id: sequence.id, reply_action: 'cancelled' }, { conversationalContext: true });
 
       return { action: 'cancelled' };
     }

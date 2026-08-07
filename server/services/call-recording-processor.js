@@ -9833,6 +9833,25 @@ const CallRecordingProcessor = {
                     });
                   const primaryOk = !(sendResult.blocked || sendResult.sent === false);
                   if (!primaryOk) {
+                    // Send-window hold: this after-hours phone booking
+                    // registered its reminder with sendConfirmation:false
+                    // (this path owns the confirmation), so nothing would
+                    // retry a held text and the customer never learns their
+                    // visit is booked. Re-arm confirmation_sent so the
+                    // 15-minute stranded-confirmation sweep delivers the
+                    // standard confirmation at the 8:00 AM window open —
+                    // same handoff as the estimate-accept flow.
+                    if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && scheduledServiceId) {
+                      try {
+                        await db('appointment_reminders')
+                          .where({ scheduled_service_id: scheduledServiceId })
+                          .where({ cancelled: false })
+                          .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                        logger.info(`[call-proc] Confirmation for ${scheduledServiceId} held (send window) — re-armed for the stranded-confirmation sweep`);
+                      } catch (rearmErr) {
+                        logger.error(`[call-proc] confirmation re-arm failed for ${scheduledServiceId}: ${rearmErr.message}`);
+                      }
+                    }
                     logger.warn(`[call-proc] Appointment SMS blocked for customer ${customerId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
                     appointmentResult = {
                       smsSent: false,

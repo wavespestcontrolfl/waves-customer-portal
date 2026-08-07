@@ -386,6 +386,10 @@ router.post('/:id/interest', async (req, res, next) => {
         customerId: customer.id,
         identityTrustLevel: 'authenticated_portal',
         entryPoint: 'promotions_upsell_interest',
+        // Send-window live-request provenance: the authenticated customer
+        // just tapped "I'm interested" in the portal — this ack answers
+        // their own mid-session action.
+        conversationalContext: true,
         metadata: {
           original_message_type: 'upsell_interest_confirmation',
           service_type: serviceType,

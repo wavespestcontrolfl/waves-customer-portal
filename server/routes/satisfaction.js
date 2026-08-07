@@ -228,6 +228,12 @@ router.post('/', async (req, res, next) => {
           customerId: customer.id,
           identityTrustLevel: 'phone_matches_customer',
           entryPoint: 'satisfaction_promoter_review',
+          // Send-window inbound-reply provenance: the customer is ON the
+          // satisfaction page right now and just rated us — this texts THEM
+          // their own review link mid-session, the live self-service class
+          // the window never defers (a morning requeue would land after
+          // the moment passed).
+          conversationalContext: true,
           metadata: {
             original_message_type: 'review_request',
             service_record_id: serviceRecordId,

@@ -2459,8 +2459,14 @@ function initScheduledJobs() {
                 const seq = await db('invoice_followup_sequences')
                   .where({ id: claimMeta.followup_sequence_id })
                   .first('status');
-                if (seq && ['stopped', 'completed'].includes(String(seq.status || ''))) {
-                  staleReason = `sequence-${seq.status}`;
+                // 'stopped' only — NOT 'completed': the FINAL touch's own
+                // advance marks the sequence completed right after queueing
+                // its held SMS leg, so suppressing on completed would block
+                // that queued final message every time. A payment stop
+                // flows through 'stopped' (and the invoice-terminal check
+                // above catches paid/void regardless).
+                if (seq && String(seq.status || '') === 'stopped') {
+                  staleReason = 'sequence-stopped';
                 }
               }
             } catch (invErr) {
@@ -2802,6 +2808,31 @@ function initScheduledJobs() {
             });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
 
+            // Deferred lead-menu replay: settle the once-ever
+            // lead_auto_reply_sends claim the webhook left unresolved when
+            // it queued this row. A real provider sid stamps the claim (the
+            // phone got its one menu); a sentinel/suppressed sid deletes
+            // the null-sid claim so a later form submission re-arms.
+            // Best-effort — a settlement failure leaves the claim
+            // fail-closed, matching the webhook's own contract.
+            if (claimMeta.entry_point === 'lead_webhook_auto_reply_deferred' && claimMeta.lead_auto_reply_phone_digits) {
+              try {
+                const sid = String(smsResult.providerMessageId || '');
+                if (/^(SM|MM)/.test(sid)) {
+                  await db('lead_auto_reply_sends')
+                    .where({ phone_digits: claimMeta.lead_auto_reply_phone_digits })
+                    .whereNull('twilio_sid')
+                    .update({ twilio_sid: sid });
+                } else {
+                  await db('lead_auto_reply_sends')
+                    .where({ phone_digits: claimMeta.lead_auto_reply_phone_digits })
+                    .whereNull('twilio_sid')
+                    .del();
+                }
+              } catch (claimErr) {
+                logger.warn(`[scheduled-sms] lead auto-reply claim settlement failed for ${msg.id} (claim stays, fail closed): ${claimErr.message}`);
+              }
+            }
             // Deferred completion/invoice replay delivered: run the
             // finalization the immediate path does inline (invoice
             // draft→sent, bundled review delivered mark, combined-receipt
@@ -2950,6 +2981,17 @@ function initScheduledJobs() {
             } else {
               await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
               logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+              // Terminal block on a deferred lead menu: release the
+              // once-ever claim so this phone's NEXT form submission can
+              // re-arm — otherwise the null-sid claim suppresses the menu
+              // forever after a replay that never delivered.
+              if (claimMeta.entry_point === 'lead_webhook_auto_reply_deferred' && claimMeta.lead_auto_reply_phone_digits) {
+                await db('lead_auto_reply_sends')
+                  .where({ phone_digits: claimMeta.lead_auto_reply_phone_digits })
+                  .whereNull('twilio_sid')
+                  .del()
+                  .catch((relErr) => logger.warn(`[scheduled-sms] lead auto-reply claim release failed for ${msg.id}: ${relErr.message}`));
+              }
               // The customer was never answered — used + parked cards return.
               const blockedMeta = await readFreshMeta();
               await require('./sms-suggest-mode').reopenScheduledSuggestions({

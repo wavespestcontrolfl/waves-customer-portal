@@ -779,6 +779,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
                   lead_source: leadSource.source,
                   original_block_code: smsResult.code,
                   refresh_customer_phone: true,
+                  // The executor settles the once-ever claim from this key:
+                  // real provider sid → stamp; suppressed/terminal → delete
+                  // the null-sid claim so a later form submission re-arms.
+                  lead_auto_reply_phone_digits: phoneDigits,
                 }),
               });
               heldQueued = true;

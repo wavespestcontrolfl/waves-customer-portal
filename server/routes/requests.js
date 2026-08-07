@@ -337,6 +337,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         channel: 'sms',
         audience: 'customer',
         purpose: 'support_resolution',
+        // Send-window live-request provenance: the authenticated customer
+        // just submitted this request/cancellation in the portal — the
+        // confirmation answers their own mid-session action.
+        conversationalContext: true,
         customerId: req.customer.id,
         identityTrustLevel: 'authenticated_portal',
         entryPoint: 'customer_service_request',

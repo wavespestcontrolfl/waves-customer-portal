@@ -144,6 +144,41 @@ async function sendSMS(to, body, options = {}) {
       },
     });
     if (!result.sent) {
+      // Send-window hold: reward/milestone legs fire from payment and
+      // first-service events at any hour, and invites can queue behind a
+      // night action — none of the callers have a retry, so a held text
+      // (e.g. "you earned $X") would be silently lost while the money
+      // moved. Persist it on the scheduled-SMS rail for 8:00 AM; report
+      // true — the obligation is durably owned.
+      if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
+        try {
+          const TWILIO_NUMBERS = require('../config/twilio-numbers');
+          await db('sms_log').insert({
+            customer_id: options.customerId || null,
+            direction: 'outbound',
+            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+            to_phone: to,
+            message_body: body,
+            status: 'scheduled',
+            scheduled_for: new Date(result.nextAllowedAt),
+            message_type: options.messageType || 'referral',
+            metadata: JSON.stringify({
+              entry_point: `${options.entryPoint || 'referral_engine'}_deferred`,
+              referral_id: options.referralId,
+              promoter_id: options.promoterId,
+              original_block_code: result.code,
+              replay_purpose: 'referral',
+              ...(options.customerId
+                ? { refresh_customer_phone: true, resolve_from_by_customer: true }
+                : (options.consentBasis ? { consent_basis: options.consentBasis } : {})),
+            }),
+          });
+          logger.info(`[ReferralEngine] SMS held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt} (${options.entryPoint || 'referral_engine'})`);
+          return true;
+        } catch (queueErr) {
+          logger.error(`[ReferralEngine] Held SMS requeue failed: ${queueErr.message}`);
+        }
+      }
       logger.warn(`[ReferralEngine] SMS blocked/failed (code=${result.code || 'UNKNOWN'} auditLogId=${result.auditLogId || 'n/a'})`);
       return false;
     }

@@ -3902,10 +3902,36 @@ async function releaseHeldProjectReport(projectId, { source = 'payment_sweep' } 
               scheduled_sms_log_id: smsClaim.id,
             },
           });
-          await finishReportHoldReleaseSmsClaim(smsClaim.id, result.sent);
-          channels.sms = result.sent
-            ? { ok: true }
-            : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+          // Send-window hold: the claim row IS an sms_log row, so flip it
+          // onto the scheduled rail at the window open — the executor
+          // replays the exact body from the claim itself. Counted as a
+          // successful channel: the queued row durably owns SMS delivery,
+          // so a night release with a delivered email no longer silently
+          // drops the text (and an SMS-only release doesn't revert to held).
+          if (!result.sent
+            && result.code === 'QUIET_HOURS_HOLD'
+            && result.deferred
+            && result.nextAllowedAt) {
+            await db('sms_log').where({ id: smsClaim.id }).update({
+              status: 'scheduled',
+              scheduled_for: new Date(result.nextAllowedAt),
+              updated_at: db.fn.now(),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
+                entry_point: 'project_report_hold_release_deferred',
+                original_block_code: result.code,
+                replay_purpose: 'support_resolution',
+                refresh_customer_phone: true,
+                resolve_from_by_customer: true,
+              })]),
+            });
+            channels.sms = { ok: true, scheduled: true };
+            logger.info(`[admin-projects] Report-release SMS for project ${refreshed.id} held outside the 8AM-8PM ET send window — claim rescheduled for ${result.nextAllowedAt}`);
+          } else {
+            await finishReportHoldReleaseSmsClaim(smsClaim.id, result.sent);
+            channels.sms = result.sent
+              ? { ok: true }
+              : { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+          }
         }
       } catch (err) {
         channels.sms = { ok: false, error: err.message };
