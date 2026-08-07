@@ -2140,6 +2140,7 @@ const InvoiceService = {
       allowClaimed = false,
       emailRecipientOverride = null,
       payUrlParams = null,
+      operatorInitiated = false,
     } = {},
   ) {
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
@@ -2208,6 +2209,7 @@ const InvoiceService = {
         const smsResult = await this.sendViaSMS(invoiceId, {
           allowClaimed: true,
           payUrlParams,
+          operatorInitiated,
         });
         if (smsResult?.payUrl) payUrl = smsResult.payUrl;
         if (smsResult?.sent) {

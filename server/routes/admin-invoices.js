@@ -688,7 +688,7 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             // payer AP inbox receives it and the invoice is finalized; self-pay
             // invoices keep the existing SMS-only immediate send.
             sendResult = invoice.payer_id
-              ? await InvoiceService.sendViaSMSAndEmail(invoice.id)
+              ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { operatorInitiated: true })
               : await InvoiceService.sendViaSMS(invoice.id, { operatorInitiated: true });
           } catch (sendErr) {
             logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
@@ -736,7 +736,7 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
 
     for (const invoiceId of invoiceIds) {
       try {
-        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId);
+        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { operatorInitiated: true });
         if (result.ok) {
           sent.push({
             invoiceId,
@@ -930,6 +930,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       requestReview,
       reviewDelayMinutes,
       emailRecipientOverride,
+      operatorInitiated: true,
     });
     if (!result.ok) {
       return res.status(400).json(result);
