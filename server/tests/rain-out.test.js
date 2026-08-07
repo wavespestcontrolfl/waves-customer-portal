@@ -1398,6 +1398,69 @@ describe('rain-out service', () => {
     });
   });
 
+  describe('dispatcher note (customerNote)', () => {
+    const sanitize = () => RainOut._test.sanitizeCustomerNote;
+
+    test('sanitizer: absent/blank notes are null, text is collapsed+trimmed', () => {
+      expect(sanitize()(undefined)).toEqual({ note: null });
+      expect(sanitize()(null)).toEqual({ note: null });
+      expect(sanitize()('   ')).toEqual({ note: null });
+      expect(sanitize()('  Gate code\n still  works!  ')).toEqual({ note: 'Gate code still works!' });
+    });
+
+    test('sanitizer: rejects over-long, shortener, and non-string notes', () => {
+      expect(sanitize()('x'.repeat(201))).toEqual({ error: 'note_too_long' });
+      expect(sanitize()('details here bit.ly/abc')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('see t.co/xyz')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()(42)).toEqual({ error: 'note_invalid' });
+      // Lookalike words that merely CONTAIN a shortener host must pass.
+      expect(sanitize()('a habit.ly no wait, a habit truly')).toEqual({ note: 'a habit.ly no wait, a habit truly' });
+    });
+
+    test('commit appends the note after the rendered template body', async () => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+      });
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+        customerNote: '  Sorry for the shuffle — see you Friday!  ',
+      });
+
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body)
+        .toBe('rendered body\n\nNote from our team: Sorry for the shuffle — see you Friday!');
+    });
+
+    test('commit rejects a shortener note BEFORE moving anything', async () => {
+      // No db queues wired past the service load — a rejected note must
+      // never reach the rebooker or the send.
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+      });
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+        customerNote: 'reschedule at bit.ly/waves',
+      });
+
+      expect(result).toEqual({ ok: false, reason: 'note_link_blocked' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getOptions', () => {
     test('attaches NWS rain chances to day options and counts the remaining route', async () => {
       SmartRebooker.findRescheduleOptions.mockResolvedValue([

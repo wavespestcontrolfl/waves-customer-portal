@@ -1,7 +1,9 @@
 // Dispatch-side "Quick Move Appointment" sheet — the admin equivalent of the
 // tech app's QuickMoveSheet (pages/tech/TechHomePage.jsx). Moves this visit
 // (or the rest of the assigned tech's route) for weather or a schedule delay
-// and texts the customer a self-serve reschedule link. All logic lives in
+// and texts the customer a self-serve reschedule link, optionally with a
+// dispatcher-typed note appended (≤200 chars, no link shorteners — server
+// enforces). All logic lives in
 // server/services/rain-out.js; this calls the admin endpoints:
 //   GET  /admin/dispatch/:id/rain-out-options
 //   POST /admin/dispatch/:id/rain-out
@@ -36,11 +38,80 @@ const EXTRA_REASONS = [
 ];
 const EXTRA_REASON_CODES = new Set(EXTRA_REASONS.map((r) => r.code));
 
+// Feather-style outline glyphs (24px grid, stroke currentColor) so the
+// reason tiles read at a glance. Monochrome by design — admin stays
+// neutral, no colored weather iconography.
+const REASON_GLYPHS = {
+  weather_rain: (
+    <>
+      <path d="M20 16.58A5 5 0 0 0 18 7h-1.26A8 8 0 1 0 4 15.25" />
+      <line x1="8" y1="19" x2="8" y2="21" />
+      <line x1="12" y1="19" x2="12" y2="23" />
+      <line x1="16" y1="19" x2="16" y2="21" />
+    </>
+  ),
+  weather_lightning: <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />,
+  weather_wind: <path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2" />,
+  weather_heat: <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z" />,
+  running_late: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </>
+  ),
+  equipment_issue: <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />,
+  tech_emergency: (
+    <>
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </>
+  ),
+  customer_noshow: (
+    <>
+      <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+      <circle cx="8.5" cy="7" r="4" />
+      <line x1="18" y1="8" x2="23" y2="13" />
+      <line x1="23" y1="8" x2="18" y2="13" />
+    </>
+  ),
+};
+
+function ReasonIcon({ code }) {
+  const glyph = REASON_GLYPHS[code];
+  if (!glyph) return null;
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{ flexShrink: 0 }}
+    >
+      {glyph}
+    </svg>
+  );
+}
+
 // Friendly copy for the server's structured rejections.
 const ERROR_COPY = {
   noshow_route_scope: 'No-show moves apply to this stop only.',
   target_not_later: 'Running late needs a time after the current window — pick a later slot.',
+  note_too_long: 'Note is too long — keep it under 200 characters.',
+  note_link_blocked: "Link shorteners can't go in customer texts — remove the shortened URL.",
+  note_invalid: 'That note could not be sent — plain text only.',
 };
+
+// Mirrors of the server's note guards (rain-out.js sanitizeCustomerNote) —
+// advisory here so the dispatcher sees the problem before tapping Move;
+// the server is the enforcer.
+const NOTE_MAX_CHARS = 200;
+const NOTE_SHORTENER_RE = /(?:^|[\s/.@])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[\s/:])/i;
 
 // Sentinel selection key for the custom-time option (distinct from the preset
 // keys, which are `${kind}:${date}:${start}`).
@@ -96,6 +167,8 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const [selectedKey, setSelectedKey] = useState(null);
   const [scope, setScope] = useState('job');
   const [notify, setNotify] = useState(true);
+  // Optional dispatcher note appended to the end of the customer text.
+  const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   // Custom on-the-hour time — dispatcher-typed instead of a preset pill.
   const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: TIMEZONE });
@@ -195,8 +268,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     }
   };
 
+  const noteBlocked = notify && NOTE_SHORTENER_RE.test(note);
+
   const handleCommit = async () => {
-    if (!selected || busy) return;
+    if (!selected || busy || noteBlocked) return;
     setBusy(true);
     setError('');
     try {
@@ -211,6 +286,8 @@ export default function RainOutSheet({ service, onClose, onDone }) {
           scope,
           target: { date: selected.date, window: selected.window },
           notifyCustomer: notify,
+          // Note only rides when a text is actually going out.
+          customerNote: notify && note.trim() ? note.trim() : undefined,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -311,12 +388,30 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         {options && (
           <>
             <div style={sectionLabel}>REASON</div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 18 }}>
-              {(options.extraReasonsEnabled ? [...RAIN_REASONS, ...EXTRA_REASONS] : RAIN_REASONS).map((r) => (
-                <button key={r.code} type="button" onClick={() => pickReason(r.code)} style={chipStyle(reason === r.code)}>
-                  {r.label}
-                </button>
-              ))}
+            {/* Icon tiles on an even grid (not ragged wrap pills) — the icon
+                carries the scan, the grid keeps tap targets uniform. */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 8, marginBottom: 18 }}>
+              {(options.extraReasonsEnabled ? [...RAIN_REASONS, ...EXTRA_REASONS] : RAIN_REASONS).map((r) => {
+                const active = reason === r.code;
+                return (
+                  <button
+                    key={r.code}
+                    type="button"
+                    onClick={() => pickReason(r.code)}
+                    aria-pressed={active}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px',
+                      borderRadius: 10, fontSize: 14, fontWeight: 500, textAlign: 'left',
+                      border: `1px solid ${active ? '#18181B' : '#D4D4D8'}`,
+                      background: active ? '#18181B' : '#FFFFFF',
+                      color: active ? '#FFFFFF' : '#18181B', cursor: 'pointer',
+                    }}
+                  >
+                    <ReasonIcon code={r.code} />
+                    <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.label}</span>
+                  </button>
+                );
+              })}
             </div>
 
             <div style={sectionLabel}>MOVE TO</div>
@@ -437,10 +532,38 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               </>
             )}
 
-            <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18, cursor: 'pointer', fontSize: 14, color: '#18181B' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: notify ? 10 : 18, cursor: 'pointer', fontSize: 14, color: '#18181B' }}>
               <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} style={{ width: 18, height: 18 }} />
               Text the customer a reply-to-adjust message
             </label>
+
+            {notify && (
+              <div style={{ marginBottom: 18 }}>
+                <textarea
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  maxLength={NOTE_MAX_CHARS}
+                  rows={2}
+                  aria-label="Add a note to the text (optional)"
+                  placeholder="Add a note to the text (optional) — added to the end of the message"
+                  style={{
+                    width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 10,
+                    fontSize: 14, border: `1px solid ${noteBlocked ? '#DC2626' : '#D4D4D8'}`,
+                    background: '#FFFFFF', color: '#18181B', fontFamily: 'inherit', resize: 'vertical',
+                  }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginTop: 4, fontSize: 12, color: '#71717A' }}>
+                  <span>
+                    {noteBlocked
+                      ? <span style={{ color: '#B91C1C' }}>{ERROR_COPY.note_link_blocked}</span>
+                      : (scope === 'route' && routeCount > 0 && note.trim()
+                        ? `This note goes to every moved customer (${routeCount + 1} stops).`
+                        : '')}
+                  </span>
+                  {note.length > 0 && <span style={{ flexShrink: 0 }}>{note.length}/{NOTE_MAX_CHARS}</span>}
+                </div>
+              </div>
+            )}
 
             <div style={{ display: 'flex', gap: 10 }}>
               <button
@@ -456,11 +579,11 @@ export default function RainOutSheet({ service, onClose, onDone }) {
               <button
                 type="button"
                 onClick={handleCommit}
-                disabled={!selected || busy}
+                disabled={!selected || busy || noteBlocked}
                 style={{
                   flex: 2, padding: '13px 20px', borderRadius: 9999, fontSize: 15, fontWeight: 500,
                   border: '1px solid #18181B', background: '#18181B', color: '#FFFFFF',
-                  cursor: !selected || busy ? 'default' : 'pointer', opacity: !selected || busy ? 0.5 : 1,
+                  cursor: !selected || busy || noteBlocked ? 'default' : 'pointer', opacity: !selected || busy || noteBlocked ? 0.5 : 1,
                 }}
               >
                 {busy ? 'Moving…' : 'Move appointment'}

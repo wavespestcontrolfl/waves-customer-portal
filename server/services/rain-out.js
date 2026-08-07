@@ -65,6 +65,27 @@ function isValidReason(reasonCode) {
   return !!WEATHER_PHRASES[reasonCode] || (isExtraReason(reasonCode) && extraReasonsEnabled());
 }
 
+// Dispatcher-typed note appended to the end of the moved SMS ("Gate code
+// still works, see you Friday!"). Two hard limits, both re-checked here
+// because the sheet's mirrors are advisory only:
+//   - 200 chars — the templates already run 2-3 segments; an unbounded
+//     note lets one tap send a novel.
+//   - no link shorteners — a shortened URL in an A2P campaign message is
+//     a carrier violation the campaign can NOT be resubmitted after.
+// On a route-scope move the same note goes to EVERY texted customer, so
+// the sheet warns the dispatcher when scope=route.
+const CUSTOMER_NOTE_MAX_CHARS = 200;
+const NOTE_SHORTENER_RE = /(?:^|[\s/.@])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[\s/:])/i;
+function sanitizeCustomerNote(raw) {
+  if (raw == null) return { note: null };
+  if (typeof raw !== 'string') return { error: 'note_invalid' };
+  const note = raw.replace(/\s+/g, ' ').trim();
+  if (!note) return { note: null };
+  if (note.length > CUSTOMER_NOTE_MAX_CHARS) return { error: 'note_too_long' };
+  if (NOTE_SHORTENER_RE.test(note)) return { error: 'note_link_blocked' };
+  return { note };
+}
+
 // Customer-facing lead for the moved SMS, grounded in what we actually know
 // instead of a fixed "heavy rain rolled through" claim (owner call,
 // 2026-07-18). A same-day push means the tech is standing in the weather —
@@ -426,7 +447,7 @@ async function getOptions(serviceId) {
 // without it — the copy is optional, the tech's response is not.
 const FORECAST_DECORATION_TIMEOUT_MS = 1500;
 
-async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, forecastHealth = { degraded: false } }) {
+async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, customerNote = null, forecastHealth = { degraded: false } }) {
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
   // Moved-first means the new slot is already booked — no confirmation
@@ -566,6 +587,13 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
     return { sent: false, reason: 'missing_template' };
   }
 
+  // Dispatcher note rides AFTER whichever rung rendered — it decorates the
+  // templated copy, never replaces it (the reply-to-adjust link and weather
+  // grounding stay intact). commit() already sanitized it.
+  if (customerNote) {
+    body = `${body}\n\nNote from our team: ${customerNote}`;
+  }
+
   const result = await sendCustomerMessage({
     to: customer.phone,
     body,
@@ -611,14 +639,23 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
  *                                       the siblings shift by the anchor's window delta so stop
  *                                       order survives; day moves keep each sibling's own window.
  * @param {boolean} [args.notifyCustomer=true]
+ * @param {string}  [args.customerNote]       optional dispatcher-typed note appended
+ *                                            to every moved-SMS this commit sends
+ *                                            (route scope: every texted customer
+ *                                            gets it). ≤200 chars, no link
+ *                                            shorteners — rejected as note_too_long
+ *                                            / note_link_blocked / note_invalid.
  * @param {string} [args.initiatedBy='tech']  actor recorded on each reschedule
  *                                            for the audit log — 'admin' from the
  *                                            dispatch board, 'tech' from the app.
  */
-async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, initiatedBy = 'tech' }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, initiatedBy = 'tech' }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
+  const noteCheck = sanitizeCustomerNote(customerNote);
+  if (noteCheck.error) return { ok: false, reason: noteCheck.error };
+  const note = noteCheck.note;
   if (!target?.date || !target.window?.start || !target.window?.end) {
     return { ok: false, reason: 'bad_target' };
   }
@@ -968,7 +1005,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             zip: service.zip, latitude: service.customer_latitude, longitude: service.customer_longitude,
           }
           : await db('customers').where({ id: job.customer_id }).first('id', 'phone', 'first_name', 'zip', 'latitude', 'longitude');
-        sms = await sendMovedSms({ job, customer, reasonCode, chosen, serviceId: job.id, forecastHealth });
+        sms = await sendMovedSms({ job, customer, reasonCode, chosen, serviceId: job.id, customerNote: note, forecastHealth });
       } catch (err) {
         logger.warn(`[rain-out] post-move notification failed for ${job.id}: ${err.message}`);
         sms = { sent: false, reason: err.message };
@@ -994,6 +1031,6 @@ module.exports = {
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
-    EXTRA_REASON_LEADS, isValidReason,
+    EXTRA_REASON_LEADS, isValidReason, sanitizeCustomerNote,
   },
 };
