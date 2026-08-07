@@ -924,7 +924,7 @@ describe('loadSecureCardPageData — page state machine', () => {
 
   test('with the price DISPLAYED (planContext present) the render freezes it as the completion cap', async () => {
     const plans = require('../services/secure-appointment-plans');
-    const spy = jest.spyOn(plans, 'buildSecurePlanContext')
+    const spy = jest.spyOn(plans, 'deriveSecurePlanContext')
       .mockResolvedValueOnce({ mode: 'one_time', perVisit: 135, selected: null });
     try {
       const res = await loadSecureCardPageData(REQUEST.token);
@@ -937,9 +937,67 @@ describe('loadSecureCardPageData — page state machine', () => {
       // the frozen cap, never raise it, and a prior no-price render wins.
       expect(String(stamp.accepted_amount.__raw)).toContain('CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount');
       expect(stamp.accepted_amount.bindings).toContain(135);
+      // A priced display is not a pin — the manual-collect bell stays quiet.
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }
+  });
+
+  test('a plan-context derivation FAILURE renders unavailable and stamps NOTHING — a hiccup is never a no-price consent (#3175 hardening)', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'deriveSecurePlanContext')
+      .mockRejectedValueOnce(new Error('db timeout'));
+    try {
+      const res = await loadSecureCardPageData(REQUEST.token);
+      // The existing unavailable path: no form, no SetupIntent handed out —
+      // a page reload retries against healthy dependencies.
+      expect(res.state).toBe('unavailable');
+      expect(res.clientSecret).toBeUndefined();
+      // NOTHING was stamped: the sticky accepted_amount=0 sentinel is a
+      // consent statement ("the page displayed no price"), permanent by
+      // design — a transient failure must never write it, or any other
+      // disclosure column.
+      const stamp = touches('appointment_card_requests')
+        .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+        .map(([, patch]) => patch)
+        .find((p) => 'accepted_amount' in p || 'no_show_fee_amount' in p);
+      expect(stamp).toBeUndefined();
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('pinning the no-price sentinel fires the billing bell ON THE TRANSITION — and not on re-render of an already-0 row', async () => {
+    // First render: policy null (gate off in this harness), row never
+    // stamped (accepted_amount undefined/null) → pin + one bell.
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('ready');
+    const bells = mockNotifyAdmin.mock.calls.filter(([category]) => category === 'billing');
+    expect(bells).toHaveLength(1);
+    expect(bells[0][1]).toContain('without a price');
+    expect(bells[0][3]).toMatchObject({
+      metadata: {
+        scheduledServiceId: REQUEST.scheduled_service_id,
+        appointmentCardRequestId: REQUEST.id,
+        reason: 'no_price_displayed',
+      },
+    });
+
+    // Re-render of the already-pinned row (the stamp re-confirms 0): silent.
+    mockNotifyAdmin.mockClear();
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, accepted_amount: '0.00' });
+    const res2 = await loadSecureCardPageData(REQUEST.token);
+    expect(res2.state).toBe('ready');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a FAILED stamp never bells — the pin did not persist, unavailable renders instead', async () => {
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => ('accepted_amount' in patch ? 0 : 1);
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('unavailable');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
   test('the page GET reads the fee disclosure ONCE — note and stamp share a single snapshot (Codex #3153 r4, source contract)', () => {

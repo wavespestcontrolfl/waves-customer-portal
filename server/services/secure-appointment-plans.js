@@ -144,86 +144,105 @@ function seriesAnchorId(visit) {
 }
 
 /**
+ * Strict derivation core: null ONLY by policy (lane dark, or an input the
+ * lane deliberately excludes — the caller renders today's card-only page);
+ * a derivation FAILURE (db hiccup, dependency error) THROWS instead of
+ * collapsing into that null. The distinction is load-bearing for the
+ * /secure render stamp (appointment-card-request.js): a null context is
+ * read there as "the page displayed no price" and pins the STICKY
+ * accepted_amount=0 consent sentinel — permanent by design (monotonic-down
+ * CASE + one request row per visit, ever) — so a transient exception must
+ * surface as a retryable failure, never as a deliberate no-price display.
+ * Callers that only need the safe fallback use buildSecurePlanContext
+ * below, which keeps the historical never-throws contract.
+ */
+async function deriveSecurePlanContext({ request, visitId }) {
+  if (!isEnabled('securePlanChoice')) return null;
+  const visit = await loadPlanVisit(visitId || request.scheduled_service_id);
+  if (!visit || !visit.customer_id) return null;
+
+  // NULL/zero price = manual quote pending — never $0, never a plan page.
+  const perVisit = visit.estimated_price != null ? Number(visit.estimated_price) : null;
+  if (!(perVisit > 0)) return null;
+
+  // An estimate-origin series already made its billing choice at accept —
+  // the accept flow minted the setup+first-application invoice (incl. the
+  // $99) and stamped the per_application lane. Re-offering the plan page
+  // there would double-disclose (and double-bill) the setup fee.
+  if (visit.source_estimate_id) return null;
+
+  const customer = await db('customers')
+    .where({ id: visit.customer_id })
+    .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'property_type');
+  if (!customer) return null;
+  // Commercial/business properties are excluded from v1 (InvoiceService
+  // taxes both — tax would split the page total from the invoice total);
+  // monthly members pay dues, annual-prepay customers are already
+  // covered, and an established per_application customer already paid
+  // their setup fee at estimate accept — all would falsify the plan copy
+  // or double-bill the fee.
+  if (['commercial', 'business'].includes(String(customer.property_type || '').toLowerCase())) return null;
+  if (customer.billing_mode === 'per_application') return null;
+  const lane = resolveBillingLane(customer);
+  if (lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay') return null;
+
+  const isRecurring = !!visit.is_recurring || !!visit.recurring_pattern;
+  if (!isRecurring) {
+    return { mode: 'one_time', perVisit: cents(perVisit), selected: request?.selected_plan || null };
+  }
+
+  const pattern = normalizedPattern(visit);
+  const visitsPerYear = visitsPerYearForCadence(pattern);
+  const coverageCadence = prepayCoverageCadenceForPattern(pattern);
+  if (!pattern || !visitsPerYear || !coverageCadence) return null;
+
+  const serviceKey = recurringServiceKey({ name: visit.service_type });
+  const planClass = PLAN_CLASS_BY_SERVICE_KEY[serviceKey] || null;
+  if (!planClass) return null;
+
+  // An existing overlapping term (any coverage-holding status) means
+  // prepay is not sellable here — hide the whole choice rather than
+  // render an option the mint would 409. The request's OWN pending term
+  // (minted by an earlier prepay selection on this same link) is
+  // excluded: it must not hide the plan context on the prepay_selected
+  // page or block the customer switching back to per-application.
+  const today = etDateString();
+  let overlapQuery = db('annual_prepay_terms')
+    .where({ customer_id: visit.customer_id })
+    .where(overlapStatusClause());
+  if (request?.annual_prepay_term_id) {
+    overlapQuery = overlapQuery.whereNot('id', request.annual_prepay_term_id);
+  }
+  const overlapping = await overlapQuery
+    .orderBy('term_end', 'desc')
+    .first('id', 'term_end');
+  const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
+  if (overlapEnd && today <= overlapEnd) return null;
+
+  const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });
+
+  return {
+    mode: 'recurring',
+    planClass,
+    perVisit: cents(perVisit),
+    visitsPerYear,
+    annualBase: pricing.annualBase,
+    prepay: pricing.prepay,
+    setupFee: pricing.setupFee,
+    selected: request?.selected_plan || null,
+  };
+}
+
+/**
  * Derive the plan context for a pending secure-card request. Returns null
  * whenever the lane is dark or ANY input is unsound — the caller renders
- * today's card-only page. Never throws.
+ * today's card-only page. Never throws (failures also collapse to null) —
+ * callers that must tell a FAILURE apart from null-by-policy use
+ * deriveSecurePlanContext directly.
  */
 async function buildSecurePlanContext({ request, visitId }) {
   try {
-    if (!isEnabled('securePlanChoice')) return null;
-    const visit = await loadPlanVisit(visitId || request.scheduled_service_id);
-    if (!visit || !visit.customer_id) return null;
-
-    // NULL/zero price = manual quote pending — never $0, never a plan page.
-    const perVisit = visit.estimated_price != null ? Number(visit.estimated_price) : null;
-    if (!(perVisit > 0)) return null;
-
-    // An estimate-origin series already made its billing choice at accept —
-    // the accept flow minted the setup+first-application invoice (incl. the
-    // $99) and stamped the per_application lane. Re-offering the plan page
-    // there would double-disclose (and double-bill) the setup fee.
-    if (visit.source_estimate_id) return null;
-
-    const customer = await db('customers')
-      .where({ id: visit.customer_id })
-      .first('id', 'billing_mode', 'waveguard_tier', 'monthly_rate', 'property_type');
-    if (!customer) return null;
-    // Commercial/business properties are excluded from v1 (InvoiceService
-    // taxes both — tax would split the page total from the invoice total);
-    // monthly members pay dues, annual-prepay customers are already
-    // covered, and an established per_application customer already paid
-    // their setup fee at estimate accept — all would falsify the plan copy
-    // or double-bill the fee.
-    if (['commercial', 'business'].includes(String(customer.property_type || '').toLowerCase())) return null;
-    if (customer.billing_mode === 'per_application') return null;
-    const lane = resolveBillingLane(customer);
-    if (lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay') return null;
-
-    const isRecurring = !!visit.is_recurring || !!visit.recurring_pattern;
-    if (!isRecurring) {
-      return { mode: 'one_time', perVisit: cents(perVisit), selected: request?.selected_plan || null };
-    }
-
-    const pattern = normalizedPattern(visit);
-    const visitsPerYear = visitsPerYearForCadence(pattern);
-    const coverageCadence = prepayCoverageCadenceForPattern(pattern);
-    if (!pattern || !visitsPerYear || !coverageCadence) return null;
-
-    const serviceKey = recurringServiceKey({ name: visit.service_type });
-    const planClass = PLAN_CLASS_BY_SERVICE_KEY[serviceKey] || null;
-    if (!planClass) return null;
-
-    // An existing overlapping term (any coverage-holding status) means
-    // prepay is not sellable here — hide the whole choice rather than
-    // render an option the mint would 409. The request's OWN pending term
-    // (minted by an earlier prepay selection on this same link) is
-    // excluded: it must not hide the plan context on the prepay_selected
-    // page or block the customer switching back to per-application.
-    const today = etDateString();
-    let overlapQuery = db('annual_prepay_terms')
-      .where({ customer_id: visit.customer_id })
-      .where(overlapStatusClause());
-    if (request?.annual_prepay_term_id) {
-      overlapQuery = overlapQuery.whereNot('id', request.annual_prepay_term_id);
-    }
-    const overlapping = await overlapQuery
-      .orderBy('term_end', 'desc')
-      .first('id', 'term_end');
-    const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
-    if (overlapEnd && today <= overlapEnd) return null;
-
-    const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });
-
-    return {
-      mode: 'recurring',
-      planClass,
-      perVisit: cents(perVisit),
-      visitsPerYear,
-      annualBase: pricing.annualBase,
-      prepay: pricing.prepay,
-      setupFee: pricing.setupFee,
-      selected: request?.selected_plan || null,
-    };
+    return await deriveSecurePlanContext({ request, visitId });
   } catch (err) {
     logger.warn(`[secure-plans] plan context failed for request ${request?.id || `(send-time probe, visit ${visitId})`}: ${err.message} — rendering card-only`);
     return null;
@@ -635,6 +654,7 @@ async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) 
 
 module.exports = {
   buildSecurePlanContext,
+  deriveSecurePlanContext,
   prepaySelectionState,
   selectSecurePlan,
   applyPerApplicationLaneStamp,
