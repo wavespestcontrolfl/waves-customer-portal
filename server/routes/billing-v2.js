@@ -153,11 +153,23 @@ router.get('/', async (req, res, next) => {
         return alias != null ? String(alias) : null;
       } catch { return null; }
     };
+    // Manual self-pay rows (cash/check/Zelle) are written with NEITHER
+    // metadata nor a PaymentIntent — admin-invoices.js only stamps metadata
+    // for payer-billed or credit-applied invoices. Their description is
+    // deterministic though: `Invoice <number> — <method>`, so the invoice
+    // number is the only link back and the receipt would otherwise never
+    // appear on a cash/check payment (codex r2 P1).
+    const invoiceNumberOf = (p) => {
+      const m = /^Invoice\s+([A-Za-z0-9-]+)\s+—/.exec(String(p.description || ''));
+      return m ? m[1] : null;
+    };
     const invoiceIds = [...new Set(visiblePayments.map(anyInvoiceIdOf).filter(Boolean))];
     const intentIds = [...new Set(visiblePayments.map(p => p.stripe_payment_intent_id).filter(Boolean))];
+    const invoiceNumbers = [...new Set(visiblePayments.map(invoiceNumberOf).filter(Boolean))];
     const receiptTokenByInvoiceId = new Map();
     const receiptTokenByIntentId = new Map();
-    if (invoiceIds.length || intentIds.length) {
+    const receiptTokenByNumber = new Map();
+    if (invoiceIds.length || intentIds.length || invoiceNumbers.length) {
       try {
         const invoiceRows = await db('invoices')
           .where({ customer_id: req.customerId })
@@ -165,6 +177,7 @@ router.get('/', async (req, res, next) => {
           .where((qb) => {
             if (invoiceIds.length) qb.orWhereIn('id', invoiceIds);
             if (intentIds.length) qb.orWhereIn('stripe_payment_intent_id', intentIds);
+            if (invoiceNumbers.length) qb.orWhereIn('invoice_number', invoiceNumbers);
           })
           .select('id', 'token', 'invoice_number', 'stripe_payment_intent_id');
         invoiceRows.forEach((row) => {
@@ -172,6 +185,7 @@ router.get('/', async (req, res, next) => {
           const entry = { token: row.token, invoiceNumber: row.invoice_number };
           receiptTokenByInvoiceId.set(row.id, entry);
           if (row.stripe_payment_intent_id) receiptTokenByIntentId.set(row.stripe_payment_intent_id, entry);
+          if (row.invoice_number) receiptTokenByNumber.set(row.invoice_number, entry);
         });
       } catch (err) {
         // Best-effort: a receipt-link lookup failure must not break the
@@ -202,14 +216,23 @@ router.get('/', async (req, res, next) => {
         // null when this payment has no retrievable receipt — the row simply
         // renders no receipt action.
         ...(() => {
-          const inv = receiptTokenByInvoiceId.get(anyInvoiceIdOf(p))
-            || (p.stripe_payment_intent_id ? receiptTokenByIntentId.get(p.stripe_payment_intent_id) : null);
+          // A FAILED attempt can carry the same metadata.invoice_id as the
+          // retry that later succeeded (stripe.js persists failed saved-card
+          // attempts with it). Attaching the invoice receipt to that row would
+          // show a receipt beside a FAILED badge for money this row never
+          // took — only settled rows get one (codex r2 P1).
+          const settled = ['paid', 'processing', 'refunded'].includes(String(p.status || '').toLowerCase());
+          const inv = !settled ? null : (
+            receiptTokenByInvoiceId.get(anyInvoiceIdOf(p))
+            || (p.stripe_payment_intent_id ? receiptTokenByIntentId.get(p.stripe_payment_intent_id) : null)
+            || receiptTokenByNumber.get(invoiceNumberOf(p))
+          );
           const stripeReceiptUrl = stripeReceiptOf(p);
           return {
             receiptUrl: inv ? `/receipt/${inv.token}` : null,
             receiptPdfUrl: inv ? `/api/receipt/${inv.token}/pdf` : null,
             receiptNumber: inv?.invoiceNumber || null,
-            stripeReceiptUrl: inv ? null : stripeReceiptUrl,
+            stripeReceiptUrl: (inv || !settled) ? null : stripeReceiptUrl,
           };
         })(),
       })),
