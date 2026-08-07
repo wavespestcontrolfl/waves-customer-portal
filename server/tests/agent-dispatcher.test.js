@@ -260,6 +260,21 @@ describe('emit_draft in-loop self-lint (W1)', () => {
     expect(r.directives.join(' ')).toMatch(/does NOT offer door-to-door/);
   });
 
+  test('a route the session VERIFIED via check_existing_content passes the in-loop lint (parity with gate 3c)', async () => {
+    const VERIFIED_BODY = 'Related reading: [our earlier post](/some-verified-post/). Follow the label re-entry directions.';
+    // Without the verified route the same body blocks (P0 UNKNOWN_INTERNAL_ROUTE)…
+    registerSessionLint('lint-7a', {});
+    const blocked = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: VERIFIED_BODY }, { sessionId: 'lint-7a' });
+    expect(blocked.draft_rejected).toBe(true);
+    clearDraft('lint-7a');
+    // …with it, the lint sees the route the same way gate 3c does.
+    registerSessionLint('lint-7b', {});
+    tools._internals.sessionCheckedRoutes.set('lint-7b', new Set(['/some-verified-post/']));
+    const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: VERIFIED_BODY }, { sessionId: 'lint-7b' });
+    expect(r.ok).toBe(true);
+    clearDraft('lint-7b');
+  });
+
   test('OFF_FOOTPRINT_CITY_CLAIM never blocks in-loop — the run-level LLM classifier owns its false positives', async () => {
     registerSessionLint('lint-6', {});
     const r = await executeBriefTool('emit_draft', {

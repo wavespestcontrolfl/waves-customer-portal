@@ -220,6 +220,10 @@ class AgentDispatcher {
         }],
       });
     } catch (err) {
+      // Session state (lint options, attempts) was registered above — a
+      // transient initial-message failure must not leak it into the
+      // process-global maps.
+      clearDraft(sessionId);
       return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId };
     }
 
