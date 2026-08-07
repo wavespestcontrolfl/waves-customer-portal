@@ -6069,17 +6069,26 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   </div>{" "}
                   {/* Bermuda-in-St.-Augustine suppression add-on — dark behind
-                      GATE_BERMUDA_SUPPRESSION. The control renders only when
-                      the server reports the gate on (subFeaturesAvailable);
-                      the engine additionally fails closed, so a stale client
-                      can never produce a silent unchanged price. St. Augustine
-                      track only. */}
-                  {bermudaSuppressionAvailable && form.grassType === "st_augustine" && (
+                      GATE_BERMUDA_SUPPRESSION. The control renders when the
+                      server reports the gate on (subFeaturesAvailable) OR the
+                      form already carries a saved selection — while gated off
+                      the checkbox is the only way to UNCHECK a reopened saved
+                      estimate (every regeneration/send 409s until it's
+                      removed). The engine additionally fails closed, so a
+                      stale client can never produce a silent unchanged price.
+                      St. Augustine track only. */}
+                  {(bermudaSuppressionAvailable || form.bermudaSuppression) && form.grassType === "st_augustine" && (
                     <div className="mt-3">
                       <CheckboxV2
                         k="bermudaSuppression"
                         label="Bermudagrass suppression add-on (baked into per-application price)"
                       />
+                      {form.bermudaSuppression && !bermudaSuppressionAvailable && (
+                        <div className="ml-7 mb-1 text-12 text-zinc-600">
+                          This add-on is currently disabled (GATE_BERMUDA_SUPPRESSION) — uncheck it
+                          to reprice, send, or accept this estimate without it.
+                        </div>
+                      )}
                       {form.bermudaSuppression && (
                         <div className="ml-7 mb-1 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-12 text-zinc-600">
                           Recognition + Fusilade II tank mix under the FL 2(ee) — max 2 applications

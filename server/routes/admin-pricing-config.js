@@ -313,9 +313,11 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     // DB-editable per-application adder knobs for the bermuda-suppression
     // add-on. Strict numbers only (no numeric strings), both keys required,
     // whole cents, bounded — an admin typo must not massively overprice a
-    // lawn ladder, and a would-be-zero adder is rejected here because the
-    // engine fails a SELECTED add-on closed rather than pricing $0 (remove
-    // the key entirely to fall back to the in-code defaults instead).
+    // lawn ladder, and a would-be-zero adder is rejected because the engine
+    // fails a SELECTED add-on closed rather than pricing $0. The knobs only
+    // TUNE the price; disabling the add-on is GATE_BERMUDA_SUPPRESSION
+    // (key removal is neither possible through this API's drop guard nor
+    // effective — db-bridge rebases absent knobs to the in-code defaults).
     const bs = data.bermudaSuppression;
     if (!bs || typeof bs !== 'object' || Array.isArray(bs)) {
       return fail('lawn_pricing_v2.bermudaSuppression must be an object with perAppBase and perAppPer1000Sqft');
@@ -335,7 +337,7 @@ function validatePricingConfigData(configKey, data, oldConfig) {
       return fail('lawn_pricing_v2.bermudaSuppression.perAppPer1000Sqft must not have sub-cent precision');
     }
     if (!(base + per1000 > 0)) {
-      return fail('lawn_pricing_v2.bermudaSuppression must produce a positive adder — remove the key to disable the add-on instead of zeroing it');
+      return fail('lawn_pricing_v2.bermudaSuppression must produce a positive adder — these knobs only tune the price; to disable the add-on, turn off GATE_BERMUDA_SUPPRESSION');
     }
   } else if (configKey === 'pest_base') {
     // Validate every field the sync consumes — not just base. A row like
