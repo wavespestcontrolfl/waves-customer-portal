@@ -2889,7 +2889,9 @@ const SANCTIONED_META_TOKEN_RE = /\{\{\s*cityPhone\s*\}\}/g;
 // "between 30 and 60", "one to two"), a common spelled number with its
 // unit, or a fractional/article form ("half an hour", "an hour").
 const REENTRY_RANGE_CONNECTOR_SRC = "(?:\\s*[-–—]\\s*|\\s+(?:to|or|and)\\s+)";
-const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:${REENTRY_RANGE_CONNECTOR_SRC}\\w+)?)\\s*(?:minutes?|mins?|hours?|hrs?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour)`;
+// Digits include decimals ("1.5 hours"); spelled numbers include the
+// "two and a half" compound form.
+const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\w+)?)\\s*(?:minutes?|mins?|hours?|hrs?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour)`;
 const REENTRY_SAFETY_SRCS = [
   // "safe to re-enter / return / go back inside", "re-entry is safe",
   // "safe for kids and pets to return"
@@ -2921,7 +2923,7 @@ const REENTRY_SAFETY_SRCS = [
   // minutes"), duration-then-action ("wait 30 minutes before re-entering",
   // "allow 30 minutes of drying time"), and keep-off forms ("keep pets off
   // the lawn for 30 minutes").
-  `\\b(?:re-?enter|re-?entry|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:re-?enter|re-?entry|return\\w*|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+)?${REENTRY_DURATION_SRC}\\b`,
   `\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "avoid the treated area for 30 minutes"
   `\\bavoid\\s+(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawns?|yards?|rooms?|surfaces?)\\b[^.!?\\n]{0,30}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
@@ -3030,6 +3032,10 @@ const BANNED_TOPIC_SRCS = [
   // tenting with a licensed structural fumigator" directs elsewhere.
   `\\b(?:schedule|book)\\s+(?:your\\s+|a\\s+|an\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?))?\\b(?!\\s+(?:with|through)\\s+(?!us\\b|waves\\b))`,
   `\\b(?:call|contact|text|email|ask)\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\s+(?:today\\s+)?(?:for|about)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
+  // Sales framings: "request a fumigation quote from Waves", "get attic
+  // insulation from Waves", "choose Waves for wildlife trapping".
+  `\\b(?:request|order|get|book)\\s+(?:a\\s+|an\\s+|your\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:quotes?|estimates?|services?|appointments?))?\\s+(?:from|with|through)\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\b`,
+  `\\b(?:choose|pick|hire|trust)\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\s+for\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
 ];
 
 function bannedTopicFinding(text) {

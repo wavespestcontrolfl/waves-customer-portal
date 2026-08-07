@@ -3082,6 +3082,10 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(spelledRange.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const approx = guardrails.evaluate({ body: 'The application dries in about 30 minutes.' }, {});
     expect(approx.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const decimal = guardrails.evaluate({ body: 'You can return in 1.5 hours.' }, {});
+    expect(decimal.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const compound = guardrails.evaluate({ body: 'Keep pets off the lawn for two and a half hours.' }, {});
+    expect(compound.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const avoidArea = guardrails.evaluate({ body: 'Avoid the treated area for 30 minutes.' }, {});
     expect(avoidArea.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const qualifier = guardrails.evaluate({ body: 'Our pesticide is environmentally safe.' }, {});
@@ -3202,6 +3206,15 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
   test('a schedule CTA directing to a THIRD PARTY stays legal', () => {
     const r = guardrails.evaluate({ body: 'For severe drywood cases, schedule tenting with a licensed structural fumigator.' }, {});
     expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('sales framings block — request-from / get-from / choose-for', () => {
+    const request = guardrails.evaluate({ body: 'Request a structural fumigation quote from Waves.' }, {});
+    expect(request.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const getFrom = guardrails.evaluate({ body: 'Get attic insulation from Waves Pest Control.' }, {});
+    expect(getFrom.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const choose = guardrails.evaluate({ body: 'Choose Waves for wildlife trapping in Bradenton.' }, {});
+    expect(choose.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('species-specific removal CTAs block — "Book raccoon removal today"', () => {
