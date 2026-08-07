@@ -268,8 +268,14 @@ async function buildFrontmatter(post) {
     // — a mechanical failure, not a content problem. Infer from the
     // title/keyword haystack (DEFAULT_SERVICE_AREAS as the final fallback,
     // same rule the autonomous path uses); stored valid areas pass through
-    // unchanged via inferServiceAreas' direct path.
-    service_areas_tag: serviceAreas.length > 0
+    // unchanged via inferServiceAreas' direct path. Inference is for
+    // GENUINELY ABSENT data only: a stored value that normalizes to empty
+    // (mistyped / out-of-area entries) is corrupt operator data, and
+    // guessing over it would publish geographically inaccurate metadata —
+    // keep the empty result so assertValidBlogFrontmatter rejects the row
+    // (the pre-hardening behavior for invalid data; Codex r2).
+    service_areas_tag: (serviceAreas.length > 0 || !(post.service_areas_tag == null
+        || (Array.isArray(post.service_areas_tag) && post.service_areas_tag.length === 0)))
       ? serviceAreas
       : inferServiceAreas({ title: post.title, primary_keyword: post.keyword, tags: post.tag, city: post.city }, {}),
     related_services: relatedServices,

@@ -235,6 +235,26 @@ describe('blog Astro frontmatter validation', () => {
     expect(result.errors.join('\n')).toMatch(/author\.bio_url must be string/);
   });
 
+  test('service-area inference covers ONLY genuinely absent data — stored invalid values stay empty for validation to reject (Codex r2)', async () => {
+    const base = {
+      title: 'Ant Pressure Basics',
+      slug: 'ant-pressure-basics',
+      meta_description: 'A short guide to household ant pressure and what drives it.',
+      keyword: 'ant control basics',
+      tag: 'Ants',
+      featured_image_url: '/images/blog/ant-pressure-basics/hero.png',
+      hero_image_alt: 'Ant trail near a patio',
+      content: 'Ant trails around patios often start with moisture and food access.',
+    };
+    // Absent → inferred (DEFAULT_SERVICE_AREAS fallback keeps the row alive).
+    const absent = await AstroPublisher.buildFrontmatter({ ...base });
+    expect(absent.service_areas_tag.length).toBeGreaterThan(0);
+    // Present but invalid (mistyped / out-of-area) → NOT inferred over; the
+    // empty result must reach assertValidBlogFrontmatter and reject the row.
+    const invalid = await AstroPublisher.buildFrontmatter({ ...base, service_areas_tag: ['Tampa'] });
+    expect(invalid.service_areas_tag).toEqual([]);
+  });
+
   test('maps pest-family legacy tags to the required pest-control category', async () => {
     const data = await AstroPublisher.buildFrontmatter({
       title: 'Ant Pressure in Palmetto',

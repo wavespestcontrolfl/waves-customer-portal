@@ -840,7 +840,8 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
         '[the absolute form](https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/).',
         'A citation: [report](https://source.example/fall-lawn-mistakes-southwest-florida/report) and',
         '[an exact foreign path](https://source.example/fall-lawn-mistakes-southwest-florida/) plus',
-        '[a longer internal route](/fall-lawn-mistakes-southwest-florida/archive/).',
+        '[a longer internal route](/fall-lawn-mistakes-southwest-florida/archive/) and',
+        '[a query value](https://source.example/report?return=/fall-lawn-mistakes-southwest-florida/).',
       ].join(' '),
     });
     const result = applyOperatorSlugRepair(operatorBrief(), draft);
@@ -851,17 +852,22 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     expect(draft.body).toContain('https://source.example/fall-lawn-mistakes-southwest-florida/report');
     expect(draft.body).toContain('[an exact foreign path](https://source.example/fall-lawn-mistakes-southwest-florida/)');
     expect(draft.body).toContain('(/fall-lawn-mistakes-southwest-florida/archive/)');
+    // A query VALUE embedding the old path is part of a different
+    // destination, not a self-link (Codex r2).
+    expect(draft.body).toContain('?return=/fall-lawn-mistakes-southwest-florida/');
   });
 
-  test('an off-site canonical is PRESERVED for the publisher guard — repair must not mask the unsafe input (Codex r1)', () => {
-    const draft = driftedDraft({
-      frontmatter: { canonical: 'https://competitor.example/their-page/' },
-    });
-    const result = applyOperatorSlugRepair(operatorBrief(), draft);
-    expect(result.ok).toBe(true);
-    expect(draft.frontmatter.slug).toBe(PINNED);
-    expect(draft.frontmatter.canonical).toBe('https://competitor.example/their-page/');
-    expect(result.repair.canonical_rewritten).toBe(false);
+  test('an off-site canonical is PRESERVED for the publisher guard — repair must not mask the unsafe input (Codex r1; protocol-relative r2)', () => {
+    for (const foreignCanonical of ['https://competitor.example/their-page/', '//competitor.example/their-page/']) {
+      const draft = driftedDraft({
+        frontmatter: { canonical: foreignCanonical },
+      });
+      const result = applyOperatorSlugRepair(operatorBrief(), draft);
+      expect(result.ok).toBe(true);
+      expect(draft.frontmatter.slug).toBe(PINNED);
+      expect(draft.frontmatter.canonical).toBe(foreignCanonical);
+      expect(result.repair.canonical_rewritten).toBe(false);
+    }
   });
 
   test('a draft without a frontmatter object is NOT repairable (cannot publish anyway)', () => {

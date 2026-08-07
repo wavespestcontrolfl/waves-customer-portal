@@ -3456,7 +3456,14 @@ function applyOperatorSlugRepair(brief, draft) {
   // let the run publish (Codex r1).
   let canonicalIsForeign = false;
   if (oldCanonical) {
-    try { canonicalIsForeign = new URL(oldCanonical).host !== new URL(hub).host; } catch { canonicalIsForeign = false; }
+    // Protocol-relative (`//host/...`) is host-bearing — the publisher's
+    // canonical guard treats it as off-site, so classify it the same way
+    // here instead of letting the URL-parse throw mark it non-foreign and
+    // repair over it (Codex r2).
+    try {
+      const parsed = new URL(oldCanonical.startsWith('//') ? `https:${oldCanonical}` : oldCanonical);
+      canonicalIsForeign = parsed.host !== new URL(hub).host;
+    } catch { canonicalIsForeign = false; }
   }
   if (!canonicalIsForeign && oldCanonical !== newCanonical) {
     draft.frontmatter.canonical = newCanonical;
@@ -3472,7 +3479,10 @@ function applyOperatorSlugRepair(brief, draft) {
   // self-link, and survives verbatim.
   if (oldSlugPath && oldSlugPath !== pinned && typeof draft.body === 'string' && draft.body.includes(oldSlugPath)) {
     const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const selfLinkRe = new RegExp(`(${escapeRe(hub)}|[\\s("'=<,\`]|^)${escapeRe(oldSlugPath)}(?![a-z0-9-])`, 'g');
+    // `=` and `,` are NOT destination starts: a query value like
+    // `?return=/old-slug/` or a srcset entry embeds the old path inside a
+    // DIFFERENT destination whose pathname is not the post route (Codex r2).
+    const selfLinkRe = new RegExp(`(${escapeRe(hub)}|[\\s("'<\`]|^)${escapeRe(oldSlugPath)}(?![a-z0-9-])`, 'g');
     let occurrences = 0;
     draft.body = draft.body.replace(selfLinkRe, (m, pre) => { occurrences += 1; return `${pre}${pinned}`; });
     repair.body_self_link_rewrites = occurrences;
