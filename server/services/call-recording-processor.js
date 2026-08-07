@@ -2232,21 +2232,22 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // and match, with last names non-conflicting; missing name data on either
   // side forces a fresh row instead (pre-push audit P1 r7 — the cost is a
   // recoverable duplicate, fail-closed beats a cross-prospect merge).
-  // Scan the newest matches rather than only the newest ONE: a shared inbox
-  // can hold several active unclaimed leads, and the caller's own row may
-  // sit behind a housemate's newer one — corroborate-then-pick, or every
-  // repeat call from this caller mints another duplicate (codex P2 r6).
-  const candidates = await query.orderBy('created_at', 'desc').limit(5);
+  // The corroboration lives IN the query, not in a post-fetch scan: a shared
+  // inbox can hold any number of active unclaimed leads, and the caller's
+  // own row must be found however deep it sits — a capped scan still minted
+  // duplicates past the cap (codex P2 r6/r13).
   const norm = (v) => String(v || '').trim().toLowerCase();
-  const conflicts = (a, b) => !!(norm(a) && norm(b) && norm(a) !== norm(b));
-  for (const candidate of candidates) {
-    const firstCorroborated = !!(norm(firstName) && norm(candidate.first_name)
-      && norm(firstName) === norm(candidate.first_name));
-    if (firstCorroborated && !conflicts(lastName, candidate.last_name)) {
-      return candidate;
-    }
+  const firstLc = norm(firstName);
+  if (!firstLc) return null; // positive corroboration impossible — fresh row
+  query = query.whereRaw('LOWER(TRIM(first_name)) = ?', [firstLc]);
+  const lastLc = norm(lastName);
+  if (lastLc) {
+    query = query.whereRaw(
+      "(last_name IS NULL OR TRIM(last_name) = '' OR LOWER(TRIM(last_name)) = ?)",
+      [lastLc],
+    );
   }
-  return null;
+  return query.orderBy('created_at', 'desc').first();
 }
 
 // New-lead admin surfacing for a lead minted by call processing — the fresh
@@ -7789,13 +7790,14 @@ const CallRecordingProcessor = {
                 logger.warn(`[call-proc] fresh-lead mint after claim race failed for ${maskSid(callSid)}: ${raceErr.code || raceErr.name || 'db_error'}`);
                 leadId = null;
               }
-            } else if (!enriched && raceRecovered) {
-              // The recovery pass ALSO wrote 0 rows: the just-minted row was
-              // claimed by a concurrent processor before this write landed.
-              // Same reasoning as a mint failure — never leave leadId pointing
-              // at a row someone else now owns.
-              leadId = null;
             }
+            // If the recovery pass ALSO wrote 0 rows (the just-minted row
+            // was claimed before this write landed), leadId is deliberately
+            // KEPT: the minted row persisted and IS this call's lead — the
+            // same reasoning as a claim on a fresh insert above. Nulling it
+            // marked the call lead_creation_failed and opened a false
+            // failure card even though the lead exists (codex P2 r13);
+            // enrichment simply skips via enriched=0.
             break;
           }
 
