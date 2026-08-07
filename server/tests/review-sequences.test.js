@@ -1604,6 +1604,45 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan.plan).toHaveLength(3);
   });
 
+  test('r17: unit-omitting primary stamps classify against the primary first, and exclusion series keep their tight walk window', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // ① Primary is Apt 3; visit is unmatched Apt 4; an old unit-omitting
+    // phone stamp of the primary must read as the primary, never inherit
+    // Apt 4 into the rental's history.
+    let mock = makeMock({
+      customers: [{ id: 'p3', first_name: 'Ida', address_line1: '100 Main St', address_line2: 'Apt 3', zip: '34205' }],
+      scheduled_services: [
+        { id: 'p3-1', customer_id: 'p3', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null, service_address_line1: '100 Main St', service_address_zip: '34205' },
+        { id: 'p3-2', customer_id: 'p3', service_id: 'svc-trap', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping', follow_up_interval_days: 3, property_id: null, service_address_line1: '100 Main St', service_address_line2: 'Apt 4', service_address_zip: '34205' },
+      ],
+    });
+    db.mockImplementation(mock);
+    const plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'p3', scheduledServiceId: 'p3-2' });
+    expect(plan.seriesFinal).not.toBe(true);
+    expect(plan.plan).toHaveLength(1);
+
+    // ② An exclusion program's return rides the generic followup SKU: the
+    // walk borrows the nearest exclusion opener's tight window, so the
+    // OLD exclusion program 20+ days back stays outside the series.
+    mock = makeMock({
+      scheduled_services: [
+        { id: 'xw-old', customer_id: 'xw', service_id: 'svc-excl', status: 'completed', scheduled_date: d(27), service_key: 'rodent_exclusion', follow_up_interval_days: 7 },
+        { id: 'xw-new', customer_id: 'xw', service_id: 'svc-excl', status: 'completed', scheduled_date: d(7), service_key: 'rodent_exclusion', follow_up_interval_days: 7 },
+        { id: 'xw-fin', customer_id: 'xw', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [
+        { id: 'seq-xw-old', customer_id: 'xw', scheduled_service_id: 'xw-old', status: 'completed' },
+        { id: 'seq-xw-new', customer_id: 'xw', scheduled_service_id: 'xw-new', status: 'completed' },
+      ],
+    });
+    db.mockImplementation(mock);
+    const exempt = await ReviewService._seriesExemptSequenceIds('xw', { scheduledServiceId: 'xw-fin' });
+    expect(exempt).toContain('seq-xw-new');
+    expect(exempt).not.toContain('seq-xw-old');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);

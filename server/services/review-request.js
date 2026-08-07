@@ -177,10 +177,16 @@ async function trappingPremiseMatcher(customerId, visit) {
       // A stamp that reads as the PRIMARY premise — matches the on-file
       // address with no unit evidence of its own — is the primary, not
       // this unmatched premise (r10 preserved: a sub-unit never merges
-      // with the whole-street primary).
+      // with the whole-street primary). Classified AGAINST THE PRIMARY
+      // FIRST with the primary's unit inherited (codex #3243 r17 P2): a
+      // unit-omitting phone stamp of an "Apt 3" primary must read as the
+      // primary, not inherit the visit's "Apt 4" and join the rental.
       const { unitKey, streetEmbeddedUnitKey } = require("./customer-properties");
       const rowUnit = unitKey(row.service_address_line2) || streetEmbeddedUnitKey(row.service_address_line1);
-      if (primaryHasStreet && !rowUnit && !premiseStampConflicts(row, primaryStamp)) return false;
+      if (primaryHasStreet && !rowUnit
+        && !premiseStampConflicts(inheritReferenceUnit(row, primaryStamp), primaryStamp)) {
+        return false;
+      }
       // Between two stamps of the SAME unmatched premise, an omitted unit
       // inherits (codex #3243 r15 P2 — phone extractions often skip it).
       const rowN = inheritReferenceUnit(row, visitN);
@@ -3427,9 +3433,10 @@ const ReviewService = {
         if (!next || seen.has(next)) break;
         seen.add(next);
         sourceIds.push(next);
-        cursor = await db("scheduled_services")
-          .where({ id: next })
-          .select("id", "parent_service_id", "followup_source_service_id", "service_id", "scheduled_date", "property_id", "service_address_line1", "service_address_line2", "service_address_city", "service_address_zip", "window_start", "created_at")
+        cursor = await db("scheduled_services as s")
+          .leftJoin("services as sv", "s.service_id", "sv.id")
+          .where("s.id", next)
+          .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "s.property_id", "s.service_address_line1", "s.service_address_line2", "s.service_address_city", "s.service_address_zip", "s.window_start", "s.created_at", "sv.service_key", "sv.follow_up_interval_days")
           .first();
         if (!cursor) break;
         ancestorRows.push(cursor);
@@ -3455,7 +3462,7 @@ const ReviewService = {
         const seriesKeys = trappingSeriesKeysFor(visit.service_key);
         const inPremise = await trappingPremiseMatcher(customerId, visit);
         const collectedRows = new Map(); // walk discoveries: id -> row
-        const walkSelect = ["ps.id", "ps.scheduled_date", "ps.property_id", "ps.service_address_line1", "ps.service_address_line2", "ps.service_address_city", "ps.service_address_zip", "ps.window_start", "ps.created_at"];
+        const walkSelect = ["ps.id", "ps.scheduled_date", "ps.property_id", "ps.service_address_line1", "ps.service_address_line2", "ps.service_address_city", "ps.service_address_zip", "ps.window_start", "ps.created_at", "psv.service_key as service_key", "psv.follow_up_interval_days as follow_up_interval_days"];
         // The declared-opener boundary is GLOBAL across dequeues (codex
         // #3243 r12 P1): later cursors re-open windows behind the opener,
         // so the bound persists (and retro-prunes) rather than living one
@@ -3490,9 +3497,40 @@ const ReviewService = {
         // siblings, starving the path to the opener. Termination is the
         // seen-set (nothing enqueues twice); the collected-size bound is a
         // runaway guard sized far above any real program.
+        // Per-cursor windows follow the ORIGINATING program (codex #3243
+        // r17 P2): a cross-key final (the return rides the generic
+        // followup SKU) must not widen an exclusion program's tight
+        // boundary — each cursor hops with its OWN key's window, and the
+        // final's first hop borrows the nearest prior line row's key when
+        // its own key is the generic followup SKU.
+        let visitWindowDays = windowDays;
+        if (visit.service_key === "rodent_trapping_followup") {
+          const peekW = etDayWindow(visit.scheduled_date, 60);
+          const nearestRows = await db("scheduled_services as ps")
+            .leftJoin("services as psv", "ps.service_id", "psv.id")
+            .where("ps.customer_id", customerId)
+            .where("ps.status", "completed")
+            .where("ps.scheduled_date", "<", peekW.anchorStr)
+            .where("ps.scheduled_date", ">=", peekW.floorStr)
+            .whereIn("psv.service_key", seriesKeys)
+            .orderBy("ps.scheduled_date", "desc")
+            .select(...walkSelect);
+          const nearest = nearestRows.filter((r) => inPremise(r))[0] || null;
+          if (nearest?.service_key) {
+            const ni = Number(nearest.follow_up_interval_days) > 0 ? Number(nearest.follow_up_interval_days) : intervalDays;
+            visitWindowDays = trappingWindowDaysFor(nearest.service_key, ni);
+          }
+        }
+        let firstHop = true;
         while (queue.length && collectedRows.size < 300) {
           const c = queue.shift();
-          const w = etDayWindow(c.scheduled_date, windowDays);
+          const cKey = c.service_key || visit.service_key;
+          const cInterval = Number(c.follow_up_interval_days) > 0 ? Number(c.follow_up_interval_days) : intervalDays;
+          const cWindow = firstHop && c.id === visit.id
+            ? visitWindowDays
+            : trappingWindowDaysFor(cKey, cInterval);
+          firstHop = false;
+          const w = etDayWindow(c.scheduled_date, cWindow);
           const rows = await db("scheduled_services as ps")
             .leftJoin("services as psv", "ps.service_id", "psv.id")
             .where("ps.customer_id", customerId)
