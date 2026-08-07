@@ -174,9 +174,12 @@ const REGISTRY = {
 
   recipient_optin_deferred: {
     async recheck(meta) {
-      // The ask is only valid while the recipient row is still pending —
-      // another save may have re-asked, or the recipient may have been
-      // removed/confirmed/declined overnight.
+      // The ask is only valid while (a) the recipient row is still pending
+      // — another save may have re-asked, or the recipient confirmed/
+      // declined overnight — AND (b) the phone still occupies one of the
+      // customer's live contact slots: the enqueue stamped dispatched_at,
+      // which removes the row from the undispatched recovery sweep, so a
+      // removed/replaced contact would otherwise still be texted the ask.
       try {
         if (!meta.optin_phone_key) return { eligible: true };
         const row = await db('recipient_optin')
@@ -184,9 +187,71 @@ const REGISTRY = {
           .first('status');
         if (!row) return { eligible: false, reason: 'optin-row-missing' };
         if (String(row.status) !== 'pending') return { eligible: false, reason: `optin-${row.status}` };
+        if (meta.optin_customer_id) {
+          const customer = await db('customers').where({ id: meta.optin_customer_id }).first();
+          if (!customer) return { eligible: false, reason: 'customer-missing' };
+          const { getAppointmentContacts } = require('../customer-contact');
+          const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+          const stillPresent = getAppointmentContacts(customer, {}, { skipConsentGate: true })
+            .some((c) => digits(c.phone) === String(meta.optin_phone_key));
+          if (!stillPresent) return { eligible: false, reason: 'contact-removed' };
+        }
         return { eligible: true };
       } catch (err) {
         return failClosed('recipient-optin', meta.optin_phone_key, err);
+      }
+    },
+    async onTerminal(meta) {
+      // A suppressed/terminally-blocked ask means this recipient was never
+      // asked — release the pending row to ask_failed so a future contact
+      // save re-claims it instead of it blocking texts forever.
+      if (!meta.optin_phone_key) return;
+      await db('recipient_optin')
+        .where({ phone_key: meta.optin_phone_key, customer_id: meta.optin_customer_id || null, status: 'pending' })
+        .update({ status: 'ask_failed', updated_at: new Date() });
+    },
+  },
+
+  stripe_webhook_billing_deferred: {
+    async recheck(meta) {
+      // An ACH failure / action-required notice queued at night can resolve
+      // before 8:00 AM (the customer retried and the success webhook
+      // updated the invoice) — a frozen failure message must not follow a
+      // successful payment. Suppress when the linked invoice went terminal
+      // (paid/prepaid/void); setup-verification notices without an invoice
+      // link stay eligible — their copy directs to the billing page, which
+      // always shows current state.
+      try {
+        let invoiceId = meta.invoice_id || null;
+        if (!invoiceId && meta.stripe_payment_intent_id) {
+          const inv = await db('invoices')
+            .where({ stripe_payment_intent_id: meta.stripe_payment_intent_id })
+            .first('id');
+          invoiceId = inv?.id || null;
+        }
+        if (!invoiceId) return { eligible: true };
+        return invoiceStillCollectible({ invoice_id: invoiceId });
+      } catch (err) {
+        return failClosed('stripe-billing', meta.stripe_payment_intent_id || meta.invoice_id, err);
+      }
+    },
+  },
+
+  public_quote_booking_sms_deferred: {
+    async recheck(meta) {
+      // The immediate EMAIL carried the same booking link, so the lead may
+      // have booked (or been deleted) overnight — "book online" the next
+      // morning after they already booked reads broken.
+      try {
+        if (!meta.lead_id) return { eligible: true };
+        const lead = await db('leads').where({ id: meta.lead_id }).whereNull('deleted_at').first('status');
+        if (!lead) return { eligible: false, reason: 'lead-missing' };
+        if (['converted', 'won', 'booked'].includes(String(lead.status || '').toLowerCase())) {
+          return { eligible: false, reason: `lead-${lead.status}` };
+        }
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('quote-booking', meta.lead_id, err);
       }
     },
   },

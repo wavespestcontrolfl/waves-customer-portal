@@ -2307,6 +2307,7 @@ const AppointmentReminders = {
       // pre-covered flag survives (startMoved sees the already-synced
       // appointment_time) and the customer would get only the 24h text.
       let noticeSent = false;
+      const rescheduleNoticeOutcome = {};
       try {
         const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
         if (customer) {
@@ -2329,7 +2330,7 @@ const AppointmentReminders = {
               entity_type: 'scheduled_service',
               entity_id: scheduledServiceId,
             });
-          }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId });
+          }, 'appointment_rescheduled', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId }, { sendOutcome: rescheduleNoticeOutcome });
           if (noticeSent) {
             await this.markRescheduleNoticeSent(scheduledServiceId);
             logger.info(`[appt-remind] Reschedule notice sent for customer ${record.customer_id}`);
@@ -2360,6 +2361,26 @@ const AppointmentReminders = {
             })
             .update({ reminder_72h_sent: false, reminder_72h_sent_at: null, updated_at: new Date() })
             .catch((rearmErr) => logger.error(`[appt-remind] 72h re-arm after failed notice failed: ${rearmErr.message}`));
+        }
+        // Send-window hold: the generic 72h/24h re-arm can be UNREACHABLE
+        // for a next-day move (the 24h band closes before the window
+        // reopens), which would silence the one notice this path exists to
+        // deliver. Re-arm the CONFIRMATION instead — the 15-minute
+        // stranded-confirmation sweep re-calls deliverConfirmation, whose
+        // own pre-check defers to 8:00 AM and then sends the standard
+        // confirmation carrying the NEW time. Same guards as the 72h
+        // re-arm so a newer reschedule's state is never clobbered.
+        if (!noticeSent && rescheduleNoticeOutcome.blockedCode === 'QUIET_HOURS_HOLD') {
+          await db('appointment_reminders')
+            .where({
+              id: record.id,
+              appointment_time: newApptTime,
+              suppressed_by_sibling: false,
+              cancelled: false,
+            })
+            .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() })
+            .catch((rearmErr) => logger.error(`[appt-remind] confirmation re-arm after held reschedule notice failed: ${rearmErr.message}`));
+          logger.info(`[appt-remind] Reschedule notice for ${scheduledServiceId} held (send window) — confirmation re-armed for the stranded-confirmation sweep`);
         }
       }
 
