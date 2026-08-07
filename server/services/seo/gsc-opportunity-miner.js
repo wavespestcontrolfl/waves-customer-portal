@@ -39,6 +39,7 @@
  * Read-only against gsc_*; writes only to opportunity_queue.
  */
 
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
@@ -401,8 +402,14 @@ function listicleFamilyEligible(fam, thresholds = THRESHOLDS) {
 // mining runs as close variants trade places — minting fresh rows for one
 // search intent. The token-identity family key is invariant under those
 // fluctuations, and city tokens live inside it, so local intents key apart.
+// Shape: a readable prefix for operators eyeballing the queue, plus a
+// digest of the COMPLETE key — a bare `.slice(120)` collided two long-tail
+// families sharing their first 120 chars (persistAll would drop one as a
+// same-run duplicate or ping-pong the pending row between identities).
 function listicleFamilyDedupeKey(familyKey) {
-  return ['listicle_family', 'fam', String(familyKey || '').slice(0, 120)].join('::');
+  const key = String(familyKey || '');
+  const digest = crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
+  return ['listicle_family', 'fam', key.slice(0, 120), digest].join('::');
 }
 
 // Used to look up the best-impression own page sharing a query's

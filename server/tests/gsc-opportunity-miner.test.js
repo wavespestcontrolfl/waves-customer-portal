@@ -885,6 +885,18 @@ describe('listicle_family scoring + action mapping', () => {
     // Distinct local intent keys apart because the city token is IN the family key.
     expect(listicleFamilyDedupeKey(listicleFamilyKey('drought tolerant plants sarasota'))).not.toBe(a);
   });
+
+  test('long family keys sharing a 120-char prefix do NOT collide (Codex r8 P2 — digest carries full identity)', () => {
+    const prefix = 'a'.repeat(119) + '+';
+    const k1 = prefix + 'saltgrass+tolerant';
+    const k2 = prefix + 'zoysia+varieties';
+    expect(k1.slice(0, 120)).toBe(k2.slice(0, 120)); // the old .slice(120) bug's exact shape
+    expect(listicleFamilyDedupeKey(k1)).not.toBe(listicleFamilyDedupeKey(k2));
+    // Determinism across runs — the stable-key property the bucket relies on.
+    expect(listicleFamilyDedupeKey(k1)).toBe(listicleFamilyDedupeKey(k1));
+    // Column budget: 200 chars.
+    expect(listicleFamilyDedupeKey(k1).length).toBeLessThanOrEqual(200);
+  });
 });
 
 describe('vendor synonyms excluded from listicle families (Codex r7 on #3255)', () => {
