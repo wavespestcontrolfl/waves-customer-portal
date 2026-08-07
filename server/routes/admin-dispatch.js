@@ -10288,9 +10288,42 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                   // executor resolves the customer's LOCATION number at
                   // send time so the morning text stays on their thread.
                   resolve_from_by_customer: true,
+                  // Delivery-time finalization references (services/
+                  // dispatch-completion-deferred.js, invoked by the
+                  // scheduled-SMS executor AFTER the provider accepts): the
+                  // invoice draft→sent flip, the bundled review's delivered
+                  // mark, and the combined-receipt claim all run at actual
+                  // delivery — never here, so a terminally-blocked replay
+                  // leaves the invoice in draft on the operator's radar.
+                  ...(invoice?.id && invoiceCreated && payUrl && allowCompletionInvoiceLink
+                    ? { mark_invoice_delivery: true, invoice_id: invoice.id, pay_url: payUrl }
+                    : {}),
+                  ...(bundledReviewRequestId && bundledReviewUrl && sentSmsBody.includes(bundledReviewUrl)
+                    ? { bundled_review_request_id: bundledReviewRequestId }
+                    : {}),
+                  ...(sentSmsType === 'service_complete_paid_receipt' && invoice?.id
+                    ? { stamp_receipt_invoice_id: invoice.id }
+                    : {}),
                 }),
               });
               completionHoldQueued = true;
+              // Safety net for the bundled review ask: arm the standalone
+              // inline-retry rail for shortly AFTER the queued completion
+              // delivers. Delivered replay → finalization marks the request
+              // delivered first and the standalone sender skips; a replay
+              // that terminally blocks → the standalone ask still goes out
+              // instead of sitting pending forever.
+              if (bundledReviewRequestId && bundledReviewUrl && sentSmsBody.includes(bundledReviewUrl)) {
+                try {
+                  const ReviewService = require('../services/review-request');
+                  await ReviewService.markInlineRetryable(
+                    bundledReviewRequestId,
+                    new Date(new Date(smsResult.nextAllowedAt).getTime() + 45 * 60 * 1000),
+                  );
+                } catch (reviewErr) {
+                  logger.warn(`[dispatch] deferred-completion review safety-net arm failed for ${bundledReviewRequestId}: ${reviewErr.message}`);
+                }
+              }
             } catch (queueErr) {
               logger.error(`[dispatch] Completion SMS requeue failed for record ${record.id}: ${queueErr.message}`);
             }

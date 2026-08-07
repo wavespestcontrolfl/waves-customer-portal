@@ -715,7 +715,7 @@ const TwilioService = {
    * Phase 1 callers always pass a token (minted by migration backfill);
    * legacy callers that pass nothing still get a sensible bodyless message.
    */
-  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null) {
+  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
@@ -834,6 +834,10 @@ const TwilioService = {
               isServiceContactRole(contact.role)
                 ? "service_contact_authorized"
                 : "phone_matches_customer",
+            // Send-window operator marker — threaded from markEnRoute for
+            // manual tech/admin taps only; geofence/system transitions
+            // never set it (validators/send-window.js).
+            ...(operatorInitiated ? { operatorInitiated: true } : {}),
             metadata: { original_message_type: "tech_en_route" },
           }),
         );

@@ -2627,6 +2627,21 @@ function initScheduledJobs() {
             });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
 
+            // Deferred dispatch-completion replay delivered: run the
+            // completion-specific finalization the immediate path does
+            // inline (invoice draft→sent, bundled review delivered mark,
+            // combined-receipt claim, record notes) — deliberately AFTER
+            // the provider accepted, mirroring the deposit-receipt
+            // pattern of message-type-specific hooks living here.
+            if (claimMeta.entry_point === 'dispatch_completion_deferred') {
+              try {
+                const { finalizeDeferredCompletionSend } = require('./dispatch-completion-deferred');
+                await finalizeDeferredCompletionSend({ ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null });
+              } catch (finalizeErr) {
+                logger.warn(`[scheduled-sms] deferred-completion finalization failed for ${msg.id}: ${finalizeErr.message}`);
+              }
+            }
+
             // A scheduled send composed from an Agent Review draft resolves
             // its decision now that the message actually left — schedule-sms
             // stashed the verified id on the row. Suggestions parked behind
