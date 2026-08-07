@@ -586,6 +586,8 @@ async function addOnPreservedMonthlyRateBase({
         'scheduled_services.is_callback',
         'scheduled_services.service_address_line1',
         'scheduled_services.service_address_line2',
+        'scheduled_services.service_address_city',
+        'scheduled_services.service_address_zip',
         'scheduled_services.source_estimate_id',
         'services.service_key as catalog_service_key',
         'services.name as catalog_service_name',
@@ -601,13 +603,21 @@ async function addOnPreservedMonthlyRateBase({
           builder.orWhere('scheduled_services.id', adoptedExistingAppointmentId);
         }
       }));
-    const planRows = (Array.isArray(otherPlanRows) ? otherPlanRows : [])
+    let planRows = (Array.isArray(otherPlanRows) ? otherPlanRows : [])
       .filter((row) => row && row.is_callback !== true);
     if (planRows.length === 0) return 0;
     // Fail CLOSED on unclassifiable plan rows (codex #3241 r3): a legacy/
     // generic row that resolves to NO family can't prove it's a different
     // family — treating it as disjoint would sum the old rate onto an
     // estimate that may re-price that very plan. Unknown → replace.
+    // Street scope FIRST (codex #3244 r8): an unclassifiable row stamped to
+    // ANOTHER property can't be replacement evidence for this one — letting
+    // it trip the fail-closed check would replace an account-level
+    // monthly_rate with just this property's price. The fail-closed
+    // classifiability bar then applies only to rows that could actually be
+    // replacement evidence (this property's).
+    planRows = await scopePlanRowsToEstimateProperty(planRows);
+    if (planRows.length === 0) return existingMonthlyRate;
     const everyRowClassifiable = planRows.every((row) => serviceFamilyKeyForAdoption({
       service: row.catalog_service_key || null,
       name: row.catalog_service_name || null,
@@ -623,28 +633,27 @@ async function addOnPreservedMonthlyRateBase({
     // estimate's address, then the customer's primary street; rows that
     // still can't be located keep their replace vote (fail closed). Only
     // grouped estimates take this path — ungrouped accepts are byte-identical.
-    let replaceEvidenceRows = planRows;
-    if (estimate?.estimate_group_id && estimate.address) {
-      const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
+    async function scopePlanRowsToEstimateProperty(rows) {
+      if (!(estimate?.estimate_group_id && estimate.address)) return rows;
+      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
       const estimateStreet = normalizedEstimateStreet(estimate.address);
-      if (estimateStreet) {
-        replaceEvidenceRows = await database.transaction(async (sp) => {
-          const customerPrimaryStreet = normalizedStampedStreet(customer?.address_line1, customer?.address_line2);
-          const kept = [];
-          for (const row of planRows) {
-            let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2);
-            if (!street && row.source_estimate_id) {
-              const src = await sp('estimates').where({ id: row.source_estimate_id }).first('address');
-              street = normalizedEstimateStreet(src?.address);
-            }
-            street = street || customerPrimaryStreet;
-            if (!street || street === estimateStreet) kept.push(row);
+      if (!estimateStreet) return rows;
+      return database.transaction(async (sp) => {
+        const customerPrimaryStreet = normalizedStampedStreet(customer?.address_line1, customer?.address_line2, customer?.city, customer?.zip);
+        const kept = [];
+        for (const row of rows) {
+          let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
+          if ((!street || scopeKeyLacksLocality(street)) && row.source_estimate_id) {
+            const src = await sp('estimates').where({ id: row.source_estimate_id }).first('address');
+            street = normalizedEstimateStreet(src?.address);
           }
-          return kept;
-        });
-      }
+          street = street || customerPrimaryStreet;
+          if (!street || sameScopeKey(street, estimateStreet)) kept.push(row);
+        }
+        return kept;
+      });
     }
-    if (!replaceEvidenceRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
+    if (!planRows.some((row) => appointmentMatchesEstimateFamily(row, familyKeys))) {
       return existingMonthlyRate;
     }
     return 0;
@@ -2279,8 +2288,8 @@ const EstimateConverter = {
       const estimateStreet = normalizedEstimateStreet(estimate.address);
       let customerPrimaryStreet = '';
       try {
-        const custRow = await database('customers').where({ id: customerId }).first('address_line1', 'address_line2');
-        customerPrimaryStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2);
+        const custRow = await database('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+        customerPrimaryStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
       } catch { /* scope falls back to stamped addresses only */ }
       if (estimateStreet) seriesAddressScope = { estimateStreet, customerPrimaryStreet };
     }

@@ -900,6 +900,36 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // cross-family accepts fall through to the standard slot pick.
   if (!row && estimate.customer_id
     && featureGates.isEnabled('estimateExistingApptCustomerWide')) {
+    // PROPERTY-SCOPED for grouped estimates (codex #3244 r8): a secondary
+    // property's accept must not adopt an upcoming visit at the customer's
+    // primary property — the adopted row gets stamped to this estimate,
+    // repriced, and the accepted property ends up with NO booked visit
+    // while linkage can no longer correct the already-linked row. Fail
+    // CLOSED on candidates whose property can't be located.
+    const { normalizedEstimateStreet: adoptStreetOf, normalizedStampedStreet: adoptStampedStreetOf, sameScopeKey: adoptSameScope, scopeKeyLacksLocality: adoptKeyLacksLocality } = require('../services/estimate-property-linkage');
+    const adoptionEstimateStreet = estimate.estimate_group_id ? adoptStreetOf(estimate.address) : '';
+    let adoptionPrimaryStreet = '';
+    if (adoptionEstimateStreet) {
+      try {
+        const adoptCust = await conn('customers').where({ id: estimate.customer_id }).first('address_line1', 'address_line2', 'city', 'zip');
+        adoptionPrimaryStreet = adoptStampedStreetOf(adoptCust?.address_line1, adoptCust?.address_line2, adoptCust?.city, adoptCust?.zip);
+      } catch { /* candidates fall back to stamped/source streets only */ }
+    }
+    const candidateAtQuotedProperty = async (cand) => {
+      if (!adoptionEstimateStreet) return true;
+      let candStreet = adoptStampedStreetOf(cand.service_address_line1, cand.service_address_line2, cand.service_address_city, cand.service_address_zip);
+      // Candidates here always carry source_estimate_id IS NULL (the query
+      // adopts only unclaimed rows), so source-estimate locality recovery
+      // can never apply (codex #3248 r7). Adoption consumes a real visit —
+      // the HIGHEST-stakes scope consumer — so it fails CLOSED: a
+      // street-only stamped candidate that cannot prove its locality is
+      // not adoptable by a grouped estimate; the slot picker books the
+      // quoted property a fresh visit instead. Fully-unstamped rows still
+      // fall back to the customer's fully-qualified primary address.
+      candStreet = candStreet || adoptionPrimaryStreet;
+      if (!candStreet || adoptKeyLacksLocality(candStreet)) return false;
+      return adoptSameScope(candStreet, adoptionEstimateStreet);
+    };
     if (familyKeys.size > 0) {
       // Page through the candidate list until a same-family row appears — a
       // fixed pre-filter LIMIT would hide a valid later appointment behind a
@@ -923,9 +953,13 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
         if (requestedId) cw.where('scheduled_services.id', requestedId);
         const candidates = await cw.limit(CANDIDATE_PAGE_SIZE).offset(offset);
         if (!Array.isArray(candidates) || candidates.length === 0) break;
-        row = candidates.find(
-          (cand) => appointmentMatchesEstimateFamily(cand, familyKeys),
-        ) || null;
+        row = null;
+        for (const cand of candidates) {
+          if (!appointmentMatchesEstimateFamily(cand, familyKeys)) continue;
+          if (!(await candidateAtQuotedProperty(cand))) continue;
+          row = cand;
+          break;
+        }
         if (candidates.length < CANDIDATE_PAGE_SIZE) break;
       }
     }
@@ -11731,25 +11765,67 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
 async function transferGroupFollowupOwnership(estimate) {
   try {
     if (!estimate?.estimate_group_id) return;
-    const owner = await db('estimates')
-      .where({ estimate_group_id: estimate.estimate_group_id })
-      .whereNot({ id: estimate.id })
-      .whereIn('status', ['sent', 'viewed'])
-      .whereNull('archived_at')
-      .orderBy('created_at', 'asc')
-      .first('id');
-    if (!owner) return;
-    await db('estimates')
-      .where({ id: owner.id })
-      .whereIn('status', ['sent', 'viewed'])
-      .update({
-        followup_unviewed_sent: false,
-        followup_viewed_sent: false,
-        followup_final_sent: false,
-        followup_expiring_sent: false,
-        updated_at: db.fn.now(),
-      });
-    logger.info(`[estimate-public] group ${estimate.estimate_group_id}: follow-up ownership transferred to sibling ${owner.id} after ${estimate.id} went terminal`);
+    const FLAGS = ['followup_unviewed_sent', 'followup_viewed_sent', 'followup_final_sent', 'followup_expiring_sent'];
+    // Anchor's completed-stage state (fresh read — codex #3244 r8) seeds the
+    // owner so an already-sent stage never repeats.
+    const anchorFlags = await db('estimates')
+      .where({ id: estimate.id })
+      .first(...FLAGS);
+    if (!anchorFlags) return;
+    // PER-STAGE merge under a group advisory lock (codex #3248 r8): a
+    // sibling that re-armed only its expiry stage (own-token extension) must
+    // not block the transfer of the anchor's other stages — and a stage any
+    // live row already has armed (false/NULL) stays with that row. Only
+    // stages burned on EVERY live sibling adopt the anchor's state on the
+    // deterministic owner (earliest created). The xact lock serializes
+    // concurrent terminal events; provenance records the ancestor claim
+    // chain plus exactly which flags this transfer set true, so
+    // releaseStage can un-burn a transient claim without touching stages
+    // the owner earned itself.
+    await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-followup', String(estimate.estimate_group_id)],
+      );
+      const siblings = await trx('estimates')
+        .where({ estimate_group_id: estimate.estimate_group_id })
+        .whereNot({ id: estimate.id })
+        .whereIn('status', ['sent', 'viewed'])
+        .whereNull('archived_at')
+        .orderBy('created_at', 'asc')
+        .select('id', ...FLAGS);
+      if (!siblings.length) return;
+      const owner = siblings[0];
+      const updates = {};
+      const copied = {};
+      for (const flag of FLAGS) {
+        const armedAnywhere = siblings.some((s) => s[flag] !== true);
+        if (armedAnywhere) {
+          copied[flag] = false;
+          continue;
+        }
+        updates[flag] = anchorFlags[flag] === true;
+        copied[flag] = anchorFlags[flag] === true;
+      }
+      if (!Object.keys(updates).length) return;
+      const chainRow = await trx('estimates')
+        .where({ id: estimate.id })
+        .first(db.raw("estimate_data->'followupOwnershipFrom'->'anchorIds' AS chain"));
+      const anchorIds = Array.isArray(chainRow?.chain) ? chainRow.chain : [];
+      if (!anchorIds.includes(String(estimate.id))) anchorIds.push(String(estimate.id));
+      await trx('estimates')
+        .where({ id: owner.id })
+        .whereIn('status', ['sent', 'viewed'])
+        .update({
+          ...updates,
+          estimate_data: trx.raw(
+            "COALESCE(estimate_data, '{}'::jsonb) || jsonb_build_object('followupOwnershipFrom', jsonb_build_object('anchorId', ?::text, 'anchorIds', ?::jsonb, 'copied', ?::jsonb))",
+            [String(estimate.id), JSON.stringify(anchorIds), JSON.stringify(copied)],
+          ),
+          updated_at: trx.fn.now(),
+        });
+      logger.info(`[estimate-public] group ${estimate.estimate_group_id}: follow-up stages ${Object.keys(updates).join(',')} transferred to sibling ${owner.id} after ${estimate.id} went terminal`);
+    });
   } catch (e) {
     logger.warn(`[estimate-public] follow-up ownership transfer failed for estimate ${estimate?.id}: ${e.message}`);
   }
