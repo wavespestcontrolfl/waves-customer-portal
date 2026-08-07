@@ -92,10 +92,18 @@ describe('message/send', () => {
   });
 
   test('reply text is deterministic across calls (messageId varies, copy does not)', async () => {
-    const a = (await rpc({ jsonrpc: '2.0', id: 1, method: 'message/send' })).body.result;
-    const b = (await rpc({ jsonrpc: '2.0', id: 2, method: 'message/send' })).body.result;
+    const params = { message: { role: 'user', parts: [{ kind: 'text', text: 'hi' }] } };
+    const a = (await rpc({ jsonrpc: '2.0', id: 1, method: 'message/send', params })).body.result;
+    const b = (await rpc({ jsonrpc: '2.0', id: 2, method: 'message/send', params })).body.result;
     expect(a.parts[0].text).toBe(b.parts[0].text);
     expect(a.messageId).not.toBe(b.messageId);
+  });
+
+  test('missing or malformed MessageSendParams → -32602', async () => {
+    for (const params of [undefined, {}, { message: 'hello' }, { message: { role: 'user' } }, { message: { role: 'user', parts: [] } }]) {
+      const { body } = await rpc({ jsonrpc: '2.0', id: 1, method: 'message/send', ...(params !== undefined ? { params } : {}) });
+      expect(body.error.code).toBe(-32602);
+    }
   });
 });
 
@@ -105,10 +113,20 @@ describe('protocol edges', () => {
     expect(body.error.code).toBe(-32600);
   });
 
-  test('defined-but-unsupported A2A methods → -32004', async () => {
-    for (const method of ['message/stream', 'tasks/get', 'tasks/cancel']) {
+  test('defined-but-unsupported A2A methods → -32004, including the full push-config family', async () => {
+    for (const method of ['message/stream', 'tasks/get', 'tasks/cancel', 'tasks/resubscribe',
+      'tasks/pushNotificationConfig/set', 'tasks/pushNotificationConfig/get',
+      'tasks/pushNotificationConfig/list', 'tasks/pushNotificationConfig/delete']) {
       const { body } = await rpc({ jsonrpc: '2.0', id: 1, method });
       expect(body.error.code).toBe(-32004);
+    }
+  });
+
+  test('non-string/non-integer ids → -32600 and are never echoed back', async () => {
+    for (const id of [true, 1.5, { a: 1 }, [1]]) {
+      const { body } = await rpc({ jsonrpc: '2.0', id, method: 'message/send', params: { message: { role: 'user', parts: [{ kind: 'text', text: 'x' }] } } });
+      expect(body.error.code).toBe(-32600);
+      expect(body.id).toBeNull();
     }
   });
 

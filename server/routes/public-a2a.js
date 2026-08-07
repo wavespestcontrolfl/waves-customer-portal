@@ -38,6 +38,7 @@ const A2A_UNSUPPORTED = -32004;
 const UNSUPPORTED_METHODS = new Set([
   'message/stream', 'tasks/get', 'tasks/cancel', 'tasks/resubscribe',
   'tasks/pushNotificationConfig/set', 'tasks/pushNotificationConfig/get',
+  'tasks/pushNotificationConfig/list', 'tasks/pushNotificationConfig/delete',
 ]);
 
 // The one reply this agent ever sends. Static and compliance-reviewed —
@@ -79,16 +80,35 @@ function infoMessage() {
   };
 }
 
+// A2A JSON-RPC ids must be strings or integers — booleans, objects, arrays,
+// and fractional numbers break client response correlation.
+function isValidRpcId(id) {
+  return typeof id === 'string' || (typeof id === 'number' && Number.isInteger(id));
+}
+
+// Minimal MessageSendParams validation: params.message must be an object
+// with a string role and a non-empty parts array. Malformed input gets
+// -32602 so conformance checks can tell a rejected request from an
+// accepted one.
+function isValidMessageSendParams(params) {
+  const m = params && typeof params === 'object' ? params.message : null;
+  return Boolean(m && typeof m === 'object' && !Array.isArray(m)
+    && typeof m.role === 'string' && Array.isArray(m.parts) && m.parts.length > 0);
+}
+
 function handleA2aRpc(message) {
   if (!message || Array.isArray(message) || message.jsonrpc !== '2.0' || typeof message.method !== 'string') {
-    return rpcError(message && !Array.isArray(message) ? message.id ?? null : null, -32600, 'invalid request');
+    return rpcError(message && !Array.isArray(message) && isValidRpcId(message.id) ? message.id : null, -32600, 'invalid request');
   }
-  const { id, method } = message;
-  // A2A has no notification methods — every request must carry an id.
-  if (id === undefined || id === null) {
-    return rpcError(null, -32600, 'invalid request: id is required');
+  const { id, method, params } = message;
+  // A2A has no notification methods — every request must carry a valid id.
+  if (!isValidRpcId(id)) {
+    return rpcError(null, -32600, 'invalid request: id must be a string or integer');
   }
   if (method === 'message/send') {
+    if (!isValidMessageSendParams(params)) {
+      return rpcError(id, -32602, 'invalid params: message/send requires params.message with role and non-empty parts');
+    }
     return rpcResult(id, infoMessage());
   }
   if (UNSUPPORTED_METHODS.has(method)) {
