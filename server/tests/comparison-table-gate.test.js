@@ -2804,6 +2804,22 @@ describe('operator authorization: detection-only unknowns + feature-flag exempti
     expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(true);
   });
 
+  test('feature flag OFF: a competitor cited only in a sources URL does NOT count as a table occurrence (Codex r5)', () => {
+    // The generic table cites trugreen.com as its source; TruGreen appears
+    // in prose under operator authorization. Attribution is not a table
+    // claim — the prose-only exemption must survive.
+    const t = NEUTRAL_TABLE.replace(
+      'caption="Contract trade-offs to weigh."',
+      'caption="Attributes as of June 2026, per each company\'s public website." sources={["https://www.trugreen.com/terms"]}',
+    );
+    const r = gate.evaluate({
+      body: `# Guide\n\nMany homeowners start with TruGreen and later want a local option.\n\n${t}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: false, operatorBriefText: 'TruGreen Alternatives in Sarasota\ntrugreen alternative sarasota' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(false);
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+  });
+
   test('feature flag OFF: operator-authorized known referenced ONLY via a link destination parks to review, never silently passes (Codex r4)', () => {
     const r = gate.evaluate({
       body: `# Guide\n\nCompare [their published terms](https://www.trugreen.com/terms) with a local plan.\n\n${NEUTRAL_TABLE}\n\nClosing prose.`,

@@ -2347,14 +2347,20 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // from the disabled-comparison finding (Codex r4). Canonicalize each
   // block's mentions with the same matcher that built `known`, and keep the
   // raw-substring test for names outside the recognition corpus.
+  // Membership means the table CONTENT names the competitor. A citation URL
+  // in a sources={...} prop is attribution, not a table claim — a generic
+  // table citing trugreen.com/terms must not strip the prose-only operator
+  // exemption (Codex r5) — so blank URL destinations before scanning.
+  const BLOCK_URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>)\]}]+/gi;
+  const blockVisibleText = (b) => String(b).replace(BLOCK_URL_RE, ' ');
   const blockMentionCanonicals = new Set();
   for (const b of blocks) {
-    for (const m of competitorFacts.findBusinessMentions(String(b))) blockMentionCanonicals.add(m.name);
+    for (const m of competitorFacts.findBusinessMentions(blockVisibleText(b))) blockMentionCanonicals.add(m.name);
   }
   const nameInAnyBlock = (nm) => {
     if (blockMentionCanonicals.has(nm)) return true;
     const re = new RegExp(escapeForNameRe(nm), 'i');
-    return blocks.some((b) => re.test(String(b)));
+    return blocks.some((b) => re.test(blockVisibleText(b)));
   };
   let operatorAuthorizedProse = false;
   for (const nm of unknown) {

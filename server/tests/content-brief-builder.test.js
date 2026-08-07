@@ -615,6 +615,13 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(directives[1]).toMatch(/ONLY inside the <ComparisonTable>/); // canonical instruction retained
   });
 
+  test('PREVENTION_PROMISE retry scopes free re-treatment to eligible recurring coverage (Codex r5)', () => {
+    const directive = (code) => buildRetryDirectives({ findings: [{ severity: 'P0', code }] })[1];
+    expect(directive('PREVENTION_PROMISE')).toMatch(/REDUCED recurrence/);
+    expect(directive('PREVENTION_PROMISE')).toMatch(/ONLY if the piece concerns recurring WaveGuard plan coverage/);
+    expect(directive('PREVENTION_PROMISE')).toMatch(/WITHOUT promising a callback/);
+  });
+
   test('COMPARISON_UNKNOWN_COMPETITOR retry preserves operator-briefed names in prose while evicting them from the table (Codex r4)', () => {
     const directive = (code) => buildRetryDirectives({ findings: [{ severity: 'P0', code }] })[1];
     expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/operator brief itself names[\s\S]{0,80}MUST stay in prose\/title\/meta/);
