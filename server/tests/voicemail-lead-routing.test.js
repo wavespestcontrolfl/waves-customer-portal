@@ -135,13 +135,16 @@ describe('hasWorkableLeadSignal anonymous-caller (no phone) path', () => {
 });
 
 describe('findReusableCallLead identity keys', () => {
-  const makeDb = (row = null) => {
+  const makeDb = (rowOrRows = null) => {
+    const rows = Array.isArray(rowOrRows) ? rowOrRows : (rowOrRows ? [rowOrRows] : []);
     const calls = [];
     const builder = {};
-    for (const m of ['where', 'whereNull', 'whereRaw', 'whereNotIn', 'orderBy']) {
+    for (const m of ['where', 'whereNull', 'whereRaw', 'whereNotIn', 'orderBy', 'limit']) {
       builder[m] = (...a) => { calls.push([m, a]); return builder; };
     }
-    builder.first = async () => { calls.push(['first', []]); return row; };
+    builder.first = async () => { calls.push(['first', []]); return rows[0] || null; };
+    // The email path awaits the builder itself (knex builders are thenable).
+    builder.then = (resolve) => resolve(rows);
     const db = (table) => { calls.push(['table', [table]]); return builder; };
     db.calls = calls;
     return db;
@@ -247,6 +250,23 @@ describe('findReusableCallLead identity keys', () => {
       lastName: null,
       workableUnnamedLead: true,
     })).toBeNull();
+  });
+
+  test('email match scans past a housemate\'s newer lead to the caller\'s own row', async () => {
+    // Shared inbox with two active unclaimed leads: newest belongs to Maria,
+    // older one to Jeff. Jeff calling back must reuse HIS row, not mint a
+    // duplicate because Maria's happens to be newest.
+    const db = makeDb([
+      { id: 'lead-maria', first_name: 'Maria', last_name: 'Lopez' },
+      { id: 'lead-jeff', first_name: 'Jeff', last_name: 'Brooks' },
+    ]);
+    expect(await findReusableCallLead(db, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
+      workableUnnamedLead: true,
+    })).toEqual({ id: 'lead-jeff', first_name: 'Jeff', last_name: 'Brooks' });
   });
 
   test('name conflict never blocks a PHONE match — corroboration is email-path only', async () => {
