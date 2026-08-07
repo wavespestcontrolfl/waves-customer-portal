@@ -583,21 +583,22 @@ router.get('/:id/edit-source', async (req, res, next) => {
     if (estimate.customer_id && req.techRole === 'admin') {
       const c = await db('customers').where({ id: estimate.customer_id }).first().catch(() => null);
       if (c) {
-        // Tier semantics follow the canonical membership predicate
-        // (admin-customers hasMembership): 'One-Time'/'Commercial'/etc. are
-        // non-membership sentinels, and the chip labels ANY truthy tier as
-        // "Recurring plan" — a sentinel tier must render "No active plan"
-        // (codex P2).
+        // hasActivePlan is the canonical membership verdict (admin-customers
+        // hasMembership): sentinel tiers (One-Time/Commercial/…) are NOT
+        // members even with a rate, and a rate-only member (null tier,
+        // monthly_rate > 0) IS one — raw tier truthiness gets both wrong, so
+        // the chip renders plan status from this boolean (codex P2 + P1 r4).
+        // tier/monthlyRate stay raw for display.
         const { hasMembership } = require('./admin-customers');
-        const member = hasMembership(c);
         customer = {
           id: c.id,
           firstName: c.first_name || '',
           lastName: c.last_name || '',
           phone: c.phone || null,
           email: c.email || null,
-          tier: member ? c.waveguard_tier : null,
-          monthlyRate: member ? parseFloat(c.monthly_rate || 0) : 0,
+          tier: c.waveguard_tier,
+          monthlyRate: parseFloat(c.monthly_rate || 0),
+          hasActivePlan: hasMembership(c),
         };
       }
     }

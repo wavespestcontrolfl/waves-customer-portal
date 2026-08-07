@@ -125,6 +125,18 @@ const PRE_SLAB_PRODUCT_META = {
   },
 };
 
+// Plan status for the existing-customer chip. The hydrated edit-source
+// payload carries the server's canonical membership verdict (hasActivePlan:
+// sentinel tiers like Commercial are NOT members even with a rate; a
+// rate-only member with a null tier IS one — raw tier truthiness gets both
+// wrong). Customer-search rows don't carry the boolean, so they keep the
+// legacy tier-truthiness reading and their rendering is unchanged.
+function matchHasActivePlan(match) {
+  if (!match) return false;
+  if (typeof match.hasActivePlan === "boolean") return match.hasActivePlan;
+  return !!(match.tier && match.tier !== "null");
+}
+
 function resolvePreSlabJobContextForForm(form) {
   if (form?._preslabJobContextEdited) return form.preslabJobContext || "standalone";
   const volume = String(form?.preslabVolume || "NONE").trim().toUpperCase();
@@ -5630,12 +5642,10 @@ export default function EstimateToolViewV2({
                     {existingCustomerMatch.firstName}{" "}
                     {existingCustomerMatch.lastName}
                   </strong>
-                  {existingCustomerMatch.tier &&
-                  existingCustomerMatch.tier !== "null"
+                  {matchHasActivePlan(existingCustomerMatch)
                     ? " · Recurring plan"
                     : " · No active plan"}
-                  {existingCustomerMatch.tier &&
-                  existingCustomerMatch.tier !== "null" &&
+                  {matchHasActivePlan(existingCustomerMatch) &&
                   existingCustomerMatch.monthlyRate > 0 &&
                   form.isRecurringCustomer === "YES"
                     ? " · 15% loyalty discount applied"
