@@ -3066,7 +3066,7 @@ function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
 // Bermuda suppression is dark until GATE_BERMUDA_SUPPRESSION is flipped.
 // Requested-while-dark fails CLOSED with a 400 the builder surfaces verbatim.
 function requireBermudaSuppressionGate() {
-  if (process.env.GATE_BERMUDA_SUPPRESSION === 'true') return true;
+  if (require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) return true;
   const err = new Error('Bermudagrass suppression is not enabled on this environment (GATE_BERMUDA_SUPPRESSION) — uncheck the add-on or flip the gate.');
   err.statusCode = 400;
   err.code = 'BERMUDA_SUPPRESSION_GATED';

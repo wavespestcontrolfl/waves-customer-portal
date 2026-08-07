@@ -946,9 +946,9 @@ const CONFIG_KEY_SUB_FEATURE_GATES = {
   lawn_pricing_v2: { bermudaSuppression: 'GATE_BERMUDA_SUPPRESSION' },
 };
 
-function gateEnvOn(gate) {
-  return ['1', 'true', 'on'].includes(String(process.env[gate] || '').toLowerCase());
-}
+// One shared call-time parser (feature-gates.gateEnvValue) so availability
+// and engine enforcement can never disagree on what counts as "on".
+const { gateEnvValue: gateEnvOn } = require('../config/feature-gates');
 
 function configKeyFeatureAvailable(key) {
   const gate = CONFIG_KEY_FEATURE_GATES[key];

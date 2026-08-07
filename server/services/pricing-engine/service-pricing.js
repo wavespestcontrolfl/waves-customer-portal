@@ -2045,7 +2045,9 @@ function priceLawnCare(property, options = {}) {
     // replays, direct generateEstimate/priceLawnCare callers — hits the
     // same wall (codex: translator-only enforcement was bypassable).
     // failClosed rides the persistence rethrow rail, never CLIENT_FALLBACK.
-    if (process.env.GATE_BERMUDA_SUPPRESSION !== 'true') {
+    // Shared parser so the UI-availability check and enforcement can never
+    // disagree on what counts as "on".
+    if (!require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
       const err = new Error('Bermudagrass suppression is not enabled on this environment (GATE_BERMUDA_SUPPRESSION) — uncheck the add-on or flip the gate.');
       err.statusCode = 400;
       err.code = 'BERMUDA_SUPPRESSION_GATED';

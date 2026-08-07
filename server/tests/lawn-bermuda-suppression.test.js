@@ -76,6 +76,17 @@ describe('priceLawnCare bermudaSuppression adder', () => {
     expect(withAddon.bermudaSuppression).toEqual({ perApp: ADDER_10K });
   });
 
+  test('every supported gate representation enables pricing (1 / true / on, case-insensitive)', () => {
+    for (const value of ['1', 'true', 'TRUE', 'on', 'On']) {
+      process.env.GATE_BERMUDA_SUPPRESSION = value;
+      const priced = priceLawnCare(PROPERTY_5K, {
+        track: 'st_augustine', tier: 'enhanced', bermudaSuppression: true,
+      });
+      expect(priced.bermudaSuppression).toEqual({ perApp: ADDER_5K });
+    }
+    process.env.GATE_BERMUDA_SUPPRESSION = 'true';
+  });
+
   test('invalid DB knobs FAIL the calculation for a selected add-on (never a silent $0)', () => {
     const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
     const saved = LAWN_PRICING_V2.bermudaSuppression;
