@@ -288,18 +288,29 @@ async function insertPayout(attrs, conn = db) {
   // Money boundary: never create (or correct) a payout for a review Google
   // has removed. Callers pre-check liveness, but attribution resolution runs
   // after their snapshot read — the hourly scan even passes rows loaded
-  // before the per-location sync lock released — so re-read the current row
-  // here, immediately before money moves. Fail closed on a vanished row too.
+  // before the per-location sync lock released. The liveness check and the
+  // payout INSERT are atomic: the source review row is locked FOR UPDATE for
+  // the duration, so the reconcile's stamping UPDATE serializes against the
+  // insert (same shape as the review-graphics approve gate — both writers are
+  // single fast statements, no slow external work under the lock). Fail
+  // closed on a vanished row too.
   if (attrs.googleReviewId) {
-    const liveRow = await conn('google_reviews')
-      .where({ id: attrs.googleReviewId })
-      .whereNull('missing_since')
-      .first();
-    if (!liveRow) {
-      return { created: false, skipped: true, reason: 'removed_from_google' };
-    }
+    return conn.transaction(async (trx) => {
+      const liveRow = await trx('google_reviews')
+        .where({ id: attrs.googleReviewId })
+        .whereNull('missing_since')
+        .forUpdate()
+        .first();
+      if (!liveRow) {
+        return { created: false, skipped: true, reason: 'removed_from_google' };
+      }
+      return _insertPayoutRow(attrs, trx);
+    });
   }
+  return _insertPayoutRow(attrs, conn);
+}
 
+async function _insertPayoutRow(attrs, conn) {
   const existing = await existingPayoutForSource(attrs, conn);
   if (existing) return { payout: existing, created: false, reason: 'duplicate' };
 
@@ -766,12 +777,20 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     };
   }
 
-  await conn('google_reviews')
+  // Conditional write, not a snapshot re-check: the read-time guard above can
+  // race the reconcile stamping this row mid-attribution. Zero rows updated
+  // means liveness was lost — abort BEFORE any side effect (the
+  // has_left_google_review mark, thank-you enrollment, and the payout).
+  const linkedCount = await conn('google_reviews')
     .where({ id: review.id })
+    .whereNull('missing_since')
     .update({
       customer_id: customerId,
       updated_at: new Date(),
     });
+  if (!((Array.isArray(linkedCount) ? linkedCount.length : linkedCount) > 0)) {
+    throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
+  }
 
   // Mirror the sync paths' _markCustomerLeftReview on EVERY manual
   // attribution touch: this customer verifiably left a review, so future

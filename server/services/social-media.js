@@ -1895,11 +1895,15 @@ const SocialMediaService = {
       if (firstSuccessFired || typeof onFirstPlatformSuccess !== 'function') return;
       const win = platformResults.find((r) => r.success === true);
       if (!win) return;
-      firstSuccessFired = true;
       try {
         await onFirstPlatformSuccess(win);
+        // Complete only on SUCCESS — a failed durable write retries at every
+        // later loop boundary instead of being one-shot (a swallowed failure
+        // followed by a crash in a later provider would leave the post live
+        // with no durable record until the caller's post-publish backstop).
+        firstSuccessFired = true;
       } catch (err) {
-        logger.warn(`[social] onFirstPlatformSuccess hook failed (${win.platform}): ${err.message}`);
+        logger.warn(`[social] onFirstPlatformSuccess hook failed (${win.platform}): ${err.message} — will retry at the next platform boundary`);
       }
     };
     const requestedPlatforms = normalizePublishChannels(channels);

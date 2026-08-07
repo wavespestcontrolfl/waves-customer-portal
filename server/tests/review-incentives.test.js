@@ -93,6 +93,7 @@ function createDbMock(initialRows = {}) {
       whereIn(column, values) { this.ins.push([column, values]); return this; },
       whereNotNull(column) { this.notNull.push(column); return this; },
       whereNull(column) { this.nulls.push(column); return this; },
+      forUpdate() { return this; },
       leftJoin() { return this; },
       select() { return this; },
       orderBy(column, direction = 'asc') { this.order = [column, direction]; return this; },
@@ -126,6 +127,9 @@ function createDbMock(initialRows = {}) {
 
   const conn = jest.fn(makeQuery);
   conn.fn = { now: jest.fn(() => new Date('2026-06-01T12:00:00.000Z')) };
+  // The payout money boundary runs its liveness check + insert in one
+  // transaction (row-locked in prod); the mock passes the same conn through.
+  conn.transaction = async (fn) => fn(conn);
   conn.__state = state;
   return conn;
 }
@@ -627,5 +631,63 @@ describe('review incentives', () => {
 
     expect(conn.__state.rows.google_reviews[0].customer_id).toBeNull();
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+  });
+
+  test('a removal stamp landing MID-attribution aborts before any side effect', async () => {
+    // The entry guard reads a live row; the reconcile stamps it while the
+    // customer/technician lookups run. The customer-link write is conditional
+    // on liveness — zero rows updated must abort the whole flow: no customer
+    // link, no has_left_google_review mark, no thank-you, no payout.
+    const daysAgo = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const conn = createDbMock({
+      customers: [{
+        id: 'customer-1',
+        first_name: 'Customer',
+        last_name: 'One',
+        active: true,
+        has_left_google_review: false,
+      }],
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-1',
+        technician_id: 'tech-1',
+        service_date: daysAgo(12).slice(0, 10),
+      }],
+      technicians: [{ id: 'tech-1', name: 'Tech One' }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: null,
+        reviewer_name: 'Customer One',
+        star_rating: 5,
+        review_created_at: daysAgo(10),
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/abc',
+        missing_since: null,
+      }],
+    });
+    // Simulate the reconcile landing mid-flow: the first customers lookup
+    // happens AFTER the entry liveness guard — stamp the row right then.
+    const baseImpl = conn.getMockImplementation();
+    let stampLanded = false;
+    conn.mockImplementation((table) => {
+      if (String(table).startsWith('customers') && !stampLanded) {
+        stampLanded = true;
+        conn.__state.rows.google_reviews[0].missing_since = daysAgo(0);
+      }
+      return baseImpl(table);
+    });
+
+    await expect(ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-1',
+      customerId: 'customer-1',
+      serviceRecordId: 'service-1',
+      adminId: 'admin-1',
+    }, { conn, policy })).rejects.toMatchObject({ code: 'review_removed_from_google' });
+
+    expect(stampLanded).toBe(true); // the race actually ran
+    expect(conn.__state.rows.google_reviews[0].customer_id).toBeNull();
+    expect(conn.__state.rows.customers[0].has_left_google_review).toBe(false);
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+    expect(conn.__state.rows.activity_log).toHaveLength(0);
   });
 });
