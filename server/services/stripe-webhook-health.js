@@ -17,8 +17,11 @@
 // filter is ACCOUNT-wide, so the probe's results are reconciled against the
 // local ledger: an event present in our ledger WAS delivered to this
 // endpoint — its failure belongs to some other integration's endpoint and
-// is excluded (events genuinely undelivered to us never reach the ledger at
-// all — the two views are complementary).
+// is excluded. Absence from the ledger is NOT proof this endpoint missed
+// the event (the event type may be routed only to another endpoint — the
+// events API offers no per-endpoint scoping), so everything that survives
+// reconciliation is reported as a POSSIBLE failure to verify in the Stripe
+// dashboard, never asserted as a confirmed failure of this endpoint.
 //
 // Subject grammar follows the ops-email convention (first word = the owner's
 // action): FIX because a stuck webhook event means payment state diverged
@@ -127,7 +130,10 @@ async function loadLedgerFailures() {
 // endpoint — a delivery_success=false flag on it comes from some OTHER
 // webhook endpoint on the account (the /v1/events filter is account-wide and
 // this Stripe API version offers no per-endpoint scoping). Local application
-// failures on those events are already the ledger section's job.
+// failures on those events are already the ledger section's job. The
+// converse does NOT hold: an id absent from the ledger may be undelivered
+// to us OR routed only to another endpoint's subscription — absence is a
+// "possible failure" signal, never a confirmed one.
 async function loadLedgerEventIds(ids) {
   if (!ids.length) return new Set();
   const rows = await db('stripe_webhook_events').whereIn('id', ids).select('id');
@@ -160,9 +166,9 @@ function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
   const plural = (n) => (n === 1 ? '' : 's');
   const stripeCombined = stripeTotal + stripeUnreconciled;
   const subject = ledgerTotal > 0
-    ? `FIX: ${ledgerTotal} Stripe webhook event${plural(ledgerTotal)} failed/unprocessed in last ${LOOKBACK_HOURS}h${stripeCombined > 0 ? ` + ${stripeCombined} undelivered Stripe-side` : ''}`
+    ? `FIX: ${ledgerTotal} Stripe webhook event${plural(ledgerTotal)} failed/unprocessed in last ${LOOKBACK_HOURS}h${stripeCombined > 0 ? ` + ${stripeCombined} possible undelivered Stripe-side` : ''}`
     : stripeTotal > 0
-      ? `FIX: ${stripeTotal} Stripe webhook delivery failure${plural(stripeTotal)} (Stripe-side) in last ${LOOKBACK_HOURS}h${stripeUnreconciled > 0 ? ` (+${stripeUnreconciled} unreconciled)` : ''}`
+      ? `FIX: ${stripeTotal} possible Stripe webhook delivery failure${plural(stripeTotal)} (Stripe-side) in last ${LOOKBACK_HOURS}h${stripeUnreconciled > 0 ? ` (+${stripeUnreconciled} unreconciled)` : ''}`
       : `FIX: ${stripeUnreconciled} possible Stripe webhook delivery failure${plural(stripeUnreconciled)} (Stripe-side, unreconciled) in last ${LOOKBACK_HOURS}h`;
 
   const textSections = [];
@@ -183,16 +189,17 @@ function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
   }
 
   if (stripeTotal > 0 || stripeUnreconciled > 0) {
+    const stripeSideIntro = `Possible Stripe-side delivery failures — Stripe flagged these undelivered somewhere on the account and they are absent from this endpoint's ledger. Absence can mean this endpoint missed them OR the event type is routed only to another endpoint (the events API has no per-endpoint scoping) — verify in the Stripe dashboard: ${stripeTotal}`;
     const unreconciledLine = `…plus ${stripeUnreconciled} more event${plural(stripeUnreconciled)} beyond the probe's scan cap that could NOT be reconciled against the local ledger — possible failures only (may belong to another endpoint on the account); verify in the Stripe dashboard.`;
     textSections.push(
       '',
-      `Stripe-side delivery failures (events Stripe could not deliver to the endpoint — these never reached the ledger): ${stripeTotal}`,
+      stripeSideIntro,
       ...stripeEvents.map((evt) => `- ${describeStripeSideEvent(evt)}`),
       ...(stripeTotal > stripeEvents.length ? [`…and ${stripeTotal - stripeEvents.length} more not shown`] : []),
       ...(stripeUnreconciled > 0 ? [unreconciledLine] : []),
     );
     htmlSections.push(
-      `<p><strong>Stripe-side delivery failures</strong> (events Stripe could not deliver to the endpoint — these never reached the ledger): ${stripeTotal}</p>`,
+      `<p><strong>Possible Stripe-side delivery failures</strong> — Stripe flagged these undelivered somewhere on the account and they are absent from this endpoint's ledger. Absence can mean this endpoint missed them OR the event type is routed only to another endpoint (the events API has no per-endpoint scoping) — verify in the Stripe dashboard: ${stripeTotal}</p>`,
       `<ul style="margin:0 0 12px 18px;padding:0;">${stripeEvents.map((evt) => `<li style="margin:0 0 6px 0;">${esc(describeStripeSideEvent(evt))}</li>`).join('')}</ul>`,
       ...(stripeTotal > stripeEvents.length ? [`<p>…and ${stripeTotal - stripeEvents.length} more not shown</p>`] : []),
       ...(stripeUnreconciled > 0 ? [`<p>${esc(unreconciledLine)}</p>`] : []),
@@ -219,7 +226,10 @@ function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js
 // (advisory lock only serializes CONCURRENT ticks; a deploy-overlap tick
-// after release would double-send). Marker stamps only when an email left.
+// after release would double-send). Marker stamps only when an email left,
+// and it gates ONLY the send decision — the health checks always run first,
+// so a deduped tick still surfaces stripeCheckError to job_health instead
+// of overwriting a failed state with a healthy "recent_send" skip.
 const SEND_MARKER_KEY = 'stripe-webhook-health';
 const TWENTY_HOURS_MS = 20 * 60 * 60 * 1000;
 
@@ -246,8 +256,6 @@ async function stampSendMarker() {
 }
 
 async function runStripeWebhookHealthCheck(opts = {}) {
-  if (await (opts.sentRecently || sentRecently)()) return { skipped: 'recent_send' };
-
   let ledger;
   try {
     ledger = await (opts.loadLedgerFailures || loadLedgerFailures)();
@@ -276,26 +284,37 @@ async function runStripeWebhookHealthCheck(opts = {}) {
       // delivery_success=false is account-wide, so another integration's
       // unhealthy endpoint would otherwise page us. Any returned event id
       // already present in OUR ledger was delivered here — not our failure.
-      // Only the DISPLAYED ids can be reconciled (the probe caps the list),
-      // so any remainder beyond the cap is carried as explicitly
-      // UNRECONCILED — reported as "verify manually", never described as a
-      // confirmed failure of this endpoint. A reconciliation query failure
-      // is caught below as stripeCheckError (blocking), same as a failed
-      // probe.
+      // Ids that SURVIVE reconciliation are still only POSSIBLE failures
+      // (absence from the ledger can also mean the event type is routed
+      // only to another endpoint) — the digest presents them as
+      // verify-in-dashboard items, never confirmed. Only the DISPLAYED ids
+      // can be reconciled (the probe caps the list), so any remainder
+      // beyond the cap is carried as explicitly UNRECONCILED. A
+      // reconciliation query failure is caught below as stripeCheckError
+      // (blocking), same as a failed probe.
       const undelivered = stripeSide?.undelivered_events || [];
       if (undelivered.length > 0) {
         const knownIds = await (opts.loadLedgerEventIds || loadLedgerEventIds)(undelivered.map((evt) => evt.id));
-        const ours = undelivered.filter((evt) => !knownIds.has(evt.id));
-        const foreignCount = undelivered.length - ours.length;
+        const possible = undelivered.filter((evt) => !knownIds.has(evt.id));
+        const foreignCount = undelivered.length - possible.length;
         if (foreignCount > 0) {
           logger.info(`[stripe-webhook-health] excluded ${foreignCount} Stripe-side failure(s) already present in the local ledger (other endpoint's failure)`);
         }
         stripeSide = {
           ...stripeSide,
-          undelivered_events: ours,
-          total_undelivered: ours.length,
+          undelivered_events: possible,
+          total_undelivered: possible.length,
           unreconciled_undelivered: Math.max(0, (Number(stripeSide.total_undelivered) || 0) - undelivered.length),
         };
+      }
+
+      // A capped scan is an INCOMPLETE check: a burst of recent-pending
+      // events can fill every scanned page while older failures sit
+      // unexamined beyond the cap, and "nothing found" would silently
+      // record a healthy job_health run. Fail closed — same blocking rail
+      // as a thrown probe (email still carries whatever WAS found).
+      if (stripeSide?.scan_exhaustive === false) {
+        stripeCheckError = "Stripe-side probe hit its scan cap before covering the full lookback — events beyond the cap were not examined; verify in the Stripe dashboard";
       }
     } catch (err) {
       stripeCheckError = err.message || String(err);
@@ -320,6 +339,14 @@ async function runStripeWebhookHealthCheck(opts = {}) {
   if (watcherDisabled()) {
     logger.info(`[stripe-webhook-health] disabled — would send: ${composed.count} ledger, ${composed.stripeFailureCount} Stripe-side`);
     return { skipped: 'disabled', ...composed };
+  }
+
+  // Send-dedupe AFTER the checks: findings (and any stripeCheckError) are
+  // already on the result, so the scheduler wrapper still fails job_health
+  // on a broken check even when the email itself is deduped.
+  if (await (opts.sentRecently || sentRecently)()) {
+    logger.info(`[stripe-webhook-health] email sent within the last 20h — skipping re-send (${composed.count} ledger, ${composed.stripeFailureCount} Stripe-side still outstanding)`);
+    return { skipped: 'recent_send', ...composed };
   }
 
   const mailer = opts.sendgrid || sendgrid;

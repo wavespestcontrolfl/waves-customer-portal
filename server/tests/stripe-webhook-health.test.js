@@ -11,7 +11,11 @@
  *  - Stripe-side results are reconciled against the local ledger: an event
  *    id we already hold was delivered to OUR endpoint, so its account-wide
  *    delivery_success=false flag is another integration's failure — never
- *    alerted here;
+ *    alerted here; ids that survive reconciliation are reported as
+ *    POSSIBLE failures (ledger absence can also mean the event type is
+ *    routed only to another endpoint), never confirmed ones;
+ *  - a probe scan that hit its page cap (scan_exhaustive=false) is an
+ *    INCOMPLETE check → blocking, never a silent healthy pass;
  *  - the Stripe-side probe runs on a 48h lookback — longer than the daily
  *    interval + the probe's recent-pending grace — so an event that was
  *    "too fresh to judge" at one tick still alerts at the next;
@@ -22,7 +26,9 @@
  *    the check never swallows its own breakage;
  *  - error snippets never carry emails or long digit runs (payloads are
  *    never read at all — the loader selects identifiers + error only);
- *  - the ops_email_send_state marker dedupes a deploy-overlap double tick.
+ *  - the ops_email_send_state marker dedupes a deploy-overlap double tick's
+ *    SEND only — the checks still run first, so a deduped tick surfaces
+ *    stripeCheckError to job_health instead of masking a broken check.
  *
  * (The ledger query's in-flight-claim exclusion is pinned in
  * stripe-webhook-health-query.test.js against the compiled SQL.)
@@ -109,7 +115,8 @@ describe('composeWebhookHealthDigest', () => {
       },
       stripeCheckError: null,
     });
-    expect(composed.subject).toBe('FIX: 1 Stripe webhook delivery failure (Stripe-side) in last 48h');
+    expect(composed.subject).toBe('FIX: 1 possible Stripe webhook delivery failure (Stripe-side) in last 48h');
+    expect(composed.text).toContain('Possible Stripe-side delivery failures');
     expect(composed.text).toContain('evt_side_1 (payout.paid)');
     expect(composed.stripeFailureCount).toBe(1);
   });
@@ -211,11 +218,44 @@ describe('runStripeWebhookHealthCheck', () => {
     expect(sendgrid.sendOne.mock.calls[0][0].text).toContain('Stripe-side delivery check itself FAILED');
   });
 
-  test('recent send marker dedupes the tick', async () => {
-    const opts = baseOpts({ sentRecently: jest.fn(async () => true) });
+  test('recent send marker dedupes the SEND but the checks still run and findings surface', async () => {
+    const opts = baseOpts({
+      sentRecently: jest.fn(async () => true),
+      loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
+    });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result).toEqual({ skipped: 'recent_send' });
-    expect(opts.loadLedgerFailures).not.toHaveBeenCalled();
+    expect(result.skipped).toBe('recent_send');
+    expect(result.count).toBe(1);
+    expect(opts.loadLedgerFailures).toHaveBeenCalledTimes(1);
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(opts.stampSendMarker).not.toHaveBeenCalled();
+  });
+
+  test('a deduped rerun after a partial run still surfaces stripeCheckError — recent_send never masks a broken check', async () => {
+    // The partial run emailed the ledger alert but the Stripe-side probe
+    // failed; a deploy-overlap rerun within 20h must NOT report a healthy
+    // recent_send that overwrites the failed job_health state.
+    const opts = baseOpts({
+      sentRecently: jest.fn(async () => true),
+      loadLedgerFailures: jest.fn(async () => ({ total: 1, rows: [ledgerRow()] })),
+      stripeOpsTools: { getStripeWebhookFailures: jest.fn(async () => { throw new Error('Stripe API returned HTTP 500'); }) },
+    });
+    const result = await runStripeWebhookHealthCheck(opts);
+    expect(result.skipped).toBe('recent_send');
+    expect(result.stripeCheckError).toContain('HTTP 500');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a capped (non-exhaustive) Stripe scan with nothing found is a blocking failure, not a silent pass', async () => {
+    const opts = baseOpts({
+      stripeOpsTools: {
+        getStripeWebhookFailures: jest.fn(async () => ({ undelivered_events: [], total_undelivered: 0, scan_exhaustive: false })),
+      },
+    });
+    const result = await runStripeWebhookHealthCheck(opts);
+    expect(result.skipped).toBe('stripe_check_failed');
+    expect(result.stripeCheckError).toContain('scan cap');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
   test('non-internal recipient fails closed', async () => {
