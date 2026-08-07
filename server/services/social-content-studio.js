@@ -1703,12 +1703,32 @@ async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
     }
     return { blocked: true, missing: !fresh };
   }
+  // Heartbeat: provider requests carry no total deadline, so a stalled
+  // publish could outlive the claim TTL and let the reconcile stamp the
+  // review mid-publication. Renew the OWNED claim (token-matched, so a
+  // successor's claim is never touched) at a third of the TTL. If a
+  // renewal is still in flight when the finally-clear runs, the clear can
+  // miss the rotated token — that orphan self-expires within one TTL and
+  // only defers that row's stamping by one cycle.
+  let currentClaim = claimUntil;
+  const heartbeat = setInterval(async () => {
+    try {
+      const next = new Date(Date.now() + PUBLISH_CLAIM_MS).toISOString();
+      const renewed = await db('google_reviews')
+        .where({ id: sourceReviewId })
+        .where('publish_claimed_until', currentClaim)
+        .update({ publish_claimed_until: next });
+      if ((Array.isArray(renewed) ? renewed.length : renewed) > 0) currentClaim = next;
+    } catch { /* best-effort — the TTL still bounds the window */ }
+  }, Math.floor(PUBLISH_CLAIM_MS / 3));
+  heartbeat.unref?.();
   try {
     return { blocked: false, result: await publishFn() };
   } finally {
+    clearInterval(heartbeat);
     await db('google_reviews')
       .where({ id: sourceReviewId })
-      .where('publish_claimed_until', claimUntil)
+      .where('publish_claimed_until', currentClaim)
       .update({ publish_claimed_until: null })
       .catch(() => null);
   }
