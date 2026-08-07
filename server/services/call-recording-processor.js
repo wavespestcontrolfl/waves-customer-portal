@@ -2190,6 +2190,22 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 //   close it — stranding this caller's booked deal with no convertible lead.
 //   A foreign-owned lead is invisible here; the caller gets a fresh row.
 async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null }) {
+  // Same-call retry FIRST, before any contact-based branch: a retry of this
+  // call (extraction_failed reprocessing) must reuse the lead an earlier
+  // attempt already inserted, and the call SID is the strongest identity
+  // there is. Extracted phone/email are MUTABLE across reprocessing attempts
+  // — branching on them first let a retry whose contact fields changed
+  // reuse an unrelated phone-matched lead or mint a second lead for the
+  // same SID (codex P2 r8 + audit P1 r14). Shared-phone ambiguity doesn't
+  // apply to the call's own row.
+  if (callSid) {
+    const own = await database('leads')
+      .whereNull('deleted_at')
+      .where('twilio_call_sid', callSid)
+      .orderBy('created_at', 'desc')
+      .first();
+    if (own) return own;
+  }
   // The email key must be a REAL email, validated here and not just at the
   // workable-signal gate: customer-attached calls reach this lookup without
   // passing hasWorkableLeadSignal, so a phone-less call carrying a malformed
@@ -2223,20 +2239,6 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   }
   // Phone identity is strong — the newest match wins outright.
   if (phone) return query.orderBy('created_at', 'desc').first();
-  // A retry of THIS call (extraction_failed reprocessing) must reuse the
-  // lead an earlier attempt already inserted: the call SID is the strongest
-  // identity there is and needs no name corroboration — without this, a
-  // phone-less name-less caller's every retry minted and notified another
-  // lead for the identical call (codex P2 r8). Checked on the phone-less
-  // path only; a phone match already finds its own prior lead.
-  if (callSid) {
-    const own = await database('leads')
-      .whereNull('deleted_at')
-      .where('twilio_call_sid', callSid)
-      .orderBy('created_at', 'desc')
-      .first();
-    if (own) return own;
-  }
   // Email-matched candidates need POSITIVE identity corroboration, not just
   // absence of conflict: two different anonymous callers can share one inbox
   // (or a transcription collision can fabricate the overlap), and reusing
