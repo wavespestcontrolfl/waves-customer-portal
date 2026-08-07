@@ -229,6 +229,28 @@ test('signature-verification failure returns 400 and does NOT capture to Sentry'
   expect(Sentry.captureException).not.toHaveBeenCalled();
 });
 
+describe('safeErrorToken (third-party egress allowlist)', () => {
+  const { safeErrorToken } = require('../utils/sentry-scrub');
+
+  test('accepts single machine tokens', () => {
+    expect(safeErrorToken('ECONNRESET')).toBe('ECONNRESET');
+    expect(safeErrorToken('23505')).toBe('23505'); // Postgres SQLSTATE
+    expect(safeErrorToken(429)).toBe('429'); // numeric HTTP status
+    expect(safeErrorToken('ER_DUP_ENTRY')).toBe('ER_DUP_ENTRY');
+  });
+
+  test('rejects prose, long digit runs (phone/PAN shapes), and non-strings', () => {
+    expect(safeErrorToken('customer Jane Q Fixture missing')).toBeNull(); // whitespace prose
+    expect(safeErrorToken('9415550100')).toBeNull(); // phone-shaped
+    expect(safeErrorToken('4242424242424242')).toBeNull(); // PAN-shaped
+    expect(safeErrorToken('ERR9415550100x')).toBeNull(); // embedded digit run
+    expect(safeErrorToken('a@b.com')).toBeNull(); // '@' excluded
+    expect(safeErrorToken('x'.repeat(80))).toBeNull(); // over length cap
+    expect(safeErrorToken({ nested: true })).toBeNull();
+    expect(safeErrorToken(null)).toBeNull();
+  });
+});
+
 test('clean processing path neither captures nor errors', async () => {
   const update = jest.fn().mockResolvedValue(1);
   const builder = ledgerBuilder({ update });

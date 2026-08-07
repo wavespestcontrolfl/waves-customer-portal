@@ -1001,12 +1001,17 @@ function initScheduledJobs() {
         logger.info(`[stripe-webhook-health] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0, stripeSide: result.stripeFailureCount || 0 })}`);
         // Delivery-BLOCKING skips count as failures; expected skips
         // (nothing_found / disabled / recent_send) stay healthy. A failed
-        // Stripe-side probe fails the run even when the ledger email went
-        // out — the check did not fully complete.
+        // Stripe-side probe or ledger query fails the run even when the
+        // alert email went out — the check did not fully complete.
         if (result?.skipped === 'query_failed' || result?.error
             || result?.skipped === 'unconfigured' || result?.skipped === 'recipient'
-            || result?.skipped === 'stripe_check_failed' || result?.stripeCheckError) {
-          throw new Error(`stripe-webhook-health check did not complete (${result.skipped || (result.stripeCheckError ? 'stripe_check_failed' : 'send_failed')})`);
+            || result?.skipped === 'stripe_check_failed'
+            || result?.stripeCheckError || result?.ledgerCheckError) {
+          const reason = result.skipped
+            || (result.ledgerCheckError ? 'ledger_check_failed' : null)
+            || (result.stripeCheckError ? 'stripe_check_failed' : null)
+            || 'send_failed';
+          throw new Error(`stripe-webhook-health check did not complete (${reason})`);
         }
       });
       // A pool-exhausted tick returns {skipped} instead of throwing —

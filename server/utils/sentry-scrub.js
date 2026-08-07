@@ -44,11 +44,17 @@ function scrubSentryText(text) {
 // machine token ('ECONNRESET', '23505', 'KnexTimeoutError'), no whitespace,
 // no '@', bounded length — a value that fails this is arbitrary prose and
 // is DROPPED, never scrubbed-and-forwarded. Numbers (Postgres error codes
-// arrive numeric-ish, HTTP statuses numeric) stringify first.
+// arrive numeric-ish, HTTP statuses numeric) stringify first. A run of 7+
+// digits is rejected outright: err.name/err.code are not schema-controlled,
+// and a phone number or PAN is a valid "token" by shape alone (real codes
+// top out around 5 digits — Postgres SQLSTATE, HTTP status).
 const ERROR_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+const LONG_DIGIT_RUN_PATTERN = /\d{7,}/;
 function safeErrorToken(value) {
   const str = typeof value === 'number' && Number.isFinite(value) ? String(value) : value;
-  return typeof str === 'string' && ERROR_TOKEN_PATTERN.test(str) ? str : null;
+  if (typeof str !== 'string') return null;
+  if (!ERROR_TOKEN_PATTERN.test(str) || LONG_DIGIT_RUN_PATTERN.test(str)) return null;
+  return str;
 }
 
 module.exports = { scrubSentryText, safeErrorToken, MAX_SCRUBBED_LENGTH };

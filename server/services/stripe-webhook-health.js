@@ -152,10 +152,11 @@ function describeStripeSideEvent(evt) {
 // automatic notifier, so if the check itself broke (missing prod key,
 // thrown probe, capped scan) and the ledger was quiet, this digest is the
 // only rail that tells the operator Stripe-side delivery status is UNKNOWN.
-// `stripeCheckError` here must be EMAIL-SAFE text — the caller passes its
-// own fixed messages verbatim and replaces a thrown error's arbitrary
-// prose with a generic line + allowlisted token (never raw err.message).
-function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
+// `stripeCheckError` / `ledgerCheckError` here must be EMAIL-SAFE text —
+// the caller passes its own fixed messages verbatim and replaces a thrown
+// error's arbitrary prose with a generic line + allowlisted token (never
+// raw err.message).
+function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError, ledgerCheckError }) {
   const ledgerTotal = ledger?.total || 0;
   const ledgerRows = ledger?.rows || [];
   const stripeEvents = stripeSide?.undelivered_events || [];
@@ -163,7 +164,8 @@ function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
   // Beyond-cap remainder the ledger reconciliation could not verify — a
   // POSSIBLE failure needing manual verification, never a confirmed one.
   const stripeUnreconciled = stripeSide?.unreconciled_undelivered || 0;
-  if (ledgerTotal === 0 && stripeTotal === 0 && stripeUnreconciled === 0 && !stripeCheckError) return null;
+  if (ledgerTotal === 0 && stripeTotal === 0 && stripeUnreconciled === 0
+    && !stripeCheckError && !ledgerCheckError) return null;
 
   const plural = (n) => (n === 1 ? '' : 's');
   const stripeCombined = stripeTotal + stripeUnreconciled;
@@ -173,7 +175,9 @@ function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
       ? `FIX: ${stripeTotal} possible Stripe webhook delivery failure${plural(stripeTotal)} (Stripe-side) in last ${LOOKBACK_HOURS}h${stripeUnreconciled > 0 ? ` (+${stripeUnreconciled} unreconciled)` : ''}`
       : stripeUnreconciled > 0
         ? `FIX: ${stripeUnreconciled} possible Stripe webhook delivery failure${plural(stripeUnreconciled)} (Stripe-side, unreconciled) in last ${LOOKBACK_HOURS}h`
-        : 'FIX: Stripe webhook delivery check FAILED — Stripe-side status unknown';
+        : ledgerCheckError
+          ? 'FIX: Stripe webhook health check FAILED — status unknown'
+          : 'FIX: Stripe webhook delivery check FAILED — Stripe-side status unknown';
 
   const textSections = [];
   const htmlSections = [];
@@ -210,15 +214,24 @@ function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
     );
   }
 
-  if (stripeCheckError) {
-    // When the broken check is the ONLY finding, say so explicitly — a
-    // quiet ledger plus a check that couldn't run is UNKNOWN, not healthy.
+  if (stripeCheckError || ledgerCheckError) {
+    // When a broken check is the ONLY finding, say so explicitly — zero
+    // findings from a check that couldn't run is UNKNOWN, not healthy.
     if (ledgerTotal === 0 && stripeTotal === 0 && stripeUnreconciled === 0) {
-      textSections.push('The local ledger is quiet, but the Stripe-side delivery check could not complete — Stripe-side delivery status is UNKNOWN until verified.');
-      htmlSections.push('<p>The local ledger is quiet, but the Stripe-side delivery check could not complete — <strong>Stripe-side delivery status is UNKNOWN until verified</strong>.</p>');
+      const unknownScope = ledgerCheckError
+        ? 'webhook health status is UNKNOWN'
+        : 'Stripe-side delivery status is UNKNOWN';
+      textSections.push(`Zero findings above do NOT mean healthy: a health check could not complete, so ${unknownScope} until verified.`);
+      htmlSections.push(`<p>Zero findings above do NOT mean healthy: a health check could not complete, so <strong>${unknownScope} until verified</strong>.</p>`);
     }
-    textSections.push('', `NOTE: the Stripe-side delivery check itself FAILED (${stripeCheckError}) — verify manually via the Intelligence Bar (get_stripe_webhook_failures) or the Stripe dashboard.`);
-    htmlSections.push(`<p><strong>NOTE:</strong> the Stripe-side delivery check itself FAILED (${esc(stripeCheckError)}) — verify manually via the Intelligence Bar (get_stripe_webhook_failures) or the Stripe dashboard.</p>`);
+    if (ledgerCheckError) {
+      textSections.push('', `NOTE: the LEDGER health query itself FAILED (${ledgerCheckError}) — query stripe_webhook_events manually (error set, or unprocessed past the stale-claim window).`);
+      htmlSections.push(`<p><strong>NOTE:</strong> the LEDGER health query itself FAILED (${esc(ledgerCheckError)}) — query <code>stripe_webhook_events</code> manually (error set, or unprocessed past the stale-claim window).</p>`);
+    }
+    if (stripeCheckError) {
+      textSections.push('', `NOTE: the Stripe-side delivery check itself FAILED (${stripeCheckError}) — verify manually via the Intelligence Bar (get_stripe_webhook_failures) or the Stripe dashboard.`);
+      htmlSections.push(`<p><strong>NOTE:</strong> the Stripe-side delivery check itself FAILED (${esc(stripeCheckError)}) — verify manually via the Intelligence Bar (get_stripe_webhook_failures) or the Stripe dashboard.</p>`);
+    }
   }
 
   textSections.push('', 'Replay/retry from the Stripe dashboard: https://dashboard.stripe.com/webhooks');
@@ -266,12 +279,22 @@ async function stampSendMarker() {
 }
 
 async function runStripeWebhookHealthCheck(opts = {}) {
-  let ledger;
+  // A failed ledger query is handled like a failed Stripe-side check, not
+  // an early return: job_health has no automatic notifier, so the FIX
+  // email below is the only rail that tells the operator local webhook
+  // failure status is UNKNOWN. Same email-safe twin discipline as
+  // stripeCheckError (generic line + allowlisted token, never raw
+  // err.message — a Knex message carries the failing SQL).
+  let ledger = { total: 0, rows: [] };
+  let ledgerCheckError = null;
+  let ledgerCheckErrorEmail = null;
   try {
     ledger = await (opts.loadLedgerFailures || loadLedgerFailures)();
   } catch (err) {
-    logger.error(`[stripe-webhook-health] ledger query failed: ${err.message}`);
-    return { skipped: 'query_failed' };
+    ledgerCheckError = err.message || String(err);
+    const codeToken = safeErrorToken(err.code) || safeErrorToken(err.name);
+    ledgerCheckErrorEmail = `the ledger health query threw an unexpected error${codeToken ? ` (${codeToken})` : ''} — full text in Railway logs / job_health`;
+    logger.error(`[stripe-webhook-health] ledger query failed: ${ledgerCheckError}`);
   }
 
   // Stripe-side delivery check via the existing IB probe. A thrown check
@@ -346,15 +369,21 @@ async function runStripeWebhookHealthCheck(opts = {}) {
     logger.info('[stripe-webhook-health] STRIPE_SECRET_KEY not set (dev/test/preview) — skipping Stripe-side delivery check');
   }
 
-  const composed = composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError: stripeCheckErrorEmail });
+  const composed = composeWebhookHealthDigest({
+    ledger,
+    stripeSide,
+    stripeCheckError: stripeCheckErrorEmail,
+    ledgerCheckError: ledgerCheckErrorEmail,
+  });
   if (!composed) {
-    // Everything quiet AND the check completed (compose returns a digest
-    // whenever stripeCheckError is set — job_health has no notifier, so a
-    // broken check must reach the operator by email, not only as a failed
-    // job_health row).
+    // Everything quiet AND both checks completed (compose returns a digest
+    // whenever either check error is set — job_health has no notifier, so
+    // a broken check must reach the operator by email, not only as a
+    // failed job_health row).
     return { skipped: 'nothing_found' };
   }
   if (stripeCheckError) composed.stripeCheckError = stripeCheckError;
+  if (ledgerCheckError) composed.ledgerCheckError = ledgerCheckError;
 
   if (watcherDisabled()) {
     logger.info(`[stripe-webhook-health] disabled — would send: ${composed.count} ledger, ${composed.stripeFailureCount} Stripe-side`);

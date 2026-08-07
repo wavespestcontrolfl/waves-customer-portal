@@ -25,10 +25,11 @@
  *    "too fresh to judge" at one tick still alerts at the next;
  *  - missing STRIPE_SECRET_KEY in deployed production is a BLOCKING check
  *    failure (fail closed), while dev/test/preview keeps the benign skip;
- *  - a failed ledger query returns the blocking query_failed skip; a failed
- *    Stripe-side probe emails AND carries stripeCheckError so the scheduler
+ *  - a failed ledger query or Stripe-side probe EMAILS (status unknown)
+ *    AND carries ledgerCheckError/stripeCheckError so the scheduler
  *    wrapper converts it into a job_health failure — the check never
- *    swallows its own breakage;
+ *    swallows its own breakage, and job_health alone is never the only
+ *    signal (it has no automatic notifier);
  *  - stored error TEXT never appears in the email at all — arbitrary prose
  *    (Knex SQL prefixes, provider echoes) cannot be made PII-safe by
  *    pattern scrubbing, so the digest carries fixed generic descriptions +
@@ -203,13 +204,20 @@ describe('runStripeWebhookHealthCheck', () => {
     expect(opts.stampSendMarker).not.toHaveBeenCalled();
   });
 
-  test('ledger query throw returns the blocking query_failed skip (job_health failure upstream)', async () => {
+  test('ledger query throw EMAILS (status unknown) and surfaces the blocking ledgerCheckError', async () => {
     const opts = baseOpts({
-      loadLedgerFailures: jest.fn(async () => { throw new Error('relation vanished'); }),
+      loadLedgerFailures: jest.fn(async () => { throw new Error('relation vanished near Jane Q Fixture'); }),
     });
     const result = await runStripeWebhookHealthCheck(opts);
-    expect(result).toEqual({ skipped: 'query_failed' });
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(result.sent).toBe(true);
+    expect(result.ledgerCheckError).toContain('relation vanished');
+    const mail = sendgrid.sendOne.mock.calls[0][0];
+    expect(mail.subject).toBe('FIX: Stripe webhook health check FAILED — status unknown');
+    expect(mail.text).toContain('LEDGER health query itself FAILED');
+    expect(mail.text).toContain('webhook health status is UNKNOWN');
+    // The thrown error's arbitrary prose stays OUT of the email.
+    expect(mail.text).not.toContain('relation vanished');
+    expect(mail.text).not.toContain('Jane Q Fixture');
   });
 
   test('failed Stripe-side probe with a quiet ledger EMAILS (status unknown) and still surfaces the blocking stripeCheckError', async () => {
