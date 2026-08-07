@@ -142,6 +142,26 @@ async function safetyGate(est, now = new Date()) {
   return { skip: false };
 }
 
+// Replay-time eligibility for a quiet-hours-deferred follow-up SMS: the
+// scheduled-SMS executor calls this before dispatching a row queued by
+// sendDualChannel's hold path. Overnight the recipient may have accepted or
+// declined the estimate, booked/paid through the email leg, or replied —
+// exactly the states safetyGate suppresses before an immediate send, so the
+// same gate runs again here. Fail-open on a read error: the touch already
+// passed the gate at enqueue, and a transient blip must not strand it.
+async function deferredFollowupStillEligible(estimateId) {
+  try {
+    const est = await db("estimates").where({ id: estimateId }).first();
+    if (!est) return { eligible: false, reason: "estimate-missing" };
+    const gate = await safetyGate(est);
+    if (gate.skip) return { eligible: false, reason: gate.reason };
+    return { eligible: true };
+  } catch (e) {
+    logger.warn(`[est-followup] replay eligibility recheck failed for ${estimateId} (sending anyway): ${e.message}`);
+    return { eligible: true, degraded: true };
+  }
+}
+
 async function renderTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === "function") {
@@ -1460,10 +1480,13 @@ const EstimateFollowUp = {
 };
 
 module.exports = EstimateFollowUp;
+// Called by the scheduled-SMS executor before replaying a deferred touch.
+module.exports.deferredFollowupStillEligible = deferredFollowupStillEligible;
 module.exports._private = {
   sendDualChannel,
   estimateEmailPayload,
   renderTemplate,
+  deferredFollowupStillEligible,
   checkDepositAbandoned,
   checkPaymentStepAbandoned,
   paymentStepStillRequiresCard,

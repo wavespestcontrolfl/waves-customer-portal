@@ -87,11 +87,13 @@ describe('processScheduledSends send-window handling', () => {
     const staleRecovery = chain();
     const dueQuery = chain({ rows: [dueRow] });
     const phoneLookup = chain({ first: { phone: '+19415550123' } });
+    const prefsLookup = chain({ first: { sms_enabled: true } });
     const deferUpdate = chain();
     db
       .mockReturnValueOnce(staleRecovery)
       .mockReturnValueOnce(dueQuery)
       .mockReturnValueOnce(phoneLookup)
+      .mockReturnValueOnce(prefsLookup)
       .mockReturnValueOnce(deferUpdate);
 
     const result = await InvoiceService.processScheduledSends();
@@ -113,17 +115,40 @@ describe('processScheduledSends send-window handling', () => {
     const staleRecovery = chain();
     const dueQuery = chain({ rows: [dueRow] });
     const phoneLookup = chain({ first: { phone: '+19415550123' } });
+    const prefsLookup = chain({ first: { sms_enabled: true } });
     const deferUpdate = chain({ updateCount: 0 });
     db
       .mockReturnValueOnce(staleRecovery)
       .mockReturnValueOnce(dueQuery)
       .mockReturnValueOnce(phoneLookup)
+      .mockReturnValueOnce(prefsLookup)
       .mockReturnValueOnce(deferUpdate);
 
     const result = await InvoiceService.processScheduledSends();
 
     expect(sendSpy).not.toHaveBeenCalled();
     expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+  });
+
+  test('outside the window: an SMS-opted-out customer is emailed at the requested time, not deferred', async () => {
+    isWithinSendWindowET.mockReturnValue(false);
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const phoneLookup = chain({ first: { phone: '+19415550123' } });
+    const prefsLookup = chain({ first: { sms_enabled: false } });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(phoneLookup)
+      .mockReturnValueOnce(prefsLookup)
+      .mockReturnValueOnce(claim);
+    sendSpy.mockResolvedValue({ ok: true, sms: { ok: false, code: 'SMS_OPTED_OUT' }, email: { ok: true }, creditApplied: 0 });
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
+    expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
   });
 
   test('outside the window: an email-only invoice (third-party payer) sends at its requested time', async () => {

@@ -2369,6 +2369,24 @@ function initScheduledJobs() {
             }
             continue;
           }
+          // Deferred estimate follow-up replay: overnight the recipient may
+          // have accepted/declined the estimate, booked or paid through the
+          // email leg, or replied — states the immediate sender suppresses
+          // via safetyGate. Re-run that same gate before dispatching the
+          // stale touch (the helper fails open on read errors).
+          if (claimMeta.entry_point === 'estimate_follow_up_deferred' && claimMeta.estimate_id) {
+            const { deferredFollowupStillEligible } = require('./estimate-follow-up');
+            const elig = await deferredFollowupStillEligible(claimMeta.estimate_id);
+            if (!elig.eligible) {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                status: 'blocked',
+                updated_at: new Date(),
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?)", [`stale_followup:${elig.reason}`]),
+              });
+              logger.info(`[scheduled-sms] deferred estimate follow-up ${msg.id} suppressed at replay: ${elig.reason}`);
+              continue;
+            }
+          }
           // replay_purpose: an enqueue whose message_type has no useful
           // purpose mapping (the Stripe billing-notice templates —
           // ach_retry_notice, bank_verification_failed, …) persists the
@@ -2664,13 +2682,15 @@ function initScheduledJobs() {
             });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
 
-            // Deferred dispatch-completion replay delivered: run the
-            // completion-specific finalization the immediate path does
-            // inline (invoice draft→sent, bundled review delivered mark,
-            // combined-receipt claim, record notes) — deliberately AFTER
-            // the provider accepted, mirroring the deposit-receipt
-            // pattern of message-type-specific hooks living here.
-            if (claimMeta.entry_point === 'dispatch_completion_deferred') {
+            // Deferred completion/invoice replay delivered: run the
+            // finalization the immediate path does inline (invoice
+            // draft→sent, bundled review delivered mark, combined-receipt
+            // claim, record notes — each step no-ops when its ref is
+            // absent, so invoice_send_deferred rows only flip the invoice)
+            // — deliberately AFTER the provider accepted, mirroring the
+            // deposit-receipt pattern of message-type-specific hooks here.
+            if (claimMeta.entry_point === 'dispatch_completion_deferred'
+              || claimMeta.entry_point === 'invoice_send_deferred') {
               let fin = { ok: false };
               try {
                 const { finalizeDeferredCompletionSend } = require('./dispatch-completion-deferred');

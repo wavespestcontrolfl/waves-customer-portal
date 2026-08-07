@@ -1618,6 +1618,36 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           });
           if (!smsResult.sent) {
             logger.warn(`[public-quote] Customer SMS blocked/failed for lead ${lead.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+            // Send-window hold: this one-shot endpoint has no later retry,
+            // so a night quote-wizard user would permanently lose the
+            // booking invite — persist it on the scheduled-SMS rail for
+            // the window open (same rail as the deferred lead-webhook
+            // menu), carrying the transactional consent basis the quote
+            // submission established.
+            if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred && smsResult.nextAllowedAt) {
+              try {
+                const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                await db('sms_log').insert({
+                  customer_id: null,
+                  direction: 'outbound',
+                  from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                  to_phone: normalizedPhone,
+                  message_body: customerBody,
+                  status: 'scheduled',
+                  scheduled_for: new Date(smsResult.nextAllowedAt),
+                  message_type: 'quote_booking_invite',
+                  metadata: JSON.stringify({
+                    entry_point: 'public_quote_booking_sms_deferred',
+                    lead_id: lead.id,
+                    original_block_code: smsResult.code,
+                    consent_basis: { status: 'transactional_allowed', source: 'public_quote_booking' },
+                  }),
+                });
+                logger.info(`[public-quote] Booking invite for lead ${lead.id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+              } catch (queueErr) {
+                logger.error(`[public-quote] Held booking-invite requeue failed for lead ${lead.id}: ${queueErr.message}`);
+              }
+            }
           } else {
             logger.info(`[public-quote] Customer SMS sent for lead ${lead.id}`);
           }

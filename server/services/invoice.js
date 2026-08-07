@@ -2285,6 +2285,14 @@ const InvoiceService = {
               replay_purpose: "payment_link",
               refresh_customer_phone: true,
               resolve_from_by_customer: true,
+              // Delivery-time finalization (executor → markDeliverySent):
+              // when the email leg ALSO failed, this queued row is the only
+              // delivery, and without the flip the morning SMS would carry
+              // a live pay link while the invoice sits in draft with
+              // follow-ups unarmed. Idempotent when the email leg DID
+              // finalize (markDeliverySent no-ops on non-finalizable
+              // status / leaves 'sent' unchanged).
+              mark_invoice_delivery: true,
             }),
           });
           sms.scheduled = true;
@@ -2569,10 +2577,13 @@ const InvoiceService = {
       if (isEnabled("smsSendWindow") && !isWithinSendWindowET()) {
         // SMS-leg check: the window is an SMS fence, so an invoice with no
         // SMS leg must not have its EMAIL delayed by it — a third-party
-        // payer invoice is delivered email-only by design, and a customer
-        // with no phone can only be emailed. Those fall through and send
-        // at their requested time. Fail toward deferral on a lookup error:
-        // worst case an email waits for 8:00 AM, never a night text.
+        // payer invoice is delivered email-only by design, a customer with
+        // no phone can only be emailed, and an SMS-opted-out customer
+        // (sms_enabled=false — texted STOP or flipped the toggle) would
+        // deterministically block the SMS leg anyway. Those fall through
+        // and send at their requested time. Fail toward deferral on a
+        // lookup error: worst case an email waits for 8:00 AM, never a
+        // night text.
         let hasSmsLeg = !inv.payer_id;
         if (hasSmsLeg) {
           try {
@@ -2582,6 +2593,16 @@ const InvoiceService = {
             hasSmsLeg = Boolean(String(cust?.phone || "").trim());
           } catch {
             hasSmsLeg = true;
+          }
+        }
+        if (hasSmsLeg) {
+          try {
+            const prefs = await db("notification_prefs")
+              .where({ customer_id: inv.customer_id })
+              .first("sms_enabled");
+            if (prefs?.sms_enabled === false) hasSmsLeg = false;
+          } catch {
+            /* keep hasSmsLeg — defer on an unreadable pref */
           }
         }
         if (!hasSmsLeg) {

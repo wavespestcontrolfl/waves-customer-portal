@@ -495,7 +495,7 @@ async function skipStaleTouches(row, now) {
  * self-heals via the TTL window.
  */
 const TOUCH_CLAIM_TTL_MS = 10 * 60 * 1000;
-async function fireStep(row) {
+async function fireStep(row, { operatorInitiated = false } = {}) {
   // The cleanup is predicated on OUR stamp: if this send outlives the TTL
   // and another worker replaces the stale claim, an unconditional clear
   // here would release the successor's live claim and let an edit race its
@@ -597,7 +597,7 @@ async function fireStep(row) {
   row.invoice_status = claimedInvoice.status;
   row.token = claimedInvoice.token;
   try {
-    await fireTouch(row);
+    await fireTouch(row, { operatorInitiated });
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
@@ -610,7 +610,7 @@ async function fireStep(row) {
   }
 }
 
-async function fireTouch(row) {
+async function fireTouch(row, { operatorInitiated = false } = {}) {
   const step = config.steps[row.step_index];
   if (!step) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
@@ -756,6 +756,10 @@ async function fireTouch(row) {
         customerId: customer.id,
         invoiceId: row.invoice_id,
         entryPoint: 'invoice_followup_sequence',
+        // Send-window operator marker: only the admin "send now" route sets
+        // it (an operator clicked THIS touch at this moment); the 10:16 ET
+        // cron path stays fenced.
+        ...(operatorInitiated ? { operatorInitiated: true } : {}),
         metadata: { original_message_type: 'invoice_followup' },
       });
       if (sendResult.blocked || sendResult.sent === false) {
@@ -1089,7 +1093,7 @@ async function stopSequence(invoiceId, { reason, adminId } = {}) {
  * Send the next touch right now, even if it's not due yet. Virginia uses this
  * when a customer is dodging (e.g. "push them to day-14 language today").
  */
-async function sendNextTouchNow(invoiceId) {
+async function sendNextTouchNow(invoiceId, { operatorInitiated = false } = {}) {
   const seq = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
   if (!seq || seq.status === 'stopped' || seq.status === 'completed') return;
 
@@ -1114,7 +1118,7 @@ async function sendNextTouchNow(invoiceId) {
     )
     .first();
 
-  if (row) await fireStep(row);
+  if (row) await fireStep(row, { operatorInitiated });
 }
 
 /**

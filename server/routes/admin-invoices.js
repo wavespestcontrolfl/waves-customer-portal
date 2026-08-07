@@ -2331,7 +2331,10 @@ router.post('/:id/followup/stop', requireAdmin, async (req, res, next) => {
 // POST /:id/followup/send-now — fires the next touch immediately
 router.post('/:id/followup/send-now', requireAdmin, async (req, res, next) => {
   try {
-    await FollowUps.sendNextTouchNow(req.params.id);
+    // Authenticated operator click — "now" means now: the SMS leg is exempt
+    // from the 8AM-8PM send window (validators/send-window.js). The 10:16 ET
+    // cron path passes nothing and stays fenced.
+    await FollowUps.sendNextTouchNow(req.params.id, { operatorInitiated: true });
     res.json({ ok: true });
   } catch (err) { next(err); }
 });
