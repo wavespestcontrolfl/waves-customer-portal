@@ -515,6 +515,35 @@ describe('blog Astro frontmatter validation', () => {
     });
   });
 
+  test('a spoke-routed draft with an OFF-SITE emitted canonical parks — spoke routing must not erase the canonical before the guard (Codex r5)', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 123, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/123' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    const prev = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    try {
+      await expect(AstroPublisher.publishOrUpdatePage(
+        {
+          type: 'draft',
+          frontmatter: validFrontmatter({
+            slug: '/ant-trails-bradenton/',
+            canonical: 'https://competitor.example/post/',
+          }),
+          body: 'Waves Pest Control guidance for Bradenton homeowners.',
+        },
+        { action_type: 'new_supporting_blog', target_sites: ['veniceflpestcontrol.com'] }
+      )).rejects.toThrow(/points off-site/);
+    } finally {
+      if (prev === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      else process.env.SPOKE_BLOG_NETWORK_ENABLED = prev;
+    }
+  });
+
   test('normalizes autonomous draft domains to the hub before committing markdown', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
@@ -3157,6 +3186,16 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
     after: { title: 'New', meta_description: 'New meta' },
     brief: { action_type: 'rewrite_title_meta' },
   };
+
+  test('backfill covers genuinely absent post_type only — an explicit empty/whitespace value stays for validation to reject (Codex r5)', () => {
+    const { backfillLegacyBlogRequiredFields } = AstroPublisher._internals;
+    const absent = { page_type: 'blog', service_areas_tag: ['Sarasota'] };
+    expect(backfillLegacyBlogRequiredFields(absent, {})).toContain('post_type');
+    expect(absent.post_type).toBeTruthy();
+    const invalid = { post_type: '  ', page_type: 'blog', service_areas_tag: ['Sarasota'] };
+    expect(backfillLegacyBlogRequiredFields(invalid, {})).not.toContain('post_type');
+    expect(invalid.post_type).toBe('  ');
+  });
 
   test('metadata PR body lists inferred fields when backfilled, stays silent otherwise', () => {
     const withFields = AstroPublisher._internals.buildMetadataPrBody({ ...base, backfilledFields: ['post_type', 'service_areas_tag'] });

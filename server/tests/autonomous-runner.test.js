@@ -800,7 +800,16 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     const before = JSON.stringify(draft);
     const result = applyOperatorSlugRepair(operatorBrief('/fall-lawn-mistakes-swfl/'), draft);
     expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/no category segment/);
+    expect(result.reason).toMatch(/not a \/category\/leaf\/ route/);
+    expect(JSON.stringify(draft)).toBe(before);
+  });
+
+  test('a NESTED pin (3+ segments) is unrepairable — normalizeAutonomousCategory cannot retain a slash-containing category (Codex r5)', () => {
+    const draft = driftedDraft();
+    const before = JSON.stringify(draft);
+    const result = applyOperatorSlugRepair(operatorBrief('/lawn-care/fall/guide/'), draft);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/not a \/category\/leaf\/ route/);
     expect(JSON.stringify(draft)).toBe(before);
   });
 
@@ -889,7 +898,9 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
         'A citation: [report](https://source.example/fall-lawn-mistakes-southwest-florida/report) and',
         '[an exact foreign path](https://source.example/fall-lawn-mistakes-southwest-florida/) plus',
         '[a longer internal route](/fall-lawn-mistakes-southwest-florida/archive/) and',
-        '[a query value](https://source.example/report?return=/fall-lawn-mistakes-southwest-florida/).',
+        '[a query value](https://source.example/report?return=/fall-lawn-mistakes-southwest-florida/) and',
+        '[a dot-prefixed child](/fall-lawn-mistakes-southwest-florida/.well-known/security.txt) and',
+        '[a percent-encoded child](/fall-lawn-mistakes-southwest-florida/%61rchive/).',
       ].join(' '),
     });
     const result = applyOperatorSlugRepair(operatorBrief(), draft);
@@ -903,6 +914,10 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     // A query VALUE embedding the old path is part of a different
     // destination, not a self-link (Codex r2).
     expect(draft.body).toContain('?return=/fall-lawn-mistakes-southwest-florida/');
+    // Child routes whose next segment starts with a non-alphanumeric URL
+    // char are DIFFERENT pathnames (Codex r5).
+    expect(draft.body).toContain('(/fall-lawn-mistakes-southwest-florida/.well-known/security.txt)');
+    expect(draft.body).toContain('(/fall-lawn-mistakes-southwest-florida/%61rchive/)');
   });
 
   test('an off-site canonical is PRESERVED for the publisher guard — repair must not mask the unsafe input (Codex r1; protocol-relative r2)', () => {

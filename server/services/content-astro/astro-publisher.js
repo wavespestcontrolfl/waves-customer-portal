@@ -405,7 +405,12 @@ function inferServiceAreas(frontmatter = {}, brief = {}) {
 function backfillLegacyBlogRequiredFields(nextFrontmatter, brief = {}) {
   const healed = [];
   const postType = nextFrontmatter.post_type;
-  if (postType == null || String(postType).trim() === '') {
+  // Backfill covers GENUINELY ABSENT fields only: an explicit "" or
+  // whitespace-only post_type is present-but-invalid data, and healing it
+  // would bypass the schema rejection that exposes corrupt metadata (and
+  // could select the wrong structural component requirements) — leave it
+  // for validation to reject (Codex r5).
+  if (postType == null) {
     nextFrontmatter.post_type = normalizePostType(nextFrontmatter.page_type);
     healed.push('post_type');
   }
@@ -1534,13 +1539,14 @@ async function publishOrUpdatePage(draft, brief = {}) {
   }
   // Spoke routing: a curated spoke-seed brief publishes the post on its single
   // spoke domain with a SELF-canonical spoke URL (the publisher owns domain
-  // routing, so it overrides the hub-defaulted canonical the writer emits).
+  // routing). The override is applied by assertCanonicalMatchesSlug below —
+  // it validates the writer's EMITTED canonical first (off-site → throw →
+  // park) and then stamps the blogOrigin-derived canonical itself. Replacing
+  // the canonical BEFORE the guard would silently erase an off-site canonical
+  // on spoke seeds that the identical hub draft gets parked for (Codex r5).
   // Non-spoke briefs keep the hub-only blog policy unchanged.
   const spokeTarget = resolveSpokeTarget(brief);
   const blogOrigin = blogOriginForSpoke(spokeTarget);
-  if (spokeTarget) {
-    sourceFrontmatter.canonical = canonicalUrlForSlug(rawSlug, blogOrigin);
-  }
   // Validate the writer's slug↔canonical self-consistency on the EMITTED slug (a
   // genuinely mismatched draft still throws → review). THEN enforce the blog URL
   // protocol: the published slug, canonical, committed FILE, hero, and branch all

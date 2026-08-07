@@ -3442,14 +3442,16 @@ function applyOperatorSlugRepair(brief, draft) {
   if (pinned == null) return null;
   // The publisher derives the final blog route as `${category}/${slug leaf}`
   // (categoryRouteSlug), so the pin is authoritative for the WHOLE route —
-  // category segment included. A single-segment pin cannot survive that
-  // derivation (any category would prepend a segment), so it is
-  // unrepairable: keep the park (Codex r4).
+  // and only a two-segment /category/leaf/ pin can survive that derivation.
+  // A single-segment pin would get a category prepended; a NESTED pin
+  // (/lawn-care/fall/guide/) would need a slash-containing category, which
+  // normalizeAutonomousCategory cannot retain — either way the published
+  // URL would differ from the pin, so park instead of guessing (Codex r4+r5).
   const pinSegments = pinned.replace(/^\/+|\/+$/g, '').split('/');
-  if (pinSegments.length < 2) {
+  if (pinSegments.length !== 2) {
     return {
       ok: false,
-      reason: `pinned slug "${rawPin}" has no category segment — the publisher derives blog routes as category/leaf, so this pin cannot be honored mechanically`,
+      reason: `pinned slug "${rawPin}" is not a /category/leaf/ route — the publisher derives blog routes as exactly category + leaf, so this pin cannot be honored mechanically`,
       mismatch: { expected_slug: rawPin, draft_slug: draft?.frontmatter?.slug || null },
     };
   }
@@ -3531,7 +3533,11 @@ function applyOperatorSlugRepair(brief, draft) {
       // `=` and `,` are NOT destination starts: a query value like
       // `?return=/old-slug/` or a srcset entry embeds the old path inside a
       // DIFFERENT destination whose pathname is not the post route (Codex r2).
-      const selfLinkRe = new RegExp(`(${escapeRe(hub)}|[\\s("'<\`]|^)${escapeRe(oldSlugPath)}(?![a-z0-9-])`, 'g');
+      // The END boundary is a POSITIVE delimiter set — the destination must
+      // terminate here (close-paren/quote/whitespace/fragment/query/EOF), so
+      // child routes with non-alphanumeric next segments (/old-slug/.well-known/,
+      // /old-slug/%61rchive/) are different pathnames and survive (Codex r5).
+      const selfLinkRe = new RegExp(`(${escapeRe(hub)}|[\\s("'<\`]|^)${escapeRe(oldSlugPath)}(?=[)"'\\s<>\`#?]|$)`, 'g');
       draft.body = draft.body.replace(selfLinkRe, (m, pre) => { occurrences += 1; return `${pre}${pinned}`; });
     }
     repair.body_self_link_rewrites = occurrences;
