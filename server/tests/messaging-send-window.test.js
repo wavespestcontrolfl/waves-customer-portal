@@ -119,6 +119,19 @@ describe('checkSendWindow validator', () => {
     expect(checkSendWindow({ ...SMS, purpose: 'conversational' }, null, null, EVENING_ET)).toEqual({ ok: true });
     expect(checkSendWindow({ ...SMS, identityTrustLevel: 'admin_operator' }, null, null, EVENING_ET)).toEqual({ ok: true });
   });
+
+  test('operator-clicked entry points pass at night even with customer-level trust', () => {
+    expect(checkSendWindow({ ...SMS, entryPoint: 'admin_estimate_send' }, null, null, EVENING_ET)).toEqual({ ok: true });
+    expect(checkSendWindow({ ...SMS, entryPoint: 'scheduled_sms_cron' }, null, null, EVENING_ET)).toEqual({ ok: true });
+  });
+
+  test('booking side-effect and automation entry points stay fenced', () => {
+    for (const entryPoint of ['admin_recurring_appointment_created', 'appointment_reminder_cron', 'invoice_followup_sequence']) {
+      const res = checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET);
+      expect(res.ok).toBe(false);
+      expect(res.code).toBe('QUIET_HOURS_HOLD');
+    }
+  });
 });
 
 describe('sendCustomerMessage send-window integration', () => {

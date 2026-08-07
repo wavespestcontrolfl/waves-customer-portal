@@ -284,6 +284,40 @@ async function sendCustomerMessage(input) {
     }
   }
 
+  // 6.75 Send-window boundary re-check: the pipeline check ran before the
+  // line-type Lookup and the caller's preDispatchCheck, both of which can
+  // straddle the 20:00 ET cutoff. Re-verify at the provider handoff so a
+  // send that entered the pipeline at 19:59 can't reach Twilio at 20:01.
+  // Same deferral contract as the pipeline block; cheap (pure clock math)
+  // and a no-op for exempt inputs.
+  {
+    const lateWindow = checkSendWindow(sendInput, policy, contactState);
+    if (lateWindow && lateWindow.ok !== true) {
+      const audit = await persistAudit({
+        input: sendInput,
+        policy,
+        segmentMeta,
+        validatorsPassed,
+        validatorsFailed: ['check_send_window_boundary'],
+        blockedBy: { code: lateWindow.code, reason: lateWindow.reason },
+        identityTrust: resolvedTrust,
+        providerOutcome: null,
+      });
+      return {
+        sent: false,
+        blocked: true,
+        code: lateWindow.code,
+        reason: lateWindow.reason,
+        retryable: true,
+        deferred: true,
+        nextAllowedAt: lateWindow.nextAllowedAt,
+        auditLogId: audit.id,
+        segmentCount: segmentMeta.segmentCount,
+        encoding: segmentMeta.encoding,
+      };
+    }
+  }
+
   // 7. Dispatch to provider
   const providerOutcome = await dispatchToProvider(sendInput);
 
