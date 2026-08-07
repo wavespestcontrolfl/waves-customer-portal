@@ -1003,6 +1003,36 @@ describe('Google Business review sync', () => {
     expect(db.__state.rows.google_reviews.find(r => r.id === 'back-1').missing_since).toBeNull();
   });
 
+  test('a same-name review from a different account cannot hijack a stamped evidence row', async () => {
+    // Stable GBP identity differs — only the display name and a nearby
+    // timestamp match. The fuzzy fallback must not resolve to the stamped
+    // row: that would overwrite the retained evidence and clear its stamp.
+    seedSyncedReview({
+      id: 'evidence-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-removed',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-removed',
+      missing_since: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+    });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-copycat',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Totally different text',
+      createTime: '2026-05-25T13:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    const evidence = db.__state.rows.google_reviews.find(r => r.id === 'evidence-1');
+    expect(evidence.missing_since).toBeTruthy();
+    expect(evidence.review_text).toBe('Great work');
+    // The copycat landed as its own distinct row instead.
+    const copycat = db.__state.rows.google_reviews.find(
+      r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-copycat',
+    );
+    expect(copycat).toBeTruthy();
+  });
+
   test('fails closed: no missing stamps on the Places fallback, and the degraded-sync alert fires once per 24h', async () => {
     seedSyncedReview({ id: 'stale-1' });
     service._getClient = jest.fn(async () => null); // token missing → Places fallback

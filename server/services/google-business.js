@@ -514,9 +514,17 @@ class GoogleBusinessService {
     if (existing) return existing;
     existing = await db('google_reviews').where({ google_review_id: normalized.google_review_id }).first();
     if (existing) return existing;
+    // The fuzzy name+time fallback must never match a stamped row: a
+    // different account posting under the same display name within the
+    // time tolerance would hijack the retained evidence row — the upsert
+    // would overwrite it and the reinstatement clear would drop its stamp.
+    // Stamped rows are only reachable via the stable GBP identity lookups
+    // above (a genuine reinstatement keeps its review ID); anything else
+    // inserts as a distinct review.
     const candidates = await db('google_reviews')
       .where({ location_id: normalized.location_id })
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .select('id', 'reviewer_name', 'review_created_at');
     return candidates.find(row => sameReviewerAndTime(row, normalized.reviewer_name, normalized.review_created_at)) || null;
   }

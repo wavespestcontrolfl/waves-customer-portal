@@ -208,22 +208,6 @@ router.get('/', async (req, res, next) => {
       locationBreakdown[row.location_id][String(row.star_rating)] = parseInt(row.count, 10) || 0;
     }
 
-    // Use Google's real totals if available
-    const totalGoogleReviews = Object.values(googleStats).reduce((s, g) => s + (g.totalReviews || 0), 0);
-
-    // For the response-rate calc, the numerator and denominator must come
-    // from the same population. `totalGoogleReviews` only sums locations
-    // that have a `_stats` row, so scope the unresponded count we expose
-    // for the rate-calc denominator to those same locations. Otherwise a
-    // location with reviews-but-no-_stats would inflate `unresponded`
-    // without contributing to the total, breaking `total - unresponded`.
-    const ratedLocationIds = Object.keys(googleStats).filter(id => (googleStats[id]?.totalReviews || 0) > 0);
-    const unrespondedInRatedRow = ratedLocationIds.length > 0
-      ? await reviewsOnly.clone().whereIn('location_id', ratedLocationIds).modify(whereNeedsRealReply).modify(whereNotDismissed).whereNull('missing_since').count('* as count').first()
-      : { count: 0 };
-    const avgGoogleRating = Object.values(googleStats).length > 0
-      ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)
-      : parseFloat(totals?.avg_rating || 0);
     // True only when every currently-configured location has a `_stats`
     // row whose synced_at is recent. Places sync runs hourly and
     // swallows per-location errors (services/google-business.js
@@ -233,8 +217,8 @@ router.get('/', async (req, res, next) => {
     // a retired location can't satisfy the count while a newly added
     // location has no row yet. The 24h window absorbs transient sync
     // hiccups; once any configured location goes a full day without a
-    // fresh _stats write, the client falls back to the
-    // responded+unresponded denominator.
+    // fresh _stats write, every stats consumer below falls back to the
+    // live-row aggregates (which exclude removed reviews).
     const STATS_FRESH_MS = 24 * 60 * 60 * 1000;
     const now = Date.now();
     const isFresh = (locId) => {
@@ -244,6 +228,30 @@ router.get('/', async (req, res, next) => {
       return t > 0 && (now - t) <= STATS_FRESH_MS;
     };
     const googleStatsComplete = WAVES_LOCATIONS.every(loc => isFresh(loc.id));
+
+    // Use Google's real totals only when the snapshot is fresh AND complete —
+    // completeness computed but ignored here previously meant stale _stats
+    // rows (removed Maps key, persistent Places failures) kept feeding the
+    // overview while the corrected live-row fallback never ran.
+    const totalGoogleReviews = googleStatsComplete
+      ? Object.values(googleStats).reduce((s, g) => s + (g.totalReviews || 0), 0)
+      : 0;
+
+    // For the response-rate calc, the numerator and denominator must come
+    // from the same population. `totalGoogleReviews` only sums locations
+    // that have a `_stats` row, so scope the unresponded count we expose
+    // for the rate-calc denominator to those same locations. Otherwise a
+    // location with reviews-but-no-_stats would inflate `unresponded`
+    // without contributing to the total, breaking `total - unresponded`.
+    const ratedLocationIds = googleStatsComplete
+      ? Object.keys(googleStats).filter(id => (googleStats[id]?.totalReviews || 0) > 0)
+      : [];
+    const unrespondedInRatedRow = ratedLocationIds.length > 0
+      ? await reviewsOnly.clone().whereIn('location_id', ratedLocationIds).modify(whereNeedsRealReply).modify(whereNotDismissed).whereNull('missing_since').count('* as count').first()
+      : { count: 0 };
+    const avgGoogleRating = googleStatsComplete && Object.values(googleStats).some(g => g.rating)
+      ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)
+      : parseFloat(totals?.avg_rating || 0);
 
     const locationStatuses = await getReviewLocationStatuses();
 
@@ -277,7 +285,7 @@ router.get('/', async (req, res, next) => {
         breakdown: Object.fromEntries(breakdown.map(b => [b.star_rating, parseInt(b.count)])),
         locationBreakdown,
         perLocation: perLocation.map(l => {
-          const gs = googleStats[l.location_id];
+          const gs = googleStatsComplete ? googleStats[l.location_id] : null;
           return {
             locationId: l.location_id,
             count: gs?.totalReviews || parseInt(l.count),

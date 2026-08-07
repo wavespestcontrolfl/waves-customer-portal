@@ -5,6 +5,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { WAVES_LOCATIONS } = require('../config/locations');
 const { whereLiveCustomer, CONVERSION_DATE_SQL } = require('./customer-stages');
 const { etDateString, etMonthStart, etMonthEnd, etWeekStart, addETDays } = require('../utils/datetime-et');
 
@@ -186,10 +187,26 @@ async function executeBITool(toolName, input) {
       const [stats, thisWeek, unresponded] = await Promise.all([
         (async () => {
           try {
+            // The _stats snapshot is trusted only when EVERY configured
+            // location has a row synced inside the last 24h — the same
+            // freshness/completeness rule as the dashboard. A removed Maps
+            // key leaves stale rows indefinitely and a per-location Places
+            // failure yields a partial total; either must fall through to
+            // the live-row aggregate (which excludes removed reviews).
             const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
-            let total = 0, ratingSum = 0, cnt = 0;
+            const STATS_FRESH_MS = 24 * 60 * 60 * 1000;
+            const freshStats = {};
             for (const row of statsRows) {
-              try { const p = JSON.parse(row.review_text); total += p.totalReviews || 0; if (p.rating) { ratingSum += p.rating; cnt++; } } catch {}
+              const t = new Date(row.synced_at).getTime();
+              if (t > 0 && Date.now() - t <= STATS_FRESH_MS) freshStats[row.location_id] = row;
+            }
+            const statsComplete = WAVES_LOCATIONS.length > 0 && WAVES_LOCATIONS.every((l) => freshStats[l.id]);
+            let total = 0, ratingSum = 0, cnt = 0;
+            if (statsComplete) {
+              for (const loc of WAVES_LOCATIONS) {
+                const row = freshStats[loc.id];
+                try { const p = JSON.parse(row.review_text); total += p.totalReviews || 0; if (p.rating) { ratingSum += p.rating; cnt++; } } catch {}
+              }
             }
             if (total > 0) return { total, rating: cnt > 0 ? (ratingSum / cnt).toFixed(1) : '5.0' };
             // Fallback aggregates report current Google state, so rows

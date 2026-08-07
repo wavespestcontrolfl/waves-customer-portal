@@ -1790,6 +1790,15 @@ export default function ReviewsPage() {
       method: "POST",
       body: JSON.stringify({ replyText }),
     });
+    // A reply removes the row from the server-side "needs reply" result set.
+    // With more pages still on the server, keeping the mutable page offset
+    // would skip one never-loaded row per reply (the set shrank underneath
+    // the offset) — restart from page 1 instead. When everything is already
+    // loaded (the common case), the cheap local update stands.
+    if (filterResponded === "needs-reply" && hasMore) {
+      loadData();
+      return;
+    }
     // Update local state
     setData((prev) => ({
       ...prev,
@@ -1803,6 +1812,12 @@ export default function ReviewsPage() {
 
   const handleDismiss = async (reviewId) => {
     await adminFetch(`/admin/reviews/${reviewId}/dismiss`, { method: "POST" });
+    // Dismissed rows are excluded from every view except Removed, so the same
+    // shrinking-result-set offset skew as handleReply applies here.
+    if (filterResponded !== "removed" && hasMore) {
+      loadData();
+      return;
+    }
     setData((prev) => ({
       ...prev,
       reviews: prev.reviews.filter((r) => r.id !== reviewId),
