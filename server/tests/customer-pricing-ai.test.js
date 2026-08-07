@@ -241,3 +241,96 @@ describe('count-based WaveGuard tier truth', () => {
     ]));
   });
 });
+
+// Codex #3253 r2 regressions: the ownership guard's four escape hatches.
+describe('never-re-price guard, r2 regressions', () => {
+  test('owned-only request with no home sqft returns the not-re-pricing answer, not PROPERTY_DETAILS_NEEDED', async () => {
+    const customer = propertyCustomer({
+      id: 'cust-owned-nosqft',
+      waveguard_tier: 'Silver',
+      property_sqft: null,
+      lot_sqft: null,
+    });
+    const result = await buildCustomerPricingResponse({
+      db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
+      propertyLookup: null,
+      prompt: 'I want to upgrade my lawn care',
+      customer,
+    });
+
+    expect(result.code).not.toBe('PROPERTY_DETAILS_NEEDED');
+    expect(result.ok).toBe(true);
+    expect(result.alreadyIncluded).toContain('Lawn Care');
+    expect(result.options).toEqual([]);
+    expect(result.message).toMatch(/not re-pricing/i);
+  });
+
+  test('mixed request carries the owned half into every priced option requestDescription', async () => {
+    const customer = propertyCustomer({ id: 'cust-mixed-desc', waveguard_tier: 'Silver' });
+    const result = await buildCustomerPricingResponse({
+      db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
+      propertyLookup: null,
+      prompt: 'upgrade my lawn care and add mosquito control',
+      customer,
+    });
+
+    expect(result.options.length).toBeGreaterThan(0);
+    // Staff read the submitted option's requestDescription, not
+    // result.message — the owned upgrade ask must reach them there.
+    for (const option of result.options) {
+      expect(option.requestDescription).toMatch(/Lawn Care/);
+      expect(option.requestDescription).toMatch(/already active/i);
+    }
+  });
+
+  test('recurring rodent monitoring blocks a fresh rodent quote even though it never qualifies for a tier', async () => {
+    const customer = propertyCustomer({ id: 'cust-rodent', waveguard_tier: 'Bronze' });
+    const result = await buildCustomerPricingResponse({
+      db: activePlanDb(customer.id, ['Rodent Monitoring', 'Quarterly Pest Control'], 'Bronze'),
+      propertyLookup: null,
+      prompt: 'Can you add rodent bait stations?',
+      customer,
+    });
+
+    expect(result.alreadyIncluded).toContain('Rodent Monitoring');
+    expect(result.options.every(o => o.serviceKey !== 'rodent_bait')).toBe(true);
+  });
+
+  test('a plan stamped at a secondary property does not suppress a quote at the primary', async () => {
+    const customerId = 'cust-multiprop';
+    const db = dbForTables({
+      customers: [{
+        id: customerId, active: true, waveguard_tier: 'Bronze', monthly_rate: 55,
+      }],
+      scheduled_services: [{
+        id: 'svc-secondary',
+        service_type: 'Lawn Care',
+        scheduled_date: '2026-08-01',
+        status: 'scheduled',
+        is_recurring: true,
+        service_address_line1: '200 Oak Ave',
+      }],
+    });
+    // The shared mock's columnInfo omits the stamped-address columns; this
+    // scenario is ABOUT them, so report them present.
+    const baseDb = db;
+    const dbWithStamps = (table) => {
+      const q = baseDb(table);
+      if (table === 'scheduled_services') {
+        q.columnInfo = () => ({ is_recurring: {}, service_address_line1: {}, service_address_city: {}, service_address_zip: {} });
+      }
+      return q;
+    };
+    const result = await buildCustomerPricingResponse({
+      db: dbWithStamps,
+      propertyLookup: null,
+      prompt: 'I am interested in adding lawn care',
+      customer: propertyCustomer({ id: customerId, address_line1: '100 Main St' }),
+    });
+
+    // Ownership scoped to the priced (primary) property: the Oak Ave plan
+    // must not block Main St, and must not be claimed as "on this property."
+    expect(result.alreadyIncluded).not.toContain('Lawn Care');
+    expect(result.options.some(o => o.serviceKey === 'lawn_care')).toBe(true);
+  });
+});

@@ -276,7 +276,14 @@ function qualifyingKeysFromRows(rows = []) {
 // tier would hand out an unearned discount).
 async function loadExistingQualifyingServiceKeys(database, customerId, { streetScope = null } = {}) {
   const rows = await loadExistingRecurringQualifyingRows(database, customerId);
-  if (!streetScope || !streetScope.estimateStreet) return qualifyingKeysFromRows(rows);
+  return qualifyingKeysFromRows(await filterRowsToStreet(database, rows, streetScope));
+}
+
+// One street filter for every per-property consumer (qualifying keys AND the
+// pricing-AI ownership set below) — a second copy of the stamped → creating
+// estimate → primary-street resolution would drift from this one.
+async function filterRowsToStreet(database, rows, streetScope) {
+  if (!streetScope || !streetScope.estimateStreet) return rows;
   const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
   const kept = [];
   for (const row of rows) {
@@ -290,7 +297,40 @@ async function loadExistingQualifyingServiceKeys(database, customerId, { streetS
     street = street || String(streetScope.customerPrimaryStreet || '');
     if (street && street === streetScope.estimateStreet) kept.push(row);
   }
-  return qualifyingKeysFromRows(kept);
+  return kept;
+}
+
+// Ownership classification for the portal pricing AI (codex #3253 r2): a
+// customer "has" a service for never-re-price purposes even when the row can
+// never raise a WaveGuard tier — recurring Rodent Monitoring is the canonical
+// case. Reuses the catalog-authoritative row classifier and adds ONLY the
+// rodent family that toQualifyingKeys deliberately excludes; qualification
+// itself stays untouched.
+function ownershipKeysForRow(row = {}) {
+  const keys = qualifyingKeysForRow(row);
+  // Same rodent-led predicate tier derivation uses to EXCLUDE these rows —
+  // one classifier, opposite purpose. Lazy require: self-booking-plan-sync
+  // requires this module at load time.
+  const { isRodentLedServiceRow } = require('./self-booking-plan-sync');
+  if (isRodentLedServiceRow(row) && !keys.includes('rodent_bait')) keys.push('rodent_bait');
+  return keys;
+}
+
+// Distinct owned recurring service keys — BROADER than qualification (all
+// active recurring rows, rodent included; no membership gate, because a
+// non-member with recurring rodent still owns rodent service). streetScope
+// behaves exactly as in loadExistingQualifyingServiceKeys.
+async function loadOwnedRecurringServiceKeys(database, customerId, { streetScope = null } = {}) {
+  const rows = await loadActiveRecurringServiceRows(database, customerId);
+  // Same catalog join as the qualifying loader: a generic service_type
+  // ("Pest Control") whose catalog identity is rodent must classify as
+  // rodent here too, not as owned pest coverage.
+  const catalogById = await loadCatalogFieldsByRowId(database, customerId);
+  const joined = rows.map((r) => ({ ...r, ...(catalogById.get(r.id) || {}) }));
+  const scoped = await filterRowsToStreet(database, joined, streetScope);
+  const keys = new Set();
+  for (const row of scoped) ownershipKeysForRow(row).forEach((key) => keys.add(key));
+  return [...keys];
 }
 
 module.exports = {
@@ -302,6 +342,8 @@ module.exports = {
   qualifyingKeysForRow,
   qualifyingKeysFromRows,
   loadExistingQualifyingServiceKeys,
+  loadOwnedRecurringServiceKeys,
+  ownershipKeysForRow,
   isMembershipCustomerRow,
   isActivePlanCustomer,
 };
