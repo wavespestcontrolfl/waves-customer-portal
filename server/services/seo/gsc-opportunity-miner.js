@@ -861,7 +861,7 @@ class GscOpportunityMiner {
       ['no_content_yet', () => this.mineNoContentYet(since, ownPagesByServiceCity)],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
       ['answer_gap', () => this.mineAnswerGap(since)],
-      ['listicle_family', () => this.mineListicleFamily(since, { mutateQueue: persist, ownPagesByServiceCity, periodDays })],
+      ['listicle_family', () => this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays })],
     ];
 
     for (const [name, fn] of runs) {
@@ -1757,7 +1757,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineListicleFamily(since, { mutateQueue = true, ownPagesByServiceCity = new Map(), periodDays = 28 } = {}) {
+  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28 } = {}) {
     // BOTH gates required: mining with the brief overlay off would persist
     // listicle_family rows whose briefs come out as ORDINARY supporting
     // blogs — the lane would look enabled while producing none of the
@@ -1884,52 +1884,14 @@ class GscOpportunityMiner {
         .filter((s) => s.hit && s.hit.position >= THRESHOLDS.strikingDistancePositionMin)
         .sort((a, b) => a.hit.position - b.hit.position)[0] || null;
       if (served) {
-        // A family that minted a pending BLOG row on an earlier (unserved)
-        // run must retire it the moment a page serves the intent — the
-        // refresh keys differently, so without this the old blog stays
-        // claimable until expiry and drafts the competing post this routing
-        // exists to prevent. Fail-soft, same posture as the near-me cleanup.
-        // mutateQueue-guarded: mineAll({ persist: false }) is a READ-ONLY
-        // preview (--no-persist, facts-population analysis) and must never
-        // retire live queue work.
-        if (mutateQueue) {
-          try {
-            await db('opportunity_queue')
-              .where({
-                dedupe_key: listicleFamilyDedupeKey(fam.key),
-                status: 'pending',
-                action_type: 'new_supporting_blog',
-              })
-                // 'expired', NOT sticky 'skipped': this transition is
-              // AUTOMATIC and must stay reversible — the upsert revives
-              // expired rows by contract, so when the page later falls back
-              // out of striking distance the re-mined family key revives.
-              // Sticky skipped would let one ranking oscillation
-              // permanently suppress the lane. skip_reason kept as audit
-              // provenance.
-              .update({ status: 'expired', skip_reason: 'family_intent_now_served', updated_at: new Date() });
-          } catch (err) {
-            logger.warn(`[gsc-opp-miner] listicle_family: stale blog retirement failed (${fam.key}): ${err.message}`);
-          }
-        }
-        // Refresh rows are PAGE-keyed, so a family whose serving page
-        // CHANGED leaves its old row claimable beside the new one, and a
-        // page that climbed into the top-3 (intent won) leaves a refresh
-        // for work that no longer needs doing. Expire every pending family
-        // refresh that does not match the current target (all of them on a
-        // top-3 win). Revivable 'expired', same rule as the other
-        // automatic transitions.
-        if (mutateQueue) {
-          try {
-            await db('opportunity_queue')
-              .where({ bucket: 'listicle_family', status: 'pending', action_type: 'refresh_existing_page' })
-              .whereRaw("jsonb_exists(COALESCE(signal_metadata->'family_keys', '[]'::jsonb), ?)", [fam.key])
-              .whereNot('page_url', served.hit.page_url)
-              .update({ status: 'expired', skip_reason: 'family_refresh_target_stale', updated_at: new Date() });
-          } catch (err) {
-            logger.warn(`[gsc-opp-miner] listicle_family: stale refresh-target cleanup failed (${fam.key}): ${err.message}`);
-          }
-        }
+        // NOTE the mine loop performs NO queue mutations: every stale-row
+        // transition (an earlier run's blog row once a page serves the
+        // intent, a refresh row whose page changed or whose family went
+        // back to blog) is covered by _sweepStaleFamilyRows — a retired
+        // row's key is, by definition, absent from the keys this run
+        // emits, so the post-persist sweep expires it. Retiring here,
+        // BEFORE persistAll, was non-atomic: a failed upsert left the old
+        // work retired while its replacement never queued (Codex r15).
         // Accumulate — families sharing a serving page merge into ONE
         // refresh row (emitted after the loop) so no family's demand is
         // dropped. Grouped by PAGE alone: families classified under
@@ -1942,22 +1904,6 @@ class GscOpportunityMiner {
         }
         group.entries.push({ fam, served, service, city });
         continue;
-      }
-
-      // Mirror direction: the family's page dropped back OUT of striking
-      // distance, so it re-becomes a blog candidate — retire any stale
-      // pending refresh row (matched via its family_key provenance) before
-      // minting the blog, or both would sit claimable at once.
-      if (mutateQueue) {
-        try {
-          await db('opportunity_queue')
-            .where({ bucket: 'listicle_family', status: 'pending', action_type: 'refresh_existing_page' })
-            .whereRaw("jsonb_exists(COALESCE(signal_metadata->'family_keys', '[]'::jsonb), ?)", [fam.key])
-            // Same revivable-state rule as family_intent_now_served above.
-            .update({ status: 'expired', skip_reason: 'family_no_longer_served', updated_at: new Date() });
-        } catch (err) {
-          logger.warn(`[gsc-opp-miner] listicle_family: stale refresh retirement failed (${fam.key}): ${err.message}`);
-        }
       }
 
       // Cityless family on a hubless service can never publish (see above).
@@ -2015,10 +1961,12 @@ class GscOpportunityMiner {
 
   // Any pending family row NOT re-emitted (and persistable) by the current
   // mine is stale — the family went ineligible (rep reached top-3, sum fell
-  // under the floor, single variant left), lost its resolvable service, or
-  // became hubless-cityless. The targeted in-mine transitions carry
-  // specific reasons; this sweep covers every other exit so a dead family
-  // can't stay claimable for 14 days (Codex r12). Revivable 'expired' as
+  // under the floor, single variant left), lost its resolvable service,
+  // became hubless-cityless, flipped between blog and refresh, or moved to
+  // a different serving page. This sweep is the SINGLE reconciliation
+  // mechanism for every such exit (the mine loop itself never mutates the
+  // queue — pre-persist retirement was non-atomic), so a dead family can't
+  // stay claimable for 14 days (Codex r12/r15). Revivable 'expired' as
   // always — if the signal returns, the upsert revives it. The allowlist is
   // POST-floor AND post-facts-boost: a candidate that will not survive
   // persistAll must not protect a stale higher-score row (pre-push audit).
@@ -2222,8 +2170,8 @@ class GscOpportunityMiner {
                city = EXCLUDED.city,
                status = 'pending',
                -- A revived row is pending again — a lingering automatic
-               -- retirement reason (family_intent_now_served etc.) would
-               -- read as false provenance on operator/audit surfaces.
+               -- retirement reason (family_signal_gone) would read as
+               -- false provenance on operator/audit surfaces.
                skip_reason = NULL,
                updated_at = now()
            -- Frozen rows (claimed / done / pending_review / skipped) skip

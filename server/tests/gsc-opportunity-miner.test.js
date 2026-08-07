@@ -1138,55 +1138,30 @@ describe('listicle_family scoring + action mapping', () => {
     expect(calls.length).toBe(0);
   });
 
-  test('served/unserved transitions retire the stale opposite row (Codex r10)', () => {
-    // Earlier-run pending blog row + newly served family → the blog must be
-    // skipped (family_intent_now_served) or it drafts the competing post
-    // until expiry; mirror: page drops out of striking distance → the stale
-    // pending refresh row is skipped (family_no_longer_served).
+  test('ALL stale-row transitions reconcile via the post-persist sweep; the mine loop never mutates the queue (Codex r10/r15)', () => {
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
     const mineSrc = src.slice(src.indexOf('async mineListicleFamily'), src.indexOf('async _sweepStaleFamilyRows'));
     const sweepSrc = src.slice(src.indexOf('async _sweepStaleFamilyRows'), src.indexOf('async mineNoContentYet'));
-    expect(mineSrc).toMatch(/skip_reason: 'family_intent_now_served'/);
-    expect(mineSrc).toMatch(/dedupe_key: listicleFamilyDedupeKey\(fam\.key\)/);
-    expect(mineSrc).toMatch(/skip_reason: 'family_no_longer_served'/);
-    // Merged refresh rows carry family_keys; the mirror retirement must
-    // match ANY member family — via jsonb_exists, never the bare
-    // question-mark operator (knex binding trap).
-    expect(mineSrc).toMatch(/jsonb_exists\(COALESCE\(signal_metadata->'family_keys', '\[\]'::jsonb\), \?\)/);
-    // Automatic transitions retire to REVIVABLE 'expired', never sticky
-    // 'skipped' — one ranking oscillation must not permanently suppress the
-    // lane (the upsert revives expired rows by contract; Codex r11).
-    expect((mineSrc.match(/status: 'expired', skip_reason: 'family_/g) || []).length).toBe(3);
-    expect((sweepSrc.match(/status: 'expired', skip_reason: 'family_/g) || []).length).toBe(1);
-    expect(mineSrc).not.toMatch(/status: 'skipped', skip_reason: 'family_/);
-    // Page-keyed refresh rows: a CHANGED serving page or a top-3 win must
-    // expire the now-stale refresh target (served is in-window by
-    // construction since r14, so the page filter is unconditional).
-    expect(mineSrc).toMatch(/skip_reason: 'family_refresh_target_stale'/);
-    expect(mineSrc).toMatch(/\.whereNot\('page_url', served\.hit\.page_url\)/);
-    // Catch-all: a pending family row NOT re-emitted by this mine (family
-    // went ineligible / unresolvable / hubless-cityless) expires instead of
-    // staying claimable for 14 days (Codex r12) — via _sweepStaleFamilyRows,
-    // which mineAll calls ONLY after a successful persistAll (Codex r15:
-    // pre-persistence sweeping + a failed persist emptied the lane) and
-    // only when the lane ran (gates on, no miner error).
+    // The mine loop is READ-ONLY: retiring a row before its replacement
+    // persisted was non-atomic — a failed upsert left old work retired
+    // with no replacement queued. Every transition (blog↔refresh, page
+    // change, ineligible/unresolvable/hubless exits) reconciles through
+    // the sweep instead: a retired row's key is by definition absent from
+    // the keys the current run emits.
+    expect(mineSrc).not.toMatch(/\.update\(/);
+    expect(mineSrc).not.toMatch(/db\('opportunity_queue'\)/);
+    // Sweep: revivable 'expired' (skipped is sticky; oscillations must
+    // revive), pending rows only, post-floor allowlist.
     expect(sweepSrc).toMatch(/skip_reason: 'family_signal_gone'/);
+    expect(sweepSrc).toMatch(/status: 'expired'/);
+    expect(sweepSrc).not.toMatch(/status: 'skipped'/);
     expect(sweepSrc).toMatch(/whereNotIn\('dedupe_key', persistableKeys\)/);
-    // Allowlist is POST-floor: a below-floor candidate never persists, so
-    // its key must not protect a stale higher-score row from expiry.
     expect(sweepSrc).toMatch(/o\.score >= \(familyFloorActions\.includes\(o\.action_type\)/);
-    // Ordering + guards in mineAll.
+    // Ordering + guards in mineAll: sweep ONLY after a successful
+    // persistAll, only when the lane ran (gates on, no miner error).
     expect(src).toMatch(/persisted = await this\.persistAll\(allOpportunities\);[\s\S]{0,700}_sweepStaleFamilyRows\(buckets\.listicle_family \|\| \[\]\)/);
     expect(src).toMatch(/!errors\.listicle_family && isEnabled\('listicleFamilyMining'\) && isEnabled\('listicleBriefs'\)/);
-    // Both cleanups touch ONLY pending rows — frozen states stay records.
-    expect(mineSrc).toMatch(/status: 'pending',\s*\n\s*action_type: 'new_supporting_blog'/);
-    // And both are mutateQueue-guarded: mineAll({ persist: false }) is a
-    // READ-ONLY preview (--no-persist, facts-population analysis) and must
-    // never retire live queue work just for being inspected.
-    expect(src).toMatch(/async mineListicleFamily\(since, \{ mutateQueue = true, ownPagesByServiceCity = new Map\(\), periodDays = 28 \} = \{\}\)/);
-    expect(src).toMatch(/this\.mineListicleFamily\(since, \{ mutateQueue: persist, ownPagesByServiceCity, periodDays \}\)/);
-    expect((mineSrc.match(/if \(mutateQueue\) \{/g) || []).length).toBe(3);
   });
 
   test('service resolves across EVERY variant, not just the representative (Codex r9)', () => {
