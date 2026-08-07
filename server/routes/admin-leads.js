@@ -895,6 +895,11 @@ router.get('/:id', async (req, res, next) => {
         const rows = await db('call_log')
           .where(function () {
             if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
+            // Phone-less reuse: a later call that reused this lead carries a
+            // DIFFERENT sid and no matchable phone — the processor links it
+            // via the durable metadata stamp instead (the lead keeps its
+            // original call's sid; codex P1, PR #3275).
+            this.orWhereRaw("metadata->>'lead_id' = ?", [String(lead.id)]);
             if (ten) {
               this.orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
               this.orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);

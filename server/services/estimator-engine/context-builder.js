@@ -218,6 +218,27 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         .first();
       if (byCall) return { lead: byCall, forThisCall: true };
     }
+    // Phone-less reuse linkage: when a phone-less caller's later call reuses
+    // a prior lead, the processor stamps call_log.metadata.lead_id instead
+    // of restamping the lead's sid (the lead keeps its ORIGINAL call's sid —
+    // rolling it would destroy that call's identity). Follow the stamp
+    // before the phone fallback; with no phone there is nothing else to
+    // follow, and without this the current call's estimator draft could not
+    // link to its lead (codex P1, PR #3275).
+    const stampedLeadId = (() => {
+      try {
+        const md = typeof call?.metadata === 'string' ? JSON.parse(call.metadata) : (call?.metadata || {});
+        return md?.lead_id || null;
+      } catch { return null; }
+    })();
+    if (stampedLeadId) {
+      const byStamp = await db('leads')
+        .select(LEAD_COLS)
+        .where({ id: stampedLeadId })
+        .whereNull('deleted_at')
+        .first();
+      if (byStamp) return { lead: byStamp, forThisCall: true };
+    }
     const digits = last10(phone);
     if (!digits) return { lead: null, forThisCall: false };
     // A REUSED open lead (the processor updates it without restamping
