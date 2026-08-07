@@ -51,6 +51,12 @@ const { etDateString, etParts } = require('../../utils/datetime-et');
 // Shared classifier — kinds email-approvals already covers with per-item
 // approval emails; the digest excludes them (one decision, one notification).
 const { isApprovableKind } = require('./email-approvals');
+// The comprehensive redactor — opportunity_queue.query and draft titles can
+// carry customer-derived text (the runner documents PII in query for some
+// lanes). Over-redaction is harmless in an internal visibility email, so
+// its known title-case false positives are acceptable HERE (unlike the
+// hard publish gates, where they park legitimate drafts).
+const piiRedactor = require('./pii-redactor');
 
 const SEND_MARKER_KEY = 'parked-run-digest';
 const NOTE_EXCERPT_CHARS = 120;
@@ -98,6 +104,12 @@ function noteExcerpt(notes) {
   const clean = sanitizeNote(notes).replace(/\s+/g, ' ').trim();
   if (!clean) return null;
   return clean.length > NOTE_EXCERPT_CHARS ? `${clean.slice(0, NOTE_EXCERPT_CHARS)}…` : clean;
+}
+
+function redactForEmail(value) {
+  if (!value) return value;
+  try { return piiRedactor.redact(String(value)).text; }
+  catch { return null; } // redactor failure → omit, never emit raw
 }
 
 function draftTitle(draftPayload) {
@@ -199,12 +211,17 @@ async function loadParkedSet() {
   const active = [];
   const stale = [];
   for (const row of rows) {
+    // Approvable kinds are email-approvals' territory (per-item approval
+    // emails) — excluded BEFORE the active/stale split, so a dismissed or
+    // decided approvable run can't resurface here as a stale entry and
+    // double-notify one decision (Codex r2).
+    if (isApprovableKind(row.skip_reason)) continue;
     const item = {
       run_id: row.run_id,
       opportunity_id: row.opportunity_id,
       skip_reason: row.skip_reason || 'unspecified',
-      title: draftTitle(row.draft_payload),
-      query: row.query || null,
+      title: redactForEmail(draftTitle(row.draft_payload)),
+      query: redactForEmail(row.query || null),
       page_type: row.opportunity_id ? pageTypes.get(row.opportunity_id) || null : null,
       parked_at: row.completed_at || row.created_at || null,
       note: noteExcerpt(row.reviewer_notes),
@@ -213,10 +230,6 @@ async function loadParkedSet() {
       // Already approved in the portal — the PR poller owns it, not the
       // owner's review decision; it is not "awaiting a decision".
       if (row.skip_reason === 'astro_pr_pending_merge') continue;
-      // Approvable kinds get their own per-item approval email from
-      // email-approvals — including them here would double-notify one
-      // decision (Codex r1).
-      if (isApprovableKind(row.skip_reason)) continue;
       active.push(item);
     } else {
       // Opportunity gone or already decided (done/skipped/expired/requeued):
@@ -376,5 +389,5 @@ async function runParkedRunDigest(opts = {}) {
 module.exports = {
   runParkedRunDigest,
   loadParkedSet,
-  _private: { composeParkedRunDigest, sanitizeNote, noteExcerpt, groupBySkipReason, reviewQueueUrl, SEND_MARKER_KEY },
+  _private: { composeParkedRunDigest, sanitizeNote, noteExcerpt, groupBySkipReason, reviewQueueUrl, redactForEmail, SEND_MARKER_KEY },
 };

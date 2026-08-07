@@ -327,3 +327,28 @@ describe('Codex r1: approvable exclusion, stale once-only, Sunday actionable-onl
     expect(src).not.toMatch(/named_competitor_review\|trust_build/); // no second regex copy
   });
 });
+
+describe('Codex r2: pre-split approvable exclusion + PII redaction', () => {
+  test('a decided approvable run never lands in the stale bucket', async () => {
+    const { loadParkedSet } = require('../services/content/parked-run-digest');
+    // Source-level pin: the exclusion runs BEFORE the active/stale split.
+    const src = require('fs').readFileSync(require.resolve('../services/content/parked-run-digest'), 'utf8');
+    const splitIdx = src.indexOf("opp_status === 'pending_review'");
+    const exclIdx = src.indexOf('isApprovableKind(row.skip_reason)');
+    expect(exclIdx).toBeGreaterThan(-1);
+    expect(exclIdx).toBeLessThan(splitIdx);
+    expect(typeof loadParkedSet).toBe('function');
+  });
+
+  test('customer-derived query/title text is redacted through pii-redactor before composition', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/content/parked-run-digest'), 'utf8');
+    expect(src).toMatch(/require\('\.\/pii-redactor'\)/);
+    expect(src).toMatch(/redactForEmail\(row\.query/);
+    expect(src).toMatch(/redactForEmail\(draftTitle/);
+    const digest = require('../services/content/parked-run-digest');
+    const redactForEmail = digest._private?.redactForEmail;
+    if (redactForEmail) {
+      expect(redactForEmail('call from John Smith at 941-555-1234')).not.toMatch(/941-555-1234/);
+    }
+  });
+});
