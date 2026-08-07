@@ -3038,6 +3038,13 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(riskFree.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('the conditional idiom exempts ONLY safe/safely phrasing — harmless/risk-free block even with both parts (Codex PR r5 audit)', () => {
+    const riskFree = guardrails.evaluate({ body: 'The treatment is risk-free once dry, and your technician confirms re-entry timing.' }, {});
+    expect(riskFree.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const harmless = guardrails.evaluate({ body: 'The spray is harmless once dry, and your technician confirms the timing.' }, {});
+    expect(harmless.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('object-first and for-led drying durations block (Codex PR r3)', () => {
     const allowDry = guardrails.evaluate({ body: 'Allow the spray to dry for 30 minutes before re-entry.' }, {});
     expect(allowDry.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3381,6 +3388,11 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     // The county agency in referral copy stays legal.
     const agency = guardrails.evaluate({ body: 'For an injured raccoon, contact animal control or an FWC-licensed rehabilitator.' }, {});
     expect(agency.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    // Exclusion as an ACTION verb is the same offering (Codex PR r5 audit).
+    const excludeRaccoons = guardrails.evaluate({ body: 'We exclude raccoons from Sarasota attics.' }, {});
+    expect(excludeRaccoons.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const excludeWildlife = guardrails.evaluate({ body: 'Our technicians exclude wildlife from your attic.' }, {});
+    expect(excludeWildlife.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('informational possessives stay legal — guides/articles/advice introduce the topic, not a service (Codex PR r5)', () => {

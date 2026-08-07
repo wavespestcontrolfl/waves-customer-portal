@@ -3048,12 +3048,15 @@ function reentrySafetyClaimFinding(text) {
         if (m.index === re.lastIndex) re.lastIndex += 1;
         continue;
       }
-      // The approved CONDITIONAL idiom — only for "safe" claims (a fixed
-      // minute figure is banned even when a dry-condition is nearby). BOTH
-      // parts are required (Codex audit): the dry condition in the same
-      // sentence AND the technician-confirms-timing clause, which may sit
-      // in a neighboring sentence (±240 chars).
-      const isSafeClaim = /safe|harmless|risk/i.test(m[0]);
+      // The approved CONDITIONAL idiom — only for "safe"/"safely" phrasing
+      // (a fixed minute figure is banned even when a dry-condition is
+      // nearby, and the AGENTS.md idiom is literally "safe once dry" —
+      // "harmless"/"risk-free" claims stay blocking even with both idiom
+      // parts, Codex PR r5 audit). BOTH parts are required (Codex audit):
+      // the dry condition in the same sentence AND the
+      // technician-confirms-timing clause, which may sit in a neighboring
+      // sentence (±240 chars).
+      const isSafeClaim = /safe/i.test(m[0]);
       if (isSafeClaim) {
         const neighborhood = s.slice(Math.max(0, m.index - 240), m.index + m[0].length + 240);
         if (DRY_CONDITION_RE.test(fullSentence) && TECH_CONFIRMS_RE.test(neighborhood)) {
@@ -3124,7 +3127,7 @@ const BANNED_TOPIC_SRCS = [
   // door-to-door" — ownership expressed through the ACTION verb rather
   // than offer/provide.
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}installs?\\s+${BANNED_TOPIC_GAP_SRC}insulation\\b`,
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?|exclud(?:es?|ing))\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
   // Get-out paraphrase of wildlife removal: "we get raccoons out of your
   // attic", "our team gets squirrels out" (Codex PR r3).
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}get(?:s|ting)?\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b[^.!?\\n]{0,20}?\\bout\\b`,
