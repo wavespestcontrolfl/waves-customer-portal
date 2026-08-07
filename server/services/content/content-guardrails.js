@@ -2872,13 +2872,14 @@ function preventionPromiseFinding(text) {
 }
 
 // ── Re-entry / safety compliance language (P0 REENTRY_SAFETY_CLAIM) ────────
-// Compliance hard rule (owner, 2026-07-11 sweep): treated areas and re-entry
-// are NEVER described as "safe", and "EPA-registered/-approved" is never
-// used as a safety endorsement — the compliant phrasing is "follow the label
-// re-entry directions" / "once dry per the label". Until now this lived only
-// in the writer prompt; this is the deterministic backstop. Negated forms
-// ("no product is completely safe…") are the WANTED phrasing and stay legal
-// via the same negation guards the prevention section uses.
+// Compliance hard rule (AGENTS.md "Compliance language on any customer
+// surface"): no pesticide is ever "safe" (incl. pet-safe/family-safe
+// compounds); "EPA-registered"/"EPA-exempt" is the REQUIRED wording and
+// "EPA-approved" is banned; never a fixed re-entry/drying minute figure.
+// The APPROVED idiom is CONDITIONAL: "safe once dry" + technician confirms
+// timing — so a "safe" match governed by a once/when/after-dry condition in
+// the same sentence stays legal, as do negated disclaimers ("no product is
+// completely safe…"), via the prevention section's negation guards.
 const REENTRY_SAFETY_SRCS = [
   // "safe to re-enter / return / go back inside", "re-entry is safe",
   // "safe for kids and pets to return"
@@ -2891,10 +2892,21 @@ const REENTRY_SAFETY_SRCS = [
   "\\bsafe\\s+(?:for|around)\\s+(?:your\\s+)?(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies)|pollinators?|bees?|wildlife)\\b",
   // "pet-safe" / "child-safe" / "kid-safe" / "family-safe" compounds
   "\\b(?:pet|child|kid|family)[-\\s]safe\\b",
-  // EPA endorsement language — never used, in ANY framing (the registration
-  // is a legal status, not a safety claim, and compliance bans the phrase).
-  "\\bEPA[-\\s]?(?:registered|approved|certified)\\b",
+  // ONLY "EPA-approved" is banned — "EPA-registered"/"EPA-exempt" is the
+  // wording AGENTS.md requires.
+  "\\bEPA[-\\s]?approved\\b",
+  // Fixed re-entry/drying minute figures ("re-enter after 30 minutes",
+  // "dry within 20 minutes") — the approved idiom carries NO number; the
+  // technician confirms timing.
+  "\\b(?:re-?enter|re-?entry|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+\\d+\\s*(?:minutes?|mins?|hours?|hrs?)\\b",
+  "\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+\\d+\\s*(?:minutes?|mins?|hours?|hrs?)\\b",
 ];
+
+// The APPROVED conditional idiom: a "safe" claim explicitly conditioned on
+// dryness ("safe once dry", "safe for pets once the application dries",
+// "once dry, the lawn is safe to walk on") — condition may sit before or
+// after the match, same sentence.
+const DRY_CONDITION_RE = /\b(?:once|when|after|until)\b[^.!?\n]{0,40}?\bdr(?:y|ies|ied)\b/i;
 
 function reentrySafetyClaimFinding(text) {
   const s = String(text || '');
@@ -2911,7 +2923,18 @@ function reentrySafetyClaimFinding(text) {
         if (m.index === re.lastIndex) re.lastIndex += 1;
         continue;
       }
-      return finding('P0', 'REENTRY_SAFETY_CLAIM', `Safety/re-entry compliance violation "${m[0].trim()}" — treated areas and products are never described as "safe" and EPA registration is never cited as endorsement. Use label-directed phrasing instead ("follow the label re-entry directions", "once dry per the label").`);
+      // The approved CONDITIONAL idiom — only for "safe" claims (a fixed
+      // minute figure is banned even when a dry-condition is nearby).
+      const isSafeClaim = /safe|harmless|risk/i.test(m[0]);
+      if (isSafeClaim) {
+        const afterMatch = s.slice(m.index + m[0].length, m.index + m[0].length + 60);
+        const afterSameSentence = afterMatch.split(/[.!?\n]/)[0];
+        if (DRY_CONDITION_RE.test(sameSentence) || DRY_CONDITION_RE.test(afterSameSentence)) {
+          if (m.index === re.lastIndex) re.lastIndex += 1;
+          continue;
+        }
+      }
+      return finding('P0', 'REENTRY_SAFETY_CLAIM', `Safety/re-entry compliance violation "${m[0].trim()}" — no pesticide or treated area is ever unconditionally "safe", "EPA-approved" is never used (say EPA-registered/EPA-exempt), and re-entry/drying never carries a fixed minute figure. The approved idiom is CONDITIONAL: "safe once dry" with the technician confirming timing.`);
     }
   }
   return null;

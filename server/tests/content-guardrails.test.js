@@ -2999,9 +2999,25 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
-  test('"EPA-registered" endorsement blocks in any framing', () => {
-    const r = guardrails.evaluate({ body: 'Every product we apply is EPA-registered for residential use.' }, {});
+  test('"EPA-approved" blocks; "EPA-registered"/"EPA-exempt" is the REQUIRED wording and stays legal (AGENTS.md)', () => {
+    const approved = guardrails.evaluate({ body: 'Every product we apply is EPA-approved for residential use.' }, {});
+    expect(approved.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const registered = guardrails.evaluate({ body: 'Every product we apply is EPA-registered, and our mosquito repellent options are EPA-exempt.' }, {});
+    expect(registered.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
+  test('the approved CONDITIONAL idiom "safe once dry" stays legal — before or after the claim', () => {
+    const r = guardrails.evaluate({
+      body: 'The lawn is safe once dry, and your technician confirms timing. Once the application dries, it is safe for kids and pets to return.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
+  test('a FIXED re-entry/drying minute figure blocks even with a dry condition nearby', () => {
+    const r = guardrails.evaluate({ body: 'You can re-enter after 30 minutes once everything is dry.' }, {});
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const r2 = guardrails.evaluate({ body: 'The application dries within 20 minutes.' }, {});
+    expect(r2.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
   test('a violation in the meta description blocks too (publishable text covers meta)', () => {
