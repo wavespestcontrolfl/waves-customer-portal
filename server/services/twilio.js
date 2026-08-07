@@ -890,20 +890,12 @@ const TwilioService = {
     if (!customer) return { success: false, suppressed: true, reason: "no_customer" };
     if (!prefs?.tech_arrived) return { success: false, suppressed: true, reason: "opt_out" };
 
-    // Honor the customer's delivery-channel choice (portal Settings dropdown,
-    // notification_prefs.tech_arrived_channel). Account-level like the
-    // appointment-reminder channels; unrecognized values (or a lookup failure)
-    // normalize to 'sms' so legacy customers see no behavior change.
-    const AppointmentReminders = require("./appointment-reminders");
-    let channel = "sms";
-    try {
-      const channelRow = await AppointmentReminders.resolveChannelPrefsRow(customerId, prefs, customer);
-      channel = AppointmentReminders.apptChannel(channelRow?.tech_arrived_channel);
-    } catch (e) {
-      logger.warn(`[twilio] tech-arrived channel lookup failed for customer ${customerId}: ${e.message} — defaulting to SMS`);
-    }
+    // Arrival notices are SMS-only. The appointment.tech_arrived email twin
+    // was retired 2026-08-06 (owner call): zero sends ever in prod and every
+    // customer's tech_arrived_channel is 'sms', so email/both values in
+    // notification_prefs.tech_arrived_channel intentionally behave as sms.
     const smsAllowed = !!prefs?.sms_enabled;
-    if (channel === "sms" && !smsAllowed) return { success: false, suppressed: true, reason: "sms_disabled" };
+    if (!smsAllowed) return { success: false, suppressed: true, reason: "sms_disabled" };
 
     const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
     // Same recipient double opt-in hold as the en-route path above. When
@@ -914,7 +906,7 @@ const TwilioService = {
     const { filterRecipientsByOptin } = require("./recipient-optin");
     const unfilteredContacts = getAppointmentContacts(customer, prefs);
     const contacts = await filterRecipientsByOptin(unfilteredContacts, customer.id);
-    if (channel === "sms" && !contacts.length && !unfilteredContacts.length) {
+    if (!contacts.length && !unfilteredContacts.length) {
       return { success: false, suppressed: true, reason: "no_contacts" };
     }
 
@@ -923,10 +915,6 @@ const TwilioService = {
       sendCustomerMessage,
     } = require("./messaging/send-customer-message");
     const customerTechName = formatTechnicianForCustomer({ name: techName });
-    // The SMS leg exists when texting is enabled and there is someone to text.
-    // For email/both this decides whether an SMS miss is retryable ("the leg
-    // existed and transiently failed") or deterministic ("there was no leg").
-    const smsLegAvailable = smsAllowed && contacts.length > 0;
     const attemptSmsLegs = async () => {
       for (const contact of contacts) {
         // Service-contact slots store a full name (e.g. "Rhonda Whitney"); the
@@ -966,69 +954,15 @@ const TwilioService = {
       }
       return results.some((r) => r?.sent);
     };
-    const sendArrivedEmail = async () => {
-      try {
-        const AppointmentEmail = require("./appointment-email");
-        return await AppointmentEmail.sendTechArrivedEmail({
-          customerId,
-          scheduledServiceId,
-          techName: customerTechName,
-          idempotencyKey: `appointment.tech_arrived:${scheduledServiceId || customerId}`,
-        });
-      } catch (e) {
-        logger.warn(`[twilio] tech-arrived email send failed for customer ${customerId}: ${e.message}`);
-        return { ok: false, error: e.message };
-      }
-    };
-    // Same suppressed-vs-retryable contract as the SMS-only path, extended to
-    // the email leg: a deterministic email miss (no address on file /
-    // suppressed) can't be fixed by retrying, so with no SMS leg left the
-    // arrival is HANDLED; a transient email error releases the guard so a
-    // later signal can retry.
-    const classifyMiss = (emailRes) => {
-      const emailTransient = emailRes ? !(emailRes.ok || emailRes.skipped || emailRes.blocked) : false;
-      const smsRetryable = smsLegAvailable && (results.length === 0 || results.some((r) => r?.retryable));
-      if (emailTransient || smsRetryable) return { success: false, results };
-      return { success: false, suppressed: true, reason: "blocked", results };
-    };
 
-    // email — email first; when no usable email exists fall back to SMS so
-    // the arrival notice still lands.
-    if (channel === "email") {
-      const emailRes = await sendArrivedEmail();
-      if (emailRes?.ok) return { success: true, results, emailSent: true };
-      if (smsLegAvailable && (await attemptSmsLegs())) return { success: true, results };
-      // SMS leg absent ONLY because the hold emptied a non-empty list: stay
-      // retryable — a YES mid-job restores the SMS leg (#2956 r11).
-      if (!contacts.length && unfilteredContacts.length) return { success: false, results };
-      return classifyMiss(emailRes);
-    }
-
-    // both — SMS and email; success when either lands. Exception: when the
-    // opt-in hold emptied a NON-empty SMS list, an email success alone must
-    // stay a retryable miss (idempotent email dedupes repeats) so a YES
-    // while the tech is on-property still gets the SMS (#2956 r10).
-    if (channel === "both") {
-      const smsDelivered = smsLegAvailable ? await attemptSmsLegs() : false;
-      const emailRes = await sendArrivedEmail();
-      const heldAllSms = !contacts.length && unfilteredContacts.length;
-      if (smsDelivered || (emailRes?.ok && !heldAllSms)) return { success: true, results, emailSent: !!emailRes?.ok };
-      if (heldAllSms) return { success: false, results, emailSent: !!emailRes?.ok };
-      return classifyMiss(emailRes);
-    }
-
-    // sms (default) — legacy behavior, plus: when the opt-in hold emptied a
-    // NON-empty recipient list there is no SMS leg at all; send the email
-    // fallback and classify from it so the arrival isn't retried as the
-    // same no-op forever (#2956 codex r6).
-    if (channel === "sms" && !contacts.length && unfilteredContacts.length) {
-      const emailRes = await sendArrivedEmail();
-      // Opt-in hold is TRANSIENT (the recipient may still reply YES): even
-      // after a successful email, return a retryable miss so the arrival
-      // guard is released and a later same-job signal can text the newly
-      // confirmed recipient — the email's idempotencyKey dedupes repeats
-      // (#2956 codex r8/r9).
-      return { success: false, results, emailSent: !!emailRes?.ok };
+    // Opt-in hold emptied a NON-empty recipient list: there is no SMS leg at
+    // all right now, but the hold is TRANSIENT (the recipient may still reply
+    // YES) — return a retryable miss so the arrival guard is released and a
+    // later same-job signal can text the newly confirmed recipient
+    // (#2956 codex r8/r9; the email fallback that used to fire here was
+    // retired with the appointment.tech_arrived email, 2026-08-06).
+    if (!contacts.length && unfilteredContacts.length) {
+      return { success: false, results };
     }
     if (await attemptSmsLegs()) return { success: true, results };
 
