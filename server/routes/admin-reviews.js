@@ -168,11 +168,15 @@ router.get('/', async (req, res, next) => {
         db.raw('COUNT(*) as total'),
         db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
       ).first(),
-      // Stamped (removed-from-Google) rows are excluded from the actionable
-      // reply metrics: every reply path rejects them, so counting them would
-      // permanently degrade the No Portal Reply card and response rate.
+      // Stamped (removed-from-Google) rows are excluded from BOTH reply
+      // metrics: every reply path rejects them, so counting them in
+      // unresponded would permanently degrade the No Portal Reply card —
+      // and counting them in responded while excluding them from
+      // unresponded would inflate the responded/(responded+unresponded)
+      // rate whenever replied reviews get removed. Same live population on
+      // both sides keeps the ratio honest.
       reviewsOnly.clone().modify(whereNeedsRealReply).modify(whereNotDismissed).whereNull('missing_since').count('* as count').first(),
-      reviewsOnly.clone().modify(whereHasRealReply).count('* as count').first(),
+      reviewsOnly.clone().modify(whereHasRealReply).whereNull('missing_since').count('* as count').first(),
       reviewsOnly.clone().where('review_created_at', '>=', startOfETMonth().toISOString()).count('* as count').first(),
       reviewsOnly.clone().select('location_id')
         .count('* as count')

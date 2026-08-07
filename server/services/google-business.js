@@ -681,14 +681,18 @@ class GoogleBusinessService {
         // same-content merge above can be a different reviewer; clearing a
         // removal stamp on that evidence would revive the removed review for
         // the testimonial/marketing surfaces. The Places `time` of an
-        // unedited review is its creation time — require it to match the
-        // stored review_created_at (24h tolerance, the same convention as
-        // the GBP reply resolver) before clearing; otherwise keep the stamp
-        // and let the authoritative GBP feed resolve it on recovery.
-        const placesMs = review.time ? review.time * 1000 : null;
-        const createdMs = existing.review_created_at ? new Date(existing.review_created_at).getTime() : null;
+        // unedited review IS its creation instant — require exact-second
+        // equality with the stored review_created_at (a tolerance window,
+        // however small, readmits a copycat posted near the original's
+        // creation time). If the timestamps disagree, keep the stamp; a
+        // genuine reinstatement still clears on the next authoritative GBP
+        // pull, so failing closed here costs only the outage window.
+        const placesSec = review.time ? Math.floor(review.time) : null;
+        const createdSec = existing.review_created_at
+          ? Math.floor(new Date(existing.review_created_at).getTime() / 1000)
+          : null;
         const identityCorroborated = !existing.missing_since
-          || (placesMs && createdMs && Math.abs(placesMs - createdMs) <= 24 * 60 * 60 * 1000);
+          || (placesSec != null && createdSec != null && placesSec === createdSec);
         const upd = {
           star_rating: review.rating || 0,
           review_text: review.text || null,

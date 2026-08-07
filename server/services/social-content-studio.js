@@ -2048,14 +2048,6 @@ async function createReviewGraphic(input) {
   if (!imageUrl) {
     throw new Error('Review graphic image could not be rendered (check S3/CDN config); refusing to create a graphic without an image');
   }
-  // The render/upload above can take seconds — long enough for the hourly
-  // sync to stamp the review removed. Re-read before persisting so the race
-  // can't store (or, via input.status, immediately approve) a removed
-  // testimonial that the eligibility check above passed moments earlier.
-  const fresh = await db('google_reviews').where({ id: input.googleReviewId }).first();
-  if (!fresh || fresh.missing_since) {
-    throw new Error('Review was removed from Google while the graphic rendered — refusing to persist it');
-  }
   const row = {
     google_review_id: candidate.googleReviewId,
     status: input.status || 'draft',
@@ -2080,11 +2072,27 @@ async function createReviewGraphic(input) {
   };
   if (await hasColumn('review_graphics', 'image_url')) row.image_url = imageUrl || null;
 
-  const [graphic] = await db('review_graphics')
-    .insert({ ...row, created_at: new Date() })
-    .onConflict(['google_review_id', 'template_key'])
-    .merge(row)
-    .returning('*');
+  // The render/upload above can take seconds — long enough for the hourly
+  // sync to stamp the review removed. Re-check and persist ATOMICALLY: the
+  // FOR UPDATE lock on the source row serializes against the sync's stamping
+  // update, so a stamp committed first is seen here (abort), and a stamp
+  // committed after waits for this transaction — the draft it stamps behind
+  // is then caught by the approve endpoints' liveness gates.
+  const graphic = await db.transaction(async (trx) => {
+    const fresh = await trx('google_reviews')
+      .where({ id: input.googleReviewId })
+      .forUpdate()
+      .first();
+    if (!fresh || fresh.missing_since) {
+      throw new Error('Review was removed from Google while the graphic rendered — refusing to persist it');
+    }
+    const [saved] = await trx('review_graphics')
+      .insert({ ...row, created_at: new Date() })
+      .onConflict(['google_review_id', 'template_key'])
+      .merge(row)
+      .returning('*');
+    return saved;
+  });
   return { ...graphic, image_url: graphic.image_url || imageUrl || null };
 }
 

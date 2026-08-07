@@ -171,26 +171,25 @@ async function executeReviewTool(toolName, input) {
 // ─── IMPLEMENTATIONS ────────────────────────────────────────────
 
 async function getReviewStats() {
-  const reviews = db('google_reviews').where('reviewer_name', '!=', '_stats');
+  // Live rows only, across EVERY aggregate: this tool answers "what's our
+  // Google rating / review count right now", and rows Google has removed
+  // (missing_since stamped) are retained history, not current state — they
+  // stay visible in the Reviews page's dedicated Removed view instead.
+  const reviews = db('google_reviews')
+    .where('reviewer_name', '!=', '_stats')
+    .whereNull('missing_since');
 
-  const [totals, liveTotal, unresponded, thisMonth, perLocation, breakdown] = await Promise.all([
+  const [totals, unresponded, thisMonth, perLocation, breakdown] = await Promise.all([
     reviews.clone().select(db.raw('COUNT(*) as total'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating')).first(),
-    // Response-rate population: live rows only. Stamped (removed) rows are
-    // excluded from unresponded below, so leaving them in the denominator
-    // would count every removed unreplied review as "responded".
-    reviews.clone().whereNull('missing_since').count('* as count').first(),
-    // Stamped (removed) rows are rejected by every reply path — they are not
-    // actionable, so they must not degrade the unresponded count either.
-    reviews.clone().whereNotNull('review_text').modify(whereNeedsRealReply).whereNull('missing_since').count('* as count').first(),
+    reviews.clone().whereNotNull('review_text').modify(whereNeedsRealReply).count('* as count').first(),
     reviews.clone().where('review_created_at', '>=', startOfETMonth().toISOString()).count('* as count').first(),
     reviews.clone().select('location_id', db.raw('COUNT(*) as count'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating')).groupBy('location_id'),
     reviews.clone().select('star_rating', db.raw('COUNT(*) as count')).groupBy('star_rating').orderBy('star_rating', 'desc'),
   ]);
 
   const total = parseInt(totals?.total || 0);
-  const live = parseInt(liveTotal?.count || 0);
-  const responded = live - parseInt(unresponded?.count || 0);
-  const responseRate = live > 0 ? Math.round(responded / live * 100) : 0;
+  const responded = total - parseInt(unresponded?.count || 0);
+  const responseRate = total > 0 ? Math.round(responded / total * 100) : 0;
 
   const starBreakdown = {};
   breakdown.forEach(b => { starBreakdown[b.star_rating] = parseInt(b.count); });
