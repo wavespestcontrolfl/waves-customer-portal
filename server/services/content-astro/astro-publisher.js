@@ -757,14 +757,25 @@ async function generateHeroBuffer(post) {
     keyword: post.keyword,
     mode: 'blog-hero',
   });
-  const img = await fetchImageBuffer(gen.dataUrl);
-  if (!img?.buffer) throw new Error('hero image generation produced no usable image');
+  let img;
+  try {
+    img = await fetchImageBuffer(gen.dataUrl);
+    if (!img?.buffer) throw new Error('hero image generation produced no usable image');
+  } catch (err) {
+    // Post-provider failure: the generator SUCCEEDED, so carry its provider
+    // chain onto the thrown error — describeHeroFailure reads err.attempts,
+    // and this failure class is exactly what the full diagnosis exists for
+    // (Codex r1).
+    if (!err.attempts && Array.isArray(gen.attempts)) err.attempts = gen.attempts;
+    throw err;
+  }
   logger.info(`[astro-publisher] generated hero image for ${post.slug || post.title} via ${gen.model}`);
   // Carry the generator's alt (derived from the actual generation prompt's
   // subject/setting) so callers can overwrite any pre-written
   // hero_image_alt — alt authored BEFORE the image exists routinely
-  // mismatches what was generated.
-  return { ...img, alt: gen.alt || null };
+  // mismatches what was generated. `attempts` rides along so downstream
+  // post-generation failures (e.g. Sharp compression) can attach it too.
+  return { ...img, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null };
 }
 
 // ── Main publish ───────────────────────────────────────────────────
@@ -1426,7 +1437,15 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
       keyword: frontmatter.primary_keyword,
       slug,
     });
-    const buffer = await compressToWebp(img.buffer);
+    let buffer;
+    try {
+      buffer = await compressToWebp(img.buffer);
+    } catch (err) {
+      // Same post-provider contract as generateHeroBuffer: compression
+      // failures keep the successful provider chain for the diagnosis.
+      if (!err.attempts && Array.isArray(img.attempts)) err.attempts = img.attempts;
+      throw err;
+    }
     generated = {
       src: `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`,
       repoPath: `${ASTRO_HERO_DIR}/${slug}/hero.webp`,
@@ -1449,8 +1468,16 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
     if (fallback) {
       logger.warn(`[astro-publisher] hero generation failed for ${slug} (${describeHeroFailure(err)}) — publishing with committed default hero ${fallback}`);
       // Reuse shape (buffer:null): the asset is already committed on main.
-      // No generation-derived alt exists; the caller keeps the draft alt.
-      return { src: fallback, buffer: null };
+      // Supply a GENERIC alt describing the fallback asset — without one the
+      // caller stamps the agent's subject-specific draft alt over an image
+      // that was never generated (Codex r1: a category/site-wide default can
+      // depict something entirely different).
+      const catLabel = String(frontmatter.category || '').trim().replace(/-/g, ' ');
+      return {
+        src: fallback,
+        buffer: null,
+        alt: catLabel ? `Illustrative ${catLabel} article header image` : 'Illustrative article header image',
+      };
     }
     const heroErr = new Error(`autonomous blog hero image generation failed for ${slug}: ${describeHeroFailure(err)}`);
     heroErr.code = 'BLOG_HERO_IMAGE_FAILED';
@@ -1757,8 +1784,9 @@ async function publishMetadataRewrite(draft, brief = {}) {
   // Legacy (pre-schema-v2) live posts may lack schema-required post_type /
   // service_areas_tag entirely — backfill the absent ones deterministically
   // instead of hard-failing a rewrite that never touched them.
+  let backfilledFields = [];
   if (isBlogTarget(filePath)) {
-    backfillLegacyBlogRequiredFields(nextFrontmatter, brief);
+    backfilledFields = backfillLegacyBlogRequiredFields(nextFrontmatter, brief);
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 
@@ -1799,6 +1827,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
       titleField,
       metaField,
       brief,
+      backfilledFields,
     }),
   });
   await requestCodexReview({
@@ -1902,8 +1931,9 @@ async function publishRefresh(draft, brief = {}) {
   // Legacy (pre-schema-v2) live posts may lack schema-required post_type /
   // service_areas_tag entirely — backfill the absent ones deterministically
   // instead of hard-failing a refresh that never touched them.
+  let backfilledFields = [];
   if (isBlogTarget(filePath)) {
-    backfillLegacyBlogRequiredFields(nextFrontmatter, brief);
+    backfilledFields = backfillLegacyBlogRequiredFields(nextFrontmatter, brief);
     assertValidBlogFrontmatter(nextFrontmatter);
   }
 
@@ -1937,7 +1967,7 @@ async function publishRefresh(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
-    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody, brief }),
+    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody, brief, backfilledFields }),
   });
   await requestCodexReview({
     pr,
@@ -2460,7 +2490,7 @@ function buildDraftPrBody({ frontmatter, slug, branch, content, brief }) {
   ].join('\n');
 }
 
-function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after = {}, titleField = 'title', metaField = 'meta_description', brief = {} }) {
+function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after = {}, titleField = 'title', metaField = 'meta_description', brief = {}, backfilledFields = [] }) {
   return [
     `**Autonomous title/meta rewrite**`,
     ``,
@@ -2477,7 +2507,11 @@ function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after =
     `| ${titleField} | ${markdownTableCell(before[titleField])} | ${markdownTableCell(after[titleField])} |`,
     `| ${metaField} | ${markdownTableCell(before[metaField])} | ${markdownTableCell(after[metaField])} |`,
     ``,
-    `Body, slug, canonical, and schema are intentionally unchanged.`,
+    ...(backfilledFields.length ? [
+      `**Backfilled schema-required fields (inferred — legacy pre-schema-v2 post):** ${backfilledFields.map((f) => `\`${f}\``).join(', ')}. Review the inferred values in the diff.`,
+      ``,
+    ] : []),
+    `Body, slug, canonical, and schema are intentionally unchanged${backfilledFields.length ? ' (other than the backfilled fields above)' : ''}.`,
     ``,
     `Generated by waves-customer-portal autonomous runner. Merge after review.`,
     ``,
@@ -2485,7 +2519,7 @@ function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after =
   ].join('\n');
 }
 
-function buildRefreshPrBody({ filePath, targetUrl, branch, before = {}, after = {}, oldBody = '', newBody = '', brief = {} }) {
+function buildRefreshPrBody({ filePath, targetUrl, branch, before = {}, after = {}, oldBody = '', newBody = '', brief = {}, backfilledFields = [] }) {
   const oldWords = String(oldBody).split(/\s+/).filter(Boolean).length;
   const newWords = String(newBody).split(/\s+/).filter(Boolean).length;
   const titleField = after.metaTitle !== undefined ? 'metaTitle' : 'title';
@@ -2506,7 +2540,11 @@ function buildRefreshPrBody({ filePath, targetUrl, branch, before = {}, after = 
     `| ${titleField} | ${markdownTableCell(before[titleField])} | ${markdownTableCell(after[titleField])} |`,
     `| ${metaField} | ${markdownTableCell(before[metaField])} | ${markdownTableCell(after[metaField])} |`,
     ``,
-    `**Frozen (unchanged):** canonical, slug, schema, domains, trackingNumberKey, cityPhone, pageType, category, robots, ogImage — all preserved from the live page. Only body + meta + freshness date changed.`,
+    ...(backfilledFields.length ? [
+      `**Backfilled schema-required fields (inferred — legacy pre-schema-v2 post):** ${backfilledFields.map((f) => `\`${f}\``).join(', ')}. Review the inferred values in the diff.`,
+      ``,
+    ] : []),
+    `**Frozen (unchanged):** canonical, slug, schema, domains, trackingNumberKey, cityPhone, pageType, category, robots, ogImage — all preserved from the live page. Only body + meta + freshness date${backfilledFields.length ? ' + the backfilled fields above' : ''} changed.`,
     ``,
     `Generated by waves-customer-portal autonomous runner. Merge after review.`,
     ``,
@@ -2993,6 +3031,7 @@ module.exports = {
     normalizeAuthorBlock,
     buildDraftPrBody,
     buildMetadataPrBody,
+    buildRefreshPrBody,
     buildSeoReviewSection,
     urlToAstroPath,
     publicPathFromAstroFile,

@@ -3424,9 +3424,13 @@ const PINNED_SLUG_PATTERN = /^\/[a-z0-9-]+(\/[a-z0-9-]+)*\/$/;
 function applyOperatorSlugRepair(brief, draft) {
   const mismatch = operatorSlugMismatch(brief, draft);
   if (!mismatch) return null;
-  const pinned = normalizeSlugPath(mismatch.expected_slug);
+  // The pin is validated RAW (trim only) — normalizing first would let a
+  // malformed pin ("Fall-Lawn", missing boundary slashes) silently become a
+  // schema-valid URL the operator never wrote. A shape error in the pin is
+  // an operator input error: park via the old remedy, never guess (Codex r1).
+  const pinned = String(mismatch.expected_slug || '').trim();
   if (!PINNED_SLUG_PATTERN.test(pinned)) {
-    return { ok: false, reason: `pinned slug "${mismatch.expected_slug}" is not a valid blog slug path`, mismatch };
+    return { ok: false, reason: `pinned slug "${mismatch.expected_slug}" is not a valid blog slug path (pin must be exact: /segment/…/ lowercase)`, mismatch };
   }
   if (!draft || typeof draft !== 'object' || !draft.frontmatter || typeof draft.frontmatter !== 'object' || Array.isArray(draft.frontmatter)) {
     return { ok: false, reason: 'draft has no frontmatter object to repair', mismatch };
@@ -3446,18 +3450,31 @@ function applyOperatorSlugRepair(brief, draft) {
 
   const newCanonical = `${hub}${pinned}`;
   const oldCanonical = typeof draft.frontmatter.canonical === 'string' ? draft.frontmatter.canonical.trim() : '';
-  if (oldCanonical !== newCanonical) {
+  // Only slug-derived canonicals are repaired. An absolute canonical on a
+  // FOREIGN host is exactly the unsafe input the publisher's off-site
+  // canonical guard must see and park — repairing it here would mask it and
+  // let the run publish (Codex r1).
+  let canonicalIsForeign = false;
+  if (oldCanonical) {
+    try { canonicalIsForeign = new URL(oldCanonical).host !== new URL(hub).host; } catch { canonicalIsForeign = false; }
+  }
+  if (!canonicalIsForeign && oldCanonical !== newCanonical) {
     draft.frontmatter.canonical = newCanonical;
     repair.canonical_rewritten = true;
   }
 
-  // Self-referencing links the writer built on its own (wrong) slug. The
-  // normalized path includes both slashes, so a match in prose is a link
-  // target, not a word; replacement is an exact-path swap, never a rewrite
-  // of surrounding content.
+  // Self-referencing links the writer built on its own (wrong) slug. Only
+  // EXACT self-link destinations are rewritten (Codex r1): the match must
+  // start a path (string start / whitespace / ( / " / ' / ` / = / < / , or
+  // the hub origin) and end at the path's end (no further segment chars) — a
+  // foreign-host citation like https://source.example/old-slug/report or a
+  // longer internal route /old-slug/archive/ is someone else's URL, not a
+  // self-link, and survives verbatim.
   if (oldSlugPath && oldSlugPath !== pinned && typeof draft.body === 'string' && draft.body.includes(oldSlugPath)) {
-    const occurrences = draft.body.split(oldSlugPath).length - 1;
-    draft.body = draft.body.split(oldSlugPath).join(pinned);
+    const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const selfLinkRe = new RegExp(`(${escapeRe(hub)}|[\\s("'=<,\`]|^)${escapeRe(oldSlugPath)}(?![a-z0-9-])`, 'g');
+    let occurrences = 0;
+    draft.body = draft.body.replace(selfLinkRe, (m, pre) => { occurrences += 1; return `${pre}${pinned}`; });
     repair.body_self_link_rewrites = occurrences;
   }
 

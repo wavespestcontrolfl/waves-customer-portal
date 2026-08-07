@@ -2276,7 +2276,10 @@ describe('resolveAutonomousHero fallback (hero is schema-required — default as
       frontmatter, slug: 'lawn-care/fall-lawn-mistakes-swfl', existingFile: null,
     });
 
-    expect(hero).toEqual({ src: '/images/blog/defaults/lawn-care/hero.webp', buffer: null });
+    // The fallback carries a GENERIC alt — the caller must never stamp the
+    // agent's subject-specific draft alt over an image that was never
+    // generated (Codex r1).
+    expect(hero).toEqual({ src: '/images/blog/defaults/lawn-care/hero.webp', buffer: null, alt: 'Illustrative lawn care article header image' });
   });
 
   test('falls back to the site-wide default when no category default exists', async () => {
@@ -2289,7 +2292,34 @@ describe('resolveAutonomousHero fallback (hero is schema-required — default as
       frontmatter, slug: 'lawn-care/fall-lawn-mistakes-swfl', existingFile: null,
     });
 
-    expect(hero).toEqual({ src: '/images/blog/defaults/hero.webp', buffer: null });
+    expect(hero).toEqual({ src: '/images/blog/defaults/hero.webp', buffer: null, alt: 'Illustrative lawn care article header image' });
+  });
+
+  test('post-provider failure (generation succeeded, decode/compress failed) still carries the provider chain on the thrown error (Codex r1)', async () => {
+    const attempts = [{ provider: 'gpt-image-2', result: { dataUrl: 'ok' } }];
+    imageGenerator.generate.mockResolvedValue({
+      dataUrl: 'data:image/png;base64,bm90IGFuIGltYWdl', // valid base64, NOT an image — sharp throws in compressToWebp
+      mimeType: 'image/png',
+      model: 'gpt-image-2',
+      attempts,
+      alt: 'a lawn',
+    });
+    gh.getFile.mockResolvedValue(null); // no committed default → parks
+
+    let thrown;
+    try {
+      await AstroPublisher._internals.resolveAutonomousHero({
+        frontmatter, slug: 'lawn-care/fall-lawn-mistakes-swfl', existingFile: null,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeTruthy();
+    expect(thrown.code).toBe('BLOG_HERO_IMAGE_FAILED');
+    // describeHeroFailure reads attempts off the cause chain — the provider
+    // history from the SUCCESSFUL generate call must survive the
+    // post-provider throw.
+    expect(thrown.message).toContain('providers: gpt-image-2=ok');
   });
 
   test('with NO committed default, still parks — and the failure message carries the FULL root cause (error class + provider attempts)', async () => {
@@ -3091,3 +3121,31 @@ describe('latestDeploymentForBranch pagination (astro #396 wedge, 2026-07-22)', 
       }],
     })).toMatchObject({ clean: false });
   });
+
+describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () => {
+  const base = {
+    filePath: 'src/content/blog/lawn-care/old-post.mdx',
+    targetUrl: 'https://www.wavespestcontrol.com/lawn-care/old-post/',
+    branch: 'content/autonomous-x',
+    before: { title: 'Old', meta_description: 'Old meta' },
+    after: { title: 'New', meta_description: 'New meta' },
+    brief: { action_type: 'rewrite_title_meta' },
+  };
+
+  test('metadata PR body lists inferred fields when backfilled, stays silent otherwise', () => {
+    const withFields = AstroPublisher._internals.buildMetadataPrBody({ ...base, backfilledFields: ['post_type', 'service_areas_tag'] });
+    expect(withFields).toContain('Backfilled schema-required fields');
+    expect(withFields).toContain('`post_type`');
+    expect(withFields).toContain('`service_areas_tag`');
+    const without = AstroPublisher._internals.buildMetadataPrBody(base);
+    expect(without).not.toContain('Backfilled schema-required fields');
+  });
+
+  test('refresh PR body lists inferred fields when backfilled, stays silent otherwise', () => {
+    const withFields = AstroPublisher._internals.buildRefreshPrBody({ ...base, oldBody: 'a b', newBody: 'a b c', backfilledFields: ['post_type'] });
+    expect(withFields).toContain('Backfilled schema-required fields');
+    expect(withFields).toContain('`post_type`');
+    const without = AstroPublisher._internals.buildRefreshPrBody({ ...base, oldBody: 'a b', newBody: 'a b c' });
+    expect(without).not.toContain('Backfilled schema-required fields');
+  });
+});

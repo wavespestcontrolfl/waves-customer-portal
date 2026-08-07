@@ -822,6 +822,48 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     }
   });
 
+  test('a pin malformed only by casing or missing boundary slashes PARKS — never silently normalized into a URL the operator did not write (Codex r1)', () => {
+    for (const badPin of ['/Lawn-Care/Fall-Lawn-Mistakes-Swfl/', 'lawn-care/fall-lawn-mistakes-swfl', '/lawn-care/fall-lawn-mistakes-swfl']) {
+      const draft = driftedDraft();
+      const before = JSON.stringify(draft);
+      const result = applyOperatorSlugRepair(operatorBrief(badPin), draft);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/not a valid blog slug path/);
+      expect(JSON.stringify(draft)).toBe(before);
+    }
+  });
+
+  test('slug repair rewrites ONLY exact self-link destinations — foreign-host citations and longer internal routes survive verbatim (Codex r1)', () => {
+    const draft = driftedDraft({
+      body: [
+        'See [our checklist](/fall-lawn-mistakes-southwest-florida/) and',
+        '[the absolute form](https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/).',
+        'A citation: [report](https://source.example/fall-lawn-mistakes-southwest-florida/report) and',
+        '[an exact foreign path](https://source.example/fall-lawn-mistakes-southwest-florida/) plus',
+        '[a longer internal route](/fall-lawn-mistakes-southwest-florida/archive/).',
+      ].join(' '),
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(result.repair.body_self_link_rewrites).toBe(2);
+    expect(draft.body).toContain(`(${PINNED})`);
+    expect(draft.body).toContain(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(draft.body).toContain('https://source.example/fall-lawn-mistakes-southwest-florida/report');
+    expect(draft.body).toContain('[an exact foreign path](https://source.example/fall-lawn-mistakes-southwest-florida/)');
+    expect(draft.body).toContain('(/fall-lawn-mistakes-southwest-florida/archive/)');
+  });
+
+  test('an off-site canonical is PRESERVED for the publisher guard — repair must not mask the unsafe input (Codex r1)', () => {
+    const draft = driftedDraft({
+      frontmatter: { canonical: 'https://competitor.example/their-page/' },
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+    expect(draft.frontmatter.canonical).toBe('https://competitor.example/their-page/');
+    expect(result.repair.canonical_rewritten).toBe(false);
+  });
+
   test('a draft without a frontmatter object is NOT repairable (cannot publish anyway)', () => {
     const draft = { type: 'draft', body: 'body only' };
     const result = applyOperatorSlugRepair(operatorBrief(), draft);
