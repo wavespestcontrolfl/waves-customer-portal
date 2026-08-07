@@ -2189,7 +2189,7 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 //   and the booking-conversion ownership guard would then (rightly) refuse to
 //   close it — stranding this caller's booked deal with no convertible lead.
 //   A foreign-owned lead is invisible here; the caller gets a fresh row.
-async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly }) {
+async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null }) {
   // The email key must be a REAL email, validated here and not just at the
   // workable-signal gate: customer-attached calls reach this lookup without
   // passing hasWorkableLeadSignal, so a phone-less call carrying a malformed
@@ -2223,6 +2223,20 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   }
   // Phone identity is strong — the newest match wins outright.
   if (phone) return query.orderBy('created_at', 'desc').first();
+  // A retry of THIS call (extraction_failed reprocessing) must reuse the
+  // lead an earlier attempt already inserted: the call SID is the strongest
+  // identity there is and needs no name corroboration — without this, a
+  // phone-less name-less caller's every retry minted and notified another
+  // lead for the identical call (codex P2 r8). Checked on the phone-less
+  // path only; a phone match already finds its own prior lead.
+  if (callSid) {
+    const own = await database('leads')
+      .whereNull('deleted_at')
+      .where('twilio_call_sid', callSid)
+      .orderBy('created_at', 'desc')
+      .first();
+    if (own) return own;
+  }
   // Email-matched candidates need POSITIVE identity corroboration, not just
   // absence of conflict: two different anonymous callers can share one inbox
   // (or a transcription collision can fabricate the overlap), and reusing
@@ -7328,7 +7342,14 @@ const CallRecordingProcessor = {
           customerId,
           workableUnnamedLead,
           unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
+          callSid: call.twilio_call_sid || null,
         });
+        // Same-call reuse (retry reprocessing found the lead THIS call's
+        // earlier attempt inserted) is strong identity — the weak-identity
+        // write revalidation below must not apply its email/name predicates
+        // to it (a name-less caller's own row would fail them and re-mint).
+        const sameCallLeadReuse = !!(existingLead && call.twilio_call_sid
+          && existingLead.twilio_call_sid === call.twilio_call_sid);
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -7416,6 +7437,10 @@ const CallRecordingProcessor = {
         // stamp.
         let droppedMidIntake = false;
         let droppedCallSeconds = 0;
+        // Raw detector verdict BEFORE the reused-lead-address suppression —
+        // the claim-race recovery below needs it to re-judge suppression
+        // against the replacement row (codex P2 r8).
+        let droppedDetectorFired = false;
         if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam
           && !isOutboundCall(call) && transcription) {
           try {
@@ -7429,12 +7454,13 @@ const CallRecordingProcessor = {
             // missing-address drop; don't card it or text for information
             // already on file (codex P1).
             const leadAddressOnFile = !!String(existingLead?.address || '').trim();
-            droppedMidIntake = !leadAddressOnFile && DroppedCallSmsDetect.detectDroppedMidIntake({
+            droppedDetectorFired = DroppedCallSmsDetect.detectDroppedMidIntake({
               durationSeconds: droppedCallSeconds,
               transcription,
               extracted,
               v2Extraction: v2Result?.status === 'valid' ? v2Result.extraction : null,
             });
+            droppedMidIntake = !leadAddressOnFile && droppedDetectorFired;
             // A PRE-EXISTING linked customer whose record already carries the
             // service address is not missing anything — the card would
             // falsely claim so (codex P2). One read, only when detection
@@ -7686,7 +7712,7 @@ const CallRecordingProcessor = {
             if (customerId) {
               enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
             }
-            if (!phone && existingLead) {
+            if (!phone && existingLead && !sameCallLeadReuse) {
               // Email-matched REUSE revalidation (phone-less caller): weak
               // identity, so the write repeats the FULL lookup eligibility —
               // email + not-deleted + status/conversion + name corroboration
@@ -7782,6 +7808,29 @@ const CallRecordingProcessor = {
                 // notifyNewCallLead never throws, so a notify failure cannot
                 // be mistaken for a mint failure by the catch below.
                 await notifyNewCallLead({ leadId, phone: null, extracted, leadSourceId, leadSourceRow, call });
+                // The dropped-call suppression above was judged against the
+                // REPLACED candidate's on-file address; the recovery row
+                // carries only this call's extraction, which the detector
+                // already found address-less. Revive detection here — inside
+                // the loop — so the pass-2 extracted_data, the triage note,
+                // and the phase-2 card/text all see it (codex P2 r8). The
+                // pre-existing-customer suppression still stands and is
+                // re-checked (the read never throws — a throw here would be
+                // misread as a mint failure).
+                if (droppedDetectorFired && !droppedMidIntake) {
+                  let reviveDropped = true;
+                  if (customerId && !createdCustomerFromCall) {
+                    const custAddr = await db('customers').where({ id: customerId })
+                      .first('address_line1').catch(() => null);
+                    if (String(custAddr?.address_line1 || '').trim()) reviveDropped = false;
+                  }
+                  if (reviveDropped) {
+                    droppedMidIntake = true;
+                    if (!bridgeNeedsConfirmation.includes('call_dropped_mid_intake')) {
+                      bridgeNeedsConfirmation.push('call_dropped_mid_intake');
+                    }
+                  }
+                }
                 continue;
               } catch (raceErr) {
                 // Sanitized code only — a Postgres/Knex error message can

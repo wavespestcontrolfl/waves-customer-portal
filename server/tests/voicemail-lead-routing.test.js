@@ -288,6 +288,24 @@ describe('findReusableCallLead identity keys', () => {
     })).toEqual({ id: 'lead-jeff', first_name: 'Jeff', last_name: 'Brooks' });
   });
 
+  test('a retry of the SAME call reuses its own lead by call SID — no name corroboration needed', async () => {
+    // extraction_failed reprocessing: the earlier attempt already inserted
+    // this call's lead. Same-SID reuse is the strongest identity there is —
+    // without it, a phone-less name-less caller minted (and notified) a new
+    // duplicate on every retry.
+    const own = { id: 'lead-own', first_name: null, last_name: null, twilio_call_sid: 'CA-retry-1' };
+    const db = makeDb(own);
+    expect(await findReusableCallLead(db, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: null,
+      lastName: null,
+      workableUnnamedLead: true,
+      callSid: 'CA-retry-1',
+    })).toEqual(own);
+    expect(db.calls.some(([m, a]) => m === 'where' && a[0] === 'twilio_call_sid' && a[1] === 'CA-retry-1')).toBe(true);
+  });
+
   test('name conflict never blocks a PHONE match — corroboration is email-path only', async () => {
     const db = makeDb({ id: 'lead-7', first_name: 'Maria', last_name: 'Lopez' });
     expect(await findReusableCallLead(db, {
