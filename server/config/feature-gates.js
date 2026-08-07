@@ -36,6 +36,7 @@
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
+ *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -1172,6 +1173,18 @@ const gates = {
   // promises and pauses redemption. Kill switch: unset or any non-'true'
   // value.
   inspectionCredit: process.env.GATE_INSPECTION_CREDIT === 'true',
+
+  // Completion-path comms guard (2026-08-07): when a dispatch /complete
+  // lands while the customer has a pending reschedule/away flag (#3232's
+  // comms_guards agent_decisions rows) or an unanswered inbound text, the
+  // post-commit hook surfaces one admin exception — bell notification +
+  // dispatch_alerts card, deduped per visit. Detection/surface ONLY: it
+  // NEVER blocks completion or invoicing and sends no customer
+  // communications. Opt-in in EVERY environment (payerStatements pattern):
+  // dark until the owner flips it after eyeballing the first flagged
+  // completion. Kill switch: unset or any non-'true' value — completions
+  // behave byte-identically to today.
+  completionCommsGuard: process.env.GATE_COMPLETION_COMMS_GUARD === 'true',
 };
 
 function isEnabled(gate) {

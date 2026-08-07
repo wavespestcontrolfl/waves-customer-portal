@@ -8097,6 +8097,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (seriesErr) {
         logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
       }
+      // Completion comms guard on the incomplete path too (same reason the
+      // series hook is duplicated here): this early return ALSO leaves the
+      // scheduled_services row 'completed', and an incomplete outcome is if
+      // anything the likelier home for the exception — "nobody home" on the
+      // day the customer texted to say they'd be away is exactly the case
+      // this guard exists to surface. The runner is gated, fail-soft and
+      // deduped per visit, so the two call sites can never double-bell.
+      // Backfills excluded (route-wide quiet-closeout posture): a backdated
+      // cleanup of a months-old row must not ring a live bell correlating it
+      // with an unrelated text from the last week.
+      if (!isBackfillCompletion) {
+        try {
+          const { runCompletionCommsGuard } = require('../services/completion-comms-guard');
+          await runCompletionCommsGuard({ serviceId: svc.id, customerId: svc.customer_id });
+        } catch (commsGuardErr) {
+          logger.warn(`[dispatch] completion comms guard failed (non-blocking): ${commsGuardErr.message}`);
+        }
+      }
       const responsePayload = {
         success: true,
         serviceRecordId: record.id,
@@ -10773,6 +10791,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       await runPostCompletionSeriesMaintenance({ db, svc, source: 'dispatch_complete' });
     } catch (seriesErr) {
       logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
+    }
+
+    // Completion comms guard (GATE_COMPLETION_COMMS_GUARD, dark by default):
+    // a visit completed while the customer has a pending reschedule/away
+    // flag or an unanswered inbound text surfaces an admin exception (bell
+    // notification + dispatch_alerts card). POST-COMMIT by placement — the
+    // completion record and the invoice decision are durable above — and
+    // fail-soft by construction: the runner checks the gate, owns its own
+    // advisory-lock dedupe (completion-comms:<serviceId>) and swallows its
+    // errors, and this try/catch backstops it (dues-covered exemplar
+    // pattern). A guard throw must NEVER fail the completion; it never
+    // blocks or alters invoicing and sends no customer communications.
+    // Backfills excluded, matching the route-wide quiet-closeout posture
+    // (referral credit, payer AP send, timer sync): a backdated cleanup must
+    // not ring a live bell correlating a months-old visit with an unrelated
+    // inbound text or customer-wide flag from the last week.
+    if (!isBackfillCompletion) {
+      try {
+        const { runCompletionCommsGuard } = require('../services/completion-comms-guard');
+        await runCompletionCommsGuard({ serviceId: svc.id, customerId: svc.customer_id });
+      } catch (commsGuardErr) {
+        logger.warn(`[dispatch] completion comms guard failed (non-blocking): ${commsGuardErr.message}`);
+      }
     }
 
     const responsePayload = {
