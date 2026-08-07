@@ -1155,14 +1155,22 @@ class GscOpportunityMiner {
       // transaction preserves the r15 contract: it runs only after every
       // upsert succeeded, and a failure rolls back both.
       await db.transaction(async (trx) => {
-        persisted = await this.persistAll(allOpportunities, trx);
+        // Lock + revalidate family predecessors FIRST — see
+        // _revalidateFamilyBatch (a claim between the mine's reads and
+        // this transaction defers the transition instead of racing it).
+        const revalidated = await this._revalidateFamilyBatch(trx, allOpportunities);
+        persisted = await this.persistAll(revalidated, trx);
         // Family-lane sweep ONLY after the upserts land, only when the
         // lane actually ran (gates on, no miner error — an empty bucket
         // then means "didn't run", not "no signal").
         if (!errors.listicle_family
           && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS
           && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs')) {
-          await this._sweepStaleFamilyRows(buckets.listicle_family || [], allOpportunities, trx);
+          await this._sweepStaleFamilyRows(
+            revalidated.filter((o) => o.bucket === 'listicle_family'),
+            revalidated,
+            trx
+          );
         }
       });
     }
@@ -2247,6 +2255,7 @@ class GscOpportunityMiner {
           // check needs it — same lesson as seasonal_rising's key mismatch).
           impressions: fam.impressions,
           family_size: fam.variants.length,
+          family_key: fam.key,
           family_queries: fam.variants.map((v) => String(v.query || '').toLowerCase()),
           family_avg_position: Math.round(fam.position * 10) / 10,
           family_variants: fam.variants.slice(0, 5).map(({ query, impressions }) => ({ query, impressions })),
@@ -2372,6 +2381,40 @@ class GscOpportunityMiner {
         .some((q) => q && arbitrated.queries.has(String(q).toLowerCase()));
     }
     return false;
+  }
+
+  // TOCTOU guard for blog↔refresh transitions (pre-push audit r22): the
+  // mine's in-flight reads happen OUTSIDE the persist transaction, so a
+  // worker can claim a predecessor row in between. Inside the transaction,
+  // lock every family row (claimNext's FOR UPDATE SKIP LOCKED then cannot
+  // grab one mid-transition) and re-read statuses as the authority: any
+  // family opp whose transition-predecessor turned claimed/pending_review
+  // since the mine is DROPPED this run (same deferral semantics as r20).
+  async _revalidateFamilyBatch(trx, opportunities = []) {
+    const hasFamily = opportunities.some((o) => o.bucket === 'listicle_family');
+    if (!hasFamily) return opportunities;
+    const rows = await trx('opportunity_queue')
+      .where({ bucket: 'listicle_family' })
+      .forUpdate()
+      .select('dedupe_key', 'action_type', 'status', trx.raw("signal_metadata->'family_keys' as family_keys"));
+    const inflight = rows.filter((r) => r.status === 'claimed' || r.status === 'pending_review');
+    const inflightBlogKeys = new Set(inflight
+      .filter((r) => r.action_type === 'new_supporting_blog')
+      .map((r) => r.dedupe_key));
+    const inflightRefreshFamilyKeys = new Set(inflight
+      .flatMap((r) => (Array.isArray(r.family_keys) ? r.family_keys : [])));
+    return opportunities.filter((o) => {
+      if (o.bucket !== 'listicle_family') return true;
+      if (o.action_type === 'refresh_existing_page') {
+        const keys = Array.isArray(o.signal_metadata?.family_keys) ? o.signal_metadata.family_keys : [];
+        return !keys.some((k) => inflightBlogKeys.has(listicleFamilyDedupeKey(k)));
+      }
+      if (o.action_type === 'new_supporting_blog') {
+        const k = o.signal_metadata?.family_key;
+        return !(k && inflightRefreshFamilyKeys.has(k));
+      }
+      return true;
+    });
   }
 
   async _sweepStaleFamilyRows(familyOpps = [], batch = [], trx = null) {

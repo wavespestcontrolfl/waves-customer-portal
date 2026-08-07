@@ -1346,9 +1346,11 @@ describe('listicle_family scoring + action mapping', () => {
     expect(sweepSrc).toMatch(/o\.score >= \(familyFloorActions\.includes\(o\.action_type\)/);
     // Ordering + guards in mineAll: sweep ONLY after a successful
     // persistAll, only when the lane ran (gates on, no miner error).
-    // Transactional (r22 audit): upserts + sweep atomic against concurrent
-    // claimNext; a failure rolls back both.
-    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,200}persisted = await this\.persistAll\(allOpportunities, trx\);[\s\S]{0,900}_sweepStaleFamilyRows\(buckets\.listicle_family \|\| \[\], allOpportunities, trx\)/);
+    // Transactional (r22 audit): lock+revalidate predecessors, then upserts,
+    // then sweep — all one transaction so concurrent claimNext can neither
+    // race the transition nor observe it halfway.
+    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,400}_revalidateFamilyBatch\(trx, allOpportunities\)[\s\S]{0,200}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1100}_sweepStaleFamilyRows\([\s\S]{0,200}trx[\s\S]{0,40}\)/);
+    expect(src).toMatch(/\.forUpdate\(\)/);
     expect(src).toMatch(/!errors\.listicle_family[\s\S]{0,140}CANONICAL_MINE_PERIOD_DAYS[\s\S]{0,140}isEnabled\('listicleFamilyMining'\) && isEnabled\('listicleBriefs'\)/);
     // Destructive sweeping only under the authoritative window — a manual
     // 7-day mine must not expire valid 28-day rows (Codex r20 P2).
