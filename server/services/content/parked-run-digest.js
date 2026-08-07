@@ -47,6 +47,10 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
+const { etDateString, etParts } = require('../../utils/datetime-et');
+// Shared classifier — kinds email-approvals already covers with per-item
+// approval emails; the digest excludes them (one decision, one notification).
+const { isApprovableKind } = require('./email-approvals');
 
 const SEND_MARKER_KEY = 'parked-run-digest';
 const NOTE_EXCERPT_CHARS = 120;
@@ -102,12 +106,10 @@ function draftTitle(draftPayload) {
   return payload?.title || payload?.frontmatter?.title || null;
 }
 
-function etDateString(date) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(date);
-}
-
+// Canonical ET calendar helpers (utils/datetime-et) — a second local ET
+// mechanism drifted from the app's on Intl edge cases (Codex r1).
 function isSundayEt(date) {
-  return new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }).format(date) === 'Sun';
+  return etParts(date).dayOfWeek === 0;
 }
 
 function parkedAt(item) {
@@ -211,6 +213,10 @@ async function loadParkedSet() {
       // Already approved in the portal — the PR poller owns it, not the
       // owner's review decision; it is not "awaiting a decision".
       if (row.skip_reason === 'astro_pr_pending_merge') continue;
+      // Approvable kinds get their own per-item approval email from
+      // email-approvals — including them here would double-notify one
+      // decision (Codex r1).
+      if (isApprovableKind(row.skip_reason)) continue;
       active.push(item);
     } else {
       // Opportunity gone or already decided (done/skipped/expired/requeued):
@@ -304,8 +310,7 @@ async function runParkedRunDigest(opts = {}) {
     logger.error(`[parked-run-digest] parked-set query failed: ${err.message}`);
     return { skipped: 'query_failed' };
   }
-  const { active = [], stale = [] } = parkedSet || {};
-  if (active.length + stale.length === 0) return { skipped: 'no_parked_runs' };
+  const { active = [], stale: staleAll = [] } = parkedSet || {};
 
   const watermark = await (opts.getWatermark || getWatermark)();
   const isNew = (item) => {
@@ -313,13 +318,21 @@ async function runParkedRunDigest(opts = {}) {
     const at = parkedAt(item);
     return !!at && at > watermark;
   };
+  // Stale rows are surfaced ONCE: the whole backlog on the first digest
+  // (no watermark), then only rows that parked after the last sent digest.
+  // The portal review queue only lists pending_review opportunities, so a
+  // dismissed run's row can never be cleared there — without this filter
+  // the Sunday full digest would resend the same stale rows forever
+  // (Codex r1).
+  const stale = staleAll.filter(isNew);
+  if (active.length + stale.length === 0) return { skipped: 'no_parked_runs' };
   const newCount = [...active, ...stale].filter(isNew).length;
 
   // Exception-based cadence: daily sends need NEW parks; Sundays send the
-  // full digest anyway while the set is non-empty (never twice in one ET day
-  // — deploy-overlap ticks re-enter after runExclusive releases).
+  // full digest anyway while ACTIONABLE (active) rows exist (never twice in
+  // one ET day — deploy-overlap ticks re-enter after runExclusive releases).
   const sentTodayEt = !!watermark && etDateString(watermark) === etDateString(now);
-  const weeklyFull = isSundayEt(now) && !sentTodayEt;
+  const weeklyFull = isSundayEt(now) && !sentTodayEt && active.length > 0;
   if (newCount === 0 && !weeklyFull) return { skipped: 'no_new_parks' };
   if (newCount > 0 && sentTodayEt) return { skipped: 'already_sent_today' };
 

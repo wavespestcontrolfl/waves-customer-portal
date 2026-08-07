@@ -1427,6 +1427,13 @@ function initScheduledJobs() {
         if (result?.sent) {
           logger.info(`Parked-run digest sent: ${result.total} parked (${result.newCount} new)`);
         }
+        // Delivery-blocking failures must surface in job_health as FAILED —
+        // a visibility lane that fails quietly is the bug this lane exists
+        // to fix. Quiet skips (gate off / nothing new) stay successful.
+        if (result?.sent === false) throw new Error(`parked-run digest send failed: ${result.error || 'unknown'}`);
+        if (result?.skipped === 'query_failed' || result?.skipped === 'recipient') {
+          throw new Error(`parked-run digest blocked: ${result.skipped}`);
+        }
       });
     } catch (err) { logger.error(`Parked-run digest failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });

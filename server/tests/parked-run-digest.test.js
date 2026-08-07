@@ -273,3 +273,57 @@ describe('runParkedRunDigest cadence + watermark', () => {
     expect(d.advanceWatermark).not.toHaveBeenCalled();
   });
 });
+
+// ── Codex r1 behaviors ───────────────────────────────────────────────
+
+describe('Codex r1: approvable exclusion, stale once-only, Sunday actionable-only', () => {
+  test('stale rows older than the watermark are NOT resent (Sunday full digest, active rows present)', async () => {
+    const d = deps({
+      active: [item({ parked_at: '2026-08-08T10:00:00Z' })],
+      stale: [item({ parked_at: '2026-07-01T10:00:00Z' }), item({ parked_at: '2026-08-08T18:00:00Z' })],
+      watermark: '2026-08-07T12:00:00Z',
+      now: SUNDAY,
+    });
+    const r = await runParkedRunDigest(d);
+    expect(r.sent).toBe(true);
+    // Only the post-watermark stale row rides along; the July one was
+    // surfaced already and the portal can never clear it — no weekly loop.
+    expect(r.staleCount).toBe(1);
+  });
+
+  test('Sunday with ONLY stale rows (no actionable active) does not send', async () => {
+    const d = deps({
+      active: [],
+      stale: [item({ parked_at: '2026-07-01T10:00:00Z' })],
+      watermark: '2026-08-07T12:00:00Z',
+      now: SUNDAY,
+    });
+    const r = await runParkedRunDigest(d);
+    expect(r.sent).toBeUndefined();
+    expect(email.send).not.toHaveBeenCalled();
+  });
+
+  test('first-ever digest still surfaces the whole stale backlog once', async () => {
+    const d = deps({
+      active: [item({ parked_at: '2026-08-05T10:00:00Z' })],
+      stale: [item({ parked_at: '2026-06-01T10:00:00Z' })],
+      watermark: null,
+      now: THURSDAY,
+    });
+    const r = await runParkedRunDigest(d);
+    expect(r.sent).toBe(true);
+    expect(r.staleCount).toBe(1);
+  });
+
+  test('loadParkedSet excludes approvable kinds via the shared email-approvals classifier', () => {
+    const { isApprovableKind } = require('../services/content/email-approvals');
+    expect(isApprovableKind('named_competitor_review')).toBe(true);
+    expect(isApprovableKind('trust_build_2_of_3')).toBe(true);
+    expect(isApprovableKind('gate_fail')).toBe(false);
+    // The digest source filters on this exact predicate (see loadParkedSet)
+    // so the two lanes can never diverge on what "approvable" means.
+    const src = require('fs').readFileSync(require.resolve('../services/content/parked-run-digest'), 'utf8');
+    expect(src).toMatch(/isApprovableKind\(row\.skip_reason\)/);
+    expect(src).not.toMatch(/named_competitor_review\|trust_build/); // no second regex copy
+  });
+});
