@@ -103,20 +103,22 @@ async function phoneIsShared(lead) {
 async function loadCalls(lead, phoneKey) {
   try {
     const digits = last10(phoneKey);
-    if (!lead.twilio_call_sid && !digits) return [];
+    // No early return on missing sid/digits: a sid-less lead (web form) can
+    // still own metadata-STAMPED calls — the stamp fetch below must run.
     const CALL_COLS = ['id', 'twilio_call_sid', 'direction', 'duration_seconds', 'transcription',
       'transcription_status', 'recording_url', 'ai_extraction', 'ai_extraction_enriched',
       'v2_extraction_status', 'created_at'];
-    // The lead's OWN call is the anchor evidence — fetch it first so three
-    // newer phone-matched calls can never crowd its transcript/extraction
-    // out of the pack; the remaining slots fill with recent phone history.
+    // The lead's OWN calls (sid- or stamp-linked, marked __forThisLead) are
+    // the anchor evidence — fetch them first so three newer phone-matched
+    // calls can never crowd their transcript/extraction out of the pack;
+    // the remaining slots fill with recent phone history.
     const rows = [];
     if (lead.twilio_call_sid) {
       const sidRow = await db('call_log')
         .where('twilio_call_sid', lead.twilio_call_sid)
         .orderBy('created_at', 'desc')
         .first(...CALL_COLS);
-      if (sidRow) rows.push(sidRow);
+      if (sidRow) rows.push(Object.assign(sidRow, { __forThisLead: true }));
     }
     // Phone-less reuse linkage: a later call that reused this lead carries a
     // DIFFERENT sid and no matchable phone — the processor stamps
@@ -137,7 +139,7 @@ async function loadCalls(lead, phoneKey) {
         .orderBy('created_at', 'desc')
         .limit(3 - rows.length)
         .select(...CALL_COLS);
-      rows.push(...stampedRows);
+      rows.push(...stampedRows.map((r) => Object.assign(r, { __forThisLead: true })));
     }
     if (digits && rows.length < 3) {
       const phoneRows = await db('call_log')
@@ -175,6 +177,10 @@ async function loadCalls(lead, phoneKey) {
       return {
         id: call.id,
         call_sid: call.twilio_call_sid || null,
+        // Sid- or stamp-linked: this call is the LEAD'S OWN evidence, not
+        // phone-matched history — summary attach, shared-number filtering,
+        // and cap protection all key on it.
+        for_this_lead: !!call.__forThisLead,
         direction: call.direction || null,
         duration_seconds: call.duration_seconds || null,
         created_at: call.created_at,
@@ -189,15 +195,18 @@ async function loadCalls(lead, phoneKey) {
     });
     const leadSummary = clampText(lead.transcript_summary, 4000);
     if (leadSummary) {
-      const matchingCall = calls.find((call) => (
-        lead.twilio_call_sid && call.call_sid === lead.twilio_call_sid
-      ));
+      // transcript_summary is a ROLLING snapshot of the lead's LATEST call —
+      // attach it to the newest owned call (sid- OR stamp-linked; calls are
+      // sorted desc), not pinned to the original sid row: a reused anonymous
+      // lead's summary reflects the newer stamped call (codex P1 r12).
+      const matchingCall = calls.find((call) => call.for_this_lead);
       if (matchingCall) {
         matchingCall.transcript_summary = leadSummary;
       } else {
         calls.unshift({
           id: `lead-summary:${lead.id}`,
           call_sid: lead.twilio_call_sid || null,
+          for_this_lead: true,
           direction: null,
           duration_seconds: lead.call_duration_seconds || null,
           created_at: lead.first_contact_at || lead.created_at || null,
@@ -210,12 +219,13 @@ async function loadCalls(lead, phoneKey) {
         });
       }
     }
-    // The cap must never evict the lead's own call — it can be the OLDEST
-    // row (the quote call that created the lead, with newer unrelated calls
-    // on the same number since), and it is the whole point of the pack.
+    // The cap must never evict the lead's own calls — an owned row can be
+    // the OLDEST (the quote call that created the lead, with newer unrelated
+    // calls on the same number since), and it is the whole point of the
+    // pack. Owned = sid- or stamp-linked (for_this_lead).
     const capped = calls.slice(0, 3);
-    if (lead.twilio_call_sid && !capped.some((call) => call.call_sid === lead.twilio_call_sid)) {
-      const anchor = calls.find((call) => call.call_sid === lead.twilio_call_sid);
+    if (!capped.some((call) => call.for_this_lead)) {
+      const anchor = calls.find((call) => call.for_this_lead);
       if (anchor) capped[capped.length - 1] = anchor;
     }
     return capped;
@@ -336,12 +346,13 @@ async function buildAgentEstimateContext(leadId) {
   // this lead's evidence pack.
   const phoneHistorySuppressed = sharedPhone || customerAmbiguous || phoneSharedWithOtherCustomer;
   // Phone-matched call rows are equally cross-contaminated on an ambiguous
-  // or other-customer-shared number; keep only calls tied to THIS lead (its
-  // twilio_call_sid or its own transcript summary).
+  // or other-customer-shared number; keep only calls tied to THIS lead —
+  // sid- or metadata-stamp-linked (for_this_lead) or its own transcript
+  // summary. Stamped calls are the lead's own evidence and must survive
+  // this suppression (codex P1 r12).
   const calls = (customerAmbiguous || phoneSharedWithOtherCustomer)
     ? rawCalls.filter((call) => (
-      (lead.twilio_call_sid && call.call_sid === lead.twilio_call_sid)
-      || String(call.id).startsWith('lead-summary:')
+      call.for_this_lead || String(call.id).startsWith('lead-summary:')
     ))
     : rawCalls;
   const [smsThread, priorEstimates, activities, currentEstimate, memories] = await Promise.all([

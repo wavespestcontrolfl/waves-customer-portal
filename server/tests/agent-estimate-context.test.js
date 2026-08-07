@@ -3,6 +3,7 @@ const mockLoadSmsThread = jest.fn(async () => [{ body: 'phone-scoped text' }]);
 const mockLoadPriorEstimates = jest.fn(async () => [{ id: 'phone-scoped-estimate' }]);
 let mockContextLead = null;
 let mockContextCallRows = [];
+let mockContextStampedCallRows = [];
 let mockContextSidCallRow = null;
 let mockContextOtherLeads = [];
 let mockLinkedCustomerRow = null;
@@ -18,7 +19,14 @@ jest.mock('../models/db', () => {
       where() { return this; },
       whereNull() { return this; },
       whereNot() { return this; },
-      whereRaw() { this._whereRaw = true; return this; },
+      whereRaw(sql) {
+        this._whereRaw = true;
+        // The metadata-stamp fetch is the only call_log list query keyed on
+        // metadata->>'lead_id' — resolve it from its own fixture so foreign
+        // phone-history rows can't masquerade as stamped/owned calls.
+        if (String(sql).includes("metadata->>'lead_id'")) this._stampQuery = true;
+        return this;
+      },
       orderBy() { return this; },
       limit() { return this; },
       modify(fn) { fn(this); return this; },
@@ -32,7 +40,7 @@ jest.mock('../models/db', () => {
       },
       catch() { return this; },
       then(resolve) {
-        if (table === 'call_log') return resolve(mockContextCallRows);
+        if (table === 'call_log') return resolve(this._stampQuery ? mockContextStampedCallRows : mockContextCallRows);
         if (table === 'leads') return resolve(mockContextOtherLeads);
         return resolve([]);
       },
@@ -268,6 +276,24 @@ describe('linked customer on a phone another customer also owns', () => {
   afterAll(() => {
     mockLinkedCustomerRow = null;
     mockOtherCustomerOnPhone = null;
+  });
+
+  test('a metadata-STAMPED call is the lead\'s own evidence — it survives shared-number suppression', async () => {
+    // Sid-less lead (web form) reused by a phone-less anonymous call: the
+    // linkage is call_log.metadata.lead_id. Suppression must keep the
+    // stamped call while dropping phone-matched history (codex P1 r12).
+    mockOtherCustomerOnPhone = { id: 'customer-other' };
+    mockContextStampedCallRows = [{
+      id: 'call-stamped', twilio_call_sid: 'CA-later-anon', direction: 'inbound',
+      duration_seconds: 90, transcription: 'the newer stamped call', created_at: '2026-07-03',
+    }];
+    try {
+      const context = await buildAgentEstimateContext('lead-1');
+      expect(context.calls.map((c) => c.call_sid)).toEqual(['CA-later-anon']);
+      expect(context.calls[0].for_this_lead).toBe(true);
+    } finally {
+      mockContextStampedCallRows = [];
+    }
   });
 
   test('another customer row on the number suppresses phone-scoped history but keeps the linked identity', async () => {
