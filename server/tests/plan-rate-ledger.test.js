@@ -613,6 +613,24 @@ describe('zero-priced accepted families (codex r2)', () => {
     expect(db.store.some((r) => r.family_key === 'pest_control')).toBe(false);
   });
 
+  test('null placeholders never read as comps — the next price field wins (codex r15)', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control', manualFinalAnnual: null, annualAfterDiscount: 480 },
+              { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', manualFinalAnnual: '', mo: 50 },
+            ],
+          },
+        },
+      },
+      monthlyRate: 90,
+    });
+    expect(slices.pest_control).toBe(40);
+    expect(slices.lawn_care).toBe(50);
+  });
+
   test('a line with NO price provenance is untouched, not zeroed', () => {
     const slices = estimateFamilySlices({
       estimateData: {

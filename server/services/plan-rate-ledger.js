@@ -98,21 +98,27 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
   // or annualAfterDiscount; rejecting them collapsed a classifiable
   // multi-family accept into one unattributed blob): post-discount stamps
   // first, then monthly, then the plain annual forms.
+  // null/''/undefined are PLACEHOLDERS, never zeros (codex #3245 r15 —
+  // the same coercion class as the r3 oneTimeAmount guard): Number(null)
+  // is 0, which would read `manualFinalAnnual: null` as an explicit comp
+  // and delete a family whose real price sits one field later.
+  const priceValue = (value) => {
+    if (value == null || value === '') return null;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+  };
   const lineMonthly = (line) => {
-    const annualForms = [line?.manualFinalAnnual, line?.annualAfterDiscount, line?.annualAfterCredits];
-    for (const value of annualForms) {
-      const annual = Number(value);
-      if (Number.isFinite(annual) && annual >= 0) return annual / 12;
+    for (const value of [line?.manualFinalAnnual, line?.annualAfterDiscount, line?.annualAfterCredits]) {
+      const annual = priceValue(value);
+      if (annual != null) return annual / 12;
     }
-    const monthlyForms = [line?.monthly, line?.mo];
-    for (const value of monthlyForms) {
-      const monthly = Number(value);
-      if (Number.isFinite(monthly) && monthly >= 0) return monthly;
+    for (const value of [line?.monthly, line?.mo]) {
+      const monthly = priceValue(value);
+      if (monthly != null) return monthly;
     }
-    const plainAnnualForms = [line?.annual, line?.ann];
-    for (const value of plainAnnualForms) {
-      const annual = Number(value);
-      if (Number.isFinite(annual) && annual >= 0) return annual / 12;
+    for (const value of [line?.annual, line?.ann]) {
+      const annual = priceValue(value);
+      if (annual != null) return annual / 12;
     }
     return null;
   };
