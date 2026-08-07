@@ -11773,12 +11773,29 @@ async function transferGroupFollowupOwnership(estimate) {
     // events target the same deterministic owner row; the loser blocks on
     // its row lock, re-evaluates NOT EXISTS against the winner's committed
     // un-burned flags, and updates zero rows — never two armed owners.
+    // Provenance rides the same atomic write (local codex P1 ×2,
+    // 2026-08-07): releaseStage must target exactly the sibling THIS
+    // transfer armed (owner may not be the earliest row by the time a
+    // failed in-flight send releases) and clear only flags that were
+    // COPIED true (transient-claim case) — never a stage the sweep
+    // legitimately completed later on the new owner.
     const result = await db.raw(
       `UPDATE estimates AS o SET
          followup_unviewed_sent = ?,
          followup_viewed_sent = ?,
          followup_final_sent = ?,
          followup_expiring_sent = ?,
+         estimate_data = COALESCE(o.estimate_data, '{}'::jsonb) || jsonb_build_object(
+           'followupOwnershipFrom', jsonb_build_object(
+             'anchorId', ?::text,
+             'copied', jsonb_build_object(
+               'followup_unviewed_sent', ?::boolean,
+               'followup_viewed_sent', ?::boolean,
+               'followup_final_sent', ?::boolean,
+               'followup_expiring_sent', ?::boolean
+             )
+           )
+         ),
          updated_at = NOW()
        WHERE o.id = (
          SELECT id FROM estimates
@@ -11795,6 +11812,11 @@ async function transferGroupFollowupOwnership(estimate) {
        )
        RETURNING o.id`,
       [
+        anchorFlags.followup_unviewed_sent === true,
+        anchorFlags.followup_viewed_sent === true,
+        anchorFlags.followup_final_sent === true,
+        anchorFlags.followup_expiring_sent === true,
+        String(estimate.id),
         anchorFlags.followup_unviewed_sent === true,
         anchorFlags.followup_viewed_sent === true,
         anchorFlags.followup_final_sent === true,

@@ -214,16 +214,19 @@ async function releaseStage(estId, flag) {
   try {
     const row = await db('estimates').where({ id: estId }).first('estimate_group_id', 'status');
     if (row?.estimate_group_id && ['accepted', 'declined'].includes(String(row.status || ''))) {
-      const owner = await db('estimates')
+      // Provenance-targeted (local codex P1 ×2, 2026-08-07): clear the flag
+      // ONLY on the sibling THIS estimate's transfer armed, and only when
+      // that flag was COPIED true (the transient-claim case) — a stage the
+      // new owner's own sweep completed after the transfer stays burned,
+      // and a pre-burned non-owner is never touched.
+      await db('estimates')
         .where({ estimate_group_id: row.estimate_group_id })
         .whereNot({ id: estId })
         .whereIn('status', ['sent', 'viewed'])
         .whereNull('archived_at')
-        .orderBy('created_at', 'asc')
-        .first('id');
-      if (owner) {
-        await db('estimates').where({ id: owner.id }).update({ [flag]: false });
-      }
+        .whereRaw("estimate_data->'followupOwnershipFrom'->>'anchorId' = ?", [String(estId)])
+        .whereRaw("(estimate_data->'followupOwnershipFrom'->'copied'->>?)::boolean IS TRUE", [flag])
+        .update({ [flag]: false });
     }
   } catch { /* best-effort — the primary release above already succeeded */ }
 }
