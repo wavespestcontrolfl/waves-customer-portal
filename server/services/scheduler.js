@@ -2823,7 +2823,7 @@ function initScheduledJobs() {
       const { sendEstimateNow } = require('../routes/admin-estimates');
       for (const est of scheduled) {
         try {
-          const result = await sendEstimateNow(est, est.send_method || 'both');
+          const result = await sendEstimateNow(est, est.send_method || 'both', { callerPreClaimed: true });
           if (result.sent) {
             const suffix = result.partialFailure ? ` with channel issues (${result.failedChannels.join(', ')})` : '';
             logger.info(`Scheduled estimate ${est.id} sent${suffix}`);

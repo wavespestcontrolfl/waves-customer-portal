@@ -18,6 +18,7 @@ const {
   applyAeoTreatment,
   applyListicleTreatment,
   isListicleQuery,
+  stripFaqRequirements,
 } = require('../services/content/content-brief-builder')._internals;
 const { ContentBriefBuilder } = require('../services/content/content-brief-builder');
 
@@ -73,8 +74,34 @@ describe('applyListicleTreatment', () => {
     expect(r.requiredSections.some((s) => /how we put this list together/i.test(s))).toBe(true);
     expect(r.requiredSections.some((s) => /Last updated/i.test(s))).toBe(true);
     expect(r.voiceConstraints.listicle_notes.some((n) => /never a ranked vendor roundup/i.test(n))).toBe(true);
-    // Schema untouched — no ItemList/FAQPage injection here.
-    expect(r.schemaTypes).toEqual(SCHEMA_TYPES['supporting-blog']);
+    // FAQPage requested — the supporting-blog contract's visible FAQ section
+    // satisfies the seo-completion-gate schema↔section invariant.
+    expect(r.schemaTypes).toEqual([...SCHEMA_TYPES['supporting-blog'], 'FAQPage']);
+  });
+
+  test('every item carries a concrete sourced figure — never invented, never a dollar amount', () => {
+    const notes = applyListicleTreatment(base()).voiceConstraints.listicle_notes;
+    const stat = notes.find((n) => /concrete figure/i.test(n));
+    expect(stat).toMatch(/facts pack/i);
+    expect(stat).toMatch(/NEVER invent/);
+    expect(stat).toMatch(/never a dollar amount/i);
+    expect(stat).toMatch(/pest-control-calculator/);
+  });
+
+  test('question-shaped list query adds the question-form item-heading section', () => {
+    const r = applyListicleTreatment(base({ query: 'what are the signs of termite damage' }));
+    expect(r.listicle).toBe(true);
+    expect(r.requiredSections[0]).toMatch(/listicle structure/i);
+    expect(r.requiredSections[1]).toMatch(/question-form item headings/i);
+    // Above-the-fold constraints still precede the original contract.
+    expect(r.requiredSections[2]).toMatch(/first 60 words/i);
+    expect(r.requiredSections[3]).toMatch(/Last updated/i);
+    expect(r.requiredSections.indexOf(REQUIRED_SECTIONS['supporting-blog'][0])).toBe(4);
+  });
+
+  test('bare noun list query keeps declarative headings — no question-form section', () => {
+    const r = applyListicleTreatment(base()); // 'signs of chinch bugs…'
+    expect(r.requiredSections.some((s) => /question-form item headings/i.test(s))).toBe(false);
   });
 
   test('above-the-fold constraints lead the ORDERED section plan; methodology note trails', () => {
@@ -136,9 +163,18 @@ describe('applyListicleTreatment', () => {
     });
     expect(r.requiredSections.some((s) => /direct-answer/i.test(s))).toBe(true); // AEO kept
     expect(r.requiredSections.some((s) => /numbered H2 per item/i.test(s))).toBe(true); // listicle added
-    expect(r.schemaTypes).toContain('FAQPage'); // AEO schema kept
+    // AEO already added FAQPage — the listicle overlay's Set dedupes it.
+    expect(r.schemaTypes.filter((t) => t === 'FAQPage')).toHaveLength(1);
     expect(r.voiceConstraints.aeo_notes).toBeDefined();
     expect(r.voiceConstraints.listicle_notes).toBeDefined();
+  });
+
+  test('FAQ-blocked services strip the overlay-requested FAQPage downstream', () => {
+    const r = applyListicleTreatment(base());
+    expect(r.schemaTypes).toContain('FAQPage');
+    const stripped = stripFaqRequirements({ requiredSections: r.requiredSections, schemaTypes: r.schemaTypes });
+    expect(stripped.schemaTypes).not.toContain('FAQPage');
+    expect(stripped.requiredSections.some((s) => /\bFAQ\b/i.test(s))).toBe(false);
   });
 });
 

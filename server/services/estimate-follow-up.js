@@ -204,6 +204,34 @@ async function releaseStage(estId, flag) {
   await db("estimates")
     .where({ id: estId })
     .update({ [flag]: false });
+  // Group-aware release (codex #3248 r2): if this estimate went TERMINAL
+  // while the stage was mid-flight, transferGroupFollowupOwnership already
+  // copied its transiently-true flag onto the new comms owner — a send that
+  // never completed would stay burned there. Clear the same flag on the
+  // transfer's deterministic pick (earliest live sent/viewed sibling) so it
+  // retries. Ordinary releases (row still live) change nothing here, and
+  // non-owner pre-burned siblings are never touched.
+  try {
+    const row = await db('estimates').where({ id: estId }).first('estimate_group_id', 'status');
+    if (row?.estimate_group_id && ['accepted', 'declined'].includes(String(row.status || ''))) {
+      // Provenance-targeted (local codex P1 ×2, 2026-08-07): clear the flag
+      // ONLY on the sibling THIS estimate's transfer armed, and only when
+      // that flag was COPIED true (the transient-claim case) — a stage the
+      // new owner's own sweep completed after the transfer stays burned,
+      // and a pre-burned non-owner is never touched.
+      await db('estimates')
+        .where({ estimate_group_id: row.estimate_group_id })
+        .whereNot({ id: estId })
+        .whereIn('status', ['sent', 'viewed'])
+        .whereNull('archived_at')
+        // anchorIds array match (codex #3248 r4): a chained transfer A→B→C
+        // keeps A in C's ancestor list, so A's failed in-flight release
+        // still reaches the current owner.
+        .whereRaw("estimate_data->'followupOwnershipFrom'->'anchorIds' @> to_jsonb(?::text)", [String(estId)])
+        .whereRaw("(estimate_data->'followupOwnershipFrom'->'copied'->>?)::boolean IS TRUE", [flag])
+        .update({ [flag]: false });
+    }
+  } catch { /* best-effort — the primary release above already succeeded */ }
 }
 
 function moneySummary(est = {}) {

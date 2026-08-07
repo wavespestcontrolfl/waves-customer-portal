@@ -781,14 +781,16 @@ async function ensureEstimateGroupId(trx, anchorEstimateId, sibling = {}, random
   // in one group would double-message one property and hand the added copy
   // an unearned 10% multi-home preset. Compare normalized streets against
   // every live member (the anchor alone when minting).
-  const { normalizedEstimateStreet } = require('./estimate-property-linkage');
-  const siblingStreet = normalizedEstimateStreet(sibling.address);
-  if (siblingStreet) {
+  const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
+  const siblingKey = normalizedEstimatePropertyKey(sibling.address);
+  if (siblingKey?.street) {
     const members = anchor.estimate_group_id
       ? await trx('estimates').where({ estimate_group_id: anchor.estimate_group_id }).whereNull('archived_at').select('address')
       : [anchor];
     for (const member of members) {
-      if (normalizedEstimateStreet(member.address) === siblingStreet) {
+      // Full property tuple (codex #3248 r1): identical street+unit in
+      // different cities/ZIPs are DISTINCT properties.
+      if (samePropertyKey(normalizedEstimatePropertyKey(member.address), siblingKey)) {
         throw errorWithStatus('This address is already in the group — each property is quoted once', 400);
       }
     }
@@ -1161,13 +1163,14 @@ async function resolveEstimateWritePayload({
   if (body.customerId && body.address) {
     try {
       const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
-      const custRow = await database('customers').where({ id: body.customerId }).first('address_line1', 'address_line2');
+      const custRow = await database('customers').where({ id: body.customerId }).first('address_line1', 'address_line2', 'city', 'zip');
       const estimateStreet = normalizedEstimateStreet(body.address);
-      const customerStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2);
+      const customerStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
       if (estimateStreet) {
         perPropertyStreetScope = { estimateStreet, customerPrimaryStreet: customerStreet };
       }
-      if (!groupedEstimate && estimateStreet && customerStreet && estimateStreet !== customerStreet) {
+      const { sameScopeKey } = require('./estimate-property-linkage');
+      if (!groupedEstimate && estimateStreet && customerStreet && !sameScopeKey(estimateStreet, customerStreet)) {
         groupedEstimate = true;
       }
     } catch (err) {
@@ -1549,9 +1552,20 @@ async function reviseAdminEstimate({
     || String(writeFields.customer_phone ?? '') !== String(estimate.customer_phone ?? '')
     || String(writeFields.customer_email ?? '') !== String(estimate.customer_email ?? '')
   );
+  const groupAddressChanged = writeFields.estimate_group_id
+    && writeFields.address !== undefined
+    && String(writeFields.address || '') !== String(estimate.address || '');
   if (groupIdChanged || groupIdentityChanged) {
     await assertGroupAssignmentAllowed(database, writeFields.estimate_group_id, writeFields, estimate.id);
   }
+  // An address-only revision of a grouped sibling must not land on another
+  // member's property (codex #3244 r8): the duplicate copy would keep its
+  // multi-home discount while accept-time linkage dedupes to one property.
+  // Serialized + tuple-compared inside the write transaction (codex #3248
+  // r1): two operators revising different siblings to the same address must
+  // not both pass a pre-transaction read, and same street in different
+  // cities is NOT a duplicate. The flag rides to the transaction below.
+  const groupDuplicateRecheckNeeded = !!groupAddressChanged;
 
   // Carry the linkage keys across the wholesale estimate_data rewrite.
   if (writeFields.estimate_data) {
@@ -1656,8 +1670,28 @@ async function reviseAdminEstimate({
 
   // Preflight stops here: same guards, same pricing pipeline, no write — the
   // returned totals let the builder confirm a server reprice with the
-  // operator before anything reaches the customer's live link.
+  // operator before anything reaches the customer's live link. The grouped
+  // duplicate-address guard runs here too (codex #3248 r2): without it the
+  // preflight reports success and walks the operator through a reprice
+  // confirm, only for the identical real save to 400. Best-effort unlocked
+  // read — the serialized in-transaction recheck below stays authoritative.
   if (dryRun) {
+    if (groupDuplicateRecheckNeeded) {
+      const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
+      const revisedKey = normalizedEstimatePropertyKey(writeFields.address);
+      if (revisedKey?.street) {
+        const members = await database('estimates')
+          .where({ estimate_group_id: writeFields.estimate_group_id })
+          .whereNot({ id: estimate.id })
+          .whereNull('archived_at')
+          .select('address');
+        for (const member of members) {
+          if (samePropertyKey(normalizedEstimatePropertyKey(member.address), revisedKey)) {
+            throw errorWithStatus('This address is already in the group — each property is quoted once', 400);
+          }
+        }
+      }
+    }
     return { estimate: { ...estimate, ...writeFields }, dryRun: true };
   }
 
@@ -1673,6 +1707,26 @@ async function reviseAdminEstimate({
   // described the PREVIOUS quote (the public view falls back to live pricing
   // until the next send re-stamps a snapshot).
   const updated = await database.transaction(async (trx) => {
+    if (groupDuplicateRecheckNeeded) {
+      const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-revise', String(writeFields.estimate_group_id)],
+      );
+      const revisedKey = normalizedEstimatePropertyKey(writeFields.address);
+      if (revisedKey?.street) {
+        const members = await trx('estimates')
+          .where({ estimate_group_id: writeFields.estimate_group_id })
+          .whereNot({ id: estimate.id })
+          .whereNull('archived_at')
+          .select('address');
+        for (const member of members) {
+          if (samePropertyKey(normalizedEstimatePropertyKey(member.address), revisedKey)) {
+            throw errorWithStatus('This address is already in the group — each property is quoted once', 400);
+          }
+        }
+      }
+    }
     // Re-read the row under its lock before rewriting: the pre-read
     // `estimate` above goes stale during payload resolution, and an Agent
     // Estimate recomposition landing in that gap replaces the composition
