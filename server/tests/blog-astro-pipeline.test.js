@@ -2369,7 +2369,10 @@ describe('resolveAutonomousHero fallback (hero is schema-required — default as
       frontmatter, slug: 'lawn-care/fall-lawn-mistakes-swfl', existingFile: null,
     });
 
-    expect(hero).toEqual({ src: '/images/blog/defaults/hero.webp', buffer: null, alt: 'Illustrative lawn care article header image' });
+    // The SITE-WIDE default is not guaranteed to depict the category, so
+    // its alt stays category-NEUTRAL (Codex r16) — only the category asset
+    // earns the category-specific text.
+    expect(hero).toEqual({ src: '/images/blog/defaults/hero.webp', buffer: null, alt: 'Illustrative article header image' });
   });
 
   test('post-provider failure (generation succeeded, decode/compress failed) still carries the provider chain on the thrown error (Codex r1)', async () => {

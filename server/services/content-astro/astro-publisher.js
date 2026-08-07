@@ -1508,10 +1508,14 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
       // that was never generated (Codex r1: a category/site-wide default can
       // depict something entirely different).
       const catLabel = String(frontmatter.category || '').trim().replace(/-/g, ' ');
+      // The category-specific alt is only truthful for the CATEGORY asset:
+      // the site-wide defaults/hero.webp is not guaranteed to depict the
+      // category, so it keeps the neutral text (Codex r16).
+      const isCategoryAsset = Boolean(catLabel) && !fallback.endsWith('/defaults/hero.webp');
       return {
         src: fallback,
         buffer: null,
-        alt: catLabel ? `Illustrative ${catLabel} article header image` : 'Illustrative article header image',
+        alt: isCategoryAsset ? `Illustrative ${catLabel} article header image` : 'Illustrative article header image',
       };
     }
     const heroErr = new Error(`autonomous blog hero image generation failed for ${slug}: ${describeHeroFailure(err)}`);

@@ -3525,13 +3525,22 @@ function applyOperatorSlugRepair(brief, draft) {
       draftPathSource = new URL(draftPathSource.startsWith('//') ? `https:${draftPathSource}` : draftPathSource).pathname;
     } catch { /* unparseable — keep the raw string as the candidate source */ }
   }
-  const rawDraftPath = draftPathSource
-    ? `/${draftPathSource.replace(/^\/+|\/+$/g, '')}/`
-    : null;
-  const oldSlugPaths = [...new Set([
-    draftPathSource ? normalizeSlugPath(draftPathSource) : null,
-    rawDraftPath,
-  ].filter(Boolean))].filter((p) => p !== pinned && p !== '//');
+  // The publisher derives the PUBLIC route as category + leaf
+  // (categoryRouteSlug), so a writer with a flat drifted slug (/old-post/)
+  // may self-link to the DERIVED route (/pest-control/old-post/) — that
+  // category-prefixed form is a drifted-route candidate too (Codex r16).
+  const candidateSources = [];
+  if (draftPathSource) {
+    candidateSources.push(draftPathSource);
+    const flatLeaf = draftPathSource.replace(/^\/+|\/+$/g, '');
+    if (flatLeaf && !flatLeaf.includes('/') && draftCategory) {
+      candidateSources.push(`/${draftCategory}/${flatLeaf}/`);
+    }
+  }
+  const oldSlugPaths = [...new Set(candidateSources.flatMap((src) => [
+    normalizeSlugPath(src),
+    `/${src.replace(/^\/+|\/+$/g, '')}/`,
+  ]))].filter((p) => p !== pinned && p !== '//');
   const repair = {
     repaired_at: new Date().toISOString(),
     from_slug: mismatch.draft_slug || null,
@@ -3637,14 +3646,17 @@ function applyOperatorSlugRepair(brief, draft) {
     // hub-host and targeted-spoke matches are the writer's own drifted
     // route (normalized to the configured hub / spoke canonical origin),
     // any other host is someone else's page and survives verbatim.
-    const originPatternSrc = '(?:[A-Za-z][\\w+.-]*://[^/\\s)"\'<>`]+)?';
+    // `scheme://authority` or PROTOCOL-RELATIVE `//authority` (Codex r16 —
+    // the guardrails' body scanner captures //host/… as host-bearing too).
+    const originPatternSrc = '(?:(?:[A-Za-z][\\w+.-]*:)?//[^/\\s)"\'<>`]+)?';
     const hubApex = hubUrl ? hubUrl.hostname.toLowerCase().replace(/^www\./, '') : null;
     const spokeApex = publishOrigin.spoke ? String(publishOrigin.spoke).toLowerCase() : null;
     // → true (relative), 'hub', 'spoke', or false (foreign — leave alone).
     const classifyLinkOrigin = (originText) => {
       if (!originText) return true;
       try {
-        const h = new URL(`${originText}/`).hostname.toLowerCase().replace(/^www\./, '');
+        const withScheme = originText.startsWith('//') ? `https:${originText}` : originText;
+        const h = new URL(`${withScheme}/`).hostname.toLowerCase().replace(/^www\./, '');
         if (hubApex && h === hubApex) return 'hub';
         if (spokeApex && h === spokeApex) return 'spoke';
         return false;

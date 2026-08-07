@@ -1060,6 +1060,37 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     expect(result.repair.body_self_link_rewrites).toBe(2);
   });
 
+  test('a PROTOCOL-RELATIVE hub self-link is the same drifted route; a protocol-relative foreign host survives (Codex r16)', () => {
+    const draft = driftedDraft({
+      body: [
+        'See [pr hub form](//www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/) and',
+        '[pr foreign form](//source.example/fall-lawn-mistakes-southwest-florida/).',
+      ].join(' '),
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.body).toContain(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(draft.body).not.toContain('//www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/');
+    expect(draft.body).toContain('(//source.example/fall-lawn-mistakes-southwest-florida/)');
+    expect(result.repair.body_self_link_rewrites).toBe(1);
+  });
+
+  test('a FLAT drifted slug with a category also repairs links to the DERIVED category route (Codex r16)', () => {
+    // The publisher derives the public route as category + leaf, so the
+    // writer may self-link to /lawn-care/<flat-slug>/ even though its
+    // frontmatter slug is flat.
+    const draft = driftedDraft({
+      frontmatter: { category: 'lawn-care' },
+      body: 'See [derived route](/lawn-care/fall-lawn-mistakes-southwest-florida/) and [flat form](/fall-lawn-mistakes-southwest-florida/).',
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.body).not.toContain('fall-lawn-mistakes-southwest-florida');
+    const pinnedLinks = draft.body.match(new RegExp(PINNED.replace(/\//g, '\\/'), 'g')) || [];
+    expect(pinnedLinks.length).toBe(2);
+    expect(result.repair.body_self_link_rewrites).toBe(2);
+  });
+
   test('an http:// hub self-link is the SAME drifted route — matched regardless of the configured scheme (Codex r14)', () => {
     const draft = driftedDraft({
       body: 'See [http www form](http://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/) and [http apex form](http://wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/).',
