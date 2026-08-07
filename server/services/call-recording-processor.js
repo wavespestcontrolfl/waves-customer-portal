@@ -7620,19 +7620,12 @@ const CallRecordingProcessor = {
             // Always refresh the rolling AI-derived fields — they're a snapshot
             // of the latest call, not user-curated content.
             if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
-            // Rolling current-call linkage for the PHONE-LESS reuse path: a
-            // repeat email-matched caller's lead kept the prior call's SID,
-            // and with phone NULL downstream SID-based resolution had no
-            // fallback to associate this call with its lead (codex P1 r15).
-            // The recording fields ride along so the SID always matches its
-            // own recording. Phone-path reuse keeps its longstanding
-            // behavior — the phone IS its durable linkage. A pass-2 recovery
-            // row already carries these values; restamping is a no-op.
-            if (!phone && existingLead && call.twilio_call_sid) {
-              leadUpdates.twilio_call_sid = call.twilio_call_sid;
-              if (call.duration_seconds != null) leadUpdates.call_duration_seconds = call.duration_seconds;
-              if (call.recording_url) leadUpdates.call_recording_url = call.recording_url;
-            }
+            // NOTE deliberately NOT rolling twilio_call_sid here: overwriting
+            // it would destroy the OLDER call's SID→lead identity (its retry
+            // could no longer find its own row, and SID-based attribution /
+            // history joins would lose the association — audit P1 r16). The
+            // current call's durable lead association is stamped on the
+            // call_log row after the enrichment loop instead.
             // Qualification now requires BOTH buying intent (hot/warm) AND the
             // contact info the office needs to work the lead: first + last name,
             // a service street address, and an email. Evaluate against the MERGED
@@ -7863,6 +7856,25 @@ const CallRecordingProcessor = {
             // failure card even though the lead exists (codex P2 r13);
             // enrichment simply skips via enriched=0.
             break;
+          }
+
+          // Durable current-call → lead association for the phone-less REUSE
+          // path, WITHOUT rolling the lead's twilio_call_sid: a repeat
+          // email-matched caller's lead keeps the prior call's SID (codex P1
+          // r15), but overwriting it would destroy the older call's identity
+          // and its retry/attribution joins (audit P1 r16). Stamp the
+          // call_log row instead — same jsonb metadata pattern as
+          // created_customer_id. Skipped when the lead already carries this
+          // call's SID (same-call retry, or a recovery row minted by this
+          // call). Best-effort: a stamp failure must never break processing.
+          if (leadId && !phone && existingLead && !sameCallLeadReuse && !raceRecovered) {
+            await db('call_log').where({ id: call.id }).update({
+              metadata: db.raw(
+                "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)",
+                [JSON.stringify(String(leadId))],
+              ),
+              updated_at: new Date(),
+            }).catch((e) => logger.warn(`[call-proc] call→lead link stamp failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
           }
 
           // Log AI triage activity — gated on the enrichment write landing, so
