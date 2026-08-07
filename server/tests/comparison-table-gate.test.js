@@ -2793,4 +2793,23 @@ describe('operator authorization: detection-only unknowns + feature-flag exempti
     }, { namedCompetitorEnabled: false, operatorBriefText: 'TruGreen Alternatives\ntrugreen alternative' });
     expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(true);
   });
+
+  test('feature flag OFF: an ALIAS in the table still requires the flag — canonical-name substring must not exempt it (Codex r4)', () => {
+    // Block says "Massey"; findBusinessMentions canonicalizes to "Massey
+    // Services", which a raw substring scan of the block would never find.
+    const t = NEUTRAL_TABLE.replace('National chain', 'Massey');
+    const r = gate.evaluate({
+      body: `# Guide\n\nIntro prose.\n\n${t}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: false, operatorBriefText: 'Massey Alternatives in Sarasota\nmassey alternative sarasota' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(true);
+  });
+
+  test('feature flag OFF: operator-authorized known referenced ONLY via a link destination parks to review, never silently passes (Codex r4)', () => {
+    const r = gate.evaluate({
+      body: `# Guide\n\nCompare [their published terms](https://www.trugreen.com/terms) with a local plan.\n\n${NEUTRAL_TABLE}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: false, operatorBriefText: 'TruGreen Alternatives in Sarasota\ntrugreen alternative sarasota' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(false);
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+  });
 });

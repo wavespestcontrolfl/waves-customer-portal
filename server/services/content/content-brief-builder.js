@@ -326,15 +326,23 @@ const GATE_RETRY_INSTRUCTIONS = {
   PREVENTION_PROMISE: 'Remove every promise that pests are prevented, eliminated, or won\'t return — describe REDUCED recurrence plus free re-treatment between visits instead, always conditional, never guaranteed.',
   COMPARISON_RIGGED_RANKING: 'Remove all ranking/winner framing ("#1", "best", "top-rated", "winner") from the comparison and the title/meta — present neutral trade-offs and let the reader conclude (highlight={} column emphasis is layout and stays fine; a declared winner is not).',
   COMPARISON_COMPETITOR_IN_PROSE: 'Move the SPECIFIC competitor(s) this finding names out of prose, title, and meta — outside your operator brief, a competitor may be named ONLY inside the <ComparisonTable> itself; in the surrounding copy say "national chains" or "other providers" instead. Competitors your operator brief itself names (its binding title/thesis/outline) are authorized and MUST stay as briefed — do not remove those.',
-  COMPARISON_UNKNOWN_COMPETITOR: 'Remove every business name that get_competitor_facts did not return — replace each with a generic provider category ("national chain", "local SWFL company", "DIY"); never invent a business name or pull one from web search.',
+  COMPARISON_UNKNOWN_COMPETITOR: 'Remove every business name that get_competitor_facts did not return — replace each with a generic provider category ("national chain", "local SWFL company", "DIY"); never invent a business name or pull one from web search. EXCEPTION: a business your operator brief itself names (its binding title/thesis/outline) MUST stay in prose/title/meta as briefed — remove it only from the <ComparisonTable> block (columns, cells, headers), where its attributes cannot be validated; keep the table options generic and make the briefed comparison in prose instead.',
   COMPARISON_DISPARAGEMENT: 'Remove all negative or disparaging language about named businesses; comparisons must be neutral and factual.',
   COMPARISON_UNCLASSIFIED_OPTION: 'Every comparison-table option must be either a generic category (no business names) or a competitor from the curated allowlist — replace unlisted names with generic categories.',
 };
 
 function buildRetryDirectives(gateRetry) {
   const findings = Array.isArray(gateRetry?.findings) ? gateRetry.findings : [];
-  const directives = findings.map((f) => GATE_RETRY_INSTRUCTIONS[f.code]
-    || `Previous draft failed ${f.severity || 'P0'} ${f.code || 'gate check'}${f.message ? `: ${f.message}` : ''} — do not repeat it.`);
+  // Always carry the gate's own finding text alongside the canonical
+  // directive: the message names the OFFENDING entity (which competitor,
+  // which city, which product), and without it a directive like "move the
+  // competitor this finding names" gives the sole redraft nothing to act on
+  // (Codex r4).
+  const directives = findings.map((f) => {
+    const canonical = GATE_RETRY_INSTRUCTIONS[f.code];
+    if (!canonical) return `Previous draft failed ${f.severity || 'P0'} ${f.code || 'gate check'}${f.message ? `: ${f.message}` : ''} — do not repeat it.`;
+    return f.message ? `${canonical} [Gate reported: ${f.message}]` : canonical;
+  });
   return [
     'PREVIOUS ATTEMPT REJECTED by hard content gates. This is the final attempt — the draft is discarded (never published, never reviewed) if any of these repeat:',
     ...Array.from(new Set(directives)),

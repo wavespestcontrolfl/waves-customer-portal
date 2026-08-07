@@ -603,6 +603,24 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(directives[1]).toContain('novel failure');
   });
 
+  test('canonical directives carry the gate finding text so the redraft knows the OFFENDING entity (Codex r4)', () => {
+    const directives = buildRetryDirectives({
+      findings: [{
+        severity: 'P1',
+        code: 'COMPARISON_COMPETITOR_IN_PROSE',
+        message: 'Names competitor "Terminix" in prose/title/meta, outside the comparison table',
+      }],
+    });
+    expect(directives[1]).toContain('Terminix'); // the name the writer must act on
+    expect(directives[1]).toMatch(/ONLY inside the <ComparisonTable>/); // canonical instruction retained
+  });
+
+  test('COMPARISON_UNKNOWN_COMPETITOR retry preserves operator-briefed names in prose while evicting them from the table (Codex r4)', () => {
+    const directive = (code) => buildRetryDirectives({ findings: [{ severity: 'P0', code }] })[1];
+    expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/operator brief itself names[\s\S]{0,80}MUST stay in prose\/title\/meta/);
+    expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/remove it only from the <ComparisonTable>/);
+  });
+
   test('composed brief carries retry_directives inside voice_constraints when gate_retry is present', () => {
     const builder = new ContentBriefBuilder();
     const brief = builder._composeBrief({

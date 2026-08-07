@@ -146,9 +146,13 @@ rule follows in later sections, but this checklist is binding on its own:
   guardrail allows the curated citation/competitor-source hosts for
   exactly that case; never use this to link hosts unrelated to the
   brief's named sources.
-- [PRODUCT_CLAIM] No professional product names, active ingredients, or
-  claims about what Waves techs carry/use — unless the facts pack states it,
-  describe the product class generically.
+- [PRODUCT_CLAIM] No active-ingredient names and no claims about what Waves
+  techs carry, use, or recommend — unless the facts pack states it, describe
+  the product class generically. EXCEPTION: a professional product MAY be
+  the piece's INFORMATIONAL TOPIC (e.g. "How Sentricon works") — keep the
+  briefed product name in the target keyword and title and describe what it
+  is and how it is designed to work per its label; efficacy promises and
+  recommendation/usage claims stay banned even then.
 - [PREVENTION_PROMISE] Never promise prevention, elimination, or that pests
   won't come back. Describe reduced recurrence + free re-treatment between
   visits, always conditional.

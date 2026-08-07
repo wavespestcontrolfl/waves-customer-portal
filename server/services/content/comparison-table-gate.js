@@ -2341,7 +2341,18 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // a comparison block. Any table occurrence keeps the full fail-closed
   // treatment: operator provenance answers "who wrote it", never "is this
   // claim verifiable" (standing rule).
+  // Block membership must see ALIASES, not just the canonical spelling: a
+  // "Massey" column canonicalizes to "Massey Services" in `known`, and a raw
+  // canonical-name regex would miss it — exempting a fully-tabled competitor
+  // from the disabled-comparison finding (Codex r4). Canonicalize each
+  // block's mentions with the same matcher that built `known`, and keep the
+  // raw-substring test for names outside the recognition corpus.
+  const blockMentionCanonicals = new Set();
+  for (const b of blocks) {
+    for (const m of competitorFacts.findBusinessMentions(String(b))) blockMentionCanonicals.add(m.name);
+  }
   const nameInAnyBlock = (nm) => {
+    if (blockMentionCanonicals.has(nm)) return true;
     const re = new RegExp(escapeForNameRe(nm), 'i');
     return blocks.some((b) => re.test(String(b)));
   };
@@ -2372,8 +2383,16 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // finding (same exemption the table-less path gives them): with the flag
   // off they park on the approvable named-competitor review path instead of
   // gate-failing — which the runner's approval re-check would reject anyway.
-  // A known named inside a table block still requires the flag.
-  const flagKnown = [...known].filter((nm) => !(operatorAuthorized(nm) && !nameInAnyBlock(nm)));
+  // A known named inside a table block still requires the flag. Every use of
+  // the exemption must ALSO force the human-review park — a known reached
+  // only through a link destination never enters the competitorInProse loop,
+  // so without this a link-only operator draft would return pass=true with
+  // requiresHumanReview=false and silently publish (Codex r4).
+  const flagKnown = [];
+  for (const nm of known) {
+    if (operatorAuthorized(nm) && !nameInAnyBlock(nm)) { operatorAuthorizedProse = true; continue; }
+    flagKnown.push(nm);
+  }
   if (flagKnown.length && !namedCompetitorEnabled) {
     findings.push(finding('P1', 'COMPARISON_NAMED_COMPETITOR_DISABLED',
       `Names a competitor (${flagKnown.join(', ')}) but named-competitor comparisons are disabled (GATE_NAMED_COMPETITOR_COMPARISON). Use a category comparison, or enable the flag.`));
