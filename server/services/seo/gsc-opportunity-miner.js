@@ -1024,6 +1024,9 @@ class GscOpportunityMiner {
     // overlapping run-now + scheduled mine sharing an instance field let
     // one run reset the other's failure flag mid-flight (Codex r26).
     const runState = { familyRefreshStateFailed: false };
+    // Unresolved served pages/families collected by the family mine —
+    // their pending rows are exempt from this run's destructive sweep.
+    const familyExemptions = { pages: new Set(), blogKeys: new Set() };
     const since = sinceDate(periodDays);
     const priorSince = sinceDate(periodDays * 2);
 
@@ -1127,10 +1130,10 @@ class GscOpportunityMiner {
           const rows = await db('opportunity_queue')
             .where({ bucket: 'listicle_family', action_type: 'refresh_existing_page' })
             .whereNotNull('page_url')
-            .select('page_url', 'dedupe_key', 'status', db.raw("signal_metadata->'family_keys' as family_keys"));
+            .select('page_url', 'dedupe_key', 'status', 'service', 'city', db.raw("signal_metadata->'family_keys' as family_keys"));
           for (const r of rows) {
             if (!familyRefreshState.has(r.page_url)) familyRefreshState.set(r.page_url, []);
-            familyRefreshState.get(r.page_url).push({ dedupe_key: r.dedupe_key, status: r.status, family_keys: r.family_keys });
+            familyRefreshState.get(r.page_url).push({ dedupe_key: r.dedupe_key, status: r.status, service: r.service, city: r.city, family_keys: r.family_keys });
           }
         } catch (err) {
           // FAIL CLOSED (Codex r25 audit): an empty map would disable the
@@ -1144,7 +1147,7 @@ class GscOpportunityMiner {
           familyRefreshState = null;
           runState.familyRefreshStateFailed = true;
         }
-        return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightRefreshQueries, inflightFamily, familyRefreshState });
+        return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightRefreshQueries, inflightFamily, familyRefreshState, reconcileExemptions: familyExemptions });
       }],
     ];
 
@@ -1219,7 +1222,8 @@ class GscOpportunityMiner {
           await this._sweepStaleFamilyRows(
             revalidated.filter((o) => o.bucket === 'listicle_family'),
             revalidated,
-            trx
+            trx,
+            familyExemptions
           );
         }
       });
@@ -2105,7 +2109,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightRefreshQueries = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() }, familyRefreshState = new Map() } = {}) {
+  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightRefreshQueries = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() }, familyRefreshState = new Map(), reconcileExemptions = { pages: new Set(), blogKeys: new Set() } } = {}) {
     // null familyRefreshState = the state lookup FAILED — sequencing is
     // blind, so no refresh may be emitted this run (fail closed).
     const refreshStateAvailable = familyRefreshState instanceof Map;
@@ -2237,8 +2241,18 @@ class GscOpportunityMiner {
       for (const [, hit] of servedBy.entries()) {
         demandByPage.set(hit.page_url, (demandByPage.get(hit.page_url) || 0) + 1);
       }
+      // COMPLETED pages (≥1 done/skipped family refresh, nothing in
+      // flight) sort behind fresh demand so a stable top-25 can't consume
+      // the budget forever while pages below the cutoff starve (Codex
+      // r28); they still probe when budget remains, so a newly emerging
+      // family can reopen them (r23).
+      const pageCompleted = (pageUrl) => {
+        const rowsFor = (refreshStateAvailable && familyRefreshState.get(pageUrl)) || [];
+        return rowsFor.some((r) => r.status === 'done' || r.status === 'skipped')
+          && !rowsFor.some((r) => ['pending', 'claimed', 'pending_review'].includes(r.status));
+      };
       const probeOrder = Array.from(demandByPage.keys())
-        .sort((a, b) => demandByPage.get(b) - demandByPage.get(a))
+        .sort((a, b) => (pageCompleted(a) - pageCompleted(b)) || (demandByPage.get(b) - demandByPage.get(a)))
         .slice(0, probeBudget);
       for (const pageUrl of probeOrder) {
         if (!astroPublisher?.loadExistingPageBody) {
@@ -2308,8 +2322,14 @@ class GscOpportunityMiner {
       if (served) {
         // I/O-failed page read: neither refresh (target unverified) nor
         // blog (the page may be live — duplicate content); the family
-        // skips this run and self-heals next mine (Codex r25 audit).
-        if (served.hit.unresolved) continue;
+        // skips this run and self-heals next mine (Codex r25 audit). Its
+        // page and blog key are EXEMPT from this run's sweep — a transient
+        // GitHub failure must not retire valid queued work (Codex r28).
+        if (served.hit.unresolved) {
+          reconcileExemptions.pages.add(served.hit.page_url);
+          reconcileExemptions.blogKeys.add(listicleFamilyDedupeKey(fam.key));
+          continue;
+        }
         // An in-flight non-family edit of any VARIANT query defers the
         // refresh too — same intent even when the target pages differ
         // (Codex r27).
@@ -2427,16 +2447,31 @@ class GscOpportunityMiner {
       // subgroup's current set already covered this work — membership
       // fluctuation (a family dropping below eligibility) must not reopen
       // it; only genuinely NEW families mint a new generation (Codex r24).
+      // Coverage requires MATCHING SUBGROUP DIMENSIONS (Codex r28): a
+      // reclassified family (lawn→pest correction) forms a new subgroup
+      // whose refresh uses a different facts pack — an old completed row
+      // under the wrong classification must not block it.
+      const dimEq = (a, b) => String(a || '_').toLowerCase() === String(b || '_').toLowerCase();
       const coveredByFrozen = (g) => frozenRows.some((r) => {
+        if (!dimEq(r.service, g.entries[0].service) || !dimEq(r.city, g.entries[0].city)) return false;
         const covered = Array.isArray(r.family_keys) ? r.family_keys : [];
         const current = g.entries.map((e) => e.fam.key);
         return current.length && current.every((k) => covered.includes(k));
       });
-      const pick = ranked.find((g) => !frozen.has(g.key) && !coveredByFrozen(g));
+      // Prefer the subgroup whose row is ALREADY in flight (Codex r28): a
+      // newly out-ranking subgroup must WAIT without discarding the active
+      // one — picking it would emit neither, and the sweep would expire
+      // the pending row as family_signal_gone before the runner claims it.
+      const inflightKeys = new Set(rowsForPage
+        .filter((r) => ['pending', 'claimed', 'pending_review'].includes(r.status))
+        .map((r) => r.dedupe_key));
+      const eligible = (g) => !frozen.has(g.key) && !coveredByFrozen(g);
+      const pick = ranked.find((g) => inflightKeys.has(g.key) && eligible(g))
+        || ranked.find(eligible);
       if (!pick) continue; // every subgroup already completed/dismissed
       const otherInflight = rowsForPage.some((r) => ['pending', 'claimed', 'pending_review'].includes(r.status)
         && r.dedupe_key !== pick.key);
-      if (otherInflight) continue; // one subgroup at a time — wait
+      if (otherInflight) continue; // superseded old generation — wait; sweep retires it (revivable)
       out.push(buildListicleFamilyRefreshOpp(pick.entries));
     }
 
@@ -2619,7 +2654,7 @@ class GscOpportunityMiner {
     });
   }
 
-  async _sweepStaleFamilyRows(familyOpps = [], batch = [], trx = null) {
+  async _sweepStaleFamilyRows(familyOpps = [], batch = [], trx = null, exemptions = { pages: new Set(), blogKeys: new Set() }) {
     const runner = trx || db;
     try {
       // (Errors re-throw under a transaction — see catch below.)
@@ -2633,10 +2668,17 @@ class GscOpportunityMiner {
           ? minScoreToActFor('new_supporting_blog')
           : minScoreToActFor(o.action_type)))
         .map((o) => o.dedupe_key);
-      await runner('opportunity_queue')
+      const exemptPages = Array.from(exemptions.pages || []);
+      let sweep = runner('opportunity_queue')
         .where({ bucket: 'listicle_family', status: 'pending' })
-        .whereNotIn('dedupe_key', persistableKeys)
-        .update({ status: 'expired', skip_reason: 'family_signal_gone', updated_at: new Date() });
+        .whereNotIn('dedupe_key', [...persistableKeys, ...Array.from(exemptions.blogKeys || [])]);
+      if (exemptPages.length) {
+        // Probe-failed pages keep their pending rows this run.
+        sweep = sweep.where(function pageExemption() {
+          this.whereNull('page_url').orWhereNotIn('page_url', exemptPages);
+        });
+      }
+      await sweep.update({ status: 'expired', skip_reason: 'family_signal_gone', updated_at: new Date() });
     } catch (err) {
       // Inside mineAll's transaction the sweep is load-bearing: swallowing
       // a failure would leave old and replacement rows both claimable (and

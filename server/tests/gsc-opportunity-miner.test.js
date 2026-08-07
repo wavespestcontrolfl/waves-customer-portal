@@ -1153,7 +1153,7 @@ describe('listicle_family scoring + action mapping', () => {
     // (service, city) with their own stable keys, ONE emitted per page at
     // a time — frozen keys rotate to the next subgroup, in-flight keys
     // make later subgroups wait (Codex r22 + audit).
-    expect(mineSrc).toMatch(/const pick = ranked\.find\(\(g\) => !frozen\.has\(g\.key\) && !coveredByFrozen\(g\)\)/);
+    expect(mineSrc).toMatch(/const pick = ranked\.find\(\(g\) => inflightKeys\.has\(g\.key\) && eligible\(g\)\)/);
     expect(mineSrc).toMatch(/r\.dedupe_key !== pick\.key/);
     expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(pick\.entries\)/);
     // Grouped by PAGE alone — mixed-classification families served by one
@@ -1207,7 +1207,7 @@ describe('listicle_family scoring + action mapping', () => {
     // beside a possibly-live page); refresh-state lookup failure → NO
     // refresh emissions; the reconciliation lock covers empty batches.
     expect(mineSrc).toMatch(/state === 'error'/);
-    expect(mineSrc).toMatch(/if \(served\.hit\.unresolved\) continue;/);
+    expect(mineSrc).toMatch(/if \(served\.hit\.unresolved\) \{/);
     expect(mineSrc).toMatch(/refreshStateAvailable \? refreshGroups\.entries\(\) : \[\]/);
     expect(src).toMatch(/familyRefreshState = null;/);
     // ...and the failure ALSO suppresses the destructive sweep.
@@ -1222,6 +1222,16 @@ describe('listicle_family scoring + action mapping', () => {
     // URL-derived refresh cities, query-level refresh arbitration, and an
     // advisory lock covering the no-existing-row insert race.
     expect(mineSrc).toMatch(/const probeBudget = 25;/);
+    // r28: completed pages deprioritized in the probe order; unresolved
+    // pages/keys exempt from the sweep; in-flight subgroup preferred over
+    // an out-ranking newcomer; frozen coverage requires matching dims.
+    expect(mineSrc).toMatch(/pageCompleted\(a\) - pageCompleted\(b\)/);
+    expect(mineSrc).toMatch(/reconcileExemptions\.pages\.add\(served\.hit\.page_url\)/);
+    expect(mineSrc).toMatch(/inflightKeys\.has\(g\.key\) && eligible\(g\)/);
+    expect(mineSrc).toMatch(/dimEq\(r\.service, g\.entries\[0\]\.service\)/);
+    const sweepSrc2 = src.slice(src.indexOf('async _sweepStaleFamilyRows'), src.indexOf('async mineNoContentYet'));
+    expect(sweepSrc2).toMatch(/orWhereNotIn\('page_url', exemptPages\)/);
+    expect(sweepSrc2).toMatch(/exemptions\.blogKeys/);
     expect(mineSrc).toMatch(/pageState\.get\(hit\.page_url\) \|\| 'error'/);
     expect(mineSrc).toMatch(/city: inferCityFromUrl\(served\.hit\.page_url\)/);
     expect(src).toMatch(/pg_advisory_xact_lock\(hashtext\('listicle_family_reconcile'\)\)/);
@@ -1410,14 +1420,14 @@ describe('listicle_family scoring + action mapping', () => {
     expect(sweepSrc).toMatch(/skip_reason: 'family_signal_gone'/);
     expect(sweepSrc).toMatch(/status: 'expired'/);
     expect(sweepSrc).not.toMatch(/status: 'skipped'/);
-    expect(sweepSrc).toMatch(/whereNotIn\('dedupe_key', persistableKeys\)/);
+    expect(sweepSrc).toMatch(/whereNotIn\('dedupe_key', \[\.\.\.persistableKeys, \.\.\.Array\.from\(exemptions\.blogKeys \|\| \[\]\)\]\)/);
     expect(sweepSrc).toMatch(/o\.score >= \(familyFloorActions\.includes\(o\.action_type\)/);
     // Ordering + guards in mineAll: sweep ONLY after a successful
     // persistAll, only when the lane ran (gates on, no miner error).
     // Transactional (r22 audit): lock+revalidate predecessors, then upserts,
     // then sweep — all one transaction so concurrent claimNext can neither
     // race the transition nor observe it halfway.
-    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,900}_revalidateFamilyBatch\(trx, allOpportunities, \{ lockEvenIfEmpty: sweepWillRun \}\)[\s\S]{0,200}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1100}_sweepStaleFamilyRows\([\s\S]{0,200}trx[\s\S]{0,40}\)/);
+    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,900}_revalidateFamilyBatch\(trx, allOpportunities, \{ lockEvenIfEmpty: sweepWillRun \}\)[\s\S]{0,200}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1200}_sweepStaleFamilyRows\([\s\S]{0,300}familyExemptions[\s\S]{0,20}\)/);
     expect(src).toMatch(/\.forUpdate\(\)/);
     // Non-family conflicts re-read INSIDE the transaction (audit r24) —
     // the pre-mine fence query alone left a producer race window.
