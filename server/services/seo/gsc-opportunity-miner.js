@@ -1815,14 +1815,15 @@ class GscOpportunityMiner {
         if (served.hit.position >= THRESHOLDS.strikingDistancePositionMin) {
           // Accumulate — families sharing a serving page merge into ONE
           // refresh row (emitted after the loop) so no family's demand is
-          // dropped by the page-keyed dedupe.
-          const groupKey = [service, city || '_', served.hit.page_url].join('::');
-          let group = refreshGroups.get(groupKey);
+          // dropped. Grouped by PAGE alone: families classified under
+          // different services/cities but served by the same URL must not
+          // become independently claimable rows editing one page.
+          let group = refreshGroups.get(served.hit.page_url);
           if (!group) {
-            group = { service, city, entries: [] };
-            refreshGroups.set(groupKey, group);
+            group = { entries: [] };
+            refreshGroups.set(served.hit.page_url, group);
           }
-          group.entries.push({ fam, served });
+          group.entries.push({ fam, served, service, city });
         }
         continue;
       }
@@ -1880,7 +1881,14 @@ class GscOpportunityMiner {
       out.push(opp);
     }
     for (const group of refreshGroups.values()) {
-      out.push(buildListicleFamilyRefreshOpp(group.entries, group.service, group.city));
+      // Mixed classification across merged families resolves to the
+      // highest-impression family's service/city — one deliberate winner,
+      // one refresh row per page. A winner flip between runs mints a new
+      // dedupe key, and the post-floor sweep expires the orphaned old row.
+      const primary = group.entries
+        .slice()
+        .sort((a, b) => b.fam.impressions - a.fam.impressions)[0];
+      out.push(buildListicleFamilyRefreshOpp(group.entries, primary.service, primary.city));
     }
 
     // Catch-all reconciliation: any pending family row NOT re-emitted by
