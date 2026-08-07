@@ -2915,6 +2915,12 @@ const REENTRY_SAFETY_SRCS = [
   `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*)\\b[^.!?\\n]{0,30}?\\bfor\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "needs 30 minutes to dry", "30 minutes of drying"
   `\\b${REENTRY_DURATION_SRC}\\s+(?:to\\s+dry|of\\s+drying)\\b`,
+  // Noun-first drying figures: "drying takes 30 minutes", "the drying time
+  // is 30 minutes"
+  `\\bdry(?:ing)?(?:\\s+time|\\s+period|\\s+window)?\\s+(?:takes?|is|runs?|lasts?)\\s+(?:about\\s+|around\\s+|roughly\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  // Hyphenated attributive figures: "a 30-minute drying period",
+  // "a 45-minute re-entry window"
+  "\\b(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)[-‑]\\s?(?:minute|min|hour|hr)\\s+(?:dry(?:ing)?|re-?entry|wait(?:ing)?)\\b",
 ];
 
 // The APPROVED conditional idiom has TWO required parts (AGENTS.md): the

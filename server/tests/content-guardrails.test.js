@@ -3049,6 +3049,12 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(doNot.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const needsToDry = guardrails.evaluate({ body: 'The treatment needs 30 minutes to dry.' }, {});
     expect(needsToDry.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const dryingTakes = guardrails.evaluate({ body: 'Drying takes 30 minutes in Florida sun.' }, {});
+    expect(dryingTakes.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const dryingTimeIs = guardrails.evaluate({ body: 'The drying time is 30 minutes for granular applications.' }, {});
+    expect(dryingTimeIs.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const hyphenated = guardrails.evaluate({ body: 'Expect a 30-minute drying period.' }, {});
+    expect(hyphenated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const directClaim = guardrails.evaluate({ body: 'Our pesticides are completely safe.' }, {});
     expect(directClaim.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     // No figure, label-directed — legal.

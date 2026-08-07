@@ -509,11 +509,18 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
             try {
               // Scrub the contract-REQUIRED {{cityPhone}} token (renders via
               // the domains pipeline, not MDX) — same scrub the runner's
-              // metadata handler applies.
+              // metadata handler applies. The TITLE is deliberately omitted:
+              // protected non-blog pages discard the title proposal at the
+              // publisher, and only the run-level gate can know which
+              // targets are protected (live-page load) — linting a
+              // to-be-discarded title here could burn both redrafts on text
+              // that never ships. The description ALWAYS ships; the
+              // authoritative gate evaluates the title with its
+              // protected-title context.
               const scrubbedMeta = metaGuardrails.SANCTIONED_META_TOKEN_RE
                 ? String(meta_description).replace(metaGuardrails.SANCTIONED_META_TOKEN_RE, '')
                 : meta_description;
-              lintResult = metaGuardrails.evaluate({ frontmatter: { title, meta_description: scrubbedMeta }, body: '' }, metaLintOptions);
+              lintResult = metaGuardrails.evaluate({ frontmatter: { meta_description: scrubbedMeta }, body: '' }, metaLintOptions);
             } catch (err) {
               logger.warn(`[brief-driven-tools] emit_metadata_only(${sessionId}): self-lint evaluator threw (${err.message}) — capturing without in-loop lint`);
             }

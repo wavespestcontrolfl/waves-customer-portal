@@ -286,10 +286,13 @@ describe('emit_draft in-loop self-lint (W1)', () => {
     clearDraft('lint-6');
   });
 
-  test('emit_metadata_only self-lints too — meta text ships on every customer surface', async () => {
+  test('emit_metadata_only self-lints the DESCRIPTION only — protected titles are discarded at the publisher and only the run-level gate knows which', async () => {
     registerSessionLint('lint-8', {});
+    // Violation lives in the description → rejected. (A violation ONLY in
+    // the title would pass here and be caught by the authoritative
+    // metadata-handler gate, which has the protected-title context.)
     const bad = await executeBriefTool('emit_metadata_only', {
-      title: 'Pet-Safe Lawn Treatments in Sarasota',
+      title: 'Lawn Treatments in Sarasota',
       meta_description: 'Our EPA-approved treatments keep your family protected across Sarasota and Bradenton, with free estimates in under two minutes.',
     }, { sessionId: 'lint-8' });
     expect(bad.ok).toBe(false);
