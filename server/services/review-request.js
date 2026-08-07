@@ -32,6 +32,11 @@ const RODENT_TRAPPING_SERIES_KEYS = new Set([
   "rodent_exclusion",
 ]);
 const TRAPPING_MULTI_TREATMENT_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS, "wildlife_trapping"]);
+// Rodent BASE bookings (everything but the generic return-check SKU): an
+// unlinked future booking under one of these is a NEW program's opener at
+// booking level, before any report exists to declare it (codex #3243 r18
+// P2). Wildlife is excluded — its checks share the base key.
+const BASE_OPENER_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS].filter((k) => k !== "rodent_trapping_followup"));
 // Series position crosses keys only within ONE service line (codex #3243 r2
 // P2): a wildlife job must not read as a rodent program's prior/next visit.
 // Wildlife has a single catalog row, so it matches only itself; the rodent
@@ -821,7 +826,7 @@ const ReviewService = {
             .where("fs.scheduled_date", ">", anchorStr)
             .where("fs.scheduled_date", "<=", ceilStr)
             .whereIn("fsv.service_key", seriesKeys)
-            .select("fs.id", "fs.status", "fs.property_id", "fs.scheduled_date", "fs.window_start", "fs.created_at", "fs.service_address_line1", "fs.service_address_line2", "fs.service_address_city", "fs.service_address_zip");
+            .select("fs.id", "fs.status", "fs.property_id", "fs.scheduled_date", "fs.window_start", "fs.created_at", "fs.parent_service_id", "fs.followup_source_service_id", "fsv.service_key as service_key", "fs.service_address_line1", "fs.service_address_line2", "fs.service_address_city", "fs.service_address_zip");
           // Same-day siblings (codex #3243 r5 P2: trap setup + same-day
           // capture/removal) are invisible to the date-only comparisons —
           // order them by appointment window (then created_at); an
@@ -832,7 +837,7 @@ const ReviewService = {
             .where("ds.id", "!=", svc.id)
             .where("ds.scheduled_date", anchorStr)
             .whereIn("dsv.service_key", seriesKeys)
-            .select("ds.id", "ds.status", "ds.property_id", "ds.scheduled_date", "ds.service_address_line1", "ds.service_address_line2", "ds.service_address_city", "ds.service_address_zip", "ds.window_start", "ds.created_at");
+            .select("ds.id", "ds.status", "ds.property_id", "ds.scheduled_date", "ds.parent_service_id", "ds.followup_source_service_id", "dsv.service_key as service_key", "ds.service_address_line1", "ds.service_address_line2", "ds.service_address_city", "ds.service_address_zip", "ds.window_start", "ds.created_at");
           const sameDayInPremise = sameDayRows.filter((r) => inPremise(r));
           if (!trapPrior) {
             trapPrior = sameDayInPremise.find(
@@ -850,7 +855,19 @@ const ReviewService = {
           // the NEW series.
           const laterFlags = new Map();
           for (const r of laterInPremise) {
-            laterFlags.set(r.id, await this._isDeclaredInitialTrapVisit({ scheduledServiceId: r.id }));
+            const declaredType = await this._declaredTrapVisitType({ scheduledServiceId: r.id });
+            // A still-booked future opener has no report to declare itself
+            // yet (codex #3243 r18 P2) — at booking level, a fresh UNLINKED
+            // base-SKU row is a new program's opener (checks ride the
+            // generic followup SKU or linkage; wildlife stays report-based
+            // because its checks share the base key). A report declaring a
+            // follow-up outranks the heuristic.
+            const boundary = declaredType === "initial"
+              || (declaredType == null
+                && BASE_OPENER_KEYS.has(r.service_key)
+                && !r.parent_service_id
+                && !r.followup_source_service_id);
+            laterFlags.set(r.id, boundary);
           }
           let boundedLater = laterInPremise;
           const laterDeclared = laterInPremise.filter((r) => laterFlags.get(r.id));
@@ -2745,7 +2762,12 @@ const ReviewService = {
       // replacement insert below (codex #3243 r9 P2): stopping up front let
       // any later enrollment failure strand the customer with the opener
       // dead and no final cadence.
-      if (seriesFinal) {
+      // An IN-FLIGHT opener is non-supersedable (codex #3243 r18 P2): the
+      // step runner's atomic claim NULLs next_run_at while sendOutreachTouch
+      // awaits the provider, and stopping the row would not cancel that
+      // call — the opener ask could still deliver alongside the
+      // replacement's. Only a scheduled, unclaimed opener yields.
+      if (seriesFinal && active.next_run_at != null) {
         try {
           const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId });
           if (seriesIds.includes(active.id)) {
@@ -2846,6 +2868,10 @@ const ReviewService = {
         if (supersedeOpenerId) {
           const stopped = await trx("review_sequences")
             .where({ id: supersedeOpenerId, status: "active" })
+            // whereNotNull: a cron claim that landed between the proof and
+            // this commit means the send is in flight — abort into the
+            // already_active recovery instead of stopping mid-send.
+            .whereNotNull("next_run_at")
             .update({ status: "stopped", stop_reason: "superseded_by_final", next_run_at: null, completed_at: new Date(), updated_at: new Date() });
           if (!stopped) {
             const raceErr = new Error("opener changed state mid-enrollment");
@@ -3504,6 +3530,7 @@ const ReviewService = {
         // final's first hop borrows the nearest prior line row's key when
         // its own key is the generic followup SKU.
         let visitWindowDays = windowDays;
+        let originWindowDays = null;
         if (visit.service_key === "rodent_trapping_followup") {
           const peekW = etDayWindow(visit.scheduled_date, 60);
           const nearestRows = await db("scheduled_services as ps")
@@ -3515,10 +3542,16 @@ const ReviewService = {
             .whereIn("psv.service_key", seriesKeys)
             .orderBy("ps.scheduled_date", "desc")
             .select(...walkSelect);
-          const nearest = nearestRows.filter((r) => inPremise(r))[0] || null;
-          if (nearest?.service_key) {
-            const ni = Number(nearest.follow_up_interval_days) > 0 ? Number(nearest.follow_up_interval_days) : intervalDays;
-            visitWindowDays = trappingWindowDaysFor(nearest.service_key, ni);
+          // The origin is the most recent BASE-key row — generic middle
+          // checks ride the followup SKU and must not reset the boundary
+          // to the 30-day check floor (codex #3243 r18 P2).
+          const originRow = nearestRows.filter(
+            (r) => inPremise(r) && r.service_key && r.service_key !== "rodent_trapping_followup",
+          )[0] || null;
+          if (originRow) {
+            const ni = Number(originRow.follow_up_interval_days) > 0 ? Number(originRow.follow_up_interval_days) : intervalDays;
+            originWindowDays = trappingWindowDaysFor(originRow.service_key, ni);
+            visitWindowDays = originWindowDays;
           }
         }
         let firstHop = true;
@@ -3526,9 +3559,14 @@ const ReviewService = {
           const c = queue.shift();
           const cKey = c.service_key || visit.service_key;
           const cInterval = Number(c.follow_up_interval_days) > 0 ? Number(c.follow_up_interval_days) : intervalDays;
+          // Generic-followup cursors inherit the ORIGIN window too — every
+          // middle check of an exclusion program hops with the exclusion
+          // boundary, not the check floor.
           const cWindow = firstHop && c.id === visit.id
             ? visitWindowDays
-            : trappingWindowDaysFor(cKey, cInterval);
+            : (cKey === "rodent_trapping_followup" && originWindowDays != null
+              ? originWindowDays
+              : trappingWindowDaysFor(cKey, cInterval));
           firstHop = false;
           const w = etDayWindow(c.scheduled_date, cWindow);
           const rows = await db("scheduled_services as ps")
