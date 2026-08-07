@@ -2200,13 +2200,19 @@ class GscOpportunityMiner {
     // it, and the family would mint a competing blog beside the in-window
     // page (Codex r17). Top-3-only queries simply have no served entry;
     // won-intent stays with the eligibility checks.
-    const servedBy = new Map();
+    // ALL in-window mappings per query, position-ranked — a non-editable
+    // best page must not discard a still-valid editable runner-up, or the
+    // family mints a blog beside a refreshable page (Codex r29).
+    const servedCandidates = new Map();
     for (const r of mappedRows) {
       const pos = parseFloat(r.page_position);
       if (pos < THRESHOLDS.strikingDistancePositionMin) continue;
-      const cur = servedBy.get(r.query);
-      if (!cur || pos < cur.position) servedBy.set(r.query, { page_url: r.page_url, position: pos });
+      if (!servedCandidates.has(r.query)) servedCandidates.set(r.query, []);
+      servedCandidates.get(r.query).push({ page_url: r.page_url, position: pos });
     }
+    for (const list of servedCandidates.values()) list.sort((a, b) => a.position - b.position);
+    const servedBy = new Map();
+    const pageCityByUrl = new Map();
 
     // Only EDITABLE Astro pages count as serving (same
     // loadExistingPageBody check mineAnswerGap uses): an in-window mapping
@@ -2216,7 +2222,7 @@ class GscOpportunityMiner {
     // r25). An unresolvable page is treated as UNSERVED, so the family
     // falls through to the blog path; publisher unavailability fails the
     // same conservative direction.
-    if (servedBy.size) {
+    if (servedCandidates.size) {
       let astroPublisher = null;
       try {
         astroPublisher = require('../content-astro/astro-publisher');
@@ -2238,21 +2244,20 @@ class GscOpportunityMiner {
       // rotate in next mine.
       const probeBudget = 25;
       const demandByPage = new Map();
-      for (const [, hit] of servedBy.entries()) {
-        demandByPage.set(hit.page_url, (demandByPage.get(hit.page_url) || 0) + 1);
+      for (const list of servedCandidates.values()) {
+        for (const cand of list) {
+          demandByPage.set(cand.page_url, (demandByPage.get(cand.page_url) || 0) + 1);
+        }
       }
-      // COMPLETED pages (≥1 done/skipped family refresh, nothing in
-      // flight) sort behind fresh demand so a stable top-25 can't consume
-      // the budget forever while pages below the cutoff starve (Codex
-      // r28); they still probe when budget remains, so a newly emerging
-      // family can reopen them (r23).
-      const pageCompleted = (pageUrl) => {
-        const rowsFor = (refreshStateAvailable && familyRefreshState.get(pageUrl)) || [];
-        return rowsFor.some((r) => r.status === 'done' || r.status === 'skipped')
-          && !rowsFor.some((r) => ['pending', 'claimed', 'pending_review'].includes(r.status));
-      };
+      // Pages that already CARRY family refresh rows — in flight OR
+      // completed — sort behind unseen demand (Codex r28/r29): an occupied
+      // page's pending row survives unprobed via the sweep exemptions, and
+      // a completed one only needs probing when budget remains (the r23
+      // reopen path), so the top of the budget always goes to pages that
+      // have never enqueued their first opportunity.
+      const pageHasRows = (pageUrl) => (((refreshStateAvailable && familyRefreshState.get(pageUrl)) || []).length > 0 ? 1 : 0);
       const probeOrder = Array.from(demandByPage.keys())
-        .sort((a, b) => (pageCompleted(a) - pageCompleted(b)) || (demandByPage.get(b) - demandByPage.get(a)))
+        .sort((a, b) => (pageHasRows(a) - pageHasRows(b)) || (demandByPage.get(b) - demandByPage.get(a)))
         .slice(0, probeBudget);
       for (const pageUrl of probeOrder) {
         if (!astroPublisher?.loadExistingPageBody) {
@@ -2262,15 +2267,31 @@ class GscOpportunityMiner {
         try {
           const loaded = await astroPublisher.loadExistingPageBody(pageUrl);
           pageState.set(pageUrl, loaded && loaded.body ? 'editable' : 'not_editable');
+          if (loaded && loaded.body) {
+            // Refresh city from the page's OWN metadata (Codex r29): local
+            // blog slugs embed cities without the -fl marker URL inference
+            // needs, but frontmatter service_areas_tag carries it
+            // authoritatively.
+            const tags = Array.isArray(loaded.frontmatter?.service_areas_tag) ? loaded.frontmatter.service_areas_tag : [];
+            pageCityByUrl.set(pageUrl, normalizeCity(tags[0]) || inferCityFromUrl(pageUrl) || null);
+          }
         } catch (err) {
           logger.warn(`[gsc-opp-miner] listicle_family: body load failed for ${pageUrl}: ${err.message}`);
           pageState.set(pageUrl, 'error');
         }
       }
-      for (const [q, hit] of Array.from(servedBy.entries())) {
-        const state = pageState.get(hit.page_url) || 'error'; // past the probe budget = unresolved
-        if (state === 'not_editable') servedBy.delete(q);
-        else if (state === 'error') servedBy.set(q, { ...hit, unresolved: true });
+      // First EDITABLE candidate per query wins; an unprobed/error page
+      // encountered before any editable one fails closed (unresolved); all
+      // confirmed non-editable → genuinely unserved (blog path).
+      for (const [q, list] of servedCandidates.entries()) {
+        let resolved = null;
+        for (const cand of list) {
+          const state = pageState.get(cand.page_url) || 'error';
+          if (state === 'editable') { resolved = { ...cand }; break; }
+          if (state === 'error') { resolved = { ...cand, unresolved: true }; break; }
+          // not_editable → try the next-ranked mapping
+        }
+        if (resolved) servedBy.set(q, resolved);
       }
     }
 
@@ -2367,7 +2388,7 @@ class GscOpportunityMiner {
           group = { entries: [] };
           refreshGroups.set(served.hit.page_url, group);
         }
-        group.entries.push({ fam, served, service, city: inferCityFromUrl(served.hit.page_url) });
+        group.entries.push({ fam, served, service, city: pageCityByUrl.get(served.hit.page_url) ?? inferCityFromUrl(served.hit.page_url) });
         continue;
       }
 
@@ -2639,6 +2660,11 @@ class GscOpportunityMiner {
       if (o.bucket !== 'listicle_family') return true;
       if (o.action_type === 'refresh_existing_page') {
         if (conflictPages.has(o.page_url)) return false;
+        // Same-query conflicts too (Codex r29): a non-family edit of a
+        // family query on a DIFFERENT page that committed since the fence
+        // read is the same intent — defer the family refresh.
+        const fqs = Array.isArray(o.signal_metadata?.family_queries) ? o.signal_metadata.family_queries : [];
+        if ([o.query, ...fqs].some((q) => q && conflictQueries.has(String(q).toLowerCase()))) return false;
         const pageKeys = inflightPageKeys.get(o.page_url);
         if (pageKeys && Array.from(pageKeys).some((k) => k !== o.dedupe_key)) return false;
         const keys = Array.isArray(o.signal_metadata?.family_keys) ? o.signal_metadata.family_keys : [];

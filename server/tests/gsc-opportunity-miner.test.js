@@ -1201,7 +1201,7 @@ describe('listicle_family scoring + action mapping', () => {
     // family stays a blog candidate, and the runtime FAQ guards read
     // gsc_signal.specialty_topic.
     expect(mineSrc).toMatch(/loadExistingPageBody\(pageUrl\)/);
-    expect(mineSrc).toMatch(/servedBy\.delete\(q\)/);
+    expect(mineSrc).toMatch(/if \(resolved\) servedBy\.set\(q, resolved\);/);
     // Fail-closed three-way (audit r25): confirmed non-editable → blog
     // fallback; I/O error → the family skips ENTIRELY (no duplicate blog
     // beside a possibly-live page); refresh-state lookup failure → NO
@@ -1225,15 +1225,21 @@ describe('listicle_family scoring + action mapping', () => {
     // r28: completed pages deprioritized in the probe order; unresolved
     // pages/keys exempt from the sweep; in-flight subgroup preferred over
     // an out-ranking newcomer; frozen coverage requires matching dims.
-    expect(mineSrc).toMatch(/pageCompleted\(a\) - pageCompleted\(b\)/);
+    expect(mineSrc).toMatch(/pageHasRows\(a\) - pageHasRows\(b\)/);
+    // r29: ranked candidates walk to the first EDITABLE mapping; refresh
+    // cities come from page frontmatter (service_areas_tag) first; the
+    // in-transaction refresh branch also defers on conflict QUERIES.
+    expect(mineSrc).toMatch(/if \(state === 'editable'\) \{ resolved = \{ \.\.\.cand \}; break; \}/);
+    expect(mineSrc).toMatch(/service_areas_tag/);
+    expect(mineSrc).toMatch(/pageCityByUrl\.get\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/reconcileExemptions\.pages\.add\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/inflightKeys\.has\(g\.key\) && eligible\(g\)/);
     expect(mineSrc).toMatch(/dimEq\(r\.service, g\.entries\[0\]\.service\)/);
     const sweepSrc2 = src.slice(src.indexOf('async _sweepStaleFamilyRows'), src.indexOf('async mineNoContentYet'));
     expect(sweepSrc2).toMatch(/orWhereNotIn\('page_url', exemptPages\)/);
     expect(sweepSrc2).toMatch(/exemptions\.blogKeys/);
-    expect(mineSrc).toMatch(/pageState\.get\(hit\.page_url\) \|\| 'error'/);
-    expect(mineSrc).toMatch(/city: inferCityFromUrl\(served\.hit\.page_url\)/);
+    expect(mineSrc).toMatch(/pageState\.get\(cand\.page_url\) \|\| 'error'/);
+    expect(mineSrc).toMatch(/city: pageCityByUrl\.get\(served\.hit\.page_url\) \?\? inferCityFromUrl\(served\.hit\.page_url\)/);
     expect(src).toMatch(/pg_advisory_xact_lock\(hashtext\('listicle_family_reconcile'\)\)/);
     // One-edit-per-page re-checked UNDER the transaction lock.
     expect(src).toMatch(/inflightPageKeys\.get\(o\.page_url\)/);
@@ -1435,6 +1441,8 @@ describe('listicle_family scoring + action mapping', () => {
     expect(revalSrc).toMatch(/whereNot\('bucket', 'listicle_family'\)/);
     expect(revalSrc).toMatch(/conflictPages\.has\(o\.page_url\)/);
     expect(revalSrc).toMatch(/conflictQueries\.has\(String\(q\)\.toLowerCase\(\)\)/);
+    // Refresh branch checks conflict queries too (r29).
+    expect(revalSrc).toMatch(/const fqs = Array\.isArray\(o\.signal_metadata\?\.family_queries\)/);
     expect(src).toMatch(/!errors\.listicle_family[\s\S]{0,140}CANONICAL_MINE_PERIOD_DAYS[\s\S]{0,140}isEnabled\('listicleFamilyMining'\) && isEnabled\('listicleBriefs'\)/);
     // Destructive sweeping only under the authoritative window — a manual
     // 7-day mine must not expire valid 28-day rows (Codex r20 P2).

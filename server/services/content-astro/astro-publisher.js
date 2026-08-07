@@ -1886,9 +1886,14 @@ async function getLiveFrontmatter(targetUrlOrPath) {
 async function loadExistingPageBody(targetUrlOrPath) {
   const resolved = await resolveExistingAstroFileForTarget(targetUrlOrPath);
   if (!resolved) return null;
-  const body = fm.parse(resolved.file.content).content || '';
+  const parsed = fm.parse(resolved.file.content);
+  const body = parsed.content || '';
   const word_count = body.split(/\s+/).filter(Boolean).length;
-  return { body, word_count };
+  // frontmatter rides along (additive): local blog slugs embed their city
+  // without the -fl marker URL inference needs, but service_areas_tag
+  // carries it authoritatively — the family miner derives refresh cities
+  // from it (Codex #3255 r29).
+  return { body, word_count, frontmatter: parsed.data || {} };
 }
 
 function canPublishRefresh(draft, brief = {}) {
