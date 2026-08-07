@@ -53,14 +53,19 @@ describe('miner upsert: skipped is sticky, expired revives', () => {
     }]);
 
     const [sql] = db.raw.mock.calls[0];
-    const caseMatch = sql.match(/status IN \(([^)]+)\)/);
-    expect(caseMatch).toBeTruthy();
-    expect(caseMatch[1]).toContain("'skipped'");
-    expect(caseMatch[1]).toContain("'claimed'");
-    expect(caseMatch[1]).toContain("'done'");
-    expect(caseMatch[1]).toContain("'pending_review'");
+    // Frozen statuses now skip the conflict-update ENTIRELY (DO UPDATE ...
+    // WHERE) rather than being preserved field-by-field in a status CASE —
+    // skipped stays just as sticky, and identity/score/metadata can no
+    // longer be rewritten beneath a claimed worker or a processed record.
+    const guard = sql.match(/DO UPDATE[\s\S]*WHERE opportunity_queue\.status NOT IN \(([^)]+)\)/);
+    expect(guard).toBeTruthy();
+    expect(guard[1]).toContain("'skipped'");
+    expect(guard[1]).toContain("'claimed'");
+    expect(guard[1]).toContain("'done'");
+    expect(guard[1]).toContain("'pending_review'");
     // expired must revive to pending on a fresh mine of the same signal
-    expect(caseMatch[1]).not.toContain("'expired'");
+    expect(guard[1]).not.toContain("'expired'");
+    expect(sql).toMatch(/status = 'pending'/);
   });
 
   test('the metadata refresh preserves the runner gate_retry marker (one-shot redraft survives the morning mine)', async () => {
@@ -277,11 +282,13 @@ describe('resurrection paths reset the lifetime claim budget (Codex round 1)', (
       expect(src).toMatch(/maxClaimAttempts\(\)/);
     }
     // The unattended miners keep 'skipped' sticky instead — a cron must not
-    // overturn a dismissal or an attempts_exhausted sweep.
-    for (const mod of ['../services/seo/gsc-opportunity-miner', '../services/seo/competitor-gap-miner']) {
-      const src = fs.readFileSync(require.resolve(mod), 'utf8');
-      expect(src).toMatch(/status IN \('claimed', 'done', 'pending_review', 'skipped'\)/);
-    }
+    // overturn a dismissal or an attempts_exhausted sweep. The GSC miner
+    // enforces this with a DO UPDATE ... WHERE guard (frozen rows skip the
+    // update entirely); the competitor miner still uses the status CASE.
+    const gscSrc = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    expect(gscSrc).toMatch(/status NOT IN \('claimed', 'done', 'pending_review', 'skipped'\)/);
+    const compSrc = fs.readFileSync(require.resolve('../services/seo/competitor-gap-miner'), 'utf8');
+    expect(compSrc).toMatch(/status IN \('claimed', 'done', 'pending_review', 'skipped'\)/);
   });
 
   test('refresh-audit in-flight check does not early-return on exhausted pending rows (Codex round 4 — the reset was unreachable)', () => {
