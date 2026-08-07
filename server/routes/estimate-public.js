@@ -9385,6 +9385,10 @@ router.put('/:token/accept', async (req, res, next) => {
             phone: estimate.customer_phone,
             email: estimate.customer_email || null,
             address_line1: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.address_line1 : estimate.address) || '',
+            // Canonicalized unit segment (codex #3244 r7): without it the
+            // primary-property backfill and every addressKey compare see a
+            // unitless address and can mint a duplicate property later.
+            address_line2: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.address_line2 : null) || null,
             city: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.city : '') || '',
             state: (parsedAcceptAddress && parsedAcceptAddress.state) || 'FL',
             zip: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.zip : '') || '',
@@ -10091,8 +10095,11 @@ router.put('/:token/accept', async (req, res, next) => {
     // visits' service address, refresh has_multi_home. AWAITED so a deploy
     // right after the response can't strand the accept unlinked, but the
     // helper never throws — the committed acceptance stands regardless.
+    // Ownership transfer is NOT customer-gated (codex #3244 r7): a lead-only
+    // group whose accept fails customer resolution still burned every
+    // sibling's follow-up stages at publication.
+    await transferGroupFollowupOwnership(estimate);
     if (customerId) {
-      await transferGroupFollowupOwnership(estimate);
       await require('../services/estimate-property-linkage').linkAcceptedEstimateProperty({
         estimateId: estimate.id,
         customerId,
@@ -20309,6 +20316,7 @@ module.exports.pricingBundleLacksManualDiscountNetting = pricingBundleLacksManua
 module.exports.estimateTotalsReflectManualDiscount = estimateTotalsReflectManualDiscount;
 module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
+module.exports.transferGroupFollowupOwnership = transferGroupFollowupOwnership;
 module.exports.buildPricingServices = buildPricingServices;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.

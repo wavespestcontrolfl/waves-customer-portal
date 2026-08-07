@@ -681,6 +681,13 @@ async function markEstimateManuallyAccepted({
     // link estimates.property_id, stamp the booked visits, refresh
     // has_multi_home. The helper never throws.
     {
+      // Manual accept is a terminal event for the group's comms owner too
+      // (codex #3244 r7) — same ownership transfer as the public accept.
+      try {
+        await require('../routes/estimate-public').transferGroupFollowupOwnership(acceptedEstimate);
+      } catch (e) {
+        logger.warn(`[manual-acceptance] follow-up ownership transfer failed for estimate ${acceptedEstimate.id}: ${e.message}`);
+      }
       const linkageCustomerId = acceptedEstimate.customer_id || proposalCustomer?.id || null;
       if (linkageCustomerId) {
         await require('./estimate-property-linkage').linkAcceptedEstimateProperty({

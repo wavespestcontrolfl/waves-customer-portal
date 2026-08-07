@@ -277,10 +277,10 @@ function qualifyingKeysFromRows(rows = []) {
 async function loadExistingQualifyingServiceKeys(database, customerId, { streetScope = null } = {}) {
   const rows = await loadExistingRecurringQualifyingRows(database, customerId);
   if (!streetScope || !streetScope.estimateStreet) return qualifyingKeysFromRows(rows);
-  const { normalizedEstimateStreet } = require('./estimate-property-linkage');
+  const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
   const kept = [];
   for (const row of rows) {
-    let street = normalizedEstimateStreet(row.service_address_line1);
+    let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2);
     if (!street && row.source_estimate_id) {
       try {
         const src = await database('estimates').where({ id: row.source_estimate_id }).first('address');

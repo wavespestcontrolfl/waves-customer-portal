@@ -338,12 +338,17 @@ async function reserveSlot({
   // property's fresh hold. Best-effort — a geocode miss books exactly as
   // before.
   let holdCoords = null;
+  let holdCoordsAddress = null;
   try {
     const estimateForCoords = await db('estimates').where({ id: estimateId }).first('id', 'customer_id', 'address');
     if (estimateForCoords && typeof estimateSlotAvailability.resolveEstimateCoords === 'function') {
       const coords = await estimateSlotAvailability.resolveEstimateCoords(estimateForCoords);
       if (coords && Number.isFinite(Number(coords.lat)) && Number.isFinite(Number(coords.lng))) {
         holdCoords = { lat: Number(coords.lat), lng: Number(coords.lng) };
+        // Snapshot the address these coords describe: the reservation txn
+        // re-reads the estimate under lock and must drop the coords if a
+        // concurrent revision changed the property (codex #3244 r7).
+        holdCoordsAddress = String(estimateForCoords.address || '');
       }
     }
   } catch (geoErr) {
@@ -746,7 +751,12 @@ async function reserveSlot({
         // for find-time's detour math; the zone slug lets the zone-capacity
         // conflict check see holds directly instead of via the (absent)
         // customer city. Both were previously never written on holds.
-        ...(holdCoords ? { lat: holdCoords.lat, lng: holdCoords.lng } : {}),
+        // Coords only when the locked row still quotes the address they were
+        // geocoded from — a concurrent revision that moved the property must
+        // not anchor routing at the old location (codex #3244 r7). Address
+        // drift drops the geo stamp; the hold books exactly as before.
+        ...(holdCoords && holdCoordsAddress === String(estimate.address || '')
+          ? { lat: holdCoords.lat, lng: holdCoords.lng } : {}),
         ...(zoneSlugOf(reserveZone) ? { zone: zoneSlugOf(reserveZone) } : {}),
         // One-time accepts are a single visit — pin is_recurring=false so
         // dispatch job-classification and recurring-only sweeps never treat

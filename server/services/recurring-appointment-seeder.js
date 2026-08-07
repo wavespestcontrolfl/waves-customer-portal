@@ -569,6 +569,7 @@ async function findActiveRecurringSeries(conn, {
     .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
   if (columns.service_id) query.select('service_id');
   if (columns.service_address_line1) query.select('service_address_line1');
+  if (columns.service_address_line2) query.select('service_address_line2');
   // Which estimate created the existing series — lets the duplicate-conflict
   // payload prove to a retrying client that the series IS the one its
   // partial save already created (codex r21 P0).
@@ -585,8 +586,8 @@ async function findActiveRecurringSeries(conn, {
       && serviceKeyFor({ service_type: parent.service_type }) === targetKey;
     if (!idMatch && !keyMatch) continue;
     if (serviceAddressScope && columns.service_address_line1 && serviceAddressScope.estimateStreet) {
-      const { normalizedEstimateStreet } = require('./estimate-property-linkage');
-      let parentStreet = normalizedEstimateStreet(parent.service_address_line1);
+      const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
+      let parentStreet = normalizedStampedStreet(parent.service_address_line1, parent.service_address_line2);
       if (!parentStreet && parent.source_estimate_id) {
         // Unstamped parent: the post-commit linkage hook may not have run yet
         // (or the gate is off), and under concurrent group accepts the other

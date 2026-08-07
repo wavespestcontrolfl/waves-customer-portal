@@ -3354,6 +3354,12 @@ export default function EstimateToolViewV2({
         customerEmail: f.customerEmail,
         address: prefill.address || "",
       }),
+      // Account-level facts survive the property reset (codex #3244 r7):
+      // the recurring-customer 15% one-time perk belongs to the PERSON —
+      // resetting it silently overcharges a member's second property, and
+      // the new address's lookup can't rediscover membership keyed to the
+      // primary address.
+      isRecurringCustomer: f.isRecurringCustomer,
       ...(multiHome
         ? {
           manualDiscountPreset: "multi_home",

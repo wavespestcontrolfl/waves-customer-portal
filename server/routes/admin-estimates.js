@@ -1163,14 +1163,16 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
       for (let attempt = 1; attempt <= 3 && !published; attempt += 1) {
         try {
           let siblingSnapshotPatch = { groupPublishedByEstimateId: estimate.id };
-          try {
-            const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: nextExpiresAt }, now);
-            if (snapshot?.sendSnapshot) {
-              siblingSnapshotPatch = { ...siblingSnapshotPatch, sendSnapshot: snapshot.sendSnapshot };
-            }
-          } catch (snapErr) {
-            logger.warn(`[admin-estimates] sibling ${sibling.id} send snapshot failed (publishing without freeze): ${snapErr.message}`);
+          // A snapshot whose pricing bundle failed is NOT a freeze — the
+          // public page would fall back to live repricing, exactly what the
+          // snapshot exists to prevent (codex #3244 r7). Treat it like any
+          // other publication failure: throw into the retry loop; after the
+          // final attempt the sibling is released for an operator re-send.
+          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: nextExpiresAt }, now);
+          if (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError) {
+            throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
           }
+          siblingSnapshotPatch = { ...siblingSnapshotPatch, sendSnapshot: snapshot.sendSnapshot };
           const updated = await db('estimates')
             .where({ id: sibling.id, status: 'sending' })
             .whereNull('price_locked_at')

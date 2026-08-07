@@ -1160,10 +1160,10 @@ async function resolveEstimateWritePayload({
   let perPropertyStreetScope = null;
   if (body.customerId && body.address) {
     try {
-      const { normalizedEstimateStreet } = require('./estimate-property-linkage');
-      const custRow = await database('customers').where({ id: body.customerId }).first('address_line1');
+      const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
+      const custRow = await database('customers').where({ id: body.customerId }).first('address_line1', 'address_line2');
       const estimateStreet = normalizedEstimateStreet(body.address);
-      const customerStreet = normalizedEstimateStreet(custRow?.address_line1);
+      const customerStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2);
       if (estimateStreet) {
         perPropertyStreetScope = { estimateStreet, customerPrimaryStreet: customerStreet };
       }

@@ -117,6 +117,11 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
           service_address_city: gparts.city || null,
           service_address_state: gparts.state || 'FL',
           service_address_zip: gparts.zip || null,
+          // Restamping the address invalidates any coords the row inherited
+          // at booking (dispatch prefers s.lat unconditionally — codex #3244
+          // r7); null them so dispatch geocodes the stamped address.
+          lat: null,
+          lng: null,
         });
       logger.info(`[estimate-property-linkage] estimate ${estimateId}: grouped visit addresses stamped (gate off — no property row)`);
       return null;
@@ -155,8 +160,13 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
           .trim();
         const street = normalizeStreet(parts.address_line1);
         if (!street) return null;
+        const unit = normalizeStreet(parts.address_line2);
         const rows = await database('customer_properties').where({ customer_id: customerId, active: true });
-        const matched = rows.find((p) => normalizeStreet(p.address_line1) === street);
+        // Unit-aware: when both sides carry a unit they must agree — a
+        // street-only match could link Unit 4's accept to Unit 5's property
+        // (codex #3244 r7).
+        const matched = rows.find((p) => normalizeStreet(p.address_line1) === street
+          && (!unit || !normalizeStreet(p.address_line2) || normalizeStreet(p.address_line2) === unit));
         if (!matched) {
           // No property row to link — but a GROUPED accept's visits must
           // still carry the quoted address or dispatch COALESCEs to the
@@ -175,6 +185,11 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
                 service_address_city: parts.city || null,
                 service_address_state: parts.state || 'FL',
                 service_address_zip: parts.zip || null,
+                // Restamping the address invalidates any coords the row inherited
+                // at booking (dispatch prefers s.lat unconditionally — codex #3244
+                // r7); null them so dispatch geocodes the stamped address.
+                lat: null,
+                lng: null,
               });
           }
           logger.info(`[estimate-property-linkage] estimate ${estimateId}: partial address didn't match an existing property — linkage skipped${estimate.estimate_group_id ? ' (grouped visit addresses stamped)' : ''}`);
@@ -227,6 +242,12 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
           service_address_city: property.city || null,
           service_address_state: property.state || 'FL',
           service_address_zip: property.zip || null,
+          // The property row's own coords replace anything the visit
+          // inherited at booking; null when unknown so dispatch geocodes
+          // the stamped address instead of trusting stale primary coords
+          // (codex #3244 r7).
+          lat: property.latitude != null ? property.latitude : null,
+          lng: property.longitude != null ? property.longitude : null,
         });
     }
 
@@ -244,18 +265,30 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
 // parseEstimateAddress keeps the WHOLE street portion — "Unit 4, 100 Beach
 // Rd" survives intact where a naive split(',')[0] would keep only "Unit 4"
 // (codex #3244 r5). Returns '' when no street can be extracted.
-function normalizedEstimateStreet(raw) {
-  const parts = parseEstimateAddress(raw);
-  return String(parts?.address_line1 || '')
+function normalizedStampedStreet(line1, line2) {
+  return [line2, line1]
+    .map((v) => String(v || ''))
+    .join(' ')
     .toLowerCase()
     .replace(/[^a-z0-9 ]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
+function normalizedEstimateStreet(raw) {
+  const parts = parseEstimateAddress(raw);
+  // Unit identity is part of the property key (codex #3244 r7): "Unit 4"
+  // and "Unit 5" at one street are different properties — the duplicate
+  // guard must allow the second unit and the scope guards must not merge
+  // their plans. Stamped-row comparisons use normalizedStampedStreet with
+  // BOTH address lines so the two sides stay symmetric.
+  return normalizedStampedStreet(parts?.address_line1, parts?.address_line2);
+}
+
 module.exports = {
   parseEstimateAddress,
   normalizedEstimateStreet,
+  normalizedStampedStreet,
   refreshHasMultiHome,
   linkAcceptedEstimateProperty,
 };
