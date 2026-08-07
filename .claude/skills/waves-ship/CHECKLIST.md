@@ -13,6 +13,7 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 ## Post-push
 - [ ] `git ls-remote origin <branch>` shows my SHA
 - [ ] Re-checked remote tip ~2 min later (external Codex hijack watch)
+- [ ] `scripts/verify-pr-checks.sh` passed — PR head == my SHA, NOT CONFLICTING, and the `tests` workflow triggered a run for this head (a CONFLICTING PR's workflow silently never fires; a stale green from the old head is not CI)
 - [ ] `@codex` (fresh PR) or `@codex review` (subsequent push) posted and not bounced
 
 ## Codex clean gate (all four, on the FINAL commit)

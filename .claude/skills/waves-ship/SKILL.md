@@ -6,7 +6,7 @@ description: Use for any code change destined for a wavespestcontrolfl repo — 
 # Waves Ship — PR lifecycle for the portal and astro repos
 
 ## Purpose
-Ship code changes through the Waves review/deploy pipeline without triggering the failure modes that have burned past sessions: wrong-branch commits, hijacked pushes, premature merges, silently-lost commits, and broken Railway builds. There is no GitHub Actions CI on the portal repo — the Codex pre-push hook, the @codex GitHub bot, and Railway's prebuild gates ARE the quality system, so this procedure is load-bearing.
+Ship code changes through the Waves review/deploy pipeline without triggering the failure modes that have burned past sessions: wrong-branch commits, hijacked pushes, premature merges, silently-lost commits, and broken Railway builds. The quality system is the Codex pre-push hook, the @codex GitHub bot, the GitHub Actions `tests` workflow (`.github/workflows/tests.yml`, since 2026-07-12 — server/client/gates/native jobs on every PR), and Railway's prebuild gates — so this procedure is load-bearing. ⚠️ The tests workflow SILENTLY NEVER FIRES for a CONFLICTING PR (the pull_request merge ref can't be built), leaving a stale green from the old head — that check is automated in §4.
 
 ## When to Use
 - Starting any implementation task on waves-customer-portal or wavespestcontrol-astro.
@@ -32,10 +32,12 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
 - If the diff changes a public API contract (`server/routes/*` request shape, a newly required field, an endpoint rename): sweep EXTERNAL consumers before shipping — the astro repo (`wavespestcontrol-astro`) posts to these routes from BookingForm/QuoteForm/ChatWidget/EstimateForm and more. `grep -rn "<route path>" ../wavespestcontrol-astro/src/` for every touched route; a consumer that doesn't send the new required field must be updated in the SAME change window. (July 2026: #2572 made /booking/confirm require slot_sig, the astro form was missed, and online booking silently 409'd for 8 days.)
 - If the diff touches blog schema: `npm run verify:blog-schema` (both run in Railway `prebuild`; catching it locally is the only pre-deploy chance).
 - The pre-push hook runs a blocking ~30–60s Codex audit and blocks on P0. Only bypass (`SKIP_CODEX_REVIEW=1 git push --no-verify --no-thin`) when the external branch-hijack strikes — see REFERENCE.md.
-- After EVERY push: `git ls-remote origin <branch>` and confirm the remote tip is your SHA. Re-check ~2 minutes later — an external Codex process has reset branches to `refs/codex/curated-sync` mid-push.
+- After EVERY push: `git ls-remote origin <branch>` and confirm the remote tip is your SHA. Re-check ~2 minutes later — an external Codex process has reset branches to `refs/codex/curated-sync` mid-push. Never pipe a push through `| tail` — it swallows the hook's verdict.
+- If the pre-push hook blocked or produced no output: the findings JSON + codex logs survive at `$(git rev-parse --absolute-git-dir)/codex-review-last/` — read them there instead of re-rolling the audit (its counts are nondeterministic run-to-run).
 
 ### 4. PR and Codex review
 - `gh pr create --head <branch> --base main` — always explicit flags (shared-worktree sessions have opened PRs from the wrong head).
+- **After every push once the PR exists, RUN `scripts/verify-pr-checks.sh` (don't just remember the rule)** — it verifies the remote tip is your SHA, the PR head matches, the PR is not CONFLICTING, and the `tests` workflow actually triggered a run for your head SHA. A CONFLICTING PR makes the tests workflow silently never fire (bit #3251 and #3253 the same night) — whenever CI looks green-but-quiet, this script is the check. On failure it prints the fix (merge origin/main, push, re-tag `@codex review`).
 - Tag bare `@codex` on a fresh PR. After each subsequent push, post `@codex review` (a bare re-tag is a no-op; a quote-reply "> @codex" spawns a cloud code-editing task, not a review).
 - Stacked PRs: open children as DRAFT and retarget them to `main` BEFORE the parent squash-merges — squash merges strand children (recurred 4×; GitHub only auto-retargets on head-branch deletion, which squash-merge flows don't guarantee).
 - Run the full merge gate in CHECKLIST.md. Core rules:
