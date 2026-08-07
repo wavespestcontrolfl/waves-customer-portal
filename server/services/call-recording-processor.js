@@ -7795,7 +7795,10 @@ const CallRecordingProcessor = {
                 await notifyNewCallLead({ leadId, phone: null, extracted, leadSourceId, leadSourceRow, call });
                 continue;
               } catch (raceErr) {
-                logger.warn(`[call-proc] fresh-lead mint after claim race failed for ${maskSid(callSid)}: ${raceErr.message}`);
+                // Sanitized code only — a Postgres/Knex error message can
+                // echo the failing row's values, and this insert carries the
+                // caller's name/email/address (codex P1 r12).
+                logger.warn(`[call-proc] fresh-lead mint after claim race failed for ${maskSid(callSid)}: ${raceErr.code || raceErr.name || 'db_error'}`);
                 leadId = null;
               }
             } else if (!enriched && raceRecovered) {
