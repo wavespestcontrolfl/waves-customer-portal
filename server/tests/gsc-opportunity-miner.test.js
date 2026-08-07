@@ -860,6 +860,19 @@ describe('listicle_family scoring + action mapping', () => {
     expect(listicleFamilyEligible(fam({ position: 0 }))).toBe(true);
   });
 
+  test('rep-over-floor exclusion requires the rep to actually qualify for a query bucket (Codex r11)', () => {
+    const fam = {
+      variants: [{ impressions: 51 }, { impressions: 49 }],
+      impressions: 100,
+      position: 18,
+    };
+    // Default (rep resolves a service): excluded — query buckets reach it.
+    expect(listicleFamilyEligible(fam)).toBe(false);
+    // Rep unresolvable (mineNoContentYet would skip it at !service): the
+    // family stays eligible or its demand reaches NO bucket at all.
+    expect(listicleFamilyEligible(fam, undefined, { repQualifiesQueryBucket: false })).toBe(true);
+  });
+
   test('served families route to a page refresh, never a drop and never map-existence (query-page map)', () => {
     // Three-way r8/r9 contract: (1) the served test is page-level RANKING
     // within strikingDistancePositionMax, not map-row existence — every GSC
@@ -879,7 +892,7 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/sum\(position \* impressions\) \/ NULLIF\(sum\(impressions\), 0\) <= \?/);
     expect(mineSrc).toMatch(/THRESHOLDS\.strikingDistancePositionMax/);
     expect(mineSrc).not.toMatch(/\.distinct\('query'\)/); // existence-only check is the inert-lane bug
-    expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(fam, served, service, city\)/);
+    expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(group\.entries, group\.service, group\.city\)/);
     expect(mineSrc).toMatch(/served\.hit\.position >= THRESHOLDS\.strikingDistancePositionMin/);
   });
 
@@ -897,7 +910,7 @@ describe('listicle_family scoring + action mapping', () => {
       variant: fam.variants[1],
       hit: { page_url: 'https://wavespestcontrol.com/blog/florida-native-plants/', position: 8.2 },
     };
-    const opp = buildListicleFamilyRefreshOpp(fam, served, 'tree-shrub', null);
+    const opp = buildListicleFamilyRefreshOpp([{ fam, served }], 'tree-shrub', null);
     // listicle_family bucket, NOT striking_distance: PAGE_ANCHORED_BUCKETS
     // is what stops the SERP profiler swapping the refresh back into a
     // competing blog and keeps page_type 'refresh' with its hard
@@ -916,6 +929,41 @@ describe('listicle_family scoring + action mapping', () => {
     // Router anchoring contract this bucket relies on.
     const routerSrc = require('fs').readFileSync(require.resolve('../services/content/decision-router'), 'utf8');
     expect(routerSrc).toMatch(/PAGE_ANCHORED_BUCKETS = new Set\(\[.*'listicle_family'.*\]\)/);
+  });
+
+  test('two families served by one page merge into a single refresh with combined provenance (Codex r11)', () => {
+    const famA = {
+      key: 'drought+florida+plants+tolerant',
+      impressions: 102,
+      variants: [
+        { query: 'drought tolerant plants florida', impressions: 48, position: 12 },
+        { query: 'florida drought tolerant plants', impressions: 30, position: 9 },
+        { query: 'plants florida drought tolerant', impressions: 24, position: 15 },
+      ],
+    };
+    const famB = {
+      key: 'florida+native+plants+types',
+      impressions: 64,
+      variants: [
+        { query: 'types of native plants florida', impressions: 40, position: 11 },
+        { query: 'florida native plants types', impressions: 24, position: 13 },
+      ],
+    };
+    const page = 'https://wavespestcontrol.com/blog/florida-native-plants/';
+    const opp = buildListicleFamilyRefreshOpp([
+      { fam: famA, served: { variant: famA.variants[1], hit: { page_url: page, position: 8.2 } } },
+      { fam: famB, served: { variant: famB.variants[0], hit: { page_url: page, position: 6.1 } } },
+    ], 'tree-shrub', null);
+    // One row; page-keyed dedupe could never hold two — so BOTH families'
+    // demand must ride in it or one is silently lost forever.
+    expect(opp.signal_metadata.impressions).toBe(166);
+    expect(opp.signal_metadata.family_count).toBe(2);
+    expect(opp.signal_metadata.family_size).toBe(5);
+    expect(opp.signal_metadata.family_keys).toEqual([famA.key, famB.key]); // impression-desc
+    expect(opp.signal_metadata.family_key).toBe(famA.key); // primary = highest-impression family
+    // Anchor query/position come from the best-ranking served variant.
+    expect(opp.query).toBe('types of native plants florida');
+    expect(opp.signal_metadata.avg_position).toBe(6.1);
   });
 
   test('served-family refresh clears the persistAll floor via the family exception (Codex r10)', async () => {
@@ -961,7 +1009,15 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/skip_reason: 'family_intent_now_served'/);
     expect(mineSrc).toMatch(/dedupe_key: listicleFamilyDedupeKey\(fam\.key\)/);
     expect(mineSrc).toMatch(/skip_reason: 'family_no_longer_served'/);
-    expect(mineSrc).toMatch(/signal_metadata->>'family_key' = \?/);
+    // Merged refresh rows carry family_keys; the mirror retirement must
+    // match ANY member family — via jsonb_exists, never the bare
+    // question-mark operator (knex binding trap).
+    expect(mineSrc).toMatch(/jsonb_exists\(COALESCE\(signal_metadata->'family_keys', '\[\]'::jsonb\), \?\)/);
+    // Automatic transitions retire to REVIVABLE 'expired', never sticky
+    // 'skipped' — one ranking oscillation must not permanently suppress the
+    // lane (the upsert revives expired rows by contract; Codex r11).
+    expect((mineSrc.match(/status: 'expired', skip_reason: 'family_/g) || []).length).toBe(2);
+    expect(mineSrc).not.toMatch(/status: 'skipped', skip_reason: 'family_/);
     // Both cleanups touch ONLY pending rows — frozen states stay records.
     expect(mineSrc).toMatch(/status: 'pending',\s*\n\s*action_type: 'new_supporting_blog'/);
     // And both are mutateQueue-guarded: mineAll({ persist: false }) is a

@@ -388,9 +388,14 @@ function clusterListicleFamilies(rows) {
 //  - the family SUM clears the floor — the whole point;
 //  - weighted position is outside the top-3 — that intent is already won by
 //    an own page (same "-3" anchor as striking_distance).
-function listicleFamilyEligible(fam, thresholds = THRESHOLDS) {
+function listicleFamilyEligible(fam, thresholds = THRESHOLDS, { repQualifiesQueryBucket = true } = {}) {
   if (!fam || fam.variants.length < 2) return false;
-  if ((fam.variants[0]?.impressions || 0) >= thresholds.minImpressionsToScore) return false;
+  // Rep-over-floor exclusion assumes the query-level buckets can actually
+  // reach the representative — the caller says whether it resolves a
+  // service (mineNoContentYet skips !service rows). A 51-imp unresolvable
+  // rep with a resolvable 49-imp sibling is still family demand: excluding
+  // it here would lose the aggregate to NO bucket at all (Codex r11).
+  if ((fam.variants[0]?.impressions || 0) >= thresholds.minImpressionsToScore && repQualifiesQueryBucket) return false;
   if (fam.impressions < thresholds.minImpressionsToScore) return false;
   if (fam.position > 0 && fam.position < 4) return false;
   // The emitted target_keyword IS the representative — if IT already ranks
@@ -432,25 +437,43 @@ function resolveListicleFamilyServiceCity(fam, { canonicalize, inferService, nor
 // standard page-keyed: two families served by the same page merge into one
 // refresh row. The family variants ride in signal_metadata so the refresh
 // brief sees the full fragmented demand it is satisfying.
-function buildListicleFamilyRefreshOpp(fam, served, service, city) {
+// entries: [{ fam, served }] — EVERY family this page serves for one
+// service/city, merged into a single refresh row. The page-keyed dedupe
+// means a second row could never queue anyway; without the merge,
+// persistAll's per-key winner pick would carry only one family's variants
+// and the other family's demand would be silently lost — unrecoverable
+// once the row froze (Codex r11). family_keys carries every merged key so
+// the mirror retirement can match any member family.
+function buildListicleFamilyRefreshOpp(entries, service, city) {
+  const sorted = entries.slice().sort((a, b) => b.fam.impressions - a.fam.impressions);
+  const primary = sorted[0];
+  const totalImpressions = sorted.reduce((sum, e) => sum + e.fam.impressions, 0);
+  const allVariants = sorted
+    .flatMap((e) => e.fam.variants)
+    .sort((a, b) => b.impressions - a.impressions);
+  const best = sorted
+    .map((e) => e.served)
+    .sort((a, b) => a.hit.position - b.hit.position)[0];
   const opp = {
     bucket: 'listicle_family',
-    query: served.variant.query,
-    page_url: served.hit.page_url,
+    query: best.variant.query,
+    page_url: best.hit.page_url,
     service,
     city,
     signal_metadata: {
-      impressions: fam.impressions,
-      avg_position: Math.round(served.hit.position * 10) / 10,
-      family_size: fam.variants.length,
-      family_key: fam.key,
-      family_variants: fam.variants.slice(0, 5).map(({ query, impressions }) => ({ query, impressions })),
+      impressions: totalImpressions,
+      avg_position: Math.round(best.hit.position * 10) / 10,
+      family_size: allVariants.length,
+      family_count: sorted.length,
+      family_key: primary.fam.key,
+      family_keys: sorted.map((e) => e.fam.key),
+      family_variants: allVariants.slice(0, 5).map(({ query, impressions }) => ({ query, impressions })),
       source: 'listicle_family',
     },
   };
   const { total, breakdown } = scoreOpportunity(opp, {
-    position: served.hit.position,
-    impressions: fam.impressions,
+    position: best.hit.position,
+    impressions: totalImpressions,
   });
   opp.score = total;
   opp.score_breakdown = breakdown;
@@ -1630,7 +1653,12 @@ class GscOpportunityMiner {
       .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as avg_position'))
       .groupBy('query', 'service_category', 'city_target');
 
-    const fams = clusterListicleFamilies(rows).filter((f) => listicleFamilyEligible(f));
+    const fams = clusterListicleFamilies(rows).filter((f) => {
+      const rep = f.variants[0];
+      const repQualifiesQueryBucket = !!(rep
+        && (canonicalizeServiceCategory(rep.service_category) || inferServiceFromQuery(rep.query)));
+      return listicleFamilyEligible(f, THRESHOLDS, { repQualifiesQueryBucket });
+    });
     if (!fams.length) return [];
 
     // A variant is SERVED when some owned page ranks within striking
@@ -1680,6 +1708,7 @@ class GscOpportunityMiner {
     }
 
     const out = [];
+    const refreshGroups = new Map();
     for (const fam of fams) {
       const { service, city } = resolveListicleFamilyServiceCity(fam, {
         canonicalize: canonicalizeServiceCategory,
@@ -1721,13 +1750,29 @@ class GscOpportunityMiner {
                 status: 'pending',
                 action_type: 'new_supporting_blog',
               })
-              .update({ status: 'skipped', skip_reason: 'family_intent_now_served', updated_at: new Date() });
+                // 'expired', NOT sticky 'skipped': this transition is
+              // AUTOMATIC and must stay reversible — the upsert revives
+              // expired rows by contract, so when the page later falls back
+              // out of striking distance the re-mined family key revives.
+              // Sticky skipped would let one ranking oscillation
+              // permanently suppress the lane. skip_reason kept as audit
+              // provenance.
+              .update({ status: 'expired', skip_reason: 'family_intent_now_served', updated_at: new Date() });
           } catch (err) {
             logger.warn(`[gsc-opp-miner] listicle_family: stale blog retirement failed (${fam.key}): ${err.message}`);
           }
         }
         if (served.hit.position >= THRESHOLDS.strikingDistancePositionMin) {
-          out.push(buildListicleFamilyRefreshOpp(fam, served, service, city));
+          // Accumulate — families sharing a serving page merge into ONE
+          // refresh row (emitted after the loop) so no family's demand is
+          // dropped by the page-keyed dedupe.
+          const groupKey = [service, city || '_', served.hit.page_url].join('::');
+          let group = refreshGroups.get(groupKey);
+          if (!group) {
+            group = { service, city, entries: [] };
+            refreshGroups.set(groupKey, group);
+          }
+          group.entries.push({ fam, served });
         }
         continue;
       }
@@ -1740,8 +1785,9 @@ class GscOpportunityMiner {
         try {
           await db('opportunity_queue')
             .where({ bucket: 'listicle_family', status: 'pending', action_type: 'refresh_existing_page' })
-            .whereRaw("signal_metadata->>'family_key' = ?", [fam.key])
-            .update({ status: 'skipped', skip_reason: 'family_no_longer_served', updated_at: new Date() });
+            .whereRaw("jsonb_exists(COALESCE(signal_metadata->'family_keys', '[]'::jsonb), ?)", [fam.key])
+            // Same revivable-state rule as family_intent_now_served above.
+            .update({ status: 'expired', skip_reason: 'family_no_longer_served', updated_at: new Date() });
         } catch (err) {
           logger.warn(`[gsc-opp-miner] listicle_family: stale refresh retirement failed (${fam.key}): ${err.message}`);
         }
@@ -1782,6 +1828,9 @@ class GscOpportunityMiner {
       // family key itself, so distinct local intents still key apart.
       opp.dedupe_key = listicleFamilyDedupeKey(fam.key);
       out.push(opp);
+    }
+    for (const group of refreshGroups.values()) {
+      out.push(buildListicleFamilyRefreshOpp(group.entries, group.service, group.city));
     }
     return out;
   }
