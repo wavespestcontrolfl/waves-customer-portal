@@ -329,6 +329,12 @@ async function createPayoutForGoogleReview(reviewId, options = {}) {
   const review = typeof reviewId === 'object'
     ? reviewId
     : await conn('google_reviews').where({ id: reviewId }).first();
+  // A stamped row is retained evidence of a review Google has removed — it
+  // must never earn a payout (the sync scan filters these too; this guards
+  // direct callers passing a row or id).
+  if (review && review.missing_since != null) {
+    return { created: false, skipped: true, reason: 'removed_from_google' };
+  }
   if (review && !reviewWithinProgramWindow(review, policy)) {
     return { created: false, skipped: true, reason: 'before_program_start' };
   }
@@ -379,6 +385,7 @@ async function syncReviewIncentives(options = {}) {
 
   const googleReviews = await conn('google_reviews')
     .where('reviewer_name', '!=', '_stats')
+    .whereNull('missing_since')
     .where('review_created_at', '>=', effectiveSince.toISOString())
     .limit(500);
 
@@ -534,6 +541,7 @@ async function getAttributionQueue(options = {}) {
 
   const reviews = await conn('google_reviews')
     .where('reviewer_name', '!=', '_stats')
+    .whereNull('missing_since')
     .where('review_created_at', '>=', effectiveSince.toISOString())
     .orderBy('review_created_at', 'desc')
     .limit(limit);
@@ -583,6 +591,9 @@ async function searchAttributionCandidates(options = {}) {
   const review = await conn('google_reviews').where({ id: reviewId }).first();
   if (!review || review.reviewer_name === '_stats') {
     throw operationalError('Google review not found', 404, 'review_not_found');
+  }
+  if (review.missing_since != null) {
+    throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
   }
 
   const search = String(options.q || '').trim();
@@ -682,6 +693,12 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   const review = await conn('google_reviews').where({ id: reviewId }).first();
   if (!review || review.reviewer_name === '_stats') {
     throw operationalError('Google review not found', 404, 'review_not_found');
+  }
+  // Attributing a Google-removed review would set customer_id and flip
+  // has_left_google_review (suppressing future review asks) off evidence that
+  // is no longer live — same lockout as the reply/dismiss/publish surfaces.
+  if (review.missing_since != null) {
+    throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
   }
   if (!reviewWithinProgramWindow(review, policy)) {
     throw operationalError('Google review predates the review incentive program start', 422, 'review_before_program_start');
@@ -935,6 +952,7 @@ async function getDashboard(options = {}) {
     const minRating = Math.max(1, toInt(policy.minRating, 1));
     const confirmedRow = await conn('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .where('review_created_at', '>=', effectivePeriodStart.toISOString())
       .where('review_created_at', '<=', periodEnd.toISOString())
       .where('star_rating', '>=', minRating)

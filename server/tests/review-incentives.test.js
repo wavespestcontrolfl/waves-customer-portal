@@ -486,4 +486,100 @@ describe('review incentives', () => {
     expect(conn.__state.rows.google_reviews[0].customer_id).toBeNull();
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
   });
+
+  test('never pays out a review Google has removed', async () => {
+    const conn = createDbMock({
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-1',
+        technician_id: 'tech-1',
+        service_date: '2026-05-27',
+      }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: 'customer-1',
+        reviewer_name: 'Customer One',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/abc',
+        missing_since: '2026-05-31T09:00:00.000Z',
+      }],
+    });
+
+    const direct = await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn, policy });
+    expect(direct).toMatchObject({ created: false, skipped: true, reason: 'removed_from_google' });
+
+    const sync = await ReviewIncentives.syncReviewIncentives({ conn, policy, sinceDays: 365 });
+    expect(sync.scannedGoogleReviews).toBe(0);
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+  });
+
+  test('attribution queue and dashboard counts exclude removed reviews', async () => {
+    const stamped = {
+      id: 'removed-google',
+      customer_id: null,
+      reviewer_name: 'Removed Customer',
+      star_rating: 5,
+      review_created_at: '2026-05-30T16:00:00.000Z',
+      location_id: 'sarasota',
+      google_review_id: 'accounts/1/locations/2/reviews/removed',
+      missing_since: '2026-05-31T09:00:00.000Z',
+    };
+    const live = {
+      id: 'live-google',
+      customer_id: null,
+      reviewer_name: 'Live Customer',
+      star_rating: 5,
+      review_created_at: '2026-05-29T16:00:00.000Z',
+      location_id: 'sarasota',
+      google_review_id: 'accounts/1/locations/2/reviews/live',
+    };
+    const conn = createDbMock({ google_reviews: [stamped, live] });
+
+    const queue = await ReviewIncentives.getAttributionQueue({ conn, policy, days: 365 });
+    expect(queue.count).toBe(1);
+    expect(queue.items[0].id).toBe('live-google');
+
+    const dashboard = await ReviewIncentives.getDashboard({
+      conn,
+      policy,
+      periodStart: '2026-05-01T00:00:00.000Z',
+      periodEnd: '2026-06-02T00:00:00.000Z',
+    });
+    expect(dashboard.summary.confirmedGoogleReviews).toBe(1);
+  });
+
+  test('candidate search and manual attribution reject removed reviews', async () => {
+    const conn = createDbMock({
+      customers: [{
+        id: 'customer-1',
+        first_name: 'Customer',
+        last_name: 'One',
+        active: true,
+      }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: null,
+        reviewer_name: 'Customer One',
+        star_rating: 5,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/abc',
+        missing_since: '2026-05-31T09:00:00.000Z',
+      }],
+    });
+
+    await expect(ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn }))
+      .rejects.toMatchObject({ code: 'review_removed_from_google' });
+
+    await expect(ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-1',
+      customerId: 'customer-1',
+      adminId: 'admin-1',
+    }, { conn, policy })).rejects.toMatchObject({ code: 'review_removed_from_google' });
+
+    expect(conn.__state.rows.google_reviews[0].customer_id).toBeNull();
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+  });
 });
