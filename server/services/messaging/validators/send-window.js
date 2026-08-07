@@ -39,7 +39,7 @@ function checkSendWindow(input, policy, contactState, now = new Date()) {
   const nextAllowedAt = nextSendWindowOpenET(now);
   return {
     ok: false,
-    code: 'OUTSIDE_SEND_WINDOW',
+    code: 'QUIET_HOURS_HOLD',
     reason: `Automated SMS is limited to 8:00 AM-8:00 PM ET; next window opens ${ET_LABEL.format(nextAllowedAt)} ET`,
     retryable: true,
     deferred: true,

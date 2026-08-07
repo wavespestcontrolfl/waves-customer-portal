@@ -735,6 +735,7 @@ async function fireTouch(row) {
 
   let smsSent = false;
   let smsSkipReason = null;
+  let smsDeferUntil = null;
   if (customer?.phone) {
     const body = mdPending
       ? await renderSmsTemplate('bank_verification_incomplete', {
@@ -759,6 +760,13 @@ async function fireTouch(row) {
       });
       if (sendResult.blocked || sendResult.sent === false) {
         smsSkipReason = sendResult.code || 'sms_blocked';
+        // Send-window block (this cron runs hourly, incl. nights): not a
+        // delivery failure — remember the window open so the no-channel
+        // branch below defers the touch instead of pausing the sequence.
+        if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.nextAllowedAt) {
+          const at = new Date(sendResult.nextAllowedAt);
+          if (!Number.isNaN(at.getTime())) smsDeferUntil = at;
+        }
         logger.warn(`[invoice-followups] SMS blocked for sequence ${row.id}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
       } else {
         smsSent = true;
@@ -770,12 +778,24 @@ async function fireTouch(row) {
   }
 
   if (!smsSent && !emailResult.ok) {
-    await db('invoice_followup_sequences').where({ id: row.id }).update({
-      updated_at: db.fn.now(),
-      status: 'paused',
-      paused_reason: smsSkipReason || emailResult.reason || emailResult.error || 'no_channel_delivered',
-      next_touch_at: null,
-    });
+    if (smsDeferUntil) {
+      // Nothing failed — the touch fired outside the 8AM-8PM ET send
+      // window and no email leg covered it. Keep the sequence active and
+      // move ONLY this touch to the window open; the same step re-fires at
+      // 8:00 AM with a fresh credit draw (tonight's is reversed below,
+      // same as the pause branch — nothing was delivered).
+      await db('invoice_followup_sequences').where({ id: row.id }).update({
+        updated_at: db.fn.now(),
+        next_touch_at: smsDeferUntil,
+      });
+    } else {
+      await db('invoice_followup_sequences').where({ id: row.id }).update({
+        updated_at: db.fn.now(),
+        status: 'paused',
+        paused_reason: smsSkipReason || emailResult.reason || emailResult.error || 'no_channel_delivered',
+        next_touch_at: null,
+      });
+    }
     // No reminder went out — reverse the credit THIS dun drew down so we don't consume
     // it for an undelivered touch (matches the invoice/project send rollback). Only
     // this dun's increment; any prior applied credit stays. The invoice is collectible

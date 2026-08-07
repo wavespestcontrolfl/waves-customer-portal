@@ -673,7 +673,12 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       return skip('send_outcome_uncertain');
     }
     if (!result?.sent) {
-      if (result?.retryable || result?.deferred) {
+      // blocked:true is a VALIDATOR stop — the pipeline never reached the
+      // provider, so the outcome is definitive even when the result also
+      // advertises deferral timing (the send-window block returns
+      // retryable/deferred/nextAllowedAt for callers that self-reschedule).
+      // Only a provider-phase retryable result is genuinely ambiguous.
+      if ((result?.retryable || result?.deferred) && !result?.blocked) {
         // AMBIGUOUS provider outcome (Codex #2771 r7): the Twilio adapter
         // classifies timeouts/5xx/429 as retryable non-sent results — the
         // provider may already have accepted the message. Same rule as the

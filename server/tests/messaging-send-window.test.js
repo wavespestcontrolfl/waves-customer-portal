@@ -32,7 +32,7 @@ const { checkSendWindow } = require('../services/messaging/validators/send-windo
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 
 // 2026-08-06 is EDT (UTC-4): 8:00 AM ET = 12:00Z, 8:00 PM ET = 00:00Z next day.
-const EVENING_ET = new Date('2026-08-07T01:15:00Z'); // 9:15 PM ET Aug 6 — the Tsai/Louis incident instant
+const EVENING_ET = new Date('2026-08-07T01:15:00Z'); // 9:15 PM ET Aug 6 — the late-reminder incident instant
 const MORNING_OPEN = new Date('2026-08-06T12:00:00Z'); // 8:00 AM ET Aug 6
 const MIDDAY_ET = new Date('2026-08-06T18:30:00Z'); // 2:30 PM ET
 const PRE_DAWN_ET = new Date('2026-08-06T07:00:00Z'); // 3:00 AM ET
@@ -103,7 +103,7 @@ describe('checkSendWindow validator', () => {
   test('outside window → blocked with deferral contract', () => {
     const res = checkSendWindow(SMS, null, null, EVENING_ET);
     expect(res.ok).toBe(false);
-    expect(res.code).toBe('OUTSIDE_SEND_WINDOW');
+    expect(res.code).toBe('QUIET_HOURS_HOLD');
     expect(res.retryable).toBe(true);
     expect(res.deferred).toBe(true);
     expect(res.nextAllowedAt).toBe('2026-08-07T12:00:00.000Z');
@@ -142,7 +142,7 @@ describe('sendCustomerMessage send-window integration', () => {
     const res = await sendCustomerMessage(INPUT);
     expect(res.sent).toBe(false);
     expect(res.blocked).toBe(true);
-    expect(res.code).toBe('OUTSIDE_SEND_WINDOW');
+    expect(res.code).toBe('QUIET_HOURS_HOLD');
     expect(res.retryable).toBe(true);
     expect(res.deferred).toBe(true);
     expect(res.nextAllowedAt).toBe('2026-08-07T12:00:00.000Z');
