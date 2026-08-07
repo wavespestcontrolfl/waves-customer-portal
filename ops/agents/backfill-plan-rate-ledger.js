@@ -193,13 +193,20 @@ function isCombinedRow(row) {
           // the owner — deleting someone's component is not this script's
           // call.
           const shortfall = Math.round((rate - componentSum) * 100) / 100;
-          if (EXECUTE && shortfall > 0) {
-            await client.query(`
-              INSERT INTO customer_plan_rates (customer_id, family_key, monthly_rate, source)
-              VALUES ($1, 'unattributed', $2, 'backfill')
-              ON CONFLICT (customer_id, family_key)
-              DO UPDATE SET monthly_rate = customer_plan_rates.monthly_rate + EXCLUDED.monthly_rate
-            `, [cust.id, shortfall]);
+          if (shortfall > 0) {
+            if (EXECUTE) {
+              await client.query(`
+                INSERT INTO customer_plan_rates (customer_id, family_key, monthly_rate, source)
+                VALUES ($1, 'unattributed', $2, 'backfill')
+                ON CONFLICT (customer_id, family_key)
+                DO UPDATE SET monthly_rate = customer_plan_rates.monthly_rate + EXCLUDED.monthly_rate
+              `, [cust.id, shortfall]);
+            } else {
+              // The dry run must state the EXACT production write (codex
+              // #3245 r22 — ops/agents convention): the generic REVIEW line
+              // alone hides this mutation from the operator's preview.
+              console.log(`DRY-RUN pre-seeded shortfall: ${cust.id} → unattributed +$${shortfall.toFixed(2)} (components $${componentSum.toFixed(2)} vs scalar $${rate.toFixed(2)}; adds to any existing unattributed row)`);
+            }
           }
           if (EXECUTE) await client.query('COMMIT');
           continue;
@@ -226,6 +233,10 @@ function isCombinedRow(row) {
               VALUES ($1, 'unattributed', $2, 'backfill')
               ON CONFLICT (customer_id, family_key) DO NOTHING
             `, [cust.id, rate]);
+          } else {
+            // Same convention as the shortfall path (codex #3245 r22): the
+            // park is a real write the preview must spell out.
+            console.log(`DRY-RUN park-unattributed: ${cust.id} → unattributed $${rate.toFixed(2)} (insert-if-absent)`);
           }
         }
         if (EXECUTE) await client.query('COMMIT');

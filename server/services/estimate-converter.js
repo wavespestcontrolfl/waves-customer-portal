@@ -2169,7 +2169,12 @@ const EstimateConverter = {
         // ZERO is a legitimate authoritative scalar (codex #3245 r8): a
         // fully comped recurring accept deletes every component and must
         // write 0, not fall back to a legacy figure over live components.
-        if (ledgerOutcome && Number.isFinite(Number(ledgerOutcome.scalar))) {
+        // But NULL is the no-slices sentinel, not a zero (codex #3245 r22
+        // — Number(null) coerces to 0): treating it as authoritative would
+        // clear the scalar while stale components survive, AND its
+        // non-null advisory echo would block the unsliced_accept ledger
+        // reset below from reconciling them.
+        if (ledgerOutcome && ledgerOutcome.scalar != null && Number.isFinite(Number(ledgerOutcome.scalar))) {
           ledgerAdvisoryScalar = Math.round(Number(ledgerOutcome.scalar) * 100) / 100;
         }
         if (PlanRateLedger.planRateLedgerEnabled() && ledgerAdvisoryScalar != null && ledgerAdvisoryScalar >= 0) {
