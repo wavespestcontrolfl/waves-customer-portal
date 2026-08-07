@@ -40,12 +40,19 @@ router.get('/', async (req, res, next) => {
     // exclusion can't be a SQL filter without casting arbitrary payment metadata
     // to jsonb table-wide). Payer payments are a small minority, so a padded
     // buffer fills the page in realistic cases.
+    let payerLookupFailed = false;
     const payerInvRows = await db('invoices')
       .where({ customer_id: req.customerId })
       .whereNotNull('payer_id')
-      .select('id')
-      .catch(() => []);
+      .select('id', 'stripe_payment_intent_id', 'invoice_number')
+      .catch(() => { payerLookupFailed = true; return []; });
     const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
+    // Payer ownership must be recognized through EVERY linkage the receipt
+    // resolution below understands — an id-only filter let alias / PaymentIntent
+    // / invoice-number-linked payer rows through, and their hosted Stripe
+    // receipt exposes the AP payer's identity to the homeowner (pre-push P0).
+    const payerIntentIds = new Set(payerInvRows.map((r) => r.stripe_payment_intent_id).filter(Boolean));
+    const payerInvoiceNumbers = new Set(payerInvRows.map((r) => r.invoice_number).filter(Boolean));
     const invoiceIdOf = (p) => {
       try {
         const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
@@ -54,9 +61,23 @@ router.get('/', async (req, res, next) => {
         return null;
       }
     };
+    const aliasInvoiceIdOf = (p) => {
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        const alias = m?.dispute_invoice_id || m?.waves_invoice_id;
+        return alias != null ? String(alias) : null;
+      } catch { return null; }
+    };
+    const descriptionInvoiceNumberOf = (p) => {
+      const m = /^Invoice\s+([A-Za-z0-9-]+)\s+—/.exec(String(p.description || ''));
+      return m ? m[1] : null;
+    };
     const isPayerLinked = (p) => {
-      const invId = invoiceIdOf(p);
-      return !!(invId && payerInvoiceIds.has(invId));
+      const invId = invoiceIdOf(p) || aliasInvoiceIdOf(p);
+      if (invId && payerInvoiceIds.has(invId)) return true;
+      if (p.stripe_payment_intent_id && payerIntentIds.has(p.stripe_payment_intent_id)) return true;
+      const num = descriptionInvoiceNumberOf(p);
+      return !!(num && payerInvoiceNumbers.has(num));
     };
     let total;
     if (payerInvoiceIds.size === 0) {
@@ -144,25 +165,14 @@ router.get('/', async (req, res, next) => {
     // invoices.stripe_payment_intent_id — the last one is what rescues
     // self-pay cash/check/Zelle rows, which admin-invoices.js writes with no
     // metadata at all and which would otherwise show no Waves receipt.
-    const anyInvoiceIdOf = (p) => {
-      const primary = invoiceIdOf(p);
-      if (primary) return primary;
-      try {
-        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-        const alias = m?.dispute_invoice_id || m?.waves_invoice_id;
-        return alias != null ? String(alias) : null;
-      } catch { return null; }
-    };
+    const anyInvoiceIdOf = (p) => invoiceIdOf(p) || aliasInvoiceIdOf(p);
     // Manual self-pay rows (cash/check/Zelle) are written with NEITHER
     // metadata nor a PaymentIntent — admin-invoices.js only stamps metadata
     // for payer-billed or credit-applied invoices. Their description is
     // deterministic though: `Invoice <number> — <method>`, so the invoice
     // number is the only link back and the receipt would otherwise never
     // appear on a cash/check payment (codex r2 P1).
-    const invoiceNumberOf = (p) => {
-      const m = /^Invoice\s+([A-Za-z0-9-]+)\s+—/.exec(String(p.description || ''));
-      return m ? m[1] : null;
-    };
+    const invoiceNumberOf = descriptionInvoiceNumberOf;
     // Same UUID shape-filter the balance path already applies below: historic
     // rows can carry a non-UUID metadata.invoice_id, and invoices.id is a uuid
     // column — an unfiltered whereIn makes Postgres throw on the cast, and the
@@ -234,7 +244,10 @@ router.get('/', async (req, res, next) => {
           // attempts with it). Attaching the invoice receipt to that row would
           // show a receipt beside a FAILED badge for money this row never
           // took — only settled rows get one (codex r2 P1).
-          const settled = ['paid', 'processing', 'refunded'].includes(String(p.status || '').toLowerCase());
+          // Fail closed: if payer ownership couldn't be resolved we cannot
+          // prove this row is self-pay, so no receipt link is emitted.
+          const settled = !payerLookupFailed
+            && ['paid', 'processing', 'refunded'].includes(String(p.status || '').toLowerCase());
           const inv = !settled ? null : (
             receiptTokenByInvoiceId.get(anyInvoiceIdOf(p))
             || (p.stripe_payment_intent_id ? receiptTokenByIntentId.get(p.stripe_payment_intent_id) : null)
