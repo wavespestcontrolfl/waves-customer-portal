@@ -1762,6 +1762,26 @@ class GscOpportunityMiner {
             logger.warn(`[gsc-opp-miner] listicle_family: stale blog retirement failed (${fam.key}): ${err.message}`);
           }
         }
+        // Refresh rows are PAGE-keyed, so a family whose serving page
+        // CHANGED leaves its old row claimable beside the new one, and a
+        // page that climbed into the top-3 (intent won) leaves a refresh
+        // for work that no longer needs doing. Expire every pending family
+        // refresh that does not match the current target (all of them on a
+        // top-3 win). Revivable 'expired', same rule as the other
+        // automatic transitions.
+        if (mutateQueue) {
+          try {
+            let stale = db('opportunity_queue')
+              .where({ bucket: 'listicle_family', status: 'pending', action_type: 'refresh_existing_page' })
+              .whereRaw("jsonb_exists(COALESCE(signal_metadata->'family_keys', '[]'::jsonb), ?)", [fam.key]);
+            if (served.hit.position >= THRESHOLDS.strikingDistancePositionMin) {
+              stale = stale.whereNot('page_url', served.hit.page_url);
+            }
+            await stale.update({ status: 'expired', skip_reason: 'family_refresh_target_stale', updated_at: new Date() });
+          } catch (err) {
+            logger.warn(`[gsc-opp-miner] listicle_family: stale refresh-target cleanup failed (${fam.key}): ${err.message}`);
+          }
+        }
         if (served.hit.position >= THRESHOLDS.strikingDistancePositionMin) {
           // Accumulate — families sharing a serving page merge into ONE
           // refresh row (emitted after the loop) so no family's demand is
@@ -1913,7 +1933,11 @@ class GscOpportunityMiner {
       // at 45 must not be discarded for taking the SAFER page-refresh
       // route; the global 75 floor calibrates ordinary refresh rows built
       // from single ≥50-imp queries, which family sums rarely reach.
-      const scoreFloor = o.bucket === 'listicle_family'
+      // Bounded to the lane's two intended actions: a demoted family row
+      // (do_not_publish, or a rerouted city-service action) must NOT ride
+      // the blog floor into the queue.
+      const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
+      const scoreFloor = o.bucket === 'listicle_family' && familyFloorActions.includes(o.action_type)
         ? minScoreToActFor('new_supporting_blog')
         : minScoreToActFor(o.action_type);
       if (o.score < scoreFloor) {

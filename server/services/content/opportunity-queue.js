@@ -98,7 +98,7 @@ class OpportunityQueue {
         // listicle_family blog-floor ride), so previews show exactly what
         // the runner would claim.
         q = q.whereRaw(
-          `score >= CASE WHEN action_type = 'new_supporting_blog' OR bucket = 'listicle_family' THEN ?::numeric ELSE ?::numeric END`,
+          `score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') THEN ?::numeric ELSE ?::numeric END`,
           [blogMinScoreFor(minScore), minScore],
         );
       }
@@ -162,11 +162,12 @@ class OpportunityQueue {
            -- bare parameters as text (no comparison context), and
            -- integer >= text has no operator — this exact line failed in
            -- prod on 2026-06-11. Mocked-db tests cannot catch this class.
-           -- listicle_family rides the blog floor for EVERY action: the
-           -- miner admits family refreshes at the blog floor (persistAll's
-           -- family exception), so claiming at the global floor would leave
-           -- 45-74-point refreshes persisted-but-unclaimable until expiry.
-           AND score >= CASE WHEN action_type = 'new_supporting_blog' OR bucket = 'listicle_family' THEN ?::numeric ELSE ?::numeric END
+           -- listicle_family REFRESHES ride the blog floor (persistAll's
+           -- family exception admits them at it — claiming at the global
+           -- floor would leave 45-74-point refreshes persisted-but-
+           -- unclaimable). Bounded to that one action: a demoted family
+           -- row must not ride the blog floor into a claim.
+           AND score >= CASE WHEN action_type = 'new_supporting_blog' OR (bucket = 'listicle_family' AND action_type = 'refresh_existing_page') THEN ?::numeric ELSE ?::numeric END
            ${whereActionType}
            ${whereExclude}
            ${whereFamilyGate}

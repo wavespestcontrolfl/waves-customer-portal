@@ -996,6 +996,12 @@ describe('listicle_family scoring + action mapping', () => {
     const dropped = await miner.persistAll([refresh({ bucket: 'striking_distance', dedupe_key: 'striking_distance::x' })]);
     expect(dropped).toBe(0);
     expect(calls.length).toBe(0);
+    // Bounded exception: a demoted family row (do_not_publish) must not
+    // ride the blog floor into the queue (Codex — floor is per-action).
+    calls.length = 0;
+    const demoted = await miner.persistAll([refresh({ action_type: 'do_not_publish', dedupe_key: 'listicle_family::demoted' })]);
+    expect(demoted).toBe(0);
+    expect(calls.length).toBe(0);
   });
 
   test('served/unserved transitions retire the stale opposite row (Codex r10)', () => {
@@ -1016,8 +1022,13 @@ describe('listicle_family scoring + action mapping', () => {
     // Automatic transitions retire to REVIVABLE 'expired', never sticky
     // 'skipped' — one ranking oscillation must not permanently suppress the
     // lane (the upsert revives expired rows by contract; Codex r11).
-    expect((mineSrc.match(/status: 'expired', skip_reason: 'family_/g) || []).length).toBe(2);
+    expect((mineSrc.match(/status: 'expired', skip_reason: 'family_/g) || []).length).toBe(3);
     expect(mineSrc).not.toMatch(/status: 'skipped', skip_reason: 'family_/);
+    // Page-keyed refresh rows: a CHANGED serving page or a top-3 win must
+    // expire the now-stale refresh target (all targets on a win — the
+    // whereNot page filter only applies in the 4-15 refresh case).
+    expect(mineSrc).toMatch(/skip_reason: 'family_refresh_target_stale'/);
+    expect(mineSrc).toMatch(/stale = stale\.whereNot\('page_url', served\.hit\.page_url\)/);
     // Both cleanups touch ONLY pending rows — frozen states stay records.
     expect(mineSrc).toMatch(/status: 'pending',\s*\n\s*action_type: 'new_supporting_blog'/);
     // And both are mutateQueue-guarded: mineAll({ persist: false }) is a
@@ -1025,7 +1036,7 @@ describe('listicle_family scoring + action mapping', () => {
     // never retire live queue work just for being inspected.
     expect(src).toMatch(/async mineListicleFamily\(since, \{ mutateQueue = true \} = \{\}\)/);
     expect(src).toMatch(/this\.mineListicleFamily\(since, \{ mutateQueue: persist \}\)/);
-    expect((mineSrc.match(/if \(mutateQueue\) \{/g) || []).length).toBe(2);
+    expect((mineSrc.match(/if \(mutateQueue\) \{/g) || []).length).toBe(3);
   });
 
   test('service resolves across EVERY variant, not just the representative (Codex r9)', () => {
