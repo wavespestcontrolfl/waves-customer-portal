@@ -146,6 +146,10 @@ const REGISTRY = {
       // A suppressed skip (recheck) also lands here via the executor's
       // blocked write — same release semantics.
     },
+    // The claim stamp/release is idempotent (whereNull twilio_sid guards) —
+    // durable so a DB blip after Twilio's accept can't strand a null-SID
+    // claim that suppresses every future menu for this phone.
+    durableFinalize: true,
   },
 
   lead_response_auto_reply_deferred: {

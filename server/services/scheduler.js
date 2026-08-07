@@ -215,7 +215,11 @@ async function recoverStaleScheduledSmsClaims(now) {
 
     // Rows that exhausted their attempts will never send — any Agent Review
     // decisions parked behind them must return to the composer now, not
-    // after the 48h expiry sweep. Retried rows keep their decisions parked.
+    // after the 48h expiry sweep, and any deferred-replay obligation must
+    // hand off per its registry terminal hook (release once-ever claims,
+    // arm review fallbacks, flip referral/report state into the admin
+    // lane — otherwise those stay falsely successful forever). Retried
+    // rows keep their decisions parked and their obligations queued.
     const decisionIds = [];
     for (const row of recovered) {
       if (row.status !== 'failed') continue;
@@ -226,6 +230,10 @@ async function recoverStaleScheduledSmsClaims(now) {
       meta = meta || {};
       if (meta.agent_decision_id) decisionIds.push(meta.agent_decision_id);
       if (Array.isArray(meta.parked_decision_ids)) decisionIds.push(...meta.parked_decision_ids);
+      if (meta.entry_point) {
+        const { onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
+        await onTerminalDeferredReplay(meta.entry_point, meta);
+      }
     }
     if (decisionIds.length) {
       await require('./sms-suggest-mode').reopenScheduledSuggestions({
