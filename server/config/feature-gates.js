@@ -926,6 +926,19 @@ const gates = {
   // or poll the shared mailbox (same posture as the auto-send policy
   // above). Kill switch = unset.
   contentEmailApprovals: process.env.GATE_CONTENT_EMAIL_APPROVALS === 'true',
+  // Parked-content digest (owner-authorized lane 2026-08-07): a daily ACT:
+  // rollup email of autonomous runs parked completed_pending_review on the
+  // admin review queue — the NON-approvable kinds (gate_fail,
+  // publish_validation_failed, operator_slug_mismatch, canary caps, …) that
+  // the email-approval flow above never covers and that otherwise park
+  // silently. Visibility only: reads runs/opportunities, writes nothing but
+  // its own ops_email_send_state watermark — no approvals, no tokens, no
+  // reply parsing. Exception-based: sends only on NEW parks since the last
+  // sent digest, plus a Sunday full digest while the backlog is non-empty.
+  // Explicit opt-in in EVERY environment (same posture as
+  // contentEmailApprovals — a dev server must never email the real owner
+  // inbox). Kill switch = unset.
+  parkedRunDigest: process.env.GATE_PARKED_RUN_DIGEST === 'true',
 
   // Data Hygiene Agent — split into sub-gates so each phase ships
   // independently. All default OFF in prod, ON in dev — except auto-apply,
