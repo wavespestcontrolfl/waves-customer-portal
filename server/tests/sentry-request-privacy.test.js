@@ -79,6 +79,30 @@ describe('Sentry request privacy', () => {
     expect(JSON.stringify(sanitizedTransaction)).not.toContain(secret);
   });
 
+  test('scrubs PII out of exception values (Knex/provider error messages)', () => {
+    // Defense-in-depth backstop: PII-risky call sites scrub before capture,
+    // but any OTHER captureException in the app flows through beforeSend —
+    // exception values must never carry emails/phones/SQL literals outward.
+    const event = {
+      exception: {
+        values: [
+          {
+            type: 'Error',
+            value: "insert into \"customers\" (\"name\") values ('Jane Q Fixture') - duplicate key; contact jane.fixture@example.com or +1 (941) 555-0100",
+          },
+          { type: 'Error', value: 42 }, // non-string value left untouched
+        ],
+      },
+    };
+    const sanitized = stripSentryRequestData(event);
+    const text = sanitized.exception.values[0].value;
+    expect(text).not.toContain('Jane Q Fixture');
+    expect(text).not.toContain('jane.fixture@example.com');
+    expect(text).not.toContain('555-0100');
+    expect(text).toContain('[redacted');
+    expect(sanitized.exception.values[1].value).toBe(42);
+  });
+
   test('initializes Sentry with the hardened options', () => {
     expect(mockInit).toHaveBeenCalledTimes(1);
     expect(mockInit.mock.calls[0][0]).toMatchObject({

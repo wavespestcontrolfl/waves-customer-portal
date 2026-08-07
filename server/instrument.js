@@ -1,4 +1,6 @@
 const Sentry = require("@sentry/node");
+const { isRailwayDeployment } = require("./utils/railway-deployment");
+const { scrubSentryText } = require("./utils/sentry-scrub");
 
 // Only report to Sentry from real Railway deployments. Two traps this avoids:
 //   1. Locally, NODE_ENV is often "production" (worktrees), which tagged local-dev
@@ -10,14 +12,13 @@ const Sentry = require("@sentry/node");
 //      re-enable Sentry from a dev shell. RAILWAY_DEPLOYMENT_ID / RAILWAY_REPLICA_ID
 //      are set ONLY inside an actual running deployment, never by the CLI locally
 //      (verified: both null under `railway run`), so they are the reliable
-//      deployment signal. SENTRY_ENABLED=true force-enables for local testing.
+//      deployment signal — the predicate lives in utils/railway-deployment.js so
+//      other deployed-only behavior reuses it. SENTRY_ENABLED=true force-enables
+//      for local testing.
 const railwayEnv =
   process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || null;
-const isRailwayDeployment = Boolean(
-  process.env.RAILWAY_DEPLOYMENT_ID || process.env.RAILWAY_REPLICA_ID
-);
 const sentryEnabled =
-  process.env.SENTRY_ENABLED === "true" || isRailwayDeployment;
+  process.env.SENTRY_ENABLED === "true" || isRailwayDeployment();
 
 const REQUEST_DATA_INCLUDE = Object.freeze({
   cookies: false,
@@ -61,6 +62,19 @@ function stripSentryRequestData(event) {
         && category !== 'fetch'
         && category !== 'xhr';
     });
+  }
+
+  // Exception VALUES can carry PII even with request data stripped — Knex
+  // appends the failing SQL (customer names/emails as quoted literals) and
+  // provider messages echo phones/emails (codex on #3268). PII-risky call
+  // sites scrub before capture; this is the defense-in-depth backstop for
+  // every other captureException in the app.
+  if (event.exception && Array.isArray(event.exception.values)) {
+    for (const entry of event.exception.values) {
+      if (entry && typeof entry.value === 'string') {
+        entry.value = scrubSentryText(entry.value);
+      }
+    }
   }
 
   return event;
