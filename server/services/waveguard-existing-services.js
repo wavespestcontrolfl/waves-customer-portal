@@ -64,6 +64,11 @@ async function isActivePlanCustomer(database, customerId) {
 // line label) to a WaveGuard qualifying service key. Scoped to the five
 // qualifiers — palm_injection and rodent_bait are explicitly NOT qualifiers,
 // and one-time treatments (one_time_pest etc.) never count toward the tier.
+// One rodent-token regex for qualification AND ownership — a second copy
+// would drift (the qualifying classifier additionally requires the row to be
+// rodent-LED; ownership below must not).
+const RODENT_TOKEN_RE = /\b(rodent|rats?|mouse|mice)\b/;
+
 function toQualifyingKeys(raw) {
   const s = String(raw || '').toLowerCase();
   if (!s) return [];
@@ -77,7 +82,7 @@ function toQualifyingKeys(raw) {
   // canonical label) are rodent service rows, not pest coverage. Mirror
   // detectServiceLine / recurring-appointment-seeder's serviceKeyFor: only a
   // "pest ... rodent" combined name ("Pest & Rodent Control") is pest-primary.
-  const rodentService = /\b(rodent|rats?|mouse|mice)\b/.test(s) && !/\bpest\b.*\brodent\b/.test(s);
+  const rodentService = RODENT_TOKEN_RE.test(s) && !/\bpest\b.*\brodent\b/.test(s);
   if (s.includes('pest') && !rodentService) keys.add('pest_control');
   if (s.includes('lawn') || s.includes('turf')) keys.add('lawn_care');
   // A palm token ("Palm Tree Injections") names the non-qualifying palm
@@ -308,11 +313,13 @@ async function filterRowsToStreet(database, rows, streetScope) {
 // itself stays untouched.
 function ownershipKeysForRow(row = {}) {
   const keys = qualifyingKeysForRow(row);
-  // Same rodent-led predicate tier derivation uses to EXCLUDE these rows —
-  // one classifier, opposite purpose. Lazy require: self-booking-plan-sync
-  // requires this module at load time.
-  const { isRodentLedServiceRow } = require('./self-booking-plan-sync');
-  if (isRodentLedServiceRow(row) && !keys.includes('rodent_bait')) keys.push('rodent_bait');
+  // The rodent COMPONENT, not just rodent-LED rows (pre-push P1): a combined
+  // "Pest & Rodent Control" / pest_rodent_* plan is pest-primary for
+  // qualification, but the customer still owns rodent service — any rodent
+  // token in the row's joined identity counts as rodent ownership.
+  const text = [row.service_key, row.service_name, row.service_type]
+    .filter(Boolean).join(' ').replace(/[_-]+/g, ' ').toLowerCase();
+  if (RODENT_TOKEN_RE.test(text) && !keys.includes('rodent_bait')) keys.push('rodent_bait');
   return keys;
 }
 

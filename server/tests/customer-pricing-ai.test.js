@@ -334,3 +334,22 @@ describe('never-re-price guard, r2 regressions', () => {
     expect(result.options.some(o => o.serviceKey === 'lawn_care')).toBe(true);
   });
 });
+
+// Pre-push P1 on the r2 batch: combined pest-and-rodent plans are
+// pest-primary for qualification, but the rodent component is still owned.
+describe('combined pest & rodent ownership', () => {
+  test('a Pest & Rodent Control plan blocks a fresh rodent quote', async () => {
+    const customer = propertyCustomer({ id: 'cust-pest-rodent', waveguard_tier: 'Bronze' });
+    const result = await buildCustomerPricingResponse({
+      db: activePlanDb(customer.id, ['Pest & Rodent Control'], 'Bronze'),
+      propertyLookup: null,
+      prompt: 'Can you add rodent bait stations?',
+      customer,
+    });
+
+    expect(result.alreadyIncluded).toContain('Rodent Monitoring');
+    expect(result.options.every(o => o.serviceKey !== 'rodent_bait')).toBe(true);
+    // The pest half still qualifies exactly as before.
+    expect(result.currentServices).toContain('Pest Control');
+  });
+});
