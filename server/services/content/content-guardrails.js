@@ -2959,10 +2959,15 @@ const REENTRY_SAFETY_SRCS = [
   // denial/negation words (Codex PR r7): "approval was denied by the EPA"
   // is accurate negated copy, not an approval claim.
   "\\bapprov\\w+\\b(?:(?!\\b(?:denied|denies|deny|refused|refuses|rejected|rejects|revoked|revokes|withdrawn|withdrew|withheld|not|never)\\b)[^.!?\\n]){0,40}?\\bby\\s+(?:the\\s+)?EPA\\b",
-  "\\b(?:the\\s+)?EPA\\s+(?:has\\s+|have\\s+|had\\s+)?(?:approv\\w+|grant\\w+\\s+(?:its\\s+)?approval)\\b",
-  "\\bEPA\\s+approvals?\\b",
+  // approv\w+ also matches the bare noun ("EPA approval …"), so this
+  // matcher carries the same postpositive-denial guard (Codex PR r8).
+  "\\b(?:the\\s+)?EPA\\s+(?:has\\s+|have\\s+|had\\s+)?(?:approv\\w+|grant\\w+\\s+(?:its\\s+)?approval)\\b(?!(?:[^.!?\\n]){0,30}?\\b(?:not|never|denied|denies|refused|rejected|revoked|revokes|withdrawn|withdrew|withheld|isn['’]?t|wasn['’]?t|aren['’]?t)\\b)",
+  // The noun forms honor POSTPOSITIVE denials too (Codex PR r8): "EPA
+  // approval was not granted / was later revoked" is accurate negated
+  // copy — the loop's negation guard only looks BEFORE the match.
+  "\\bEPA\\s+approvals?\\b(?!(?:[^.!?\\n]){0,30}?\\b(?:not|never|denied|denies|refused|rejected|revoked|revokes|withdrawn|withdrew|withheld|isn['’]?t|wasn['’]?t|aren['’]?t)\\b)",
   // "received/carries approval from the EPA" (Codex PR r6).
-  "\\bapprovals?\\s+(?:from|by)\\s+(?:the\\s+)?EPA\\b",
+  "\\bapprovals?\\s+(?:from|by)\\s+(?:the\\s+)?EPA\\b(?!(?:[^.!?\\n]){0,30}?\\b(?:not|never|denied|denies|refused|rejected|revoked|revokes|withdrawn|withdrew|withheld|isn['’]?t|wasn['’]?t|aren['’]?t)\\b)",
   // Fixed re-entry/drying figures — the approved idiom carries NO number;
   // the technician confirms timing. Ranges (30–60), spelled numbers, and
   // BOTH word orders count: action-then-duration ("re-enter after 30
@@ -2970,7 +2975,9 @@ const REENTRY_SAFETY_SRCS = [
   // "allow 30 minutes of drying time"), and keep-off forms ("keep pets off
   // the lawn for 30 minutes").
   `\\b(?:re-?enter|re-?entry|return\\w*|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
-  { src: `\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  // A bounded qualifier may sit between the drying verb and the
+  // preposition (Codex PR r8: "dries completely within 45 minutes").
+  { src: `\\bdr(?:y|ies|ied)\\s+(?:\\w+\\s+){0,2}?(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   // "avoid the treated area for 30 minutes"
   `\\bavoid\\s+(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawns?|yards?|rooms?|surfaces?)\\b[^.!?\\n]{0,30}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // Duration-then-action: the intrinsically-re-entry tails (re-enter,
@@ -2994,6 +3001,10 @@ const REENTRY_SAFETY_SRCS = [
   // "the room can be entered 30 minutes after treatment" order.
   { src: `\\benter\\w*\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   { src: `\\bbe\\s+entered\\b[^.!?\\n]{0,20}?${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  // Affirmative go-inside/go-into with treatment context (Codex PR r8:
+  // "you may go inside after 30 minutes once treatment is complete") —
+  // the do-not branch covers the prohibitive forms.
+  { src: `\\bgo\\s+(?:back\\s+)?(?:inside|into|in)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
   `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
@@ -3133,7 +3144,7 @@ const BANNED_TOPIC_GAP_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b)[\\w'’-]+\\s+){0,3
 // Content nouns that make a possessive INFORMATIONAL rather than a
 // service claim (Codex PR r5, extended r6): "our guide to wildlife
 // removal explains…", "our report on wildlife removal…".
-const BANNED_TOPIC_INFO_NOUN_SRC = "(?:guides?|articles?|posts?|pages?|blogs?|overviews?|explainers?|resources?|advice|primers?|faqs?|breakdowns?|comparisons?|information|reports?|research|glossar(?:y|ies)|summar(?:y|ies)|explanations?|reviews?|coverage|discussions?)";
+const BANNED_TOPIC_INFO_NOUN_SRC = "(?:guides?|articles?|posts?|pages?|blogs?|overviews?|explainers?|resources?|advice|primers?|faqs?|breakdowns?|comparisons?|information|reports?|research|glossar(?:y|ies)|summar(?:y|ies)|explanations?|reviews?|coverage|discussions?|checklists?|handbooks?|manuals?|playbooks?|worksheets?|walkthroughs?|tutorials?)";
 // Action-verb patterns must not absorb a THIRD-PARTY subject in their
 // filler (Codex PR r6): "we help specialists remove wildlife" and "we
 // have partners trap wildlife" attribute the work to someone else — the

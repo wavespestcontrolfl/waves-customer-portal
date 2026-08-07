@@ -3164,6 +3164,32 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(denied.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
+  test('POSTPOSITIVE denials of EPA approval stay legal (Codex PR r8)', () => {
+    for (const body of [
+      'EPA approval was not granted for this treatment.',
+      'EPA approval is not required for minimum-risk products.',
+      'The EPA approval was later revoked.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    }
+  });
+
+  test('affirmative go-inside instructions with treatment context block (Codex PR r8)', () => {
+    const mayGo = guardrails.evaluate({ body: 'You may go inside after 30 minutes once treatment is complete.' }, {});
+    expect(mayGo.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const goInto = guardrails.evaluate({ body: 'You can go into the treated room after 30 minutes.' }, {});
+    expect(goInto.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // Without treatment context it is not a re-entry figure.
+    const bare = guardrails.evaluate({ body: 'You may go inside after 30 minutes.' }, {});
+    expect(bare.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
+  test('adverbs between the drying verb and preposition still carry the figure (Codex PR r8)', () => {
+    const r = guardrails.evaluate({ body: 'The application dries completely within 45 minutes.' }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('go-inside/go-into re-entry instructions carry the figure too (Codex PR r7)', () => {
     const inside = guardrails.evaluate({ body: 'Do not go inside the treated home for 30 minutes.' }, {});
     expect(inside.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3532,6 +3558,11 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
       'Our information about wildlife removal explains when to call a specialist.',
       'Our report on wildlife removal summarizes state guidance.',
       'Our wildlife removal glossary defines common terms.',
+      // Checklist/handbook labels are the same informational framing
+      // (Codex PR r8).
+      'Our checklist for wildlife removal explains when to call a licensed specialist.',
+      'Our wildlife removal checklist explains referrals.',
+      'Our handbook on structural fumigation covers when tenting is needed.',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
