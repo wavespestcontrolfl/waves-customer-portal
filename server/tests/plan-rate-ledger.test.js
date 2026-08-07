@@ -631,6 +631,41 @@ describe('zero-priced accepted families (codex r2)', () => {
     expect(slices.lawn_care).toBe(50);
   });
 
+  test('an empty root recurring container never shadows nested palm scalars (codex r17)', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        recurring: {},
+        result: {
+          recurring: {
+            services: [{ name: 'Quarterly Pest Control Service', service: 'pest_control', mo: 50 }],
+            palmInjectionMo: 55,
+          },
+        },
+      },
+      monthlyRate: 105,
+    });
+    expect(slices.pest_control).toBe(50);
+    expect(slices.palm_injection).toBe(55);
+  });
+
+  test('per-treatment-only rows annualize through their visit cadence (codex r17)', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control', mo: 40 },
+              { name: 'Bi-Monthly Tree & Shrub Care Service', service: 'tree_shrub', perTreatment: 65.73, visitsPerYear: 6 },
+            ],
+          },
+        },
+      },
+      monthlyRate: 72.87,
+    });
+    expect(slices.pest_control).toBe(40);
+    expect(slices.tree_shrub).toBeCloseTo(32.87, 1);
+  });
+
   test('palm-injection mapper scalars get their own slice (codex r16)', () => {
     const slices = estimateFamilySlices({
       estimateData: {

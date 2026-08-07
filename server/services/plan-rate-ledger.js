@@ -124,6 +124,18 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
       const annual = priceValue(value);
       if (annual != null) return annual / 12;
     }
+    // Per-application-only rows (codex #3245 r17 — RECURRING_DOLLAR_FIELDS
+    // admits them): annualize through the row's own visit cadence. No
+    // classifiable visit count means no derivable monthly — the row stays
+    // unpriced rather than inventing one.
+    const visits = priceValue(line?.visitsPerYear) ?? priceValue(line?.visits)
+      ?? priceValue(line?.appsPerYear) ?? priceValue(line?.frequency);
+    if (visits != null && visits > 0) {
+      for (const value of [line?.perTreatment, line?.perVisit, line?.perApp, line?.pa, line?.price]) {
+        const perApplication = priceValue(value);
+        if (perApplication != null) return (perApplication * visits) / 12;
+      }
+    }
     return null;
   };
   const addLine = (line) => {
@@ -164,16 +176,24 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
   // the palm dollars onto pest_control and the next pest re-quote drops
   // them. Same family dedupe as the supplements above.
   {
+    // Scan EVERY recurring container for the first positive palm value
+    // (codex #3245 r17): an empty root `recurring` object must not shadow
+    // the populated `result.recurring` — container truthiness is not
+    // evidence.
     const root = estimateData?.result && typeof estimateData.result === 'object'
       ? estimateData.result
       : estimateData;
-    const palmRecurring = (estimateData?.recurring && typeof estimateData.recurring === 'object')
-      ? estimateData.recurring
-      : (root?.recurring && typeof root.recurring === 'object' ? root.recurring : {});
-    const palmMonthly = priceValue(palmRecurring.palmInjectionMo)
-      ?? (priceValue(palmRecurring.palmInjectionAnn) != null
-        ? priceValue(palmRecurring.palmInjectionAnn) / 12
-        : null);
+    const palmContainers = [estimateData?.recurring, root?.recurring, root?.results?.recurring]
+      .filter((container) => container && typeof container === 'object');
+    let palmMonthly = null;
+    for (const container of palmContainers) {
+      palmMonthly = priceValue(container.palmInjectionMo)
+        ?? (priceValue(container.palmInjectionAnn) != null
+          ? priceValue(container.palmInjectionAnn) / 12
+          : null);
+      if (palmMonthly != null && palmMonthly > 0) break;
+      palmMonthly = null;
+    }
     if (palmMonthly != null && palmMonthly > 0
       && !recurringFamilies.has(boundedFamilyKey('palm_injection'))) {
       addLine({ service: 'palm_injection', name: 'Palm Injection', monthly: palmMonthly });
