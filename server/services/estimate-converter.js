@@ -30,6 +30,30 @@ const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-serv
 // Find the first grassType/grass_type string anywhere in the estimate data
 // (confirmed primary path is inputs.grassType, but estimate shapes vary).
 // Depth-capped to avoid pathological recursion.
+// The billing lane THIS acceptance leaves the customer in — passed
+// explicitly into the membership.started email (#3140 resolution): the email
+// is fire-and-forget and can race the still-uncommitted accept transaction,
+// so the email service's own loadCustomer may read the PRE-accept row and
+// resolve the wrong lane. Mirrors the customers-row stamp exactly: annual
+// prepay is re-stamped 'annual_prepay' at the term choke point; a current
+// monthly member accepting an add-on keeps their model; everyone else
+// converts to per-application (owner ruling 2026-07-09).
+function acceptedBillingLaneForConversion({
+  billingTerm,
+  preservesExistingMembership,
+  customerBillingMode,
+  waveguardTier,
+  monthlyRate,
+}) {
+  if (billingTerm === 'prepay_annual') return 'annual_prepay';
+  const { resolveBillingLane } = require('./billing-lane');
+  return resolveBillingLane({
+    billing_mode: preservesExistingMembership ? (customerBillingMode || null) : 'per_application',
+    waveguard_tier: waveguardTier,
+    monthly_rate: monthlyRate,
+  }).mode;
+}
+
 function findGrassTypeDeep(node, depth = 6) {
   if (depth < 0 || node == null || typeof node !== 'object') return null;
   for (const k of ['grassType', 'grass_type']) {
@@ -2215,6 +2239,37 @@ const EstimateConverter = {
     try {
       billingModeColumnsExist = await database.schema.hasColumn('customers', 'billing_mode');
     } catch { /* keep false — legacy update shape */ }
+    // Exact per-visit charge at the accepted billing cadence (quarterly
+    // derives from the exact annual: $98.00, not 3 x rounded-monthly
+    // $98.01 — resolveBillingCadence). SINGLE-recurring-service accepts
+    // only — the same gate the scheduled-row estimated_price writer
+    // uses: a multi-service plan creates one row per service, and a
+    // customer-level whole-plan fee would bill the full package on
+    // EVERY row's completion (Codex P1). Multi-service plans leave the
+    // fee NULL so completion keeps its existing per-row precedence.
+    // An already-per_application customer accepting an ADD-ON keeps
+    // their established fee (Codex round-10): the customer-level fee
+    // is the fallback for EVERY per-app visit without a row price,
+    // so overwriting it with the add-on's cadence amount would
+    // re-price the ORIGINAL series; the add-on's own rows carry
+    // their explicit estimated_price (single-service writer).
+    // recurringUnitCount, not raw line count (Codex P1 on the
+    // pest+rodent removal): a standalone-scheduling supplement
+    // (rodent bait) makes the plan multi-row even with ONE
+    // recurring line — a customer-level whole-plan fee would bill
+    // the full package on BOTH rows' completions.
+    // Hoisted so the customers-row stamp below and the membership.started
+    // email payload render the SAME fee — one authority, no drift.
+    const stampedPerApplicationFee = preservesExistingMembership
+      ? (customer.per_application_fee ?? null)
+      : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
+        ? Number(customer.per_application_fee)
+        : ((recurringUnitCount === 1
+          && billingCadence && Number(billingCadence.amount) > 0)
+          ? Number(perApplicationAmount)
+          : (recurringUnitCount === 1 && Number(monthlyRate) > 0
+            ? Number(monthlyRate)
+            : null)));
     // 1. Update customer to active. Clear deleted_at: admin screens filter
     //    on whereNull('deleted_at'), so reactivating a soft-deleted customer
     //    without clearing it would create an actively-billed customer no
@@ -2272,35 +2327,9 @@ const EstimateConverter = {
             billing_mode: preservesExistingMembership
               ? (customer.billing_mode || null)
               : 'per_application',
-          // Exact per-visit charge at the accepted billing cadence (quarterly
-          // derives from the exact annual: $98.00, not 3 x rounded-monthly
-          // $98.01 — resolveBillingCadence). SINGLE-recurring-service accepts
-          // only — the same gate the scheduled-row estimated_price writer
-          // uses: a multi-service plan creates one row per service, and a
-          // customer-level whole-plan fee would bill the full package on
-          // EVERY row's completion (Codex P1). Multi-service plans leave the
-          // fee NULL so completion keeps its existing per-row precedence.
-            // An already-per_application customer accepting an ADD-ON keeps
-            // their established fee (Codex round-10): the customer-level fee
-            // is the fallback for EVERY per-app visit without a row price,
-            // so overwriting it with the add-on's cadence amount would
-            // re-price the ORIGINAL series; the add-on's own rows carry
-            // their explicit estimated_price (single-service writer).
-            // recurringUnitCount, not raw line count (Codex P1 on the
-            // pest+rodent removal): a standalone-scheduling supplement
-            // (rodent bait) makes the plan multi-row even with ONE
-            // recurring line — a customer-level whole-plan fee would bill
-            // the full package on BOTH rows' completions.
-            per_application_fee: preservesExistingMembership
-              ? (customer.per_application_fee ?? null)
-              : ((customer.billing_mode === 'per_application' && Number(customer.per_application_fee) > 0)
-                ? Number(customer.per_application_fee)
-                : ((recurringUnitCount === 1
-                  && billingCadence && Number(billingCadence.amount) > 0)
-                  ? Number(perApplicationAmount)
-                  : (recurringUnitCount === 1 && Number(monthlyRate) > 0
-                    ? Number(monthlyRate)
-                    : null))),
+            // Fee semantics documented on stampedPerApplicationFee above —
+            // shared with the membership.started email payload.
+            per_application_fee: stampedPerApplicationFee,
           } : {}),
           active: true,
           deleted_at: null,
@@ -3712,6 +3741,20 @@ const EstimateConverter = {
       // customer rate (summed on add-on accepts), not this estimate's slice.
       monthlyRate: convertedMonthlyRate,
       billingCadence: billingCadence?.periodLabel || (billingTerm === 'prepay_annual' ? 'annual prepay' : 'monthly'),
+      // Explicit lane + fee (#3140): sendMembershipStarted gates its rate
+      // rows on the lane, and the explicit params are REQUIRED here — this
+      // send can race the uncommitted accept transaction, so the email
+      // service's row-fallback could resolve the stale pre-accept lane.
+      // The fee is the SAME value stamped on customers.per_application_fee
+      // (NULL on multi-service accepts — the email row blanks and drops).
+      billingLane: acceptedBillingLaneForConversion({
+        billingTerm,
+        preservesExistingMembership,
+        customerBillingMode: customer.billing_mode || null,
+        waveguardTier: commercialOnlyRecurring ? 'Commercial' : (tier === 'none' ? null : tier),
+        monthlyRate: convertedMonthlyRate,
+      }),
+      perApplicationAmount: stampedPerApplicationFee,
       includedServices: recurringServicesForConversion
         .map((svc) => svc.name || svc.serviceName || svc.service_name || svc.label)
         .filter(Boolean)
@@ -3997,3 +4040,4 @@ module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
 module.exports.visitsPerYearForRecurringService = visitsPerYearForRecurringService;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
+module.exports.acceptedBillingLaneForConversion = acceptedBillingLaneForConversion;

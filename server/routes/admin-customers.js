@@ -2652,7 +2652,7 @@ router.get('/:id', async (req, res, next) => {
 // POST /api/admin/customers — create
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
-    const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, tier, monthlyRate, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel } = req.body;
+    const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, tier, monthlyRate, billingMode, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel } = req.body;
     if (!firstName || !phone) return res.status(400).json({ error: 'First name and phone required' });
     const normalizedAddress = normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip });
     if (normalizedAddress.unitConflict) {
@@ -2682,6 +2682,41 @@ router.post('/', requireAdmin, async (req, res, next) => {
     }
     if (!isValidStage(normalized.pipelineStage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
 
+    // Billing lane at create (#3140 resolution — the inferred-monthly
+    // vector): a create with a real membership tier + a positive rate and
+    // NO lane used to mint a NULL-mode row the lane resolver infers into
+    // monthly_membership — invisible to lane audits and, for a
+    // mis-created row, wrongfully dues-charged on the 1st. Callers may now
+    // pass an explicit billingMode; absent one, the inference is stamped
+    // explicitly (identical billing behavior, but visible and frozen) and
+    // a review notification surfaces it for the owner.
+    const { BILLING_MODES, impliedMonthlyStampForWrite } = require('../services/billing-lane');
+    const explicitBillingMode = (billingMode === undefined || billingMode === null || billingMode === '') ? null : billingMode;
+    if (explicitBillingMode) {
+      if (!BILLING_MODES.includes(explicitBillingMode)) {
+        return res.status(400).json({ error: 'Invalid billing mode' });
+      }
+      // Same lane prerequisites as the profile editor (PUT /:id): never
+      // create a customer in a lane whose visits then complete unbilled.
+      if (explicitBillingMode === 'monthly_membership' && !(normalized.monthlyRate > 0)) {
+        return res.status(400).json({ error: 'Set a monthly rate before selecting Monthly membership — dues cannot collect at $0' });
+      }
+      if (explicitBillingMode === 'per_application') {
+        return res.status(400).json({ error: 'Per application requires the acceptance-stamped fee — create the customer, then set the fee and lane in the profile editor (or let an estimate acceptance stamp both)' });
+      }
+      if (explicitBillingMode === 'annual_prepay') {
+        return res.status(400).json({ error: 'Annual prepay requires a PAID term covering today — the lane stamps automatically when the annual invoice is paid' });
+      }
+    }
+    const impliedLaneStamp = explicitBillingMode
+      ? null
+      : impliedMonthlyStampForWrite({}, {
+          billing_mode: null,
+          waveguard_tier: normalized.tier,
+          monthly_rate: normalized.monthlyRate,
+        });
+    const billingModeForCreate = explicitBillingMode || impliedLaneStamp;
+
     const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
 
     const customer = await db.transaction(async (trx) => {
@@ -2694,6 +2729,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
         first_name: normalized.firstName, last_name: normalized.lastName || null, phone: normalized.phone, email: normalized.email,
         address_line1: normalized.addressLine1 || null, address_line2: normalized.addressLine2 || null, city: normalized.city || null, state: normalized.state, zip: normalized.zip || null,
         waveguard_tier: normalized.tier, monthly_rate: normalized.monthlyRate,
+        // Explicit lane, or the stamped inference — see the billing-lane
+        // block above. NULL only when the row isn't rate-bearing-membered.
+        billing_mode: billingModeForCreate,
         // Human-chosen tier at create: 'manual' provenance keeps the
         // auto-tier machinery off it (migration 20260728000001).
         waveguard_tier_source: normalized.tier ? 'manual' : null,
@@ -2743,12 +2781,32 @@ router.post('/', requireAdmin, async (req, res, next) => {
       require('../services/geocoder').ensureCustomerGeocoded(customer.id).catch(() => {});
     }
 
+    if (impliedLaneStamp) {
+      // The stamp changed nothing about how the customer bills — the
+      // resolver already inferred this lane — but a hand-created monthly
+      // member is exactly the shape a mis-keyed duplicate takes, so the
+      // owner eyeballs each one before the next dues run (fire-and-forget;
+      // never blocks the create).
+      try {
+        const NotificationService = require('../services/notification-service');
+        void NotificationService.notifyAdmin(
+          'billing_lane_review',
+          `Billing lane stamped: ${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
+          `Created with WaveGuard ${normalized.tier} and $${Number(normalized.monthlyRate).toFixed(2)}/mo but no explicit billing lane — stamped monthly_membership (the lane this combination already inferred). Verify before the next dues run; if they actually bill per application, change the lane in the profile.`,
+          { icon: '\u{1F4B3}', link: `/admin/customers?customerId=${customer.id}`, bell: true, metadata: { customerId: customer.id, stamped: impliedLaneStamp, source: 'admin_customer_create' } },
+        ).catch((err) => logger.warn(`[customers] billing-lane review notify failed for ${customer.id}: ${err.message}`));
+      } catch (err) {
+        logger.warn(`[customers] billing-lane review notify setup failed for ${customer.id}: ${err.message}`);
+      }
+    }
+
     if (hasMembership(normalized)) {
       void AccountMembershipEmail.sendMembershipStarted({
         customerId: customer.id,
         effectiveDate: customer.member_since || new Date(),
         membershipTier: normalized.tier,
         monthlyRate: normalized.monthlyRate,
+        billingLane: billingModeForCreate || null,
         sourceId: `admin_customer_create:${customer.id}`,
       }).catch(err => logger.warn(`[customers] membership.started email failed for ${customer.id}: ${err.message}`));
     }
@@ -2946,6 +3004,21 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // SMS landline guard re-evaluates the new number instead of acting on the
     // old number's marker.
     clearLineTypeOnPhoneChange(updates, before);
+    // Close the inferred-monthly vector (#3140 resolution): a save that
+    // TRANSITIONS the row into (NULL lane + real membership tier + positive
+    // rate) mints an implicit monthly member the lane audits can't see —
+    // the shape that wrongfully queued a mis-created duplicate for dues.
+    // Stamp the inference explicitly in the SAME write (identical billing
+    // behavior — the resolver already infers monthly_membership) and
+    // surface a review notification after commit. A save carrying an
+    // explicit billingMode (even a clear-to-NULL, which the guard above
+    // already vetted) is the operator's own lane decision — never restamp.
+    let impliedLaneStamp = null;
+    if (req.body.billingMode === undefined && updates.billing_mode === undefined) {
+      const { impliedMonthlyStampForWrite } = require('../services/billing-lane');
+      impliedLaneStamp = impliedMonthlyStampForWrite(before, { ...before, ...updates });
+      if (impliedLaneStamp) updates.billing_mode = impliedLaneStamp;
+    }
     if (Object.keys(updates).length) {
       const contactConflict = await findCrossAccountContactConflict(
         req.params.id,
@@ -3098,6 +3171,21 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           sensitiveFieldsChanged: changed.filter(field => sensitiveFields.includes(field)),
         }, true);
       }
+      if (impliedLaneStamp) {
+        // Post-commit review card for the auto-stamped lane (see the stamp
+        // block above) — fire-and-forget, never blocks the save.
+        try {
+          const NotificationService = require('../services/notification-service');
+          void NotificationService.notifyAdmin(
+            'billing_lane_review',
+            `Billing lane stamped: ${before.first_name || ''} ${before.last_name || ''}`.trim(),
+            `A profile edit left this customer with a WaveGuard tier and a positive monthly rate but no explicit billing lane — stamped monthly_membership (the lane this combination already inferred). Verify before the next dues run; if they actually bill per application, change the lane in the profile.`,
+            { icon: '\u{1F4B3}', link: `/admin/customers?customerId=${req.params.id}`, bell: true, metadata: { customerId: req.params.id, stamped: impliedLaneStamp, source: 'admin_customer_update' } },
+          ).catch((err) => logger.warn(`[customers] billing-lane review notify failed for ${req.params.id}: ${err.message}`));
+        } catch (err) {
+          logger.warn(`[customers] billing-lane review notify setup failed for ${req.params.id}: ${err.message}`);
+        }
+      }
       // EFFECTIVE membership for lifecycle emails: an auto-derived tier
       // LABEL (waveguard_tier_source = 'auto', no positive rate, label-only
       // lane) is not a membership the customer knows about — deactivating,
@@ -3137,6 +3225,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           effectiveDate: membershipEventAt,
           membershipTier: after.waveguard_tier,
           monthlyRate: after.monthly_rate,
+          // Explicit lane from this save's own outcome — the send is
+          // fire-and-forget, so the row-fallback could race a concurrent
+          // edit; null rides the resolver fallback (#3140).
+          billingLane: after.billing_mode || null,
           sourceId: `admin_membership_start:${req.params.id}:${etDateString(membershipEventAt)}`,
           idempotencyKey: adminMembershipStartIdempotencyKey(req.params.id, before, after, membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.started email failed for ${req.params.id}: ${err.message}`));

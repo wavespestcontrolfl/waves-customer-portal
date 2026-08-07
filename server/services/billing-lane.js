@@ -66,6 +66,24 @@ function resolveBillingLane(customer) {
   return { mode: inferredMember ? 'monthly_membership' : 'per_visit', source: 'inferred' };
 }
 
+// Guard for admin/IB customer writes: a save that leaves a row with a REAL
+// membership tier, a positive monthly_rate, and NO billing_mode mints an
+// INFERRED monthly member — the exact ambiguity that dues-charged an
+// admin-created duplicate row (#3140 resolution 2026-08-07). When a write
+// TRANSITIONS a row into that state (it wasn't inferred-monthly before, and
+// the write itself sets no explicit lane), the writer stamps the inference
+// explicitly. Billing behavior is unchanged by construction —
+// resolveBillingLane already resolves these rows to monthly_membership —
+// but the lane becomes visible, auditable, and frozen against later field
+// drift, and no new NULL-mode rate-bearing member rows can be minted.
+// Returns the mode to stamp, or null when no stamp is needed.
+function impliedMonthlyStampForWrite(before = {}, after = {}) {
+  const inferredMonthly = (row) => !row?.billing_mode
+    && isMembershipTier(row?.waveguard_tier)
+    && Number(row?.monthly_rate || 0) > 0;
+  return !inferredMonthly(before) && inferredMonthly(after) ? 'monthly_membership' : null;
+}
+
 // The MONTHLY-MEMBERSHIP suppression ("the 8AM cron collects the dues, the
 // visit itself is free"). Never for a payer-billed visit — the AP invoice must
 // still be cut and sent to the payer. Never for a per-application customer:
@@ -284,6 +302,7 @@ module.exports = {
   BILLING_MODES,
   MONTHLY_LANE_SQL,
   isMembershipTier,
+  impliedMonthlyStampForWrite,
   resolveBillingLane,
   membershipDuesCoverVisit,
   completionInvoiceAmount,

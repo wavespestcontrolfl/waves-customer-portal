@@ -22,7 +22,7 @@ jest.mock('../services/email-template-library', () => ({
   hasTemplate: jest.fn(() => true),
 }));
 
-const { sendMembershipUpdated } = require('../services/account-membership-email');
+const { sendMembershipUpdated, sendMembershipStarted } = require('../services/account-membership-email');
 
 function stubCustomer(row) {
   mockDb.mockImplementation((table) => {
@@ -158,5 +158,102 @@ describe('membership.updated resolves BOTH sides of a lane transition', () => {
     expect(String(payload.membership_change_summary)).toMatch(/Monthly rate: .*40.* to .*45/);
     expect(payload.old_monthly_rate).not.toBe('');
     expect(payload.new_monthly_rate).not.toBe('');
+  });
+});
+
+// membership.started was the LAST lane-ungated monthly_rate reader (#3140
+// resolution 2026-08-07): three welcome emails since 08-01 told
+// per-application customers a monthly figure they are never charged
+// ("$30.33 / quarter" for a real $91-per-application plan). The rate/cadence
+// rows now gate on the billing lane, and the estimate converter passes the
+// lane EXPLICITLY because the send is fire-and-forget and can race the
+// still-uncommitted accept transaction (the pool read sees the PRE-accept
+// row).
+describe('membership.started billing-lane gate', () => {
+  async function startedPayload(customerRow, args = {}) {
+    stubCustomer({ pipeline_stage: 'active_customer', ...customerRow });
+    const res = await sendMembershipStarted({ customerId: 'c1', ...args });
+    expect(res.ok).toBe(true);
+    expect(sentTemplates).toHaveLength(1);
+    return sentTemplates[0].payload;
+  }
+
+  test('RACE PATH: the explicit lane wins over a stale customer row', async () => {
+    // The row still shows the PRE-accept state (NULL mode + tier + rate —
+    // resolves monthly_membership); the converter knows the accept stamps
+    // per_application. The explicit param must win or the welcome email
+    // quotes a monthly charge that will never bill.
+    const payload = await startedPayload(
+      { ...BASE, billing_mode: null, monthly_rate: 30.33 },
+      { billingLane: 'per_application', perApplicationAmount: 91, monthlyRate: 30.33, billingCadence: 'quarter' },
+    );
+    expect(payload.monthly_rate).toBe('$91.00');
+    expect(payload.billing_cadence).toBe('per application');
+  });
+
+  test('per-application multi-service accepts render a BLANK fee (row drops)', async () => {
+    // A multi-service accept intentionally stamps NO customer-level fee —
+    // the whole-plan monthly figure must not leak in as a substitute.
+    const payload = await startedPayload(
+      { ...BASE, billing_mode: null, per_application_fee: null },
+      { billingLane: 'per_application', perApplicationAmount: null, monthlyRate: 150 },
+    );
+    expect(payload.monthly_rate).toBe('');
+    expect(payload.billing_cadence).toBe('per application');
+  });
+
+  test('without an explicit lane, the fee falls back to the customer row', async () => {
+    const payload = await startedPayload(
+      { ...BASE, billing_mode: 'per_application', per_application_fee: 109 },
+      { monthlyRate: 36.33 },
+    );
+    expect(payload.monthly_rate).toBe('$109.00');
+    expect(payload.billing_cadence).toBe('per application');
+  });
+
+  test('annual prepay renders no rate and prepaid wording', async () => {
+    const payload = await startedPayload(
+      { ...BASE, billing_mode: null },
+      { billingLane: 'annual_prepay', monthlyRate: 55, billingCadence: 'annual prepay' },
+    );
+    expect(payload.monthly_rate).toBe('');
+    expect(payload.billing_cadence).toBe('12 months prepaid');
+  });
+
+  test('a true monthly member is unchanged', async () => {
+    const payload = await startedPayload(
+      { ...BASE, billing_mode: 'monthly_membership' },
+      { billingLane: 'monthly_membership', monthlyRate: 45, billingCadence: 'month' },
+    );
+    expect(payload.monthly_rate).toBe('$45.00');
+    expect(payload.billing_cadence).toBe('month');
+  });
+
+  test('a NULL-mode inferred member still sees the monthly rate (fallback resolution)', async () => {
+    const payload = await startedPayload(
+      { ...BASE, billing_mode: null },
+      { monthlyRate: 45 },
+    );
+    expect(payload.monthly_rate).toBe('$45.00');
+  });
+
+  test('invoice-on-complete lanes show no rate and no banned phrasing', async () => {
+    const payload = await startedPayload(
+      { ...BASE, billing_mode: 'per_visit' },
+      { monthlyRate: 55 },
+    );
+    expect(payload.monthly_rate).toBe('');
+    expect(payload.billing_cadence).toBe('billed after each service');
+  });
+
+  test('HARD RULE: no lane ever renders the phrase "per visit"', async () => {
+    for (const lane of ['per_application', 'annual_prepay', 'per_visit', 'one_time', 'monthly_membership']) {
+      sentTemplates.length = 0;
+      const payload = await startedPayload(
+        { ...BASE, billing_mode: lane === 'monthly_membership' ? 'monthly_membership' : null },
+        { billingLane: lane, monthlyRate: 45, perApplicationAmount: 91 },
+      );
+      expect(JSON.stringify(payload)).not.toMatch(/per visit/i);
+    }
   });
 });
