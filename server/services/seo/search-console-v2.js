@@ -695,3 +695,8 @@ class SearchConsoleService {
 }
 
 module.exports = new SearchConsoleService();
+// The classification vocabulary, exposed for consumers that must stay in
+// lockstep with what this sync can tag (the family miner's classifier
+// revalidation derives boundary-safe forms from these exact patterns —
+// a second hand-maintained term list drifts).
+module.exports._internals = { SERVICE_PATTERNS };

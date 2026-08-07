@@ -91,25 +91,44 @@ function inferServiceFromQuery(query) {
   return null;
 }
 
-// The sync's 'specialty' bucket canonicalizes to 'pest', but its topics
-// (fleas, wasps…) don't match the pest keyword list — validated separately
-// so revalidation doesn't regress those families.
-const SPECIALTY_TERMS_RE = /\b(bed\s*bugs?|fleas?|ticks?|wasps?|hornets?|fire\s*ants?|no[\s-]*see[\s-]*ums?|scorpions?|silverfish|earwigs?)\b/i;
-
 // Family admission must not trust the stored GSC classifier blindly: its
 // patterns are unbounded substring tests ('ant' inside "important"), so
 // "types of important documents florida" arrives classified 'pest'. A
 // classifier value counts only when the query contains boundary-aware
-// evidence FOR THAT SERVICE (the miner's own keyword list, or the
-// specialty terms for specialty→pest); otherwise resolution falls to the
-// contextual inference, and an off-topic family dies at the !service guard.
+// evidence for the RAW category — derived from the sync's OWN
+// SERVICE_PATTERNS so the validator accepts exactly what the classifier
+// can legitimately tag ('insect'→pest, 'turf'/'weed'→lawn,
+// 'bee'→specialty); a second hand-maintained term list drifts (Codex r17).
+// Transform: each alternative gains a LEADING word boundary (kills the
+// 'important'→ant overreach — no boundary mid-word) and keeps the
+// original prefix semantics via a [a-z]* tail ('termit'→termite,
+// 'bee'→bees). Safe because SERVICE_PATTERNS alternations are flat
+// (no groups); revisit if that ever changes. Fail closed: patterns
+// unavailable → classifier values rejected, resolution falls to the
+// contextual inference.
+let CLASSIFIER_VALIDATION_RES = null;
+function classifierValidationRes() {
+  if (CLASSIFIER_VALIDATION_RES) return CLASSIFIER_VALIDATION_RES;
+  CLASSIFIER_VALIDATION_RES = new Map();
+  try {
+    const { SERVICE_PATTERNS } = require('./search-console-v2')._internals;
+    for (const [cat, re] of Object.entries(SERVICE_PATTERNS)) {
+      const alts = re.source
+        .split('|')
+        .map((alt) => `\\b(?:${alt})[a-z]*\\b`)
+        .join('|');
+      CLASSIFIER_VALIDATION_RES.set(cat, new RegExp(alts, 'i'));
+    }
+  } catch (err) {
+    logger.warn(`[gsc-opp-miner] classifier vocabulary unavailable (${err.message}) — classifier values rejected, inference only`);
+  }
+  return CLASSIFIER_VALIDATION_RES;
+}
 function classifierQuerySupported(rawCategory, canonicalService, query) {
   if (!canonicalService) return false;
-  if (String(rawCategory || '').toLowerCase().trim() === 'specialty') {
-    return SPECIALTY_TERMS_RE.test(String(query || ''));
-  }
-  const entry = SERVICE_KEYWORDS.find((k) => k.service === canonicalService);
-  return !!(entry && entry.re.test(String(query || '')));
+  const raw = String(rawCategory || '').toLowerCase().trim();
+  const re = classifierValidationRes().get(raw);
+  return !!(re && re.test(String(query || '')));
 }
 
 // The GSC sync's classifier (search-console-v2 SERVICE_PATTERNS) stores
@@ -1908,26 +1927,27 @@ class GscOpportunityMiner {
     // so stale queue rows expire when every family went ineligible.
     const allFams = clusterListicleFamilies(rows);
     // Reachability data must match the QUERY MINERS' scope: cross-domain
-    // tuples (they don't filter domain) and the seasonal admission for
-    // EVERY rep (a rep under the hub floor can still be over-floor
-    // cross-domain, or seasonal-emittable). Checked once per rep query.
-    const repQueries = Array.from(new Set(allFams
-      .map((f) => f.variants[0]?.query)
-      .filter(Boolean)));
-    const [crossTuples, seasonalEmittable] = repQueries.length
+    // tuples (they don't filter domain) and the seasonal admission —
+    // checked for EVERY VARIANT, not just the representative: the miners
+    // can emit ANY variant on cross-domain totals or seasonal growth, and
+    // a 30-hub/30-spoke sibling emitted beside the family blog is the same
+    // competing-rows bug from the representative's angle (Codex r17).
+    const reachQueries = Array.from(new Set(allFams
+      .flatMap((f) => f.variants.map((v) => v.query))));
+    const [crossTuples, seasonalEmittable] = reachQueries.length
       ? await Promise.all([
-        this._crossDomainRepTuples(repQueries, since),
-        this._seasonalEmittableQueries(repQueries, periodDays),
+        this._crossDomainRepTuples(reachQueries, since),
+        this._seasonalEmittableQueries(reachQueries, periodDays),
       ])
       : [new Map(), new Set()];
     const fams = allFams.filter((f) => {
-      const rep = f.variants[0];
-      const repForReach = rep ? { ...rep, tuples: crossTuples.get(rep.query) || rep.tuples } : rep;
-      return listicleFamilyEligible(f, THRESHOLDS, {
-        repQualifiesQueryBucket: listicleFamilyRepReachable(repForReach, ownPagesByServiceCity, THRESHOLDS, {
-          seasonalEmittable: seasonalEmittable.has(rep?.query),
-        }),
-      });
+      const anyVariantReachable = f.variants.some((v) => listicleFamilyRepReachable(
+        { ...v, tuples: crossTuples.get(v.query) || v.tuples },
+        ownPagesByServiceCity,
+        THRESHOLDS,
+        { seasonalEmittable: seasonalEmittable.has(v.query) }
+      ));
+      return listicleFamilyEligible(f, THRESHOLDS, { repQualifiesQueryBucket: anyVariantReachable });
     });
 
     // A variant is SERVED when some owned page ranks within striking
@@ -1951,10 +1971,17 @@ class GscOpportunityMiner {
         'sum(position * impressions) / NULLIF(sum(impressions), 0) <= ?',
         [THRESHOLDS.strikingDistancePositionMax]
       );
-    // Best (lowest-position) qualifying owned page per variant query.
+    // Best (lowest-position) IN-WINDOW owned page per variant query. The
+    // window filter comes BEFORE the per-query reduction: a page at
+    // position 2 must not shadow a refreshable page at position 8 — the
+    // reduction would keep the top-3 hit, the served filter would discard
+    // it, and the family would mint a competing blog beside the in-window
+    // page (Codex r17). Top-3-only queries simply have no served entry;
+    // won-intent stays with the eligibility checks.
     const servedBy = new Map();
     for (const r of mappedRows) {
       const pos = parseFloat(r.page_position);
+      if (pos < THRESHOLDS.strikingDistancePositionMin) continue;
       const cur = servedBy.get(r.query);
       if (!cur || pos < cur.position) servedBy.set(r.query, { page_url: r.page_url, position: pos });
     }

@@ -971,11 +971,16 @@ describe('listicle_family scoring + action mapping', () => {
     // documents florida" as pest — revalidation rejects it, and with no
     // contextual inference either, the family dies at the !service guard.
     expect(classifierQuerySupported('pest', 'pest', 'types of important documents florida')).toBe(false);
-    expect(classifierQuerySupported('pest', 'pest', 'kinds of ants in florida')).toBe(true); // \bants?\b
-    // specialty→pest canonicalization validates against the SPECIALTY
-    // terms — a flea family must not regress to unsupported.
+    expect(classifierQuerySupported('pest', 'pest', 'kinds of ants in florida')).toBe(true);
+    // The vocabulary derives from the sync's OWN SERVICE_PATTERNS (r17) —
+    // every form the classifier can legitimately tag must validate:
+    expect(classifierQuerySupported('pest', 'pest', 'signs of insect infestation')).toBe(true);
+    expect(classifierQuerySupported('lawn', 'lawn', 'types of turf varieties')).toBe(true);
+    expect(classifierQuerySupported('specialty', 'pest', 'types of bees in florida')).toBe(true);
     expect(classifierQuerySupported('specialty', 'pest', 'signs of fleas in sarasota')).toBe(true);
     expect(classifierQuerySupported('specialty', 'pest', 'types of important documents florida')).toBe(false);
+    // Prefix semantics survive the boundary wrap ('termit' → termite).
+    expect(classifierQuerySupported('termite', 'termite', 'signs of termite damage')).toBe(true);
     // Resolver integration: unsupported classifier + no inference → null.
     const helpers = {
       canonicalize: canonicalizeServiceCategory,
@@ -1020,9 +1025,12 @@ describe('listicle_family scoring + action mapping', () => {
     // Reachability reads CROSS-DOMAIN tuples (the query miners don't
     // filter domain; the family rows deliberately do — Codex r16) and the
     // seasonal admission for every rep.
-    expect(mineSrc).toMatch(/_crossDomainRepTuples\(repQueries, since\)/);
-    expect(mineSrc).toMatch(/_seasonalEmittableQueries\(repQueries, periodDays\)/);
+    expect(mineSrc).toMatch(/_crossDomainRepTuples\(reachQueries, since\)/);
+    expect(mineSrc).toMatch(/_seasonalEmittableQueries\(reachQueries, periodDays\)/);
     expect(src).toMatch(/async _crossDomainRepTuples\(queries, since\)/);
+    // EVERY variant is reachability-checked — the query miners can emit
+    // any of them on cross-domain totals or seasonal growth (Codex r17).
+    expect(mineSrc).toMatch(/f\.variants\.some\(\(v\) => listicleFamilyRepReachable\(/);
     expect(mineSrc).toMatch(/groupByRaw\(CANON_URL_SQL\)/); // per owned PAGE, not per query
     expect(mineSrc).toMatch(/sum\(position \* impressions\) \/ NULLIF\(sum\(impressions\), 0\) <= \?/);
     expect(mineSrc).toMatch(/THRESHOLDS\.strikingDistancePositionMax/);
@@ -1032,6 +1040,9 @@ describe('listicle_family scoring + action mapping', () => {
     // URL must never become multiple claimable rows editing the same page.
     expect(mineSrc).toMatch(/refreshGroups\.get\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/s\.hit && s\.hit\.position >= THRESHOLDS\.strikingDistancePositionMin/);
+    // Window filter BEFORE the per-query page reduction — a top-3 page
+    // must not shadow a refreshable in-window page (Codex r17).
+    expect(mineSrc).toMatch(/if \(pos < THRESHOLDS\.strikingDistancePositionMin\) continue;/);
     // No second won-intent classifier inside the served branch.
     expect(mineSrc).not.toMatch(/if \(served\.hit\.position >= THRESHOLDS\.strikingDistancePositionMin\)/);
   });
