@@ -87,7 +87,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // GET /api/admin/reviews — all reviews with filters
 router.get('/', async (req, res, next) => {
   try {
-    const { location, rating, responded, search, page = 1, limit = 200 } = req.query;
+    const { location, rating, responded, search, page = 1, limit = 200, missing } = req.query;
 
     // Exclude stats rows and dismissed reviews from actual reviews.
     // Scoped to active WAVES_LOCATIONS so the displayed list stays
@@ -109,6 +109,10 @@ router.get('/', async (req, res, next) => {
 
     if (location && location !== 'all') query = query.where('google_reviews.location_id', location);
     if (rating) query = query.where('google_reviews.star_rating', parseInt(rating));
+    // Dedicated removed-from-Google filter — makes every stamped review
+    // reachable regardless of the result cap on the default view (a large
+    // profile wipe stays fully inspectable).
+    if (missing === 'true') query = query.whereNotNull('google_reviews.missing_since');
     if (responded === 'true') query = query.modify(whereHasRealReply);
     if (responded === 'false') {
       // The default "Needs Reply" view must still surface reviews Google has

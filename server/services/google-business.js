@@ -844,6 +844,11 @@ class GoogleBusinessService {
           const claimedRows = await trx('google_reviews')
             .whereIn('id', candidates.map(r => r.id))
             .whereNull('missing_since')
+            // Re-check freshness at claim time: an overlapping runner may have
+            // confirmed a candidate live (refreshed synced_at) between our
+            // candidate select and this update — a stale snapshot must not
+            // stamp a review another sync just proved is on Google.
+            .where('synced_at', '<', syncStart)
             .update({ missing_since: db.fn.now() }, ['id']);
           const claimedIds = new Set((claimedRows || []).map(r => r.id));
           gone = candidates.filter(r => claimedIds.has(r.id));

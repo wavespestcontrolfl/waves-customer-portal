@@ -513,7 +513,20 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
           marginTop: 8,
         }}
       >
-        {review.draftReply && !review.reply && !editing && (
+        {review.missingSince && (
+          <div
+            style={{
+              fontSize: 13,
+              fontFamily: "Roboto, Arial, sans-serif",
+              color: D.muted,
+              marginBottom: 8,
+            }}
+          >
+            Removed from Google — replying is disabled. The review is retained
+            here as evidence for a missing-reviews support case.
+          </div>
+        )}
+        {!review.missingSince && review.draftReply && !review.reply && !editing && (
           <div
             style={{
               padding: 10,
@@ -607,6 +620,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
             >
               {review.reply}
             </div>{" "}
+            {!review.missingSince && (
             <div style={{ display: "flex", gap: 8 }}>
               {" "}
               <button
@@ -645,9 +659,10 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
               >
                 {aiLoading ? "Generating..." : "AI Reply"}
               </button>{" "}
-            </div>{" "}
+            </div>
+            )}{" "}
           </div>
-        ) : editing || !review.reply ? (
+        ) : !review.missingSince && (editing || !review.reply) ? (
           <div>
             {" "}
             <textarea
@@ -1695,6 +1710,7 @@ export default function ReviewsPage() {
     if (filterRating !== "all") params.set("rating", filterRating);
     if (filterResponded === "responded") params.set("responded", "true");
     if (filterResponded === "needs-reply") params.set("responded", "false");
+    if (filterResponded === "removed") params.set("missing", "true");
     if (search.trim()) params.set("search", search.trim());
     adminFetch(`/admin/reviews?${params.toString()}`)
       .then((d) => {
@@ -1784,7 +1800,10 @@ export default function ReviewsPage() {
     if (filterRating !== "all" && r.starRating !== Number(filterRating))
       return false;
     if (filterResponded === "responded" && !r.reply) return false;
-    if (filterResponded === "needs-reply" && r.reply) return false;
+    // Needs Reply keeps stamped (removed-from-Google) rows visible even when
+    // replied — mirrors the server-side inclusion; the removal alert links here.
+    if (filterResponded === "needs-reply" && r.reply && !r.missingSince) return false;
+    if (filterResponded === "removed" && !r.missingSince) return false;
     if (search.trim()) {
       const q = search.toLowerCase();
       const matches =
@@ -1829,6 +1848,7 @@ export default function ReviewsPage() {
     { value: "all", label: "All Reviews" },
     { value: "responded", label: "Responded" },
     { value: "needs-reply", label: "Needs Reply" },
+    { value: "removed", label: "Removed from Google" },
   ];
   const activeGroup =
     REVIEWS_TAB_GROUPS.find((g) => g.tabs.includes(activeTab)) ||
