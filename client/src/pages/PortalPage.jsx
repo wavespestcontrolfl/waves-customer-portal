@@ -26,7 +26,7 @@ import {
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
 import { isNativeApp, nativePlatform } from '../native/platform';
-import { canSaveNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
+import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
 
@@ -5486,8 +5486,12 @@ function BillingTab({ customer }) {
                 // (canSaveNative() === false), so render nothing there rather
                 // than controls that dead-end or do nothing. Web is unchanged.
                 const native = isNativeApp();
+                // Save (Filesystem+Share) opens the PDF; Share alone can still
+                // hand over a link. Binaries with NEITHER have no safe path —
+                // only those render nothing (codex r3 P2).
                 const nativeCapable = native && canSaveNative();
-                if (native && !nativeCapable) return null;
+                const nativeShareOnly = native && !nativeCapable && canShareNative();
+                if (native && !nativeCapable && !nativeShareOnly) return null;
                 if (!p.receiptUrl && !p.stripeReceiptUrl) return null;
                 const receiptName = `Waves_Receipt_${p.receiptNumber || String(p.id).slice(0, 8)}.pdf`;
                 const btn = {
@@ -5498,16 +5502,18 @@ function BillingTab({ customer }) {
                 };
                 return (
                   <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                    {nativeCapable ? (
+                    {(nativeCapable || nativeShareOnly) ? (
                       // In-app: hand the receipt to the OS. PDF via
                       // saveUrlNative (preview + save/share sheet); a
                       // Stripe-only row shares its hosted link instead.
                       <button
                         type="button"
                         onClick={() => {
-                          const task = p.receiptPdfUrl
+                          // Share-only binaries can't save the file, but can
+                          // share a link — send the receipt page (or Stripe's).
+                          const task = (nativeCapable && p.receiptPdfUrl)
                             ? saveUrlNative(receiptApiUrl(p.receiptPdfUrl), receiptName)
-                            : shareUrlNative(p.stripeReceiptUrl, 'Waves receipt');
+                            : shareUrlNative(p.receiptUrl ? receiptApiUrl(p.receiptUrl) : p.stripeReceiptUrl, 'Waves receipt');
                           Promise.resolve(task).catch(() => {
                             showCustomerAlert('Could not open this receipt. Please try again.');
                           });

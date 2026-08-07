@@ -163,7 +163,13 @@ router.get('/', async (req, res, next) => {
       const m = /^Invoice\s+([A-Za-z0-9-]+)\s+—/.exec(String(p.description || ''));
       return m ? m[1] : null;
     };
-    const invoiceIds = [...new Set(visiblePayments.map(anyInvoiceIdOf).filter(Boolean))];
+    // Same UUID shape-filter the balance path already applies below: historic
+    // rows can carry a non-UUID metadata.invoice_id, and invoices.id is a uuid
+    // column — an unfiltered whereIn makes Postgres throw on the cast, and the
+    // catch would then leave EVERY receipt link null (codex r3 P2).
+    const RECEIPT_UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const invoiceIds = [...new Set(visiblePayments.map(anyInvoiceIdOf).filter(Boolean))]
+      .filter((id) => RECEIPT_UUID_SHAPE.test(id));
     const intentIds = [...new Set(visiblePayments.map(p => p.stripe_payment_intent_id).filter(Boolean))];
     const invoiceNumbers = [...new Set(visiblePayments.map(invoiceNumberOf).filter(Boolean))];
     const receiptTokenByInvoiceId = new Map();
