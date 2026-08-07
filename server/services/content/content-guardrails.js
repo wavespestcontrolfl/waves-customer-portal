@@ -2885,9 +2885,11 @@ const SANCTIONED_META_TOKEN_RE = /\{\{\s*cityPhone\s*\}\}/g;
 // timing — so a "safe" match governed by a once/when/after-dry condition in
 // the same sentence stays legal, as do negated disclaimers ("no product is
 // completely safe…"), via the prevention section's negation guards.
-// A "figure" is a digit, a range, a common spelled number with its unit, or
-// a fractional/article form ("half an hour", "an hour").
-const REENTRY_DURATION_SRC = "(?:(?:\\d+(?:\\s*[-–—]\\s*\\d+)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:\\s*[-–—]\\s*\\w+)?)\\s*(?:minutes?|mins?|hours?|hrs?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour)";
+// A "figure" is a digit, a range (hyphen/en-dash or worded: "30 to 60",
+// "between 30 and 60", "one to two"), a common spelled number with its
+// unit, or a fractional/article form ("half an hour", "an hour").
+const REENTRY_RANGE_CONNECTOR_SRC = "(?:\\s*[-–—]\\s*|\\s+(?:to|or|and)\\s+)";
+const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:${REENTRY_RANGE_CONNECTOR_SRC}\\w+)?)\\s*(?:minutes?|mins?|hours?|hrs?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour)`;
 const REENTRY_SAFETY_SRCS = [
   // "safe to re-enter / return / go back inside", "re-entry is safe",
   // "safe for kids and pets to return"

@@ -3075,6 +3075,11 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(negatedUntil.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const negatedAfter = guardrails.evaluate({ body: 'Do not re-enter after 30 minutes.' }, {});
     expect(negatedAfter.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // Worded ranges are figures too.
+    const wordRange = guardrails.evaluate({ body: 'You can re-enter after 30 to 60 minutes.' }, {});
+    expect(wordRange.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const spelledRange = guardrails.evaluate({ body: 'Wait one to two hours before re-entering.' }, {});
+    expect(spelledRange.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     // Adverbial "safely" without BOTH idiom parts blocks; with dry-condition
     // AND technician confirmation it is the approved idiom.
     const adverbBare = guardrails.evaluate({ body: 'You can safely re-enter once dry.' }, {});
