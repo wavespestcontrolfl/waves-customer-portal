@@ -2336,10 +2336,21 @@ function initScheduledJobs() {
           return raw || {};
         };
         try {
-          const purpose = purposeForScheduledMessageType(msg.message_type, { hasCustomer: !!msg.customer_id });
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
+          // replay_purpose: an enqueue whose message_type has no useful
+          // purpose mapping (the Stripe billing-notice templates —
+          // ach_retry_notice, bank_verification_failed, …) persists the
+          // exact purpose its immediate send ran under, so the policy
+          // re-check at dispatch matches the original consent/trust shape
+          // instead of falling through to 'conversational'. Bounded to the
+          // known purpose enum; every validator still re-runs at dispatch.
+          const { MESSAGE_PURPOSES } = require('./messaging/policy');
+          const purpose = (typeof claimMeta.replay_purpose === 'string'
+            && MESSAGE_PURPOSES.includes(claimMeta.replay_purpose))
+            ? claimMeta.replay_purpose
+            : purposeForScheduledMessageType(msg.message_type, { hasCustomer: !!msg.customer_id });
           // A decision-linked scheduled reply must clear a fire-time
           // re-check: its anchoring inbound is still the newest on the
           // thread. (The former price-quote fire-time block is RETIRED —
@@ -2551,6 +2562,13 @@ function initScheduledJobs() {
             // the retryable QUIET_HOURS_HOLD branch below instead of
             // texting after the cutoff.
             ...((msg.admin_user_id || claimMeta.human_authored === true) ? { operatorInitiated: true } : {}),
+            // Inbound-reply provenance survives the retry rail: a transient
+            // provider failure on an immediate AI reply (Twilio 429/5xx)
+            // re-queues here minutes later — still an answer to the
+            // customer's own text, not ordinary automation, so the send
+            // window must not reclassify it. Persisted at enqueue by the
+            // inbound webhook's retry insert; automated rows never carry it.
+            ...(claimMeta.conversational_context === true ? { conversationalContext: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
             // — without it an anonymous-lead transactional replay blocks as
@@ -2568,7 +2586,15 @@ function initScheduledJobs() {
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
-              fromNumber: msg.from_phone || undefined,
+              // resolve_from_by_customer: customer-linked requeues (deferred
+              // completion/prep/follow-up texts) stamped a placeholder
+              // from_phone at enqueue only because the column is NOT NULL —
+              // suppress the override so twilio.js resolves the customer's
+              // LOCATION number at send time, keeping the morning text on
+              // the same line/thread the immediate path would have used.
+              fromNumber: claimMeta.resolve_from_by_customer === true
+                ? undefined
+                : (msg.from_phone || undefined),
               adminUserId: msg.admin_user_id || undefined,
               // Forward the operator-authored provenance persisted by
               // /schedule-sms so a hand-composed scheduled message with an

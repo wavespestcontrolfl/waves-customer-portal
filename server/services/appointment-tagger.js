@@ -371,6 +371,9 @@ class AppointmentTagger {
               scheduled_service_id: service.id,
               original_block_code: prepResult.code,
               refresh_customer_phone: true,
+              // from_phone above is a NOT-NULL placeholder — the executor
+              // resolves the customer's LOCATION number at send time.
+              resolve_from_by_customer: true,
             }),
           });
           await trx('customer_interactions').insert({

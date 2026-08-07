@@ -1953,6 +1953,22 @@ const AppointmentReminders = {
               logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} deferred — outside 8AM-8PM ET send window, window reopens before the visit day`);
               continue;
             }
+            // 'both' channel: the SKIP ruling applies to the SMS leg (a
+            // deferred text would land on the visit's own day), but the
+            // customer's requested EMAIL is not subject to the SMS window —
+            // deliver it now so closing the row drops one leg, not both.
+            // Best-effort + idempotent per occurrence; an email failure
+            // still closes (same as the SMS-only skip, where nothing sends).
+            if (apptChannel(channel24) === 'both') {
+              const emailRes = await sendAppointmentNoticeEmail({
+                kind: '24h',
+                customerId: r.customer_id,
+                scheduledServiceId: r.scheduled_service_id,
+                apptTime,
+                serviceLabel: smsServiceLabelStored(r.service_type),
+              });
+              logger.info(`[appt-remind] 24h night skip for ${r.scheduled_service_id} — email leg ${emailRes?.ok ? 'sent' : `not sent (${emailRes?.reason || emailRes?.error || 'unknown'})`} before close`);
+            }
             const closedWindow24 = await db('appointment_reminders')
               .where({ id: r.id })
               .where('appointment_time', r.appointment_time)

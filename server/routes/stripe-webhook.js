@@ -48,7 +48,7 @@ async function sendBillingSms(customer, body, metadata = {}) {
   if (!customer?.phone || !customer?.id) {
     return { sent: false, blocked: true, code: 'MISSING_CUSTOMER_CONTACT' };
   }
-  return sendCustomerMessage({
+  const result = await sendCustomerMessage({
     to: customer.phone,
     body,
     channel: 'sms',
@@ -59,6 +59,45 @@ async function sendBillingSms(customer, body, metadata = {}) {
     entryPoint: 'stripe_webhook',
     metadata,
   });
+  // Send-window hold: a Stripe event (ACH failure, requires-action,
+  // setup-failure) fires ONCE and is deduped — no morning retry exists, so
+  // a held notice must persist its own on the scheduled-SMS rail or the
+  // customer permanently misses an actionable billing message.
+  // replay_purpose pins the 8 AM dispatch to the same payment_failure
+  // policy this immediate send ran under. Reported as { scheduled: true }
+  // so callers log deferred, not lost; a failed enqueue falls through and
+  // returns the block unchanged (loudly logged).
+  if (!result.sent
+    && result.code === 'QUIET_HOURS_HOLD'
+    && result.deferred
+    && result.nextAllowedAt) {
+    try {
+      const TWILIO_NUMBERS = require('../config/twilio-numbers');
+      await db('sms_log').insert({
+        customer_id: customer.id,
+        direction: 'outbound',
+        from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+        to_phone: customer.phone,
+        message_body: body,
+        status: 'scheduled',
+        scheduled_for: new Date(result.nextAllowedAt),
+        message_type: metadata.original_message_type || 'billing_reminder',
+        metadata: JSON.stringify({
+          ...metadata,
+          entry_point: 'stripe_webhook_billing_deferred',
+          original_block_code: result.code,
+          replay_purpose: 'payment_failure',
+          refresh_customer_phone: true,
+          resolve_from_by_customer: true,
+        }),
+      });
+      logger.info(`[stripe-webhook] Billing SMS for customer ${customer.id} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt} (${metadata.original_message_type || 'billing'})`);
+      return { ...result, scheduled: true };
+    } catch (queueErr) {
+      logger.error(`[stripe-webhook] Held billing SMS requeue FAILED for customer ${customer.id}: ${queueErr.message} — notice may be lost`);
+    }
+  }
+  return result;
 }
 
 // Advance `from` by `days` ET weekdays (Mon–Fri). Used to render the

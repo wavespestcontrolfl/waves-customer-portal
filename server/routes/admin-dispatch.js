@@ -10284,6 +10284,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                   service_record_id: record.id,
                   original_block_code: smsResult.code,
                   refresh_customer_phone: true,
+                  // from_phone above is a NOT-NULL placeholder — the
+                  // executor resolves the customer's LOCATION number at
+                  // send time so the morning text stays on their thread.
+                  resolve_from_by_customer: true,
                 }),
               });
               completionHoldQueued = true;

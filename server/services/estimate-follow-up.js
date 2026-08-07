@@ -377,11 +377,13 @@ async function sendDualChannel(est, { sms, email }) {
           estimate_id: est.id,
           followup_stage: email?.stage || null,
           original_block_code: smsHold.code,
-          // Customer rows re-read the live phone at send time; anonymous
-          // lead rows persist the transactional consent basis the
-          // immediate send ran under (same as the voicemail deferral).
+          // Customer rows re-read the live phone at send time and resolve
+          // their LOCATION from-number (from_phone above is a NOT-NULL
+          // placeholder); anonymous lead rows persist the transactional
+          // consent basis the immediate send ran under (same as the
+          // voicemail deferral).
           ...(est.customer_id
-            ? { refresh_customer_phone: true }
+            ? { refresh_customer_phone: true, resolve_from_by_customer: true }
             : { consent_basis: { status: "transactional_allowed", source: "estimate_follow_up" } }),
         }),
       });

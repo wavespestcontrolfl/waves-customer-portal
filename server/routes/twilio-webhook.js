@@ -873,6 +873,10 @@ router.post('/sms', async (req, res) => {
                       entry_point: 'twilio_inbound_ai_assistant_retry',
                       provider_retry: true,
                       original_failure_code: sendResult.code || null,
+                      // The retry is still an answer to the customer's own
+                      // inbound text — the executor restores the send-window
+                      // inbound-reply exemption from this flag.
+                      conversational_context: true,
                     }),
                   });
                   logger.info(`[twilio-webhook] AI reply re-queued (retry at ${sendResult.nextAllowedAt}) for ***${last4}`);
