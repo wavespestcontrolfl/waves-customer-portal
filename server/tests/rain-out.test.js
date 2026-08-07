@@ -1418,6 +1418,22 @@ describe('rain-out service', () => {
       // Punctuation-wrapped naked links are still valid links (codex P1).
       expect(sanitize()('details (bit.ly/abc)')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()('see [t.co/xyz] for info')).toEqual({ error: 'note_link_blocked' });
+      // Encoded/unicode forms that canonicalize back to a shortener host
+      // must not slip the textual regex (codex PR P1): percent-encoded dot,
+      // ideographic full stop, fullwidth chars, zero-width joins.
+      expect(sanitize()('go https://bit%2ely/abc')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('go https://bit。ly/abc')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('go ｂｉｔ．ｌｙ/abc')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('go bit\u200B.ly/abc')).toEqual({ error: 'note_link_blocked' });
+    });
+
+    test('sanitizer: rejects emoji BEFORE the move (send layer would block the SMS after)', () => {
+      // sendCustomerMessage's EMOJI_FOR_CUSTOMER validator would otherwise
+      // fire after the reschedule committed — move done, customer silent.
+      expect(sanitize()('See you Friday 👍')).toEqual({ error: 'note_emoji_blocked' });
+      expect(sanitize()('Rain check ☔ sorry!')).toEqual({ error: 'note_emoji_blocked' });
+      // Smart punctuation is NOT emoji — same line the voice validator draws.
+      expect(sanitize()('Friday — we’ll be there')).toEqual({ note: 'Friday — we’ll be there' });
       expect(sanitize()(42)).toEqual({ error: 'note_invalid' });
       // Lookalike words that merely CONTAIN a shortener host must pass.
       expect(sanitize()('a habit.ly no wait, a habit truly')).toEqual({ note: 'a habit.ly no wait, a habit truly' });

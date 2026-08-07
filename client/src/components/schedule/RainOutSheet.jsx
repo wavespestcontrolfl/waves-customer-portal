@@ -104,6 +104,7 @@ const ERROR_COPY = {
   target_not_later: 'Running late needs a time after the current window — pick a later slot.',
   note_too_long: 'Note is too long — keep it under 200 characters.',
   note_link_blocked: "Link shorteners can't go in customer texts — remove the shortened URL.",
+  note_emoji_blocked: "Emoji can't go in customer texts — remove them.",
   note_invalid: 'That note could not be sent — plain text only.',
 };
 
@@ -112,6 +113,24 @@ const ERROR_COPY = {
 // the server is the enforcer.
 const NOTE_MAX_CHARS = 200;
 const NOTE_SHORTENER_RE = /(?:^|[^a-z0-9-])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[^a-z0-9-])/i;
+// Customer-facing SMS are emoji-free (messaging validator EMOJI_FOR_CUSTOMER)
+// — catching it here keeps the move from committing with a text that the
+// send layer would then block.
+const NOTE_EMOJI_RE = /\p{Extended_Pictographic}/u;
+// Same canonicalization the server runs before the shortener test —
+// encoded/unicode-dot hosts (`bit%2ely`, `bit。ly`) resolve to real links.
+function normalizeForLinkCheck(raw) {
+  let out = String(raw).normalize('NFKC');
+  out = out.replace(/[\u3002\uFF0E\uFF61]/g, '.');
+  out = out.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+  for (let i = 0; i < 3; i++) {
+    let decoded;
+    try { decoded = decodeURIComponent(out); } catch { break; }
+    if (decoded === out) break;
+    out = decoded;
+  }
+  return out;
+}
 
 // Sentinel selection key for the custom-time option (distinct from the preset
 // keys, which are `${kind}:${date}:${start}`).
@@ -268,7 +287,9 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     }
   };
 
-  const noteBlocked = notify && NOTE_SHORTENER_RE.test(note);
+  const noteShortener = NOTE_SHORTENER_RE.test(note) || NOTE_SHORTENER_RE.test(normalizeForLinkCheck(note));
+  const noteEmoji = NOTE_EMOJI_RE.test(note);
+  const noteBlocked = notify && (noteShortener || noteEmoji);
 
   const handleCommit = async () => {
     if (!selected || busy || noteBlocked) return;
@@ -555,7 +576,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginTop: 4, fontSize: 12, color: '#71717A' }}>
                   <span>
                     {noteBlocked
-                      ? <span style={{ color: '#B91C1C' }}>{ERROR_COPY.note_link_blocked}</span>
+                      ? <span style={{ color: '#B91C1C' }}>{noteShortener ? ERROR_COPY.note_link_blocked : ERROR_COPY.note_emoji_blocked}</span>
                       : (scope === 'route' && routeCount > 0 && note.trim()
                         ? "Note goes to this stop's customer only — the rest of the route gets the standard text."
                         : '')}

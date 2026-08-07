@@ -82,13 +82,41 @@ const CUSTOMER_NOTE_MAX_CHARS = 200;
 // `bit.ly./abc`, while still passing lookalike words like `habit.ly`
 // whose match is preceded by a domain character (codex pre-push P1 ×2).
 const NOTE_SHORTENER_RE = /(?:^|[^a-z0-9-])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[^a-z0-9-])/i;
+
+// The regex is textual, so hosts hidden behind encodings that a URL parser
+// (or a tapping thumb) canonicalizes back to the real hostname would slip
+// it: `bit%2ely`, fullwidth `ｂｉｔ．ｌｙ`, ideographic-dot `bit。ly`,
+// zero-width joins (codex PR P1). Check the shortener set against a
+// canonicalized copy too: NFKC fold, unicode dot forms → '.', zero-width
+// chars stripped, then bounded percent-decode.
+function normalizeForLinkCheck(raw) {
+  let out = String(raw).normalize('NFKC');
+  out = out.replace(/[\u3002\uFF0E\uFF61]/g, '.');
+  out = out.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+  for (let i = 0; i < 3; i++) {
+    let decoded;
+    try { decoded = decodeURIComponent(out); } catch { break; }
+    if (decoded === out) break;
+    out = decoded;
+  }
+  return out;
+}
+
 function sanitizeCustomerNote(raw) {
   if (raw == null) return { note: null };
   if (typeof raw !== 'string') return { error: 'note_invalid' };
   const note = raw.replace(/\s+/g, ' ').trim();
   if (!note) return { note: null };
   if (note.length > CUSTOMER_NOTE_MAX_CHARS) return { error: 'note_too_long' };
-  if (NOTE_SHORTENER_RE.test(note)) return { error: 'note_link_blocked' };
+  if (NOTE_SHORTENER_RE.test(note) || NOTE_SHORTENER_RE.test(normalizeForLinkCheck(note))) {
+    return { error: 'note_link_blocked' };
+  }
+  // Same emoji rule sendCustomerMessage enforces (validators/voice.js) —
+  // checked HERE so an emoji note rejects BEFORE the move commits, instead
+  // of committing the reschedule and then silently blocking the SMS with
+  // EMOJI_FOR_CUSTOMER (codex PR P2).
+  const { _internals: { findEmoji } } = require('./messaging/validators/voice');
+  if (findEmoji(note).found) return { error: 'note_emoji_blocked' };
   return { note };
 }
 
