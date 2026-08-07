@@ -514,9 +514,10 @@ class AutonomousRunner {
     // is authoritative truth, so drift is REPAIRED — slug forced back to the
     // pin, canonical + body self-links repointed — BEFORE any gate runs
     // (every gate then evaluates exactly what will publish; no finding
-    // evidence is destroyed). operatorSlugMismatch stays the detector; only
-    // a repair that cannot be made safe (the pinned slug itself invalid)
-    // keeps the old park remedy.
+    // evidence is destroyed). applyOperatorSlugRepair is both detector and
+    // remedy (single definition of slug drift — Codex r9); only a repair
+    // that cannot be made safe (the pinned slug itself invalid) keeps the
+    // old park remedy.
     if (opp.bucket === OPERATOR_INTERCEPT_BUCKET) {
       const slugRepair = applyOperatorSlugRepair(brief, draft);
       if (slugRepair && !slugRepair.ok) {
@@ -3371,21 +3372,6 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
   return run;
 }
 
-/**
- * operatorSlugMismatch(brief, draft) → null when OK, or
- * { expected_slug, draft_slug } when an operator-pinned slug exists and the
- * draft's frontmatter slug doesn't match it (or is missing). Refresh briefs
- * carry no operator slug (payload.slug is null) so they skip the check.
- * Pure — exported via _internals for unit tests.
- */
-function operatorSlugMismatch(brief, draft) {
-  const expected = brief?.voice_constraints?.operator_brief?.slug || null;
-  if (!expected) return null;
-  const draftSlug = draft?.frontmatter?.slug || null;
-  if (draftSlug && normalizeSlugPath(draftSlug) === normalizeSlugPath(expected)) return null;
-  return { expected_slug: expected, draft_slug: draftSlug };
-}
-
 function normalizeSlugPath(slug) {
   const trimmed = String(slug || '').trim().toLowerCase().replace(/^\/+|\/+$/g, '');
   return `/${trimmed}/`;
@@ -3399,7 +3385,28 @@ const PINNED_SLUG_PATTERN = /^\/[a-z0-9-]+(\/[a-z0-9-]+)*\/$/;
 const { POST_CATEGORIES: BLOG_POST_CATEGORIES } = require('../content-astro/blog-categories');
 // Spoke fleet keys shared with the publisher's isFleetCanonicalHost — also a
 // dependency-free module (content-guardrails already requires it).
-const { SPOKE_SITE_KEYS: FLEET_SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
+const {
+  SPOKE_SITE_KEYS: FLEET_SPOKE_SITE_KEYS,
+  HUB_SITE_KEYS: FLEET_HUB_SITE_KEYS,
+  normalizeSpokeSites: normalizeFleetSpokeSites,
+  spokeSiteOrigin: fleetSpokeSiteOrigin,
+} = require('../content-astro/spoke-sites');
+const { spokeBlogNetworkEnabled: fleetSpokeNetworkEnabled } = require('./spoke-blog-network');
+
+// The publish origin a repaired draft will actually land on — a light mirror
+// of the publisher's resolveSpokeTarget + blogOriginForSpoke (astro-publisher
+// can't be required here in the unit env): exactly ONE non-hub spoke target
+// with the spoke network enabled publishes on that spoke's canonical origin;
+// everything else publishes on the hub.
+function resolveDraftPublishOrigin(brief, hub) {
+  const fromBrief = normalizeFleetSpokeSites(brief?.target_sites);
+  const fromOverlay = normalizeFleetSpokeSites(brief?.voice_constraints?.operator_brief?.target_sites);
+  const sites = (fromBrief.length ? fromBrief : fromOverlay)
+    .filter((k) => !FLEET_HUB_SITE_KEYS.includes(k));
+  const spoke = sites.length === 1 ? sites[0] : null;
+  if (!spoke || !fleetSpokeNetworkEnabled()) return { origin: hub, spoke: null };
+  return { origin: fleetSpokeSiteOrigin(spoke) || hub, spoke };
+}
 
 /**
  * applyOperatorSlugRepair(brief, draft) — the operator-pinned slug is
@@ -3431,9 +3438,9 @@ function applyOperatorSlugRepair(brief, draft) {
   // The pin is validated RAW (trim only) BEFORE the mismatch short-circuit —
   // normalizing first would let a malformed pin ("Fall-Lawn", missing
   // boundary slashes) silently become a schema-valid URL the operator never
-  // wrote, and operatorSlugMismatch compares NORMALIZED slugs, so a pin
-  // like /Fall-Lawn/ against draft /fall-lawn/ reads as "no drift" and
-  // would wave the invalid pin straight through to publish (Codex r1+r3).
+  // wrote, and a NORMALIZED comparison would read a pin like /Fall-Lawn/
+  // against draft /fall-lawn/ as "no drift" and wave the invalid pin
+  // straight through to publish (Codex r1+r3).
   // A shape error in the pin is an operator input error: park via the old
   // remedy, never guess.
   const rawPin = brief?.voice_constraints?.operator_brief?.slug;
@@ -3474,9 +3481,9 @@ function applyOperatorSlugRepair(brief, draft) {
       mismatch: { expected_slug: rawPin, draft_slug: draft?.frontmatter?.slug || null },
     };
   }
-  // Drift detection is EXACT, not normalized (Codex r4): operatorSlugMismatch
-  // lowercases both sides, so a case-drifted writer slug (/Lawn-Care/… vs
-  // pin /lawn-care/…) would read as "no drift", reach the publisher uncased,
+  // Drift detection is EXACT, not normalized (Codex r4): a lowercasing
+  // comparison would read a case-drifted writer slug (/Lawn-Care/… vs
+  // pin /lawn-care/…) as "no drift", reach the publisher uncased,
   // and fail schema validation instead of publishing the pinned route.
   // Category drift is repaired for the same reason even when the slug
   // matches exactly — the writer's category would otherwise override the
@@ -3518,6 +3525,10 @@ function applyOperatorSlugRepair(brief, draft) {
     ...(hubUrl ? [hubUrl.hostname.toLowerCase().replace(/^www\./, '')] : []),
     ...FLEET_SPOKE_SITE_KEYS.map((key) => String(key).toLowerCase()),
   ]);
+  // The origin this draft will actually publish on (hub, or its single
+  // targeted spoke) — used for the draft.url stamp and spoke self-link
+  // rewrites below.
+  const publishOrigin = resolveDraftPublishOrigin(brief, hub);
   const repair = {
     repaired_at: new Date().toISOString(),
     from_slug: mismatch.draft_slug || null,
@@ -3542,12 +3553,15 @@ function applyOperatorSlugRepair(brief, draft) {
   // let the run publish (Codex r1).
   let canonicalIsForeign = false;
   if (oldCanonical) {
-    // Protocol-relative (`//host/...`) is host-bearing — the publisher's
-    // canonical guard treats it as off-site, so classify it the same way
-    // here instead of letting the URL-parse throw mark it non-foreign and
-    // repair over it (Codex r2).
+    // Parse with the hub as base and classify by the RESOLVED host, exactly
+    // like the publisher's guard: protocol-relative (`//host/…`, Codex r2)
+    // and slash-backslash (`/\host/…`, Codex r9) forms are host-bearing
+    // after WHATWG resolution and must stay preserved for the guard, while
+    // a genuinely relative path resolves onto the hub and stays repairable.
     try {
-      const parsed = new URL(oldCanonical.startsWith('//') ? `https:${oldCanonical}` : oldCanonical);
+      const parsed = hubUrl
+        ? new URL(oldCanonical, hubUrl)
+        : new URL(oldCanonical.startsWith('//') ? `https:${oldCanonical}` : oldCanonical);
       // Fleet membership, www-insensitive (Codex r7/r8): an exact- or
       // hub-only host comparison misclassifies an apex-host (r7) or
       // spoke-host (r8) canonical as foreign, preserves the stale old-leaf
@@ -3563,12 +3577,15 @@ function applyOperatorSlugRepair(brief, draft) {
 
   // draft.url is the writer's own-route reference, consumed downstream by
   // the sitemap pre-check, the AI-visibility gate, uniqueness
-  // self-exclusion, and the published/pending-url fallback — after a repair
-  // it must describe the pinned route, not the rejected writer route
-  // (Codex r8). Unlike the canonical, no publish guard reads it, so there
-  // is no unsafe input to preserve.
-  if (typeof draft.url === 'string' && draft.url.trim() && draft.url !== newCanonical) {
-    draft.url = newCanonical;
+  // self-exclusion, and the review-queue target_url fallback — after a
+  // repair it must describe the pinned route on the brief's RESOLVED
+  // publish origin (Codex r8/r9). The production writer (emit_draft) never
+  // sets the field, so the stamp is unconditional — a present-only rewrite
+  // is dead code on every real draft. Unlike the canonical, no publish
+  // guard reads it, so there is no unsafe input to preserve.
+  const pinnedUrl = `${publishOrigin.origin}${pinned}`;
+  if (draft.url !== pinnedUrl) {
+    draft.url = pinnedUrl;
     repair.url_rewritten = true;
   }
 
@@ -3586,7 +3603,24 @@ function applyOperatorSlugRepair(brief, draft) {
     // route and must be repaired (Codex r6). Rewrites normalize the prefix to
     // the configured hub origin.
     const hubOrigins = hubUrl ? hubHostVariants.map((h) => `${hubUrl.protocol}//${h}`) : [hub];
-    const hubAlternation = hubOrigins.map(escapeRe).join('|');
+    // The targeted spoke's host forms are the writer's own drifted route too
+    // (Codex r9): a spoke-seeded draft may self-link absolutely on its own
+    // spoke, and leaving the old destination intact publishes a link to the
+    // writer's nonexistent route. OTHER spokes' hosts stay untouched — a
+    // link to a different fleet site is someone else's page, not a
+    // self-link. Spoke matches normalize to the spoke's canonical (www)
+    // origin, hub matches to the configured hub origin.
+    const spokeOrigins = [];
+    if (publishOrigin.spoke) {
+      const spokeUrl = (() => { try { return new URL(publishOrigin.origin); } catch { return null; } })();
+      if (spokeUrl) {
+        for (const h of new Set([spokeUrl.host, spokeUrl.host.startsWith('www.') ? spokeUrl.host.slice(4) : `www.${spokeUrl.host}`])) {
+          spokeOrigins.push(`${spokeUrl.protocol}//${h}`);
+        }
+      }
+    }
+    const spokeOriginSet = new Set(spokeOrigins);
+    const hubAlternation = [...hubOrigins, ...spokeOrigins].map(escapeRe).join('|');
     let occurrences = 0;
     for (const oldSlugPath of oldSlugPaths) {
       if (!draft.body.includes(oldSlugPath)) continue;
@@ -3604,7 +3638,8 @@ function applyOperatorSlugRepair(brief, draft) {
       const selfLinkRe = new RegExp(`(^|[\\s("'<\`])((?:${hubAlternation})?)${escapeRe(oldSlugPath)}(?=[)"'\\s<>\`#?]|$)`, 'g');
       draft.body = draft.body.replace(selfLinkRe, (m, pre, origin) => {
         occurrences += 1;
-        return `${pre}${origin ? hub : ''}${pinned}`;
+        if (!origin) return `${pre}${pinned}`;
+        return `${pre}${spokeOriginSet.has(origin) ? publishOrigin.origin : hub}${pinned}`;
       });
     }
     repair.body_self_link_rewrites = occurrences;
@@ -3905,7 +3940,6 @@ module.exports._internals = {
   isShadow,
   autoPublishEnabled,
   OPERATOR_INTERCEPT_BUCKET,
-  operatorSlugMismatch,
   applyOperatorSlugRepair,
   FACTS_GATED_ACTIONS,
   TRUST_BUILD_THRESHOLD,

@@ -814,6 +814,15 @@ describe('autonomous frontmatter normalization (Bucket A generator fixes)', () =
       const fm = { slug: '/ant-trails/', canonical: '//evil.example.com/ant-trails/' };
       expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical points off-site/);
     });
+
+    test('REJECTS a slash-backslash off-site canonical — the WHATWG parser resolves /\\host/… as HOST-BEARING (Codex r9)', () => {
+      // A raw "starts with a single slash" test would classify this as
+      // path-relative and skip the fleet check; the parsed hostname is the
+      // truth.
+      const fm = { slug: '/ant-trails/', canonical: '/\\evil.example.com/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical points off-site/);
+      expect(fm.canonical).toBe('/\\evil.example.com/ant-trails/'); // untouched — no silent repair
+    });
   });
 
   describe('clampMetaDescription — over-160 is normalized, not rejected', () => {

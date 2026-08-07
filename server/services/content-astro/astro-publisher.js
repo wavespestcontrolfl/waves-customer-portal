@@ -34,7 +34,7 @@ const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
 const { describeHeroForAlt } = require('../content/hero-alt-vision');
 const { normalizeContentUrl } = require('../content/content-registry');
-const { normalizeSpokeSites, SPOKE_SITE_KEYS, spokeSiteOrigin } = require('./spoke-sites');
+const { normalizeSpokeSites, SPOKE_SITE_KEYS, HUB_SITE_KEYS, spokeSiteOrigin } = require('./spoke-sites');
 const { spokeBlogNetworkEnabled } = require('../content/spoke-blog-network');
 const { etDateString } = require('../../utils/datetime-et');
 
@@ -50,7 +50,9 @@ function isBlogTarget(filePath) {
 }
 const ASTRO_HERO_PUBLIC_BASE = '/images/blog';
 const HUB_ORIGIN = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
-const BLOG_HUB_DOMAINS = Object.freeze(['wavespestcontrol.com']);
+// Single-sourced from spoke-sites so the runner's publish-origin mirror can
+// never disagree on what counts as the hub.
+const BLOG_HUB_DOMAINS = HUB_SITE_KEYS;
 
 // A hero already committed to the Astro repo — either the relative /images/blog
 // path or its absolute hub URL. These are NOT re-fetched on republish (the
@@ -2725,7 +2727,13 @@ function assertCanonicalMatchesSlug(frontmatter, slug, origin = HUB_ORIGIN) {
       suppliedUrl = null; // malformed → derive from slug below
     }
     if (suppliedUrl) {
-      if (!isPathRelative && !isFleetCanonicalHost(suppliedUrl.hostname, origin)) {
+      // The off-site check runs on the PARSED hostname regardless of the raw
+      // prefix (Codex r9): the WHATWG parser resolves slash-backslash forms
+      // like `/\competitor.example/foo/` as HOST-BEARING URLs, so a textual
+      // "starts with a single slash" test would skip the fleet check on an
+      // off-fleet canonical. A genuinely path-relative canonical resolves
+      // onto the expected origin and passes the fleet check by construction.
+      if (!isFleetCanonicalHost(suppliedUrl.hostname, origin)) {
         // Deterministic publish error (autonomous-runner parks it for review
         // instead of retry-looping the same draft).
         throw new Error(`autonomous draft canonical points off-site (${suppliedUrl.hostname}) — refusing to repair a cross-site canonical`);

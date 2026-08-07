@@ -14,7 +14,6 @@ const { _internals } = require('../services/content/autonomous-runner');
 const {
   isShadow,
   autoPublishEnabled,
-  operatorSlugMismatch,
   applyOperatorSlugRepair,
   FACTS_GATED_ACTIONS,
   TRUST_BUILD_THRESHOLD,
@@ -849,9 +848,10 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
       url_rewritten: true,
       body_self_link_rewrites: 2,
     });
-    // The detector reads clean afterwards — the pipeline continues past the
-    // machine check instead of parking.
-    expect(operatorSlugMismatch(operatorBrief(), draft)).toBeNull();
+    // A second pass reads clean afterwards — the repair is its own drift
+    // detector (single definition of slug drift, Codex r9), so the pipeline
+    // continues past the machine check instead of parking.
+    expect(applyOperatorSlugRepair(operatorBrief(), draft)).toBeNull();
   });
 
   test('repairs a draft that emitted NO slug at all (slug set, body untouched)', () => {
@@ -897,9 +897,9 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
   });
 
   test('an invalid pin that NORMALIZES equal to the draft slug still parks — normalized equality must not bypass raw validation (Codex r3)', () => {
-    // Pin /Lawn-Care/…-Swfl/ lowercases to the draft slug, so
-    // operatorSlugMismatch alone reads "no drift" — the malformed pin must
-    // still park instead of publishing.
+    // Pin /Lawn-Care/…-Swfl/ lowercases to the draft slug, so a normalized
+    // comparison alone reads "no drift" — the malformed pin must still park
+    // instead of publishing.
     const draft = driftedDraft({ frontmatter: { slug: '/lawn-care/fall-lawn-mistakes-swfl/' } });
     const before = JSON.stringify(draft);
     const result = applyOperatorSlugRepair(operatorBrief('/Lawn-Care/Fall-Lawn-Mistakes-Swfl/'), draft);
@@ -978,8 +978,66 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     }
   });
 
-  test('an off-site canonical is PRESERVED for the publisher guard — repair must not mask the unsafe input (Codex r1; protocol-relative r2)', () => {
-    for (const foreignCanonical of ['https://competitor.example/their-page/', '//competitor.example/their-page/']) {
+  test('draft.url is stamped even when the writer omitted it — emit_draft never captures a url field (Codex r9)', () => {
+    const draft = driftedDraft();
+    delete draft.url;
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.url).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(result.repair.url_rewritten).toBe(true);
+  });
+
+  test('a spoke-targeted draft stamps draft.url on the SPOKE origin and rewrites spoke-absolute self-links (Codex r9)', () => {
+    const prev = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    try {
+      const brief = {
+        target_sites: ['sarasotaflpestcontrol.com'],
+        voice_constraints: { operator_brief: { slug: PINNED } },
+      };
+      const draft = driftedDraft({
+        body: [
+          'See [www form](https://www.sarasotaflpestcontrol.com/fall-lawn-mistakes-southwest-florida/) and',
+          '[apex form](https://sarasotaflpestcontrol.com/fall-lawn-mistakes-southwest-florida/) and',
+          '[a DIFFERENT spoke](https://www.veniceflpestcontrol.com/fall-lawn-mistakes-southwest-florida/).',
+        ].join(' '),
+      });
+      const result = applyOperatorSlugRepair(brief, draft);
+      expect(result.ok).toBe(true);
+      expect(draft.url).toBe(`https://www.sarasotaflpestcontrol.com${PINNED}`);
+      // Both host forms of the TARGETED spoke are the writer's own drifted
+      // route — repaired and normalized to the spoke's canonical www origin.
+      expect(draft.body).toContain(`https://www.sarasotaflpestcontrol.com${PINNED}`);
+      expect(draft.body).not.toContain('sarasotaflpestcontrol.com/fall-lawn-mistakes-southwest-florida/');
+      expect(draft.body).not.toContain(`https://sarasotaflpestcontrol.com${PINNED}`);
+      // A different fleet site's route is someone else's page, not a self-link.
+      expect(draft.body).toContain('https://www.veniceflpestcontrol.com/fall-lawn-mistakes-southwest-florida/');
+      expect(result.repair.body_self_link_rewrites).toBe(2);
+    } finally {
+      if (prev === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      else process.env.SPOKE_BLOG_NETWORK_ENABLED = prev;
+    }
+  });
+
+  test('with the spoke network DISABLED a spoke-targeted draft publishes on the hub — draft.url stays hub-origin (kill switch honored)', () => {
+    const prev = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    try {
+      const brief = {
+        target_sites: ['sarasotaflpestcontrol.com'],
+        voice_constraints: { operator_brief: { slug: PINNED } },
+      };
+      const draft = driftedDraft();
+      const result = applyOperatorSlugRepair(brief, draft);
+      expect(result.ok).toBe(true);
+      expect(draft.url).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    } finally {
+      if (prev !== undefined) process.env.SPOKE_BLOG_NETWORK_ENABLED = prev;
+    }
+  });
+
+  test('an off-site canonical is PRESERVED for the publisher guard — repair must not mask the unsafe input (Codex r1; protocol-relative r2; slash-backslash r9)', () => {
+    for (const foreignCanonical of ['https://competitor.example/their-page/', '//competitor.example/their-page/', '/\\competitor.example/their-page/']) {
       const draft = driftedDraft({
         frontmatter: { canonical: foreignCanonical },
       });
