@@ -2319,6 +2319,30 @@ function initScheduledJobs() {
       let scheduled = [];
       try {
         await recoverStaleScheduledSmsClaims(now);
+        // Stranded-finalization recovery: a crash after a deferred
+        // completion/invoice row settled 'sent' but before its
+        // finalization hook ran leaves finalize_pending stamped (written
+        // atomically with the settlement). Convert those to bounded
+        // finalize_only rows — the executor re-runs ONLY the idempotent
+        // state steps, never resending the SMS. The 5-minute age floor
+        // keeps this from racing an in-flight first pass.
+        try {
+          const strandedFinalize = await db('sms_log')
+            .where({ status: 'sent' })
+            .whereRaw("metadata->>'finalize_pending' = 'true'")
+            .where('updated_at', '<', new Date(now.getTime() - 5 * 60 * 1000))
+            .update({
+              status: 'scheduled',
+              scheduled_for: now,
+              updated_at: new Date(),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('finalize_only', true, 'finalize_attempts', COALESCE((metadata->>'finalize_attempts')::int, 0) + 1)"),
+            });
+          if (strandedFinalize) {
+            logger.warn(`[scheduled-sms] recovered ${strandedFinalize} stranded deferred-send finalization(s)`);
+          }
+        } catch (recErr) {
+          logger.warn(`[scheduled-sms] stranded-finalization recovery failed: ${recErr.message}`);
+        }
         scheduled = await claimDueScheduledSms(now);
       } catch { return; /* scheduled_for column may not exist yet */ }
 
@@ -2355,7 +2379,13 @@ function initScheduledJobs() {
               logger.warn(`[scheduled-sms] finalize-only retry threw for ${msg.id}: ${finErr.message}`);
             }
             if (fin.ok || finalizeAttempts >= SCHEDULED_SMS_MAX_ATTEMPTS) {
-              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'sent', updated_at: completedAt });
+              // finalize_pending clears on BOTH outcomes or the stranded-
+              // finalization sweep would convert this row forever.
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                status: 'sent',
+                updated_at: completedAt,
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('finalize_pending', false)"),
+              });
               if (!fin.ok) {
                 logger.error(`[scheduled-sms] deferred-completion finalization EXHAUSTED for ${msg.id} (record ${claimMeta.service_record_id || 'unknown'}) — invoice/review state may need manual sync`);
               }
@@ -2378,12 +2408,69 @@ function initScheduledJobs() {
             const { deferredFollowupStillEligible } = require('./estimate-follow-up');
             const elig = await deferredFollowupStillEligible(claimMeta.estimate_id);
             if (!elig.eligible) {
+              if (elig.retryable && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+                // Recheck read failed — fail closed but retryable: hold the
+                // row for the next pass rather than sending unverified or
+                // discarding a possibly-valid touch.
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'scheduled',
+                  scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
+                  updated_at: new Date(),
+                });
+                logger.warn(`[scheduled-sms] deferred estimate follow-up ${msg.id} eligibility unverifiable — held for retry`);
+              } else {
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'blocked',
+                  updated_at: new Date(),
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?)", [`stale_followup:${elig.reason}`]),
+                });
+                logger.info(`[scheduled-sms] deferred estimate follow-up ${msg.id} suppressed at replay: ${elig.reason}`);
+              }
+              continue;
+            }
+          }
+          // Deferred invoice replays (pay links + dunning touches): the
+          // invoice can be paid or voided — and a dunning sequence stopped —
+          // between the night enqueue and the 8 AM dispatch. Re-read the
+          // live state before sending payment copy; same fail-closed
+          // retryable shape as the estimate recheck above.
+          if ((claimMeta.entry_point === 'invoice_send_deferred'
+            || claimMeta.entry_point === 'invoice_followup_deferred')
+            && claimMeta.invoice_id) {
+            let staleReason = null;
+            let recheckFailed = false;
+            try {
+              const { isTerminalInvoice } = require('./invoice-followups');
+              const inv = await db('invoices').where({ id: claimMeta.invoice_id }).first();
+              if (!inv) staleReason = 'invoice-missing';
+              else if (isTerminalInvoice(inv)) staleReason = `invoice-terminal:${inv.status}`;
+              if (!staleReason && claimMeta.followup_sequence_id) {
+                const seq = await db('invoice_followup_sequences')
+                  .where({ id: claimMeta.followup_sequence_id })
+                  .first('status');
+                if (seq && ['stopped', 'completed'].includes(String(seq.status || ''))) {
+                  staleReason = `sequence-${seq.status}`;
+                }
+              }
+            } catch (invErr) {
+              recheckFailed = true;
+              logger.warn(`[scheduled-sms] deferred invoice recheck failed for ${msg.id}: ${invErr.message}`);
+            }
+            if (recheckFailed && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                status: 'scheduled',
+                scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
+                updated_at: new Date(),
+              });
+              continue;
+            }
+            if (staleReason) {
               await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                 status: 'blocked',
                 updated_at: new Date(),
-                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?)", [`stale_followup:${elig.reason}`]),
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?)", [`stale_invoice:${staleReason}`]),
               });
-              logger.info(`[scheduled-sms] deferred estimate follow-up ${msg.id} suppressed at replay: ${elig.reason}`);
+              logger.info(`[scheduled-sms] deferred invoice message ${msg.id} suppressed at replay: ${staleReason}`);
               continue;
             }
           }
@@ -2674,11 +2761,20 @@ function initScheduledJobs() {
             // must appear when it was DELIVERED. Preserve the original
             // queue moment in metadata so the audit trail isn't lost
             // (jsonb_build_object reads the pre-update column value).
+            // finalize_pending is stamped ATOMICALLY with the sent
+            // settlement for entry points that owe post-delivery
+            // finalization — a crash between this update and the hook below
+            // must leave durable evidence, which the executor's stranded-
+            // finalization sweep converts to a finalize_only retry.
+            const owesFinalization = claimMeta.entry_point === 'dispatch_completion_deferred'
+              || claimMeta.entry_point === 'invoice_send_deferred';
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'sent',
               created_at: completedAt,
               updated_at: completedAt,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
+              metadata: db.raw(owesFinalization
+                ? "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at, 'finalize_pending', true)"
+                : "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
             });
             logger.info(`[scheduled-sms] Sent scheduled SMS ${msg.id}`);
 
@@ -2697,6 +2793,14 @@ function initScheduledJobs() {
                 fin = await finalizeDeferredCompletionSend({ ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null });
               } catch (finalizeErr) {
                 logger.warn(`[scheduled-sms] deferred-completion finalization failed for ${msg.id}: ${finalizeErr.message}`);
+              }
+              // Finalization succeeded — clear the pending stamp so the
+              // stranded-finalization sweep doesn't re-run it. Best-effort:
+              // a failed clear just causes one idempotent re-run.
+              if (fin.ok) {
+                await db('sms_log').where({ id: msg.id }).update({
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('finalize_pending', false)"),
+                }).catch((clearErr) => logger.warn(`[scheduled-sms] finalize_pending clear failed for ${msg.id}: ${clearErr.message}`));
               }
               // Durability: the SMS is delivered and this row is 'sent', so
               // a transient finalization failure has no natural retry —

@@ -1152,6 +1152,9 @@ async function isDunningStopped(invoiceId) {
 module.exports = {
   scheduleForInvoice,
   runPending,
+  // Used by the scheduled-SMS executor to suppress stale deferred
+  // invoice/dunning replays (paid/void overnight).
+  isTerminalInvoice,
   stopOnPayment,
   releaseFromAutopayHold,
   handleAutopayFailure,

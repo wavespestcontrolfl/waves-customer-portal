@@ -147,8 +147,10 @@ async function safetyGate(est, now = new Date()) {
 // sendDualChannel's hold path. Overnight the recipient may have accepted or
 // declined the estimate, booked/paid through the email leg, or replied —
 // exactly the states safetyGate suppresses before an immediate send, so the
-// same gate runs again here. Fail-open on a read error: the touch already
-// passed the gate at enqueue, and a transient blip must not strand it.
+// same gate runs again here. A read failure FAILS CLOSED as retryable:
+// authorizing delivery on an unchecked condition could nudge a customer who
+// already declined or paid — the executor reschedules the row and re-checks
+// on the next pass instead.
 async function deferredFollowupStillEligible(estimateId) {
   try {
     const est = await db("estimates").where({ id: estimateId }).first();
@@ -157,8 +159,8 @@ async function deferredFollowupStillEligible(estimateId) {
     if (gate.skip) return { eligible: false, reason: gate.reason };
     return { eligible: true };
   } catch (e) {
-    logger.warn(`[est-followup] replay eligibility recheck failed for ${estimateId} (sending anyway): ${e.message}`);
-    return { eligible: true, degraded: true };
+    logger.warn(`[est-followup] replay eligibility recheck failed for ${estimateId} (holding for retry): ${e.message}`);
+    return { eligible: false, reason: "recheck-failed", retryable: true };
   }
 }
 
