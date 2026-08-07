@@ -1,6 +1,7 @@
 /**
  * Data fix — correct the bermudagrass-in-St.-Augustine protocol facts in the
- * three LIVE tables that carry them, on deploy:
+ * LIVE tables that carry them (knowledge_base + its knowledge_embeddings
+ * chunks, opportunity_queue, products_catalog), on deploy:
  *   1) knowledge_base — the "Fusilade II — Bermuda & Bahia Eradication" article
  *      taught Fusilade ALONE at 1 oz/gal per 1,000 sq ft (4-8x the labeled turf
  *      rate, on a use the standalone label does not allow over St. Augustine),
@@ -35,7 +36,7 @@
 const KB_SLUG = 'fusilade-ii-bermuda-bahia-eradication';
 const KB_ENTRY = {
   title: 'Recognition + Fusilade II — Bermudagrass Suppression in St. Augustine',
-  tags: ['fusilade', 'recognition', 'bermuda', 'bahia', 'st-augustine', 'tank-mix', '2ee'],
+  tags: ['fusilade', 'recognition', 'bermuda', 'st-augustine', 'tank-mix', '2ee'],
   content: `# Recognition + Fusilade II — Bermudagrass Suppression in St. Augustine (TANK MIX ONLY)
 
 ## ⛔ Never Fusilade alone
@@ -76,7 +77,8 @@ An earlier version of this article described Fusilade II by itself at 1 oz per g
 - Sprayer cleanout: 2.5 oz household ammonia per gallon, recirculate 15+ min, repeat, rinse.
 
 ## Critical warnings
-- The mix kills Bermudagrass, Bahiagrass, AND Zoysiagrass — confirm the lawn is St. Augustine first.
+- The mix kills bermudagrass AND zoysiagrass — confirm the lawn is St. Augustine first.
+- Bahiagrass is NOT in the 2026 Fusilade II weed table — do not sell or apply this program for bahia.
 - Single-MOA for bermuda: never exceed the 2-application season ceiling — that is how resistant bermudagrass gets selected.
 
 Source of truth: the published blog protocol /lawn-care/remove-bermudagrass-from-st-augustine/ (fact-checked 2026-08-05), the Syngenta Recognition and Fusilade II labels, and the Florida 2(ee).`,
@@ -84,7 +86,7 @@ Source of truth: the published blog protocol /lawn-care/remove-bermudagrass-from
 
 const CELSIUS_SLUG = 'celsius-wg-application-limits';
 const CELSIUS_OLD_LINE = '- Fusilade II — specifically for Bermuda/Bahia eradication in St. Augustine';
-const CELSIUS_NEW_LINE = '- Recognition + Fusilade II tank mix — bermuda/bahia suppression in St. Augustine (NEVER Fusilade alone over St. Augustine; see the Recognition + Fusilade II article)';
+const CELSIUS_NEW_LINE = '- Recognition + Fusilade II tank mix — bermudagrass suppression in St. Augustine (bermudagrass ONLY — bahiagrass is not in the 2026 Fusilade II weed table; NEVER Fusilade alone over St. Augustine; see the Recognition + Fusilade II article)';
 
 // Canonical corrected L18 brief — matches server/data/category-seed-topics-v1.json.
 // Fresh environments never hit this branch (the seeder only runs on explicit
@@ -154,6 +156,22 @@ exports.up = async function up(knex) {
         verified_by: 'migration-bermuda-tank-mix-protocol',
       });
     }
+  }
+
+  // 1b) knowledge_embeddings — /api/mcp serves raw chunk snippets from this
+  //     table (server/routes/mcp.js), NOT from knowledge_base, and the index
+  //     rebuild runs only nightly AND only when the independent hybridKnowledge
+  //     gate is enabled (scheduler.js) — so without this purge an environment
+  //     with MCP enabled but hybrid search disabled could serve the old
+  //     solo-Fusilade overdose chunks indefinitely. Delete the two corrected
+  //     articles' chunks (source='kb', source_id=slug per
+  //     services/knowledge-index/connectors.js); until the next index sync the
+  //     articles are simply absent from chunk search — the safe state.
+  if (await knex.schema.hasTable('knowledge_embeddings')) {
+    await knex('knowledge_embeddings')
+      .where({ source: 'kb' })
+      .whereIn('source_id', [KB_SLUG, CELSIUS_SLUG])
+      .del();
   }
 
   // 2) opportunity_queue — refresh the embedded L18 brief on rows the engine

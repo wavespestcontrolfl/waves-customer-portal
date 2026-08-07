@@ -156,7 +156,7 @@ Celsius WG (thiencarbazone-methyl + iodosulfuron + dicamba) is limited to a MAXI
 ## Alternatives After Cap
 - Dismiss NXT (sulfentrazone + prodiamine) — different MOA, no annual cap concern
 - Certainty (sulfosulfuron) — good for sedge pressure
-- Recognition + Fusilade II tank mix — bermuda/bahia suppression in St. Augustine (NEVER Fusilade alone over St. Augustine; see the Recognition + Fusilade II article)`,
+- Recognition + Fusilade II tank mix — bermudagrass suppression in St. Augustine (bermudagrass ONLY — bahiagrass is not in the 2026 Fusilade II weed table; NEVER Fusilade alone over St. Augustine; see the Recognition + Fusilade II article)`,
       // Correction (2026-08-07): the alternatives list pointed at Fusilade II
       // ALONE for bermuda in St. Augustine — the solo-application injury
       // failure mode. forceUpdate re-seeds this row in place on a manual
@@ -169,7 +169,7 @@ Celsius WG (thiencarbazone-methyl + iodosulfuron + dicamba) is limited to a MAXI
       // corrected in place rather than orphaned alongside a duplicate.
       slug: 'fusilade-ii-bermuda-bahia-eradication',
       category: 'chemicals',
-      tags: ['fusilade', 'recognition', 'bermuda', 'bahia', 'st-augustine', 'tank-mix', '2ee'],
+      tags: ['fusilade', 'recognition', 'bermuda', 'st-augustine', 'tank-mix', '2ee'],
       confidence: 'high',
       // Correction (2026-08-07): the original article taught Fusilade II ALONE
       // at 1 oz/gal per 1,000 sq ft — 4-8x the labeled turf rate, on a use
@@ -218,7 +218,8 @@ An earlier version of this article described Fusilade II by itself at 1 oz per g
 - Sprayer cleanout: 2.5 oz household ammonia per gallon, recirculate 15+ min, repeat, rinse.
 
 ## Critical warnings
-- The mix kills Bermudagrass, Bahiagrass, AND Zoysiagrass — confirm the lawn is St. Augustine first.
+- The mix kills bermudagrass AND zoysiagrass — confirm the lawn is St. Augustine first.
+- Bahiagrass is NOT in the 2026 Fusilade II weed table — do not sell or apply this program for bahia.
 - Single-MOA for bermuda: never exceed the 2-application season ceiling — that is how resistant bermudagrass gets selected.
 
 Source of truth: the published blog protocol /lawn-care/remove-bermudagrass-from-st-augustine/ (fact-checked 2026-08-05), the Syngenta Recognition and Fusilade II labels, and the Florida 2(ee).`,
