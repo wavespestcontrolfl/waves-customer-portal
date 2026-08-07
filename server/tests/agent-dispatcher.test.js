@@ -281,6 +281,16 @@ describe('emit_draft in-loop self-lint (W1)', () => {
     clearDraft('lint-7b');
   });
 
+  test('an evaluator failure records an explicit fail-open audit — never indistinguishable from lint-disabled (Codex PR r11)', async () => {
+    // Options whose property access throws force evaluate() to throw.
+    const poison = new Proxy({}, { get() { throw new Error('boom'); }, has() { throw new Error('boom'); } });
+    registerSessionLint('lint-8', poison);
+    const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: CLEAN_BODY }, { sessionId: 'lint-8' });
+    expect(r.ok).toBe(true); // fail OPEN — gate 3c stays authoritative
+    expect(getDraft('lint-8').self_lint).toEqual({ redrafts: 0, fail_open: 'evaluator_error' });
+    clearDraft('lint-8');
+  });
+
   test('OFF_FOOTPRINT_CITY_CLAIM never blocks in-loop — the run-level LLM classifier owns its false positives', async () => {
     registerSessionLint('lint-6', {});
     const r = await executeBriefTool('emit_draft', {

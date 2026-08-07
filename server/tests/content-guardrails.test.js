@@ -3225,6 +3225,18 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(possessive.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('parenthetical qualifiers and noun-first re-entry figures block; bare outdoor-activity durations stay legal (Codex PR r11)', () => {
+    const parenthetical = guardrails.evaluate({ body: 'The pesticide, when used as directed, is safe.' }, {});
+    expect(parenthetical.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const interval = guardrails.evaluate({ body: 'The recommended re-entry interval is 30 minutes.' }, {});
+    expect(interval.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const period = guardrails.evaluate({ body: 'The re-entry period lasts 30 minutes.' }, {});
+    expect(period.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // Outdoor-activity advice without treatment context is not re-entry.
+    const activity = guardrails.evaluate({ body: 'Stay outdoors for 30 minutes each morning to inspect your yard for mosquito breeding sites.' }, {});
+    expect(activity.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
   test('remain-outside keep-out figures and appears/seems predicates block (Codex PR r10)', () => {
     const outside = guardrails.evaluate({ body: 'You can remain outside the treated room for 30 minutes.' }, {});
     expect(outside.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3590,6 +3602,13 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(conduct.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
     const manages = guardrails.evaluate({ body: 'Waves manages wildlife removal for local homeowners.' }, {});
     expect(manages.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('proud-to/pleased-to framing before offer verbs blocks (Codex PR r11)', () => {
+    const proud = guardrails.evaluate({ body: 'We are proud to offer wildlife removal services.' }, {});
+    expect(proud.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const pleased = guardrails.evaluate({ body: 'We are pleased to provide structural fumigation.' }, {});
+    expect(pleased.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('offering CONTENT about a topic is not offering the service (Codex PR r9 false positive)', () => {

@@ -2936,13 +2936,16 @@ const REENTRY_SAFETY_SRCS = [
   // "safe FROM <hazard>" is protection-from-harm phrasing, never the
   // pesticide-safety claim (Codex PR r6: "the home is safe from termite
   // damage after repairs" is legal educational copy).
-  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?|surfaces?|rooms?|turf|grass|homes?|houses?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)\\s+(?:\\w+\\s+){0,2}?${REENTRY_LINKING_VERB_SRC}\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`,
+  // A bounded parenthetical may separate the subject from its predicate
+  // (Codex PR r11: "The pesticide, when used as directed, is safe" is
+  // label-style wording of the same claim).
+  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?|surfaces?|rooms?|turf|grass|homes?|houses?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)(?:,\\s*[^,.!?\\n]{0,40},)?\\s+(?:\\w+\\s+){0,2}?${REENTRY_LINKING_VERB_SRC}\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`,
   // Abstract service nouns (service/program/plan) only count as pesticide
   // subjects with treatment context in the sentence (Codex PR r6: "your
   // service plan is safe from price increases" is not a pesticide claim;
   // "our pest-control program is safe" stays caught by the direct
   // subjects above).
-  { src: `\\b(?:services?|programs?|plans?)\\s+(?:\\w+\\s+){0,2}?${REENTRY_LINKING_VERB_SRC}\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`, needsTreatmentContext: true },
+  { src: `\\b(?:services?|programs?|plans?)(?:,\\s*[^,.!?\\n]{0,40},)?\\s+(?:\\w+\\s+){0,2}?${REENTRY_LINKING_VERB_SRC}\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`, needsTreatmentContext: true },
   // Pronoun subjects with a treatment ANTECEDENT (Codex PR r5): "We apply
   // a granular treatment. It is safe once dry." is the same claim with the
   // noun one sentence back. Only it/they — never that/this, which appear as
@@ -3019,9 +3022,17 @@ const REENTRY_SAFETY_SRCS = [
   { src: `\\bgo\\s+(?:back\\s+)?(?:inside|into|in)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
-  // outside/outdoors are keep-out locations too (Codex PR r10: "remain
-  // outside the treated room for 30 minutes").
-  `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside|outside|outdoors)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
+  // off/out-of/away-from are intrinsically keep-off-the-surface; the
+  // inside/outside/outdoors locations need treatment context (Codex PR
+  // r10 + r11: "remain outside the treated room" is a re-entry figure,
+  // "stay outdoors for 30 minutes each morning to inspect your yard"
+  // is activity advice).
+  `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
+  { src: `\\b(?:stay|remain)\\s+(?:inside|outside|outdoors)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  // Noun-first re-entry figures (Codex PR r11): "the recommended
+  // re-entry interval is 30 minutes", "the re-entry period lasts 30
+  // minutes".
+  `\\bre-?entry\\s+(?:intervals?|periods?|windows?|times?|waits?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|lasts?|runs?|takes?|equals?)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // go-inside/go-into count as the entry action too (Codex PR r7: "Do not
   // go inside the treated home for 30 minutes").
   `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*|go\\s+(?:back|inside|into|in)\\b)[^.!?\\n]{0,30}?\\b(?:for|until|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
@@ -3180,9 +3191,9 @@ const BANNED_TOPIC_SRCS = [
   // "we provide information about wildlife removal" / "Waves provides a
   // guide to wildlife removal" offer CONTENT about the topic, not the
   // service — the same exemption the possessive branch carries.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?|conducts?|manag(?:es?|ing)|carr(?:y|ies|ied)\\s+out)\\s+(?:(?!${NEGATION_WORD_SRC}\\b|${BANNED_TOPIC_INFO_NOUN_SRC}\\b)[\\w'’-]+\\s+){0,3}?${BANNED_TOPIC_CORE_SRC}`,
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:(?:proud|pleased|happy|excited|glad|ready)\\s+to\\s+)?(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?|conducts?|manag(?:es?|ing)|carr(?:y|ies|ied)\\s+out)\\s+(?:(?!${NEGATION_WORD_SRC}\\b|${BANNED_TOPIC_INFO_NOUN_SRC}\\b)[\\w'’-]+\\s+){0,3}?${BANNED_TOPIC_CORE_SRC}`,
   // Insulation with SERVICE-UNAMBIGUOUS verbs only.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|sells?|installs?|replaces?)\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:(?:proud|pleased|happy|excited|glad|ready)\\s+to\\s+)?(?:offers?|provides?|sells?|installs?|replaces?)\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
   // Work/project phrasing is an unambiguous insulation OFFERING even with
   // the broad verbs the bare-noun branch excludes (Codex PR r6): "we
   // perform attic insulation work" — the trailing work-noun is what

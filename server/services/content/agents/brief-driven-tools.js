@@ -426,6 +426,14 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       //     because gate 3c is the fail-closed authority.
       let selfLintAudit = null;
       const lintOptions = sessionLintOptions.get(sessionId);
+      if (lintOptions && !guardrails?.evaluate) {
+        // Armed but the evaluator failed to load — fail OPEN by design,
+        // but the audit trail must SAY so (Codex PR r11): a systematic
+        // evaluator outage must stay distinguishable from lint-disabled
+        // in the persisted draft_payload.
+        selfLintAudit = { fail_open: 'evaluator_unavailable' };
+        logger.warn(`[brief-driven-tools] emit_draft(${sessionId}): self-lint armed but the guardrails evaluator is unavailable — capturing fail-open`);
+      }
       if (lintOptions && guardrails?.evaluate) {
         const attempts = sessionLintAttempts.get(sessionId) || 0;
         if (attempts >= SELF_LINT_MAX_REDRAFTS) {
@@ -469,7 +477,11 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
               directives,
             };
           }
-          if (lintResult) selfLintAudit = { redrafts: attempts, pass: true };
+          // lintResult is null exactly when the evaluator threw — record
+          // the fail-open explicitly (Codex PR r11).
+          selfLintAudit = lintResult
+            ? { redrafts: attempts, pass: true }
+            : { redrafts: attempts, fail_open: 'evaluator_error' };
         }
       }
       sessionDrafts.set(sessionId, {
@@ -503,6 +515,11 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       {
         const metaLintOptions = sessionLintOptions.get(sessionId);
         const metaGuardrails = getContentGuardrails();
+        if (metaLintOptions && !metaGuardrails?.evaluate) {
+          // Same explicit fail-open audit as emit_draft (Codex PR r11).
+          metaSelfLintAudit = { fail_open: 'evaluator_unavailable' };
+          logger.warn(`[brief-driven-tools] emit_metadata_only(${sessionId}): self-lint armed but the guardrails evaluator is unavailable — capturing fail-open`);
+        }
         if (metaLintOptions && metaGuardrails?.evaluate) {
           const attempts = sessionLintAttempts.get(sessionId) || 0;
           if (attempts >= SELF_LINT_MAX_REDRAFTS) {
@@ -544,10 +561,13 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
                 directives,
               };
             }
-            // Passed (or evaluator failed open) — record the audit so a
-            // retried session is distinguishable from a first-pass one in
-            // the persisted draft_payload (Codex PR r2).
-            if (lintResult) metaSelfLintAudit = { redrafts: attempts, pass: true };
+            // Passed OR failed open — record which, so a retried session,
+            // a first-pass one, and an evaluator outage are all
+            // distinguishable in the persisted draft_payload (Codex PR
+            // r2, r11).
+            metaSelfLintAudit = lintResult
+              ? { redrafts: attempts, pass: true }
+              : { redrafts: attempts, fail_open: 'evaluator_error' };
           }
         }
       }
