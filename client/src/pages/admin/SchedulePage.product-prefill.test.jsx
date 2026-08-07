@@ -59,6 +59,27 @@ const CATALOG_TARGETS = [
   "Lethal bronzing (palm) — preventive", "Lethal yellowing (palm) — preventive",
   "Pythium blight", "Pythium damping-off", "Wood-decay fungi",
   "Yellow tuft (downy mildew)",
+  // Added by 20260807200000, which fills the lawn products the dedupe left
+  // empty (nutrition goals use the PLAIN forms — the "(palms)" variants
+  // classify onto tree & shrub only, and these are turf fertilizers).
+  "Balanced feeding", "Micronutrient deficiency", "Slow-release feeding",
+  "Magnesium deficiency", "Manganese deficiency",
+  "Root strength & winter hardiness", "Starter root support (new plantings)",
+  // Trifloxysulfuron labels (Monument, Recognition) claim torpedograss
+  // SUPPRESSION, not control — the chip says so, because it is a
+  // customer-facing treatment claim.
+  "Torpedograss (suppression)",
+  // Turf algae: the only turfgrass claim the copper fungicides carry, also on
+  // the K-Phite and (commercial-site) chlorothalonil labels.
+  "Turf algae",
+  // Bed/hardscape work done on a lawn visit — the honest vocabulary
+  // 20260801300000 said didn't exist yet for non-selective and bed-only
+  // herbicides.
+  "Landscape bed weeds (pre-emergent)", "Bed & border grassy weeds",
+  "Non-selective weed control (spot treatment)",
+  "Driveway & sidewalk crack weeds",
+  // Cytogro (cytokinin biostimulant, EPA 90022-1) — turf section on label.
+  "Turf root development & nutrient uptake",
 ];
 
 describe("defaultApplicationMethod", () => {
