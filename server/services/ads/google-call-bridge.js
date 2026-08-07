@@ -341,7 +341,15 @@ async function fetchCrmCalls(days = 30) {
 
   return db('call_log as c')
     .leftJoin('customers as cu', 'c.customer_id', 'cu.id')
-    .leftJoin('leads as l', 'c.twilio_call_sid', 'l.twilio_call_sid')
+    // The sid join misses a phone-less reused-lead call: the lead keeps its
+    // ORIGINAL call's sid and the later call links via the durable
+    // call_log.metadata.lead_id stamp instead (codex P1, PR #3275). The two
+    // arms are mutually exclusive by construction — the stamp is written
+    // exactly when no lead carries this call's sid.
+    .leftJoin('leads as l', function joinLeadForCall() {
+      this.on('c.twilio_call_sid', 'l.twilio_call_sid')
+        .orOn(db.raw("c.metadata->>'lead_id' = l.id::text"));
+    })
     .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
     .where('c.direction', 'inbound')
     .whereIn('c.to_phone', phoneVariants(target.number))

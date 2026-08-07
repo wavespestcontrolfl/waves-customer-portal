@@ -118,6 +118,27 @@ async function loadCalls(lead, phoneKey) {
         .first(...CALL_COLS);
       if (sidRow) rows.push(sidRow);
     }
+    // Phone-less reuse linkage: a later call that reused this lead carries a
+    // DIFFERENT sid and no matchable phone — the processor stamps
+    // call_log.metadata.lead_id instead of restamping the lead's sid (codex
+    // P1, PR #3275). Without this fetch the assistant would read the
+    // ORIGINAL call's raw transcript while transcript_summary reflects the
+    // newer call. Stamped rows rank after the anchor, before phone history.
+    if (rows.length < 3) {
+      const stampedRows = await db('call_log')
+        .whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
+        .modify((q) => {
+          if (lead.twilio_call_sid) {
+            q.where(function notAnchor() {
+              this.whereNull('twilio_call_sid').orWhereNot('twilio_call_sid', lead.twilio_call_sid);
+            });
+          }
+        })
+        .orderBy('created_at', 'desc')
+        .limit(3 - rows.length)
+        .select(...CALL_COLS);
+      rows.push(...stampedRows);
+    }
     if (digits && rows.length < 3) {
       const phoneRows = await db('call_log')
         .where(function phoneMatch() {
@@ -138,8 +159,18 @@ async function loadCalls(lead, phoneKey) {
         .select(...CALL_COLS);
       rows.push(...phoneRows);
     }
-    rows.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    const calls = rows.map((call) => {
+    // The three fetches (sid anchor / metadata stamp / phone history) are
+    // disjoint by construction, but dedup by id anyway — one call appearing
+    // twice would double its transcript in the pack.
+    const seenCallIds = new Set();
+    const uniqueRows = rows.filter((r) => {
+      const key = String(r.id);
+      if (seenCallIds.has(key)) return false;
+      seenCallIds.add(key);
+      return true;
+    });
+    uniqueRows.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const calls = uniqueRows.map((call) => {
       const { extraction, source } = extractionFromCall(call);
       return {
         id: call.id,
