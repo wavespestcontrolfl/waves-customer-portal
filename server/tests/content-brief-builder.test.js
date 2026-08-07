@@ -708,6 +708,13 @@ describe('_composeBrief family-refresh coverage section (Codex r21 on #3255)', (
       existingBriefVersions: 0,
     });
     expect(brief.required_sections.some((sec) => /family coverage/i.test(sec))).toBe(false);
+    // Cityless family blog composes WITHOUT a facts pack → the listicle
+    // methodology note must ground in field experience, never demand
+    // facts-pack figures the writer cannot source (Codex r26).
+    const methodology = brief.required_sections.find((sec) => /how we put this list together/i.test(sec));
+    expect(methodology).toBeTruthy();
+    expect(methodology).toContain('NO specific figures');
+    expect(methodology).not.toContain("facts pack, naming sources");
   });
 });
 

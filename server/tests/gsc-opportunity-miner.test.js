@@ -1198,8 +1198,13 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/refreshStateAvailable \? refreshGroups\.entries\(\) : \[\]/);
     expect(src).toMatch(/familyRefreshState = null;/);
     // ...and the failure ALSO suppresses the destructive sweep.
-    expect(src).toMatch(/this\._familyRefreshStateFailed = true;/);
-    expect(src).toMatch(/&& !this\._familyRefreshStateFailed/);
+    // Run state is invocation-LOCAL (r26): overlapping singleton runs must
+    // not share the failure flag.
+    expect(src).toMatch(/runState\.familyRefreshStateFailed = true;/);
+    expect(src).toMatch(/&& !runState\.familyRefreshStateFailed/);
+    expect(src).not.toMatch(/this\._familyRefreshStateFailed/);
+    // ALL same-page editing actions arbitrate (rewrite_title_meta too).
+    expect(src).toMatch(/PAGE_EDITING_ACTIONS = \['refresh_existing_page', 'rewrite_title_meta'\]/);
     // One-edit-per-page re-checked UNDER the transaction lock.
     expect(src).toMatch(/inflightPageKeys\.get\(o\.page_url\)/);
     expect(src).toMatch(/k !== o\.dedupe_key/);

@@ -228,7 +228,7 @@ const LISTICLE_ELIGIBLE_PAGE_TYPES = new Set(['supporting-blog']);
 // termites") keeps declarative headings.
 const LISTICLE_QUESTION_RE = /^\s*(what|why|which|how|when|where|is|are|can|do|does|should)\b/i;
 
-function applyListicleTreatment({ enabled, actionType, pageType, query, operatorPinned = false, requiredSections, schemaTypes, voiceConstraints }) {
+function applyListicleTreatment({ enabled, actionType, pageType, query, operatorPinned = false, factsAvailable = true, requiredSections, schemaTypes, voiceConstraints }) {
   // New MINED drafts only:
   // - a refresh whose SERP type normalizes to supporting-blog must never
   //   receive restructure-the-title/H2 mandates (preserve slug + structure);
@@ -251,7 +251,14 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, operator
     'quick-answer summary inside the first 60 words that names every list item in one scannable sentence or tight list',
     'visible "Last updated: [Month Year]" line under the title — use the current month and year (the publisher stamps frontmatter `updated` to the PR-open date, so month+year granularity stays consistent with it; never an older or invented date)',
     ...requiredSections,
-    '"how we put this list together" note (2–3 sentences grounded in the brief\'s facts pack, naming sources in PLAIN TEXT only — no external links (off-fleet links are rejected by the publish guardrail), and never an invented methodology)',
+    // Cityless family rows have NO facts pack (facts are city×service) —
+    // demanding facts-pack grounding there forces the writer to invent
+    // sourcing without claims-ledger validation (Codex r26). The no-facts
+    // variant grounds in the brief's own signals instead and stays
+    // figure-free.
+    factsAvailable
+      ? '"how we put this list together" note (2–3 sentences grounded in the brief\'s facts pack, naming sources in PLAIN TEXT only — no external links (off-fleet links are rejected by the publish guardrail), and never an invented methodology)'
+      : '"how we put this list together" note (2–3 sentences describing the general SWFL field experience behind the list, in PLAIN TEXT — no facts pack rides this brief, so NO specific figures, measurements, or named studies, no external links, and never an invented source or methodology)',
   ];
   const voice = {
     ...voiceConstraints,
@@ -652,6 +659,7 @@ class ContentBriefBuilder {
     // Overlay the citable-listicle architecture on list-shaped supporting-blog
     // queries (gated; applied on top of the AEO overlay so both can coexist).
     const layered = applyListicleTreatment({
+      factsAvailable: !!factsPack,
       // listicle_family rows exist ONLY to produce listicle-shaped posts,
       // and the queue's claim fence (listicleFamilyLaneOpen in
       // opportunity-queue.js) means one can only be claimed while BOTH lane

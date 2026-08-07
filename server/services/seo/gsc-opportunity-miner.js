@@ -1020,7 +1020,10 @@ class GscOpportunityMiner {
   static CANONICAL_MINE_PERIOD_DAYS = 28;
 
   async mineAll({ periodDays = GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS, persist = true } = {}) {
-    this._familyRefreshStateFailed = false;
+    // Invocation-LOCAL run state: the exported miner is a singleton, and an
+    // overlapping run-now + scheduled mine sharing an instance field let
+    // one run reset the other's failure flag mid-flight (Codex r26).
+    const runState = { familyRefreshStateFailed: false };
     const since = sinceDate(periodDays);
     const priorSince = sinceDate(periodDays * 2);
 
@@ -1078,7 +1081,7 @@ class GscOpportunityMiner {
         const inflightRefreshQueries = new Set();
         try {
           const inflight = await db('opportunity_queue')
-            .where('action_type', 'refresh_existing_page')
+            .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
             .whereNot('bucket', 'listicle_family')
             .whereIn('status', ['pending', 'claimed', 'pending_review'])
             .whereNotNull('page_url')
@@ -1139,7 +1142,7 @@ class GscOpportunityMiner {
           // sweep would retire valid queued work.
           logger.warn(`[gsc-opp-miner] family refresh-state lookup failed (${err.message}) — refresh emission and sweep suppressed this run`);
           familyRefreshState = null;
-          this._familyRefreshStateFailed = true;
+          runState.familyRefreshStateFailed = true;
         }
         return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightRefreshQueries, inflightFamily, familyRefreshState });
       }],
@@ -1199,7 +1202,7 @@ class GscOpportunityMiner {
       // upsert succeeded, and a failure rolls back both.
       await db.transaction(async (trx) => {
         const sweepWillRun = !errors.listicle_family
-          && !this._familyRefreshStateFailed
+          && !runState.familyRefreshStateFailed
           && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS
           && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs');
         // Lock + revalidate family predecessors FIRST — see
@@ -2447,9 +2450,14 @@ class GscOpportunityMiner {
   // r20). claimed/pending_review rows are NOT excluded — their edit is in
   // flight, and yielding to it is exactly right. Fail-soft: a lookup error
   // keeps every candidate (the pre-r20 behavior).
+  // Every same-page EDITING action arbitrates — rewrite_title_meta
+  // (ctr_rewrite) edits the same Astro file a family refresh would, so
+  // overlapping PRs conflict just like two refreshes (Codex r26).
+  static PAGE_EDITING_ACTIONS = ['refresh_existing_page', 'rewrite_title_meta'];
+
   async _arbitratedRefreshPages(batch = []) {
     const candidates = batch.filter((o) => o.bucket !== 'listicle_family'
-      && o.action_type === 'refresh_existing_page'
+      && GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type)
       && o.page_url
       && o.score >= minScoreToActFor(o.action_type));
     let frozenKeys = new Set();
@@ -2545,7 +2553,7 @@ class GscOpportunityMiner {
     // serialization would need a shared advisory lock adopted by EVERY
     // producer, which is beyond this lane (pre-push audit r24).
     const nonFamily = await trx('opportunity_queue')
-      .where('action_type', 'refresh_existing_page')
+      .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
       .whereNot('bucket', 'listicle_family')
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
       .whereNotNull('page_url')
