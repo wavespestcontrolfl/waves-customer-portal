@@ -163,6 +163,20 @@ const arrivalWindowEnd = (windowStart) => {
   return new Date(d.getTime() + 120 * 60000).toISOString();
 };
 
+// True while the visit's quoted arrival window has not closed — mirrors
+// services/appointment-ics-eligibility on the server, so a long-open tab
+// stops offering a calendar file the route will refuse.
+const calendarLinkStillLive = (svc) => {
+  if (!svc?.date || !svc?.windowStart) return false;
+  const day = String(svc.date).slice(0, 10);
+  const end = arrivalWindowEnd(svc.windowStart);
+  if (!end) return false;
+  const endsAt = new Date(`${day}T${String(end).slice(0, 5)}:00`);
+  if (Number.isNaN(endsAt.getTime())) return false;
+  return endsAt.getTime() >= Date.now();
+};
+
+
 // ---------------------------------------------------------------------------
 // Waves AI bar — the wavespestcontrol.com "Ask Waves" intake, embedded on
 // every portal tab. Pills are screen-aware; asking opens the authenticated
@@ -2061,7 +2075,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   Server nulls calendarUrl for every case the route would 404
                   (gate dark, pre-token row, no window, window elapsed), so no
                   fallback needed here. */}
-              {nextService.calendarUrl && (
+              {/* The dashboard fetches the next visit once, so a page left
+                  open past the arrival window would keep a calendarUrl the
+                  .ics route now 404s. Re-check the window client-side on each
+                  render against the same 2-hour promise (codex r3 P2). */}
+              {nextService.calendarUrl && calendarLinkStillLive(nextService) && (
                 <button type="button" onClick={() => {
                   downloadCalendarIcs(nextService.calendarUrl).catch(() => {
                     showCustomerAlert('Could not download the calendar file. Please try again.');
