@@ -948,6 +948,11 @@ function ReviewIncentivesPanel() {
   const [likelyReviewers, setLikelyReviewers] = useState([]);
   const [candidateLoading, setCandidateLoading] = useState(false);
   const [matching, setMatching] = useState({});
+  // Monotonic guard: candidate state is shared across repair panels, so a
+  // slow response for review A must never land after review B's panel opened
+  // — the rendered candidates would belong to A while the attribute POST
+  // carries B's review id (pre-push codex P1).
+  const candidateReqRef = useRef(0);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -1039,16 +1044,21 @@ function ReviewIncentivesPanel() {
 
   const openRepair = (review) => {
     const isOpen = activeRepairId === review.id;
+    // Invalidate any in-flight candidate request — its response belongs to a
+    // panel that is no longer the active one.
+    candidateReqRef.current += 1;
     setActiveRepairId(isOpen ? null : review.id);
     setCandidateSearch(isOpen ? "" : review.reviewerName || "");
     setCandidateResults([]);
     setLikelyReviewers([]);
+    setCandidateLoading(false);
     // Auto-search on open so the click-correlated "likely reviewers" show up
     // without a keystroke. qOverride avoids the just-set-state stale closure.
     if (!isOpen) searchCandidates(review, review.reviewerName || "");
   };
 
   const searchCandidates = async (review, qOverride) => {
+    const reqId = ++candidateReqRef.current;
     setCandidateLoading(true);
     setError(null);
     try {
@@ -1057,12 +1067,13 @@ function ReviewIncentivesPanel() {
         q: qOverride ?? (candidateSearch || review.reviewerName || ""),
       });
       const result = await adminFetch(`/admin/reviews/incentives/attribution-candidates?${params.toString()}`);
+      if (candidateReqRef.current !== reqId) return; // superseded — drop stale response
       setCandidateResults(result.candidates || []);
       setLikelyReviewers(result.likelyReviewers || []);
     } catch (e) {
-      setError(e.message);
+      if (candidateReqRef.current === reqId) setError(e.message);
     } finally {
-      setCandidateLoading(false);
+      if (candidateReqRef.current === reqId) setCandidateLoading(false);
     }
   };
 
