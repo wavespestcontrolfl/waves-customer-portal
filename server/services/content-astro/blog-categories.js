@@ -11,4 +11,18 @@
  */
 const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
 
-module.exports = { POST_CATEGORIES };
+// The LEAF (final path segment) of a slug, path, or absolute URL — the unit
+// the publisher's canonical guard compares. Lives here (not in the
+// publisher) because the runner's slug repair gates canonical rewrites on
+// the same comparison and must not maintain a second definition.
+function slugLeafOf(value) {
+  return String(value || '')
+    .replace(/^https?:\/\/[^/]+/i, '')
+    .split(/[?#]/)[0]
+    .replace(/^\/+|\/+$/g, '')
+    .split('/')
+    .filter(Boolean)
+    .pop() || '';
+}
+
+module.exports = { POST_CATEGORIES, slugLeafOf };

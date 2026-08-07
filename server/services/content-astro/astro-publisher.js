@@ -134,7 +134,7 @@ function syncDraftPublishTarget(draft, frontmatter) {
   return draft;
 }
 
-const { POST_CATEGORIES } = require('./blog-categories');
+const { POST_CATEGORIES, slugLeafOf } = require('./blog-categories');
 const POST_TYPES = new Set(['diagnostic', 'seasonal', 'by-grass-type', 'protocol', 'cost', 'comparison', 'case-study', 'location', 'decision']);
 const SCHEMA_TYPES = new Set(['Article', 'BlogPosting', 'FAQPage', 'BreadcrumbList', 'HowTo', 'Service', 'Review']);
 const SERVICE_AREAS = new Set(['Bradenton', 'Lakewood Ranch', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
@@ -2610,15 +2610,8 @@ function buildSeoReviewSection({ frontmatter = {}, brief = {} } = {}) {
 
 // The topic segment of a slug/canonical/URL — the LAST non-empty path part,
 // stripped of origin, query, hash, and surrounding slashes.
-function slugLeafOf(value) {
-  return String(value || '')
-    .replace(/^https?:\/\/[^/]+/i, '')
-    .split(/[?#]/)[0]
-    .replace(/^\/+|\/+$/g, '')
-    .split('/')
-    .filter(Boolean)
-    .pop() || '';
-}
+// slugLeafOf moved to ./blog-categories — the runner's slug repair gates
+// canonical rewrites on the same leaf comparison (Codex r11).
 
 // The ROUTE slug (the /{category}/{slug}/ URL path) for a blog post: the post's
 // own category, then the topic leaf of its raw slug. The astro

@@ -978,6 +978,33 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     }
   });
 
+  test('an on-fleet canonical naming a genuinely DIFFERENT post is PRESERVED — the publisher leaf guard must see the confused draft (Codex r11)', () => {
+    // Fleet host alone is not enough to repair: a canonical pointing at an
+    // unrelated post is exactly what assertCanonicalMatchesSlug parks on,
+    // and rewriting it here would publish a confused draft at the pin.
+    const draft = driftedDraft({ frontmatter: { canonical: 'https://www.wavespestcontrol.com/unrelated-post/' } });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.canonical).toBe('https://www.wavespestcontrol.com/unrelated-post/');
+    expect(result.repair.canonical_rewritten).toBe(false);
+  });
+
+  test('unquoted HTML/MDX href self-links are rewritten — legal syntax the body scanners support (Codex r11)', () => {
+    const draft = driftedDraft({
+      body: [
+        'Click <a href=/fall-lawn-mistakes-southwest-florida/>here</a> or',
+        '<a href=https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/>the absolute form</a>;',
+        'a query param named src [x](https://source.example/r?src=/fall-lawn-mistakes-southwest-florida/) survives.',
+      ].join(' '),
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.body).toContain(`<a href=${PINNED}>`);
+    expect(draft.body).toContain(`<a href=https://www.wavespestcontrol.com${PINNED}>`);
+    expect(draft.body).toContain('?src=/fall-lawn-mistakes-southwest-florida/');
+    expect(result.repair.body_self_link_rewrites).toBe(2);
+  });
+
   test('draft.url is stamped even when the writer omitted it — emit_draft never captures a url field (Codex r9)', () => {
     const draft = driftedDraft();
     delete draft.url;

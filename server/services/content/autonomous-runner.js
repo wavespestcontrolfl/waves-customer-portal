@@ -3382,7 +3382,7 @@ function normalizeSlugPath(slug) {
 const PINNED_SLUG_PATTERN = /^\/[a-z0-9-]+(\/[a-z0-9-]+)*\/$/;
 // Canonical category set shared with the publisher (dependency-free module —
 // requirable here without the publisher's full module graph).
-const { POST_CATEGORIES: BLOG_POST_CATEGORIES } = require('../content-astro/blog-categories');
+const { POST_CATEGORIES: BLOG_POST_CATEGORIES, slugLeafOf: blogSlugLeafOf } = require('../content-astro/blog-categories');
 // Spoke fleet keys shared with the publisher's isFleetCanonicalHost — also a
 // dependency-free module (content-guardrails already requires it).
 const { SPOKE_SITE_KEYS: FLEET_SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
@@ -3554,7 +3554,22 @@ function applyOperatorSlugRepair(brief, draft) {
       canonicalIsForeign = !fleetCanonicalHosts.has(parsed.hostname.toLowerCase().replace(/^www\./, ''));
     } catch { canonicalIsForeign = false; }
   }
-  if (!canonicalIsForeign && oldCanonical !== newCanonical) {
+  // A fleet-host canonical naming a genuinely DIFFERENT post (leaf matching
+  // neither the drifted slug nor the pin) is the "confused draft" signal the
+  // publisher's leaf guard parks on — rewriting it would publish a draft the
+  // publisher explicitly treats as confused (Codex r11). Only slug-derived
+  // canonicals are repaired; the leaf comparison is the publisher's own
+  // (shared slugLeafOf), case-insensitive so the writer's own casing drift
+  // still counts as self-reference.
+  const pinnedLeaf = blogSlugLeafOf(pinned).toLowerCase();
+  const driftLeaves = new Set(
+    [mismatch.draft_slug, ...oldSlugPaths].map((p) => blogSlugLeafOf(p).toLowerCase()).filter(Boolean),
+  );
+  const oldCanonicalLeaf = oldCanonical ? blogSlugLeafOf(oldCanonical).toLowerCase() : '';
+  const canonicalCorresponds = !oldCanonicalLeaf
+    || oldCanonicalLeaf === pinnedLeaf
+    || driftLeaves.has(oldCanonicalLeaf);
+  if (!canonicalIsForeign && canonicalCorresponds && oldCanonical !== newCanonical) {
     draft.frontmatter.canonical = newCanonical;
     repair.canonical_rewritten = true;
   }
@@ -3624,6 +3639,20 @@ function applyOperatorSlugRepair(brief, draft) {
         occurrences += 1;
         if (!origin) return `${pre}${pinned}`;
         return `${pre}${spokeOriginSet.has(origin) ? publishOrigin.origin : hub}${pinned}`;
+      });
+      // UNQUOTED href/src self-links (`<a href=/old-slug/>`) are legal
+      // HTML/MDX the body scanners support (content-guardrails
+      // RELATIVE_DEST_RE arm 4), but the destination-start boundary above
+      // deliberately excludes `=` to protect query values — so they need
+      // their own attribute-anchored pass (Codex r11). The leading
+      // whitespace requirement keeps a query param literally named
+      // href/src (`?src=/old-slug/`) out of scope: that is part of a
+      // different destination, not an attribute.
+      const unquotedAttrRe = new RegExp(`((?:^|\\s)(?:href|src)\\s*=\\s*)((?:${hubAlternation})?)${escapeRe(oldSlugPath)}(?=[\\s>]|$)`, 'gi');
+      draft.body = draft.body.replace(unquotedAttrRe, (m, attr, origin) => {
+        occurrences += 1;
+        if (!origin) return `${attr}${pinned}`;
+        return `${attr}${spokeOriginSet.has(origin) ? publishOrigin.origin : hub}${pinned}`;
       });
     }
     repair.body_self_link_rewrites = occurrences;
