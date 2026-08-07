@@ -71,31 +71,45 @@ if [ "$PR_HEAD" != "$LOCAL_SHA" ]; then
 fi
 
 # 3. Mergeable — poll while GitHub computes (UNKNOWN right after a push).
-MERGEABLE="UNKNOWN"
-MERGE_STATE=""
-try=0
-while [ "$try" -lt "$MERGEABLE_TRIES" ]; do
-  VIEW_JSON="$(gh pr view "$PR_NUMBER" --repo "$REPO_SLUG" \
-    --json mergeable,mergeStateStatus 2>/dev/null)" \
-    || fail "gh pr view failed for PR #$PR_NUMBER."
-  MERGEABLE="$(printf '%s' "$VIEW_JSON" | jq -r '.mergeable // "UNKNOWN"')"
-  MERGE_STATE="$(printf '%s' "$VIEW_JSON" | jq -r '.mergeStateStatus // ""')"
-  [ "$MERGEABLE" != "UNKNOWN" ] && break
-  try=$((try + 1))
-  [ "$try" -lt "$MERGEABLE_TRIES" ] && sleep 5
-done
-if [ "$MERGEABLE" = "CONFLICTING" ]; then
-  fail "PR #$PR_NUMBER is CONFLICTING with main — the tests workflow will SILENTLY NEVER FIRE for this head." \
-    "The pull_request merge ref can't be built, so the checks tab keeps a STALE green from the old head." \
-    "Fix: git fetch origin main && git merge origin/main   (resolve, commit, push)" \
-    "Then: re-run this script, and post '@codex review' — the pre-conflict clean does not cover the merge commit."
-fi
-if [ "$MERGEABLE" = "UNKNOWN" ]; then
-  fail "PR #$PR_NUMBER mergeability is still UNKNOWN after $((MERGEABLE_TRIES * 5))s — this gate cannot prove the PR is non-conflicting." \
-    "A pass here is supposed to MEAN 'not conflicting, so CI silence would be real'. UNKNOWN proves nothing, so it fails." \
-    "GitHub is usually just slow computing the merge ref: wait a moment and re-run this script." \
-    "If it stays UNKNOWN, check the PR on GitHub directly before trusting any CI state."
-fi
+#    ONE implementation, used both here and in the post-poll re-check (§5).
+#    Two copies of this rule drifted once already: the final check rejected
+#    CONFLICTING but let UNKNOWN pass, silently weakening the same guarantee.
+#    Sets MERGEABLE / MERGE_STATE / PR_HEAD_NOW; fails on CONFLICTING and on
+#    UNKNOWN, because a pass here MEANS "proved not conflicting".
+assert_mergeable() {
+  when="$1"   # human label for the failure text
+  MERGEABLE="UNKNOWN"
+  MERGE_STATE=""
+  PR_HEAD_NOW=""
+  t=0
+  while [ "$t" -lt "$MERGEABLE_TRIES" ]; do
+    VIEW_JSON="$(gh pr view "$PR_NUMBER" --repo "$REPO_SLUG" \
+      --json mergeable,mergeStateStatus,headRefOid 2>/dev/null)" \
+      || fail "gh pr view failed for PR #$PR_NUMBER ($when)."
+    MERGEABLE="$(printf '%s' "$VIEW_JSON" | jq -r '.mergeable // "UNKNOWN"')"
+    MERGE_STATE="$(printf '%s' "$VIEW_JSON" | jq -r '.mergeStateStatus // ""')"
+    PR_HEAD_NOW="$(printf '%s' "$VIEW_JSON" | jq -r '.headRefOid // empty')"
+    [ "$MERGEABLE" != "UNKNOWN" ] && break
+    t=$((t + 1))
+    [ "$t" -lt "$MERGEABLE_TRIES" ] && sleep 5
+  done
+  if [ "$MERGEABLE" = "CONFLICTING" ]; then
+    fail "PR #$PR_NUMBER is CONFLICTING with main ($when) — the tests workflow will SILENTLY NEVER FIRE for this head." \
+      "The pull_request merge ref can't be built, so the checks tab keeps a STALE green from the old head." \
+      "Fix: git fetch origin main && git merge origin/main   (resolve, commit, push)" \
+      "Then: re-run this script, and post '@codex review' — the pre-conflict clean does not cover the merge commit."
+  fi
+  if [ "$MERGEABLE" = "UNKNOWN" ]; then
+    fail "PR #$PR_NUMBER mergeability is still UNKNOWN after $((MERGEABLE_TRIES * 5))s ($when) — this gate cannot prove the PR is non-conflicting." \
+      "A pass here is supposed to MEAN 'not conflicting, so CI silence would be real'. UNKNOWN proves nothing, so it fails." \
+      "GitHub is usually just slow computing the merge ref: wait a moment and re-run this script." \
+      "If it stays UNKNOWN, check the PR on GitHub directly before trusting any CI state."
+  fi
+}
+
+assert_mergeable "before CI polling"
+PRE_MERGEABLE="$MERGEABLE"
+PRE_MERGE_STATE="$MERGE_STATE"
 
 # 4. The tests workflow actually triggered a run for this head SHA, attributable
 #    to this push. Re-pushing the same SHA (the documented hijack recovery)
@@ -189,29 +203,19 @@ if [ "$FINAL_REMOTE" != "$LOCAL_SHA" ]; then
   fail "remote tip moved to $FINAL_REMOTE during the wait (was $LOCAL_SHA) — the CI evidence above is for a SHA that is no longer the branch tip." \
     "See waves-ship REFERENCE.md 'external push-hijack hazard', then re-push and re-run this script."
 fi
-#    Mergeability is re-read too: `main` can advance during the wait and make
-#    this PR conflicting without either SHA changing, which would leave the
-#    cached pre-poll MERGEABLE printed as if it still held.
-FINAL_VIEW="$(gh pr view "$PR_NUMBER" --repo "$REPO_SLUG" \
-  --json headRefOid,mergeable,mergeStateStatus 2>/dev/null)" \
-  || fail "gh pr view failed for PR #$PR_NUMBER during final re-verification."
-FINAL_HEAD="$(printf '%s' "$FINAL_VIEW" | jq -r '.headRefOid // empty')"
-if [ "$FINAL_HEAD" != "$LOCAL_SHA" ]; then
-  fail "PR #$PR_NUMBER head moved to $FINAL_HEAD during the wait (was $LOCAL_SHA) — CI evidence is stale." \
+#    Mergeability is re-asserted through the SAME function as §3: `main` can
+#    advance during the wait and make this PR conflicting without either SHA
+#    changing, which would leave the cached pre-poll value printed as if it
+#    still held. Same rule, one implementation — CONFLICTING and UNKNOWN both
+#    fail here exactly as they do before polling.
+assert_mergeable "after CI polling"
+if [ "$PR_HEAD_NOW" != "$LOCAL_SHA" ]; then
+  fail "PR #$PR_NUMBER head moved to $PR_HEAD_NOW during the wait (was $LOCAL_SHA) — CI evidence is stale." \
     "Re-run this script against the current head before trusting any check state."
 fi
-FINAL_MERGEABLE="$(printf '%s' "$FINAL_VIEW" | jq -r '.mergeable // "UNKNOWN"')"
-FINAL_STATE="$(printf '%s' "$FINAL_VIEW" | jq -r '.mergeStateStatus // ""')"
-if [ "$FINAL_MERGEABLE" = "CONFLICTING" ]; then
-  fail "PR #$PR_NUMBER became CONFLICTING during the wait (was $MERGEABLE/$MERGE_STATE, now $FINAL_MERGEABLE/$FINAL_STATE) — main advanced under it." \
-    "The CI evidence above predates the conflict, and the next push's workflow will silently never fire while it stands." \
-    "Fix: git fetch origin main && git merge origin/main   (resolve, commit, push), then re-run and re-tag '@codex review'."
+if [ "$MERGEABLE" != "$PRE_MERGEABLE" ] || [ "$MERGE_STATE" != "$PRE_MERGE_STATE" ]; then
+  echo "ℹ️  verify-pr-checks: mergeability changed during the wait: $PRE_MERGEABLE/$PRE_MERGE_STATE → $MERGEABLE/$MERGE_STATE" >&2
 fi
-if [ "$FINAL_MERGEABLE" != "$MERGEABLE" ] || [ "$FINAL_STATE" != "$MERGE_STATE" ]; then
-  echo "ℹ️  verify-pr-checks: mergeability changed during the wait: $MERGEABLE/$MERGE_STATE → $FINAL_MERGEABLE/$FINAL_STATE" >&2
-fi
-MERGEABLE="$FINAL_MERGEABLE"
-MERGE_STATE="$FINAL_STATE"
 
 echo "✅ verify-pr-checks: PR #$PR_NUMBER head $LOCAL_SHA — mergeable=$MERGEABLE ($MERGE_STATE), push=$PUSH_KIND, $NEW_COUNT tests-workflow run(s) attributable to this push:"
 echo "   run attribution: $ATTRIBUTION"
