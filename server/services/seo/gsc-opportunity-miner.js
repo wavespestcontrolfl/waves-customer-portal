@@ -1561,9 +1561,26 @@ class GscOpportunityMiner {
       .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as avg_position'))
       .groupBy('query', 'service_category', 'city_target');
 
+    const fams = clusterListicleFamilies(rows).filter((f) => listicleFamilyEligible(f));
+    if (!fams.length) return [];
+
+    // An owned page already ranking for any of the family's variants means
+    // the intent is served — improving that page belongs to the
+    // page-anchored buckets (striking_distance / ctr_rewrite / answer_gap),
+    // and a new post would cannibalize it. gsc_query_page_map is the
+    // existing query→own-page mechanism; position alone can't see this
+    // (a page at 4+ passes the top-3 exclusion).
+    const variantQueries = Array.from(new Set(fams.flatMap((f) => f.variants.map((v) => v.query))));
+    const mappedRows = await db('gsc_query_page_map')
+      .where('domain', 'wavespestcontrol.com')
+      .where('date_from', '>=', since)
+      .whereIn('query', variantQueries)
+      .distinct('query');
+    const servedQueries = new Set(mappedRows.map((r) => r.query));
+
     const out = [];
-    for (const fam of clusterListicleFamilies(rows)) {
-      if (!listicleFamilyEligible(fam)) continue;
+    for (const fam of fams) {
+      if (fam.variants.some((v) => servedQueries.has(v.query))) continue;
       const rep = fam.variants[0];
       const city = normalizeCity(rep.city_target) || inferCityFromQuery(rep.query);
       const service = canonicalizeServiceCategory(rep.service_category) || inferServiceFromQuery(rep.query);
@@ -1790,7 +1807,9 @@ class GscOpportunityMiner {
           row.mined_at, row.expires_at, row.dedupe_key,
         ]
       );
-      count += result.rowCount || 1;
+      // ?? not || — a frozen-row conflict legitimately reports rowCount 0
+      // (the WHERE guard skipped the update) and must not count as persisted.
+      count += result.rowCount ?? 0;
     }
     return count;
   }

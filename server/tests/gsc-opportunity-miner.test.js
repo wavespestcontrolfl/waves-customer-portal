@@ -521,6 +521,29 @@ describe('persistAll upsert binding integrity (07-31 regression)', () => {
       /DO UPDATE[\s\S]*WHERE opportunity_queue\.status NOT IN \('claimed', 'done', 'pending_review', 'skipped'\)/
     );
   });
+
+  test('a frozen-row conflict (rowCount 0) does not count as persisted', async () => {
+    const db = require('../models/db');
+    // The WHERE guard makes Postgres report rowCount 0 when the conflicting
+    // row is claimed/done/pending_review/skipped — admin responses and
+    // scheduler logs must not report the untouched row as persisted.
+    db.raw = jest.fn(() => Promise.resolve({ rowCount: 0 }));
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const miner = new GscOpportunityMiner();
+    const persisted = await miner.persistAll([{
+      bucket: 'listicle_family',
+      action_type: 'new_supporting_blog',
+      query: 'kinds of ants in florida',
+      page_url: null,
+      service: 'pest',
+      city: null,
+      score: 50,
+      score_breakdown: { base: 50 },
+      signal_metadata: { impressions: 60 },
+      dedupe_key: 'listicle_family::fam::ants+florida+kinds',
+    }]);
+    expect(persisted).toBe(0);
+  });
 });
 
 // ── answer_gap helpers ───────────────────────────────────────────────
@@ -830,6 +853,20 @@ describe('listicle_family scoring + action mapping', () => {
     }))).toBe(false);
     // Position 0 (no data) does not trip the top-3 exclusion.
     expect(listicleFamilyEligible(fam({ position: 0 }))).toBe(true);
+  });
+
+  test('families with an owned page already ranking for a variant are excluded (query-page map)', () => {
+    // Position alone cannot see an owned page ranking 4+ for the family —
+    // that page is refresh territory for the page-anchored buckets, and a
+    // new post would cannibalize it. mineListicleFamily must consult
+    // gsc_query_page_map (the existing query→own-page mechanism) and drop
+    // families where ANY variant is already served.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    const mineSrc = src.slice(src.indexOf('async mineListicleFamily'), src.indexOf('async mineNoContentYet'));
+    expect(mineSrc).toMatch(/gsc_query_page_map/);
+    expect(mineSrc).toMatch(/whereIn\('query', variantQueries\)/);
+    expect(mineSrc).toMatch(/fam\.variants\.some\(\(v\) => servedQueries\.has\(v\.query\)\)/);
   });
 
   test('dedupe key is stable under representative/classification churn (family key, not query)', () => {
