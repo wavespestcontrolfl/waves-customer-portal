@@ -2071,9 +2071,13 @@ const InvoiceService = {
         // Send-window deferral contract: a QUIET_HOURS_HOLD is "try again at
         // 8 AM", not a delivery failure — carry the hold metadata so
         // sendViaSMSAndEmail / processScheduledSends can reschedule instead
-        // of burning one of the five generic scheduled-send attempts.
+        // of burning one of the five generic scheduled-send attempts. The
+        // rendered body + recipient ride along so a direct (non-scheduled)
+        // caller can requeue the exact pay-link text on the scheduled rail.
         if (sendResult.deferred) err.deferred = true;
         if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
+        err.smsBody = body;
+        err.toPhone = customer.phone;
         throw err;
       }
 
@@ -2232,8 +2236,52 @@ const InvoiceService = {
         // instead of treating the hold as a spent delivery attempt.
         if (err.deferred) sms.deferred = true;
         if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
+        if (err.smsBody) sms.heldBody = err.smsBody;
+        if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
     }
+
+    // DIRECT callers (estimate acceptance/conversion, admin resends —
+    // anything not on the scheduled queue): the email leg below finalizes
+    // the invoice, which clears every retry hook, so a held SMS pay link
+    // must be persisted on the scheduled-SMS rail FIRST or the customer
+    // never receives it. The queued row replays the exact rendered body at
+    // 8:00 AM under the same payment_link policy. Scheduled callers
+    // (allowClaimed) skip this — their whole send defers below instead.
+    if (!allowClaimed
+      && sms.code === "QUIET_HOURS_HOLD"
+      && sms.deferred
+      && sms.nextAllowedAt
+      && sms.heldBody
+      && sms.heldToPhone) {
+      try {
+        const TWILIO_NUMBERS = require("../config/twilio-numbers");
+        await db("sms_log").insert({
+          customer_id: claim.invoice.customer_id,
+          direction: "outbound",
+          from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+          to_phone: sms.heldToPhone,
+          message_body: sms.heldBody,
+          status: "scheduled",
+          scheduled_for: new Date(sms.nextAllowedAt),
+          message_type: "invoice",
+          metadata: JSON.stringify({
+            entry_point: "invoice_send_deferred",
+            invoice_id: invoiceId,
+            original_block_code: sms.code,
+            replay_purpose: "payment_link",
+            refresh_customer_phone: true,
+            resolve_from_by_customer: true,
+          }),
+        });
+        sms.scheduled = true;
+        logger.info(`[invoice] Pay-link SMS for invoice ${invoiceId} held outside the 8AM-8PM ET send window — queued for ${sms.nextAllowedAt}`);
+      } catch (queueErr) {
+        logger.error(`[invoice] Held pay-link SMS requeue FAILED for invoice ${invoiceId}: ${queueErr.message} — SMS leg may be lost (email leg proceeds)`);
+      }
+    }
+    delete sms.heldBody;
+    delete sms.heldToPhone;
 
     // A send-window hold on a SCHEDULED delivery defers the WHOLE send: a
     // successful email here would make `ok` true, finalize the invoice and

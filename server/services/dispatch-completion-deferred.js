@@ -20,9 +20,18 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
-async function finalizeDeferredCompletionSend(claimMeta = {}) {
+async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } = {}) {
   const recordId = claimMeta.service_record_id || null;
   const sentAtIso = new Date().toISOString();
+  // ok covers the STATE steps (invoice flip, review mark, receipt claim).
+  // All three are idempotent, so the executor can re-run this whole
+  // function from a finalize_only retry row when any of them failed —
+  // without that retry, one transient DB error after the SMS delivered
+  // would permanently leave the invoice in draft or double-send the
+  // review ask. The notes/event writes below stay cosmetic best-effort
+  // (an event-row duplicate on retry would mislead analytics, a missed
+  // one loses nothing).
+  let ok = true;
 
   // Invoice pay link delivered → draft becomes sent, follow-ups schedule.
   if (claimMeta.mark_invoice_delivery === true && claimMeta.invoice_id) {
@@ -34,6 +43,7 @@ async function finalizeDeferredCompletionSend(claimMeta = {}) {
         payUrl: claimMeta.pay_url || null,
       });
     } catch (err) {
+      ok = false;
       logger.warn(`[completion-deferred] invoice delivery sync failed for ${claimMeta.invoice_id}: ${err.message}`);
     }
   }
@@ -46,6 +56,7 @@ async function finalizeDeferredCompletionSend(claimMeta = {}) {
       const ReviewService = require('./review-request');
       await ReviewService.markInlineDelivered(claimMeta.bundled_review_request_id);
     } catch (err) {
+      ok = false;
       logger.warn(`[completion-deferred] inline review delivery mark failed for ${claimMeta.bundled_review_request_id}: ${err.message}`);
     }
   }
@@ -60,6 +71,7 @@ async function finalizeDeferredCompletionSend(claimMeta = {}) {
         .whereNull('receipt_sent_at')
         .update({ receipt_sent_at: db.fn.now(), updated_at: new Date() });
     } catch (err) {
+      ok = false;
       logger.warn(`[completion-deferred] combined-receipt claim failed for invoice ${claimMeta.stamp_receipt_invoice_id}: ${err.message}`);
     }
   }
@@ -77,18 +89,23 @@ async function finalizeDeferredCompletionSend(claimMeta = {}) {
     } catch (err) {
       logger.warn(`[completion-deferred] notes update failed for record ${recordId}: ${err.message}`);
     }
-    try {
-      await db('service_report_events').insert({
-        service_record_id: recordId,
-        customer_id: claimMeta.customer_id || null,
-        event_name: 'sms_sent',
-        channel: 'sms',
-        metadata: JSON.stringify({ deferred_send_window: true }),
-      });
-    } catch (err) {
-      logger.warn(`[completion-deferred] report event insert failed for record ${recordId}: ${err.message}`);
+    // Not on retries — the event insert is not idempotent and a duplicate
+    // row would mislead the report analytics; the first pass owns it.
+    if (!retry) {
+      try {
+        await db('service_report_events').insert({
+          service_record_id: recordId,
+          customer_id: claimMeta.customer_id || null,
+          event_name: 'sms_sent',
+          channel: 'sms',
+          metadata: JSON.stringify({ deferred_send_window: true }),
+        });
+      } catch (err) {
+        logger.warn(`[completion-deferred] report event insert failed for record ${recordId}: ${err.message}`);
+      }
     }
   }
+  return { ok };
 }
 
 module.exports = { finalizeDeferredCompletionSend };

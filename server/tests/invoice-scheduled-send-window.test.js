@@ -30,6 +30,9 @@ jest.mock('../services/messaging/send-window', () => ({
 jest.mock('../services/invoice-email', () => ({
   sendInvoiceEmail: jest.fn(async () => ({ ok: true })),
 }));
+jest.mock('../config/twilio-numbers', () => ({
+  getOutboundNumber: jest.fn(() => '+19413180000'),
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -244,13 +247,15 @@ describe('processScheduledSends send-window handling', () => {
     }
   });
 
-  test('sendViaSMSAndEmail (direct caller): a held SMS leg still sends the email immediately', async () => {
+  test('sendViaSMSAndEmail (direct caller): a held SMS leg is queued for the window open and the email still sends immediately', async () => {
     const { sendInvoiceEmail } = require('../services/invoice-email');
     const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockImplementation(async () => {
       const err = new Error('payment-link SMS blocked: QUIET_HOURS_HOLD');
       err.code = 'QUIET_HOURS_HOLD';
       err.deferred = true;
       err.nextAllowedAt = WINDOW_OPEN.toISOString();
+      err.smsBody = 'Hi Pat, your invoice is ready: https://pay.example/abc';
+      err.toPhone = '+19415550123';
       throw err;
     });
     try {
@@ -262,10 +267,12 @@ describe('processScheduledSends send-window handling', () => {
         scheduled_request_review: false,
         scheduled_review_delay_minutes: null,
       };
+      const requeueInsert = chain();
       db
         .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
         .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
         .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
+        .mockReturnValueOnce(requeueInsert) // held-SMS scheduled-rail insert
         .mockReturnValueOnce(chain()) // finalize update
         .mockReturnValueOnce(chain({ first: null })); // lead-conversion read (permissive)
 
@@ -273,6 +280,11 @@ describe('processScheduledSends send-window handling', () => {
 
       expect(sendInvoiceEmail).toHaveBeenCalledTimes(1);
       expect(result.ok).toBe(true);
+      expect(result.sms.scheduled).toBe(true);
+      const queuedRow = requeueInsert.insert.mock.calls[0][0];
+      expect(queuedRow.status).toBe('scheduled');
+      expect(queuedRow.scheduled_for).toEqual(WINDOW_OPEN);
+      expect(queuedRow.message_body).toContain('https://pay.example/abc');
     } finally {
       smsSpy.mockRestore();
     }

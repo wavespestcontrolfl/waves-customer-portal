@@ -2339,6 +2339,36 @@ function initScheduledJobs() {
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
+          // finalize_only: a deferred-completion row whose SMS already
+          // DELIVERED but whose post-delivery finalization (invoice flip,
+          // review mark, receipt claim — all idempotent) failed on a
+          // transient error. Re-run ONLY the finalization; never resend.
+          // Bounded, then closed loudly — the SMS itself is long gone.
+          if (claimMeta.finalize_only === true) {
+            const completedAt = new Date();
+            const finalizeAttempts = Number(claimMeta.finalize_attempts) || 1;
+            let fin = { ok: false };
+            try {
+              const { finalizeDeferredCompletionSend } = require('./dispatch-completion-deferred');
+              fin = await finalizeDeferredCompletionSend(claimMeta, { retry: true });
+            } catch (finErr) {
+              logger.warn(`[scheduled-sms] finalize-only retry threw for ${msg.id}: ${finErr.message}`);
+            }
+            if (fin.ok || finalizeAttempts >= SCHEDULED_SMS_MAX_ATTEMPTS) {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'sent', updated_at: completedAt });
+              if (!fin.ok) {
+                logger.error(`[scheduled-sms] deferred-completion finalization EXHAUSTED for ${msg.id} (record ${claimMeta.service_record_id || 'unknown'}) — invoice/review state may need manual sync`);
+              }
+            } else {
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                status: 'scheduled',
+                scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
+                updated_at: completedAt,
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('finalize_attempts', ?::int)", [finalizeAttempts + 1]),
+              });
+            }
+            continue;
+          }
           // replay_purpose: an enqueue whose message_type has no useful
           // purpose mapping (the Stripe billing-notice templates —
           // ach_retry_notice, bank_verification_failed, …) persists the
@@ -2562,6 +2592,13 @@ function initScheduledJobs() {
             // the retryable QUIET_HOURS_HOLD branch below instead of
             // texting after the cutoff.
             ...((msg.admin_user_id || claimMeta.human_authored === true) ? { operatorInitiated: true } : {}),
+            // Entity linkage for policies with requireIds beyond customerId
+            // (payment_link needs invoiceId): requeued rows persist the ids
+            // in metadata and the replay forwards them, or the
+            // require_input_ids validator would block a send the immediate
+            // path already validated.
+            ...(claimMeta.invoice_id ? { invoiceId: claimMeta.invoice_id } : {}),
+            ...(claimMeta.estimate_id ? { estimateId: claimMeta.estimate_id } : {}),
             // Inbound-reply provenance survives the retry rail: a transient
             // provider failure on an immediate AI reply (Twilio 429/5xx)
             // re-queues here minutes later — still an answer to the
@@ -2634,11 +2671,30 @@ function initScheduledJobs() {
             // the provider accepted, mirroring the deposit-receipt
             // pattern of message-type-specific hooks living here.
             if (claimMeta.entry_point === 'dispatch_completion_deferred') {
+              let fin = { ok: false };
               try {
                 const { finalizeDeferredCompletionSend } = require('./dispatch-completion-deferred');
-                await finalizeDeferredCompletionSend({ ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null });
+                fin = await finalizeDeferredCompletionSend({ ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null });
               } catch (finalizeErr) {
                 logger.warn(`[scheduled-sms] deferred-completion finalization failed for ${msg.id}: ${finalizeErr.message}`);
+              }
+              // Durability: the SMS is delivered and this row is 'sent', so
+              // a transient finalization failure has no natural retry —
+              // convert the row into a bounded finalize_only obligation
+              // (the branch above) that re-runs the idempotent state steps
+              // WITHOUT resending. If even this conversion fails, log loud.
+              if (!fin.ok) {
+                try {
+                  await db('sms_log').where({ id: msg.id, status: 'sent' }).update({
+                    status: 'scheduled',
+                    scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
+                    updated_at: new Date(),
+                    metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('finalize_only', true, 'finalize_attempts', 1, 'customer_id', ?::text)", [msg.customer_id || null]),
+                  });
+                  logger.warn(`[scheduled-sms] deferred-completion finalization incomplete for ${msg.id} — converted to finalize-only retry`);
+                } catch (convErr) {
+                  logger.error(`[scheduled-sms] deferred-completion finalization failed AND retry conversion failed for ${msg.id}: ${convErr.message} — invoice/review state may need manual sync`);
+                }
               }
             }
 
