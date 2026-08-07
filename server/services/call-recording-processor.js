@@ -7620,6 +7620,19 @@ const CallRecordingProcessor = {
             // Always refresh the rolling AI-derived fields — they're a snapshot
             // of the latest call, not user-curated content.
             if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
+            // Rolling current-call linkage for the PHONE-LESS reuse path: a
+            // repeat email-matched caller's lead kept the prior call's SID,
+            // and with phone NULL downstream SID-based resolution had no
+            // fallback to associate this call with its lead (codex P1 r15).
+            // The recording fields ride along so the SID always matches its
+            // own recording. Phone-path reuse keeps its longstanding
+            // behavior — the phone IS its durable linkage. A pass-2 recovery
+            // row already carries these values; restamping is a no-op.
+            if (!phone && existingLead && call.twilio_call_sid) {
+              leadUpdates.twilio_call_sid = call.twilio_call_sid;
+              if (call.duration_seconds != null) leadUpdates.call_duration_seconds = call.duration_seconds;
+              if (call.recording_url) leadUpdates.call_recording_url = call.recording_url;
+            }
             // Qualification now requires BOTH buying intent (hot/warm) AND the
             // contact info the office needs to work the lead: first + last name,
             // a service street address, and an email. Evaluate against the MERGED
