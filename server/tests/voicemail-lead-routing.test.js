@@ -26,7 +26,7 @@ const CallRecordingProcessor = require('../services/call-recording-processor');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const policy = require('../services/messaging/policy');
 
-const { hasWorkableLeadSignal } = CallRecordingProcessor._test;
+const { hasWorkableLeadSignal, findReusableCallLead } = CallRecordingProcessor._test;
 
 describe('hasWorkableLeadSignal voicemail waiver', () => {
   const PHONE = '+19415550101';
@@ -71,7 +71,7 @@ describe('hasWorkableLeadSignal voicemail waiver', () => {
     })).toBe(false);
   });
 
-  test('no callback number, no lead — voicemail or not', () => {
+  test('no callback number and no email, no lead — voicemail or not', () => {
     expect(hasWorkableLeadSignal({
       extracted: { matched_service: 'pest control' },
       phone: null,
@@ -85,6 +85,90 @@ describe('hasWorkableLeadSignal voicemail waiver', () => {
       phone: PHONE,
       voicemail: 'yes',
     })).toBe(false);
+  });
+});
+
+describe('hasWorkableLeadSignal anonymous-caller (no phone) path', () => {
+  test('valid spoken email + service intent is workable with no phone at all', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'pest control', email: 'jeff@example.com' },
+      phone: null,
+    })).toBe(true);
+  });
+
+  test('an address alone is not a reachback when there is no callback number', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'pest control', address_line1: '123 Palm Ave' },
+      phone: null,
+    })).toBe(false);
+  });
+
+  test('a garbled email does not qualify', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'pest control', email: 'jeff at gmail' },
+      phone: null,
+    })).toBe(false);
+  });
+
+  test('email without service intent is still not workable', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { email: 'jeff@example.com' },
+      phone: null,
+    })).toBe(false);
+  });
+
+  test('the voicemail waiver never substitutes for the email when phone-less', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'pest control', address_line1: '123 Palm Ave' },
+      phone: null,
+      voicemail: true,
+    })).toBe(false);
+  });
+});
+
+describe('findReusableCallLead identity keys', () => {
+  const makeDb = (row = null) => {
+    const calls = [];
+    const builder = {};
+    for (const m of ['where', 'whereNull', 'whereRaw', 'whereNotIn', 'orderBy']) {
+      builder[m] = (...a) => { calls.push([m, a]); return builder; };
+    }
+    builder.first = async () => { calls.push(['first', []]); return row; };
+    const db = (table) => { calls.push(['table', [table]]); return builder; };
+    db.calls = calls;
+    return db;
+  };
+
+  test('phone present: matches by phone only — email never becomes an identity key', async () => {
+    const db = makeDb({ id: 'lead-1' });
+    const found = await findReusableCallLead(db, {
+      phone: '+19415550101',
+      email: 'shared@example.com',
+      workableUnnamedLead: false,
+    });
+    expect(found).toEqual({ id: 'lead-1' });
+    expect(db.calls.some(([m, a]) => m === 'where' && a[0] === 'phone')).toBe(true);
+    expect(db.calls.some(([m]) => m === 'whereRaw')).toBe(false);
+  });
+
+  test('no phone: matches by lowercased trimmed email', async () => {
+    const db = makeDb({ id: 'lead-2' });
+    const found = await findReusableCallLead(db, {
+      phone: null,
+      email: '  JBrooks00005@Gmail.com ',
+      workableUnnamedLead: true,
+    });
+    expect(found).toEqual({ id: 'lead-2' });
+    const raw = db.calls.find(([m]) => m === 'whereRaw');
+    expect(raw[1][1]).toEqual(['jbrooks00005@gmail.com']);
+    expect(db.calls.some(([m, a]) => m === 'where' && a[0] === 'phone')).toBe(false);
+  });
+
+  test('no phone and no email: returns null without querying', async () => {
+    const db = makeDb({ id: 'lead-3' });
+    const found = await findReusableCallLead(db, { phone: null, email: null });
+    expect(found).toBeNull();
+    expect(db.calls.length).toBe(0);
   });
 });
 
