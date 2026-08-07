@@ -138,17 +138,40 @@ router.get('/', async (req, res, next) => {
         return m?.stripe_receipt_url || p.receipt_url || null;
       } catch { return p.receipt_url || null; }
     };
-    const invoiceIds = [...new Set(visiblePayments.map(invoiceIdOf).filter(Boolean))];
+    // Invoice resolution mirrors the canonical webhook resolver
+    // (stripe-webhook.js): metadata.invoice_id, then the dispute/legacy
+    // aliases, then the payment's Stripe PaymentIntent matched against
+    // invoices.stripe_payment_intent_id — the last one is what rescues
+    // self-pay cash/check/Zelle rows, which admin-invoices.js writes with no
+    // metadata at all and which would otherwise show no Waves receipt.
+    const anyInvoiceIdOf = (p) => {
+      const primary = invoiceIdOf(p);
+      if (primary) return primary;
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        const alias = m?.dispute_invoice_id || m?.waves_invoice_id;
+        return alias != null ? String(alias) : null;
+      } catch { return null; }
+    };
+    const invoiceIds = [...new Set(visiblePayments.map(anyInvoiceIdOf).filter(Boolean))];
+    const intentIds = [...new Set(visiblePayments.map(p => p.stripe_payment_intent_id).filter(Boolean))];
     const receiptTokenByInvoiceId = new Map();
-    if (invoiceIds.length) {
+    const receiptTokenByIntentId = new Map();
+    if (invoiceIds.length || intentIds.length) {
       try {
         const invoiceRows = await db('invoices')
           .where({ customer_id: req.customerId })
-          .whereIn('id', invoiceIds)
           .whereIn('status', ['paid', 'refunded'])
-          .select('id', 'token', 'invoice_number');
+          .where((qb) => {
+            if (invoiceIds.length) qb.orWhereIn('id', invoiceIds);
+            if (intentIds.length) qb.orWhereIn('stripe_payment_intent_id', intentIds);
+          })
+          .select('id', 'token', 'invoice_number', 'stripe_payment_intent_id');
         invoiceRows.forEach((row) => {
-          if (row.token) receiptTokenByInvoiceId.set(row.id, { token: row.token, invoiceNumber: row.invoice_number });
+          if (!row.token) return;
+          const entry = { token: row.token, invoiceNumber: row.invoice_number };
+          receiptTokenByInvoiceId.set(row.id, entry);
+          if (row.stripe_payment_intent_id) receiptTokenByIntentId.set(row.stripe_payment_intent_id, entry);
         });
       } catch (err) {
         // Best-effort: a receipt-link lookup failure must not break the
@@ -179,7 +202,8 @@ router.get('/', async (req, res, next) => {
         // null when this payment has no retrievable receipt — the row simply
         // renders no receipt action.
         ...(() => {
-          const inv = receiptTokenByInvoiceId.get(invoiceIdOf(p));
+          const inv = receiptTokenByInvoiceId.get(anyInvoiceIdOf(p))
+            || (p.stripe_payment_intent_id ? receiptTokenByIntentId.get(p.stripe_payment_intent_id) : null);
           const stripeReceiptUrl = stripeReceiptOf(p);
           return {
             receiptUrl: inv ? `/receipt/${inv.token}` : null,
