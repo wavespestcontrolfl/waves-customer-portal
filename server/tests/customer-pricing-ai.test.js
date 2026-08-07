@@ -96,6 +96,21 @@ describe('customer pricing AI helpers', () => {
     expect(result.message).toMatch(/not re-pricing/i);
   });
 
+  test('a mixed request prices the new service and still flags the owned one', async () => {
+    const customer = propertyCustomer({ id: 'cust-mixed', waveguard_tier: 'Silver' });
+    const result = await buildCustomerPricingResponse({
+      db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
+      propertyLookup: null,
+      prompt: 'upgrade my lawn care and add mosquito control',
+      customer,
+    });
+
+    expect(result.alreadyIncluded).toContain('Lawn Care');
+    expect(result.options.every(o => o.serviceKey !== 'lawn_care')).toBe(true);
+    // The owned half must survive in the reply even though the new half priced.
+    expect(result.message).toMatch(/not re-pricing/i);
+  });
+
   test('prices a requested service from the customer property profile', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,

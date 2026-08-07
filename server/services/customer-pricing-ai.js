@@ -491,6 +491,15 @@ async function maybeSyncPricingEngine(db) {
   }
 }
 
+// Repeatable purchases: quotable even for a current customer, because they are
+// not an existing recurring obligation whose rate could disagree.
+const REPEATABLE_ONE_TIME_KEYS = ['palm', 'one_time_lawn', 'one_time_mosquito'];
+
+/** Owned by this customer AND not a repeatable one-time purchase. */
+function ownedAndNotRepeatable(serviceKey, currentSet) {
+  return currentSet.has(serviceKey) && !REPEATABLE_ONE_TIME_KEYS.includes(serviceKey);
+}
+
 async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, propertyLookup }) {
   const text = String(prompt || '').trim();
   const currentServiceKeys = await loadCurrentServiceKeys(db, customer);
@@ -531,7 +540,6 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
   }
 
   const propertyContext = await resolvePropertyContext({ customer, turfProfile, propertyLookup: lookupFn });
-  const missing = missingPropertyFor(requestedServices, propertyContext);
 
   // A service the customer ALREADY has is never re-priced from the property
   // profile — owner ruling 2026-08-06. Their live rate may predate a price
@@ -540,11 +548,13 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
   // longer opens that door (it previously did): an upgrade is a conversation,
   // routed to Waves, not a self-serve re-quote. The one-time keys stay
   // exempt — those are repeatable purchases, not an existing obligation.
-  const REPEATABLE_ONE_TIME_KEYS = ['palm', 'one_time_lawn', 'one_time_mosquito'];
-  const alreadyIncluded = requestedServices.filter(key =>
-    currentSet.has(key) && !REPEATABLE_ONE_TIME_KEYS.includes(key)
-  );
+  const alreadyIncluded = requestedServices.filter(key => ownedAndNotRepeatable(key, currentSet));
   const servicesToPrice = requestedServices.filter(key => !alreadyIncluded.includes(key));
+
+  // Measured AFTER the exclusion: an owned service missing a measurement must
+  // not short-circuit the request into PROPERTY_DETAILS_NEEDED — we are not
+  // pricing it, so its gaps are irrelevant to what we CAN price (codex r1 P2).
+  const missing = missingPropertyFor(servicesToPrice, propertyContext);
 
   if (missing) {
     return {
@@ -601,18 +611,24 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
         showEstimatedPlanMonthly: !billingModelMismatch,
         baselineMismatch: billingModelMismatch,
       });
-      // Second gate on the same rule: even if a future path routes an owned
-      // service into servicesToPrice, no price for it reaches the customer.
-      if (quoted.alreadyHasRelatedService && !REPEATABLE_ONE_TIME_KEYS.includes(option.serviceKey)) continue;
+      // Belt-and-braces on the money rule, sharing the SAME predicate as the
+      // servicesToPrice filter above (no second definition to drift): if a
+      // future path ever routes an owned service here, no price for it can
+      // still reach the customer.
+      if (ownedAndNotRepeatable(option.serviceKey, currentSet)) continue;
       if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) options.push(quoted);
     }
   }
 
-  const message = alreadyIncluded.length && !options.length
-    ? `You already have ${alreadyIncluded.map(toKeyLabel).join(', ')} on this property, so I am not re-pricing it here — your current rate stands. Send Waves a request and we will review your plan with you.`
-    : options.length
-      ? `I priced ${[...new Set(servicesToPrice.map(toKeyLabel))].join(', ')} using the property tied to your portal.`
-      : 'I could not price that request automatically. Waves can review it manually.';
+  // A mixed prompt ("upgrade my lawn care and add mosquito") must not lose the
+  // owned half just because the new half priced (codex r1 P2).
+  const ownedNote = alreadyIncluded.length
+    ? `You already have ${alreadyIncluded.map(toKeyLabel).join(', ')} on this property, so I am not re-pricing that here — your current rate stands. Send Waves a request and we will review it with you.`
+    : '';
+  const message = options.length
+    ? [`I priced ${[...new Set(servicesToPrice.map(toKeyLabel))].join(', ')} using the property tied to your portal.`, ownedNote]
+      .filter(Boolean).join(' ')
+    : ownedNote || 'I could not price that request automatically. Waves can review it manually.';
 
   return {
     ok: true,
