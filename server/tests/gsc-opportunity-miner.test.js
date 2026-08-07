@@ -512,6 +512,18 @@ describe('persistAll upsert binding integrity (07-31 regression)', () => {
     expect(calls.length).toBe(1);
     const placeholders = (calls[0].sql.match(/\?/g) || []).length;
     expect(placeholders).toBe(calls[0].bindings.length);
+
+    // Identity refresh (query/service/city from EXCLUDED, added for
+    // listicle_family representative churn) must be guarded by the SAME
+    // frozen-status list as the status CASE: a claimed row's identity must
+    // not shift beneath its worker, and done/reviewed/skipped rows are
+    // records of what WAS processed (pre-push r7).
+    const frozen = "IN \\('claimed', 'done', 'pending_review', 'skipped'\\)";
+    for (const field of ['query', 'service', 'city']) {
+      expect(calls[0].sql).toMatch(new RegExp(
+        `${field} = CASE WHEN opportunity_queue\\.status ${frozen}\\s+THEN opportunity_queue\\.${field}\\s+ELSE EXCLUDED\\.${field}`
+      ));
+    }
   });
 });
 
@@ -704,6 +716,27 @@ describe('clusterListicleFamilies', () => {
   test('empty/undefined input → no families', () => {
     expect(clusterListicleFamilies([])).toEqual([]);
     expect(clusterListicleFamilies(undefined)).toEqual([]);
+  });
+
+  test('classification-split rows of ONE query merge into one variant (pre-push r7)', () => {
+    // Source rows group by (query, service, city): a query whose
+    // classification changed mid-window arrives as multiple rows. Those must
+    // not count as separate variants — one real query would then satisfy the
+    // ≥2-variant rule on its own.
+    const fams = clusterListicleFamilies([
+      { query: 'kinds of ants in florida', impressions: 30, avg_position: 10, service_category: 'pest', city_target: null },
+      { query: 'kinds of ants in florida', impressions: 40, avg_position: 20, service_category: 'lawn', city_target: 'sarasota' },
+    ]);
+    expect(fams).toHaveLength(1);
+    expect(fams[0].variants).toHaveLength(1); // one DISTINCT query = one variant
+    const v = fams[0].variants[0];
+    expect(v.impressions).toBe(70);
+    expect(v.position).toBeCloseTo((10 * 30 + 20 * 40) / 70);
+    expect(v.service_category).toBe('lawn'); // higher-impression classification wins
+    expect(v.city_target).toBe('sarasota');
+    expect(fams[0].impressions).toBe(70);
+    // A single distinct query can never clear the ≥2-variant rule.
+    expect(listicleFamilyEligible(fams[0])).toBe(false);
   });
 });
 

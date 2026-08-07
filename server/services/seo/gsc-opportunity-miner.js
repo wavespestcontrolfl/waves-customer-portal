@@ -321,19 +321,39 @@ function clusterListicleFamilies(rows) {
     const pos = Number(r.avg_position) || 0;
     let fam = families.get(key);
     if (!fam) {
-      fam = { key, variants: [], impressions: 0, posWeightedSum: 0 };
+      fam = { key, variants: [], byQuery: new Map(), impressions: 0, posWeightedSum: 0 };
       families.set(key, fam);
     }
-    fam.variants.push({
-      query: r.query,
-      impressions: imp,
-      // Per-variant position kept so admission can judge the REPRESENTATIVE
-      // on its own ranking — the family-wide weighted average can be dragged
-      // past the top-3 cutoff by one low-volume deep variant.
-      position: pos,
-      service_category: r.service_category || null,
-      city_target: r.city_target || null,
-    });
+    // One variant per DISTINCT query string. The source rows group by
+    // (query, service, city), so a query whose classification changed
+    // mid-window arrives as multiple rows — counting those as separate
+    // variants would let ONE real query satisfy the ≥2-variant rule.
+    const existing = fam.byQuery.get(r.query);
+    if (existing) {
+      const merged = existing.impressions + imp;
+      existing.position = merged
+        ? (existing.position * existing.impressions + pos * imp) / merged
+        : 0;
+      // Higher-impression classification wins the merged variant.
+      if (imp > existing.impressions) {
+        existing.service_category = r.service_category || null;
+        existing.city_target = r.city_target || null;
+      }
+      existing.impressions = merged;
+    } else {
+      const variant = {
+        query: r.query,
+        impressions: imp,
+        // Per-variant position kept so admission can judge the REPRESENTATIVE
+        // on its own ranking — the family-wide weighted average can be dragged
+        // past the top-3 cutoff by one low-volume deep variant.
+        position: pos,
+        service_category: r.service_category || null,
+        city_target: r.city_target || null,
+      };
+      fam.variants.push(variant);
+      fam.byQuery.set(r.query, variant);
+    }
     fam.impressions += imp;
     fam.posWeightedSum += pos * imp;
   }
@@ -1742,9 +1762,22 @@ class GscOpportunityMiner {
                -- classification while its score/metadata came from the new
                -- representative (internally inconsistent; facts checks could
                -- run against a stale service/city).
-               query = EXCLUDED.query,
-               service = EXCLUDED.service,
-               city = EXCLUDED.city,
+               -- ...but ONLY for mutable rows: a claimed row's identity must
+               -- not shift beneath its worker, and done/reviewed/skipped rows
+               -- are records of what WAS processed. Same frozen-status list
+               -- as the status CASE below.
+               query = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'skipped')
+                            THEN opportunity_queue.query
+                            ELSE EXCLUDED.query
+                       END,
+               service = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'skipped')
+                              THEN opportunity_queue.service
+                              ELSE EXCLUDED.service
+                         END,
+               city = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'skipped')
+                           THEN opportunity_queue.city
+                           ELSE EXCLUDED.city
+                      END,
                status = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review', 'skipped')
                              THEN opportunity_queue.status
                              ELSE 'pending'
