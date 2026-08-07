@@ -2689,3 +2689,56 @@ describe('top-level title/meta on the TABLE path (Codex round 11)', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
   });
 });
+
+// ── operator authorization on the TABLE path (Codex r2 on #3256) ─────
+
+describe('operator-authorized prose mentions on table-backed drafts', () => {
+  const D1_BRIEF = [
+    'TruGreen Alternatives in Sarasota: What to Weigh',
+    'trugreen alternative sarasota',
+    'Why homeowners look beyond TruGreen, with a trade-off comparison table',
+  ].join('\n');
+  const D1_TABLE = `<ComparisonTable
+  columns={["What to weigh","National chain","Local SWFL company","DIY"]}
+  rows={[
+    { label: "Knows SWFL turf", values: ["Generic playbook","Yes","No"] },
+    { label: "Re-treat guarantee", values: ["Varies","Common","None"] }
+  ]}
+  highlight={1}
+  caption="Trade-offs to weigh for Sarasota lawns." />`;
+
+  test('operator-named competitor in title/prose + mandated table → passes to human review, no IN_PROSE finding', () => {
+    const r = gate.evaluate({
+      body: `# Guide\n\nMany homeowners start with TruGreen and later want a local option; here is what to weigh.\n\n${D1_TABLE}\n\nClosing prose.`,
+      frontmatter: { title: 'TruGreen Alternatives in Sarasota: What to Weigh' },
+    }, { namedCompetitorEnabled: true, operatorBriefText: D1_BRIEF });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+  });
+
+  test('a competitor the operator did NOT name still flags IN_PROSE on the table path', () => {
+    const r = gate.evaluate({
+      body: `# Guide\n\nTruGreen plans are annual, and Terminix offers similar contracts.\n\n${D1_TABLE}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: true, operatorBriefText: D1_BRIEF });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE' && /Terminix/.test(f.message))).toBe(true);
+  });
+
+  test('table CELLS keep full curated strictness — operator authorship never verifies a cell claim', () => {
+    const t = D1_TABLE.replace('National chain', 'TruGreen');
+    const r = gate.evaluate({
+      body: `# Guide\n\nIntro prose.\n\n${t}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: true, operatorBriefText: D1_BRIEF });
+    // TruGreen named in a table whose cells state non-curated facts with no
+    // sourced caption → the known-competitor findings still fire;
+    // authorization changed nothing about cell validation.
+    expect(r.pass).toBe(false);
+  });
+
+  test('mined drafts (no operator text) on the table path are unchanged', () => {
+    const r = gate.evaluate({
+      body: `# Guide\n\nMany homeowners start with TruGreen and later want a local option.\n\n${D1_TABLE}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+  });
+});

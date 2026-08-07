@@ -578,7 +578,8 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(directive('CITATION_TOKEN_RESIDUE')).toMatch(/plain prose/);
     expect(directive('OFF_FOOTPRINT_CITY_CLAIM')).toMatch(/outside the Waves footprint/);
     expect(directive('OFF_FOOTPRINT_CITY_CLAIM')).toMatch(/educational mention/);
-    expect(directive('PRODUCT_CLAIM')).toMatch(/product CLASS generically/);
+    expect(directive('PRODUCT_CLAIM')).toMatch(/INFORMATIONAL TOPIC/);
+    expect(directive('PRODUCT_CLAIM')).toMatch(/keep the brief.s target keyword and title intact/);
     expect(directive('PREVENTION_PROMISE')).toMatch(/REDUCED recurrence/);
     expect(directive('COMPARISON_RIGGED_RANKING')).toMatch(/#1/);
     expect(directive('COMPARISON_RIGGED_RANKING')).toMatch(/neutral trade-offs/);
