@@ -6,31 +6,14 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
-const { etDateString, addETDays, parseETDateTime, etCalendarDayOf } = require('../utils/datetime-et');
-const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const { calendarIcsAvailable } = require('../services/appointment-ics-eligibility');
 
-// Add-to-calendar link for a visit row, or null. Mirrors the guardrails of
-// appointment-public's pageState 'upcoming': that router 404s the .ics while
-// GATE_APPOINTMENT_PAGE is dark, for non-pending/confirmed statuses, without
-// a date + window_start, or once the quoted 2-hour arrival window has
-// elapsed — so suppress the link rather than hand out a dead one (codex r1).
-function calendarUrlFor(row, now = new Date()) {
-  if (process.env.GATE_APPOINTMENT_PAGE !== 'true') return null;
-  if (!row?.reschedule_token) return null;
-  if (!['pending', 'confirmed'].includes(String(row.status || '').toLowerCase())) return null;
-  const start = String(row.window_start || '').slice(0, 5);
-  if (!row.scheduled_date || !start) return null;
-  // DATE-column normalization, NOT etDateString: knex hands back a UTC-midnight
-  // Date for a pg DATE, which etDateString would render as the PRECEDING
-  // Eastern day — that would mark today's visit elapsed and drop tomorrow's
-  // link early. etCalendarDayOf is the canonical date-only helper and matches
-  // what appointment-public's own apptDateStr resolves (codex r2 P1).
-  const dateStr = etCalendarDayOf(row.scheduled_date);
-  const startAt = dateStr ? parseETDateTime(`${dateStr}T${start}`) : null;
-  if (!startAt || Number.isNaN(startAt.getTime())) return null;
-  if (startAt.getTime() + ARRIVAL_WINDOW_MINUTES * 60000 < now.getTime()) return null;
-  return `/api/public/appointment/${row.reschedule_token}/calendar.ics`;
-}
+// Add-to-calendar link for a visit row, or null. The eligibility verdict is
+// NOT re-derived here — services/appointment-ics-eligibility.js owns it and
+// routes/appointment-public.js's .ics route applies the same predicate, so the
+// portal can never advertise a link that 404s or hide one the route serves
+// (codex r3 P1).
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 
@@ -39,6 +22,14 @@ router.use(authenticate);
 const listQuerySchema = Joi.object({
   days: Joi.number().integer().min(1).max(365).default(90),
 });
+
+function calendarUrlFor(row, now = new Date()) {
+  if (process.env.GATE_APPOINTMENT_PAGE !== 'true') return null;
+  if (!row?.reschedule_token) return null;
+  if (!calendarIcsAvailable(row, now)) return null;
+  return `/api/public/appointment/${row.reschedule_token}/calendar.ics`;
+}
+
 
 // =========================================================================
 // GET /api/schedule — Upcoming scheduled services
