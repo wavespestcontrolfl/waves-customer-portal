@@ -7,7 +7,7 @@ const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { calendarIcsAvailable } = require('../services/appointment-ics-eligibility');
+const { calendarIcsAvailable, arrivalWindowEndsAt } = require('../services/appointment-ics-eligibility');
 
 // Add-to-calendar link for a visit row, or null. The eligibility verdict is
 // NOT re-derived here — services/appointment-ics-eligibility.js owns it and
@@ -28,6 +28,15 @@ function calendarUrlFor(row, now = new Date()) {
   if (!row?.reschedule_token) return null;
   if (!calendarIcsAvailable(row, now)) return null;
   return `/api/public/appointment/${row.reschedule_token}/calendar.ics`;
+}
+
+// The instant the link stops being servable, straight from the same owner, so
+// the client never reconstructs the deadline (no second date parser, no
+// duplicated window constant — codex r6 P1).
+function calendarExpiresAtFor(row, now = new Date()) {
+  if (!calendarUrlFor(row, now)) return null;
+  const endsAt = arrivalWindowEndsAt(row);
+  return endsAt ? endsAt.toISOString() : null;
 }
 
 
@@ -133,6 +142,7 @@ router.get('/', async (req, res, next) => {
         // window). Same-customer token, same posture as rescheduleUrl above;
         // calendarUrlFor nulls every case that route would 404.
         calendarUrl: calendarUrlFor(s),
+        calendarExpiresAt: calendarExpiresAtFor(s),
       })),
     });
   } catch (err) {
@@ -368,6 +378,7 @@ router.get('/next', async (req, res, next) => {
         rescheduleUrl: nextService.reschedule_token ? `/reschedule/${nextService.reschedule_token}` : null,
         // Same contract as the list payload above.
         calendarUrl: calendarUrlFor(nextService),
+        calendarExpiresAt: calendarExpiresAtFor(nextService),
       },
     });
   } catch (err) {

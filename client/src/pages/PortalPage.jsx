@@ -166,18 +166,14 @@ const arrivalWindowEnd = (windowStart) => {
 // True while the visit's quoted arrival window has not closed — mirrors
 // services/appointment-ics-eligibility on the server, so a long-open tab
 // stops offering a calendar file the route will refuse.
+// The deadline is SERVER-OWNED (schedule payload's calendarExpiresAt, from
+// services/appointment-ics-eligibility). The client parses no dates and holds
+// no copy of the arrival-window constant, so it can't drift from the endpoint
+// that serves the file (codex #3249 r6 P1).
 const calendarLinkEndsAt = (svc) => {
-  if (!svc?.date || !svc?.windowStart) return null;
-  const day = String(svc.date).slice(0, 10);
-  // Add the 2-hour promise to the START instant. Using arrivalWindowEnd's
-  // string here was wrong for late visits: it wraps 22:00 -> 00:00, and
-  // pairing that with the SAME day put the deadline at the START of the
-  // appointment day, hiding the button for every evening visit (codex r5 P2).
-  const m = /^(\d{1,2}):(\d{2})/.exec(String(svc.windowStart));
-  if (!m) return null;
-  const startsAt = new Date(`${day}T${String(m[1]).padStart(2, '0')}:${m[2]}:00`);
-  if (Number.isNaN(startsAt.getTime())) return null;
-  return new Date(startsAt.getTime() + (120 * 60000));
+  if (!svc?.calendarExpiresAt) return null;
+  const endsAt = new Date(svc.calendarExpiresAt);
+  return Number.isNaN(endsAt.getTime()) ? null : endsAt;
 };
 
 const calendarLinkStillLive = (svc) => {
