@@ -497,6 +497,9 @@ describe('ownership lifecycle evidence (gated)', () => {
     const { loadOwnedRecurringServiceKeys } = require('../services/waveguard-existing-services');
     return loadOwnedRecurringServiceKeys;
   };
+  // Relative, not hardcoded: the gated check is scheduled_date >= today (ET),
+  // so a literal future date would start failing when the calendar passes it.
+  const futureDate = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
   test('a callback row is not ownership evidence; a live upcoming row is', async () => {
     const loadOwned = loadOwnedGated();
@@ -505,13 +508,13 @@ describe('ownership lifecycle evidence (gated)', () => {
       scheduled_services: rows,
     });
     const callbackOnly = await loadOwned(mk([{
-      id: 'svc-cb', service_type: 'Rodent Monitoring', scheduled_date: '2027-01-01',
+      id: 'svc-cb', service_type: 'Rodent Monitoring', scheduled_date: futureDate,
       status: 'scheduled', is_recurring: true, is_callback: true,
     }]), 'cust-gated');
     expect(callbackOnly).toEqual([]);
 
     const live = await loadOwned(mk([{
-      id: 'svc-live', service_type: 'Rodent Monitoring', scheduled_date: '2027-01-01',
+      id: 'svc-live', service_type: 'Rodent Monitoring', scheduled_date: futureDate,
       status: 'scheduled', is_recurring: true,
     }]), 'cust-gated');
     expect(live).toEqual(['rodent_bait']);
