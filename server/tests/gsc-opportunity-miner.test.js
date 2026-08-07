@@ -33,6 +33,8 @@ const {
   clusterListicleFamilies,
   listicleFamilyDedupeKey,
   listicleFamilyEligible,
+  resolveListicleFamilyServiceCity,
+  buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
 
@@ -855,15 +857,16 @@ describe('listicle_family scoring + action mapping', () => {
     expect(listicleFamilyEligible(fam({ position: 0 }))).toBe(true);
   });
 
-  test('families with an owned page ranking in striking distance for a variant are excluded (query-page map)', () => {
-    // Position alone cannot see an owned page ranking 4+ for the family —
-    // that page is refresh territory for the page-anchored buckets, and a
-    // new post would cannibalize it. mineListicleFamily must consult
-    // gsc_query_page_map and drop families where ANY variant has an owned
-    // page within strikingDistancePositionMax. Crucially the test is
-    // page-level RANKING, not map-row existence: every GSC impression maps
-    // to whatever page happened to show, so existence alone would kill
-    // nearly every family and leave the lane inert.
+  test('served families route to a page refresh, never a drop and never map-existence (query-page map)', () => {
+    // Three-way r8/r9 contract: (1) the served test is page-level RANKING
+    // within strikingDistancePositionMax, not map-row existence — every GSC
+    // impression maps to whatever page happened to show, so existence alone
+    // would kill nearly every family and leave the lane inert. (2) A served
+    // family EMITS a family-aggregated refresh of the mapped page rather
+    // than silently delegating to mineStrikingDistance, whose ≥50-imp
+    // per-query floor every eligible variant fails by construction. (3) A
+    // best page already in the top-3 (below strikingDistancePositionMin) is
+    // won intent — dropped outright.
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
     const mineSrc = src.slice(src.indexOf('async mineListicleFamily'), src.indexOf('async mineNoContentYet'));
@@ -873,7 +876,81 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/sum\(position \* impressions\) \/ NULLIF\(sum\(impressions\), 0\) <= \?/);
     expect(mineSrc).toMatch(/THRESHOLDS\.strikingDistancePositionMax/);
     expect(mineSrc).not.toMatch(/\.distinct\('query'\)/); // existence-only check is the inert-lane bug
-    expect(mineSrc).toMatch(/fam\.variants\.some\(\(v\) => servedQueries\.has\(v\.query\)\)/);
+    expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(fam, served, service, city\)/);
+    expect(mineSrc).toMatch(/served\.hit\.position >= THRESHOLDS\.strikingDistancePositionMin/);
+  });
+
+  test('a served family becomes a striking_distance refresh of the mapped page with family provenance (Codex r9)', () => {
+    const fam = {
+      key: 'drought+florida+plants+tolerant',
+      impressions: 102,
+      variants: [
+        { query: 'drought tolerant plants florida', impressions: 48, position: 12 },
+        { query: 'florida drought tolerant plants', impressions: 30, position: 9 },
+        { query: 'plants florida drought tolerant', impressions: 24, position: 15 },
+      ],
+    };
+    const served = {
+      variant: fam.variants[1],
+      hit: { page_url: 'https://wavespestcontrol.com/blog/florida-native-plants/', position: 8.2 },
+    };
+    const opp = buildListicleFamilyRefreshOpp(fam, served, 'tree-shrub', null);
+    expect(opp.bucket).toBe('striking_distance');
+    expect(opp.page_url).toBe(served.hit.page_url);
+    expect(opp.query).toBe('florida drought tolerant plants');
+    expect(opp.signal_metadata.impressions).toBe(102); // family-aggregated demand
+    expect(opp.signal_metadata.source).toBe('listicle_family');
+    expect(opp.signal_metadata.family_size).toBe(3);
+    expect(opp.action_type).not.toBe('new_supporting_blog'); // refresh, not a competing post
+    // Standard page-keyed dedupe: merges with a genuine striking_distance
+    // row for the same page instead of queueing a duplicate.
+    expect(opp.dedupe_key).toContain('striking_distance::');
+    expect(opp.dedupe_key).toContain(served.hit.page_url.slice(0, 60));
+  });
+
+  test('service resolves across EVERY variant, not just the representative (Codex r9)', () => {
+    const helpers = {
+      canonicalize: canonicalizeServiceCategory,
+      inferService: inferServiceFromQuery,
+      normCity: (c) => c || null,
+      inferCity: () => null,
+    };
+    // Representative is the reordered variant the horticultural regex
+    // misses; the second variant resolves tree-shrub — the family survives.
+    const fam = {
+      variants: [
+        { query: 'plants florida drought tolerant', impressions: 26, service_category: null, city_target: null },
+        { query: 'drought tolerant plants florida', impressions: 25, service_category: null, city_target: null },
+      ],
+    };
+    expect(inferServiceFromQuery('plants florida drought tolerant')).toBeNull(); // the premise
+    expect(resolveListicleFamilyServiceCity(fam, helpers).service).toBe('tree-shrub');
+    // Off-topic families still resolve nothing from any variant.
+    const offTopic = {
+      variants: [
+        { query: 'types of fish in florida', impressions: 30, service_category: null, city_target: null },
+        { query: 'florida types of fish', impressions: 25, service_category: null, city_target: null },
+      ],
+    };
+    expect(resolveListicleFamilyServiceCity(offTopic, helpers).service).toBeNull();
+  });
+
+  test('cityless families on hubless services are excluded at mine time (Codex r9 — hub_link_present would park them)', () => {
+    // SERVICE_HUB_LINKS is intentionally empty for lawn and tree-shrub; a
+    // cityless family there can never satisfy the hard gate and would
+    // mine → draft → park forever. Mine-time exclusion is the same
+    // fail-closed posture the brief builder documents; a statewide link
+    // target (owner ruling) unlocks these.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    const mineSrc = src.slice(src.indexOf('async mineListicleFamily'), src.indexOf('async mineNoContentYet'));
+    expect(mineSrc).toMatch(/SERVICE_HUB_LINKS/);
+    expect(mineSrc).toMatch(/!city && \(!hublessServices \|\| hublessServices\.has\(service\)\)/);
+    // The map derives from the brief builder's own export — single source
+    // of truth, and lawn/tree-shrub are hubless there today.
+    const { SERVICE_HUB_LINKS } = require('../services/content/content-brief-builder')._internals;
+    expect(SERVICE_HUB_LINKS.lawn).toEqual([]);
+    expect(SERVICE_HUB_LINKS['tree-shrub']).toEqual([]);
   });
 
   test('dedupe key is stable under representative/classification churn (family key, not query)', () => {

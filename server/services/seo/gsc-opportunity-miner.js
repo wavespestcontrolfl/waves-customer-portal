@@ -397,6 +397,59 @@ function listicleFamilyEligible(fam, thresholds = THRESHOLDS) {
   return true;
 }
 
+// Service/city resolution across the WHOLE family, impression order. The
+// representative alone is not enough: variants share one token set, but
+// service inference is order-sensitive (the horticultural-context regex
+// needs the qualifier NEAR 'plants'), so 'plants florida drought tolerant'
+// resolves nothing while its same-family variant 'drought tolerant plants
+// florida' resolves tree-shrub — and whichever has one more impression is
+// the representative. Any variant's supported classification keeps the
+// family; a family where NO variant resolves stays off-topic-rejected.
+function resolveListicleFamilyServiceCity(fam, { canonicalize, inferService, normCity, inferCity }) {
+  let service = null;
+  let city = null;
+  for (const v of fam.variants) {
+    if (!service) service = canonicalize(v.service_category) || inferService(v.query);
+    if (!city) city = normCity(v.city_target) || inferCity(v.query);
+    if (service && city) break;
+  }
+  return { service, city };
+}
+
+// A served family (owned page in striking distance for a variant) becomes a
+// family-aggregated refresh of that page, in the striking_distance bucket so
+// the page-anchored action/scoring machinery applies wholesale. dedupeKey
+// intentionally standard: it keys on the PAGE, so this merges with any
+// genuine striking_distance row for the same page instead of queueing a
+// duplicate. The family variants ride in signal_metadata so the refresh
+// brief sees the full fragmented demand it is satisfying.
+function buildListicleFamilyRefreshOpp(fam, served, service, city) {
+  const opp = {
+    bucket: 'striking_distance',
+    query: served.variant.query,
+    page_url: served.hit.page_url,
+    service,
+    city,
+    signal_metadata: {
+      impressions: fam.impressions,
+      avg_position: Math.round(served.hit.position * 10) / 10,
+      family_size: fam.variants.length,
+      family_key: fam.key,
+      family_variants: fam.variants.slice(0, 5).map(({ query, impressions }) => ({ query, impressions })),
+      source: 'listicle_family',
+    },
+  };
+  const { total, breakdown } = scoreOpportunity(opp, {
+    position: served.hit.position,
+    impressions: fam.impressions,
+  });
+  opp.score = total;
+  opp.score_breakdown = breakdown;
+  opp.action_type = actionForOpportunity(opp);
+  opp.dedupe_key = dedupeKey(opp);
+  return opp;
+}
+
 // Family-stable dedupe key. Deliberately NOT dedupeKey(opp): that keys on
 // the representative query + service/city, all of which can flip between
 // mining runs as close variants trade places — minting fresh rows for one
@@ -1573,9 +1626,7 @@ class GscOpportunityMiner {
 
     // A variant is SERVED when some owned page ranks within striking
     // distance for it (best page-level weighted position ≤
-    // strikingDistancePositionMax) — improving that page belongs to the
-    // page-anchored buckets (striking_distance / ctr_rewrite), and a new
-    // post would cannibalize it. Mere map-row EXISTENCE is deliberately
+    // strikingDistancePositionMax). Mere map-row EXISTENCE is deliberately
     // NOT the test: every GSC impression maps to whatever owned page
     // happened to show, so existence alone would kill nearly every family
     // and leave the lane inert. Weak-ranking coverage (page beyond
@@ -1586,25 +1637,75 @@ class GscOpportunityMiner {
       .where('date_from', '>=', since)
       .whereIn('query', variantQueries)
       .select('query')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as page_position'))
       .groupBy('query')
       .groupByRaw(CANON_URL_SQL)
       .havingRaw(
         'sum(position * impressions) / NULLIF(sum(impressions), 0) <= ?',
         [THRESHOLDS.strikingDistancePositionMax]
       );
-    const servedQueries = new Set(mappedRows.map((r) => r.query));
+    // Best (lowest-position) qualifying owned page per variant query.
+    const servedBy = new Map();
+    for (const r of mappedRows) {
+      const pos = parseFloat(r.page_position);
+      const cur = servedBy.get(r.query);
+      if (!cur || pos < cur.position) servedBy.set(r.query, { page_url: r.page_url, position: pos });
+    }
+
+    // Hubless services (empty SERVICE_HUB_LINKS entry — lawn, tree-shrub)
+    // cannot pass the hub_link_present hard gate without a city-service
+    // route in the body, and _internalLinksFor supplies none for a cityless
+    // brief — a cityless hubless family would mine, draft, and park every
+    // time. Excluding the shape at mine time is the same fail-closed
+    // posture the brief builder documents ("no hub page to point at is an
+    // owner call"); a statewide link target unlocks these when ruled.
+    let hublessServices = null;
+    try {
+      const { SERVICE_HUB_LINKS } = require('../content/content-brief-builder')._internals;
+      hublessServices = new Set(
+        Object.entries(SERVICE_HUB_LINKS).filter(([, links]) => !links.length).map(([svc]) => svc)
+      );
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] listicle_family: hub-link map unavailable (${err.message}) — skipping cityless families outright`);
+    }
 
     const out = [];
     for (const fam of fams) {
-      if (fam.variants.some((v) => servedQueries.has(v.query))) continue;
-      const rep = fam.variants[0];
-      const city = normalizeCity(rep.city_target) || inferCityFromQuery(rep.query);
-      const service = canonicalizeServiceCategory(rep.service_category) || inferServiceFromQuery(rep.query);
-      // No resolvable Waves service (classifier AND inference both blank —
-      // e.g. an incidental "types of fish in florida" family) → skip:
-      // default revenue weight + contentGap would otherwise clear the blog
-      // floor and draft an off-topic hub post. Same rule as mineNoContentYet.
+      const { service, city } = resolveListicleFamilyServiceCity(fam, {
+        canonicalize: canonicalizeServiceCategory,
+        inferService: inferServiceFromQuery,
+        normCity: normalizeCity,
+        inferCity: inferCityFromQuery,
+      });
+      // No resolvable Waves service on ANY variant (classifier AND
+      // inference blank — e.g. an incidental "types of fish in florida"
+      // family) → skip: default revenue weight + contentGap would otherwise
+      // clear the blog floor and draft an off-topic hub post. Same rule as
+      // mineNoContentYet.
       if (!service) continue;
+
+      // Served family → route to a page REFRESH, never a competing blog and
+      // never a silent drop: every eligible variant is under the 50-imp
+      // floor by construction, so mineStrikingDistance (which needs ≥50 per
+      // query) can NEVER pick these pages up — delegation would strand
+      // them. A best page already in the top-3 means the intent is won
+      // outright; nothing to mine.
+      const served = fam.variants
+        .map((v) => ({ variant: v, hit: servedBy.get(v.query) }))
+        .filter((s) => s.hit)
+        .sort((a, b) => a.hit.position - b.hit.position)[0] || null;
+      if (served) {
+        if (served.hit.position >= THRESHOLDS.strikingDistancePositionMin) {
+          out.push(buildListicleFamilyRefreshOpp(fam, served, service, city));
+        }
+        continue;
+      }
+
+      // Cityless family on a hubless service can never publish (see above).
+      if (!city && (!hublessServices || hublessServices.has(service))) continue;
+
+      const rep = fam.variants[0];
       const opp = {
         bucket: 'listicle_family',
         query: rep.query,
@@ -1873,6 +1974,8 @@ module.exports._internals = {
   clusterListicleFamilies,
   listicleFamilyDedupeKey,
   listicleFamilyEligible,
+  resolveListicleFamilyServiceCity,
+  buildListicleFamilyRefreshOpp,
   canonicalizeServiceCategory,
   answerGapStem,
   stemmedTokenSet,
