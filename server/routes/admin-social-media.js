@@ -7,6 +7,7 @@ const { SOCIAL_FLAGS, isPausedByAdmin, normalizeUrl } = require('../services/soc
 const linkedin = require('../services/linkedin');
 const SocialContentStudio = require('../services/social-content-studio');
 const logger = require('../services/logger');
+const { runExclusive } = require('../utils/cron-lock');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -205,32 +206,46 @@ router.post('/review-graphics/:id/approve', requireStudioEnabled, async (req, re
     // Liveness gate, mirroring the autonomous-run approval: the source review
     // can be stamped removed between draft creation and this approval, and
     // approving would publish a removed review as a current testimonial.
-    // Check and approval run in ONE transaction with the source row locked
-    // (same shape as createReviewGraphic / publishWithReviewLivenessLock):
-    // the reconcile's stamping UPDATE queues behind the lock, so it cannot
-    // stamp between this read and the status write.
-    let outcome = null;
-    await db.transaction(async (trx) => {
-      if (existing.google_review_id) {
-        const src = await trx('google_reviews')
-          .where({ id: existing.google_review_id })
-          .forUpdate()
-          .first();
-        if (!src || src.missing_since) {
-          outcome = { status: 409, error: 'source Google review has been removed from Google — the graphic cannot be approved' };
-          return;
+    // Check and approval run in ONE transaction with the source row locked,
+    // UNDER the per-location sync advisory lock (same shape as
+    // createReviewGraphic / publishWithReviewLivenessLock): the row lock
+    // alone only serializes against the stamping UPDATE — a sync cycle that
+    // already fetched a snapshot without this review could stamp it right
+    // after a row-lock-only approval committed.
+    const approve = async () => {
+      let outcome = null;
+      await db.transaction(async (trx) => {
+        if (existing.google_review_id) {
+          const src = await trx('google_reviews')
+            .where({ id: existing.google_review_id })
+            .forUpdate()
+            .first();
+          if (!src || src.missing_since) {
+            outcome = { status: 409, error: 'source Google review has been removed from Google — the graphic cannot be approved' };
+            return;
+          }
         }
+        const [graphic] = await trx('review_graphics')
+          .where({ id: req.params.id })
+          .update({
+            status: 'approved',
+            approved_at: new Date(),
+            updated_at: new Date(),
+          })
+          .returning('*');
+        outcome = { status: 200, graphic };
+      });
+      return outcome;
+    };
+    let outcome;
+    if (existing.google_review_id && existing.location_id) {
+      outcome = await runExclusive(`gbp-review-sync:${existing.location_id}`, approve, { recordHealth: false });
+      if (outcome?.skipped) {
+        outcome = { status: 409, error: 'review sync is in progress for this location — approve again in a moment' };
       }
-      const [graphic] = await trx('review_graphics')
-        .where({ id: req.params.id })
-        .update({
-          status: 'approved',
-          approved_at: new Date(),
-          updated_at: new Date(),
-        })
-        .returning('*');
-      outcome = { status: 200, graphic };
-    });
+    } else {
+      outcome = await approve();
+    }
     if (outcome.status !== 200) return res.status(outcome.status).json({ error: outcome.error });
     res.json({ success: true, graphic: outcome.graphic });
   } catch (err) { next(err); }

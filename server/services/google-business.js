@@ -893,7 +893,15 @@ class GoogleBusinessService {
             logger.info(`[gbp] Synced ${reviews.length} reviews for ${loc.name} via GBP Reviews API`);
             // Authoritative full pull succeeded → anything we synced before
             // that Google no longer returns has been removed/filtered.
-            await this._reconcileMissingReviews(loc, locSyncStart);
+            // A failed reconcile must NOT hide behind the successful pull:
+            // it silently disables removal detection, so it joins
+            // result.errors and rings the degraded-sync alert (24h-deduped)
+            // — without falling back to Places (the pull itself was fine).
+            const reconcile = await this._reconcileMissingReviews(loc, locSyncStart);
+            if (reconcile && reconcile.ok === false) {
+              errors.push({ location: loc.name, error: reconcile.error, source: 'reconcile' });
+              await this._notifyDegradedSync(loc, `removal reconcile failed: ${reconcile.error}`);
+            }
           } catch (gbpErr) {
             gbpFailure = gbpErr.message;
             errors.push({ location: loc.name, error: gbpErr.message, source: 'gbp' });
@@ -973,7 +981,7 @@ class GoogleBusinessService {
         .whereNull('missing_since')
         .where('synced_at', '<', syncStart)
         .select('id', 'reviewer_name', 'star_rating', 'review_created_at');
-      if (candidates.length === 0) return;
+      if (candidates.length === 0) return { ok: true };
 
       // Atomic claim + alert in ONE transaction: the hourly job and the
       // manual admin sync (or two instances overlapping during a deploy) can
@@ -1027,14 +1035,19 @@ class GoogleBusinessService {
         });
       } catch (err) {
         logger.warn(`[gbp] Removal alert for ${loc.name} rolled back (${err.message}) — claim released, retrying next sync`);
-        return;
+        return { ok: false, error: `removal-alert transaction rolled back: ${err.message}` };
       }
-      if (gone.length === 0) return;
+      if (gone.length === 0) return { ok: true };
       // Count only — reviewer display names are PII and ride in the admin
       // notification, not the plaintext log.
       logger.warn(`[gbp] ${gone.length} review(s) at ${loc.name} disappeared from the GBP feed — stamped missing_since, admin notified`);
+      return { ok: true };
     } catch (err) {
+      // Surfaced to the caller: a silently failing reconcile disables
+      // removal detection while the sync still reports GBP success — the
+      // exact failure mode this watchdog exists to alert on.
       logger.warn(`[gbp] Missing-review reconcile failed for ${loc.name}: ${err.message}`);
+      return { ok: false, error: err.message };
     }
   }
 
@@ -1062,6 +1075,11 @@ class GoogleBusinessService {
           .first();
         if (recent) return;
 
+        // A reconcile failure is its own case: the authoritative pull
+        // SUCCEEDED (new reviews still sync, no Places fallback runs), but
+        // removal detection is dead until the reconcile works — the body
+        // must not claim the feed is down or that a fallback will run.
+        const reconcileFailure = String(cause || '').startsWith('removal reconcile failed');
         const detail = cause === 'no_client'
           ? `the GBP client could not be initialized: ${await this._describeCredentialGap(loc)}`
           : `the GBP Reviews API pull failed: ${cause}`;
@@ -1073,10 +1091,13 @@ class GoogleBusinessService {
         const fallbackState = process.env.GOOGLE_MAPS_API_KEY
           ? `is degraded — the sync will attempt the ~5-review Places sample fallback`
           : `is fully down — no Places fallback is available (GOOGLE_MAPS_API_KEY is not set)`;
+        const body = reconcileFailure
+          ? `Review sync for ${loc.name} pulled the GBP feed, but the ${cause}. New reviews are still syncing; REMOVALS will not be detected until the reconcile succeeds.`
+          : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
         await NotificationService.notifyAdmin(
           'review',
           title,
-          `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`,
+          body,
           { bell: true, link: '/admin/reviews', metadata: { locationId: loc.id, reason: 'gbp_sync_degraded', cause } },
         );
         logger.warn(`[gbp] Review sync degraded for ${loc.name} (${cause === 'no_client' ? 'no client' : 'pull failed'}) — admin notified`);

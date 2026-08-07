@@ -1044,6 +1044,30 @@ describe('Google Business review sync', () => {
     expect(copycat).toBeTruthy();
   });
 
+  test('a failed reconcile surfaces in errors and rings the degraded alert (no Places fallback)', async () => {
+    seedSyncedReview({ id: 'keep-1' });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+    service._reconcileMissingReviews = jest.fn(async () => ({ ok: false, error: 'boom' }));
+
+    const result = await service.syncAllReviews();
+
+    // The pull itself succeeded — no Places review-sample fallback runs.
+    expect(result.sources).toEqual({ bradenton: 'gbp' });
+    expect(result.errors.some(e => e.source === 'reconcile')).toBe(true);
+    const degraded = (db.__state.rows.notifications || []).filter(n => n.title.includes('sync degraded'));
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0].body).toContain('pulled the GBP feed');
+    expect(degraded[0].body).toContain('REMOVALS will not be detected');
+    const urls = global.fetch.mock.calls.map(c => String(c[0]));
+    expect(urls.filter(u => u.includes('fields=reviews'))).toHaveLength(0);
+  });
+
   test('an older overlapping runner cannot regress a newer synced_at token', async () => {
     // Runner B (newer fetch start) refreshed the row; runner A (older start,
     // slower feed processing) upserts the same review afterwards. A's write
