@@ -112,6 +112,33 @@ fi
 TMPDIR_RUN="$(mktemp -d -t codex-review.XXXXXX)"
 trap 'rm -rf "$TMPDIR_RUN"' EXIT
 
+# Stable artifact dir: the EXIT trap above deletes $TMPDIR_RUN the moment the
+# hook exits, so on a BLOCKED push the findings JSON was gone before anyone
+# could read it — if the terminal output was truncated (a piped push, a
+# harness cutoff), the P0s were unrecoverable and a re-run re-rolls the LLM
+# (counts are nondeterministic run-to-run). Persist each ref's findings +
+# codex stderr under the per-worktree git dir (parallel worktree pushes
+# never collide) and point every verdict message at it. Best-effort: a
+# persist failure must never affect the audit verdict.
+PERSIST_DIR="$(git rev-parse --absolute-git-dir 2>/dev/null)/codex-review-last"
+if [ -n "${PERSIST_DIR%/codex-review-last}" ] \
+  && rm -rf "$PERSIST_DIR" 2>/dev/null \
+  && mkdir -p "$PERSIST_DIR" 2>/dev/null; then
+  : # persistence armed — a failed wipe disables it so a stale run's
+    # findings can never masquerade as this run's evidence.
+else
+  PERSIST_DIR=""
+fi
+
+persist_ref_artifacts() {
+  # $1 = ref index. Copies whatever exists; never fails the hook.
+  [ -n "$PERSIST_DIR" ] || return 0
+  for artifact in "findings-$1.json" "codex-$1.stdout" "codex-$1.stderr"; do
+    [ -f "$TMPDIR_RUN/$artifact" ] && cp "$TMPDIR_RUN/$artifact" "$PERSIST_DIR/$artifact" 2>/dev/null
+  done
+  return 0
+}
+
 P0_TOTAL=0
 P1_TOTAL=0
 AUDITED=0
@@ -222,6 +249,10 @@ for i in "${!REF_SHAS[@]}"; do
   kill -TERM -"$WATCHDOG_PID" 2>/dev/null
   wait "$WATCHDOG_PID" 2>/dev/null
 
+  # Persist BEFORE any verdict/skip: the EXIT trap deletes $TMPDIR_RUN, and
+  # a blocked push's findings must survive the hook (see PERSIST_DIR above).
+  persist_ref_artifacts "$i"
+
   # Timeouts and codex failures skip only THIS ref: a multi-ref push keeps
   # its aggregate verdict, so a P0 already found on an earlier ref still
   # blocks even if a later ref's audit dies.
@@ -254,7 +285,19 @@ for i in "${!REF_SHAS[@]}"; do
   fi
 
   if [ ! -s "$OUT_FILE" ]; then
-    echo "[codex-review] codex produced no output for $AUDIT_LABEL — skipping this ref." >&2
+    # Post-quota codex has been seen exiting 0 with an EMPTY output file
+    # (2026-08: "attempt 1 blocked with P0s, attempt 2 no output → pushed").
+    # An empty verdict is NOT a clean verdict — say so as loudly as the
+    # usage-limit branch does, because the fail-open pass is otherwise
+    # indistinguishable from a real clean review in a scrollback.
+    echo "" >&2
+    echo "[codex-review] ⚠️  codex produced NO OUTPUT for $AUDIT_LABEL — this ref is UN-AUDITED." >&2
+    echo "[codex-review] An empty verdict is not a clean review (seen post-quota: a prior" >&2
+    echo "[codex-review] attempt blocked with P0s, the retry emitted nothing). The GitHub" >&2
+    echo "[codex-review] @codex round is the only audit on this push." >&2
+    if [ -n "$PERSIST_DIR" ]; then
+      echo "[codex-review] codex stdout/stderr saved in: $PERSIST_DIR" >&2
+    fi
     continue
   fi
 
@@ -309,6 +352,9 @@ echo "────────────────────────�
 if [ "$P0_TOTAL" -gt 0 ]; then
   echo "" >&2
   echo "[codex-review] blocking push — fix the P0 issues above, or bypass with SKIP_CODEX_REVIEW=1 git push." >&2
+  if [ -n "$PERSIST_DIR" ]; then
+    echo "[codex-review] findings JSON + codex logs saved in: $PERSIST_DIR (survives this hook; overwritten by the next audited push)." >&2
+  fi
   exit 1
 fi
 
