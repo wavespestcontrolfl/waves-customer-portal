@@ -111,7 +111,7 @@ fi
 #    The remote-tracking reflog is the evidence; it is written by the push
 #    itself, so no timestamp comparison and no workflow change is needed.
 PUSH_AFTER="${VERIFY_PR_PUSH_AFTER:-}"
-RUN_FIELDS="status,conclusion,event,url,databaseId,createdAt,headSha"
+RUN_FIELDS="status,conclusion,event,url,databaseId,createdAt,headSha,headBranch"
 
 REFLOG_SHAS="$(git log -g --format='%H' "origin/$BRANCH" 2>/dev/null)"
 if [ -z "$REFLOG_SHAS" ]; then
@@ -149,10 +149,13 @@ while [ "$try" -lt "$WORKFLOW_TRIES" ]; do
   RUNS_JSON="$(gh run list --repo "$REPO_SLUG" --workflow "$WORKFLOW_FILE" \
     --commit "$LOCAL_SHA" --json "$RUN_FIELDS" 2>/dev/null)" \
     || fail "gh run list failed — check gh auth."
-  # Only runs for THIS head, triggered by the PR itself. --commit already
-  # filters by SHA; headSha/event guard against a run attached to another ref.
+  # Only runs for THIS head on THIS branch, triggered by the PR itself.
+  # --commit filters by SHA alone, so the same SHA sitting at the head of
+  # another branch or a stacked PR would otherwise satisfy this gate with a
+  # run the target PR never triggered. headBranch ties it to this PR's ref.
   MINE_JSON="$(printf '%s' "$RUNS_JSON" \
-    | jq -r --arg sha "$LOCAL_SHA" '[.[] | select(.headSha == $sha and .event == "pull_request")]')"
+    | jq -r --arg sha "$LOCAL_SHA" --arg br "$BRANCH" \
+      '[.[] | select(.headSha == $sha and .event == "pull_request" and .headBranch == $br)]')"
   if [ -n "$PUSH_AFTER" ]; then
     NEW_JSON="$(printf '%s' "$MINE_JSON" \
       | jq -r --arg after "$PUSH_AFTER" '[.[] | select(.createdAt >= $after)]')"
@@ -186,12 +189,29 @@ if [ "$FINAL_REMOTE" != "$LOCAL_SHA" ]; then
   fail "remote tip moved to $FINAL_REMOTE during the wait (was $LOCAL_SHA) — the CI evidence above is for a SHA that is no longer the branch tip." \
     "See waves-ship REFERENCE.md 'external push-hijack hazard', then re-push and re-run this script."
 fi
-FINAL_HEAD="$(gh pr view "$PR_NUMBER" --repo "$REPO_SLUG" --json headRefOid 2>/dev/null \
-  | jq -r '.headRefOid // empty')"
+#    Mergeability is re-read too: `main` can advance during the wait and make
+#    this PR conflicting without either SHA changing, which would leave the
+#    cached pre-poll MERGEABLE printed as if it still held.
+FINAL_VIEW="$(gh pr view "$PR_NUMBER" --repo "$REPO_SLUG" \
+  --json headRefOid,mergeable,mergeStateStatus 2>/dev/null)" \
+  || fail "gh pr view failed for PR #$PR_NUMBER during final re-verification."
+FINAL_HEAD="$(printf '%s' "$FINAL_VIEW" | jq -r '.headRefOid // empty')"
 if [ "$FINAL_HEAD" != "$LOCAL_SHA" ]; then
   fail "PR #$PR_NUMBER head moved to $FINAL_HEAD during the wait (was $LOCAL_SHA) — CI evidence is stale." \
     "Re-run this script against the current head before trusting any check state."
 fi
+FINAL_MERGEABLE="$(printf '%s' "$FINAL_VIEW" | jq -r '.mergeable // "UNKNOWN"')"
+FINAL_STATE="$(printf '%s' "$FINAL_VIEW" | jq -r '.mergeStateStatus // ""')"
+if [ "$FINAL_MERGEABLE" = "CONFLICTING" ]; then
+  fail "PR #$PR_NUMBER became CONFLICTING during the wait (was $MERGEABLE/$MERGE_STATE, now $FINAL_MERGEABLE/$FINAL_STATE) — main advanced under it." \
+    "The CI evidence above predates the conflict, and the next push's workflow will silently never fire while it stands." \
+    "Fix: git fetch origin main && git merge origin/main   (resolve, commit, push), then re-run and re-tag '@codex review'."
+fi
+if [ "$FINAL_MERGEABLE" != "$MERGEABLE" ] || [ "$FINAL_STATE" != "$MERGE_STATE" ]; then
+  echo "ℹ️  verify-pr-checks: mergeability changed during the wait: $MERGEABLE/$MERGE_STATE → $FINAL_MERGEABLE/$FINAL_STATE" >&2
+fi
+MERGEABLE="$FINAL_MERGEABLE"
+MERGE_STATE="$FINAL_STATE"
 
 echo "✅ verify-pr-checks: PR #$PR_NUMBER head $LOCAL_SHA — mergeable=$MERGEABLE ($MERGE_STATE), push=$PUSH_KIND, $NEW_COUNT tests-workflow run(s) attributable to this push:"
 echo "   run attribution: $ATTRIBUTION"
