@@ -11765,83 +11765,67 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
 async function transferGroupFollowupOwnership(estimate) {
   try {
     if (!estimate?.estimate_group_id) return;
+    const FLAGS = ['followup_unviewed_sent', 'followup_viewed_sent', 'followup_final_sent', 'followup_expiring_sent'];
     // Anchor's completed-stage state (fresh read — codex #3244 r8) seeds the
-    // new owner so an already-sent stage never repeats.
+    // owner so an already-sent stage never repeats.
     const anchorFlags = await db('estimates')
       .where({ id: estimate.id })
-      .first('followup_unviewed_sent', 'followup_viewed_sent', 'followup_final_sent', 'followup_expiring_sent');
+      .first(...FLAGS);
     if (!anchorFlags) return;
-    // ONE atomic statement (local codex P1, 2026-08-07): owner pick +
-    // armed-sibling guard + flag write together. Two concurrent terminal
-    // events target the same deterministic owner row; the loser blocks on
-    // its row lock, re-evaluates NOT EXISTS against the winner's committed
-    // un-burned flags, and updates zero rows — never two armed owners.
-    // Provenance rides the same atomic write (local codex P1 ×2,
-    // 2026-08-07): releaseStage must target exactly the sibling THIS
-    // transfer armed (owner may not be the earliest row by the time a
-    // failed in-flight send releases) and clear only flags that were
-    // COPIED true (transient-claim case) — never a stage the sweep
-    // legitimately completed later on the new owner.
-    const result = await db.raw(
-      `UPDATE estimates AS o SET
-         followup_unviewed_sent = ?,
-         followup_viewed_sent = ?,
-         followup_final_sent = ?,
-         followup_expiring_sent = ?,
-         estimate_data = COALESCE(o.estimate_data, '{}'::jsonb) || jsonb_build_object(
-           'followupOwnershipFrom', jsonb_build_object(
-             'anchorId', ?::text,
-             'anchorIds', COALESCE(
-               (SELECT a.estimate_data->'followupOwnershipFrom'->'anchorIds' FROM estimates a WHERE a.id = ?),
-               '[]'::jsonb
-             ) || to_jsonb(?::text),
-             'copied', jsonb_build_object(
-               'followup_unviewed_sent', ?::boolean,
-               'followup_viewed_sent', ?::boolean,
-               'followup_final_sent', ?::boolean,
-               'followup_expiring_sent', ?::boolean
-             )
-           )
-         ),
-         updated_at = NOW()
-       WHERE o.id = (
-         SELECT id FROM estimates
-         WHERE estimate_group_id = ? AND id <> ?
-           AND status IN ('sent','viewed') AND archived_at IS NULL
-         ORDER BY created_at ASC LIMIT 1
-       )
-       AND NOT EXISTS (
-         SELECT 1 FROM estimates s
-         WHERE s.estimate_group_id = ? AND s.id <> ?
-           AND s.status IN ('sent','viewed') AND s.archived_at IS NULL
-           AND (s.followup_unviewed_sent IS NOT TRUE OR s.followup_viewed_sent IS NOT TRUE
-             OR s.followup_final_sent IS NOT TRUE OR s.followup_expiring_sent IS NOT TRUE)
-       )
-       RETURNING o.id`,
-      [
-        anchorFlags.followup_unviewed_sent === true,
-        anchorFlags.followup_viewed_sent === true,
-        anchorFlags.followup_final_sent === true,
-        anchorFlags.followup_expiring_sent === true,
-        String(estimate.id),
-        // Chained transfers (codex #3248 r4): A→B→C inside A's in-flight
-        // window must let releaseStage(A) still find C — the anchorIds
-        // array carries every ancestor claim holder, seeded from the
-        // terminal row's OWN chain plus itself.
-        String(estimate.id),
-        String(estimate.id),
-        anchorFlags.followup_unviewed_sent === true,
-        anchorFlags.followup_viewed_sent === true,
-        anchorFlags.followup_final_sent === true,
-        anchorFlags.followup_expiring_sent === true,
-        String(estimate.estimate_group_id), String(estimate.id),
-        String(estimate.estimate_group_id), String(estimate.id),
-      ],
-    );
-    const ownerId = result?.rows?.[0]?.id;
-    if (ownerId) {
-      logger.info(`[estimate-public] group ${estimate.estimate_group_id}: follow-up ownership transferred to sibling ${ownerId} after ${estimate.id} went terminal`);
-    }
+    // PER-STAGE merge under a group advisory lock (codex #3248 r8): a
+    // sibling that re-armed only its expiry stage (own-token extension) must
+    // not block the transfer of the anchor's other stages — and a stage any
+    // live row already has armed (false/NULL) stays with that row. Only
+    // stages burned on EVERY live sibling adopt the anchor's state on the
+    // deterministic owner (earliest created). The xact lock serializes
+    // concurrent terminal events; provenance records the ancestor claim
+    // chain plus exactly which flags this transfer set true, so
+    // releaseStage can un-burn a transient claim without touching stages
+    // the owner earned itself.
+    await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-followup', String(estimate.estimate_group_id)],
+      );
+      const siblings = await trx('estimates')
+        .where({ estimate_group_id: estimate.estimate_group_id })
+        .whereNot({ id: estimate.id })
+        .whereIn('status', ['sent', 'viewed'])
+        .whereNull('archived_at')
+        .orderBy('created_at', 'asc')
+        .select('id', ...FLAGS);
+      if (!siblings.length) return;
+      const owner = siblings[0];
+      const updates = {};
+      const copied = {};
+      for (const flag of FLAGS) {
+        const armedAnywhere = siblings.some((s) => s[flag] !== true);
+        if (armedAnywhere) {
+          copied[flag] = false;
+          continue;
+        }
+        updates[flag] = anchorFlags[flag] === true;
+        copied[flag] = anchorFlags[flag] === true;
+      }
+      if (!Object.keys(updates).length) return;
+      const chainRow = await trx('estimates')
+        .where({ id: estimate.id })
+        .first(db.raw("estimate_data->'followupOwnershipFrom'->'anchorIds' AS chain"));
+      const anchorIds = Array.isArray(chainRow?.chain) ? chainRow.chain : [];
+      if (!anchorIds.includes(String(estimate.id))) anchorIds.push(String(estimate.id));
+      await trx('estimates')
+        .where({ id: owner.id })
+        .whereIn('status', ['sent', 'viewed'])
+        .update({
+          ...updates,
+          estimate_data: trx.raw(
+            "COALESCE(estimate_data, '{}'::jsonb) || jsonb_build_object('followupOwnershipFrom', jsonb_build_object('anchorId', ?::text, 'anchorIds', ?::jsonb, 'copied', ?::jsonb))",
+            [String(estimate.id), JSON.stringify(anchorIds), JSON.stringify(copied)],
+          ),
+          updated_at: trx.fn.now(),
+        });
+      logger.info(`[estimate-public] group ${estimate.estimate_group_id}: follow-up stages ${Object.keys(updates).join(',')} transferred to sibling ${owner.id} after ${estimate.id} went terminal`);
+    });
   } catch (e) {
     logger.warn(`[estimate-public] follow-up ownership transfer failed for estimate ${estimate?.id}: ${e.message}`);
   }

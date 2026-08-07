@@ -490,6 +490,7 @@ async function processLeadEstimateAutoSendBatch({
     staleBlocked: staleClaims.blocked,
   };
 
+  const claimedGroupIdsThisScan = new Set();
   for (const estimate of candidates) {
     const eligibility = leadEstimateAutoSendEligibility(estimate, { ...config, now });
     if (!eligibility.eligible) {
@@ -506,6 +507,27 @@ async function processLeadEstimateAutoSendBatch({
       continue;
     }
 
+    // One auto-send per estimate GROUP per scan (codex #3248 r8): sending
+    // any member publishes its siblings, and two workers pre-claiming
+    // different members would deadlock into mutual aborts that stamp
+    // attemptedAt on both — permanently disqualifying the group. Skip a
+    // member whose group was already claimed this scan or has a mid-send
+    // member; the group send covers it, or the next scan retries.
+    if (estimate.estimate_group_id) {
+      if (claimedGroupIdsThisScan.has(String(estimate.estimate_group_id))) {
+        results.skipped += 1;
+        continue;
+      }
+      const midSend = await database('estimates')
+        .where({ estimate_group_id: estimate.estimate_group_id, status: 'sending' })
+        .whereNot({ id: estimate.id })
+        .first('id');
+      if (midSend) {
+        results.skipped += 1;
+        continue;
+      }
+    }
+
     const claimed = await claimLeadEstimateAutoSend(database, estimate, {
       now,
       sendMethod: config.sendMethod,
@@ -513,6 +535,9 @@ async function processLeadEstimateAutoSendBatch({
     if (!claimed) {
       results.skipped += 1;
       continue;
+    }
+    if (estimate.estimate_group_id) {
+      claimedGroupIdsThisScan.add(String(estimate.estimate_group_id));
     }
 
     try {
