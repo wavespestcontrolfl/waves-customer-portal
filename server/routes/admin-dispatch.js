@@ -10325,23 +10325,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               });
               Object.assign(smsNotesDelta, deferredDelta);
               completionHoldQueued = true;
-              // Safety net for the bundled review ask: arm the standalone
-              // inline-retry rail for shortly AFTER the queued completion
-              // delivers. Delivered replay → finalization marks the request
-              // delivered first and the standalone sender skips; a replay
-              // that terminally blocks → the standalone ask still goes out
-              // instead of sitting pending forever.
-              if (bundledReviewRequestId && bundledReviewUrl && sentSmsBody.includes(bundledReviewUrl)) {
-                try {
-                  const ReviewService = require('../services/review-request');
-                  await ReviewService.markInlineRetryable(
-                    bundledReviewRequestId,
-                    new Date(new Date(smsResult.nextAllowedAt).getTime() + 45 * 60 * 1000),
-                  );
-                } catch (reviewErr) {
-                  logger.warn(`[dispatch] deferred-completion review safety-net arm failed for ${bundledReviewRequestId}: ${reviewErr.message}`);
-                }
-              }
+              // The bundled review ask rides inside the queued body. Its
+              // standalone fallback is armed by the scheduled-SMS executor
+              // ONLY if the queued row terminally blocks — a fixed timer
+              // here would race a still-retryable replay and double-text
+              // the ask (delivered replays mark the request delivered via
+              // the finalization hook instead).
             } catch (queueErr) {
               logger.error(`[dispatch] Completion SMS requeue failed for record ${record.id}: ${queueErr.message}`);
             }

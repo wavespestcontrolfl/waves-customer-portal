@@ -2981,6 +2981,23 @@ function initScheduledJobs() {
             } else {
               await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
               logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+              // Terminal block on a deferred completion carrying a bundled
+              // review link: the completion text (and its review ask) will
+              // never deliver, so arm the standalone review sender now —
+              // armed ONLY here, never on a timer, so it can't race a
+              // still-retryable replay into a double ask.
+              if (claimMeta.entry_point === 'dispatch_completion_deferred' && claimMeta.bundled_review_request_id) {
+                try {
+                  const ReviewService = require('./review-request');
+                  await ReviewService.markInlineRetryable(
+                    claimMeta.bundled_review_request_id,
+                    new Date(Date.now() + 5 * 60 * 1000),
+                  );
+                  logger.info(`[scheduled-sms] deferred completion ${msg.id} terminally blocked — standalone review fallback armed for ${claimMeta.bundled_review_request_id}`);
+                } catch (reviewErr) {
+                  logger.warn(`[scheduled-sms] review fallback arm failed for ${msg.id}: ${reviewErr.message}`);
+                }
+              }
               // Terminal block on a deferred lead menu: release the
               // once-ever claim so this phone's NEXT form submission can
               // re-arm — otherwise the null-sid claim suppresses the menu
@@ -3015,11 +3032,23 @@ function initScheduledJobs() {
               .first('id');
             const failedAt = new Date();
             if (providerRow) {
+              // Same finalize_pending stamp as the normal settlement: a
+              // deferred completion/invoice row settled through THIS crash
+              // path also delivered without its finalization running — the
+              // stranded-finalization sweep picks the stamp up. (claimMeta
+              // is scoped to the try above — re-parse from the row here.)
+              const crashMeta = typeof msg.metadata === 'string'
+                ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
+                : (msg.metadata || {});
+              const crashOwesFinalization = crashMeta.entry_point === 'dispatch_completion_deferred'
+                || crashMeta.entry_point === 'invoice_send_deferred';
               await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                 status: 'sent',
                 created_at: failedAt,
                 updated_at: failedAt,
-                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
+                metadata: db.raw(crashOwesFinalization
+                  ? "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at, 'finalize_pending', true)"
+                  : "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('queued_at', created_at)"),
               });
               const recoveredMeta = await readFreshMeta();
               const suggest = require('./sms-suggest-mode');
