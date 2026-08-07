@@ -343,7 +343,12 @@ async function filterRowsToStreet(database, rows, streetScope) {
 //    termite BOND (termite_bond_1yr) is a distinct warranty product and must
 //    not block a bait-monitoring quote (codex #3253 r3).
 function ownershipFamiliesFromText(raw) {
-  const s = String(raw || '').toLowerCase();
+  // Key-shaped text ('rodent_bait', 'pest_rodent_quarterly' in an unlinked
+  // row's service_type) must match the token regexes — underscores are word
+  // characters, so without this normalization \brodent\b never fires and a
+  // key-shaped owned row goes unrecognized (codex #3253 r5). Catalog text
+  // arrives pre-normalized; doing it again is harmless.
+  const s = String(raw || '').toLowerCase().replace(/[_-]+/g, ' ');
   // One-time identities are never an owned recurring obligation — mirrors
   // toQualifyingKeys' own first check, which only guards the qualifying
   // families; without this, rodent_general_one_time's repeated joined text

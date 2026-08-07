@@ -624,3 +624,38 @@ describe('non-owning catalog identities under stale service_type', () => {
     })).toEqual(['lawn_care']);
   });
 });
+
+// Codex #3253 r5: key-shaped service_type values must classify; tier
+// queries bypass the ownership fail-closed gate.
+describe('r5 regressions', () => {
+  const { ownershipKeysForRow } = require('../services/waveguard-existing-services');
+
+  test('key-shaped service_type values classify for ownership', () => {
+    expect(ownershipKeysForRow({ service_type: 'rodent_bait' })).toEqual(['rodent_bait']);
+    expect(ownershipKeysForRow({ service_type: 'rodent_monitoring' })).toEqual(['rodent_bait']);
+    expect(ownershipKeysForRow({ service_type: 'pest_rodent_quarterly' }).sort())
+      .toEqual(['pest_control', 'rodent_bait']);
+    expect(ownershipKeysForRow({ service_type: 'termite_bond_1yr' })).toEqual([]);
+  });
+
+  test('a target-tier query is answered despite an ownership lookup failure', async () => {
+    const base = activePlanDb('cust-tier-fc', ['Mosquito Control', 'Termite Bait Monitoring'], 'Silver');
+    const db = (table) => {
+      const q = base(table);
+      if (table === 'scheduled_services as s') {
+        q.select = () => { throw new Error('join exploded'); };
+      }
+      return q;
+    };
+    const result = await buildCustomerPricingResponse({
+      db,
+      propertyLookup: null,
+      prompt: 'Price WaveGuard Silver',
+      targetTier: 'Silver',
+      customer: propertyCustomer({ id: 'cust-tier-fc', waveguard_tier: 'Silver' }),
+    });
+
+    expect(result.code).toBe('TARGET_TIER_ALREADY_EARNED');
+    expect(result.code).not.toBe('PRICING_UNAVAILABLE');
+  });
+});
