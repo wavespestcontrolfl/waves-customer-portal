@@ -574,18 +574,30 @@ router.get('/:id/edit-source', async (req, res, next) => {
     // empty search state even when customer_id is set. Shape mirrors the
     // fields the chip and its setters read from the customer search results.
     // Best-effort: a lookup failure must not block opening the estimate.
+    // ADMIN ONLY: this router is requireTechOrAdmin and the estimate lookup
+    // is unscoped, so returning the payload to a technician token would leak
+    // contact fields and office-only monthlyRate outside the customer APIs'
+    // assignment gate (codex P1). Technicians get customer:null — the chip
+    // simply doesn't render, which was the pre-PR behavior for everyone.
     let customer = null;
-    if (estimate.customer_id) {
+    if (estimate.customer_id && req.techRole === 'admin') {
       const c = await db('customers').where({ id: estimate.customer_id }).first().catch(() => null);
       if (c) {
+        // Tier semantics follow the canonical membership predicate
+        // (admin-customers hasMembership): 'One-Time'/'Commercial'/etc. are
+        // non-membership sentinels, and the chip labels ANY truthy tier as
+        // "Recurring plan" — a sentinel tier must render "No active plan"
+        // (codex P2).
+        const { hasMembership } = require('./admin-customers');
+        const member = hasMembership(c);
         customer = {
           id: c.id,
           firstName: c.first_name || '',
           lastName: c.last_name || '',
           phone: c.phone || null,
           email: c.email || null,
-          tier: c.waveguard_tier,
-          monthlyRate: parseFloat(c.monthly_rate || 0),
+          tier: member ? c.waveguard_tier : null,
+          monthlyRate: member ? parseFloat(c.monthly_rate || 0) : 0,
         };
       }
     }
