@@ -181,6 +181,16 @@ describe('findReusableCallLead identity keys', () => {
     expect(db.calls.length).toBe(0);
   });
 
+  test('no phone with a NON-email capture ("unknown"): never an identity key, no query', async () => {
+    // Customer-attached calls reach this lookup without the workable-signal
+    // EMAIL_RE gate — the function itself must refuse a malformed capture, or
+    // two calls both storing "unknown" would reuse each other's leads.
+    const db = makeDb({ id: 'lead-junk' });
+    const found = await findReusableCallLead(db, { phone: null, email: 'unknown' });
+    expect(found).toBeNull();
+    expect(db.calls.length).toBe(0);
+  });
+
   test('email match with a CONFLICTING stated name forces a fresh lead', async () => {
     const db = makeDb({ id: 'lead-4', first_name: 'Maria', last_name: 'Lopez' });
     const found = await findReusableCallLead(db, {
