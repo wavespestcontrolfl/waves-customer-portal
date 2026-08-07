@@ -1140,7 +1140,7 @@ describe('listicle_family scoring + action mapping', () => {
     // (service, city) with their own stable keys, ONE emitted per page at
     // a time — frozen keys rotate to the next subgroup, in-flight keys
     // make later subgroups wait (Codex r22 + audit).
-    expect(mineSrc).toMatch(/const pick = ranked\.find\(\(g\) => !frozen\.has\(g\.key\)\)/);
+    expect(mineSrc).toMatch(/const pick = ranked\.find\(\(g\) => !frozen\.has\(g\.key\) && !coveredByFrozen\(g\)\)/);
     expect(mineSrc).toMatch(/r\.dedupe_key !== pick\.key/);
     expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(pick\.entries\)/);
     // Grouped by PAGE alone — mixed-classification families served by one
@@ -1170,6 +1170,19 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/inflightRefreshQueries\.has\(String\(v\.query \|\| ''\)\.toLowerCase\(\)\)/);
     // The sweep re-throws under a transaction (rollback beats half-state).
     expect(src).toMatch(/if \(trx\) throw err;/);
+    // r24: the blocked topic behind specialty→pest survives into metadata,
+    // completed supersets stay covered, and BOTH fences read every
+    // unanswered query an answer_gap refresh will edit.
+    const { extractSpecialtyTopic } = require('../services/seo/gsc-opportunity-miner')._internals;
+    expect(extractSpecialtyTopic(['types of wasps in florida'])).toBe('wasp');
+    expect(extractSpecialtyTopic(['signs of bed bugs sarasota'])).toBe('bed-bug');
+    expect(extractSpecialtyTopic(['drought tolerant plants florida'])).toBeNull();
+    expect(mineSrc).toMatch(/specialty_topic: extractSpecialtyTopic/);
+    expect(mineSrc).toMatch(/const coveredByFrozen = \(g\) => frozenRows\.some/);
+    expect(mineSrc).toMatch(/current\.every\(\(k\) => covered\.includes\(k\)\)/);
+    expect(src).toMatch(/signal_metadata->'unanswered_queries' as unanswered_queries/);
+    const arbSrc2 = src.slice(src.indexOf('async _arbitratedRefreshPages'), src.indexOf('async _sweepStaleFamilyRows'));
+    expect(arbSrc2).toMatch(/unanswered_queries/);
     // Blog↔refresh transitions defer while the family's prior work is
     // claimed or in review (Codex r20).
     expect(mineSrc).toMatch(/inflightFamily\.blogKeys\.has\(listicleFamilyDedupeKey\(fam\.key\)\)/);

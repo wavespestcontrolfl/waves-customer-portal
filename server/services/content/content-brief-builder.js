@@ -676,6 +676,11 @@ class ContentBriefBuilder {
     // on customer_signal — e.g. 'rodent'/'termite').
     const faqBlocked = isFaqBlockedService([
       opportunity.service,
+      // The specific topic behind specialty→pest canonicalization — 'wasp'
+      // is individually FAQ-blocked while broad 'pest' is not, so the
+      // collapsed service alone would let a blocked topic keep its FAQ
+      // mandate (Codex r24).
+      opportunity.signal_metadata?.specialty_topic,
       signals.customer_signal?.service,
       signals.customer_signal?.topic,
     ]);
@@ -804,6 +809,7 @@ class ContentBriefBuilder {
         family_size: opportunity.signal_metadata?.family_size ?? null,
         family_variants: opportunity.signal_metadata?.family_variants || null,
         family_queries: opportunity.signal_metadata?.family_queries || null,
+        specialty_topic: opportunity.signal_metadata?.specialty_topic || null,
         family_avg_position: opportunity.signal_metadata?.family_avg_position ?? null,
       },
       customer_signal: signals.customer_signal

@@ -140,6 +140,27 @@ function classifierValidationRes() {
   }
   return CLASSIFIER_VALIDATION_RES;
 }
+// The specific FAQ-blocked topic hiding behind specialty→pest
+// canonicalization: 'wasp' etc. are individually blocked in
+// content-guardrails while broad 'pest' is not, so the topic must ride
+// the opportunity's metadata into the brief-builder's policy inputs
+// instead of vanishing at canonicalization (Codex r24). Ids match
+// FAQ_BLOCKED_SERVICES ('bed bug' → 'bed-bug').
+const SPECIALTY_TOPIC_PATTERNS = [
+  ['bed-bug', /\bbed\s*bugs?\b/i],
+  ['wasp', /\bwasps?\b/i],
+  ['cockroach', /\b(?:cockroach|roach)(?:es)?\b/i],
+  ['spider', /\bspiders?\b/i],
+];
+function extractSpecialtyTopic(queries = []) {
+  for (const q of queries) {
+    for (const [topic, re] of SPECIALTY_TOPIC_PATTERNS) {
+      if (re.test(String(q || ''))) return topic;
+    }
+  }
+  return null;
+}
+
 function classifierQuerySupported(rawCategory, canonicalService, query) {
   if (!canonicalService) return false;
   const raw = String(rawCategory || '').toLowerCase().trim();
@@ -605,6 +626,7 @@ function buildListicleFamilyRefreshOpp(entries) {
       // variant; family_variants below stays capped for brief metadata
       // (pre-push audit r21).
       family_queries: allVariants.map((v) => String(v.query || '').toLowerCase()),
+      specialty_topic: extractSpecialtyTopic(allVariants.map((v) => v.query)),
       // At least one variant from EVERY merged family, then fill by
       // impressions — a five-big-variant family A must not erase family B
       // from the only row that can carry it (Codex r12).
@@ -1059,10 +1081,13 @@ class GscOpportunityMiner {
             .whereNot('bucket', 'listicle_family')
             .whereIn('status', ['pending', 'claimed', 'pending_review'])
             .whereNotNull('page_url')
-            .select('page_url', 'query');
+            .select('page_url', 'query', db.raw("signal_metadata->'unanswered_queries' as unanswered_queries"));
           for (const r of inflight) {
             answerGapPages.add(r.page_url);
             if (r.query) inflightRefreshQueries.add(String(r.query).toLowerCase());
+            for (const u of (Array.isArray(r.unanswered_queries) ? r.unanswered_queries : [])) {
+              if (u && u.query) inflightRefreshQueries.add(String(u.query).toLowerCase());
+            }
           }
         } catch (err) {
           logger.warn(`[gsc-opp-miner] in-flight refresh fence lookup failed: ${err.message}`);
@@ -1098,10 +1123,10 @@ class GscOpportunityMiner {
           const rows = await db('opportunity_queue')
             .where({ bucket: 'listicle_family', action_type: 'refresh_existing_page' })
             .whereNotNull('page_url')
-            .select('page_url', 'dedupe_key', 'status');
+            .select('page_url', 'dedupe_key', 'status', db.raw("signal_metadata->'family_keys' as family_keys"));
           for (const r of rows) {
             if (!familyRefreshState.has(r.page_url)) familyRefreshState.set(r.page_url, []);
-            familyRefreshState.get(r.page_url).push({ dedupe_key: r.dedupe_key, status: r.status });
+            familyRefreshState.get(r.page_url).push({ dedupe_key: r.dedupe_key, status: r.status, family_keys: r.family_keys });
           }
         } catch (err) {
           logger.warn(`[gsc-opp-miner] family refresh-state lookup failed: ${err.message}`);
@@ -2265,6 +2290,7 @@ class GscOpportunityMiner {
           family_size: fam.variants.length,
           family_key: fam.key,
           family_queries: fam.variants.map((v) => String(v.query || '').toLowerCase()),
+          specialty_topic: extractSpecialtyTopic(fam.variants.map((v) => v.query)),
           family_avg_position: Math.round(fam.position * 10) / 10,
           family_variants: fam.variants.slice(0, 5).map(({ query, impressions }) => ({ query, impressions })),
         },
@@ -2307,8 +2333,18 @@ class GscOpportunityMiner {
         }))
         .sort((a, b) => b.impressions - a.impressions);
       const rowsForPage = familyRefreshState.get(pageUrl) || [];
-      const frozen = new Set(rowsForPage.filter((r) => r.status === 'done' || r.status === 'skipped').map((r) => r.dedupe_key));
-      const pick = ranked.find((g) => !frozen.has(g.key));
+      const frozenRows = rowsForPage.filter((r) => r.status === 'done' || r.status === 'skipped');
+      const frozen = new Set(frozenRows.map((r) => r.dedupe_key));
+      // A completed row whose stored family_keys is a SUPERSET of the
+      // subgroup's current set already covered this work — membership
+      // fluctuation (a family dropping below eligibility) must not reopen
+      // it; only genuinely NEW families mint a new generation (Codex r24).
+      const coveredByFrozen = (g) => frozenRows.some((r) => {
+        const covered = Array.isArray(r.family_keys) ? r.family_keys : [];
+        const current = g.entries.map((e) => e.fam.key);
+        return current.length && current.every((k) => covered.includes(k));
+      });
+      const pick = ranked.find((g) => !frozen.has(g.key) && !coveredByFrozen(g));
       if (!pick) continue; // every subgroup already completed/dismissed
       const otherInflight = rowsForPage.some((r) => ['pending', 'claimed', 'pending_review'].includes(r.status)
         && r.dedupe_key !== pick.key);
@@ -2365,13 +2401,23 @@ class GscOpportunityMiner {
       logger.warn(`[gsc-opp-miner] refresh arbitration frozen-key lookup failed: ${err.message}`);
     }
     const live = candidates.filter((o) => !frozenKeys.has(o.dedupe_key));
+    // EVERY query the refresh will edit — an answer_gap candidate anchors
+    // its strongest unanswered query in o.query but edits all of
+    // unanswered_queries; a secondary one can be a family's variant
+    // (Codex r24).
+    const liveQueries = new Set();
+    for (const o of live) {
+      if (o.query) liveQueries.add(String(o.query).toLowerCase());
+      for (const u of (Array.isArray(o.signal_metadata?.unanswered_queries) ? o.signal_metadata.unanswered_queries : [])) {
+        if (u && u.query) liveQueries.add(String(u.query).toLowerCase());
+      }
+    }
     return {
       pages: new Set(live.map((o) => o.page_url)),
-      // Their queries too: a family BLOG whose variant one of these
-      // refreshes targets is the same intent under a different key — a
-      // boosted ordinary refresh and a family blog must not both persist
-      // (Codex r21).
-      queries: new Set(live.map((o) => String(o.query || '').toLowerCase()).filter(Boolean)),
+      // A family BLOG whose variant one of these refreshes targets is the
+      // same intent under a different key — a boosted ordinary refresh and
+      // a family blog must not both persist (Codex r21).
+      queries: liveQueries,
     };
   }
 
@@ -2712,6 +2758,7 @@ module.exports._internals = {
   listicleFamilyEligible,
   resolveListicleFamilyServiceCity,
   classifierQuerySupported,
+  extractSpecialtyTopic,
   listicleFamilyRefreshDedupeKey,
   listicleFamilyRepReachable,
   buildListicleFamilyRefreshOpp,
