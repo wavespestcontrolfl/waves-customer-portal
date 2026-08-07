@@ -3099,6 +3099,17 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(saying.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
+  test('pest-control service/program subjects are safety claims too (Codex PR r5 audit)', () => {
+    for (const body of [
+      'Our pest control is safe for pets.',
+      'Our pest-control program is safe for kids.',
+      'We offer safe pest control for your family.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+  });
+
   test('treated-surface subjects reach the idiom check — incomplete idiom blocks (Codex PR r4)', () => {
     const surfaces = guardrails.evaluate({ body: 'Treated surfaces are safe once dry.' }, {});
     expect(surfaces.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);

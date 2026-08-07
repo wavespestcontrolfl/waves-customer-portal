@@ -1879,7 +1879,6 @@ class AutonomousRunner {
         },
       };
     }
-
     const gateResult = spamGate.evaluateTitleMetaSpam({
       // Protected target: blank title makes inspectTitle skip (the proposal
       // is discarded by the publisher); the meta half still runs in full.
@@ -1925,6 +1924,37 @@ class AutonomousRunner {
           reviewer_notes: 'Content-guardrails module failed to load — failing closed; metadata rewrite routed to review instead of publishing without the compliance/price checks.',
         },
       };
+    }
+    // A missing domains array does NOT mean hub-only (Codex PR r5 audit):
+    // a blog post with null/empty domains renders on ALL sites (the Astro
+    // collection filter's fallback — the same resolution publishAstro's
+    // guardrails use), and a page served from a spoke host ships on that
+    // spoke regardless of its frontmatter. Resolve the effective domains
+    // so the brand-token guard arms, or park when the surface genuinely
+    // cannot be determined — never default a possibly-multi-domain
+    // rewrite to the hub-only brand rules. A page with a PRESENT empty
+    // array is explicit hub-only data and stays as-is.
+    if (targetPageType === 'supporting-blog') {
+      if (liveDomains == null || liveDomains.length === 0) liveDomains = FLEET_SPOKE_SITE_KEYS;
+    } else if (liveDomains == null) {
+      let targetHost = null;
+      try {
+        targetHost = new URL(String(brief.target_url || brief.page_url || draft.page_url || '')).hostname.toLowerCase().replace(/^www\./, '');
+      } catch (_) { targetHost = null; }
+      if (targetHost && FLEET_HUB_SITE_KEYS.includes(targetHost)) {
+        liveDomains = [];
+      } else if (targetHost) {
+        liveDomains = [targetHost];
+      } else {
+        return {
+          notes: 'metadata_domains_unresolved',
+          patch: {
+            outcome: 'completed_pending_review',
+            skip_reason: 'metadata_domains_unresolved',
+            reviewer_notes: 'The live page carries no domains array and the target reference has no resolvable host — parked instead of assuming hub-only brand rules for a rewrite that may ship on spoke domains.',
+          },
+        };
+      }
     }
     const metaGuardResult = metadataGuardrails.evaluate({
       frontmatter: {
@@ -3373,7 +3403,7 @@ const PINNED_SLUG_PATTERN = /^\/[a-z0-9-]+(\/[a-z0-9-]+)*\/$/;
 const { POST_CATEGORIES: BLOG_POST_CATEGORIES, slugLeafOf: blogSlugLeafOf } = require('../content-astro/blog-categories');
 // Spoke fleet keys shared with the publisher's isFleetCanonicalHost — also a
 // dependency-free module (content-guardrails already requires it).
-const { SPOKE_SITE_KEYS: FLEET_SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
+const { SPOKE_SITE_KEYS: FLEET_SPOKE_SITE_KEYS, HUB_SITE_KEYS: FLEET_HUB_SITE_KEYS } = require('../content-astro/spoke-sites');
 // The SAME publish-origin routing decision the publisher makes (single-spoke
 // resolution + kill switch + origin mapping) — shared module, not a mirror,
 // so repaired draft.url values and self-links can never point at a different

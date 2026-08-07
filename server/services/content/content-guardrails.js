@@ -2904,7 +2904,7 @@ const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR
 // needsTreatmentContext are skipped when the sentence lacks this context;
 // needsTreatmentAntecedent entries (pronoun subjects) instead require it
 // in the bounded PRECEDING window.
-const REENTRY_TREATMENT_CONTEXT_RE = /\b(?:treat(?:ed|ments?|ing)?|pre-?treat\w*|applications?|appl(?:y|ies|ied|ying)|products?|pesticides?|insecticides?|herbicides?|sprays?|sprayed|spraying|granules?|granular|baits?|chemicals?|solutions?|formulas?)\b/i;
+const REENTRY_TREATMENT_CONTEXT_RE = /\b(?:treat(?:ed|ments?|ing)?|pre-?treat\w*|applications?|appl(?:y|ies|ied|ying)|products?|pesticides?|insecticides?|herbicides?|sprays?|sprayed|spraying|granules?|granular|baits?|chemicals?|solutions?|formulas?|pest[-\s]?control|lawn\s+care|mosquito\s+control)\b/i;
 const REENTRY_SAFETY_SRCS = [
   // "safe to re-enter / return / go back inside", "re-entry is safe",
   // "safe for kids and pets to return"
@@ -2919,7 +2919,9 @@ const REENTRY_SAFETY_SRCS = [
   // "environmentally safe", "perfectly pet safe") count as the same claim;
   // the qualifier gap is negation-guarded so "is not safe" stays a
   // disclaimer handled by the polarity guards.
-  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?|surfaces?|rooms?|turf|grass|homes?|houses?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b`,
+  // Service-noun subjects are the same claim (Codex PR r5 audit): "our
+  // pest control is safe for pets", "our pest-control program is safe".
+  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?|surfaces?|rooms?|turf|grass|homes?|houses?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control|services?|programs?|plans?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b`,
   // Pronoun subjects with a treatment ANTECEDENT (Codex PR r5): "We apply
   // a granular treatment. It is safe once dry." is the same claim with the
   // noun one sentence back. Only it/they — never that/this, which appear as
@@ -2937,7 +2939,7 @@ const REENTRY_SAFETY_SRCS = [
   "\\b(?:pet|child|kid|family)[-\\s]safe\\b",
   // Adjective-before-product forms: "safe pesticides", "our safe treatment
   // options" — the unconditional claim in attributive position.
-  "\\bsafe\\s+(?:pesticides?|insecticides?|herbicides?|products?|treatments?|sprays?|applications?|chemicals?|materials?|solutions?|options?|granules?|baits?|formulas?)\\b",
+  "\\bsafe\\s+(?:pesticides?|insecticides?|herbicides?|products?|treatments?|sprays?|applications?|chemicals?|materials?|solutions?|options?|granules?|baits?|formulas?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)\\b",
   // ONLY EPA *approval* claims are banned — "EPA-registered"/"EPA-exempt"
   // is the wording AGENTS.md requires. All word orders count (Codex PR r1):
   // hyphenated, passive ("approved by the EPA"), active ("the EPA has

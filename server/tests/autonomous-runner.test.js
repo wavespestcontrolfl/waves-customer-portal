@@ -252,6 +252,64 @@ describe('rewrite_title_meta live adapter', () => {
     }
   });
 
+  test('a blog target with domains:null arms the brand-token guard fleet-wide (Codex PR r5 audit — null renders on ALL sites, never hub-only)', async () => {
+    const previousShadow = process.env.SHADOW_MODE_REWRITE_TITLE_META;
+    process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';
+    try {
+      const claimedAt = new Date('2026-05-27T13:00:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({ id: 'opp_meta_nulldom', action_type: 'rewrite_title_meta', claimed_at: claimedAt }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_meta_nulldom',
+          action_type: 'rewrite_title_meta',
+          page_type: 'metadata',
+          target_url: 'https://www.wavespestcontrol.com/blog/signs-of-termites/',
+          target_keyword: 'signs of termites',
+          city: 'Sarasota',
+          service: 'termite',
+          serp_signal: { dominant_intent: 'informational' },
+          gsc_signal: { impressions: 900 },
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: {
+            type: 'metadata',
+            title: 'Signs of Termites in Sarasota Homes | Waves',
+            // Literal hub brand in the description — a leak on every spoke
+            // domain the null-domains blog actually renders on.
+            meta_description: 'Learn how Waves Pest Control technicians identify early drywood termite activity in Sarasota homes and what an inspection covers.',
+          },
+        }),
+      };
+      const publisher = {
+        // Blog target with NO domains array: the Astro collection filter
+        // renders null/empty target_sites on ALL sites, so the brand guard
+        // must arm fleet-wide instead of assuming hub-only.
+        getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/blog/signs-of-termites.md', domains: null }),
+        publishMetadataRewrite: jest.fn(),
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, publisher });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('content_guardrails_failed');
+      expect(result.reviewer_notes).toMatch(/BRAND_TOKEN_LEAK/);
+      expect(publisher.publishMetadataRewrite).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_REWRITE_TITLE_META;
+      else process.env.SHADOW_MODE_REWRITE_TITLE_META = previousShadow;
+    }
+  });
+
   test('parks spammy metadata without opening a PR', async () => {
     const previousShadow = process.env.SHADOW_MODE_REWRITE_TITLE_META;
     process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';
