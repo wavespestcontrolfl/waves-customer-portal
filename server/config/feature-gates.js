@@ -197,6 +197,12 @@ const gates = {
   // Kill switch: unset — the endpoint 404s (dark).
   mcpPublic: process.env.GATE_MCP_PUBLIC === 'true',
 
+  // Public A2A endpoint: /api/public/a2a — the informational Agent2Agent
+  // server behind the hub's agent-card.json. Static single-reply, LLM-free,
+  // read-only. No auth BY DESIGN; rate-limited; opt-in in EVERY environment.
+  // Kill switch: unset — the endpoint 404s (dark).
+  a2aPublic: process.env.GATE_A2A_PUBLIC === 'true',
+
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
 

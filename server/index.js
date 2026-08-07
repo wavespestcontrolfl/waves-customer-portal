@@ -394,6 +394,8 @@ app.use('/api/mcp', ...require('./routes/mcp').mcpPreParsers);
 // Public MCP endpoint (anonymous agents): gate + rate limit BEFORE any body
 // parsing, then a 64kb capped parse — dark (404) until GATE_MCP_PUBLIC flips.
 app.use('/api/public/mcp', ...require('./routes/public-mcp').publicMcpPreParsers);
+// Public A2A endpoint: same guard shape — dark (404) until GATE_A2A_PUBLIC.
+app.use('/api/public/a2a', ...require('./routes/public-a2a').publicA2aPreParsers);
 
 // Base64 media payloads (service/job photos, call-recording snippets, the
 // photo lead magnets' customer uploads) only travel on the staff surfaces and
@@ -549,6 +551,8 @@ app.use('/api/public/pricing-ranges', require('./routes/public-pricing-ranges'))
 // Public MCP read-only tool surface for AI agents — gated (404 when off),
 // rate-limited, read-only registry; see routes/public-mcp.js.
 app.use('/api/public/mcp', require('./routes/public-mcp'));
+// Public A2A informational endpoint — gated (404 when off), static reply.
+app.use('/api/public/a2a', require('./routes/public-a2a'));
 app.use('/api/public/credentials', require('./routes/public-credentials'));
 app.use('/api/public/track', require('./routes/track-public'));
 // Client-side GrowthBook exposure intake (experimentation Phase 2) — gated by
