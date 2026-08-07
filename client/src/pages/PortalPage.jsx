@@ -5677,8 +5677,13 @@ function BillingTab({ customer }) {
                 // The toggle beside this row turns the TEXT leg off on its own,
                 // for any channel — copy must never promise a text the customer
                 // just disabled (codex r4 P2 extends the Both-only fix).
-                const emailLeg = paymentConfirmationChannel === 'email' || paymentConfirmationChannel === 'both';
-                const textLeg = paymentConfirmationChannel !== 'email' && paymentSmsEnabled;
+                // Effective channel, not stored: the select and the save path
+                // both coerce to SMS when no deliverable billing email exists,
+                // so a stale persisted email/both must not drive an email
+                // promise here either (codex r5 P2).
+                const channel = hasBillingEmail ? paymentConfirmationChannel : 'sms';
+                const emailLeg = channel === 'email' || channel === 'both';
+                const textLeg = channel !== 'email' && paymentSmsEnabled;
                 if (textLeg && emailLeg) return 'Payment confirmations';
                 if (emailLeg) return 'Payment confirmation emails';
                 if (textLeg) return 'Payment confirmation texts';
@@ -5690,8 +5695,10 @@ function BillingTab({ customer }) {
                   the channel stays Text & Email — the copy must not keep
                   promising a text the customer just disabled (codex r1 P2). */}
               {(() => {
-                const emailLeg = paymentConfirmationChannel === 'email' || paymentConfirmationChannel === 'both';
-                const textLeg = paymentConfirmationChannel !== 'email' && paymentSmsEnabled;
+                // Same effective-channel rule as the title above (codex r5 P2).
+                const channel = hasBillingEmail ? paymentConfirmationChannel : 'sms';
+                const emailLeg = channel === 'email' || channel === 'both';
+                const textLeg = channel !== 'email' && paymentSmsEnabled;
                 if (textLeg && emailLeg) return 'Get a text and an email when your payment processes.';
                 if (emailLeg) return 'Get an email when your payment processes.';
                 if (textLeg) return 'Get a text when your payment processes.';
