@@ -3025,11 +3025,22 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(r2.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
-  test('a FIXED re-entry/drying minute figure blocks even with a dry condition nearby', () => {
+  test('a FIXED re-entry/drying figure blocks even with a dry condition nearby — including ranges and spelled numbers', () => {
     const r = guardrails.evaluate({ body: 'You can re-enter after 30 minutes once everything is dry.' }, {});
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const r2 = guardrails.evaluate({ body: 'The application dries within 20 minutes.' }, {});
     expect(r2.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const range = guardrails.evaluate({ body: 'Plan to re-enter after 30–60 minutes.' }, {});
+    expect(range.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const spelled = guardrails.evaluate({ body: 'You can go back inside after thirty minutes.' }, {});
+    expect(spelled.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('"safe … when wet or dry" is a claim of safety in EVERY state, never the conditional idiom', () => {
+    const r = guardrails.evaluate({
+      body: 'The granules are safe for pets when wet or dry, and your technician confirms timing.',
+    }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
   test('a violation in the meta description blocks too (publishable text covers meta)', () => {
@@ -3061,6 +3072,13 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
   test('"our wildlife trapping service" blocks', () => {
     const r = guardrails.evaluate({ body: 'Ask about our wildlife trapping service for raccoons in the attic.' }, {});
     expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('ownership phrasings block — "Our services include …", "We can help with …"', () => {
+    const r = guardrails.evaluate({ body: 'Our services include structural fumigation for severe drywood cases.' }, {});
+    expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const r2 = guardrails.evaluate({ body: 'We can help with wildlife removal when raccoons move into the attic.' }, {});
+    expect(r2.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('"call Waves for insulation" blocks', () => {

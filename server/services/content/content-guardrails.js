@@ -2898,18 +2898,22 @@ const REENTRY_SAFETY_SRCS = [
   // ONLY "EPA-approved" is banned — "EPA-registered"/"EPA-exempt" is the
   // wording AGENTS.md requires.
   "\\bEPA[-\\s]?approved\\b",
-  // Fixed re-entry/drying minute figures ("re-enter after 30 minutes",
-  // "dry within 20 minutes") — the approved idiom carries NO number; the
-  // technician confirms timing.
-  "\\b(?:re-?enter|re-?entry|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+\\d+\\s*(?:minutes?|mins?|hours?|hrs?)\\b",
-  "\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+\\d+\\s*(?:minutes?|mins?|hours?|hrs?)\\b",
+  // Fixed re-entry/drying figures ("re-enter after 30 minutes", "dry within
+  // 20 minutes", "after 30–60 minutes", "after thirty minutes") — the
+  // approved idiom carries NO number; the technician confirms timing.
+  // Ranges (30–60) and common spelled numbers count as figures too.
+  `\\b(?:re-?enter|re-?entry|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+${'(?:\\d+(?:\\s*[-–—]\\s*\\d+)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:\\s*[-–—]\\s*\\w+)?)'}\\s*(?:minutes?|mins?|hours?|hrs?)\\b`,
+  `\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+${'(?:\\d+(?:\\s*[-–—]\\s*\\d+)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:\\s*[-–—]\\s*\\w+)?)'}\\s*(?:minutes?|mins?|hours?|hrs?)\\b`,
 ];
 
 // The APPROVED conditional idiom has TWO required parts (AGENTS.md): the
 // dry condition ("safe once dry" — condition before or after the claim,
 // same sentence) AND the technician-confirms-timing clause, which may sit
 // in a neighboring sentence.
-const DRY_CONDITION_RE = /\b(?:once|when|after|until)\b[^.!?\n]{0,40}?\bdr(?:y|ies|ied)\b/i;
+// The condition must be an actual DRY-STATE condition: "when wet or dry"
+// (a claim of safety in EVERY state) is not a condition at all — the window
+// rejects "wet" and the alternation suffix ("dry or wet") likewise.
+const DRY_CONDITION_RE = /\b(?:once|when|after|until)\b(?:(?!\bwet\b)[^.!?\n]){0,40}?\b(?:fully\s+|completely\s+)?dr(?:y|ies|ied)\b(?!\s*(?:or|and)\s+wet\b)/i;
 const TECH_CONFIRMS_RE = /\b(?:technicians?|techs?|applicators?|pros?)\b[^.!?\n]{0,60}?\b(?:confirms?|will\s+confirm|advises?|verif(?:y|ies)|lets?\s+you\s+know|gives?\s+you\s+the\s+all[-\s]clear)\b|\bconfirms?\s+(?:the\s+)?(?:timing|re-?entry|when\b)/i;
 
 function reentrySafetyClaimFinding(text) {
@@ -2965,8 +2969,8 @@ const BANNED_TOPIC_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|insu
 // absorbed by the gap. Hyphens allowed ("whole-structure fumigation").
 const BANNED_TOPIC_GAP_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b)[\\w'’-]+\\s+){0,3}?`;
 const BANNED_TOPIC_SRCS = [
-  // "we/Waves/our team offer(s)/provide(s)/perform(s)/handle(s) … <topic>"
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
+  // "we/Waves/our team|services offer(s)/include(s)/help(s) with … <topic>"
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
   // "our fumigation/insulation/wildlife-trapping service/program/team"
   `\\bour\\s+${BANNED_TOPIC_SRC}\\s+(?:services?|programs?|teams?|offerings?|packages?|crews?)\\b`,
   // "schedule/book (your) fumigation …" — on OUR pages a bare CTA presents
