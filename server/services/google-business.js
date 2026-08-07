@@ -476,7 +476,7 @@ class GoogleBusinessService {
    * Fires once, on first insert only — callers gate on the new-review branch so
    * repeat hourly syncs don't re-notify. Best-effort (notifyAdmin self-catches).
    *
-   * @param {{reviewer_name?:string, star_rating?:number, review_text?:string, location_id?:string, google_review_id?:string}} row
+   * @param {{reviewer_name?:string, star_rating?:number, review_text?:string, location_id?:string, google_review_id?:string, review_created_at?:string}} row
    */
   async _notifyUnlinkedReview(row) {
     try {
@@ -485,10 +485,22 @@ class GoogleBusinessService {
       const stars = Number(row.star_rating) || 0;
       const reviewer = row.reviewer_name || 'Anonymous';
       const snippet = row.review_text ? ` — "${String(row.review_text).slice(0, 120)}"` : '';
+      // Click-time detective work: customers whose tracked review-link click
+      // landed near this review's timestamp. Suggestion only — the office
+      // confirms via the manual match flow; nothing is auto-linked.
+      const { findLikelyReviewers } = require('./review-click-correlation');
+      const likely = await findLikelyReviewers(row, { limit: 3 });
+      let likelyLine = '';
+      if (likely.length) {
+        const top = likely[0];
+        const topName = [top.firstName, top.lastName].filter(Boolean).join(' ') || 'a customer';
+        const more = likely.length > 1 ? ` (+${likely.length - 1} more in Reviews)` : '';
+        likelyLine = ` Likely reviewer: ${topName} tapped their review link ${top.clickOffsetLabel} this review posted${more}.`;
+      }
       await NotificationService.notifyAdmin(
         'review',
         `Unlinked Google review from ${reviewer}`,
-        `${stars}-star review at ${locName} couldn't be matched to a customer${snippet}. Open Reviews to match it, or mark the customer as already-reviewed.`,
+        `${stars}-star review at ${locName} couldn't be matched to a customer${snippet}. Open Reviews to match it, or mark the customer as already-reviewed.${likelyLine}`,
         {
           link: '/admin/reviews',
           metadata: {
@@ -497,6 +509,13 @@ class GoogleBusinessService {
             reviewerName: reviewer,
             starRating: stars,
             reason: 'no_customer_match',
+            likelyReviewers: likely.map(l => ({
+              customerId: l.customerId,
+              name: [l.firstName, l.lastName].filter(Boolean).join(' ') || null,
+              clickedAt: l.clickedAt,
+              clickOffsetLabel: l.clickOffsetLabel,
+              locationMatch: l.locationMatch,
+            })),
           },
         },
       );
@@ -702,6 +721,7 @@ class GoogleBusinessService {
           review_text: review.text || null,
           location_id: loc.id,
           google_review_id: googleId,
+          review_created_at: new Date(review.time * 1000).toISOString(),
         });
       }
       synced++;
