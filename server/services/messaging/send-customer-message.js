@@ -245,11 +245,12 @@ async function sendCustomerMessage(input) {
     };
   }
 
-  // 6.5 Caller-supplied final recheck — the LAST await before the provider
-  //     handoff, so callers with race-sensitive sends (clarify asks: an
-  //     answer can arrive while the validators above run) get their
-  //     freshest possible abort point inside the canonical path. Fail
-  //     closed: a throwing check blocks the send.
+  // 6.5 Caller-supplied final recheck — the last caller-visible abort point
+  //     before dispatch (only the provider-internal send-window boundary
+  //     re-check runs later), so callers with race-sensitive sends (clarify
+  //     asks: an answer can arrive while the validators above run) get
+  //     their freshest possible abort point inside the canonical path.
+  //     Fail closed: a throwing check blocks the send.
   if (typeof preDispatchCheck === 'function') {
     let verdict;
     try {
@@ -284,42 +285,48 @@ async function sendCustomerMessage(input) {
     }
   }
 
-  // 6.75 Send-window boundary re-check: the pipeline check ran before the
-  // line-type Lookup and the caller's preDispatchCheck, both of which can
-  // straddle the 20:00 ET cutoff. Re-verify at the provider handoff so a
-  // send that entered the pipeline at 19:59 can't reach Twilio at 20:01.
-  // Same deferral contract as the pipeline block; cheap (pure clock math)
-  // and a no-op for exempt inputs.
-  {
-    const lateWindow = checkSendWindow(sendInput, policy, contactState);
-    if (lateWindow && lateWindow.ok !== true) {
-      const audit = await persistAudit({
-        input: sendInput,
-        policy,
-        segmentMeta,
-        validatorsPassed,
-        validatorsFailed: ['check_send_window_boundary'],
-        blockedBy: { code: lateWindow.code, reason: lateWindow.reason },
-        identityTrust: resolvedTrust,
-        providerOutcome: null,
-      });
-      return {
-        sent: false,
-        blocked: true,
-        code: lateWindow.code,
-        reason: lateWindow.reason,
-        retryable: true,
-        deferred: true,
-        nextAllowedAt: lateWindow.nextAllowedAt,
-        auditLogId: audit.id,
-        segmentCount: segmentMeta.segmentCount,
-        encoding: segmentMeta.encoding,
-      };
-    }
-  }
+  // 7. Dispatch to provider. preSendCheck is the send-window boundary
+  // re-check, run by the provider IMMEDIATELY before the Twilio
+  // messages.create() call: the pipeline check above ran before the
+  // line-type Lookup and the caller's preDispatchCheck, and the provider
+  // itself awaits an internal-redirect check, the SMS-template lookup and a
+  // customer/location query before the handoff — any of which can straddle
+  // the 20:00 ET cutoff. Re-checking at the last await means a send that
+  // entered the pipeline at 19:59 can't reach Twilio at 20:01. Same
+  // deferral contract as the pipeline block; cheap (pure clock math) and a
+  // no-op for exempt inputs.
+  const providerOutcome = await dispatchToProvider(sendInput, {
+    preSendCheck: () => checkSendWindow(sendInput, policy, contactState),
+  });
 
-  // 7. Dispatch to provider
-  const providerOutcome = await dispatchToProvider(sendInput);
+  // 7.5 Provider-handoff block (preSendCheck said no): map back onto the
+  // same blocked/deferral contract as a pipeline validator, with a
+  // dedicated validator name so audit rows distinguish the boundary race
+  // from the ordinary pipeline block.
+  if (providerOutcome.blocked) {
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['check_send_window_boundary'],
+      blockedBy: { code: providerOutcome.code, reason: providerOutcome.error },
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      code: providerOutcome.code,
+      reason: providerOutcome.error,
+      ...(providerOutcome.retryable ? { retryable: true } : {}),
+      ...(providerOutcome.deferred ? { deferred: true } : {}),
+      ...(providerOutcome.nextAllowedAt ? { nextAllowedAt: providerOutcome.nextAllowedAt } : {}),
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
 
   // 8. Persist final audit row with provider outcome. A throw past this
   // point carries the KNOWN provider outcome on the error, so callers with
@@ -417,9 +424,9 @@ function validateContract(input) {
  * Per-channel provider routing. Only sms ships in this commit; email and
  * portal_chat dispatchers land when the corresponding call sites migrate.
  */
-async function dispatchToProvider(input) {
+async function dispatchToProvider(input, hooks = {}) {
   if (input.channel === 'sms') {
-    return sendViaTwilio(input);
+    return sendViaTwilio(input, hooks);
   }
   return {
     sent: false,

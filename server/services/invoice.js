@@ -2068,6 +2068,12 @@ const InvoiceService = {
         const err = new Error(`payment-link SMS blocked: ${sendResult.code}`);
         err.code = sendResult.code;
         err.reason = sendResult.reason;
+        // Send-window deferral contract: a QUIET_HOURS_HOLD is "try again at
+        // 8 AM", not a delivery failure — carry the hold metadata so
+        // sendViaSMSAndEmail / processScheduledSends can reschedule instead
+        // of burning one of the five generic scheduled-send attempts.
+        if (sendResult.deferred) err.deferred = true;
+        if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
         throw err;
       }
 
@@ -2221,6 +2227,11 @@ const InvoiceService = {
       } catch (err) {
         sms.error = err.message;
         if (err.code) sms.code = err.code;
+        // Preserve the send-window hold so callers with a retry rail
+        // (processScheduledSends) can move the due time to the window open
+        // instead of treating the hold as a spent delivery attempt.
+        if (err.deferred) sms.deferred = true;
+        if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
       }
     }
 
@@ -2458,7 +2469,37 @@ const InvoiceService = {
 
     let sent = 0;
     let failed = 0;
+    let deferred = 0;
+    // Send-window pre-claim guard (mirrors the appointment-reminders
+    // pre-send guard): a scheduled send due outside 8AM-8PM ET moves to the
+    // window open WITHOUT claiming or burning one of the five attempts.
+    // Deferring the whole send — email leg included — keeps the invoice
+    // arriving as one unit at 8:00 AM; letting the email go overnight would
+    // finalize the row ('sent', scheduled_send_at cleared) with the SMS pay
+    // link held and no rail left to retry it. Checked per row: pure clock
+    // math, and a batch that starts at 19:59 can straddle the cutoff.
+    const { isEnabled } = require("../config/feature-gates");
+    const {
+      isWithinSendWindowET,
+      nextSendWindowOpenET,
+    } = require("./messaging/send-window");
     for (const inv of due) {
+      if (isEnabled("smsSendWindow") && !isWithinSendWindowET()) {
+        const nextOpen = nextSendWindowOpenET();
+        await db("invoices")
+          .where({ id: inv.id, status: "scheduled" })
+          .update({
+            scheduled_send_at: nextOpen,
+            scheduled_send_error:
+              "QUIET_HOURS_HOLD — outside 8AM-8PM ET send window, deferred to window open",
+            updated_at: new Date(),
+          });
+        deferred += 1;
+        logger.info(
+          `[invoice] Scheduled send for ${inv.invoice_number} outside 8AM-8PM ET send window — deferred to ${nextOpen.toISOString()}`,
+        );
+        continue;
+      }
       const [claimed] = await db("invoices")
         .where({ id: inv.id, status: "scheduled" })
         .whereNotNull("scheduled_send_at")
@@ -2486,7 +2527,6 @@ const InvoiceService = {
         continue;
       }
 
-      failed += 1;
       const error =
         [
           result.sms?.error && `sms: ${result.sms.error}`,
@@ -2494,14 +2534,33 @@ const InvoiceService = {
         ]
           .filter(Boolean)
           .join(" | ") || "send failed";
-      await db("invoices")
-        .where({ id: inv.id })
-        .update({
-          status: "scheduled",
-          scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
-          scheduled_send_error: error,
-          updated_at: new Date(),
-        });
+      // A send-window hold that slipped past the pre-claim guard (the
+      // 19:59→20:01 race) is a deferral, not a failure: move the due time
+      // to the window open and leave the attempt counter alone — five
+      // overnight cron passes must not permanently fail the send.
+      const smsHeld =
+        result.sms?.code === "QUIET_HOURS_HOLD" && result.sms?.nextAllowedAt;
+      if (smsHeld) {
+        deferred += 1;
+        await db("invoices")
+          .where({ id: inv.id })
+          .update({
+            status: "scheduled",
+            scheduled_send_at: new Date(result.sms.nextAllowedAt),
+            scheduled_send_error: error,
+            updated_at: new Date(),
+          });
+      } else {
+        failed += 1;
+        await db("invoices")
+          .where({ id: inv.id })
+          .update({
+            status: "scheduled",
+            scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+            scheduled_send_error: error,
+            updated_at: new Date(),
+          });
+      }
       // We pre-claimed this row, so sendViaSMSAndEmail couldn't reverse the credit
       // it auto-applied (the row was 'sending'). Now that it's back to 'scheduled'
       // and nothing was delivered, return that credit so it isn't stranded +
@@ -2514,11 +2573,17 @@ const InvoiceService = {
           logger.warn(`[invoice] credit reversal after failed scheduled send skipped for ${inv.id}: ${e.message}`);
         }
       }
-      logger.error(
-        `[invoice] Scheduled send failed for ${inv.invoice_number}: ${error}`,
-      );
+      if (smsHeld) {
+        logger.info(
+          `[invoice] Scheduled send for ${inv.invoice_number} outside 8AM-8PM ET send window — deferred to ${result.sms.nextAllowedAt}`,
+        );
+      } else {
+        logger.error(
+          `[invoice] Scheduled send failed for ${inv.invoice_number}: ${error}`,
+        );
+      }
     }
-    return { sent, failed };
+    return { sent, failed, deferred };
   },
 
   /**

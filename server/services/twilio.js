@@ -500,6 +500,40 @@ const TwilioService = {
         explicitMedia = [{ url: options.mediaUrl, index: 0 }];
       }
       if (urls.length > 0) msgPayload.mediaUrl = urls;
+      // Caller-supplied final gate, awaited as the LAST step before the
+      // Twilio handoff. The canonical messaging pipeline passes its
+      // send-window boundary re-check here: every await above (redirect
+      // check, template lookup, customer/location query) can straddle the
+      // 20:00 ET cutoff, so checking any earlier lets a 19:59 send reach
+      // Twilio at 20:01. Fail closed: a throwing check blocks the send.
+      // Legacy direct sendSMS callers don't pass it and are unaffected.
+      if (typeof options.preSendCheck === "function") {
+        let verdict;
+        try {
+          verdict = await options.preSendCheck();
+        } catch (err) {
+          verdict = {
+            ok: false,
+            code: "PRE_SEND_CHECK_FAILED",
+            reason: err.message,
+          };
+        }
+        if (!verdict || verdict.ok !== true) {
+          logger.warn(
+            `[twilio] SMS to ${maskPhone(to)} blocked at provider handoff: ${verdict?.code || "PRE_SEND_CHECK_FAILED"} — ${verdict?.reason || "pre-send check did not pass"}`,
+          );
+          return {
+            success: false,
+            sid: null,
+            preSendBlocked: true,
+            code: verdict?.code || "PRE_SEND_CHECK_FAILED",
+            error: verdict?.reason || "pre-send check did not pass",
+            retryable: verdict?.retryable === true,
+            deferred: verdict?.deferred === true,
+            nextAllowedAt: verdict?.nextAllowedAt,
+          };
+        }
+      }
       const message = await c.messages.create(msgPayload);
       logger.info(
         `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,

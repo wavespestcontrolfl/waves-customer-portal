@@ -15,6 +15,14 @@ async function sendAppointmentSms({ to, body, customerId, messageType }) {
     purpose: 'appointment',
     customerId,
     identityTrustLevel: 'phone_matches_customer',
+    // Every send in this module answers a customer's OWN inbound reply
+    // ("1"/"2"/"call me") — by the time either send fires the appointment
+    // has already moved / the offer is already closed, so an 8 PM-blocked
+    // confirmation would leave the customer unaware their request
+    // succeeded. Exempt from the send window as an inbound reply while
+    // keeping purpose 'appointment' (its service_contact_authorized trust
+    // floor is stricter than the conversational policy's).
+    conversationalContext: true,
     metadata: { original_message_type: messageType },
   });
   if (result.blocked || result.sent === false) {

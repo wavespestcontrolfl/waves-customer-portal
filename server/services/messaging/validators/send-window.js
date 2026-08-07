@@ -9,6 +9,13 @@
  *   - purpose 'conversational' — a reply into an active thread answers a
  *     customer who just texted us; deferring an instant reply to 8 AM is
  *     worse than answering at 9:30 PM.
+ *   - input `conversationalContext: true` — the same rationale for sends
+ *     whose purpose must stay stricter than the conversational policy
+ *     (e.g. the reschedule-reply confirmation keeps purpose 'appointment'
+ *     for its service_contact_authorized trust floor, but IS an immediate
+ *     answer to a customer's "1"/"2" reply). Only inbound-reply handlers
+ *     may set it; an automation/cron passing it defeats the window and is
+ *     a review-blocking bug.
  *   - resolved identity trust 'admin_operator' — an operator clicking send
  *     (manual SMS, estimate sends, IB drafts) chose the moment on purpose;
  *     the owner works nights and the moratorium is for machine-initiated
@@ -67,6 +74,10 @@ function checkSendWindow(input, policy, contactState, now = new Date()) {
   if (input.channel !== 'sms') return { ok: true };
   if (!['customer', 'lead'].includes(input.audience)) return { ok: true };
   if (input.purpose === 'conversational') return { ok: true };
+  // Inbound-reply marker for sends that need a stricter purpose policy than
+  // 'conversational' (see header). Same trust model as operatorInitiated:
+  // only the handler answering a customer's just-received text may set it.
+  if (input.conversationalContext === true) return { ok: true };
   // Explicit operator-origin marker for SHARED services (invoice sends,
   // card requests) whose entry point serves both operator clicks and
   // automation. Only authenticated admin/IB routes may set it — an

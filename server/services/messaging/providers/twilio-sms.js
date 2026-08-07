@@ -87,7 +87,7 @@ function providerMediaUrls(input) {
   return urls;
 }
 
-async function sendViaTwilio(input) {
+async function sendViaTwilio(input, { preSendCheck } = {}) {
   // metadata.original_message_type lets a caller force a specific
   // legacy messageType (e.g. 'lead_response', 'invoice', 'manual')
   // through to TwilioService.sendSMS so the existing
@@ -129,10 +129,32 @@ async function sendViaTwilio(input) {
       // operator-driven sends (Comms inbox, IB) lose the audit trail
       // that distinguishes them from system-initiated sends.
       adminUserId: input.metadata && input.metadata.adminUserId,
+      // Awaited by twilio.js immediately before messages.create() — the
+      // send-window boundary re-check must run at the actual provider
+      // handoff, after sendSMS's own internal awaits (redirect check,
+      // template lookup, customer/location query).
+      preSendCheck,
     });
 
     if (!result) {
       return { sent: false, provider: 'twilio', error: 'twilio.sendSMS returned undefined' };
+    }
+    if (result.preSendBlocked) {
+      // The caller's preSendCheck refused the send at the provider handoff
+      // (send-window boundary race). Not a provider failure: surface it as a
+      // BLOCK carrying the check's own deferral contract so sendCustomerMessage
+      // maps it back onto the QUIET_HOURS_HOLD vocabulary callers reschedule on.
+      return {
+        sent: false,
+        provider: 'twilio',
+        blocked: true,
+        code: result.code,
+        error: result.error,
+        retryable: result.retryable === true,
+        deferred: result.deferred === true,
+        nextAllowedAt: result.nextAllowedAt,
+        raw: result,
+      };
     }
     if (result.success === false) {
       const failure = classifyProviderFailure(null, result.error || (result.guardBlocked ? 'sms-guard blocked' : result.gateBlocked ? 'feature gate blocked' : 'twilio rejected'));

@@ -120,6 +120,15 @@ describe('checkSendWindow validator', () => {
     expect(checkSendWindow({ ...SMS, identityTrustLevel: 'admin_operator' }, null, null, EVENING_ET)).toEqual({ ok: true });
   });
 
+  test('conversationalContext marker exempts an inbound-reply send that keeps a stricter purpose', () => {
+    // The reschedule-reply confirmation: purpose stays 'appointment' (its
+    // trust floor is stricter than the conversational policy) but the send
+    // answers a customer's own "1"/"2" reply.
+    expect(checkSendWindow({ ...SMS, purpose: 'appointment', conversationalContext: true }, null, null, EVENING_ET)).toEqual({ ok: true });
+    const res = checkSendWindow({ ...SMS, purpose: 'appointment' }, null, null, EVENING_ET);
+    expect(res.ok).toBe(false);
+  });
+
   test('operator-clicked entry points pass at night even with customer-level trust', () => {
     expect(checkSendWindow({ ...SMS, entryPoint: 'admin_estimate_send' }, null, null, EVENING_ET)).toEqual({ ok: true });
     expect(checkSendWindow({ ...SMS, entryPoint: 'scheduled_sms_cron' }, null, null, EVENING_ET)).toEqual({ ok: true });
@@ -180,5 +189,48 @@ describe('sendCustomerMessage send-window integration', () => {
     const res = await sendCustomerMessage(INPUT);
     expect(res.sent).toBe(true);
     expect(sendViaTwilio).toHaveBeenCalledTimes(1);
+  });
+
+  test('provider receives a preSendCheck hook that flips when the clock crosses the 20:00 cutoff', async () => {
+    // The 19:59→20:01 boundary race: validators pass at 19:59, but the
+    // provider's internal awaits (template lookup, customer query) can carry
+    // the send past 20:00. The hook re-runs the window check at the actual
+    // Twilio handoff.
+    jest.useFakeTimers({ now: LAST_MINUTE, doNotFake: ['nextTick', 'setImmediate'] });
+    const res = await sendCustomerMessage(INPUT);
+    expect(res.sent).toBe(true);
+    const hooks = sendViaTwilio.mock.calls[0][1];
+    expect(typeof hooks.preSendCheck).toBe('function');
+    expect(hooks.preSendCheck()).toEqual({ ok: true });
+    jest.setSystemTime(WINDOW_CLOSE);
+    const lateVerdict = hooks.preSendCheck();
+    expect(lateVerdict.ok).toBe(false);
+    expect(lateVerdict.code).toBe('QUIET_HOURS_HOLD');
+    expect(lateVerdict.nextAllowedAt).toBe('2026-08-07T12:00:00.000Z');
+  });
+
+  test('a provider-handoff block maps back onto the QUIET_HOURS_HOLD deferral contract', async () => {
+    jest.useFakeTimers({ now: LAST_MINUTE, doNotFake: ['nextTick', 'setImmediate'] });
+    sendViaTwilio.mockResolvedValueOnce({
+      sent: false,
+      provider: 'twilio',
+      blocked: true,
+      code: 'QUIET_HOURS_HOLD',
+      error: 'Automated SMS is limited to 8:00 AM-8:00 PM ET',
+      retryable: true,
+      deferred: true,
+      nextAllowedAt: '2026-08-07T12:00:00.000Z',
+    });
+    const res = await sendCustomerMessage(INPUT);
+    expect(res.sent).toBe(false);
+    expect(res.blocked).toBe(true);
+    expect(res.code).toBe('QUIET_HOURS_HOLD');
+    expect(res.retryable).toBe(true);
+    expect(res.deferred).toBe(true);
+    expect(res.nextAllowedAt).toBe('2026-08-07T12:00:00.000Z');
+    const { persistAudit } = require('../services/messaging/audit');
+    const auditArgs = persistAudit.mock.calls.at(-1)[0];
+    expect(auditArgs.validatorsFailed).toEqual(['check_send_window_boundary']);
+    expect(auditArgs.providerOutcome).toBeNull();
   });
 });
