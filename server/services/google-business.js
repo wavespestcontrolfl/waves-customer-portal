@@ -876,7 +876,12 @@ class GoogleBusinessService {
         const locSyncStart = new Date();
         if (loc.googleLocationResourceName && await this._getClient(loc.id)) {
           try {
-            const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id, 100);
+            // Default page size (50) — the GBP reviews.list API caps
+            // pageSize at 50, and an oversized value risks the whole pull
+            // rejecting, which would push every location into degraded
+            // fallback and stall reconciliation. Pagination fetches all
+            // pages regardless.
+            const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id);
             for (const review of reviews) {
               const normalized = this._normalizeGbpReview(review, loc);
               const result = await this._upsertGbpReview(normalized, locSyncStart);

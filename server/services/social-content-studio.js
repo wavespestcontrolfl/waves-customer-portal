@@ -1545,9 +1545,11 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       }),
     );
     if (publishOutcome.blocked) {
-      const reason = publishOutcome.missing
-        ? 'source Google review no longer exists — testimonial publish blocked'
-        : 'source Google review has been removed from Google — testimonial publish blocked';
+      const reason = publishOutcome.lockBusy
+        ? 'review sync in progress for this location — testimonial publish deferred, retry the run'
+        : publishOutcome.missing
+          ? 'source Google review no longer exists — testimonial publish blocked'
+          : 'source Google review has been removed from Google — testimonial publish blocked';
       await updateAutonomousRun(run?.id, {
         status: 'failed',
         preview: finalPreview,
@@ -1631,31 +1633,48 @@ function cityFromLocationId(locationId) {
  * live" and "published" are one atomic decision — a stamp that loses the
  * race lands after commit, where it is a genuinely concurrent removal (the
  * watchdog alert still fires and stamped rows drop off every surface).
- * publishFn must not touch google_reviews (it writes social tables on its
- * own connections); the lock is held for the duration of the external
- * posting, which only delays the hourly reconcile for that window.
- * Non-review publishes (no sourceReviewId) pass straight through. FAIL
- * CLOSED: no hasTable pre-check here — a sourceReviewId implies the table
- * existed at draft time, and swallowing a transient schema-lookup failure
- * would publish a possibly-removed review unchecked. A DB error inside the
- * transaction rejects, and the publish fails loudly instead.
+ * The row lock alone is not enough: it serializes against the reconcile's
+ * stamping UPDATE, but a sync cycle that has already FETCHED a snapshot
+ * without this review could stamp it moments after a row-lock-only publish
+ * commits. The liveness decision therefore also takes the same
+ * per-location advisory lock the sync holds across its whole
+ * fetch→reconcile cycle (gbp-review-sync:<loc>) — while a cycle is in
+ * flight the publish is deferred (lockBusy, retryable), and while the
+ * publish holds it the sync tick skips the location and the next tick
+ * covers it. publishFn must not touch google_reviews (it writes social
+ * tables on its own connections). Non-review publishes (no sourceReviewId)
+ * pass straight through. FAIL CLOSED: no hasTable pre-check here — a
+ * sourceReviewId implies the table existed at draft time, and swallowing a
+ * transient schema-lookup failure would publish a possibly-removed review
+ * unchecked. A DB error inside the transaction rejects, and the publish
+ * fails loudly instead.
  */
 async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
   if (!sourceReviewId) {
     return { blocked: false, result: await publishFn() };
   }
-  let outcome = null;
-  await db.transaction(async (trx) => {
-    const src = await trx('google_reviews')
-      .where({ id: sourceReviewId })
-      .forUpdate()
-      .first();
-    if (!src || src.missing_since) {
-      outcome = { blocked: true, missing: !src };
-      return;
-    }
-    outcome = { blocked: false, result: await publishFn() };
-  });
+  const source = await db('google_reviews').where({ id: sourceReviewId }).first();
+  if (!source || source.missing_since) {
+    return { blocked: true, missing: !source };
+  }
+  const outcome = await runExclusive(`gbp-review-sync:${source.location_id}`, async () => {
+    let inner = null;
+    await db.transaction(async (trx) => {
+      const src = await trx('google_reviews')
+        .where({ id: sourceReviewId })
+        .forUpdate()
+        .first();
+      if (!src || src.missing_since) {
+        inner = { blocked: true, missing: !src };
+        return;
+      }
+      inner = { blocked: false, result: await publishFn() };
+    });
+    return inner;
+  }, { recordHealth: false });
+  if (outcome?.skipped) {
+    return { blocked: true, lockBusy: true };
+  }
   return outcome;
 }
 
@@ -1835,9 +1854,11 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       return {
         ok: false,
         status: 409,
-        error: publishOutcome.missing
-          ? 'source Google review no longer exists — testimonial cannot be published'
-          : 'source Google review has been removed from Google — testimonial cannot be published',
+        error: publishOutcome.lockBusy
+          ? 'review sync is in progress for this location — approve again in a moment'
+          : publishOutcome.missing
+            ? 'source Google review no longer exists — testimonial cannot be published'
+            : 'source Google review has been removed from Google — testimonial cannot be published',
       };
     }
     const publishResult = publishOutcome.result;
