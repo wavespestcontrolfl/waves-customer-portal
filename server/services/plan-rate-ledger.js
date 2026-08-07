@@ -391,7 +391,13 @@ async function applyAcceptToLedger(database, {
     }
     return key; // other base plans supersede via their own exact key upsert
   };
-  const sliceVariantGroups = new Set(sliceFamilies.map(termiteVariantGroup).filter(Boolean));
+  // Never on a PROVEN add-on (codex #3245 r11): the classifier established
+  // this accept replaces no live coverage — a different termite variant at
+  // ANOTHER property (bond_1yr at B beside bond_5yr at A) is new coverage,
+  // not supersession.
+  const sliceVariantGroups = addOnBase > 0
+    ? new Set()
+    : new Set(sliceFamilies.map(termiteVariantGroup).filter(Boolean));
   if (sliceVariantGroups.size > 0) {
     for (const family of [...components.keys()]) {
       const group = termiteVariantGroup(family);

@@ -384,6 +384,24 @@ describe('cross-property same-family components (codex r10)', () => {
   });
 });
 
+describe('codex r11 — cross-property termite variants', () => {
+  test('a proven add-on never supersedes termite variants at other properties', async () => {
+    const db = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: 'termite_bond_5yr', monthly_rate: 12 },
+    ]);
+    const out = await applyAcceptToLedger(db, {
+      customerId: 'cust-1',
+      estimateId: 'est-b',
+      slices: { termite_bond_1yr: 15 },
+      previousScalar: 12,
+      addOnBase: 12, // grouped accept — property B's new bond
+    });
+    expect(out.scalar).toBe(27); // both bonds bill
+    expect(db.store.some((r) => r.family_key === 'termite_bond_5yr')).toBe(true);
+    expect(db.store.some((r) => r.family_key === 'termite_bond_1yr')).toBe(true);
+  });
+});
+
 describe('local codex P0 regressions (r8 push audit)', () => {
   test('a fully comped re-quote emits ZERO slices so seeded components are deleted', async () => {
     const slices = estimateFamilySlices({
