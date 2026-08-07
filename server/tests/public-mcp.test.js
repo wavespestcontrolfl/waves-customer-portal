@@ -160,7 +160,7 @@ describe('JSON-RPC surface', () => {
 });
 
 describe('catalog tools', () => {
-  test('list_services filters to active, non-archived, customer-visible rows and selects no price columns', async () => {
+  test('list_services filters to active, non-archived, customer-visible rows and selects no price columns and no free-text description', async () => {
     mockRows = [{ service_key: 'pest_control', name: 'Pest Control', category: 'pest_control' }];
     const { body } = await callTool('list_services', {});
     expect(toolResult(body).services).toHaveLength(1);
@@ -169,7 +169,10 @@ describe('catalog tools', () => {
     const selected = b.select.mock.calls[0][0];
     expect(selected).not.toEqual(expect.arrayContaining(['base_price']));
     expect(selected).not.toEqual(expect.arrayContaining(['price_range_min']));
-    expect(selected).toEqual(expect.arrayContaining(['service_key', 'name', 'description', 'frequency']));
+    // description is admin-editable free text (uncurated for compliance and
+    // price staleness) — it must never be selected on the anonymous surface
+    expect(selected).not.toEqual(expect.arrayContaining(['description']));
+    expect(selected).toEqual(expect.arrayContaining(['service_key', 'name', 'frequency']));
   });
 
   test('get_service returns the row; unknown key → isError', async () => {
@@ -229,5 +232,17 @@ describe('how_to_request_quote', () => {
     expect(doc.quoteApi.requiredFields.services).toContain('pest, lawn, mosquito');
     expect(doc.quoteApi.sideEffects).toMatch(/consent/i);
     expect(doc.webAlternatives.quotePage).toMatch(/wavespestcontrol\.com/);
+  });
+
+  test('documents the palm palmCount requirement and the one_time_total response field', async () => {
+    const { body } = await callTool('how_to_request_quote', {});
+    const doc = toolResult(body);
+    // palm rejects bare true with 400 (public-quote.js palm branch) — the
+    // contract doc must carry the required object shape
+    expect(doc.quoteApi.requiredFields.services).toMatch(/palm REQUIRES an object with a positive palmCount/);
+    // one-time services return one_time_total with monthly/annual at 0 —
+    // agents must be told to check it before reporting a price
+    expect(doc.quoteApi.responseSummary).toMatch(/one_time_total/);
+    expect(doc.quoteApi.responseSummary).toMatch(/monthly_total\/annual_total can be 0/);
   });
 });

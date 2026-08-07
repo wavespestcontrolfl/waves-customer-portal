@@ -66,10 +66,15 @@ const publicMcpLimiter = rateLimit({
 
 // ── Tools ───────────────────────────────────────────────────────────
 
-// Catalog column discipline mirrors /api/mcp's get_service: descriptive
-// fields only — base_price / price_range_* stay excluded; published price
-// data flows through get_pricing_ranges (the engine-derived ranges feed).
-const SERVICE_COLUMNS = ['service_key', 'name', 'short_name', 'description', 'category', 'subcategory', 'billing_type', 'frequency', 'visits_per_year'];
+// Catalog column discipline: base_price / price_range_* excluded (published
+// price data flows through get_pricing_ranges, the engine-derived ranges
+// feed) — AND `description` excluded too, deliberately tighter than
+// /api/mcp's get_service. Catalog descriptions are admin-editable free text
+// that is neither compliance-curated nor price-synced (Codex r1 found a
+// banned "safe …treatment" claim and a stale embedded price schedule in
+// active rows), so free text must not reach an anonymous agent surface.
+// Agents get service copy from the governed website pages / llms.txt.
+const SERVICE_COLUMNS = ['service_key', 'name', 'short_name', 'category', 'subcategory', 'billing_type', 'frequency', 'visits_per_year'];
 
 async function listServices() {
   const rows = await db('services')
@@ -112,12 +117,12 @@ function howToRequestQuote() {
       contentType: 'application/json',
       requiredFields: {
         firstName: 'string', lastName: 'string', email: 'string', phone: 'string (10-digit US)', address: 'string (street address; include city and zip when known)',
-        services: `object — at least one of these keys set true: ${PUBLIC_QUOTE_SERVICE_KEYS.join(', ')}`,
+        services: `object — at least one of these keys set: ${PUBLIC_QUOTE_SERVICE_KEYS.join(', ')}. Each key accepts true or an options object. EXCEPTION: palm REQUIRES an object with a positive palmCount, e.g. { "palm": { "palmCount": 4 } } — bare true returns 400.`,
       },
       optionalFields: {
         city: 'string', zip: 'string', homeSqFt: 'number', lotSqFt: 'number', stories: 'number (1-3)', propertyType: "string (e.g. 'Single Family')",
       },
-      responseSummary: 'JSON with monthly_total, annual_total, variance_low/high, confidence, and per-service recurring_lines. Some properties (notably commercial) return a manual-review outcome instead of an instant price.',
+      responseSummary: 'JSON with monthly_total, annual_total, variance_low/high, confidence, and per-service recurring_lines. One-time services (e.g. rodent exclusion, sanitation, bed bug) return the quoted amount in one_time_total, and monthly_total/annual_total can be 0 in that case — check one_time_total before reporting a price. Some properties (notably commercial) return a manual-review outcome instead of an instant price.',
       rateLimit: '10 requests per hour per IP',
       sideEffects: 'Submitting creates a quote request (lead) with Waves Pest Control; Waves may follow up using the contact details provided. Only submit on behalf of a real customer, with that customer\'s knowledge and consent.',
     },
@@ -132,13 +137,13 @@ function howToRequestQuote() {
 const PUBLIC_MCP_TOOLS = [
   {
     name: 'list_services',
-    description: 'List the customer-visible Waves Pest Control service catalog (pest, lawn, mosquito, termite, rodent, WDO inspection, tree & shrub, specialty). Descriptive fields only — use get_pricing_ranges for published price ranges.',
+    description: 'List the customer-visible Waves Pest Control service catalog (pest, lawn, mosquito, termite, rodent, WDO inspection, tree & shrub, specialty): names, categories, billing type, and visit frequency. Service descriptions live on the website (see https://www.wavespestcontrol.com/llms.txt); published price ranges via get_pricing_ranges.',
     inputSchema: { type: 'object', properties: {} },
     execute: () => listServices(),
   },
   {
     name: 'get_service',
-    description: 'Fetch one customer-visible catalog service by service_key (name, description, category, frequency, visits per year).',
+    description: 'Fetch one customer-visible catalog service by service_key (name, category, billing type, frequency, visits per year).',
     inputSchema: {
       type: 'object',
       properties: { service_key: { type: 'string' } },
@@ -175,9 +180,12 @@ const rpc = createMcpRpc({
   logPrefix: 'public-mcp',
 });
 
-// Gate + limiter run here too so the router stays dark and bounded even if
-// mounted without the pre-chain (same defense-in-depth as /api/mcp's auth).
-router.post('/', publicMcpGate, publicMcpLimiter, rpc.createPostHandler({ maxBatch: MAX_BATCH, maxBatchToolCalls: MAX_BATCH_TOOL_CALLS }));
+// The gate runs here too so the router stays dark even if mounted without
+// the pre-chain (same defense-in-depth as /api/mcp's auth). The rate
+// limiter deliberately does NOT repeat here — it lives ONLY in
+// publicMcpPreParsers below; applying it in both chains would count every
+// prod request twice and halve the documented per-IP budget (Codex r1).
+router.post('/', publicMcpGate, rpc.createPostHandler({ maxBatch: MAX_BATCH, maxBatchToolCalls: MAX_BATCH_TOOL_CALLS }));
 
 // Stateless server: no SSE stream to offer.
 router.get('/', publicMcpGate, (req, res) => res.status(405).json({ error: 'streaming not supported; POST JSON-RPC' }));

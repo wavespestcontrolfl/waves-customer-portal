@@ -1257,7 +1257,10 @@ violations at the severity noted.
   /api/mcp batch caps, sharing the same JSON-RPC plumbing
   (services/mcp-rpc.js). Tools are READ-ONLY, side-effect-free, LLM-free, and
   expose only already-public data: customer-visible catalog rows (price
-  columns excluded — same column discipline as /api/mcp get_service),
+  columns excluded AND `description` excluded — tighter than /api/mcp
+  get_service, because catalog descriptions are admin-editable free text
+  that is neither compliance-curated nor price-synced and must not reach an
+  anonymous surface),
   the /api/public/pricing-ranges payload via its shared fail-closed producer,
   the service-areas table, and a static description of the
   /api/public/quote/calculate HTTP contract (how_to_request_quote). No
