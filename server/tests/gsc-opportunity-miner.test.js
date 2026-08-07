@@ -883,17 +883,33 @@ describe('listicle_family scoring + action mapping', () => {
       city_target: null,
       ...over,
     });
-    // No resolvable service → unreachable (mineNoContentYet skips !service).
+    // Beyond 15 with no resolvable service (raw AND inferred blank) →
+    // unreachable: mineNoContentYet skips !service.
     expect(listicleFamilyRepReachable(rep({ query: 'types of fish in florida' }), new Map())).toBe(false);
-    // Striking-distance window (4-15) → reachable regardless of own-page map.
+    // Striking-distance window (4-15) → reachable regardless of own-page
+    // map AND regardless of service (that miner has no service guard).
     expect(listicleFamilyRepReachable(rep({ position: 8 }), new Map([['tree-shrub::', 'https://x/']]))).toBe(true);
+    expect(listicleFamilyRepReachable(rep({ position: 8, query: 'types of fish in florida' }), new Map())).toBe(true);
     // Beyond 15 with NO own page for the service+city → no_content_yet reaches it.
     expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map())).toBe(true);
-    // Beyond 15 but an own page EXISTS for the service+city (ownPageKey =
-    // 'service::city', empty city as '') → no_content_yet skips it and
-    // striking_distance is out of window: NO bucket emits the rep, so the
-    // family must stay eligible.
+    // Beyond 15 but an own page EXISTS for the service+city →
+    // no_content_yet skips it and striking_distance is out of window: NO
+    // bucket emits the rep, so the family must stay eligible. The lookup
+    // mirrors that miner's RAW-classifier-first keying (Codex r13): a raw
+    // 'tree_shrub' classification must find the raw-keyed map entry.
     expect(listicleFamilyRepReachable(rep({ position: 20 }), new Map([['tree-shrub::', 'https://x/']]))).toBe(false);
+    expect(listicleFamilyRepReachable(
+      rep({ position: 20, service_category: 'tree_shrub' }),
+      new Map([['tree_shrub::', 'https://x/']])
+    )).toBe(false);
+    // Seasonal-emittable rep → reachable regardless of position/own-page
+    // (mineSeasonalRising emits it independently; Codex r13).
+    expect(listicleFamilyRepReachable(
+      rep({ position: 20 }),
+      new Map([['tree-shrub::', 'https://x/']]),
+      undefined,
+      { seasonalEmittable: true }
+    )).toBe(true);
     // Position 0 (no data) → not reachable through either window.
     expect(listicleFamilyRepReachable(rep({ position: 0 }), new Map())).toBe(false);
   });
@@ -917,7 +933,7 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/sum\(position \* impressions\) \/ NULLIF\(sum\(impressions\), 0\) <= \?/);
     expect(mineSrc).toMatch(/THRESHOLDS\.strikingDistancePositionMax/);
     expect(mineSrc).not.toMatch(/\.distinct\('query'\)/); // existence-only check is the inert-lane bug
-    expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(group\.entries, primary\.service, primary\.city\)/);
+    expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(group\.entries\)/);
     // Grouped by PAGE alone — mixed-classification families served by one
     // URL must never become multiple claimable rows editing the same page.
     expect(mineSrc).toMatch(/refreshGroups\.get\(served\.hit\.page_url\)/);
@@ -928,6 +944,7 @@ describe('listicle_family scoring + action mapping', () => {
     const fam = {
       key: 'drought+florida+plants+tolerant',
       impressions: 102,
+      position: 12.4,
       variants: [
         { query: 'drought tolerant plants florida', impressions: 48, position: 12 },
         { query: 'florida drought tolerant plants', impressions: 30, position: 9 },
@@ -938,7 +955,13 @@ describe('listicle_family scoring + action mapping', () => {
       variant: fam.variants[1],
       hit: { page_url: 'https://wavespestcontrol.com/blog/florida-native-plants/', position: 8.2 },
     };
-    const opp = buildListicleFamilyRefreshOpp([{ fam, served }], 'tree-shrub', null);
+    const opp = buildListicleFamilyRefreshOpp([{ fam, served, service: 'tree-shrub', city: null }]);
+    // Summed impressions sit beside the AGGREGATE family position; the
+    // anchor page's own rank rides separately (Codex r13 P2).
+    expect(opp.signal_metadata.avg_position).toBe(12.4);
+    expect(opp.signal_metadata.family_avg_position).toBe(12.4);
+    expect(opp.signal_metadata.page_position).toBe(8.2);
+    expect(opp.service).toBe('tree-shrub');
     // listicle_family bucket, NOT striking_distance: PAGE_ANCHORED_BUCKETS
     // is what stops the SERP profiler swapping the refresh back into a
     // competing blog and keeps page_type 'refresh' with its hard
@@ -963,6 +986,7 @@ describe('listicle_family scoring + action mapping', () => {
     const famA = {
       key: 'drought+florida+plants+tolerant',
       impressions: 102,
+      position: 14,
       variants: [
         { query: 'drought tolerant plants florida', impressions: 48, position: 12 },
         { query: 'florida drought tolerant plants', impressions: 30, position: 9 },
@@ -972,6 +996,7 @@ describe('listicle_family scoring + action mapping', () => {
     const famB = {
       key: 'florida+native+plants+types',
       impressions: 64,
+      position: 11,
       variants: [
         { query: 'types of native plants florida', impressions: 40, position: 11 },
         { query: 'florida native plants types', impressions: 24, position: 13 },
@@ -979,9 +1004,9 @@ describe('listicle_family scoring + action mapping', () => {
     };
     const page = 'https://wavespestcontrol.com/blog/florida-native-plants/';
     const opp = buildListicleFamilyRefreshOpp([
-      { fam: famA, served: { variant: famA.variants[1], hit: { page_url: page, position: 8.2 } } },
-      { fam: famB, served: { variant: famB.variants[0], hit: { page_url: page, position: 6.1 } } },
-    ], 'tree-shrub', null);
+      { fam: famA, served: { variant: famA.variants[1], hit: { page_url: page, position: 8.2 } }, service: 'lawn', city: null },
+      { fam: famB, served: { variant: famB.variants[0], hit: { page_url: page, position: 6.1 } }, service: 'tree-shrub', city: 'Sarasota' },
+    ]);
     // One row; page-keyed dedupe could never hold two — so BOTH families'
     // demand must ride in it or one is silently lost forever.
     expect(opp.signal_metadata.impressions).toBe(166);
@@ -989,9 +1014,16 @@ describe('listicle_family scoring + action mapping', () => {
     expect(opp.signal_metadata.family_size).toBe(5);
     expect(opp.signal_metadata.family_keys).toEqual([famA.key, famB.key]); // impression-desc
     expect(opp.signal_metadata.family_key).toBe(famA.key); // primary = highest-impression family
-    // Anchor query/position come from the best-ranking served variant.
-    expect(opp.query).toBe('types of native plants florida');
-    expect(opp.signal_metadata.avg_position).toBe(6.1);
+    // Query, classification, and position anchor to the SAME entry — the
+    // PRIMARY family — never a mix of the best-ranked family's query with
+    // another family's service/city (Codex r13).
+    expect(opp.query).toBe('florida drought tolerant plants');
+    expect(opp.service).toBe('lawn');
+    expect(opp.city).toBeNull();
+    expect(opp.signal_metadata.page_position).toBe(8.2);
+    // Aggregate position is impressions-weighted across BOTH families:
+    // (14*102 + 11*64) / 166 = 12.8.
+    expect(opp.signal_metadata.avg_position).toBe(12.8);
   });
 
   test('every merged family keeps at least one variant in family_variants (Codex r12)', () => {
@@ -1011,9 +1043,9 @@ describe('listicle_family scoring + action mapping', () => {
     };
     const page = 'https://wavespestcontrol.com/blog/florida-native-plants/';
     const opp = buildListicleFamilyRefreshOpp([
-      { fam: famA, served: { variant: famA.variants[0], hit: { page_url: page, position: 9 } } },
-      { fam: famB, served: { variant: famB.variants[0], hit: { page_url: page, position: 9 } } },
-    ], 'tree-shrub', null);
+      { fam: famA, served: { variant: famA.variants[0], hit: { page_url: page, position: 9 } }, service: 'tree-shrub', city: null },
+      { fam: famB, served: { variant: famB.variants[0], hit: { page_url: page, position: 9 } }, service: 'tree-shrub', city: null },
+    ]);
     const queries = opp.signal_metadata.family_variants.map((v) => v.query);
     // Without the per-family guarantee, A's five variants fill the top-5
     // and B vanishes from the only row that can carry it.
@@ -1096,8 +1128,8 @@ describe('listicle_family scoring + action mapping', () => {
     // And both are mutateQueue-guarded: mineAll({ persist: false }) is a
     // READ-ONLY preview (--no-persist, facts-population analysis) and must
     // never retire live queue work just for being inspected.
-    expect(src).toMatch(/async mineListicleFamily\(since, \{ mutateQueue = true, ownPagesByServiceCity = new Map\(\) \} = \{\}\)/);
-    expect(src).toMatch(/this\.mineListicleFamily\(since, \{ mutateQueue: persist, ownPagesByServiceCity \}\)/);
+    expect(src).toMatch(/async mineListicleFamily\(since, \{ mutateQueue = true, ownPagesByServiceCity = new Map\(\), periodDays = 28 \} = \{\}\)/);
+    expect(src).toMatch(/this\.mineListicleFamily\(since, \{ mutateQueue: persist, ownPagesByServiceCity, periodDays \}\)/);
     expect((mineSrc.match(/if \(mutateQueue\) \{/g) || []).length).toBe(4);
   });
 
@@ -1177,6 +1209,15 @@ describe('vendor synonyms excluded from listicle families (Codex r7 on #3255)', 
     expect(isListicleQuery('7 pest control firms compared')).toBe(false);
     expect(isListicleQuery('top mosquito repellent brands')).toBe(false);
     // Informational lists unaffected
+    expect(isListicleQuery('7 signs of termite damage')).toBe(true);
+  });
+
+  test('punctuation-stripped 24/7 phrasing is cadence, never an item count (Codex r13)', () => {
+    // GSC strips the slash: '24/7 pest control' arrives as '24 7 pest
+    // control' — a numeric second token means cadence, and a 24-item brief
+    // for an emergency-service query would be self-contradictory.
+    expect(isListicleQuery('24 7 pest control')).toBe(false);
+    expect(isListicleQuery('24 hour pest control')).toBe(false);
     expect(isListicleQuery('7 signs of termite damage')).toBe(true);
   });
 });

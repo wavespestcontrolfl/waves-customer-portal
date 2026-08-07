@@ -31,7 +31,11 @@ function isListicleQuery(query) {
   if (!q) return false;
   if (LISTICLE_VENDOR_RE.test(q)) return false;
   const count = q.match(LISTICLE_LEADING_COUNT_RE);
-  if (count && !LISTICLE_TIME_UNIT_RE.test(count[1])) return true;
+  // A numeric second token is punctuation-stripped cadence ("24 7 pest
+  // control" = 24/7 emergency phrasing — GSC strips the slash), never an
+  // item count: a 24-item listicle brief for an emergency-service query
+  // would be self-contradictory.
+  if (count && !LISTICLE_TIME_UNIT_RE.test(count[1]) && !/^\d/.test(count[1])) return true;
   return LISTICLE_NOUN_RE.test(q);
 }
 

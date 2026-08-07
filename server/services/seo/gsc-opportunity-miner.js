@@ -444,25 +444,36 @@ function resolveListicleFamilyServiceCity(fam, { canonicalize, inferService, nor
 // and the other family's demand would be silently lost — unrecoverable
 // once the row froze (Codex r11). family_keys carries every merged key so
 // the mirror retirement can match any member family.
-function buildListicleFamilyRefreshOpp(entries, service, city) {
+function buildListicleFamilyRefreshOpp(entries) {
   const sorted = entries.slice().sort((a, b) => b.fam.impressions - a.fam.impressions);
+  // The PRIMARY (highest-impression) family anchors query, classification,
+  // AND position TOGETHER — mixing the best-ranked family's query with
+  // another family's service/city produced internally inconsistent refresh
+  // briefs (a lawn keyword loading pest facts; Codex r13).
   const primary = sorted[0];
   const totalImpressions = sorted.reduce((sum, e) => sum + e.fam.impressions, 0);
   const allVariants = sorted
     .flatMap((e) => e.fam.variants)
     .sort((a, b) => b.impressions - a.impressions);
-  const best = sorted
-    .map((e) => e.served)
-    .sort((a, b) => a.hit.position - b.hit.position)[0];
+  const pagePosition = primary.served.hit.position;
+  // Impressions-weighted across the merged families — the summed
+  // impressions must sit beside an aggregate position, not the single
+  // best-ranked variant's (Codex r13 P2); the anchor page's own rank rides
+  // separately as page_position.
+  const familyAvgPosition = totalImpressions
+    ? sorted.reduce((sum, e) => sum + (e.fam.position || 0) * e.fam.impressions, 0) / totalImpressions
+    : 0;
   const opp = {
     bucket: 'listicle_family',
-    query: best.variant.query,
-    page_url: best.hit.page_url,
-    service,
-    city,
+    query: primary.served.variant.query,
+    page_url: primary.served.hit.page_url,
+    service: primary.service,
+    city: primary.city,
     signal_metadata: {
       impressions: totalImpressions,
-      avg_position: Math.round(best.hit.position * 10) / 10,
+      avg_position: Math.round(familyAvgPosition * 10) / 10,
+      family_avg_position: Math.round(familyAvgPosition * 10) / 10,
+      page_position: Math.round(pagePosition * 10) / 10,
       family_size: allVariants.length,
       family_count: sorted.length,
       family_key: primary.fam.key,
@@ -485,7 +496,7 @@ function buildListicleFamilyRefreshOpp(entries, service, city) {
     },
   };
   const { total, breakdown } = scoreOpportunity(opp, {
-    position: best.hit.position,
+    position: pagePosition,
     impressions: totalImpressions,
   });
   opp.score = total;
@@ -503,15 +514,24 @@ function buildListicleFamilyRefreshOpp(entries, service, city) {
 // is emitted by NEITHER, so excluding its family would lose the demand to
 // no bucket at all. Top-3 reps are irrelevant here: family admission drops
 // them as won intent regardless.
-function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thresholds = THRESHOLDS) {
+function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thresholds = THRESHOLDS, { seasonalEmittable = false } = {}) {
   if (!rep) return false;
-  const service = canonicalizeServiceCategory(rep.service_category) || inferServiceFromQuery(rep.query);
-  if (!service) return false;
+  // mineSeasonalRising emits the rep independently of position and the
+  // own-page map — a seasonal-emittable rep must count as reachable or the
+  // two buckets queue competing posts for one intent (Codex r13).
+  if (seasonalEmittable) return true;
   const pos = rep.position || 0;
+  // striking_distance has NO service guard — the window alone admits.
   if (pos >= thresholds.strikingDistancePositionMin && pos <= thresholds.strikingDistancePositionMax) return true;
   if (pos <= thresholds.strikingDistancePositionMax) return false;
+  // no_content_yet mirror, including its RAW-classifier-first service
+  // lookup: the own-page map keys raw classifier values (tree_shrub), so
+  // canonicalizing here made the lookup miss and BOTH buckets dropped the
+  // demand (Codex r13).
+  const ncService = rep.service_category || inferServiceFromQuery(rep.query);
+  if (!ncService) return false;
   const city = normalizeCity(rep.city_target) || inferCityFromQuery(rep.query);
-  return !ownPagesByServiceCity.get(ownPageKey(service, city));
+  return !ownPagesByServiceCity.get(ownPageKey(ncService, city));
 }
 
 // Family-stable dedupe key. Deliberately NOT dedupeKey(opp): that keys on
@@ -814,7 +834,7 @@ class GscOpportunityMiner {
       ['no_content_yet', () => this.mineNoContentYet(since, ownPagesByServiceCity)],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
       ['answer_gap', () => this.mineAnswerGap(since)],
-      ['listicle_family', () => this.mineListicleFamily(since, { mutateQueue: persist, ownPagesByServiceCity })],
+      ['listicle_family', () => this.mineListicleFamily(since, { mutateQueue: persist, ownPagesByServiceCity, periodDays })],
     ];
 
     for (const [name, fn] of runs) {
@@ -960,6 +980,47 @@ class GscOpportunityMiner {
       if (!map.has(key)) map.set(key, r.page_url); // first wins (orderBy impressions desc)
     }
     return map;
+  }
+
+  // Which of these queries would mineSeasonalRising emit right now?
+  // Mirrors its admission exactly: half/full windows, (query, service,
+  // city) tuple grouping, prior-window floor of minImpressionsToScore,
+  // ≥50% growth. Used only for representative reachability in the family
+  // bucket — the seasonal and family dedupe keys differ by construction,
+  // so without this check both buckets queue posts for one intent.
+  async _seasonalEmittableQueries(queries, periodDays) {
+    const recentDays = Math.max(1, Math.round(periodDays / 2));
+    const recentSince = sinceDate(recentDays);
+    const priorSince = sinceDate(periodDays);
+    const tupleKey = (q, svc, c) => `${q}\x00${svc || ''}\x00${c || ''}`;
+    const [recent, prior] = await Promise.all([
+      db('gsc_queries')
+        .where('date', '>=', recentSince)
+        .where('is_branded', false)
+        .whereIn('query', queries)
+        .select('query', 'service_category', 'city_target')
+        .sum('impressions as impressions')
+        .groupBy('query', 'service_category', 'city_target'),
+      db('gsc_queries')
+        .where('date', '>=', priorSince)
+        .where('date', '<', recentSince)
+        .where('is_branded', false)
+        .whereIn('query', queries)
+        .select('query', 'service_category', 'city_target')
+        .sum('impressions as impressions')
+        .groupBy('query', 'service_category', 'city_target'),
+    ]);
+    const priorMap = new Map();
+    for (const p of prior) {
+      priorMap.set(tupleKey(p.query, p.service_category, p.city_target), parseInt(p.impressions, 10));
+    }
+    const out = new Set();
+    for (const r of recent) {
+      const priorImp = priorMap.get(tupleKey(r.query, r.service_category, r.city_target)) || 0;
+      if (priorImp < THRESHOLDS.minImpressionsToScore) continue;
+      if ((parseInt(r.impressions, 10) - priorImp) / priorImp >= 0.5) out.add(r.query);
+    }
+    return out;
   }
 
   // ── bucket miners ──────────────────────────────────────────────────
@@ -1660,7 +1721,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineListicleFamily(since, { mutateQueue = true, ownPagesByServiceCity = new Map() } = {}) {
+  async mineListicleFamily(since, { mutateQueue = true, ownPagesByServiceCity = new Map(), periodDays = 28 } = {}) {
     // BOTH gates required: mining with the brief overlay off would persist
     // listicle_family rows whose briefs come out as ORDINARY supporting
     // blogs — the lane would look enabled while producing none of the
@@ -1687,8 +1748,21 @@ class GscOpportunityMiner {
 
     // No early return on empty fams: the end-of-mine sweep must still run
     // so stale queue rows expire when every family went ineligible.
-    const fams = clusterListicleFamilies(rows).filter((f) => listicleFamilyEligible(f, THRESHOLDS, {
-      repQualifiesQueryBucket: listicleFamilyRepReachable(f.variants[0], ownPagesByServiceCity),
+    const allFams = clusterListicleFamilies(rows);
+    // Over-floor reps blocked from the position-window buckets can STILL be
+    // emitted by mineSeasonalRising — check its admission for exactly those
+    // queries so the two buckets never queue competing posts (Codex r13).
+    const overFloorRepQueries = Array.from(new Set(allFams
+      .map((f) => f.variants[0])
+      .filter((r) => r && (r.impressions || 0) >= THRESHOLDS.minImpressionsToScore)
+      .map((r) => r.query)));
+    const seasonalEmittable = overFloorRepQueries.length
+      ? await this._seasonalEmittableQueries(overFloorRepQueries, periodDays)
+      : new Set();
+    const fams = allFams.filter((f) => listicleFamilyEligible(f, THRESHOLDS, {
+      repQualifiesQueryBucket: listicleFamilyRepReachable(f.variants[0], ownPagesByServiceCity, THRESHOLDS, {
+        seasonalEmittable: seasonalEmittable.has(f.variants[0]?.query),
+      }),
     }));
 
     // A variant is SERVED when some owned page ranks within striking
@@ -1881,14 +1955,11 @@ class GscOpportunityMiner {
       out.push(opp);
     }
     for (const group of refreshGroups.values()) {
-      // Mixed classification across merged families resolves to the
-      // highest-impression family's service/city — one deliberate winner,
-      // one refresh row per page. A winner flip between runs mints a new
+      // Mixed classification resolves INSIDE the builder: the
+      // highest-impression family anchors query + service/city + position
+      // as one consistent unit. A winner flip between runs mints a new
       // dedupe key, and the post-floor sweep expires the orphaned old row.
-      const primary = group.entries
-        .slice()
-        .sort((a, b) => b.fam.impressions - a.fam.impressions)[0];
-      out.push(buildListicleFamilyRefreshOpp(group.entries, primary.service, primary.city));
+      out.push(buildListicleFamilyRefreshOpp(group.entries));
     }
 
     // Catch-all reconciliation: any pending family row NOT re-emitted by
