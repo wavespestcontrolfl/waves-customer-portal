@@ -528,6 +528,11 @@ function faqPolicyTopicFields(draft, brief) {
     // Spoke seeds carry the coarse 'pest' service (so link gates work) but tag
     // a blocked pest topic here so the FAQ-blocked policy still applies.
     brief?.voice_constraints?.operator_brief?.faq_blocked_topic,
+    // listicle_family rows canonicalize specialty→pest; the specific
+    // blocked topic (wasp, bed-bug…) rides gsc_signal and must reach this
+    // policy or a wasp refresh on a broad pest page passes with an FAQ
+    // (Codex r25).
+    brief?.gsc_signal?.specialty_topic,
   ];
 }
 

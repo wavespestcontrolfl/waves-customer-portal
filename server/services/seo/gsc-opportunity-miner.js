@@ -2184,6 +2184,39 @@ class GscOpportunityMiner {
       if (!cur || pos < cur.position) servedBy.set(r.query, { page_url: r.page_url, position: pos });
     }
 
+    // Only EDITABLE Astro pages count as serving (same
+    // loadExistingPageBody check mineAnswerGap uses): an in-window mapping
+    // to a legacy/redirected URL would emit a refresh the publisher cannot
+    // resolve — the attempt budget burns, the skipped row freezes, and
+    // coveredByFrozen would then block the blog fallback forever (Codex
+    // r25). An unresolvable page is treated as UNSERVED, so the family
+    // falls through to the blog path; publisher unavailability fails the
+    // same conservative direction.
+    if (servedBy.size) {
+      let astroPublisher = null;
+      try {
+        astroPublisher = require('../content-astro/astro-publisher');
+      } catch (err) {
+        logger.warn(`[gsc-opp-miner] listicle_family: astro-publisher unavailable (${err.message}) — served pages treated as unserved`);
+      }
+      const editable = new Map();
+      for (const [q, hit] of Array.from(servedBy.entries())) {
+        if (!editable.has(hit.page_url)) {
+          let ok = false;
+          if (astroPublisher?.loadExistingPageBody) {
+            try {
+              const loaded = await astroPublisher.loadExistingPageBody(hit.page_url);
+              ok = !!(loaded && loaded.body);
+            } catch (err) {
+              logger.warn(`[gsc-opp-miner] listicle_family: body load failed for ${hit.page_url}: ${err.message}`);
+            }
+          }
+          editable.set(hit.page_url, ok);
+        }
+        if (!editable.get(hit.page_url)) servedBy.delete(q);
+      }
+    }
+
     // Hubless services (empty SERVICE_HUB_LINKS entry — lawn, tree-shrub)
     // cannot pass the hub_link_present hard gate without a city-service
     // route in the body, and _internalLinksFor supplies none for a cityless

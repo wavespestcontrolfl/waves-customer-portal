@@ -1183,6 +1183,16 @@ describe('listicle_family scoring + action mapping', () => {
     expect(src).toMatch(/signal_metadata->'unanswered_queries' as unanswered_queries/);
     const arbSrc2 = src.slice(src.indexOf('async _arbitratedRefreshPages'), src.indexOf('async _sweepStaleFamilyRows'));
     expect(arbSrc2).toMatch(/unanswered_queries/);
+    // r25: served mappings validate as EDITABLE Astro pages (same
+    // loadExistingPageBody check as mineAnswerGap); unresolvable → the
+    // family stays a blog candidate, and the runtime FAQ guards read
+    // gsc_signal.specialty_topic.
+    expect(mineSrc).toMatch(/loadExistingPageBody\(hit\.page_url\)/);
+    expect(mineSrc).toMatch(/servedBy\.delete\(q\)/);
+    const gateSrc = require('fs').readFileSync(require.resolve('../services/content/content-quality-gate'), 'utf8');
+    expect(gateSrc).toMatch(/brief\?\.gsc_signal\?\.specialty_topic/);
+    const runnerSrc = require('fs').readFileSync(require.resolve('../services/content/autonomous-runner'), 'utf8');
+    expect(runnerSrc).toMatch(/brief\?\.gsc_signal\?\.specialty_topic/);
     // Blog↔refresh transitions defer while the family's prior work is
     // claimed or in review (Codex r20).
     expect(mineSrc).toMatch(/inflightFamily\.blogKeys\.has\(listicleFamilyDedupeKey\(fam\.key\)\)/);
