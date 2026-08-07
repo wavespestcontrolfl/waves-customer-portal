@@ -756,6 +756,10 @@ describe('clusterListicleFamilies', () => {
     expect(v.position).toBeCloseTo((10 * 30 + 20 * 40) / 70);
     expect(v.service_category).toBe('lawn'); // higher-impression classification wins
     expect(v.city_target).toBe('sarasota');
+    // Constituent tuples preserved — the query miners admit PER tuple, so
+    // reachability needs them individually (Codex r14).
+    expect(v.tuples).toHaveLength(2);
+    expect(v.tuples.map((t) => t.impressions).sort((a, b) => a - b)).toEqual([30, 40]);
     expect(fams[0].impressions).toBe(70);
     // A single distinct query can never clear the ≥2-variant rule.
     expect(listicleFamilyEligible(fams[0])).toBe(false);
@@ -914,6 +918,43 @@ describe('listicle_family scoring + action mapping', () => {
     expect(listicleFamilyRepReachable(rep({ position: 0 }), new Map())).toBe(false);
   });
 
+  test('reachability judges tuples by the QUERY MINERS aggregation, not the family weighting (Codex r14)', () => {
+    // 100 imps at plain-avg 54 (volatile daily rankings): the family's
+    // weighted position may sit near 8, but mineStrikingDistance uses
+    // avg(position)=54 (out of window) and mineNoContentYet skips on the
+    // own page — NO bucket emits it, so the family must stay eligible.
+    const volatile = {
+      query: 'drought tolerant plants florida',
+      impressions: 101,
+      position: 8.9, // family weighting — must NOT decide reachability
+      tuples: [{ impressions: 101, plainPosition: 54, service_category: 'tree_shrub', city_target: null }],
+    };
+    expect(listicleFamilyRepReachable(volatile, new Map([['tree_shrub::', 'https://x/']]))).toBe(false);
+    // Same rep with no own page → no_content_yet emits (plain avg > 15).
+    expect(listicleFamilyRepReachable(volatile, new Map())).toBe(true);
+    // Split classification: 30+21 imps across two tuples — each tuple is
+    // under the per-tuple ≥50 floor the query miners apply per group, so
+    // neither miner emits despite the 51-imp total.
+    const split = {
+      query: 'drought tolerant plants florida',
+      impressions: 51,
+      position: 8,
+      tuples: [
+        { impressions: 30, plainPosition: 8, service_category: 'tree_shrub', city_target: null },
+        { impressions: 21, plainPosition: 9, service_category: 'lawn', city_target: null },
+      ],
+    };
+    expect(listicleFamilyRepReachable(split, new Map())).toBe(false);
+    // One tuple over the floor and in-window → striking_distance emits it.
+    const inWindow = {
+      query: 'drought tolerant plants florida',
+      impressions: 60,
+      position: 8,
+      tuples: [{ impressions: 60, plainPosition: 8, service_category: null, city_target: null }],
+    };
+    expect(listicleFamilyRepReachable(inWindow, new Map())).toBe(true);
+  });
+
   test('served families route to a page refresh, never a drop and never map-existence (query-page map)', () => {
     // Three-way r8/r9 contract: (1) the served test is page-level RANKING
     // within strikingDistancePositionMax, not map-row existence — every GSC
@@ -922,8 +963,9 @@ describe('listicle_family scoring + action mapping', () => {
     // family EMITS a family-aggregated refresh of the mapped page rather
     // than silently delegating to mineStrikingDistance, whose ≥50-imp
     // per-query floor every eligible variant fails by construction. (3) A
-    // best page already in the top-3 (below strikingDistancePositionMin) is
-    // won intent — dropped outright.
+    // ONLY in-window (4-15) hits count as served — top-3 won-intent is
+    // decided solely by the rep/aggregate admission checks, never by a
+    // tiny variant's page hit (Codex r14).
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
     const mineSrc = src.slice(src.indexOf('async mineListicleFamily'), src.indexOf('async mineNoContentYet'));
@@ -937,7 +979,9 @@ describe('listicle_family scoring + action mapping', () => {
     // Grouped by PAGE alone — mixed-classification families served by one
     // URL must never become multiple claimable rows editing the same page.
     expect(mineSrc).toMatch(/refreshGroups\.get\(served\.hit\.page_url\)/);
-    expect(mineSrc).toMatch(/served\.hit\.position >= THRESHOLDS\.strikingDistancePositionMin/);
+    expect(mineSrc).toMatch(/s\.hit && s\.hit\.position >= THRESHOLDS\.strikingDistancePositionMin/);
+    // No second won-intent classifier inside the served branch.
+    expect(mineSrc).not.toMatch(/if \(served\.hit\.position >= THRESHOLDS\.strikingDistancePositionMin\)/);
   });
 
   test('a served family becomes a striking_distance refresh of the mapped page with family provenance (Codex r9)', () => {
@@ -1111,10 +1155,10 @@ describe('listicle_family scoring + action mapping', () => {
     expect((mineSrc.match(/status: 'expired', skip_reason: 'family_/g) || []).length).toBe(4);
     expect(mineSrc).not.toMatch(/status: 'skipped', skip_reason: 'family_/);
     // Page-keyed refresh rows: a CHANGED serving page or a top-3 win must
-    // expire the now-stale refresh target (all targets on a win — the
-    // whereNot page filter only applies in the 4-15 refresh case).
+    // expire the now-stale refresh target (served is in-window by
+    // construction since r14, so the page filter is unconditional).
     expect(mineSrc).toMatch(/skip_reason: 'family_refresh_target_stale'/);
-    expect(mineSrc).toMatch(/stale = stale\.whereNot\('page_url', served\.hit\.page_url\)/);
+    expect(mineSrc).toMatch(/\.whereNot\('page_url', served\.hit\.page_url\)/);
     // Catch-all: a pending family row NOT re-emitted by this mine (family
     // went ineligible / unresolvable / hubless-cityless) expires instead of
     // staying claimable for 14 days (Codex r12).

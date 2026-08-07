@@ -333,6 +333,12 @@ function clusterListicleFamilies(rows) {
     // (query, service, city), so a query whose classification changed
     // mid-window arrives as multiple rows — counting those as separate
     // variants would let ONE real query satisfy the ≥2-variant rule.
+    const tuple = {
+      impressions: imp,
+      plainPosition: Number(r.plain_avg_position) || 0,
+      service_category: r.service_category || null,
+      city_target: r.city_target || null,
+    };
     const existing = fam.byQuery.get(r.query);
     if (existing) {
       const merged = existing.impressions + imp;
@@ -348,6 +354,9 @@ function clusterListicleFamilies(rows) {
         existing.classificationImp = imp;
       }
       existing.impressions = merged;
+      // Every constituent (service, city) tuple kept — the query miners
+      // admit PER TUPLE, so reachability must see them individually.
+      existing.tuples.push(tuple);
     } else {
       const variant = {
         query: r.query,
@@ -360,6 +369,7 @@ function clusterListicleFamilies(rows) {
         city_target: r.city_target || null,
         // Row impressions backing the current classification (merge tiebreak).
         classificationImp: imp,
+        tuples: [tuple],
       };
       fam.variants.push(variant);
       fam.byQuery.set(r.query, variant);
@@ -520,18 +530,35 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
   // own-page map — a seasonal-emittable rep must count as reachable or the
   // two buckets queue competing posts for one intent (Codex r13).
   if (seasonalEmittable) return true;
-  const pos = rep.position || 0;
-  // striking_distance has NO service guard — the window alone admits.
-  if (pos >= thresholds.strikingDistancePositionMin && pos <= thresholds.strikingDistancePositionMax) return true;
-  if (pos <= thresholds.strikingDistancePositionMax) return false;
-  // no_content_yet mirror, including its RAW-classifier-first service
-  // lookup: the own-page map keys raw classifier values (tree_shrub), so
-  // canonicalizing here made the lookup miss and BOTH buckets dropped the
-  // demand (Codex r13).
-  const ncService = rep.service_category || inferServiceFromQuery(rep.query);
-  if (!ncService) return false;
-  const city = normalizeCity(rep.city_target) || inferCityFromQuery(rep.query);
-  return !ownPagesByServiceCity.get(ownPageKey(ncService, city));
+  // Judged per (query, service, city) TUPLE with the query miners' OWN
+  // aggregation — plain avg(position) and a PER-TUPLE ≥50 floor (Codex
+  // r14): the family mine's impressions-weighted position can sit in the
+  // striking window while the miners' plain average sits far outside it
+  // (100 imps at 8 + 1 at 100 → weighted ~8.9, plain 54), and a split
+  // classification can leave every tuple under the floor those miners
+  // apply per group.
+  const tuples = rep.tuples && rep.tuples.length ? rep.tuples : [{
+    impressions: rep.impressions || 0,
+    plainPosition: rep.position || 0,
+    service_category: rep.service_category || null,
+    city_target: rep.city_target || null,
+  }];
+  for (const t of tuples) {
+    if ((t.impressions || 0) < thresholds.minImpressionsToScore) continue;
+    const pos = t.plainPosition || 0;
+    // striking_distance has NO service guard — the window alone admits.
+    if (pos >= thresholds.strikingDistancePositionMin && pos <= thresholds.strikingDistancePositionMax) return true;
+    if (pos <= thresholds.strikingDistancePositionMax) continue;
+    // no_content_yet mirror, including its RAW-classifier-first service
+    // lookup: the own-page map keys raw classifier values (tree_shrub), so
+    // canonicalizing here made the lookup miss and BOTH buckets dropped
+    // the demand (Codex r13).
+    const ncService = t.service_category || inferServiceFromQuery(rep.query);
+    if (!ncService) continue;
+    const city = normalizeCity(t.city_target) || inferCityFromQuery(rep.query);
+    if (!ownPagesByServiceCity.get(ownPageKey(ncService, city))) return true;
+  }
+  return false;
 }
 
 // Family-stable dedupe key. Deliberately NOT dedupeKey(opp): that keys on
@@ -1744,6 +1771,10 @@ class GscOpportunityMiner {
       // already an impression-level average, so a plain avg() lets a
       // one-impression day at position 1 mask a 100-impression day at 50.
       .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as avg_position'))
+      // Plain average too: reachability must judge the rep by the QUERY
+      // MINERS' aggregation (they use avg(position)), not the family
+      // weighting — volatile rankings make the two diverge wildly.
+      .avg('position as plain_avg_position')
       .groupBy('query', 'service_category', 'city_target');
 
     // No early return on empty fams: the end-of-mine sweep must still run
@@ -1831,11 +1862,13 @@ class GscOpportunityMiner {
       // never a silent drop: every eligible variant is under the 50-imp
       // floor by construction, so mineStrikingDistance (which needs ≥50 per
       // query) can NEVER pick these pages up — delegation would strand
-      // them. A best page already in the top-3 means the intent is won
-      // outright; nothing to mine.
+      // them. ONLY in-window (4-15) hits count as served: a two-impression
+      // variant whose page ranks top-3 must not suppress a family the
+      // rep/aggregate admission checks deliberately treat as NOT won —
+      // those checks are the single won-intent classifier (Codex r14).
       const served = fam.variants
         .map((v) => ({ variant: v, hit: servedBy.get(v.query) }))
-        .filter((s) => s.hit)
+        .filter((s) => s.hit && s.hit.position >= THRESHOLDS.strikingDistancePositionMin)
         .sort((a, b) => a.hit.position - b.hit.position)[0] || null;
       if (served) {
         // A family that minted a pending BLOG row on an earlier (unserved)
@@ -1875,30 +1908,26 @@ class GscOpportunityMiner {
         // automatic transitions.
         if (mutateQueue) {
           try {
-            let stale = db('opportunity_queue')
+            await db('opportunity_queue')
               .where({ bucket: 'listicle_family', status: 'pending', action_type: 'refresh_existing_page' })
-              .whereRaw("jsonb_exists(COALESCE(signal_metadata->'family_keys', '[]'::jsonb), ?)", [fam.key]);
-            if (served.hit.position >= THRESHOLDS.strikingDistancePositionMin) {
-              stale = stale.whereNot('page_url', served.hit.page_url);
-            }
-            await stale.update({ status: 'expired', skip_reason: 'family_refresh_target_stale', updated_at: new Date() });
+              .whereRaw("jsonb_exists(COALESCE(signal_metadata->'family_keys', '[]'::jsonb), ?)", [fam.key])
+              .whereNot('page_url', served.hit.page_url)
+              .update({ status: 'expired', skip_reason: 'family_refresh_target_stale', updated_at: new Date() });
           } catch (err) {
             logger.warn(`[gsc-opp-miner] listicle_family: stale refresh-target cleanup failed (${fam.key}): ${err.message}`);
           }
         }
-        if (served.hit.position >= THRESHOLDS.strikingDistancePositionMin) {
-          // Accumulate — families sharing a serving page merge into ONE
-          // refresh row (emitted after the loop) so no family's demand is
-          // dropped. Grouped by PAGE alone: families classified under
-          // different services/cities but served by the same URL must not
-          // become independently claimable rows editing one page.
-          let group = refreshGroups.get(served.hit.page_url);
-          if (!group) {
-            group = { entries: [] };
-            refreshGroups.set(served.hit.page_url, group);
-          }
-          group.entries.push({ fam, served, service, city });
+        // Accumulate — families sharing a serving page merge into ONE
+        // refresh row (emitted after the loop) so no family's demand is
+        // dropped. Grouped by PAGE alone: families classified under
+        // different services/cities but served by the same URL must not
+        // become independently claimable rows editing one page.
+        let group = refreshGroups.get(served.hit.page_url);
+        if (!group) {
+          group = { entries: [] };
+          refreshGroups.set(served.hit.page_url, group);
         }
+        group.entries.push({ fam, served, service, city });
         continue;
       }
 
