@@ -2197,11 +2197,17 @@ class GscOpportunityMiner {
       out.push(opp);
     }
     for (const group of refreshGroups.values()) {
-      // Mixed classification resolves INSIDE the builder: the
-      // highest-impression family anchors query + service/city + position
-      // as one consistent unit. A winner flip between runs mints a new
-      // dedupe key, and the post-floor sweep expires the orphaned old row.
-      out.push(buildListicleFamilyRefreshOpp(group.entries));
+      const groupSorted = group.entries.slice().sort((a, b) => b.fam.impressions - a.fam.impressions);
+      const primary = groupSorted[0];
+      // One facts contract per brief: the builder loads exactly one
+      // city/service facts pack, so families whose resolved service/city
+      // differ from the primary's are DEFERRED, never merged — the binding
+      // coverage section must not demand edits the refresh agent has no
+      // approved facts for (Codex r22). A page serving cross-service
+      // families handles its dominant classification; the deferred
+      // families' stale rows expire via the sweep and they re-mine.
+      const compatible = groupSorted.filter((e) => e.service === primary.service && e.city === primary.city);
+      out.push(buildListicleFamilyRefreshOpp(compatible));
     }
 
     // Catch-all reconciliation of families that exited every branch above

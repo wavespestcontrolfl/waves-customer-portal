@@ -695,9 +695,16 @@ class ContentBriefBuilder {
     if (decision.action_type === 'refresh_existing_page'
       && opportunity.signal_metadata?.source === 'listicle_family'
       && familyQueries.length) {
+      // FAQ phrasing is conditional: the refresh agent never sees the
+      // blocked-service list, so on FAQ-blocked topics the section must
+      // steer AWAY from the format the publish guard would reject
+      // (FAQ_BLOCKED_SERVICE) instead of offering it (Codex r22).
+      const coverageHow = faqBlocked
+        ? 'extend an existing section or add a NON-FAQ section (this topic forbids FAQ formats)'
+        : 'extend an existing section or add one (FAQ acceptable)';
       requiredSections = [
         ...requiredSections,
-        `family coverage: the refreshed page must directly address EVERY fragmented phrasing of this intent — ${familyQueries.map((q) => `"${q}"`).join(', ')} — extend an existing section or add one (FAQ acceptable where allowed) for any phrasing the page does not already answer`,
+        `family coverage: the refreshed page must directly address EVERY fragmented phrasing of this intent — ${familyQueries.map((q) => `"${q}"`).join(', ')} — ${coverageHow} for any phrasing the page does not already answer`,
       ];
     }
 

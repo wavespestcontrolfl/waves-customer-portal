@@ -632,7 +632,59 @@ describe('_composeBrief family-refresh coverage section (Codex r21 on #3255)', (
     expect(familySection).toContain('drought tolerant plants florida');
     expect(familySection).toContain('types of native plants florida');
     expect(familySection).toContain('deep sixth variant phrasing');
+    // tree-shrub is itself FAQ-blocked → the NON-FAQ steering applies.
+    expect(familySection).toContain('NON-FAQ');
     expect(brief.gsc_signal.family_queries).toContain('deep sixth variant phrasing');
+  });
+
+  test('FAQ-blocked service steers the coverage section AWAY from FAQ formats (Codex r22)', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-fam-refresh-faqblocked',
+        bucket: 'listicle_family',
+        query: 'signs of rodents florida',
+        page_url: 'https://wavespestcontrol.com/blog/rodent-signs/',
+        service: 'rodent',
+        city: null,
+        signal_metadata: {
+          source: 'listicle_family',
+          impressions: 120,
+          family_queries: ['signs of rodents florida', 'florida rodent signs'],
+        },
+      },
+      signals: {},
+      decision: { page_type: 'refresh', action_type: 'refresh_existing_page', final_score: 60, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    const familySection = brief.required_sections.find((sec) => /family coverage/i.test(sec));
+    expect(familySection).toBeTruthy();
+    expect(familySection).toContain('NON-FAQ');
+    expect(familySection).not.toContain('FAQ acceptable');
+  });
+
+  test('a non-blocked service keeps the FAQ-acceptable wording', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-fam-refresh-pest',
+        bucket: 'listicle_family',
+        query: 'kinds of ants in florida',
+        page_url: 'https://wavespestcontrol.com/blog/ant-types/',
+        service: 'pest',
+        city: null,
+        signal_metadata: {
+          source: 'listicle_family',
+          impressions: 120,
+          family_queries: ['kinds of ants in florida', 'florida ant kinds'],
+        },
+      },
+      signals: {},
+      decision: { page_type: 'refresh', action_type: 'refresh_existing_page', final_score: 60, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    const familySection = brief.required_sections.find((sec) => /family coverage/i.test(sec));
+    expect(familySection).toContain('FAQ acceptable');
   });
 
   test('a family BLOG (no page) gets no family-coverage section', () => {

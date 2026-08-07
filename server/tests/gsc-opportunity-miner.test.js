@@ -1132,7 +1132,10 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/sum\(position \* impressions\) \/ NULLIF\(sum\(impressions\), 0\) <= \?/);
     expect(mineSrc).toMatch(/THRESHOLDS\.strikingDistancePositionMax/);
     expect(mineSrc).not.toMatch(/\.distinct\('query'\)/); // existence-only check is the inert-lane bug
-    expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(group\.entries\)/);
+    // One facts contract per refresh: families whose service/city differ
+    // from the group's primary are DEFERRED, never merged (Codex r22).
+    expect(mineSrc).toMatch(/e\.service === primary\.service && e\.city === primary\.city/);
+    expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(compatible\)/);
     // Grouped by PAGE alone — mixed-classification families served by one
     // URL must never become multiple claimable rows editing the same page.
     expect(mineSrc).toMatch(/refreshGroups\.get\(served\.hit\.page_url\)/);
