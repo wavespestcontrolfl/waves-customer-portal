@@ -205,9 +205,12 @@ function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, 
 // natural…"), layer the citable-listicle architecture on top of the normal
 // supporting-blog contract: exact count in the title, one numbered H2 per
 // item, a quick-answer summary in the first 60 words, a sourced "how we put
-// this together" note, and a visible dated line. List-format pages are the
-// most-cited content class in answer engines (Ahrefs 2026 citation study),
-// and the same structural rules lift informational lists. Deliberately
+// this together" note, a visible dated line, FAQPage schema (the visible FAQ
+// is already in the supporting-blog contract), a per-item concrete-figure
+// note, and — for question-shaped queries — question-form item headings.
+// List-format pages are the most-cited content class in answer engines
+// (Ahrefs 2026 citation study), and the same structural rules lift
+// informational lists. Deliberately
 // INFORMATIONAL-ONLY: ranked vendor roundups stay out of the blog lane
 // (operator directive — the router's terminal near-me guard already parks
 // transactional queries), so "best company" intent never reaches this
@@ -229,6 +232,13 @@ const LISTICLE_NOUN_RE = /\b(signs?|symptoms|ways|tips|ideas|mistakes|myths|type
 // buyer-guide/comparison handling. Conservative by design: excluding e.g.
 // "best plants for shade" only costs the list formatting, never the post.
 const LISTICLE_VENDOR_RE = /\b(best|top|cheapest|company|companies|providers?|services?|exterminators?|reviews?|vs)\b/i;
+
+// Question-shaped list queries ("what are the signs of termites") get a
+// question-header variant: each numbered H2 is phrased as the exact
+// sub-question that item answers, so the heading itself matches how the
+// query was asked. Interrogative-lead only — a bare noun query ("signs of
+// termites") keeps declarative headings.
+const LISTICLE_QUESTION_RE = /^\s*(what|why|which|how|when|where|is|are|can|do|does|should)\b/i;
 
 function isListicleQuery(query) {
   const q = String(query || '').trim();
@@ -253,8 +263,12 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, operator
   // constraints (title structure, 60-word quick answer, dated line) go FIRST
   // so they can't be buried under the body/FAQ/CTA sections; the sourced
   // methodology note reads naturally after the list body, so it appends.
+  const questionShaped = LISTICLE_QUESTION_RE.test(String(query));
   const sections = [
     'listicle structure: exact item count in the title (e.g. "7 Signs of Termite Damage in Bradenton Homes"), one numbered H2 per item, and the same internal shape for every item (what it is → why it matters in SWFL → what to do)',
+    ...(questionShaped ? [
+      'question-form item headings: the query is question-shaped, so phrase each numbered H2 as the exact sub-question that item answers, the way a SWFL homeowner would ask it (e.g. "3. Are Mud Tubes on the Foundation a Termite Sign?") — keep the leading number, and the first sentence under each heading answers its question directly',
+    ] : []),
     'quick-answer summary inside the first 60 words that names every list item in one scannable sentence or tight list',
     'visible "Last updated: [Month Year]" line under the title — use the current month and year (the publisher stamps frontmatter `updated` to the PR-open date, so month+year granularity stays consistent with it; never an older or invented date)',
     ...requiredSections,
@@ -266,12 +280,20 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, operator
       'The item count in the title MUST equal the number of numbered H2 sections — recount before finishing.',
       "Each item's first sentence is self-contained and declarative so it can be quoted standalone by an answer engine.",
       'No filler between an item heading and its answer — the payoff sentence comes first, color commentary after.',
+      'Anchor each item with one concrete figure from the brief\'s facts pack or a brief-named source (a measurement, timeframe, temperature, count) where one exists — answer engines cite numbers over vague claims. NEVER invent a figure, and never a dollar amount (cost questions link /pest-control-calculator/ instead).',
       'This is an informational list, never a ranked vendor roundup — do not rank or compare companies.',
     ],
   };
-  // Schema unchanged: Article/BreadcrumbList from the supporting-blog
-  // contract (FAQPage only ever arrives via the AEO overlay upstream).
-  return { requiredSections: sections, schemaTypes, voiceConstraints: voice, listicle: true };
+  // The supporting-blog contract already requires a visible FAQ section, so
+  // requesting FAQPage schema here keeps seo-completion-gate's
+  // FAQ_SCHEMA_WITHOUT_VISIBLE_FAQ invariant satisfied; answer engines parse
+  // FAQPage regardless of Google's rich-result deprecation (same reasoning as
+  // the AEO overlay, which may have added it already — the Set dedupes).
+  // FAQ-blocked services are handled downstream: _composeBrief runs
+  // stripFaqRequirements AFTER this overlay, removing both the section and
+  // the schema type.
+  const schema = Array.from(new Set([...schemaTypes, 'FAQPage']));
+  return { requiredSections: sections, schemaTypes: schema, voiceConstraints: voice, listicle: true };
 }
 
 // NO-FAQ policy at the BRIEF level. FAQ-blocked topics (content-guardrails.
