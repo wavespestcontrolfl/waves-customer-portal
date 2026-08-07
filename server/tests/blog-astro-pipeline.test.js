@@ -3214,6 +3214,16 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
     expect(invalid.post_type).toBe('  ');
   });
 
+  test('backfill covers genuinely absent service_areas_tag only — an explicit EMPTY array is present data and stays for validation to reject (Codex r11)', () => {
+    const { backfillLegacyBlogRequiredFields } = AstroPublisher._internals;
+    const absent = { post_type: 'location', page_type: 'blog', title: 'Sarasota lawn care' };
+    expect(backfillLegacyBlogRequiredFields(absent, {})).toContain('service_areas_tag');
+    expect(Array.isArray(absent.service_areas_tag) && absent.service_areas_tag.length > 0).toBe(true);
+    const explicitEmpty = { post_type: 'location', page_type: 'blog', title: 'Sarasota lawn care', service_areas_tag: [] };
+    expect(backfillLegacyBlogRequiredFields(explicitEmpty, {})).not.toContain('service_areas_tag');
+    expect(explicitEmpty.service_areas_tag).toEqual([]); // inferring over it could publish wrong geography
+  });
+
   test('metadata PR body lists inferred fields when backfilled, stays silent otherwise', () => {
     const withFields = AstroPublisher._internals.buildMetadataPrBody({ ...base, backfilledFields: ['post_type', 'service_areas_tag'] });
     expect(withFields).toContain('Backfilled schema-required fields');

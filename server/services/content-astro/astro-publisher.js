@@ -394,8 +394,12 @@ function backfillLegacyBlogRequiredFields(nextFrontmatter, brief = {}) {
     nextFrontmatter.post_type = normalizePostType(nextFrontmatter.page_type);
     healed.push('post_type');
   }
+  // Same contract as post_type: an explicit empty array is PRESENT data —
+  // someone (or something) wrote it — and inferring areas over it could
+  // publish geographically inaccurate metadata; leave it for validation to
+  // reject (Codex r11 pre-push audit).
   const areas = nextFrontmatter.service_areas_tag;
-  if (areas == null || (Array.isArray(areas) && areas.length === 0)) {
+  if (areas == null) {
     nextFrontmatter.service_areas_tag = inferServiceAreas(nextFrontmatter, brief);
     healed.push('service_areas_tag');
   }
