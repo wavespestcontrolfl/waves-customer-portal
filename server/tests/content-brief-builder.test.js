@@ -612,6 +612,13 @@ describe('_composeBrief family-refresh coverage section (Codex r21 on #3255)', (
             { query: 'drought tolerant plants florida', impressions: 48 },
             { query: 'types of native plants florida', impressions: 40 },
           ],
+          // The COMPLETE set — the binding section must include queries
+          // beyond the capped family_variants (audit r21).
+          family_queries: [
+            'drought tolerant plants florida',
+            'types of native plants florida',
+            'deep sixth variant phrasing',
+          ],
         },
       },
       signals: {},
@@ -624,6 +631,8 @@ describe('_composeBrief family-refresh coverage section (Codex r21 on #3255)', (
     expect(familySection).toBeTruthy();
     expect(familySection).toContain('drought tolerant plants florida');
     expect(familySection).toContain('types of native plants florida');
+    expect(familySection).toContain('deep sixth variant phrasing');
+    expect(brief.gsc_signal.family_queries).toContain('deep sixth variant phrasing');
   });
 
   test('a family BLOG (no page) gets no family-coverage section', () => {

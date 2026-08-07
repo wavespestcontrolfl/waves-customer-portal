@@ -1146,7 +1146,10 @@ describe('listicle_family scoring + action mapping', () => {
     // refresh — one claimable edit per page per cycle (Codex r18); the
     // fence set is floor-filtered where mineAll builds it.
     expect(mineSrc).toMatch(/if \(answerGapPages\.has\(served\.hit\.page_url\)\) continue;/);
-    expect(src).toMatch(/const answerGapPages = new Set\(\(buckets\.answer_gap \|\| \[\]\)[\s\S]{0,200}minScoreToActFor\(o\.action_type\)/);
+    // Mine-time fence = LIVE in-flight rows only; same-batch candidates go
+    // through frozen-aware persist arbitration instead (audit r21).
+    expect(src).toMatch(/const answerGapPages = new Set\(\);/);
+    expect(src).not.toMatch(/new Set\(\(buckets\.answer_gap \|\| \[\]\)/);
     // In-flight refresh rows from EVERY other bucket join the fence — an
     // occupied page can be absent from this run's batch (recovered
     // decay_refresh signal) but its still-open edit must not race a family

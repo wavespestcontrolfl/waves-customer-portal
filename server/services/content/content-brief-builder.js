@@ -689,13 +689,15 @@ class ContentBriefBuilder {
     // would be silently dropped while the frozen page-key blocks them from
     // ever queueing separately. Mirrors the answer-gap pattern: the data
     // in gsc_signal, the requirement in required_sections.
-    const familyVariants = opportunity.signal_metadata?.family_variants;
+    const familyQueries = Array.isArray(opportunity.signal_metadata?.family_queries)
+      ? opportunity.signal_metadata.family_queries
+      : (opportunity.signal_metadata?.family_variants || []).map((v) => v.query).filter(Boolean);
     if (decision.action_type === 'refresh_existing_page'
       && opportunity.signal_metadata?.source === 'listicle_family'
-      && Array.isArray(familyVariants) && familyVariants.length) {
+      && familyQueries.length) {
       requiredSections = [
         ...requiredSections,
-        `family coverage: the refreshed page must directly address EVERY fragmented phrasing of this intent — ${familyVariants.map((v) => `"${v.query}"`).join(', ')} — extend an existing section or add one (FAQ acceptable where allowed) for any phrasing the page does not already answer`,
+        `family coverage: the refreshed page must directly address EVERY fragmented phrasing of this intent — ${familyQueries.map((q) => `"${q}"`).join(', ')} — extend an existing section or add one (FAQ acceptable where allowed) for any phrasing the page does not already answer`,
       ];
     }
 
@@ -794,6 +796,7 @@ class ContentBriefBuilder {
         // 450 impressions as a single-query metric.
         family_size: opportunity.signal_metadata?.family_size ?? null,
         family_variants: opportunity.signal_metadata?.family_variants || null,
+        family_queries: opportunity.signal_metadata?.family_queries || null,
         family_avg_position: opportunity.signal_metadata?.family_avg_position ?? null,
       },
       customer_signal: signals.customer_signal

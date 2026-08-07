@@ -1000,10 +1000,12 @@ class GscOpportunityMiner {
       // family refresh (Codex r19/r20). Fail-soft: a lookup error just
       // weakens the fence for one run.
       ['listicle_family', async () => {
-        const answerGapPages = new Set((buckets.answer_gap || [])
-          .filter((o) => o.score >= minScoreToActFor(o.action_type))
-          .map((o) => o.page_url)
-          .filter(Boolean));
+        // ONLY live in-flight rows fence at mine time — same-batch
+        // answer_gap candidates are arbitrated frozen-aware in persistAll
+        // (_arbitratedRefreshPages); a batch fence here would re-suppress
+        // families against candidates whose frozen rows land nothing
+        // (pre-push audit r21).
+        const answerGapPages = new Set();
         try {
           const inflight = await db('opportunity_queue')
             .where('action_type', 'refresh_existing_page')
