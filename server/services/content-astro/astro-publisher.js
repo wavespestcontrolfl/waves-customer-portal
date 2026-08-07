@@ -34,8 +34,9 @@ const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
 const { describeHeroForAlt } = require('../content/hero-alt-vision');
 const { normalizeContentUrl } = require('../content/content-registry');
-const { normalizeSpokeSites, SPOKE_SITE_KEYS, spokeSiteOrigin } = require('./spoke-sites');
+const { normalizeSpokeSites, SPOKE_SITE_KEYS, HUB_SITE_KEYS } = require('./spoke-sites');
 const { spokeBlogNetworkEnabled } = require('../content/spoke-blog-network');
+const { resolveSpokeTarget, blogOriginForSpoke: sharedBlogOriginForSpoke } = require('./spoke-routing');
 const { etDateString } = require('../../utils/datetime-et');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
@@ -50,7 +51,9 @@ function isBlogTarget(filePath) {
 }
 const ASTRO_HERO_PUBLIC_BASE = '/images/blog';
 const HUB_ORIGIN = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
-const BLOG_HUB_DOMAINS = Object.freeze(['wavespestcontrol.com']);
+// Single-sourced from spoke-sites so the runner's publish-origin mirror can
+// never disagree on what counts as the hub.
+const BLOG_HUB_DOMAINS = HUB_SITE_KEYS;
 
 // A hero already committed to the Astro repo — either the relative /images/blog
 // path or its absolute hub URL. These are NOT re-fetched on republish (the
@@ -99,37 +102,14 @@ function stampBlogDomains(frontmatter, spokeKey) {
   return frontmatter;
 }
 
-// Resolve the single spoke a blog post targets, from the composed brief
-// (top-level target_sites, or the persisted operator_brief copy). Spoke routing
-// is only well-defined for EXACTLY ONE non-hub spoke (single-domain render +
-// self-canonical); a hub target, an empty target, or multiple spokes all fall
-// back to the hub-only blog policy.
-function resolveSpokeTarget(brief = {}) {
-  const fromBrief = normalizeSpokeSites(brief.target_sites);
-  const fromOverlay = normalizeSpokeSites(brief?.voice_constraints?.operator_brief?.target_sites);
-  const sites = (fromBrief.length ? fromBrief : fromOverlay)
-    .filter((k) => !BLOG_HUB_DOMAINS.includes(k));
-  const spoke = sites.length === 1 ? sites[0] : null;
-  // Kill-switch enforcement at the PUBLISHING chokepoint. The seeder gate stops
-  // NEW spoke topics from being queued, but a spoke-seed row already in
-  // opportunity_queue — or one seeded during a temporary re-enable that is later
-  // turned off — would otherwise still fan out here. Honor the owner directive:
-  // when the network is disabled, no blog post publishes to a spoke; it falls
-  // back to the hub-only policy (null) and publishes on the hub instead.
-  if (spoke && !spokeBlogNetworkEnabled()) {
-    logger.info(`[astro-publisher] spoke blog network disabled — "${spoke}"-targeted post routed to the hub only (set SPOKE_BLOG_NETWORK_ENABLED=true to fan out to spokes)`);
-    return null;
-  }
-  return spoke;
-}
-
-// The canonical origin a blog post publishes under: the spoke's own canonical
-// origin (from the fleet map, mirroring the Astro build's SITE_DOMAIN) when
-// spoke-targeted, else the hub origin. Never assumes a host prefix at the call
-// site — spokeSiteOrigin owns the www/apex decision per domains.json.
+// The publish-origin routing decision (single-spoke resolution + kill switch
+// + origin mapping) lives in the SHARED spoke-routing module — the runner's
+// slug repair makes the same decision, and two copies would let repaired
+// draft.url values and self-links point at a different host than the
+// publisher actually uses (Codex r10). This wrapper only binds the
+// publisher's HUB_ORIGIN default.
 function blogOriginForSpoke(spokeKey) {
-  if (!spokeKey) return HUB_ORIGIN;
-  return spokeSiteOrigin(spokeKey) || HUB_ORIGIN;
+  return sharedBlogOriginForSpoke(spokeKey, HUB_ORIGIN);
 }
 
 // The first remark-substitution token (brandName/siteUrl/…) left un-interpolated
@@ -154,7 +134,7 @@ function syncDraftPublishTarget(draft, frontmatter) {
   return draft;
 }
 
-const POST_CATEGORIES = new Set(['pest-control', 'lawn-care', 'termite', 'mosquito', 'tree-shrub', 'seasonal']);
+const { POST_CATEGORIES, slugLeafOf } = require('./blog-categories');
 const POST_TYPES = new Set(['diagnostic', 'seasonal', 'by-grass-type', 'protocol', 'cost', 'comparison', 'case-study', 'location', 'decision']);
 const SCHEMA_TYPES = new Set(['Article', 'BlogPosting', 'FAQPage', 'BreadcrumbList', 'HowTo', 'Service', 'Review']);
 const SERVICE_AREAS = new Set(['Bradenton', 'Lakewood Ranch', 'Sarasota', 'Venice', 'North Port', 'Palmetto', 'Parrish', 'Port Charlotte']);
@@ -247,7 +227,17 @@ async function buildFrontmatter(post) {
     || (post.technically_reviewed_at ? todayEt : null);
   const factCheckedDate = clampDateToToday(calendarDateOnly(post.fact_checked_at), todayEt)
     || (post.fact_checked_at ? todayEt : null);
-  const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
+  // City substitution applies to ABSENT stored areas only: with an invalid
+  // stored value (['Tampa']) plus a valid city, letting city stand in would
+  // silently replace the corrupt field and publish it — present-but-invalid
+  // must normalize to empty so schema validation rejects the row (Codex r3).
+  // ABSENT means null/undefined ONLY: the admin editor can persist an
+  // explicit [] — an operator CLEARING the field — and inferring over it
+  // could publish every default service area; it stays present-but-invalid
+  // for validation to reject, same contract as the legacy backfill
+  // (Codex r12).
+  const storedAreasAbsent = post.service_areas_tag == null;
+  const serviceAreas = normalizeServiceAreas(post.service_areas_tag, storedAreasAbsent ? post.city : undefined);
   const relatedServices = normalizeArray(post.related_services);
   // Blog posts from this publisher are hub-only. Spoke/service pages can still
   // carry spoke domains, but blog content should not fan out to city spokes.
@@ -261,7 +251,22 @@ async function buildFrontmatter(post) {
     secondary_keywords: normalizeArray(post.secondary_keywords),
     category: normalizeCategory(post.category, post.tag),
     post_type: normalizePostType(post.post_type),
-    service_areas_tag: serviceAreas.length > 0 ? serviceAreas : undefined,
+    // service_areas_tag is schema-REQUIRED (minItems 1). A row with no stored
+    // areas and a city outside the service-area set used to emit `undefined`
+    // here (dropped by the JSON round-trip) and hard-fail
+    // assertValidBlogFrontmatter after the whole generation was already spent
+    // — a mechanical failure, not a content problem. Infer from the
+    // title/keyword haystack (DEFAULT_SERVICE_AREAS as the final fallback,
+    // same rule the autonomous path uses); stored valid areas pass through
+    // unchanged via inferServiceAreas' direct path. Inference is for
+    // GENUINELY ABSENT data only: a stored value that normalizes to empty
+    // (mistyped / out-of-area entries) is corrupt operator data, and
+    // guessing over it would publish geographically inaccurate metadata —
+    // keep the empty result so assertValidBlogFrontmatter rejects the row
+    // (the pre-hardening behavior for invalid data; Codex r2).
+    service_areas_tag: (serviceAreas.length > 0 || !storedAreasAbsent)
+      ? serviceAreas
+      : inferServiceAreas({ title: post.title, primary_keyword: post.keyword, tags: post.tag, city: post.city }, {}),
     related_services: relatedServices,
     spoke_links: normalizeArray(post.spoke_links),
     // Per-post domain targeting. For publisher-created blogs this is always
@@ -358,6 +363,14 @@ function inferServiceAreas(frontmatter = {}, brief = {}) {
   const direct = normalizeServiceAreas(frontmatter.service_areas_tag, frontmatter.city || brief.city);
   if (direct.length > 0) return direct;
 
+  // An EXPLICIT city outside the service-area set is corrupt geography
+  // data, exactly like invalid stored areas — haystack inference (or the
+  // all-area fallback) over it would publish inaccurate metadata. Return
+  // empty so schema validation rejects the row; the fallback chain below is
+  // reserved for genuinely generic posts with NO city signal (Codex r11).
+  const explicitCity = String(frontmatter.city || brief.city || '').trim();
+  if (explicitCity && !SERVICE_AREAS.has(explicitCity)) return [];
+
   const haystack = [
     frontmatter.title,
     frontmatter.primary_keyword,
@@ -365,8 +378,70 @@ function inferServiceAreas(frontmatter = {}, brief = {}) {
     brief.city,
     frontmatter.tags,
   ].flatMap((value) => Array.isArray(value) ? value : [value]).filter(Boolean).join(' ').toLowerCase();
-  const inferred = DEFAULT_SERVICE_AREAS.filter((area) => haystack.includes(area.toLowerCase()));
+  // "Palmetto bugs" / "saw palmetto" / "laurel oaks" are Florida vernacular
+  // (pests/plants), not the cities Palmetto / Laurel — scrub them before the
+  // city-name match or a generic roach post gets committed with false city
+  // metadata (Codex r13; same scrub social-content-studio applies to its
+  // city-mention scanner, which is too heavy to require from here).
+  const scrubbed = haystack.replace(/\b(?:saw\s+palmetto|palmetto\s+bugs?|laurel\s+oaks?)\b/g, ' ');
+  const inferred = DEFAULT_SERVICE_AREAS.filter((area) => scrubbed.includes(area.toLowerCase()));
   return inferred.length > 0 ? inferred : [...DEFAULT_SERVICE_AREAS];
+}
+
+// Self-heal schema-required, safely inferable fields on a BLOG frontmatter
+// about to be re-committed by the refresh / metadata-rewrite lanes. Those
+// lanes freeze the LIVE page's frontmatter and swap only the editable
+// fields — so a legacy (pre-schema-v2) post that never carried post_type /
+// service_areas_tag re-validates with BOTH missing and hard-fails
+// assertValidBlogFrontmatter ("post_type is required; service_areas_tag is
+// required") on every attempt: a mechanical park, not a content problem.
+// Backfill ONLY absent fields, and only from RELIABLE signals (a page_type
+// that maps to a real post type; inferServiceAreas' haystack, all-area
+// fallback reserved for no-city-signal posts). A field that is PRESENT —
+// valid or not — is never touched, and an absent field with no reliable
+// signal stays absent, so corrupt or unclassifiable rows still fail
+// validation loudly and park for a one-time human fix.
+function backfillLegacyBlogRequiredFields(nextFrontmatter, brief = {}) {
+  const healed = [];
+  const postType = nextFrontmatter.post_type;
+  // Backfill covers GENUINELY ABSENT fields only: an explicit "" or
+  // whitespace-only post_type is present-but-invalid data, and healing it
+  // would bypass the schema rejection that exposes corrupt metadata (and
+  // could select the wrong structural component requirements) — leave it
+  // for validation to reject (Codex r5).
+  if (postType == null) {
+    // Only a page_type that RELIABLY maps to a post type is backfilled: the
+    // 'location' fallback misclassifies seasonal/cost/comparison content
+    // (writer contract), and post_type drives structural component
+    // requirements. An unmappable legacy post stays missing and parks for
+    // a one-time human classification (Codex r11).
+    const rawPageType = String(nextFrontmatter.page_type || '').trim();
+    const mapped = POST_TYPES.has(rawPageType) ? rawPageType : POST_TYPE_ALIASES[rawPageType.toLowerCase()];
+    if (mapped) {
+      nextFrontmatter.post_type = mapped;
+      // page_type is a pre-schema-v2 key the blog schema rejects as
+      // unknown — once consumed as the mapping signal it must not ride
+      // into the committed frontmatter. An UNMAPPABLE page_type stays put
+      // so validation parks the row loudly. The removal is DISCLOSED in
+      // the healed list so PR-body summaries reflect the complete
+      // metadata migration (Codex r12).
+      delete nextFrontmatter.page_type;
+      healed.push('post_type', 'page_type (legacy key consumed & removed)');
+    }
+  }
+  // Same contract as post_type: an explicit empty array is PRESENT data —
+  // someone (or something) wrote it — and inferring areas over it could
+  // publish geographically inaccurate metadata; leave it for validation to
+  // reject (Codex r11 pre-push audit).
+  const areas = nextFrontmatter.service_areas_tag;
+  if (areas == null) {
+    nextFrontmatter.service_areas_tag = inferServiceAreas(nextFrontmatter, brief);
+    healed.push('service_areas_tag');
+  }
+  if (healed.length) {
+    logger.warn(`[astro-publisher] backfilled missing schema-required blog field(s) ${healed.join(', ')} on a legacy live frontmatter (pre-schema-v2 post)`);
+  }
+  return healed;
 }
 
 function normalizeAuthorBlock(value, fallback) {
@@ -638,15 +713,36 @@ function imageExtFromSource(url) {
 
 // ── Image fetch (optional) ─────────────────────────────────────────
 
+// Parse a base64 image data: URL WITHOUT running a regex across the payload.
+// Generated heroes arrive as ~5-8MB data URLs; the previous
+// /^data:...;base64,(.+)$/ match executed V8's backtracking engine over the
+// whole multi-megabyte payload (and simply failed on provider base64 that
+// contains whitespace/newlines, falling through to a network fetch() of a
+// data: URL). Deep in the publish call chain that regex is the only
+// huge-input operation and the prime suspect for the prod
+// "Maximum call stack size exceeded" hero failure. Split at the first comma
+// and regex ONLY the bounded header; Buffer.from(base64) tolerates embedded
+// whitespace, so wrapped payloads now decode instead of erroring.
+function parseImageDataUrl(url) {
+  const s = String(url || '');
+  if (!s.toLowerCase().startsWith('data:')) return null;
+  const comma = s.indexOf(',');
+  if (comma === -1) return null;
+  const header = s.slice(0, comma); // bounded — never the multi-MB payload
+  const m = header.match(/^data:(image\/[a-z0-9.+-]+);base64$/i);
+  if (!m) return null;
+  return { mime: m[1].toLowerCase(), base64: s.slice(comma + 1) };
+}
+
 async function fetchImageBuffer(url) {
   if (!url) return null;
   // In-repo path — nothing to fetch, already committed.
   if (url.startsWith('/images/blog/')) return null;
-  const dataMatch = String(url).match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
-  if (dataMatch) {
+  const dataParsed = parseImageDataUrl(url);
+  if (dataParsed) {
     return {
-      buffer: Buffer.from(dataMatch[2], 'base64'),
-      ext: imageExtFromMime(dataMatch[1].toLowerCase()),
+      buffer: Buffer.from(dataParsed.base64, 'base64'),
+      ext: imageExtFromMime(dataParsed.mime),
     };
   }
   try {
@@ -696,14 +792,25 @@ async function generateHeroBuffer(post) {
     keyword: post.keyword,
     mode: 'blog-hero',
   });
-  const img = await fetchImageBuffer(gen.dataUrl);
-  if (!img?.buffer) throw new Error('hero image generation produced no usable image');
+  let img;
+  try {
+    img = await fetchImageBuffer(gen.dataUrl);
+    if (!img?.buffer) throw new Error('hero image generation produced no usable image');
+  } catch (err) {
+    // Post-provider failure: the generator SUCCEEDED, so carry its provider
+    // chain onto the thrown error — describeHeroFailure reads err.attempts,
+    // and this failure class is exactly what the full diagnosis exists for
+    // (Codex r1).
+    if (!err.attempts && Array.isArray(gen.attempts)) err.attempts = gen.attempts;
+    throw err;
+  }
   logger.info(`[astro-publisher] generated hero image for ${post.slug || post.title} via ${gen.model}`);
   // Carry the generator's alt (derived from the actual generation prompt's
   // subject/setting) so callers can overwrite any pre-written
   // hero_image_alt — alt authored BEFORE the image exists routinely
-  // mismatches what was generated.
-  return { ...img, alt: gen.alt || null };
+  // mismatches what was generated. `attempts` rides along so downstream
+  // post-generation failures (e.g. Sharp compression) can attach it too.
+  return { ...img, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null };
 }
 
 // ── Main publish ───────────────────────────────────────────────────
@@ -1290,6 +1397,40 @@ async function verifiedCommittedHeroSrc(src) {
   return file ? src : null;
 }
 
+// A committed category-default hero asset, or null. Probed only on the hero
+// generation FAILURE path: the schema requires a hero, so the only safe
+// fallback is an asset proven to already exist in the Astro repo. Probe the
+// category default first, then the site-wide default, under the standard
+// hero directory conventions.
+async function defaultHeroForCategory(category) {
+  const cat = String(category || '').trim().toLowerCase();
+  const candidates = [
+    ...(cat && /^[a-z0-9-]+$/.test(cat) ? [`defaults/${cat}/hero.webp`] : []),
+    'defaults/hero.webp',
+  ];
+  for (const rel of candidates) {
+    if (await gh.getFile(`${ASTRO_HERO_DIR}/${rel}`)) return `${ASTRO_HERO_PUBLIC_BASE}/${rel}`;
+  }
+  return null;
+}
+
+// Full root cause for a hero-pipeline failure. err.message alone loses the
+// error CLASS (a RangeError "Maximum call stack size exceeded" reads like
+// provider text), the provider-chain attempts (image-generator attaches
+// them), and where it threw — all of which the parked run's failure_message
+// needs for a diagnosis that doesn't require a redeploy with extra logging.
+function describeHeroFailure(err) {
+  const parts = [
+    err?.name && err.name !== 'Error' ? `${err.name}: ${err?.message || ''}`.trim() : String(err?.message || err || 'unknown error'),
+  ];
+  if (Array.isArray(err?.attempts) && err.attempts.length) {
+    parts.push(`providers: ${err.attempts.map((a) => `${a.provider}=${a.result?.dataUrl ? 'ok' : (a.result?.status || a.result?.error || a.result?.reason || 'failed')}`).join(', ')}`);
+  }
+  const frame = String(err?.stack || '').split('\n').find((line) => /^\s+at /.test(line));
+  if (frame) parts.push(`at ${frame.trim().replace(/^at\s+/, '')}`);
+  return parts.join(' | ');
+}
+
 // Resolve the hero for an autonomous blog publish. Reuse-first:
 //   1. the live post's own frontmatter hero (mirrors mergedHeroRef), verified
 //      to exist in the repo — refresh/update runs must not regenerate;
@@ -1331,7 +1472,15 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
       keyword: frontmatter.primary_keyword,
       slug,
     });
-    const buffer = await compressToWebp(img.buffer);
+    let buffer;
+    try {
+      buffer = await compressToWebp(img.buffer);
+    } catch (err) {
+      // Same post-provider contract as generateHeroBuffer: compression
+      // failures keep the successful provider chain for the diagnosis.
+      if (!err.attempts && Array.isArray(img.attempts)) err.attempts = img.attempts;
+      throw err;
+    }
     generated = {
       src: `${ASTRO_HERO_PUBLIC_BASE}/${slug}/hero.webp`,
       repoPath: `${ASTRO_HERO_DIR}/${slug}/hero.webp`,
@@ -1341,8 +1490,37 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
       alt: img.alt || null,
     };
   } catch (err) {
-    const heroErr = new Error(`autonomous blog hero image generation failed for ${slug}: ${err.message}`);
+    // The blog schema REQUIRES hero_image + og_image (packages/blog-schema/
+    // schema.json), so a hero-less publish is never an option. Before
+    // parking, probe the repo for a CATEGORY-DEFAULT hero asset under the
+    // existing hero conventions and reuse it (deterministic, already
+    // committed, so nothing new can fail). Committing
+    // public/images/blog/defaults/<category>/hero.webp (or the site-wide
+    // defaults/hero.webp) in the Astro repo arms this fallback; while no
+    // such asset exists the run still parks — fail-closed, with the FULL
+    // root cause on the failure message.
+    const fallback = await defaultHeroForCategory(frontmatter.category).catch(() => null);
+    if (fallback) {
+      logger.warn(`[astro-publisher] hero generation failed for ${slug} (${describeHeroFailure(err)}) — publishing with committed default hero ${fallback}`);
+      // Reuse shape (buffer:null): the asset is already committed on main.
+      // Supply a GENERIC alt describing the fallback asset — without one the
+      // caller stamps the agent's subject-specific draft alt over an image
+      // that was never generated (Codex r1: a category/site-wide default can
+      // depict something entirely different).
+      const catLabel = String(frontmatter.category || '').trim().replace(/-/g, ' ');
+      // The category-specific alt is only truthful for the CATEGORY asset:
+      // the site-wide defaults/hero.webp is not guaranteed to depict the
+      // category, so it keeps the neutral text (Codex r16).
+      const isCategoryAsset = Boolean(catLabel) && !fallback.endsWith('/defaults/hero.webp');
+      return {
+        src: fallback,
+        buffer: null,
+        alt: isCategoryAsset ? `Illustrative ${catLabel} article header image` : 'Illustrative article header image',
+      };
+    }
+    const heroErr = new Error(`autonomous blog hero image generation failed for ${slug}: ${describeHeroFailure(err)}`);
     heroErr.code = 'BLOG_HERO_IMAGE_FAILED';
+    heroErr.cause = err;
     throw heroErr;
   }
 
@@ -1384,13 +1562,14 @@ async function publishOrUpdatePage(draft, brief = {}) {
   }
   // Spoke routing: a curated spoke-seed brief publishes the post on its single
   // spoke domain with a SELF-canonical spoke URL (the publisher owns domain
-  // routing, so it overrides the hub-defaulted canonical the writer emits).
+  // routing). The override is applied by assertCanonicalMatchesSlug below —
+  // it validates the writer's EMITTED canonical first (off-site → throw →
+  // park) and then stamps the blogOrigin-derived canonical itself. Replacing
+  // the canonical BEFORE the guard would silently erase an off-site canonical
+  // on spoke seeds that the identical hub draft gets parked for (Codex r5).
   // Non-spoke briefs keep the hub-only blog policy unchanged.
   const spokeTarget = resolveSpokeTarget(brief);
   const blogOrigin = blogOriginForSpoke(spokeTarget);
-  if (spokeTarget) {
-    sourceFrontmatter.canonical = canonicalUrlForSlug(rawSlug, blogOrigin);
-  }
   // Validate the writer's slug↔canonical self-consistency on the EMITTED slug (a
   // genuinely mismatched draft still throws → review). THEN enforce the blog URL
   // protocol: the published slug, canonical, committed FILE, hero, and branch all
@@ -1642,7 +1821,14 @@ async function publishMetadataRewrite(draft, brief = {}) {
 
   // Blog targets must stay schema-valid after a metadata rewrite (e.g.
   // meta_description 115-160). Non-blog pages use a different contract.
-  if (isBlogTarget(filePath)) assertValidBlogFrontmatter(nextFrontmatter);
+  // Legacy (pre-schema-v2) live posts may lack schema-required post_type /
+  // service_areas_tag entirely — backfill the absent ones deterministically
+  // instead of hard-failing a rewrite that never touched them.
+  let backfilledFields = [];
+  if (isBlogTarget(filePath)) {
+    backfilledFields = backfillLegacyBlogRequiredFields(nextFrontmatter, brief);
+    assertValidBlogFrontmatter(nextFrontmatter);
+  }
 
   const markdown = fm.stringify(nextFrontmatter, parsed.content || '');
   if (markdown === existing.content) {
@@ -1681,6 +1867,7 @@ async function publishMetadataRewrite(draft, brief = {}) {
       titleField,
       metaField,
       brief,
+      backfilledFields,
     }),
   });
   await requestCodexReview({
@@ -1781,7 +1968,14 @@ async function publishRefresh(draft, brief = {}) {
   // already exist on the live page, so a valid blog post stays valid unless the
   // agent produced an out-of-bounds title/meta — which this gate now blocks
   // before a PR is ever opened. Non-blog pages use a different contract.
-  if (isBlogTarget(filePath)) assertValidBlogFrontmatter(nextFrontmatter);
+  // Legacy (pre-schema-v2) live posts may lack schema-required post_type /
+  // service_areas_tag entirely — backfill the absent ones deterministically
+  // instead of hard-failing a refresh that never touched them.
+  let backfilledFields = [];
+  if (isBlogTarget(filePath)) {
+    backfilledFields = backfillLegacyBlogRequiredFields(nextFrontmatter, brief);
+    assertValidBlogFrontmatter(nextFrontmatter);
+  }
 
   // Fact-check a refreshed blog body too — a refresh can introduce a wrong
   // pesticide/pathogen/ordinance fact just like a new draft. Only when the body
@@ -1813,7 +2007,7 @@ async function publishRefresh(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
-    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody, brief }),
+    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody, brief, backfilledFields }),
   });
   await requestCodexReview({
     pr,
@@ -2336,7 +2530,7 @@ function buildDraftPrBody({ frontmatter, slug, branch, content, brief }) {
   ].join('\n');
 }
 
-function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after = {}, titleField = 'title', metaField = 'meta_description', brief = {} }) {
+function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after = {}, titleField = 'title', metaField = 'meta_description', brief = {}, backfilledFields = [] }) {
   return [
     `**Autonomous title/meta rewrite**`,
     ``,
@@ -2353,7 +2547,11 @@ function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after =
     `| ${titleField} | ${markdownTableCell(before[titleField])} | ${markdownTableCell(after[titleField])} |`,
     `| ${metaField} | ${markdownTableCell(before[metaField])} | ${markdownTableCell(after[metaField])} |`,
     ``,
-    `Body, slug, canonical, and schema are intentionally unchanged.`,
+    ...(backfilledFields.length ? [
+      `**Backfilled schema-required fields (inferred — legacy pre-schema-v2 post):** ${backfilledFields.map((f) => `\`${f}\``).join(', ')}. Review the inferred values in the diff.`,
+      ``,
+    ] : []),
+    `Body, slug, canonical, and schema are intentionally unchanged${backfilledFields.length ? ' (other than the backfilled fields above)' : ''}.`,
     ``,
     `Generated by waves-customer-portal autonomous runner. Merge after review.`,
     ``,
@@ -2361,7 +2559,7 @@ function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after =
   ].join('\n');
 }
 
-function buildRefreshPrBody({ filePath, targetUrl, branch, before = {}, after = {}, oldBody = '', newBody = '', brief = {} }) {
+function buildRefreshPrBody({ filePath, targetUrl, branch, before = {}, after = {}, oldBody = '', newBody = '', brief = {}, backfilledFields = [] }) {
   const oldWords = String(oldBody).split(/\s+/).filter(Boolean).length;
   const newWords = String(newBody).split(/\s+/).filter(Boolean).length;
   const titleField = after.metaTitle !== undefined ? 'metaTitle' : 'title';
@@ -2382,7 +2580,11 @@ function buildRefreshPrBody({ filePath, targetUrl, branch, before = {}, after = 
     `| ${titleField} | ${markdownTableCell(before[titleField])} | ${markdownTableCell(after[titleField])} |`,
     `| ${metaField} | ${markdownTableCell(before[metaField])} | ${markdownTableCell(after[metaField])} |`,
     ``,
-    `**Frozen (unchanged):** canonical, slug, schema, domains, trackingNumberKey, cityPhone, pageType, category, robots, ogImage — all preserved from the live page. Only body + meta + freshness date changed.`,
+    ...(backfilledFields.length ? [
+      `**Backfilled schema-required fields (inferred — legacy pre-schema-v2 post):** ${backfilledFields.map((f) => `\`${f}\``).join(', ')}. Review the inferred values in the diff.`,
+      ``,
+    ] : []),
+    `**Frozen (unchanged):** canonical, slug, schema, domains, trackingNumberKey, cityPhone, ${backfilledFields.some((f) => String(f).startsWith('page_type')) ? '' : 'pageType, '}category, robots, ogImage — all preserved from the live page. Only body + meta + freshness date${backfilledFields.length ? ' + the backfilled fields above' : ''} changed.`,
     ``,
     `Generated by waves-customer-portal autonomous runner. Merge after review.`,
     ``,
@@ -2451,15 +2653,8 @@ function buildSeoReviewSection({ frontmatter = {}, brief = {} } = {}) {
 
 // The topic segment of a slug/canonical/URL — the LAST non-empty path part,
 // stripped of origin, query, hash, and surrounding slashes.
-function slugLeafOf(value) {
-  return String(value || '')
-    .replace(/^https?:\/\/[^/]+/i, '')
-    .split(/[?#]/)[0]
-    .replace(/^\/+|\/+$/g, '')
-    .split('/')
-    .filter(Boolean)
-    .pop() || '';
-}
+// slugLeafOf moved to ./blog-categories — the runner's slug repair gates
+// canonical rewrites on the same leaf comparison (Codex r11).
 
 // The ROUTE slug (the /{category}/{slug}/ URL path) for a blog post: the post's
 // own category, then the topic leaf of its raw slug. The astro
@@ -2501,27 +2696,75 @@ function normalizeCanonicalPath(pathname) {
   return `/${String(pathname || '').replace(/^\/+|\/+$/g, '')}/`;
 }
 
+// Hosts an autonomous draft canonical may legitimately point at: the resolved
+// publish origin, the hub, and the spoke fleet (with/without www). A canonical
+// on any of these is publisher-repairable (we derive the binding canonical
+// from the slug anyway); a canonical on ANY OTHER host would hand the page's
+// ranking signal to an off-fleet site and must fail, never be silently
+// "repaired" into a publish.
+function isFleetCanonicalHost(host, expectedOrigin) {
+  const h = String(host || '').toLowerCase().replace(/^www\./, '');
+  if (!h) return false;
+  try {
+    if (h === new URL(expectedOrigin).hostname.toLowerCase().replace(/^www\./, '')) return true;
+  } catch { /* fall through to the fleet list */ }
+  try {
+    if (h === new URL(HUB_ORIGIN).hostname.toLowerCase().replace(/^www\./, '')) return true;
+  } catch { /* fall through to the fleet list */ }
+  return SPOKE_SITE_KEYS.some((key) => h === String(key).toLowerCase());
+}
+
 function assertCanonicalMatchesSlug(frontmatter, slug, origin = HUB_ORIGIN) {
   const expected = canonicalUrlForSlug(slug, origin);
   const supplied = String(frontmatter?.canonical || '').trim();
   // The writer's canonical is ADVISORY — the binding canonical is derived from
-  // the (category-route) slug by the caller regardless. Reject ONLY a canonical
-  // that VALIDLY points to a DIFFERENT post (different leaf slug): that's a
-  // genuinely confused draft worth parking for review. An absent, malformed,
-  // different-origin, or mere category-prefix variant ("/foo/" vs
-  // "/pest-control/foo/", which the publisher resolves via categoryRouteSlug) is
-  // normalized to the slug — those mismatches were wasting whole generations on
-  // a field we overwrite anyway.
+  // the (category-route) slug by the caller regardless. Reject ONLY:
+  //   - a canonical that VALIDLY points to a DIFFERENT post (different leaf
+  //     slug): a genuinely confused draft worth parking for review;
+  //   - an OFF-FLEET canonical (absolute URL on a host that is neither the
+  //     publish origin, the hub, nor a spoke): repairing that would silently
+  //     convert a cross-site canonical into a publish — fail closed instead.
+  // An absent, malformed, relative, fleet-origin, or mere category-prefix
+  // variant ("/foo/" vs "/pest-control/foo/", which the publisher resolves via
+  // categoryRouteSlug) is normalized to the slug-derived canonical — those
+  // mismatches were wasting whole generations on a field we overwrite anyway.
   if (supplied) {
+    // Route-bearing forms (leading slash or backslash, or an absolute URL)
+    // parse against the expected origin, and the host check below runs on
+    // the RESOLVED hostname (Codex r9/r10): textual prefix tests keep
+    // missing host-bearing forms — protocol-relative `//host/…`,
+    // slash-backslash `/\host/…`, and network-path `\\host/…` all resolve
+    // onto a foreign host under WHATWG rules, while a genuinely relative
+    // path resolves onto the expected origin and passes the fleet check by
+    // construction. A base-less parse is equally wrong in the other
+    // direction: `\\host/…` fails it outright and was silently replaced
+    // instead of parked. Bare junk with no route shape ("not a valid url")
+    // stays OUT of classification — it validly points nowhere, so it is
+    // derived from the slug instead of wasting the generation.
     let suppliedUrl = null;
-    try {
-      suppliedUrl = supplied.startsWith('/')
-        ? new URL(supplied, new URL(expected).origin)
-        : new URL(supplied);
-    } catch {
-      suppliedUrl = null; // malformed → derive from slug below
+    let routeBearing = /^[/\\]/.test(supplied);
+    if (!routeBearing) {
+      try { new URL(supplied); routeBearing = true; } catch { /* bare junk → derive */ }
+    }
+    if (routeBearing) {
+      try {
+        suppliedUrl = new URL(supplied, new URL(expected).origin);
+      } catch {
+        suppliedUrl = null; // malformed → derive from slug below
+      }
     }
     if (suppliedUrl) {
+      // The off-site check runs on the PARSED hostname regardless of the raw
+      // prefix (Codex r9): the WHATWG parser resolves slash-backslash forms
+      // like `/\competitor.example/foo/` as HOST-BEARING URLs, so a textual
+      // "starts with a single slash" test would skip the fleet check on an
+      // off-fleet canonical. A genuinely path-relative canonical resolves
+      // onto the expected origin and passes the fleet check by construction.
+      if (!isFleetCanonicalHost(suppliedUrl.hostname, origin)) {
+        // Deterministic publish error (autonomous-runner parks it for review
+        // instead of retry-looping the same draft).
+        throw new Error(`autonomous draft canonical points off-site (${suppliedUrl.hostname}) — refusing to repair a cross-site canonical`);
+      }
       const suppliedLeaf = slugLeafOf(suppliedUrl.pathname);
       const expectedLeaf = slugLeafOf(slug);
       if (suppliedLeaf && expectedLeaf && suppliedLeaf !== expectedLeaf) {
@@ -2811,6 +3054,13 @@ module.exports = {
     generateHeroBuffer,
     compressToWebp,
     resolveAutonomousHero,
+    fetchImageBuffer,
+    parseImageDataUrl,
+    defaultHeroForCategory,
+    describeHeroFailure,
+    inferServiceAreas,
+    backfillLegacyBlogRequiredFields,
+    isFleetCanonicalHost,
     stampAutonomousHero,
     heroAltForDraft,
     verifiedCommittedHeroSrc,
@@ -2833,6 +3083,7 @@ module.exports = {
     normalizeAuthorBlock,
     buildDraftPrBody,
     buildMetadataPrBody,
+    buildRefreshPrBody,
     buildSeoReviewSection,
     urlToAstroPath,
     publicPathFromAstroFile,

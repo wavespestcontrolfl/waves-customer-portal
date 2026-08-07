@@ -235,6 +235,37 @@ describe('blog Astro frontmatter validation', () => {
     expect(result.errors.join('\n')).toMatch(/author\.bio_url must be string/);
   });
 
+  test('service-area inference covers ONLY genuinely absent data — stored invalid values stay empty for validation to reject (Codex r2)', async () => {
+    const base = {
+      title: 'Ant Pressure Basics',
+      slug: 'ant-pressure-basics',
+      meta_description: 'A short guide to household ant pressure and what drives it.',
+      keyword: 'ant control basics',
+      tag: 'Ants',
+      featured_image_url: '/images/blog/ant-pressure-basics/hero.png',
+      hero_image_alt: 'Ant trail near a patio',
+      content: 'Ant trails around patios often start with moisture and food access.',
+    };
+    // Absent → inferred (DEFAULT_SERVICE_AREAS fallback keeps the row alive).
+    const absent = await AstroPublisher.buildFrontmatter({ ...base });
+    expect(absent.service_areas_tag.length).toBeGreaterThan(0);
+    // Present but invalid (mistyped / out-of-area) → NOT inferred over; the
+    // empty result must reach assertValidBlogFrontmatter and reject the row.
+    const invalid = await AstroPublisher.buildFrontmatter({ ...base, service_areas_tag: ['Tampa'] });
+    expect(invalid.service_areas_tag).toEqual([]);
+    // A valid city must NOT stand in for present-but-invalid stored areas
+    // (Codex r3) — city substitution is for absent data only.
+    const invalidWithCity = await AstroPublisher.buildFrontmatter({ ...base, service_areas_tag: ['Tampa'], city: 'Sarasota' });
+    expect(invalidWithCity.service_areas_tag).toEqual([]);
+    const absentWithCity = await AstroPublisher.buildFrontmatter({ ...base, city: 'Sarasota' });
+    expect(absentWithCity.service_areas_tag).toEqual(['Sarasota']);
+    // An explicit EMPTY array is an operator CLEARING the field via the
+    // admin editor — present data, never inferred over (Codex r12); it
+    // reaches validation empty and rejects, same contract as the backfill.
+    const explicitEmpty = await AstroPublisher.buildFrontmatter({ ...base, service_areas_tag: [], city: 'Sarasota' });
+    expect(explicitEmpty.service_areas_tag).toEqual([]);
+  });
+
   test('maps pest-family legacy tags to the required pest-control category', async () => {
     const data = await AstroPublisher.buildFrontmatter({
       title: 'Ant Pressure in Palmetto',
@@ -489,6 +520,35 @@ describe('blog Astro frontmatter validation', () => {
     });
   });
 
+  test('a spoke-routed draft with an OFF-SITE emitted canonical parks — spoke routing must not erase the canonical before the guard (Codex r5)', async () => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue(null);
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 123, html_url: 'https://github.com/wavespestcontrolfl/waves-astro/pull/123' });
+    gh.createIssueComment.mockResolvedValue({});
+    mockHeroGeneration();
+
+    const prev = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    try {
+      await expect(AstroPublisher.publishOrUpdatePage(
+        {
+          type: 'draft',
+          frontmatter: validFrontmatter({
+            slug: '/ant-trails-bradenton/',
+            canonical: 'https://competitor.example/post/',
+          }),
+          body: 'Waves Pest Control guidance for Bradenton homeowners.',
+        },
+        { action_type: 'new_supporting_blog', target_sites: ['veniceflpestcontrol.com'] }
+      )).rejects.toThrow(/points off-site/);
+    } finally {
+      if (prev === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      else process.env.SPOKE_BLOG_NETWORK_ENABLED = prev;
+    }
+  });
+
   test('normalizes autonomous draft domains to the hub before committing markdown', async () => {
     jest.clearAllMocks();
     gh.createBranch.mockResolvedValue({});
@@ -733,6 +793,48 @@ describe('autonomous frontmatter normalization (Bucket A generator fixes)', () =
     test('still rejects a canonical pointing to a genuinely different post (different leaf)', () => {
       const fm = { slug: '/ant-trails/', canonical: 'https://www.wavespestcontrol.com/roach-trails/' };
       expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical must match slug/);
+    });
+
+    test('repairs a RELATIVE canonical (derives from slug, keeps the generation)', () => {
+      const fm = { slug: '/ant-trails/', canonical: '/pest-control/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'pest-control/ant-trails')).not.toThrow();
+      expect(fm.canonical).toBe(canonicalUrlForSlug('pest-control/ant-trails'));
+    });
+
+    test('repairs a same-leaf canonical on a FLEET (spoke) host — on-fleet drift is publisher-owned', () => {
+      const fm = { slug: '/ant-trails/', canonical: 'https://sarasotaflpestcontrol.com/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).not.toThrow();
+      expect(fm.canonical).toBe(canonicalUrlForSlug('ant-trails'));
+    });
+
+    test('REJECTS an off-site canonical even with a matching leaf — never repaired into a publish', () => {
+      const fm = { slug: '/ant-trails/', canonical: 'https://evil.example.com/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical points off-site/);
+      // The rejection message is in the runner's deterministic-park list, so
+      // the run parks for review instead of retry-looping.
+      expect(fm.canonical).toBe('https://evil.example.com/ant-trails/'); // untouched — no silent repair
+    });
+
+    test('REJECTS a protocol-relative off-site canonical (//host/… carries a host of its own)', () => {
+      const fm = { slug: '/ant-trails/', canonical: '//evil.example.com/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical points off-site/);
+    });
+
+    test('REJECTS a slash-backslash off-site canonical — the WHATWG parser resolves /\\host/… as HOST-BEARING (Codex r9)', () => {
+      // A raw "starts with a single slash" test would classify this as
+      // path-relative and skip the fleet check; the parsed hostname is the
+      // truth.
+      const fm = { slug: '/ant-trails/', canonical: '/\\evil.example.com/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical points off-site/);
+      expect(fm.canonical).toBe('/\\evil.example.com/ant-trails/'); // untouched — no silent repair
+    });
+
+    test('REJECTS a network-path off-site canonical — \\\\host/… resolves host-bearing against the base (Codex r10)', () => {
+      // A base-less parse THROWS on this form, and the old catch branch then
+      // silently replaced the foreign canonical instead of parking it.
+      const fm = { slug: '/ant-trails/', canonical: '\\\\evil.example.com/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical points off-site/);
+      expect(fm.canonical).toBe('\\\\evil.example.com/ant-trails/'); // untouched — no silent repair
     });
   });
 
@@ -2195,6 +2297,135 @@ describe('generateHeroBuffer (publish-time AI hero)', () => {
       AstroPublisher._internals.generateHeroBuffer({ title: 'T' })
     ).rejects.toThrow(/no usable image/);
   });
+
+  test('decodes a provider-scale (multi-MB, whitespace-wrapped) data URL without regexing the payload', async () => {
+    // The old /^data:...;base64,(.+)$/ ran V8's regex engine across the whole
+    // multi-megabyte payload (the huge-input suspect behind the prod
+    // "Maximum call stack size exceeded" hero failure) and outright FAILED on
+    // wrapped base64 (newlines), falling through to a network fetch() of a
+    // data: URL. The bounded header parse must decode both shapes locally.
+    const wrapped = `data:image/png;base64,${(PNG_B64.match(/.{1,20}/g) || []).join('\n')}`;
+    imageGenerator.generate.mockResolvedValue({ dataUrl: wrapped, model: 'test-model' });
+    const img = await AstroPublisher._internals.generateHeroBuffer({ title: 'Wrapped' });
+    expect(Buffer.isBuffer(img.buffer)).toBe(true);
+    expect(img.buffer.length).toBeGreaterThan(0);
+    expect(img.ext).toBe('png');
+  });
+});
+
+describe('parseImageDataUrl (bounded data-URL header parse)', () => {
+  const { parseImageDataUrl } = AstroPublisher._internals;
+
+  test('parses mime + payload without touching the payload with a regex', () => {
+    const big = 'A'.repeat(6 * 1024 * 1024);
+    const parsed = parseImageDataUrl(`data:image/webp;base64,${big}`);
+    expect(parsed.mime).toBe('image/webp');
+    expect(parsed.base64).toBe(big);
+  });
+
+  test('rejects non-data and non-base64-image URLs', () => {
+    expect(parseImageDataUrl('https://example.com/x.png')).toBeNull();
+    expect(parseImageDataUrl('data:text/html;base64,PGI+')).toBeNull();
+    expect(parseImageDataUrl('data:image/png,rawdata')).toBeNull();
+    expect(parseImageDataUrl('')).toBeNull();
+  });
+});
+
+describe('resolveAutonomousHero fallback (hero is schema-required — default asset or full-cause park)', () => {
+  const imageGenerator = require('../services/content/image-generator');
+  const frontmatter = {
+    title: 'Fall Lawn Mistakes',
+    meta_description: 'm',
+    primary_keyword: 'fall lawn mistakes',
+    category: 'lawn-care',
+  };
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('on generation failure, reuses a COMMITTED category-default hero when one exists in the repo', async () => {
+    const boom = new RangeError('Maximum call stack size exceeded');
+    imageGenerator.generate.mockRejectedValue(boom);
+    gh.getFile.mockImplementation(async (path) => (
+      path === 'public/images/blog/defaults/lawn-care/hero.webp' ? { content: 'x', sha: 's' } : null
+    ));
+
+    const hero = await AstroPublisher._internals.resolveAutonomousHero({
+      frontmatter, slug: 'lawn-care/fall-lawn-mistakes-swfl', existingFile: null,
+    });
+
+    // The fallback carries a GENERIC alt — the caller must never stamp the
+    // agent's subject-specific draft alt over an image that was never
+    // generated (Codex r1).
+    expect(hero).toEqual({ src: '/images/blog/defaults/lawn-care/hero.webp', buffer: null, alt: 'Illustrative lawn care article header image' });
+  });
+
+  test('falls back to the site-wide default when no category default exists', async () => {
+    imageGenerator.generate.mockRejectedValue(new Error('all providers failed'));
+    gh.getFile.mockImplementation(async (path) => (
+      path === 'public/images/blog/defaults/hero.webp' ? { content: 'x', sha: 's' } : null
+    ));
+
+    const hero = await AstroPublisher._internals.resolveAutonomousHero({
+      frontmatter, slug: 'lawn-care/fall-lawn-mistakes-swfl', existingFile: null,
+    });
+
+    // The SITE-WIDE default is not guaranteed to depict the category, so
+    // its alt stays category-NEUTRAL (Codex r16) — only the category asset
+    // earns the category-specific text.
+    expect(hero).toEqual({ src: '/images/blog/defaults/hero.webp', buffer: null, alt: 'Illustrative article header image' });
+  });
+
+  test('post-provider failure (generation succeeded, decode/compress failed) still carries the provider chain on the thrown error (Codex r1)', async () => {
+    const attempts = [{ provider: 'gpt-image-2', result: { dataUrl: 'ok' } }];
+    imageGenerator.generate.mockResolvedValue({
+      dataUrl: 'data:image/png;base64,bm90IGFuIGltYWdl', // valid base64, NOT an image — sharp throws in compressToWebp
+      mimeType: 'image/png',
+      model: 'gpt-image-2',
+      attempts,
+      alt: 'a lawn',
+    });
+    gh.getFile.mockResolvedValue(null); // no committed default → parks
+
+    let thrown;
+    try {
+      await AstroPublisher._internals.resolveAutonomousHero({
+        frontmatter, slug: 'lawn-care/fall-lawn-mistakes-swfl', existingFile: null,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeTruthy();
+    expect(thrown.code).toBe('BLOG_HERO_IMAGE_FAILED');
+    // describeHeroFailure reads attempts off the cause chain — the provider
+    // history from the SUCCESSFUL generate call must survive the
+    // post-provider throw.
+    expect(thrown.message).toContain('providers: gpt-image-2=ok');
+  });
+
+  test('with NO committed default, still parks — and the failure message carries the FULL root cause (error class + provider attempts)', async () => {
+    const boom = new RangeError('Maximum call stack size exceeded');
+    boom.attempts = [
+      { provider: 'gpt-image-2', result: { retryable: true, status: 503 } },
+      { provider: 'gemini', result: { fatal: true, status: 'no_image_in_response' } },
+    ];
+    imageGenerator.generate.mockRejectedValue(boom);
+    gh.getFile.mockResolvedValue(null);
+
+    let thrown;
+    try {
+      await AstroPublisher._internals.resolveAutonomousHero({
+        frontmatter, slug: 'lawn-care/fall-lawn-mistakes-swfl', existingFile: null,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeDefined();
+    expect(thrown.code).toBe('BLOG_HERO_IMAGE_FAILED');
+    expect(thrown.message).toContain('autonomous blog hero image generation failed for lawn-care/fall-lawn-mistakes-swfl');
+    expect(thrown.message).toContain('RangeError: Maximum call stack size exceeded');
+    expect(thrown.message).toContain('gpt-image-2=503');
+    expect(thrown.message).toContain('gemini=no_image_in_response');
+  });
 });
 
 describe('compressToWebp (hero LCP optimization)', () => {
@@ -2247,6 +2478,43 @@ describe('blog posts target the hub only', () => {
       ...base, source: 'ai_generated', target_sites: ['wavespestcontrol.com', 'veniceflpestcontrol.com'],
     });
     expect(data.domains).toEqual(['wavespestcontrol.com']);
+  });
+});
+
+describe('buildFrontmatter self-heals schema-required service_areas_tag (never undefined)', () => {
+  const base = {
+    title: 'Dollar Spot in Venice', slug: 'dollar-spot-venice',
+    meta_description: 'A short guide to dollar spot on Venice lawns and how to actually treat it.',
+    keyword: 'dollar spot Venice', tag: 'Lawn Disease',
+    featured_image_url: '/images/blog/dollar-spot-venice/hero.webp',
+    content: 'Dollar spot shows up as small bleached patches on warm-season turf.',
+  };
+
+  test('keeps stored valid service areas unchanged', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, service_areas_tag: ['Sarasota', 'Parrish'] });
+    expect(data.service_areas_tag).toEqual(['Sarasota', 'Parrish']);
+  });
+
+  test('with no stored areas and no valid city, infers from the title/keyword haystack instead of emitting undefined', async () => {
+    // The old `serviceAreas.length > 0 ? serviceAreas : undefined` dropped the
+    // key entirely and hard-failed assertValidBlogFrontmatter
+    // ("service_areas_tag is required") after the generation was spent.
+    const data = await AstroPublisher.buildFrontmatter({ ...base, city: null });
+    expect(data.service_areas_tag).toEqual(['Venice']);
+  });
+
+  test('a fully generic post falls back to the default service-area set (still schema-valid)', async () => {
+    const data = await AstroPublisher.buildFrontmatter({
+      ...base,
+      title: 'How soil pH changes turf color',
+      keyword: 'soil ph turf',
+      city: null,
+    });
+    expect(Array.isArray(data.service_areas_tag)).toBe(true);
+    expect(data.service_areas_tag.length).toBeGreaterThan(0);
+    // post_type already defaults deterministically — both schema-required
+    // fields are guaranteed present on this path now.
+    expect(data.post_type).toBe('location');
   });
 });
 
@@ -2933,3 +3201,90 @@ describe('latestDeploymentForBranch pagination (astro #396 wedge, 2026-07-22)', 
       }],
     })).toMatchObject({ clean: false });
   });
+
+describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () => {
+  const base = {
+    filePath: 'src/content/blog/lawn-care/old-post.mdx',
+    targetUrl: 'https://www.wavespestcontrol.com/lawn-care/old-post/',
+    branch: 'content/autonomous-x',
+    before: { title: 'Old', meta_description: 'Old meta' },
+    after: { title: 'New', meta_description: 'New meta' },
+    brief: { action_type: 'rewrite_title_meta' },
+  };
+
+  test('backfill covers genuinely absent post_type only — an explicit empty/whitespace value stays for validation to reject (Codex r5)', () => {
+    const { backfillLegacyBlogRequiredFields } = AstroPublisher._internals;
+    // A page_type that RELIABLY maps (how-to → protocol) is backfilled; the
+    // consumed pre-v2 key is removed AND the removal is disclosed in the
+    // healed list so PR bodies reflect the full migration (Codex r12).
+    const absent = { page_type: 'how-to', service_areas_tag: ['Sarasota'] };
+    const healed = backfillLegacyBlogRequiredFields(absent, {});
+    expect(healed).toContain('post_type');
+    expect(healed).toContain('page_type (legacy key consumed & removed)');
+    expect(absent.post_type).toBe('protocol');
+    expect(absent.page_type).toBeUndefined();
+    const invalid = { post_type: '  ', page_type: 'how-to', service_areas_tag: ['Sarasota'] };
+    expect(backfillLegacyBlogRequiredFields(invalid, {})).not.toContain('post_type');
+    expect(invalid.post_type).toBe('  ');
+  });
+
+  test('backfill never defaults post_type to location — an unmappable legacy page_type parks for human classification (Codex r11)', () => {
+    const { backfillLegacyBlogRequiredFields } = AstroPublisher._internals;
+    // Legacy posts generally carry page_type 'blog' or nothing; the
+    // 'location' fallback misclassifies seasonal/cost/comparison content
+    // and post_type drives structural component requirements.
+    for (const pageType of ['blog', undefined]) {
+      const fm = { page_type: pageType, service_areas_tag: ['Sarasota'] };
+      expect(backfillLegacyBlogRequiredFields(fm, {})).not.toContain('post_type');
+      expect(fm.post_type).toBeUndefined();
+    }
+  });
+
+  test('inferServiceAreas rejects an explicit out-of-area city — all-area fallback is for posts with NO city signal (Codex r11)', () => {
+    const { inferServiceAreas } = AstroPublisher._internals;
+    // Explicit invalid city → corrupt geography data → empty, so schema
+    // validation parks the row instead of tagging every service area.
+    expect(inferServiceAreas({ title: 'Lawn care guide', city: 'Tampa' }, {})).toEqual([]);
+    expect(inferServiceAreas({ title: 'Lawn care guide' }, { city: 'Tampa' })).toEqual([]);
+    // No city signal at all → haystack match, then the all-area fallback.
+    expect(inferServiceAreas({ title: 'Sarasota lawn care guide' }, {})).toEqual(['Sarasota']);
+    expect(inferServiceAreas({ title: 'Generic lawn care guide' }, {}).length).toBeGreaterThan(0);
+  });
+
+  test('inferServiceAreas scrubs Florida vernacular before the city match — "Palmetto bugs" is a roach, not the city (Codex r13)', () => {
+    const { inferServiceAreas } = AstroPublisher._internals;
+    // A generic palmetto-bug post gets the all-area fallback, NOT ['Palmetto'].
+    const generic = inferServiceAreas({ title: 'How to keep Palmetto bugs out of your garage' }, {});
+    expect(generic).not.toEqual(['Palmetto']);
+    expect(generic.length).toBeGreaterThan(1);
+    // The actual city still matches.
+    expect(inferServiceAreas({ title: 'Palmetto lawn care schedule' }, {})).toEqual(['Palmetto']);
+  });
+
+  test('backfill covers genuinely absent service_areas_tag only — an explicit EMPTY array is present data and stays for validation to reject (Codex r11)', () => {
+    const { backfillLegacyBlogRequiredFields } = AstroPublisher._internals;
+    const absent = { post_type: 'location', page_type: 'blog', title: 'Sarasota lawn care' };
+    expect(backfillLegacyBlogRequiredFields(absent, {})).toContain('service_areas_tag');
+    expect(Array.isArray(absent.service_areas_tag) && absent.service_areas_tag.length > 0).toBe(true);
+    const explicitEmpty = { post_type: 'location', page_type: 'blog', title: 'Sarasota lawn care', service_areas_tag: [] };
+    expect(backfillLegacyBlogRequiredFields(explicitEmpty, {})).not.toContain('service_areas_tag');
+    expect(explicitEmpty.service_areas_tag).toEqual([]); // inferring over it could publish wrong geography
+  });
+
+  test('metadata PR body lists inferred fields when backfilled, stays silent otherwise', () => {
+    const withFields = AstroPublisher._internals.buildMetadataPrBody({ ...base, backfilledFields: ['post_type', 'service_areas_tag'] });
+    expect(withFields).toContain('Backfilled schema-required fields');
+    expect(withFields).toContain('`post_type`');
+    expect(withFields).toContain('`service_areas_tag`');
+    const without = AstroPublisher._internals.buildMetadataPrBody(base);
+    expect(without).not.toContain('Backfilled schema-required fields');
+  });
+
+  test('refresh PR body lists inferred fields when backfilled, stays silent otherwise', () => {
+    const withFields = AstroPublisher._internals.buildRefreshPrBody({ ...base, oldBody: 'a b', newBody: 'a b c', backfilledFields: ['post_type'] });
+    expect(withFields).toContain('Backfilled schema-required fields');
+    expect(withFields).toContain('`post_type`');
+    const without = AstroPublisher._internals.buildRefreshPrBody({ ...base, oldBody: 'a b', newBody: 'a b c' });
+    expect(without).not.toContain('Backfilled schema-required fields');
+  });
+});
