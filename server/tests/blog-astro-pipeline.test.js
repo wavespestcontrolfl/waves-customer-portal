@@ -3248,6 +3248,16 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
     expect(inferServiceAreas({ title: 'Generic lawn care guide' }, {}).length).toBeGreaterThan(0);
   });
 
+  test('inferServiceAreas scrubs Florida vernacular before the city match — "Palmetto bugs" is a roach, not the city (Codex r13)', () => {
+    const { inferServiceAreas } = AstroPublisher._internals;
+    // A generic palmetto-bug post gets the all-area fallback, NOT ['Palmetto'].
+    const generic = inferServiceAreas({ title: 'How to keep Palmetto bugs out of your garage' }, {});
+    expect(generic).not.toEqual(['Palmetto']);
+    expect(generic.length).toBeGreaterThan(1);
+    // The actual city still matches.
+    expect(inferServiceAreas({ title: 'Palmetto lawn care schedule' }, {})).toEqual(['Palmetto']);
+  });
+
   test('backfill covers genuinely absent service_areas_tag only — an explicit EMPTY array is present data and stays for validation to reject (Codex r11)', () => {
     const { backfillLegacyBlogRequiredFields } = AstroPublisher._internals;
     const absent = { post_type: 'location', page_type: 'blog', title: 'Sarasota lawn care' };

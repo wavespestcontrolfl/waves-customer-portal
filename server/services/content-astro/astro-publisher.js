@@ -378,7 +378,13 @@ function inferServiceAreas(frontmatter = {}, brief = {}) {
     brief.city,
     frontmatter.tags,
   ].flatMap((value) => Array.isArray(value) ? value : [value]).filter(Boolean).join(' ').toLowerCase();
-  const inferred = DEFAULT_SERVICE_AREAS.filter((area) => haystack.includes(area.toLowerCase()));
+  // "Palmetto bugs" / "saw palmetto" / "laurel oaks" are Florida vernacular
+  // (pests/plants), not the cities Palmetto / Laurel — scrub them before the
+  // city-name match or a generic roach post gets committed with false city
+  // metadata (Codex r13; same scrub social-content-studio applies to its
+  // city-mention scanner, which is too heavy to require from here).
+  const scrubbed = haystack.replace(/\b(?:saw\s+palmetto|palmetto\s+bugs?|laurel\s+oaks?)\b/g, ' ');
+  const inferred = DEFAULT_SERVICE_AREAS.filter((area) => scrubbed.includes(area.toLowerCase()));
   return inferred.length > 0 ? inferred : [...DEFAULT_SERVICE_AREAS];
 }
 

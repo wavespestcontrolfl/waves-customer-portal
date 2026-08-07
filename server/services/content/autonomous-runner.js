@@ -3472,9 +3472,43 @@ function applyOperatorSlugRepair(brief, draft) {
   // Category drift is repaired for the same reason even when the slug
   // matches exactly — the writer's category would otherwise override the
   // pin's segment in the published route.
+  const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+  // Hub host equivalence (apex ≡ www) — mirrors the publisher's
+  // isFleetCanonicalHost contract. The body self-link rewrite uses the hub
+  // variants; the canonical foreign-check uses the FULL fleet set — both
+  // derive from this one block so the classifiers never diverge (Codex r7).
+  const hubUrl = (() => { try { return new URL(hub); } catch { return null; } })();
+  const hubHostVariants = hubUrl
+    ? [...new Set([hubUrl.host, hubUrl.host.startsWith('www.') ? hubUrl.host.slice(4) : `www.${hubUrl.host}`])]
+    : [];
+  // "Foreign" for a canonical means OFF-FLEET (Codex r8): the publisher's
+  // isFleetCanonicalHost accepts the hub AND every spoke host
+  // (www-insensitive), so a spoke-host canonical "preserved" here would pass
+  // the publisher's host check but fail its leaf check and park a finished
+  // draft. Rewriting any fleet-host canonical to hub+pin is safe — the
+  // publisher derives the binding, origin-correct canonical from the slug
+  // regardless.
+  const fleetCanonicalHosts = new Set([
+    ...(hubUrl ? [hubUrl.hostname.toLowerCase().replace(/^www\./, '')] : []),
+    ...FLEET_SPOKE_SITE_KEYS.map((key) => String(key).toLowerCase()),
+  ]);
+  // The origin this draft will actually publish on (hub, or its single
+  // targeted spoke) — used for the draft.url stamp and spoke self-link
+  // rewrites below.
+  const publishOrigin = resolvePublishOrigin(brief, hub);
+  const pinnedUrl = `${publishOrigin.origin}${pinned}`;
+
   const draftSlugRaw = typeof draft?.frontmatter?.slug === 'string' ? draft.frontmatter.slug.trim() : null;
   const draftCategory = typeof draft?.frontmatter?.category === 'string' ? draft.frontmatter.category.trim() : null;
-  if (draftSlugRaw === pinned && draftCategory === pinCategory) return null;
+  if (draftSlugRaw === pinned && draftCategory === pinCategory) {
+    // Even a drift-free draft needs its own-route reference: production
+    // emit_draft never sets draft.url and new intercept rows generally have
+    // no page_url, so a run parked BEFORE publish (trust-build,
+    // named-competitor review) would otherwise surface a null target_url in
+    // the review queue (Codex r13).
+    if (draft.url !== pinnedUrl) draft.url = pinnedUrl;
+    return null;
+  }
   const mismatch = { expected_slug: rawPin, draft_slug: draft?.frontmatter?.slug ?? null };
   if (!draft || typeof draft !== 'object' || !draft.frontmatter || typeof draft.frontmatter !== 'object' || Array.isArray(draft.frontmatter)) {
     return { ok: false, reason: 'draft has no frontmatter object to repair', mismatch };
@@ -3501,30 +3535,6 @@ function applyOperatorSlugRepair(brief, draft) {
     draftPathSource ? normalizeSlugPath(draftPathSource) : null,
     rawDraftPath,
   ].filter(Boolean))].filter((p) => p !== pinned && p !== '//');
-  const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
-  // Hub host equivalence (apex ≡ www) — mirrors the publisher's
-  // isFleetCanonicalHost contract. The body self-link rewrite uses the hub
-  // variants; the canonical foreign-check uses the FULL fleet set — both
-  // derive from this one block so the classifiers never diverge (Codex r7).
-  const hubUrl = (() => { try { return new URL(hub); } catch { return null; } })();
-  const hubHostVariants = hubUrl
-    ? [...new Set([hubUrl.host, hubUrl.host.startsWith('www.') ? hubUrl.host.slice(4) : `www.${hubUrl.host}`])]
-    : [];
-  // "Foreign" for a canonical means OFF-FLEET (Codex r8): the publisher's
-  // isFleetCanonicalHost accepts the hub AND every spoke host
-  // (www-insensitive), so a spoke-host canonical "preserved" here would pass
-  // the publisher's host check but fail its leaf check and park a finished
-  // draft. Rewriting any fleet-host canonical to hub+pin is safe — the
-  // publisher derives the binding, origin-correct canonical from the slug
-  // regardless.
-  const fleetCanonicalHosts = new Set([
-    ...(hubUrl ? [hubUrl.hostname.toLowerCase().replace(/^www\./, '')] : []),
-    ...FLEET_SPOKE_SITE_KEYS.map((key) => String(key).toLowerCase()),
-  ]);
-  // The origin this draft will actually publish on (hub, or its single
-  // targeted spoke) — used for the draft.url stamp and spoke self-link
-  // rewrites below.
-  const publishOrigin = resolvePublishOrigin(brief, hub);
   const repair = {
     repaired_at: new Date().toISOString(),
     from_slug: mismatch.draft_slug || null,
@@ -3548,6 +3558,7 @@ function applyOperatorSlugRepair(brief, draft) {
   // canonical guard must see and park — repairing it here would mask it and
   // let the run publish (Codex r1).
   let canonicalIsForeign = false;
+  let oldCanonicalPath = null;
   if (oldCanonical) {
     // Parse with the hub as base and classify by the RESOLVED host, exactly
     // like the publisher's guard: protocol-relative (`//host/…`, Codex r2)
@@ -3564,6 +3575,13 @@ function applyOperatorSlugRepair(brief, draft) {
       // canonical, and the publisher then parks a draft whose repair should
       // have succeeded (fleet host accepted, old leaf rejected).
       canonicalIsForeign = !fleetCanonicalHosts.has(parsed.hostname.toLowerCase().replace(/^www\./, ''));
+      // The correspondence check below must read the PARSED pathname, not
+      // the raw string (Codex r13): a WHATWG-valid backslash form like
+      // \\hub\old-route\ resolves to /old-route/, but a raw-string leaf
+      // split never sees backslash separators — the repair would preserve a
+      // corresponding canonical the publisher's parsed-path leaf check then
+      // rejects, parking a draft whose repair should have succeeded.
+      oldCanonicalPath = parsed.pathname;
     } catch { canonicalIsForeign = false; }
   }
   // A fleet-host canonical naming a genuinely DIFFERENT post (leaf matching
@@ -3577,7 +3595,7 @@ function applyOperatorSlugRepair(brief, draft) {
   const driftLeaves = new Set(
     [mismatch.draft_slug, ...oldSlugPaths].map((p) => blogSlugLeafOf(p).toLowerCase()).filter(Boolean),
   );
-  const oldCanonicalLeaf = oldCanonical ? blogSlugLeafOf(oldCanonical).toLowerCase() : '';
+  const oldCanonicalLeaf = oldCanonical ? blogSlugLeafOf(oldCanonicalPath ?? oldCanonical).toLowerCase() : '';
   const canonicalCorresponds = !oldCanonicalLeaf
     || oldCanonicalLeaf === pinnedLeaf
     || driftLeaves.has(oldCanonicalLeaf);
@@ -3594,7 +3612,6 @@ function applyOperatorSlugRepair(brief, draft) {
   // sets the field, so the stamp is unconditional — a present-only rewrite
   // is dead code on every real draft. Unlike the canonical, no publish
   // guard reads it, so there is no unsafe input to preserve.
-  const pinnedUrl = `${publishOrigin.origin}${pinned}`;
   if (draft.url !== pinnedUrl) {
     draft.url = pinnedUrl;
     repair.url_rewritten = true;

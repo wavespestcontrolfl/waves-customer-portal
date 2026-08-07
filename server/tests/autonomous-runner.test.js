@@ -764,11 +764,29 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     };
   }
 
-  test('returns null (no-op) when the draft already matches the pin — slug AND category', () => {
+  test('returns null (no-op) when the draft already matches the pin — draft.url still stamped for parked-run review targets (Codex r13)', () => {
     const draft = driftedDraft({ frontmatter: { slug: PINNED, canonical: `https://www.wavespestcontrol.com${PINNED}`, category: 'lawn-care' } });
-    const before = JSON.stringify(draft);
+    delete draft.url; // production emit_draft never sets it
+    const bodyBefore = draft.body;
     expect(applyOperatorSlugRepair(operatorBrief(), draft)).toBeNull();
-    expect(JSON.stringify(draft)).toBe(before);
+    // Even the drift-free path stamps the own-route reference: a run parked
+    // BEFORE publish (trust-build, named-competitor review) needs a non-null
+    // review target_url.
+    expect(draft.url).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    // Nothing else moves.
+    expect(draft.body).toBe(bodyBefore);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+    expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+  });
+
+  test('an on-fleet BACKSLASH network-path canonical naming the drifted route is repaired — correspondence reads the parsed pathname (Codex r13)', () => {
+    const draft = driftedDraft({
+      frontmatter: { canonical: '\\\\www.wavespestcontrol.com\\fall-lawn-mistakes-southwest-florida\\' },
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(result.repair.canonical_rewritten).toBe(true);
   });
 
   test('a CASE-drifted draft slug is repaired — normalized equality must not skip the repair (Codex r4)', () => {

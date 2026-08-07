@@ -372,14 +372,17 @@ describe('applyOperatorSlugRepair drift detection (single definition of slug dri
   const { applyOperatorSlugRepair } = require('../services/content/autonomous-runner')._internals;
   const briefFor = (slug) => ({ voice_constraints: { operator_brief: { slug } } });
 
-  test('an exactly matching draft (slug AND category) passes untouched', () => {
+  test('an exactly matching draft (slug AND category) passes with only the own-route URL stamped (Codex r13)', () => {
     const draft = {
       frontmatter: { slug: '/pest-control/can-another-company-service-taexx/', category: 'pest-control' },
       body: '',
     };
-    const before = JSON.stringify(draft);
     expect(applyOperatorSlugRepair(briefFor('/pest-control/can-another-company-service-taexx/'), draft)).toBeNull();
-    expect(JSON.stringify(draft)).toBe(before);
+    // The drift-free path still stamps draft.url so a parked run has a
+    // non-null review target; frontmatter and body stay untouched.
+    expect(draft.url).toBe('https://www.wavespestcontrol.com/pest-control/can-another-company-service-taexx/');
+    expect(draft.frontmatter).toEqual({ slug: '/pest-control/can-another-company-service-taexx/', category: 'pest-control' });
+    expect(draft.body).toBe('');
   });
 
   test('a case/boundary-drifted draft slug is REPAIRED to the pin — comparison is exact, not normalized (Codex r4)', () => {
