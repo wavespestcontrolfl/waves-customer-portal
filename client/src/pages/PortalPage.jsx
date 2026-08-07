@@ -169,10 +169,15 @@ const arrivalWindowEnd = (windowStart) => {
 const calendarLinkEndsAt = (svc) => {
   if (!svc?.date || !svc?.windowStart) return null;
   const day = String(svc.date).slice(0, 10);
-  const end = arrivalWindowEnd(svc.windowStart);
-  if (!end) return null;
-  const endsAt = new Date(`${day}T${String(end).slice(0, 5)}:00`);
-  return Number.isNaN(endsAt.getTime()) ? null : endsAt;
+  // Add the 2-hour promise to the START instant. Using arrivalWindowEnd's
+  // string here was wrong for late visits: it wraps 22:00 -> 00:00, and
+  // pairing that with the SAME day put the deadline at the START of the
+  // appointment day, hiding the button for every evening visit (codex r5 P2).
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(svc.windowStart));
+  if (!m) return null;
+  const startsAt = new Date(`${day}T${String(m[1]).padStart(2, '0')}:${m[2]}:00`);
+  if (Number.isNaN(startsAt.getTime())) return null;
+  return new Date(startsAt.getTime() + (120 * 60000));
 };
 
 const calendarLinkStillLive = (svc) => {
@@ -1530,7 +1535,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   // The Add-to-Calendar button hides itself once the arrival window closes,
   // but an idle dashboard never rerenders to notice. Fire a one-shot timer at
   // the deadline so the button disappears on its own (codex #3249 r4 P2).
-  const [, setCalendarWindowTick] = useState(0);
+  const [calendarWindowTick, setCalendarWindowTick] = useState(0);
   useEffect(() => {
     const endsAt = calendarLinkEndsAt(nextService);
     if (!nextService?.calendarUrl || !endsAt) return undefined;
@@ -1540,7 +1545,10 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
     // clamp so a far-future visit can't wrap to an immediate fire.
     const timer = setTimeout(() => setCalendarWindowTick(t => t + 1), Math.min(ms, 2147483647));
     return () => clearTimeout(timer);
-  }, [nextService]);
+    // calendarWindowTick is a dependency ON PURPOSE: when the delay saturates
+    // the setTimeout ceiling the timer fires early, and without re-running
+    // here it would never be rescheduled toward the real deadline (codex r5).
+  }, [nextService, calendarWindowTick]);
   const [nextServiceStatus, setNextServiceStatus] = useState('loading');
   const [confirmingVisit, setConfirmingVisit] = useState(false);
   const [stats, setStats] = useState(null);
