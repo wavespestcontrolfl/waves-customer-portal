@@ -551,6 +551,42 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(directives.join(' ')).toContain('FAQ');
   });
 
+  test('every frequent gate code from the prod audit maps to a specific corrective instruction, not the generic fallback', () => {
+    const codes = [
+      'HARDCODED_PRICE', 'FAQ_BLOCKED_SERVICE', 'DISALLOWED_EXTERNAL_LINK',
+      'UNKNOWN_INTERNAL_ROUTE', 'CITATION_TOKEN_RESIDUE', 'OFF_FOOTPRINT_CITY_CLAIM',
+      'PRODUCT_CLAIM', 'PREVENTION_PROMISE',
+      'COMPARISON_RIGGED_RANKING', 'COMPARISON_COMPETITOR_IN_PROSE',
+      'COMPARISON_UNKNOWN_COMPETITOR', 'COMPARISON_DISPARAGEMENT', 'COMPARISON_UNCLASSIFIED_OPTION',
+    ];
+    const directives = buildRetryDirectives({
+      findings: codes.map((code) => ({ severity: 'P0', code, message: 'gate text' })),
+    });
+    expect(directives).toHaveLength(codes.length + 1); // header + one per code
+    for (const d of directives.slice(1)) {
+      // The generic fallback echoes "Previous draft failed <code>" — every
+      // audited code must carry a real corrective instruction instead.
+      expect(d).not.toContain('Previous draft failed');
+    }
+  });
+
+  test('new retry instructions tell the writer what to DO, in gate-accurate terms', () => {
+    const directive = (code) => buildRetryDirectives({ findings: [{ severity: 'P0', code }] })[1];
+    expect(directive('UNKNOWN_INTERNAL_ROUTE')).toContain('internal_links_to_add');
+    expect(directive('UNKNOWN_INTERNAL_ROUTE')).toMatch(/never link a guessed/);
+    expect(directive('CITATION_TOKEN_RESIDUE')).toContain('<cite');
+    expect(directive('CITATION_TOKEN_RESIDUE')).toMatch(/plain prose/);
+    expect(directive('OFF_FOOTPRINT_CITY_CLAIM')).toMatch(/outside the Waves footprint/);
+    expect(directive('OFF_FOOTPRINT_CITY_CLAIM')).toMatch(/educational mention/);
+    expect(directive('PRODUCT_CLAIM')).toMatch(/product CLASS generically/);
+    expect(directive('PREVENTION_PROMISE')).toMatch(/REDUCED recurrence/);
+    expect(directive('COMPARISON_RIGGED_RANKING')).toMatch(/#1/);
+    expect(directive('COMPARISON_RIGGED_RANKING')).toMatch(/neutral trade-offs/);
+    expect(directive('COMPARISON_COMPETITOR_IN_PROSE')).toMatch(/ONLY inside the <ComparisonTable>/);
+    expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/get_competitor_facts/);
+    expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/never invent a business name/);
+  });
+
   test('unknown codes fall back to the finding text and duplicates collapse', () => {
     const directives = buildRetryDirectives({
       findings: [
