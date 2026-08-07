@@ -3201,6 +3201,30 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     }
   });
 
+  test('adverbs inside modal safety predicates still claim (Codex PR r9)', () => {
+    const eventually = guardrails.evaluate({ body: 'The treatment will eventually be safe once dry.' }, {});
+    expect(eventually.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const generally = guardrails.evaluate({ body: 'The treatment should generally be safe once dry.' }, {});
+    expect(generally.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // Negation between modal and linking verb stays a disclaimer.
+    const negated = guardrails.evaluate({ body: 'The treatment will not be safe until it dries fully.' }, {});
+    expect(negated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
+  test('just/only qualifiers before durations still carry the figure (Codex PR r9)', () => {
+    const inJust = guardrails.evaluate({ body: 'You can re-enter the treated room in just 30 minutes.' }, {});
+    expect(inJust.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const waitOnly = guardrails.evaluate({ body: 'Wait only 30 minutes before re-entering the treated room.' }, {});
+    expect(waitOnly.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('"dry time of" and possessive EPA approval block (Codex PR r9)', () => {
+    const dryTime = guardrails.evaluate({ body: 'The application has a dry time of 30 minutes.' }, {});
+    expect(dryTime.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const possessive = guardrails.evaluate({ body: "This product has the EPA's approval." }, {});
+    expect(possessive.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('seconds and days are fixed figures too (Codex PR r8 audit)', () => {
     const seconds = guardrails.evaluate({ body: 'Do not re-enter the treated room for 90 seconds.' }, {});
     expect(seconds.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3541,6 +3565,22 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
       'We help specialists remove wildlife.',
       'We let partners remove wildlife.',
       'We have partners trap wildlife.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    }
+  });
+
+  test('take-out phrasing is wildlife removal too (Codex PR r9)', () => {
+    const takeOut = guardrails.evaluate({ body: 'We can take raccoons out of attics.' }, {});
+    expect(takeOut.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('offering CONTENT about a topic is not offering the service (Codex PR r9 false positive)', () => {
+    for (const body of [
+      'We provide information about wildlife removal and licensed referrals.',
+      'Waves provides a guide to wildlife removal by licensed specialists.',
+      'Our team offers advice about structural fumigation.',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);

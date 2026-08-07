@@ -148,6 +148,12 @@ describe('buildInputPayload', () => {
     expect(p.brief_summary.city).toBe('Bradenton');
     expect(p.brief_summary.service).toBe('pest');
   });
+
+  test('every session input carries the self-lint retry permission — stale registered prompts must not strand rejected emits (Codex PR r9)', () => {
+    const p = buildInputPayload(brief());
+    expect(p.instruction).toMatch(/draft_rejected or metadata_rejected/);
+    expect(p.instruction).toMatch(/call the SAME emit tool again/);
+  });
   test('handles missing optional fields', () => {
     const p = buildInputPayload(brief({ target_url: undefined, city: undefined }));
     expect(p.brief_summary.target_url).toBeNull();

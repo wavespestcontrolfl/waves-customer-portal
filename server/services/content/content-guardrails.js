@@ -2901,8 +2901,14 @@ const REENTRY_SPELLED_NUM_SRC = "(?:(?:twenty|thirty|forty|fifty|sixty|seventy|e
 const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}(?:${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?|\\w+))?)\\s*(?:minutes?|mins?|hours?|hrs?|seconds?|secs?|days?|weeks?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour|a\\s+(?:day|week)\\b)`;
 // Copular/modal predicate grammar shared by the safety-subject patterns
 // (Codex PR r8 audit): "will be safe", "becomes safe", "should be safe"
-// are the same unconditional claim as "is safe".
-const REENTRY_LINKING_VERB_SRC = "(?:is|are|remains?|stays?|becomes?|(?:will|can|could|should|would|may|might|must)\\s+(?:be|remain|stay|become))";
+// are the same unconditional claim as "is safe". Bounded NON-NEGATING
+// adverbs may sit between the modal and the linking verb (Codex PR r9:
+// "will eventually be safe") — negation stays outside so "will not be
+// safe" remains a disclaimer.
+const REENTRY_LINKING_VERB_SRC = `(?:is|are|remains?|stays?|becomes?|(?:will|can|could|should|would|may|might|must)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)\\w+\\s+){0,2}?(?:be|remain|stay|become))`;
+// Bounded qualifiers accepted wherever a duration is parsed (Codex PR
+// r9): "in just 30 minutes", "wait only 30 minutes".
+const REENTRY_QUALIFIER_SRC = "(?:(?:about|around|roughly|approximately|between|just|only|at\\s+least|up\\s+to)\\s+){0,2}?";
 // Drying-duration forms with no intrinsic re-entry word require PESTICIDE
 // context in the sentence (Codex PR r5): "Paint drying takes 30 minutes"
 // and "the caulk needs 30 minutes to dry" are home-maintenance advice —
@@ -2971,7 +2977,7 @@ const REENTRY_SAFETY_SRCS = [
   // The noun forms honor POSTPOSITIVE denials too (Codex PR r8): "EPA
   // approval was not granted / was later revoked" is accurate negated
   // copy — the loop's negation guard only looks BEFORE the match.
-  "\\bEPA\\s+approvals?\\b(?!(?:[^.!?\\n]){0,30}?\\b(?:not|never|denied|denies|refused|rejected|revoked|revokes|withdrawn|withdrew|withheld|isn['’]?t|wasn['’]?t|aren['’]?t)\\b)",
+  "\\bEPA(?:['’]s)?\\s+approvals?\\b(?!(?:[^.!?\\n]){0,30}?\\b(?:not|never|denied|denies|refused|rejected|revoked|revokes|withdrawn|withdrew|withheld|isn['’]?t|wasn['’]?t|aren['’]?t)\\b)",
   // "received/carries approval from the EPA" (Codex PR r6).
   "\\bapprovals?\\s+(?:from|by)\\s+(?:the\\s+)?EPA\\b(?!(?:[^.!?\\n]){0,30}?\\b(?:not|never|denied|denies|refused|rejected|revoked|revokes|withdrawn|withdrew|withheld|isn['’]?t|wasn['’]?t|aren['’]?t)\\b)",
   // Fixed re-entry/drying figures — the approved idiom carries NO number;
@@ -2980,12 +2986,12 @@ const REENTRY_SAFETY_SRCS = [
   // minutes"), duration-then-action ("wait 30 minutes before re-entering",
   // "allow 30 minutes of drying time"), and keep-off forms ("keep pets off
   // the lawn for 30 minutes").
-  `\\b(?:re-?enter|re-?entry|return\\w*|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:re-?enter|re-?entry|return\\w*|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // A bounded qualifier may sit between the drying verb and the
   // preposition (Codex PR r8: "dries completely within 45 minutes").
-  { src: `\\bdr(?:y|ies|ied)\\s+(?:\\w+\\s+){0,2}?(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  { src: `\\bdr(?:y|ies|ied)\\s+(?:\\w+\\s+){0,2}?(?:in|within|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   // "avoid the treated area for 30 minutes"
-  `\\bavoid\\s+(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawns?|yards?|rooms?|surfaces?)\\b[^.!?\\n]{0,30}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\bavoid\\s+(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawns?|yards?|rooms?|surfaces?)\\b[^.!?\\n]{0,30}?\\b(?:for|until)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // Duration-then-action: the intrinsically-re-entry tails (re-enter,
   // re-entry, dry) match bare; the AMBIGUOUS tails (return, go back, walk,
   // play) require treated/application context in the same sentence — "wait
@@ -2994,29 +3000,29 @@ const REENTRY_SAFETY_SRCS = [
   // The intrinsically-re-entry tails stay bare; the DRY tail needs
   // treatment context (Codex PR r5: "the caulk needs 30 minutes to dry
   // before inspection" is maintenance advice, not a pesticide figure).
-  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:for\\s+)?(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry)`,
-  { src: `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:for\\s+)?(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\bdry\\w*`, needsTreatmentContext: true },
-  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:for\\s+)?(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:enter\\w*|return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*)\\b[^.!?\\n]{0,50}?\\b(?:treated|treatment|application|sprayed|lawn|yard|turf|grass|inside|indoors|home|house)\\b`,
+  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:for\\s+)?${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry)`,
+  { src: `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:for\\s+)?${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\bdry\\w*`, needsTreatmentContext: true },
+  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:for\\s+)?${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:enter\\w*|return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*)\\b[^.!?\\n]{0,50}?\\b(?:treated|treatment|application|sprayed|lawn|yard|turf|grass|inside|indoors|home|house)\\b`,
   // Object-first drying: "allow the spray to dry for 30 minutes" — a
   // TREATMENT noun is required in the clause (Codex PR r4: "allow the caulk
   // to dry" is home-maintenance advice, not a pesticide figure).
-  `\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?)\\b[^.!?\\n]{0,40}?\\b(?:to\\s+dry|dry(?:ing)?)\\s+for\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?)\\b[^.!?\\n]{0,40}?\\b(?:to\\s+dry|dry(?:ing)?)\\s+for\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // Plain ENTER with treatment context anywhere in the sentence — before
   // or after the duration (Codex PR r4, widened PR r6: "you can enter
   // after 30 minutes once treatment is complete"), plus the passive
   // "the room can be entered 30 minutes after treatment" order.
-  { src: `\\benter\\w*\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  { src: `\\benter\\w*\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   { src: `\\bbe\\s+entered\\b[^.!?\\n]{0,20}?${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   // Affirmative go-inside/go-into with treatment context (Codex PR r8:
   // "you may go inside after 30 minutes once treatment is complete") —
   // the do-not branch covers the prohibitive forms.
-  { src: `\\bgo\\s+(?:back\\s+)?(?:inside|into|in)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
-  `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  { src: `\\bgo\\s+(?:back\\s+)?(?:inside|into|in)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
-  `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // go-inside/go-into count as the entry action too (Codex PR r7: "Do not
   // go inside the treated home for 30 minutes").
-  `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*|go\\s+(?:back|inside|into|in)\\b)[^.!?\\n]{0,30}?\\b(?:for|until|after)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*|go\\s+(?:back|inside|into|in)\\b)[^.!?\\n]{0,30}?\\b(?:for|until|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // "needs 30 minutes to dry", "30 minutes of drying" — treatment context
   // required (Codex PR r5).
   { src: `\\b${REENTRY_DURATION_SRC}\\s+(?:to\\s+dry|of\\s+drying)\\b`, needsTreatmentContext: true },
@@ -3025,8 +3031,10 @@ const REENTRY_SAFETY_SRCS = [
   // drying takes 30 minutes" is maintenance advice). The treatment may sit
   // BETWEEN drying and its verb (Codex PR r6: "Drying the treatment takes
   // 30 minutes"), and "has a drying time of 30 minutes" is the same figure.
-  { src: `\\bdry(?:ing)?(?:\\s+time|\\s+period|\\s+window)?\\b[^.!?\\n]{0,40}?\\b(?:takes?|is|runs?|lasts?)\\s+(?:about\\s+|around\\s+|roughly\\s+)?${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
-  { src: `\\bdrying\\s+time\\s+of\\s+(?:about\\s+|around\\s+|roughly\\s+)?${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  { src: `\\bdry(?:ing)?(?:\\s+time|\\s+period|\\s+window)?\\b[^.!?\\n]{0,40}?\\b(?:takes?|is|runs?|lasts?)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  // "dry time" is the same noun as "drying time" (Codex PR r9: "has a
+  // dry time of 30 minutes").
+  { src: `\\bdry(?:ing)?\\s+time\\s+of\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   // Attributive figures, hyphenated or not: "a 30 minute re-entry
   // interval", "a 45-minute re-entry window" — the re-entry/wait tails are
   // intrinsic; the drying tail needs treatment context (Codex PR r5).
@@ -3162,11 +3170,15 @@ const BANNED_TOPIC_ACTION_FILLER_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b|partners?\
 // Nor through installable OBJECTS or location prepositions (Codex PR r7):
 // "our technicians install traps above attic insulation" installs traps —
 // insulation is merely the location.
-const BANNED_TOPIC_INSULATION_GAP_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b|photos?\\b|pictures?\\b|images?\\b|reports?\\b|records?\\b|observations?\\b|documentation\\b|videos?\\b|footage\\b|notes?\\b|evidence\\b|traps?\\b|stations?\\b|monitors?\\b|baits?\\b|barriers?\\b|above\\b|below\\b|under\\b|underneath\\b|beneath\\b|behind\\b|over\\b|near\\b|around\\b|beside\\b|atop\\b|inside\\b|into\\b|onto\\b|within\\b)[\\w'’-]+\\s+){0,3}?`;
+const BANNED_TOPIC_INSULATION_GAP_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b|${BANNED_TOPIC_INFO_NOUN_SRC}\\b|photos?\\b|pictures?\\b|images?\\b|records?\\b|observations?\\b|documentation\\b|videos?\\b|footage\\b|notes?\\b|evidence\\b|traps?\\b|stations?\\b|monitors?\\b|baits?\\b|barriers?\\b|above\\b|below\\b|under\\b|underneath\\b|beneath\\b|behind\\b|over\\b|near\\b|around\\b|beside\\b|atop\\b|inside\\b|into\\b|onto\\b|within\\b)[\\w'’-]+\\s+){0,3}?`;
 const BANNED_TOPIC_SRCS = [
   // "we/Waves/our team|services offer(s)/include(s)/help(s) with … <topic>"
   // — CORE topics only for the BROAD verbs (see BANNED_TOPIC_CORE_SRC).
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_CORE_SRC}`,
+  // The object gap refuses informational framing nouns too (Codex PR r9):
+  // "we provide information about wildlife removal" / "Waves provides a
+  // guide to wildlife removal" offer CONTENT about the topic, not the
+  // service — the same exemption the possessive branch carries.
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b|${BANNED_TOPIC_INFO_NOUN_SRC}\\b)[\\w'’-]+\\s+){0,3}?${BANNED_TOPIC_CORE_SRC}`,
   // Insulation with SERVICE-UNAMBIGUOUS verbs only.
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|sells?|installs?|replaces?)\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
   // Work/project phrasing is an unambiguous insulation OFFERING even with
@@ -3203,7 +3215,7 @@ const BANNED_TOPIC_SRCS = [
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}exclud(?:es?|ing)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b[^.!?\\n]{0,30}?\\b(?:from\\b[^.!?\\n]{0,20}?\\b(?:attics?|homes?|houses?|structures?|buildings?|crawl\\s?spaces?|soffits?|roofs?|eaves|walls?|properties|property|gara?ges?|sheds?|yards?|chimneys?|vents?)|entry\\s+points?)\\b`,
   // Get-out paraphrase of wildlife removal: "we get raccoons out of your
   // attic", "our team gets squirrels out" (Codex PR r3).
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}get(?:s|ting)?\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b[^.!?\\n]{0,20}?\\bout\\b`,
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}(?:get(?:s|ting)?|took|take(?:s|n|ing)?)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b[^.!?\\n]{0,20}?\\bout\\b`,
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:sell|market|canvass)\\w*\\s+${BANNED_TOPIC_GAP_SRC}door[-\\s]?to[-\\s]?door\\b`,
   // Direct banned-service verbs: "we fumigate homes", "our technicians
   // tent homes across Sarasota" — ownership expressed as the action itself.
