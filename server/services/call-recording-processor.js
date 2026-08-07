@@ -2233,6 +2233,55 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   return candidate;
 }
 
+// New-lead admin surfacing for a lead minted by call processing — the fresh
+// insert on a lookup miss AND the claim-race recovery mint (codex P2, PR
+// #3275: a race-recovered lead is just as new as a fresh one, and on the
+// phone-less path the SMS rail fails closed, so skipping this left it with
+// no bell or push at all). Untracked calls ring the admin bell directly —
+// category 'lead' is default-denied under GATE_ADMIN_BELL_POLICY, but a new
+// lead must ring like every other new lead. Tracked marketing calls fire the
+// same new_lead bell + Web Push the web-form path sends. Best-effort BY
+// CONTRACT: never throws — the race-mint call site sits inside the mint's
+// try/catch, where a thrown notify error would be misread as a mint failure
+// and null out a lead that DID insert.
+async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadSourceRow, call }) {
+  const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+    .filter(Boolean)
+    .join(' ');
+  if (!leadSourceId) {
+    try {
+      await require('./notification-service').notifyAdmin(
+        'lead',
+        'Untracked call lead',
+        `New lead from a call we couldn't attribute: ${callerName || 'Unknown caller'} (${phone || 'unknown number'}). No marketing source matched — tag the source or follow up.`,
+        {
+          link: `/admin/leads?lead=${leadId}`,
+          metadata: { leadId, phone, callSid: call.twilio_call_sid },
+          bell: true,
+        },
+      );
+    } catch (notifyErr) {
+      logger.warn(`[call-proc] untracked-call admin notify failed: ${notifyErr.message}`);
+    }
+  } else {
+    try {
+      const { triggerNotification } = require('./notification-triggers');
+      await triggerNotification('new_lead', {
+        title: extracted.is_voicemail ? 'New voicemail lead' : 'New call lead',
+        name: callerName || (phone ? maskPhone(phone) : null),
+        source: leadSourceRow?.name || null,
+        zip: extracted.zip || null,
+        service: extracted.matched_service || extracted.requested_service || null,
+        phone,
+        message: !!extracted.call_summary,
+        leadId,
+      });
+    } catch (notifyErr) {
+      logger.warn(`[call-proc] tracked-call new_lead notify failed: ${notifyErr.message}`);
+    }
+  }
+}
+
 // Convert the call's lead to won when the pipeline books an appointment,
 // on the SAME transaction as the scheduled_services insert (mirrors the
 // admin-leads schedule-appointment route: conversion cannot commit without
@@ -7339,58 +7388,13 @@ const CallRecordingProcessor = {
           leadId = newLead.id;
           logger.info(`[call-proc] Created new lead ${leadId} (${maskPhone(phone)})${extracted.first_name ? '' : ' — no name captured'}`);
 
-          // Untracked inbound call → no lead_source matched (caller reached the
-          // main line / caller-ID didn't match a tracking number). These are the
-          // "Unattributed" call leads the dashboard surfaces — notify an admin so
-          // it can be source-tagged or followed up. Best-effort; a notify failure
-          // must never break call processing.
-          if (!leadSourceId) {
-            try {
-              const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
-                .filter(Boolean)
-                .join(' ');
-              await require('./notification-service').notifyAdmin(
-                'lead',
-                'Untracked call lead',
-                `New lead from a call we couldn't attribute: ${callerName || 'Unknown caller'} (${phone || 'unknown number'}). No marketing source matched — tag the source or follow up.`,
-                {
-                  link: `/admin/leads?lead=${leadId}`,
-                  metadata: { leadId, phone, callSid: call.twilio_call_sid },
-                  // These ARE new leads — category 'lead' is default-denied
-                  // under GATE_ADMIN_BELL_POLICY, but an unattributed call
-                  // lead must ring like every other new lead.
-                  bell: true,
-                },
-              );
-            } catch (notifyErr) {
-              logger.warn(`[call-proc] untracked-call admin notify failed: ${notifyErr.message}`);
-            }
-          } else {
-            // Tracked call lead (GBP/spoke/paid tracking number): fire the same
-            // new_lead bell + Web Push the web-form path sends. Until now ONLY
-            // untracked call leads notified anyone — a tracked marketing call
-            // lead (the common case) landed silently and relied on someone
-            // happening to open the Leads page. Best-effort; a notify failure
-            // must never break call processing.
-            try {
-              const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
-                .filter(Boolean)
-                .join(' ');
-              const { triggerNotification } = require('./notification-triggers');
-              await triggerNotification('new_lead', {
-                title: extracted.is_voicemail ? 'New voicemail lead' : 'New call lead',
-                name: callerName || (phone ? maskPhone(phone) : null),
-                source: leadSourceRow?.name || null,
-                zip: extracted.zip || null,
-                service: extracted.matched_service || extracted.requested_service || null,
-                phone,
-                message: !!extracted.call_summary,
-                leadId,
-              });
-            } catch (notifyErr) {
-              logger.warn(`[call-proc] tracked-call new_lead notify failed: ${notifyErr.message}`);
-            }
-          }
+          // Untracked inbound call → no lead_source matched → admin bell so the
+          // "Unattributed" lead can be source-tagged; tracked marketing call →
+          // the same new_lead bell + Web Push the web-form path sends. Both
+          // branches live in notifyNewCallLead (shared with the claim-race
+          // recovery mint below) and never throw — a notify failure must never
+          // break call processing.
+          await notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadSourceRow, call });
         }
 
         // Marketing call lead (matched a tracking number), NEW or reused -> surface
@@ -7771,6 +7775,13 @@ const CallRecordingProcessor = {
               logger.warn(`[call-proc] email-matched lead ${leadId} lost the claim race — minted fresh lead ${raceFresh.id}`);
               leadId = raceFresh.id;
               enriched = 1;
+              // A race-recovery mint IS a new lead — surface it exactly like a
+              // fresh insert (codex P2: the reuse path never runs the new-lead
+              // notification, and the phone-less SMS rail fails closed, so this
+              // lead otherwise landed with no bell or push). notifyNewCallLead
+              // never throws, so a notify failure can't be mistaken for a mint
+              // failure by the catch below.
+              await notifyNewCallLead({ leadId, phone: null, extracted, leadSourceId, leadSourceRow, call });
             } catch (raceErr) {
               logger.warn(`[call-proc] fresh-lead mint after claim race failed for ${maskSid(callSid)}: ${raceErr.message}`);
               leadId = null;
