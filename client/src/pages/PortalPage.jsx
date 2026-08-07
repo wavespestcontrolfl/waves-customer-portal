@@ -68,6 +68,28 @@ async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
   URL.revokeObjectURL(blobUrl);
 }
 
+// Public (token-authenticated) PDF download — receipts. No Bearer needed, but
+// the same two traps as downloadAuthedPdf apply: a root-relative path misses a
+// configured VITE_API_URL origin, and in the Capacitor shell a programmatic
+// <a download> click is a silent no-op, so hand the bytes to the OS instead.
+async function downloadPublicPdf(path, fileName = 'Waves_Receipt.pdf') {
+  // Server sends an app-absolute '/api/...' path; API_BASE already ends in
+  // '/api' (default '/api', or a full cross-origin API URL), so splice.
+  const abs = path.startsWith('/api/') ? `${API_BASE}${path.slice(4)}` : path;
+  const r = await fetch(abs);
+  if (!r.ok) throw new Error(`Download failed (${r.status})`);
+  const blob = await r.blob();
+  if (await saveBlobNative(blob, fileName)) return;
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
 // Authenticated fetch → PDF blob, with the JSON "not ready yet" body turned
 // into a readable error. Shared by the Documents + Visits report flows.
 async function fetchAuthedPdfBlob(url) {
@@ -5444,6 +5466,53 @@ function BillingTab({ customer }) {
                     bank payment never reads "Card ending in …". */}
                 {p.lastFour && ` - ${isBankMethod(p.methodType) ? (p.bankName || 'Bank account') : (p.cardBrand || 'Card')} ending in ${p.lastFour}`}
               </div>
+              {/* Receipt actions. Waves receipts (invoice-backed) get a View
+                  page + a PDF download; recurring autopay rows carry only
+                  Stripe's hosted receipt, so they get View alone. The server
+                  nulls every field when no receipt is retrievable. */}
+              {(p.receiptUrl || p.stripeReceiptUrl) && (
+                <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <a
+                    href={p.receiptUrl || p.stripeReceiptUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={`View receipt for ${p.description || 'this payment'}`}
+                    style={{
+                      minHeight: 36, padding: '7px 10px', borderRadius: 8,
+                      border: `1px solid ${PORTAL_SHELL.border}`, background: '#fff',
+                      color: B.glassNavy, fontSize: 12, fontWeight: 800,
+                      textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 6,
+                    }}
+                  >
+                    <Icon name="document" size={14} strokeWidth={1.75} /> View receipt
+                  </a>
+                  {p.receiptPdfUrl && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // Public token endpoint, but same two traps as the
+                        // authed report download: honor a configured API
+                        // origin and hand bytes to the OS in the native shell.
+                        downloadPublicPdf(
+                          p.receiptPdfUrl,
+                          `Waves_Receipt_${p.receiptNumber || String(p.id).slice(0, 8)}.pdf`,
+                        ).catch(() => {
+                          showCustomerAlert('Could not download this receipt. Please try again.');
+                        });
+                      }}
+                      aria-label={`Download receipt PDF for ${p.description || 'this payment'}`}
+                      style={{
+                        minHeight: 36, padding: '7px 10px', borderRadius: 8,
+                        border: `1px solid ${PORTAL_SHELL.border}`, background: '#fff',
+                        color: B.glassNavy, fontSize: 12, fontWeight: 800,
+                        cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6,
+                      }}
+                    >
+                      <Icon name="download" size={14} strokeWidth={1.75} /> Download
+                    </button>
+                  )}
+                </div>
+              )}
               {p.status === 'failed' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                   {primaryOpenInvoice && (
@@ -5560,8 +5629,23 @@ function BillingTab({ customer }) {
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
           <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Payment confirmation texts</div>
-            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get a text when your payment processes.</div>
+            {/* Channel-aware copy: the dropdown beside this row offers
+                Text / Email / Text & Email, so hardcoded "texts" copy read as
+                false the moment a customer picked Email. */}
+            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>
+              {paymentConfirmationChannel === 'email'
+                ? 'Payment confirmation emails'
+                : paymentConfirmationChannel === 'both'
+                  ? 'Payment confirmations'
+                  : 'Payment confirmation texts'}
+            </div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
+              {paymentConfirmationChannel === 'email'
+                ? 'Get an email when your payment processes.'
+                : paymentConfirmationChannel === 'both'
+                  ? 'Get a text and an email when your payment processes.'
+                  : 'Get a text when your payment processes.'}
+            </div>
           </div>
           {(() => {
             const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');

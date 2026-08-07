@@ -121,6 +121,42 @@ router.get('/', async (req, res, next) => {
       return (p.description || '').includes('WaveGuard Monthly');
     };
 
+    // Receipt links per payment row. Two sources, in preference order:
+    //   1. The Waves receipt — invoice.token drives the permanent
+    //      /receipt/:token page + its PDF (receipt-v2). Only for invoices the
+    //      PDF route will actually serve (paid/refunded), so the portal never
+    //      offers a download that 409s.
+    //   2. Stripe's hosted receipt — recurring autopay rows carry no
+    //      invoice_id but do stamp metadata.stripe_receipt_url (the same link
+    //      the payment-success SMS/email uses). View-only, no PDF.
+    // Customer-scoped lookup: a token is only ever returned for an invoice
+    // belonging to the requesting customer.
+    // invoiceIdOf is already defined above (payer-link filtering) — reuse it.
+    const stripeReceiptOf = (p) => {
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        return m?.stripe_receipt_url || p.receipt_url || null;
+      } catch { return p.receipt_url || null; }
+    };
+    const invoiceIds = [...new Set(visiblePayments.map(invoiceIdOf).filter(Boolean))];
+    const receiptTokenByInvoiceId = new Map();
+    if (invoiceIds.length) {
+      try {
+        const invoiceRows = await db('invoices')
+          .where({ customer_id: req.customerId })
+          .whereIn('id', invoiceIds)
+          .whereIn('status', ['paid', 'refunded'])
+          .select('id', 'token', 'invoice_number');
+        invoiceRows.forEach((row) => {
+          if (row.token) receiptTokenByInvoiceId.set(row.id, { token: row.token, invoiceNumber: row.invoice_number });
+        });
+      } catch (err) {
+        // Best-effort: a receipt-link lookup failure must not break the
+        // payment history itself.
+        logger.warn(`[billing] receipt token lookup failed for customer ${req.customerId}: ${err.message}`);
+      }
+    }
+
     res.json({
       payments: visiblePayments.map(p => ({
         id: p.id,
@@ -139,6 +175,19 @@ router.get('/', async (req, res, next) => {
         stripePaymentIntentId: p.stripe_payment_intent_id || null,
         refundAmount: p.refund_amount ? parseFloat(p.refund_amount) : null,
         refundStatus: p.refund_status || null,
+        // Receipt surfaces (see the resolution block above). All three are
+        // null when this payment has no retrievable receipt — the row simply
+        // renders no receipt action.
+        ...(() => {
+          const inv = receiptTokenByInvoiceId.get(invoiceIdOf(p));
+          const stripeReceiptUrl = stripeReceiptOf(p);
+          return {
+            receiptUrl: inv ? `/receipt/${inv.token}` : null,
+            receiptPdfUrl: inv ? `/api/receipt/${inv.token}/pdf` : null,
+            receiptNumber: inv?.invoiceNumber || null,
+            stripeReceiptUrl: inv ? null : stripeReceiptUrl,
+          };
+        })(),
       })),
       total,
       limit: requestedLimit,
