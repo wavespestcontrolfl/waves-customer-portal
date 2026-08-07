@@ -241,6 +241,28 @@ const REGISTRY = {
     },
   },
 
+  estimate_accept_onetime_booking_deferred: {
+    async recheck(meta) {
+      // The acceptance email carried the same booking link, so the
+      // customer may have booked overnight — "book your service" the next
+      // morning after a live appointment exists reads broken. Suppress
+      // when any non-cancelled visit already traces to this estimate.
+      try {
+        if (!meta.estimate_id) return { eligible: true };
+        const booked = await db('scheduled_services')
+          .where({ source_estimate_id: meta.estimate_id })
+          .whereNotIn('status', ['cancelled', 'skipped'])
+          .first('id');
+        if (booked) return { eligible: false, reason: 'already-booked' };
+        const est = await db('estimates').where({ id: meta.estimate_id }).first('id');
+        if (!est) return { eligible: false, reason: 'estimate-missing' };
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('accept-booking', meta.estimate_id, err);
+      }
+    },
+  },
+
   notification_dispatcher_deferred: {
     async recheck(meta) {
       // The dispatcher's per-type toggle, channel choice, and CUSTOMER
