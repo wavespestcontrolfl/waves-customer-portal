@@ -3225,6 +3225,15 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(possessive.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('remain-outside keep-out figures and appears/seems predicates block (Codex PR r10)', () => {
+    const outside = guardrails.evaluate({ body: 'You can remain outside the treated room for 30 minutes.' }, {});
+    expect(outside.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const appears = guardrails.evaluate({ body: 'The application appears safe once it dries.' }, {});
+    expect(appears.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const seems = guardrails.evaluate({ body: 'The treatment seems harmless to children.' }, {});
+    expect(seems.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('seconds and days are fixed figures too (Codex PR r8 audit)', () => {
     const seconds = guardrails.evaluate({ body: 'Do not re-enter the treated room for 90 seconds.' }, {});
     expect(seconds.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3574,6 +3583,13 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
   test('take-out phrasing is wildlife removal too (Codex PR r9)', () => {
     const takeOut = guardrails.evaluate({ body: 'We can take raccoons out of attics.' }, {});
     expect(takeOut.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('conduct/manage fulfillment verbs are offerings too (Codex PR r10)', () => {
+    const conduct = guardrails.evaluate({ body: 'We conduct wildlife removal services.' }, {});
+    expect(conduct.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const manages = guardrails.evaluate({ body: 'Waves manages wildlife removal for local homeowners.' }, {});
+    expect(manages.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('offering CONTENT about a topic is not offering the service (Codex PR r9 false positive)', () => {

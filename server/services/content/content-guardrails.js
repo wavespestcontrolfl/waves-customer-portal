@@ -2905,7 +2905,7 @@ const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR
 // adverbs may sit between the modal and the linking verb (Codex PR r9:
 // "will eventually be safe") — negation stays outside so "will not be
 // safe" remains a disclaimer.
-const REENTRY_LINKING_VERB_SRC = `(?:is|are|remains?|stays?|becomes?|(?:will|can|could|should|would|may|might|must)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)\\w+\\s+){0,2}?(?:be|remain|stay|become))`;
+const REENTRY_LINKING_VERB_SRC = `(?:is|are|remains?|stays?|becomes?|appears?|seems?|looks?|(?:will|can|could|should|would|may|might|must)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)\\w+\\s+){0,2}?(?:be|remain|stay|become|appear|seem|look))`;
 // Bounded qualifiers accepted wherever a duration is parsed (Codex PR
 // r9): "in just 30 minutes", "wait only 30 minutes".
 const REENTRY_QUALIFIER_SRC = "(?:(?:about|around|roughly|approximately|between|just|only|at\\s+least|up\\s+to)\\s+){0,2}?";
@@ -3019,7 +3019,9 @@ const REENTRY_SAFETY_SRCS = [
   { src: `\\bgo\\s+(?:back\\s+)?(?:inside|into|in)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
-  `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
+  // outside/outdoors are keep-out locations too (Codex PR r10: "remain
+  // outside the treated room for 30 minutes").
+  `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside|outside|outdoors)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // go-inside/go-into count as the entry action too (Codex PR r7: "Do not
   // go inside the treated home for 30 minutes").
   `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*|go\\s+(?:back|inside|into|in)\\b)[^.!?\\n]{0,30}?\\b(?:for|until|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
@@ -3178,7 +3180,7 @@ const BANNED_TOPIC_SRCS = [
   // "we provide information about wildlife removal" / "Waves provides a
   // guide to wildlife removal" offer CONTENT about the topic, not the
   // service — the same exemption the possessive branch carries.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b|${BANNED_TOPIC_INFO_NOUN_SRC}\\b)[\\w'’-]+\\s+){0,3}?${BANNED_TOPIC_CORE_SRC}`,
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?|conducts?|manag(?:es?|ing)|carr(?:y|ies|ied)\\s+out)\\s+(?:(?!${NEGATION_WORD_SRC}\\b|${BANNED_TOPIC_INFO_NOUN_SRC}\\b)[\\w'’-]+\\s+){0,3}?${BANNED_TOPIC_CORE_SRC}`,
   // Insulation with SERVICE-UNAMBIGUOUS verbs only.
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|sells?|installs?|replaces?)\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
   // Work/project phrasing is an unambiguous insulation OFFERING even with
