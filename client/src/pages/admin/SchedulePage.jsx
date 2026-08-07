@@ -6602,7 +6602,10 @@ const LAWN_ASSESSMENT_METRICS = [
 // visit and read by nothing, and the owner ruled the rest off too. The
 // completion capture is now photos, the gauge reading, and the four score
 // counters. The server endpoints still accept the retired keys from old
-// payloads, and Soil K remains editable on the customer's turf-profile page.
+// payloads. Soil K no longer has a client input anywhere, so the plan
+// engine's profile-completeness check no longer requires it; drought_stress
+// likewise no longer reaches the planner's drought-prep selection — both are
+// deliberate owner rulings, not oversights.
 
 function lawnScoreColor(value) {
   const n = Number(value) || 0;
