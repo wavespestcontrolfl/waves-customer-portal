@@ -2189,23 +2189,29 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 //   and the booking-conversion ownership guard would then (rightly) refuse to
 //   close it — stranding this caller's booked deal with no convertible lead.
 //   A foreign-owned lead is invisible here; the caller gets a fresh row.
-async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null }) {
+async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null, stampedLeadId = null }) {
   // Same-call retry FIRST, before any contact-based branch: a retry of this
   // call (extraction_failed reprocessing) must reuse the lead an earlier
-  // attempt already inserted, and the call SID is the strongest identity
-  // there is. Extracted phone/email are MUTABLE across reprocessing attempts
-  // — branching on them first let a retry whose contact fields changed
-  // reuse an unrelated phone-matched lead or mint a second lead for the
-  // same SID (codex P2 r8 + audit P1 r14). The SID row still passes the
-  // SAME ownership/lifecycle filters as the contact-based lookups (audit P1
-  // r17): a retry that now resolves to a different customer must not adopt
-  // a lead another customer owns, and the workableUnnamedLead path stays
-  // active-leads-only — an ineligible SID row falls through to contact
-  // reuse or a fresh mint like any other rejected candidate.
-  if (callSid) {
+  // attempt already inserted (matched by the call SID) OR already REUSED
+  // (matched by the call_log.metadata.lead_id stamp — a reused lead keeps
+  // its original call's sid, so the stamp IS the same-call identity there;
+  // codex P1 r19). Extracted phone/email are MUTABLE across reprocessing
+  // attempts — branching on them first let a retry whose contact fields
+  // changed reuse an unrelated phone-matched lead or mint a second lead for
+  // the same SID (codex P2 r8 + audit P1 r14). The same-call row still
+  // passes the SAME ownership/lifecycle filters as the contact-based
+  // lookups (audit P1 r17): a retry that now resolves to a different
+  // customer must not adopt a lead another customer owns, and the
+  // workableUnnamedLead path stays active-leads-only — an ineligible row
+  // falls through to contact reuse or a fresh mint like any other rejected
+  // candidate.
+  if (callSid || stampedLeadId) {
     let ownQuery = database('leads')
       .whereNull('deleted_at')
-      .where('twilio_call_sid', callSid);
+      .where(function sameCallIdentity() {
+        if (callSid) this.orWhere('twilio_call_sid', callSid);
+        if (stampedLeadId) this.orWhere('id', stampedLeadId);
+      });
     if (workableUnnamedLead) {
       ownQuery = ownQuery.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
     }
@@ -7347,6 +7353,19 @@ const CallRecordingProcessor = {
         // customer is never reused/overwritten; UNCLAIMED-only when the phone
         // is ambiguous across customers — this call must not enrich a lead
         // one of the candidates owns while the office adjudicates).
+        // A stamp an EARLIER ATTEMPT of this call may have written
+        // (call_log.metadata.lead_id) is same-call identity exactly like the
+        // sid — a reused lead keeps its original call's sid, so without the
+        // stamp a retry whose mutable contact fields changed would mint a
+        // second lead while the stamp still pointed at the first, and the
+        // OR-join consumers would associate this call with BOTH (codex P1
+        // r19).
+        const priorStampedLeadId = (() => {
+          try {
+            const md = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+            return md?.lead_id ? String(md.lead_id) : null;
+          } catch { return null; }
+        })();
         const existingLead = await findReusableCallLead(db, {
           phone,
           email: phone ? null : (extracted.email || null),
@@ -7356,13 +7375,16 @@ const CallRecordingProcessor = {
           workableUnnamedLead,
           unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
           callSid: call.twilio_call_sid || null,
+          stampedLeadId: priorStampedLeadId,
         });
         // Same-call reuse (retry reprocessing found the lead THIS call's
-        // earlier attempt inserted) is strong identity — the weak-identity
-        // write revalidation below must not apply its email/name predicates
-        // to it (a name-less caller's own row would fail them and re-mint).
-        const sameCallLeadReuse = !!(existingLead && call.twilio_call_sid
-          && existingLead.twilio_call_sid === call.twilio_call_sid);
+        // earlier attempt inserted, by sid — or already reused, by stamp) is
+        // strong identity — the weak-identity write revalidation below must
+        // not apply its email/name predicates to it (a name-less caller's
+        // own row would fail them and re-mint).
+        const sameCallLeadReuse = !!(existingLead
+          && ((call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid)
+            || (priorStampedLeadId && String(existingLead.id) === priorStampedLeadId)));
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -7869,23 +7891,59 @@ const CallRecordingProcessor = {
             break;
           }
 
-          // Durable current-call → lead association for the phone-less REUSE
-          // path, WITHOUT rolling the lead's twilio_call_sid: a repeat
-          // email-matched caller's lead keeps the prior call's SID (codex P1
-          // r15), but overwriting it would destroy the older call's identity
-          // and its retry/attribution joins (audit P1 r16). Stamp the
-          // call_log row instead — same jsonb metadata pattern as
-          // created_customer_id. Skipped when the lead already carries this
-          // call's SID (same-call retry, or a recovery row minted by this
-          // call). Best-effort: a stamp failure must never break processing.
-          if (leadId && !phone && existingLead && !sameCallLeadReuse && !raceRecovered) {
-            await db('call_log').where({ id: call.id }).update({
-              metadata: db.raw(
-                "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)",
-                [JSON.stringify(String(leadId))],
-              ),
-              updated_at: new Date(),
-            }).catch((e) => logger.warn(`[call-proc] call→lead link stamp failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
+          // Call→lead linkage maintenance for the phone-less path, WITHOUT
+          // rolling the lead's twilio_call_sid (rolling it destroyed the
+          // older call's identity — audit P1 r16): a reused lead keeps its
+          // ORIGINAL call's sid, so this call's association lives in
+          // call_log.metadata.lead_id (codex P1 r15; same jsonb pattern as
+          // created_customer_id). The stamp is REQUIRED state, not
+          // best-effort — it is the only linkage admin history, agent
+          // context, and estimator grounding have for this call, and a stale
+          // stamp from an earlier attempt that reused a DIFFERENT lead
+          // double-associates the call under the OR-join consumers (codex
+          // P1 r19 ×2). Writes are fenced on the processing token; a lost
+          // fence or write failure aborts into the extraction_failed retry
+          // path via abortProcessing (the lead-section catch rethrows it).
+          if (!phone && leadId) {
+            const finalLeadCarriesSid = raceRecovered || !existingLead
+              || (!!call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid);
+            const requireLinkWrite = async (label, updatePayload) => {
+              let written = 0;
+              try {
+                written = await db('call_log').where({ id: call.id })
+                  .where('processing_token', procToken)
+                  .update(updatePayload);
+              } catch (stampErr) {
+                const wrapped = new Error(`call→lead link ${label} failed: ${stampErr.code || stampErr.name || 'db_error'}`);
+                wrapped.abortProcessing = true;
+                throw wrapped;
+              }
+              if (!written) {
+                const lost = new Error(`processing claim lost during call→lead link ${label}`);
+                lost.abortProcessing = true;
+                throw lost;
+              }
+            };
+            if (finalLeadCarriesSid) {
+              // The final lead is linked by its own sid — a leftover stamp
+              // pointing at a different lead must not survive.
+              if (priorStampedLeadId && priorStampedLeadId !== String(leadId)) {
+                await requireLinkWrite('clear', {
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'lead_id'"),
+                  updated_at: new Date(),
+                });
+              }
+            } else if (priorStampedLeadId !== String(leadId)) {
+              // Reuse of a different-sid lead: stamp (or re-point) the
+              // association. Idempotent-skip when the stamp already matches.
+              await requireLinkWrite('stamp', {
+                metadata: db.raw(
+                  "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)",
+                  [JSON.stringify(String(leadId))],
+                ),
+                updated_at: new Date(),
+              });
+            }
           }
 
           // Log AI triage activity — gated on the enrichment write landing, so
@@ -8150,6 +8208,10 @@ const CallRecordingProcessor = {
         }
 
       } catch (leadErr) {
+        // Required-linkage failures must reach the outer extraction_failed
+        // guard — swallowing them finalized the call with its only
+        // call→lead association missing or stale (codex P1 r19).
+        if (leadErr.abortProcessing) throw leadErr;
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
       }
     }

@@ -158,8 +158,14 @@ describe('findReusableCallLead identity keys', () => {
       return out;
     };
     const builder = {};
-    for (const m of ['where', 'whereNull', 'whereRaw', 'whereNotIn', 'orderBy', 'limit']) {
-      builder[m] = (...a) => { calls.push([m, a]); return builder; };
+    for (const m of ['where', 'orWhere', 'whereNull', 'whereRaw', 'whereNotIn', 'orderBy', 'limit']) {
+      builder[m] = (...a) => {
+        calls.push([m, a]);
+        // where-group callbacks (e.g. the same-call identity group) build
+        // their arms via this.orWhere — invoke them so those arms record.
+        if (typeof a[0] === 'function') a[0].call(builder);
+        return builder;
+      };
     }
     builder.first = async () => { calls.push(['first', []]); return filtered()[0] || null; };
     // Some paths await the builder itself (knex builders are thenable).
@@ -303,7 +309,24 @@ describe('findReusableCallLead identity keys', () => {
       workableUnnamedLead: true,
       callSid: 'CA-retry-1',
     })).toEqual(own);
-    expect(db.calls.some(([m, a]) => m === 'where' && a[0] === 'twilio_call_sid' && a[1] === 'CA-retry-1')).toBe(true);
+    expect(db.calls.some(([m, a]) => (m === 'where' || m === 'orWhere') && a[0] === 'twilio_call_sid' && a[1] === 'CA-retry-1')).toBe(true);
+  });
+
+  test('a retry reuses the lead the earlier attempt STAMPED (metadata lead_id) — reused leads keep the original sid', async () => {
+    // Attempt 1 reused an older email-matched lead (different sid) and
+    // stamped call_log.metadata.lead_id. The retry must treat that stamp as
+    // same-call identity even though contact fields may have changed.
+    const own = { id: 'lead-stamped', first_name: 'Jeff', last_name: 'Brooks', twilio_call_sid: 'CA-original-call' };
+    const db = makeDb(own);
+    expect(await findReusableCallLead(db, {
+      phone: null,
+      email: 'different-now@example.com',
+      firstName: null,
+      lastName: null,
+      workableUnnamedLead: true,
+      callSid: 'CA-retry-2',
+      stampedLeadId: 'lead-stamped',
+    })).toEqual(own);
   });
 
   test('name conflict never blocks a PHONE match — corroboration is email-path only', async () => {
