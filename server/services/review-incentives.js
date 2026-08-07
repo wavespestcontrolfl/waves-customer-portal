@@ -629,9 +629,41 @@ async function searchAttributionCandidates(options = {}) {
     });
   }
 
+  // Click-time correlation: customers whose tracked review-link click landed
+  // near this review's timestamp. Rendered as a separate "likely reviewers"
+  // section so a name mismatch ("SunshineGal88") still surfaces the probable
+  // customer. Suggestion only — attribution stays a manual confirm.
+  const { findLikelyReviewers } = require('./review-click-correlation');
+  const likelyRaw = await findLikelyReviewers(review, { conn, limit: 4 });
+  const likelyReviewers = [];
+  for (const l of likelyRaw) {
+    const services = await recentServiceCandidatesForCustomer(l.customerId, review, conn);
+    likelyReviewers.push({
+      ...serializeCustomer({
+        id: l.customerId,
+        first_name: l.firstName,
+        last_name: l.lastName,
+        phone: l.phone,
+        email: l.email,
+        address_line1: l.addressLine1,
+        address_line2: l.addressLine2,
+        city: l.city,
+        state: l.state,
+        zip: l.zip,
+      }),
+      services,
+      clickedAt: l.clickedAt,
+      clickOffsetLabel: l.clickOffsetLabel,
+      clickedBeforeReview: l.clickedBeforeReview,
+      locationMatch: l.locationMatch,
+      alreadyFlagged: l.alreadyFlagged,
+    });
+  }
+
   return {
     review: serializeAttributionQueueItem(review, null, review.customer_id ? 'missing_technician' : 'missing_customer'),
     candidates,
+    likelyReviewers,
   };
 }
 

@@ -753,4 +753,39 @@ describe('Google Business review sync', () => {
     expect(alert).toBeTruthy();
     expect(alert.title).toContain('John Doe');
   });
+
+  test('unlinked-review notification defers to the batch collector when one is passed', async () => {
+    const spy = jest.spyOn(service, '_notifyUnlinkedReview').mockResolvedValue();
+    const normalized = {
+      google_review_id: 'gid-defer-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/gid-defer-1',
+      location_id: 'bradenton',
+      reviewer_name: 'SunshineGal88',
+      reviewer_photo_url: null,
+      star_rating: 5,
+      review_text: 'Great service',
+      review_created_at: '2026-05-25T12:00:00Z',
+      owner_reply: null,
+      owner_reply_updated_at: null,
+    };
+
+    // With a collector: pushed, NOT notified inline (batch defers to end of run).
+    const pending = [];
+    const result = await service._upsertGbpReview(normalized, pending);
+    expect(result.inserted).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].google_review_id).toBe('gid-defer-1');
+
+    // Without a collector (direct callers): inline notify still fires.
+    await service._upsertGbpReview({
+      ...normalized,
+      google_review_id: 'gid-defer-2',
+      gbp_review_name: 'accounts/1/locations/2/reviews/gid-defer-2',
+      reviewer_name: 'OtherHandle77',
+      review_created_at: '2026-05-26T12:00:00Z',
+    });
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+  });
 });

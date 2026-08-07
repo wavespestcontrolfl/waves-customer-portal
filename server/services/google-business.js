@@ -476,7 +476,7 @@ class GoogleBusinessService {
    * Fires once, on first insert only — callers gate on the new-review branch so
    * repeat hourly syncs don't re-notify. Best-effort (notifyAdmin self-catches).
    *
-   * @param {{reviewer_name?:string, star_rating?:number, review_text?:string, location_id?:string, google_review_id?:string}} row
+   * @param {{reviewer_name?:string, star_rating?:number, review_text?:string, location_id?:string, google_review_id?:string, review_created_at?:string}} row
    */
   async _notifyUnlinkedReview(row) {
     try {
@@ -485,10 +485,22 @@ class GoogleBusinessService {
       const stars = Number(row.star_rating) || 0;
       const reviewer = row.reviewer_name || 'Anonymous';
       const snippet = row.review_text ? ` — "${String(row.review_text).slice(0, 120)}"` : '';
+      // Click-time detective work: customers whose tracked review-link click
+      // landed near this review's timestamp. Suggestion only — the office
+      // confirms via the manual match flow; nothing is auto-linked.
+      const { findLikelyReviewers } = require('./review-click-correlation');
+      const likely = await findLikelyReviewers(row, { limit: 3 });
+      let likelyLine = '';
+      if (likely.length) {
+        const top = likely[0];
+        const topName = [top.firstName, top.lastName].filter(Boolean).join(' ') || 'a customer';
+        const more = likely.length > 1 ? ` (+${likely.length - 1} more in Reviews)` : '';
+        likelyLine = ` Likely reviewer: ${topName} tapped their review link ${top.clickOffsetLabel} this review posted${more}.`;
+      }
       await NotificationService.notifyAdmin(
         'review',
         `Unlinked Google review from ${reviewer}`,
-        `${stars}-star review at ${locName} couldn't be matched to a customer${snippet}. Open Reviews to match it, or mark the customer as already-reviewed.`,
+        `${stars}-star review at ${locName} couldn't be matched to a customer${snippet}. Open Reviews to match it, or mark the customer as already-reviewed.${likelyLine}`,
         {
           link: '/admin/reviews',
           metadata: {
@@ -497,6 +509,13 @@ class GoogleBusinessService {
             reviewerName: reviewer,
             starRating: stars,
             reason: 'no_customer_match',
+            likelyReviewers: likely.map(l => ({
+              customerId: l.customerId,
+              name: [l.firstName, l.lastName].filter(Boolean).join(' ') || null,
+              clickedAt: l.clickedAt,
+              clickOffsetLabel: l.clickOffsetLabel,
+              locationMatch: l.locationMatch,
+            })),
           },
         },
       );
@@ -520,7 +539,7 @@ class GoogleBusinessService {
     return candidates.find(row => sameReviewerAndTime(row, normalized.reviewer_name, normalized.review_created_at)) || null;
   }
 
-  async _upsertGbpReview(normalized) {
+  async _upsertGbpReview(normalized, pendingUnlinkedNotifications = null) {
     const existing = await this._findExistingReview(normalized);
     const customerId = await this._findCustomerIdByReviewerName(normalized.reviewer_name);
     const replyFields = isDraftReply(existing?.review_reply)
@@ -569,8 +588,18 @@ class GoogleBusinessService {
         });
       }
     } else if (result.inserted) {
-      // New review we couldn't tie to a customer — alert the office to match it.
-      await this._notifyUnlinkedReview(row);
+      // New review we couldn't tie to a customer — alert the office to match
+      // it. During a batch sync the notification is DEFERRED to the end of
+      // the run: the likely-reviewer exclusion inside it queries
+      // google_reviews.customer_id links, and a matched review later in the
+      // same provider response isn't inserted yet — notifying inline could
+      // name that customer as an earlier unlinked review's likely reviewer
+      // (codex #3264 r2).
+      if (Array.isArray(pendingUnlinkedNotifications)) {
+        pendingUnlinkedNotifications.push(row);
+      } else {
+        await this._notifyUnlinkedReview(row);
+      }
     }
     return result;
   }
@@ -602,7 +631,7 @@ class GoogleBusinessService {
     return { rating: googleRating, totalReviews: googleTotalReviews };
   }
 
-  async _syncPlacesReviewSampleForLocation(loc, googleKey) {
+  async _syncPlacesReviewSampleForLocation(loc, googleKey, pendingUnlinkedNotifications = null) {
     if (!loc.googlePlaceId || !googleKey) return { synced: 0, new: 0 };
     const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${loc.googlePlaceId}&fields=reviews,rating,user_ratings_total,name&reviews_sort=newest&key=${googleKey}`;
     const res = await fetch(url);
@@ -695,14 +724,23 @@ class GoogleBusinessService {
           });
         }
       } else if (!existing) {
-        // Newly inserted, unmatched → alert the office to match it.
-        await this._notifyUnlinkedReview({
+        // Newly inserted, unmatched → alert the office to match it. Deferred
+        // to the end of the batch run when a collector is passed (see
+        // _upsertGbpReview) so the likely-reviewer exclusion sees the whole
+        // batch's links.
+        const notifyRow = {
           reviewer_name: reviewerName,
           star_rating: review.rating || 0,
           review_text: review.text || null,
           location_id: loc.id,
           google_review_id: googleId,
-        });
+          review_created_at: new Date(review.time * 1000).toISOString(),
+        };
+        if (Array.isArray(pendingUnlinkedNotifications)) {
+          pendingUnlinkedNotifications.push(notifyRow);
+        } else {
+          await this._notifyUnlinkedReview(notifyRow);
+        }
       }
       synced++;
     }
@@ -721,6 +759,10 @@ class GoogleBusinessService {
     let totalSynced = 0, totalNew = 0;
     const errors = [];
     const sources = {};
+    // Unlinked-review notifications collected across the WHOLE run and fired
+    // after every location's reviews are inserted/linked — the likely-reviewer
+    // exclusion must see the full batch (codex #3264 r2).
+    const pendingUnlinked = [];
 
     for (const loc of WAVES_LOCATIONS) {
       try {
@@ -734,7 +776,7 @@ class GoogleBusinessService {
             const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id, 100);
             for (const review of reviews) {
               const normalized = this._normalizeGbpReview(review, loc);
-              const result = await this._upsertGbpReview(normalized);
+              const result = await this._upsertGbpReview(normalized, pendingUnlinked);
               if (result.inserted) totalNew++;
               totalSynced++;
             }
@@ -748,7 +790,7 @@ class GoogleBusinessService {
         }
 
         if (!usedGbp) {
-          const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY);
+          const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked);
           totalSynced += sample.synced;
           totalNew += sample.new;
           sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
@@ -759,6 +801,13 @@ class GoogleBusinessService {
         errors.push({ location: loc.name, error: err.message });
         if (!sources[loc.id]) sources[loc.id] = 'none';
       }
+    }
+
+    // Whole batch is now inserted/linked — safe to run the likely-reviewer
+    // lookup inside each deferred notification. _notifyUnlinkedReview
+    // self-catches, so one failure can't drop the rest.
+    for (const row of pendingUnlinked) {
+      await this._notifyUnlinkedReview(row);
     }
 
     await this._resolveGbpResourceNames();
