@@ -1020,6 +1020,17 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         }
       }
 
+      // Outside the send window: return WITHOUT marking confirmation_sent —
+      // the stranded-confirmation sweep (every 15 min) re-calls this
+      // function and the text goes out when the window opens at 8:00 AM.
+      // Attempting the send instead would burn the confirmation: the
+      // canonical-path block collapses to false here, the email fallback
+      // fires at night, and the unconditional mark below ends all retries.
+      if (reminderSendWindowHold(prefs.confirmationChannel)) {
+        logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} deferred — outside 8AM-8PM ET send window`);
+        return false;
+      }
+
       const day = formatDay(apptTime);
       const date = formatDate(apptTime);
       const time = formatTime(apptTime);
