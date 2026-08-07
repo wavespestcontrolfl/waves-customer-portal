@@ -368,6 +368,28 @@ describe("labelTargetLines", () => {
     expect(labelTargetLines("Darkling beetles")).toEqual(["pest"]);
   });
 
+  it("passes bed-work targets on lawn AND tree & shrub visits", () => {
+    // The quarterly T&S protocol applies Snapshot for bed pre-emergence, and
+    // the bed-only herbicides ride both visit types. These strings contain
+    // "weeds", so without the bed check first the turf pattern would claim
+    // them lawn-only and a T&S completion would prefill nothing (codex P2 r1
+    // on the 20260807200000 fills).
+    [
+      "Landscape bed weeds (pre-emergent)",
+      "Bed & border grassy weeds",
+      "Non-selective weed control (spot treatment)",
+      "Driveway & sidewalk crack weeds",
+    ].forEach((t) => expect(labelTargetLines(t)).toEqual(["lawn", "tree_shrub"]));
+    // Snapshot on a T&S visit keeps its bed chip while the turf-specific
+    // weeds stay off that line.
+    expect(
+      filterLabelTargetsForLine(
+        ["Landscape bed weeds (pre-emergent)", "Chamberbitter", "Spurge"],
+        lines("Tree & Shrub Care"),
+      ),
+    ).toEqual(["Landscape bed weeds (pre-emergent)"]);
+  });
+
   it("NEVER prefills a target nothing controls", () => {
     // UF/IFAS: Ganoderma butt rot has no chemical control and Thielaviopsis
     // trunk rot has no prevention or cure. A chip on a completed visit reads

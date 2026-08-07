@@ -116,9 +116,11 @@ const FILLS = [
   // Fluopicolide: Pythium only, and the label REQUIRES a tank-mix partner
   // with a different mode of action.
   ['ADORN Fungicide', ['Pythium blight', 'Pythium damping-off']],
-  // Fosetyl-Al: Pythium + yellow tuft standalone; the anthracnose claim is
-  // the label's tank-mix table (Signature is a mix partner by design).
-  ['Chipco Signature', ['Pythium blight', 'Yellow tuft (downy mildew)', 'Anthracnose']],
+  // Fosetyl-Al: Pythium + yellow tuft ONLY — the label's anthracnose claim
+  // exists solely in its tank-mix table, so an unconditional prefill would
+  // mint a false treatment claim whenever Signature is applied standalone
+  // (codex P1 r1). The tech can add it by hand on a mixed application.
+  ['Chipco Signature', ['Pythium blight', 'Yellow tuft (downy mildew)']],
   // Potassium phosphite: broad turf list on the label — but NOT take-all,
   // despite the extension-lore reputation. Label says "Brown patch", not
   // large patch, so the chip follows the label.

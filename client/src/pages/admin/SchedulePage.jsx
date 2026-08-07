@@ -17268,6 +17268,16 @@ export const ALL_TARGET_LINES = ["pest", "lawn", "tree_shrub", "termite", "mosqu
 const LAWN_ONLY_TARGET_RE =
   /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|bahiagrass|foxtail|kyllinga|dollarweed|doveweed|chamberbitter|chickweed|burweed|pusley|buttonweed|spurge|clover|nutsedge|\bsedge\b|flatsedge|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|leaf spot|anthracnose|summer patch|take-?all|fairy ring|pythium|yellow tuft|turf/i;
 
+// Bed/hardscape work happens on lawn AND tree & shrub visits — the quarterly
+// T&S protocol applies Snapshot for bed pre-emergence, and the bed-only
+// herbicides (SureGuard, Fusilade, Segment) are directed bed/border work
+// wherever they ride. Checked BEFORE the turf pattern because these strings
+// contain "weeds", which the lawn regex would otherwise claim lawn-only and
+// filterLabelTargetsForLine would drop the whole list on a T&S completion
+// (codex P2 r1 on the 20260807200000 fills).
+const BED_WORK_TARGET_RE =
+  /landscape bed|bed & border|non-selective weed|driveway & sidewalk/i;
+
 // Ornamental-only targets (tree & shrub / palm work): sap feeders, mites,
 // borers, and foliar issues. Checked BEFORE the structural set so "Spider
 // mites" classifies as ornamental instead of matching the spider pattern.
@@ -17351,6 +17361,7 @@ export function labelTargetLines(target) {
   if (NO_CONTROL_TARGET_RE.test(target)) return [];
   if (/fire ant/i.test(target)) return ["pest", "lawn"];
   if (ORNAMENTAL_DISEASE_RE.test(target)) return ["tree_shrub"];
+  if (BED_WORK_TARGET_RE.test(target)) return ["lawn", "tree_shrub"];
   if (LAWN_ONLY_TARGET_RE.test(target)) return ["lawn"];
   if (CATERPILLAR_TARGET_RE.test(target)) return ["tree_shrub", "lawn"];
   if (ORNAMENTAL_ONLY_TARGET_RE.test(target)) return ["tree_shrub"];
