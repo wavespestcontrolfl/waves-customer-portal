@@ -31,6 +31,7 @@ const {
   deriveLinkBoost,
   listicleFamilyKey,
   clusterListicleFamilies,
+  listicleFamilyDedupeKey,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
 
 const { WEIGHTS } = require('../services/content/scoring-config');
@@ -720,5 +721,26 @@ describe('listicle_family scoring + action mapping', () => {
   test('family-summed impressions clear the boost floor that individual variants miss', () => {
     expect(impressionsBoost(48)).toBe(0); // best single variant: below minImpressionsToScore
     expect(impressionsBoost(102)).toBeGreaterThan(0); // family sum: scores
+  });
+
+  test('earns contentGap weight, and the motivating family clears the 45 blog admission floor', () => {
+    const { total, breakdown } = scoreOpportunity(
+      { bucket: 'listicle_family', query: 'drought tolerant plants florida', service: 'lawn' },
+      { position: 18, impressions: 450 }
+    );
+    expect(breakdown.contentGap).toBe(WEIGHTS.contentGap);
+    // 450 impressions / informational lawn family — must clear blogMinScoreToAct
+    // (45) or the bucket is silently inert (Codex r1 P1).
+    expect(total).toBeGreaterThanOrEqual(45);
+  });
+
+  test('dedupe key is stable under representative/classification churn (family key, not query)', () => {
+    const key = listicleFamilyKey('drought tolerant plants florida');
+    const a = listicleFamilyDedupeKey(key);
+    const b = listicleFamilyDedupeKey(listicleFamilyKey('florida drought tolerant plants'));
+    expect(a).toBe(b); // variants trading first place never mint a new row
+    expect(a).toContain('listicle_family::fam::');
+    // Distinct local intent keys apart because the city token is IN the family key.
+    expect(listicleFamilyDedupeKey(listicleFamilyKey('drought tolerant plants sarasota'))).not.toBe(a);
   });
 });

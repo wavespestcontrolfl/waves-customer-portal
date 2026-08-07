@@ -324,6 +324,15 @@ function clusterListicleFamilies(rows) {
   });
 }
 
+// Family-stable dedupe key. Deliberately NOT dedupeKey(opp): that keys on
+// the representative query + service/city, all of which can flip between
+// mining runs as close variants trade places — minting fresh rows for one
+// search intent. The token-identity family key is invariant under those
+// fluctuations, and city tokens live inside it, so local intents key apart.
+function listicleFamilyDedupeKey(familyKey) {
+  return ['listicle_family', 'fam', String(familyKey || '').slice(0, 120)].join('::');
+}
+
 // Used to look up the best-impression own page sharing a query's
 // service+city classification — same keying as the gsc_queries → gsc_pages
 // join. Treat null/empty as a distinct group rather than collapsing them.
@@ -354,8 +363,14 @@ function scoreOpportunity(opportunity, extraSignals = {}) {
     // missing) on an existing page whose rankings the new blocks lift. The
     // double credit is what lets a strong gap (impressionsBoost 1.0) clear
     // the 75 floor at all — weaker signals still fall short by design.
+    // listicle_family earns contentGap too: the bucket admits a family only
+    // when no own page already dominates it (top-3 families are excluded at
+    // mine time), so what remains is enumerable demand with no satisfying
+    // asset — and without this weight the motivating ~450-impression family
+    // scores ~40, under the 45 blog admission floor, making the bucket
+    // silently inert.
     contentGap: opportunity.bucket === 'local_gap' || opportunity.bucket === 'no_content_yet'
-        || opportunity.bucket === 'answer_gap'
+        || opportunity.bucket === 'answer_gap' || opportunity.bucket === 'listicle_family'
       ? WEIGHTS.contentGap
       : 0,
     refreshLift: opportunity.bucket === 'decay_refresh' || opportunity.bucket === 'ctr_rewrite'
@@ -1460,7 +1475,10 @@ class GscOpportunityMiner {
       .where('is_branded', false)
       .select('query', 'service_category', 'city_target')
       .sum('impressions as impressions')
-      .avg('position as avg_position')
+      // Impressions-weighted, matching mineAnswerGap: each stored position is
+      // already an impression-level average, so a plain avg() lets a
+      // one-impression day at position 1 mask a 100-impression day at 50.
+      .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as avg_position'))
       .groupBy('query', 'service_category', 'city_target');
 
     const out = [];
@@ -1470,6 +1488,12 @@ class GscOpportunityMiner {
       // reachable through striking_distance / no_content_yet / seasonal.
       if (fam.variants.length < 2) continue;
       if (fam.impressions < THRESHOLDS.minImpressionsToScore) continue;
+      // A family already ranking top-3 is won intent — an own page serves it,
+      // and a new blog would compete with ourselves. Same "-3" anchor as
+      // striking_distance's distance math: inside it there is no distance to
+      // strike. (Weighted position, so a dominant variant can't be masked by
+      // a stray deep-ranking one.)
+      if (fam.position > 0 && fam.position < 4) continue;
       const rep = fam.variants[0];
       const city = normalizeCity(rep.city_target) || inferCityFromQuery(rep.query);
       const service = rep.service_category || inferServiceFromQuery(rep.query);
@@ -1496,7 +1520,13 @@ class GscOpportunityMiner {
       opp.score = total;
       opp.score_breakdown = breakdown;
       opp.action_type = actionForOpportunity(opp);
-      opp.dedupe_key = dedupeKey(opp);
+      // Dedupe on the STABLE family key, not the representative query: two
+      // close variants trading first place between mining runs would mint a
+      // fresh dedupe_key each time and queue competing posts for one intent.
+      // Service/city are omitted for the same reason (the representative's
+      // classification can flip run-to-run); city tokens are part of the
+      // family key itself, so distinct local intents still key apart.
+      opp.dedupe_key = listicleFamilyDedupeKey(fam.key);
       out.push(opp);
     }
     return out;
@@ -1711,6 +1741,7 @@ module.exports._internals = {
   linkBoostCap,
   listicleFamilyKey,
   clusterListicleFamilies,
+  listicleFamilyDedupeKey,
   answerGapStem,
   stemmedTokenSet,
   queryContentTerms,
