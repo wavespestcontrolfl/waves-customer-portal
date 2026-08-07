@@ -627,6 +627,11 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
                 });
             })
             .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
+            // Current-interval fence (codex r16): a worker delayed across
+            // an on-off-on cycle must not stamp a cancellation that
+            // predates the CURRENT enable boundary; fail-closed when the
+            // boundary is absent.
+            .whereRaw("COALESCE((SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled'), '-infinity'::timestamptz) >= COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-enabled-at'), 'infinity'::timestamptz)")
             // Survivor guard IN the stamp (codex #3238 r4): a live
             // same-customer/same-slot sibling appearing between the
             // classification read and this update must void the
@@ -661,6 +666,9 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             // late-claim after a newer disable was stamped — same guard
             // as the sweep's late-claim.
             .whereRaw("COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-enabled-at'), '-infinity'::timestamptz) > COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-disabled-at'), '-infinity'::timestamptz)")
+            // Current-interval fence (codex r16): the cancellation itself
+            // must fall within the current enable interval.
+            .whereRaw("COALESCE((SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled'), '-infinity'::timestamptz) >= COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-enabled-at'), 'infinity'::timestamptz)")
             .where(function claimable() {
               this.whereNull('cancellation_notice_at')
                 .orWhere(function stale() {
