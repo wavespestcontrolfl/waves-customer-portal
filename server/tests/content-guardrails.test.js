@@ -3117,6 +3117,72 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     }
   });
 
+  test('generic service subjects and safe-from phrasing stay legal (Codex PR r6 false positives)', () => {
+    for (const body of [
+      'Your service plan is safe from unexpected price increases.',
+      'The service is safe from cancellation.',
+      'The home is safe from termite damage after repairs.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    }
+    // Direct treatment subjects still block.
+    const direct = guardrails.evaluate({ body: 'Our pest-control program is safe.' }, {});
+    expect(direct.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('treatment context on either side of an entry duration blocks (Codex PR r6)', () => {
+    for (const body of [
+      'You may enter the room after 30 minutes following treatment.',
+      'You can enter after 30 minutes once treatment is complete.',
+      'The room can be entered 30 minutes after treatment.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    // No treatment context anywhere in the sentence → not a re-entry figure.
+    const waitingRoom = guardrails.evaluate({ body: 'You may enter the room after 30 minutes.' }, {});
+    expect(waitingRoom.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
+  test('qualified EPA approval wording blocks (Codex PR r6)', () => {
+    for (const body of [
+      'This pesticide is approved for use by the EPA.',
+      'These products were approved for residential use by EPA.',
+      'EPA granted approval for this treatment.',
+      'This product received approval from the EPA.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    const required = guardrails.evaluate({ body: 'Every product we use is EPA-registered or EPA-exempt.' }, {});
+    expect(required.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
+  test('treatment-separated drying figures block (Codex PR r6)', () => {
+    for (const body of [
+      'Drying the treatment takes 30 minutes.',
+      'Drying after the application takes 30 minutes.',
+      'The treatment has a drying time of 30 minutes.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+  });
+
+  test('the pronoun antecedent is the GOVERNING sentence, not any earlier treatment word (Codex PR r6 false positive)', () => {
+    const screen = guardrails.evaluate({ body: 'The pesticide is applied outdoors. The repaired screen prevents entry. It is safe for pets.' }, {});
+    expect(screen.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
+  test('"confirms the appointment time" is not the idiom second part (Codex PR r6)', () => {
+    const apptTime = guardrails.evaluate({ body: 'The treatment is safe once dry. Your technician confirms the appointment time.' }, {});
+    expect(apptTime.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // A when-clause that itself concerns re-entry still completes the idiom.
+    const whenSafe = guardrails.evaluate({ body: 'The treatment is safe once dry, and your technician confirms when it is safe to re-enter.' }, {});
+    expect(whenSafe.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
   test('treated-surface subjects reach the idiom check — incomplete idiom blocks (Codex PR r4)', () => {
     const surfaces = guardrails.evaluate({ body: 'Treated surfaces are safe once dry.' }, {});
     expect(surfaces.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3412,6 +3478,48 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(waves.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
     const wavesPC = guardrails.evaluate({ body: "Waves Pest Control's wildlife trapping service protects attics." }, {});
     expect(wavesPC.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('third-party wildlife attribution stays legal (Codex PR r6 false positive)', () => {
+    for (const body of [
+      'We help specialists remove wildlife.',
+      'We let partners remove wildlife.',
+      'We have partners trap wildlife.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    }
+  });
+
+  test('exclude-as-omit stays legal — only physical exclusion is the service (Codex PR r6)', () => {
+    const examples = guardrails.evaluate({ body: 'We exclude wildlife examples from this comparison.' }, {});
+    expect(examples.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    const discussion = guardrails.evaluate({ body: 'We exclude animals from this discussion.' }, {});
+    expect(discussion.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('insulation work/project offerings block; inspection artifacts stay legal (Codex PR r6)', () => {
+    for (const body of [
+      'We perform attic insulation work.',
+      'We do attic insulation work.',
+      'Our team completes attic insulation projects.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    }
+    const photos = guardrails.evaluate({ body: 'We can provide photos of attic insulation during the inspection.' }, {});
+    expect(photos.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('info nouns extend to information/reports/glossaries (Codex PR r6)', () => {
+    for (const body of [
+      'Our information about wildlife removal explains when to call a specialist.',
+      'Our report on wildlife removal summarizes state guidance.',
+      'Our wildlife removal glossary defines common terms.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    }
   });
 
   test('handling EXISTING insulation during inspection stays legal (Codex PR r1 false positive)', () => {
