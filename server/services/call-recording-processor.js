@@ -7356,12 +7356,24 @@ const CallRecordingProcessor = {
         : `existing customer (${leadCustomer?.pipeline_stage || 'unknown'})`;
       logger.info(`[call-proc] Skipping lead creation for ${skipReason}, customer ${customerId || 'none'}`);
     }
-    // Phone-less linkage completion flag: once a phone-less flow involves a
-    // reused lead or a prior stamp, it must EXIT with its linkage settled
-    // (stamped, re-pointed, or cleared by the maintenance block). A throw
-    // anywhere before that block would otherwise be swallowed by the
-    // section's non-blocking catch and finalize the call with missing or
-    // stale linkage (audit P1 r21) — the catch escalates while this is set.
+    // A stamp an EARLIER ATTEMPT of this call may have written
+    // (call_log.metadata.lead_id). Parsed OUTSIDE the lead section: it must
+    // be reconciled on EVERY retry outcome — including a retry that gained a
+    // phone or was vetoed out of lead creation entirely — or the OR-join
+    // consumers keep associating this call with a lead a prior attempt
+    // chose (audit P1 r22).
+    const priorStampedLeadId = (() => {
+      try {
+        const md = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+        return md?.lead_id ? String(md.lead_id) : null;
+      } catch { return null; }
+    })();
+    // Linkage completion flag: once this call's flow involves a reused lead
+    // or a prior stamp, it must EXIT with its linkage settled (stamped,
+    // re-pointed, or cleared by the maintenance block). A throw anywhere
+    // before that block would otherwise be swallowed by the section's
+    // non-blocking catch and finalize the call with missing or stale
+    // linkage (audit P1 r21) — the catch escalates while this is set.
     let phoneLessLinkagePending = false;
     if (shouldCreateLead) {
       try {
@@ -7373,19 +7385,12 @@ const CallRecordingProcessor = {
         // customer is never reused/overwritten; UNCLAIMED-only when the phone
         // is ambiguous across customers — this call must not enrich a lead
         // one of the candidates owns while the office adjudicates).
-        // A stamp an EARLIER ATTEMPT of this call may have written
-        // (call_log.metadata.lead_id) is same-call identity exactly like the
-        // sid — a reused lead keeps its original call's sid, so without the
-        // stamp a retry whose mutable contact fields changed would mint a
-        // second lead while the stamp still pointed at the first, and the
-        // OR-join consumers would associate this call with BOTH (codex P1
-        // r19).
-        const priorStampedLeadId = (() => {
-          try {
-            const md = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
-            return md?.lead_id ? String(md.lead_id) : null;
-          } catch { return null; }
-        })();
+        // priorStampedLeadId (parsed above) is same-call identity exactly
+        // like the sid — a reused lead keeps its original call's sid, so
+        // without the stamp a retry whose mutable contact fields changed
+        // would mint a second lead while the stamp still pointed at the
+        // first, and the OR-join consumers would associate this call with
+        // BOTH (codex P1 r19).
         const existingLead = await findReusableCallLead(db, {
           phone,
           email: phone ? null : (extracted.email || null),
@@ -7406,9 +7411,9 @@ const CallRecordingProcessor = {
           && ((call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid)
             || (priorStampedLeadId && String(existingLead.id) === priorStampedLeadId)));
         // A fresh phone-less insert with no prior stamp self-links via its
-        // own sid at insert time — only reuse or a leftover stamp puts
-        // linkage state in play.
-        if (!phone && (existingLead || priorStampedLeadId)) phoneLessLinkagePending = true;
+        // own sid at insert time — phone-less reuse OR any leftover stamp
+        // (even on a retry that gained a phone) puts linkage state in play.
+        if ((!phone && existingLead) || priorStampedLeadId) phoneLessLinkagePending = true;
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -7928,7 +7933,7 @@ const CallRecordingProcessor = {
           // P1 r19 ×2). Writes are fenced on the processing token; a lost
           // fence or write failure aborts into the extraction_failed retry
           // path via abortProcessing (the lead-section catch rethrows it).
-          if (!phone) {
+          if (!phone || priorStampedLeadId) {
             const finalLeadCarriesSid = raceRecovered || !existingLead
               || (!!call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid);
             const requireLinkWrite = async (label, updatePayload) => {
@@ -7961,6 +7966,17 @@ const CallRecordingProcessor = {
             } else if (finalLeadCarriesSid) {
               // The final lead is linked by its own sid — a leftover stamp
               // pointing at a different lead must not survive.
+              if (priorStampedLeadId && priorStampedLeadId !== String(leadId)) {
+                await requireLinkWrite('clear', {
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'lead_id'"),
+                  updated_at: new Date(),
+                });
+              }
+            } else if (phone) {
+              // Retry GAINED a phone and selected a phone-linked lead: its
+              // linkage is the phone, not the stamp — a stale stamp pointing
+              // at a different lead must not survive (audit P1 r22); a stamp
+              // already pointing at this lead stays accurate.
               if (priorStampedLeadId && priorStampedLeadId !== String(leadId)) {
                 await requireLinkWrite('clear', {
                   metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'lead_id'"),
@@ -8256,6 +8272,30 @@ const CallRecordingProcessor = {
           throw unsettled;
         }
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
+      }
+    } else if (priorStampedLeadId) {
+      // The retry was VETOED out of lead creation (non-lead nature /
+      // existing-customer stage) but an earlier attempt stamped a lead —
+      // the stamp must not survive a non-lead verdict (audit P1 r22). Same
+      // fenced/required semantics as the maintenance block; abortProcessing
+      // reaches the outer extraction_failed guard directly.
+      try {
+        const cleared = await db('call_log').where({ id: call.id })
+          .where('processing_token', procToken)
+          .update({
+            metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'lead_id'"),
+            updated_at: new Date(),
+          });
+        if (!cleared) {
+          const lost = new Error('processing claim lost during call→lead link clear (non-lead path)');
+          lost.abortProcessing = true;
+          throw lost;
+        }
+      } catch (clearErr) {
+        if (clearErr.abortProcessing) throw clearErr;
+        const wrapped = new Error(`call→lead link clear failed (non-lead path): ${clearErr.code || clearErr.name || 'db_error'}`);
+        wrapped.abortProcessing = true;
+        throw wrapped;
       }
     }
 
