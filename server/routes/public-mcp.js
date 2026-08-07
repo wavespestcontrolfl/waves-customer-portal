@@ -27,6 +27,7 @@
 
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const { isEnabled } = require('../config/feature-gates');
 const db = require('../models/db');
 const logger = require('../services/logger');
@@ -55,12 +56,16 @@ function publicMcpGate(req, res, next) {
 
 // Per-IP budget for anonymous agents. Tools are cheap reads (catalog rows,
 // memoized pricing payload), so this bounds abuse without starving a real
-// agent session; the batch caps below bound per-request fan-out.
+// agent session; the batch caps below bound per-request fan-out. Keyed via
+// the shared unauthenticated key generator — it collapses IPv6 /64s (raw
+// req.ip would hand a rotating-IPv6 caller a fresh bucket per address) and
+// never subject-buckets on a JWT, which an anonymous caller could rotate.
 const publicMcpLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
   message: { error: 'rate limit exceeded — try again later' },
 });
 
