@@ -192,12 +192,16 @@ async function executeBITool(toolName, input) {
               try { const p = JSON.parse(row.review_text); total += p.totalReviews || 0; if (p.rating) { ratingSum += p.rating; cnt++; } } catch {}
             }
             if (total > 0) return { total, rating: cnt > 0 ? (ratingSum / cnt).toFixed(1) : '5.0' };
+            // Fallback aggregates report current Google state, so rows
+            // Google removed (missing_since stamped) are excluded.
             const fallback = await db('google_reviews').where('reviewer_name', '!=', '_stats')
+              .whereNull('missing_since')
               .select(db.raw('COUNT(*) as total'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as rating')).first();
             return { total: parseInt(fallback?.total || 0), rating: fallback?.rating || '0' };
           } catch { return { total: 0, rating: '0' }; }
         })(),
-        db('google_reviews').where('reviewer_name', '!=', '_stats').where('created_at', '>=', weekAgo).count('* as count').first(),
+        db('google_reviews').where('reviewer_name', '!=', '_stats').whereNull('missing_since')
+          .where('created_at', '>=', weekAgo).count('* as count').first(),
         // Removed-from-Google rows are not actionable reply targets.
         db('google_reviews').where('reviewer_name', '!=', '_stats').whereNotNull('review_text').modify(whereNeedsRealReviewReply)
           .whereNull('missing_since')

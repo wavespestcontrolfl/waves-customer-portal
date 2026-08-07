@@ -321,10 +321,18 @@ async function submitReviewReply(reviewId, replyText) {
     return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
   }
 
-  await db('google_reviews').where('id', reviewId).update({
-    review_reply: replyText,
-    reply_updated_at: new Date(),
-  });
+  // Guards the read-then-write race: the hourly sync can stamp the row
+  // between the check above and this update.
+  const updated = await db('google_reviews')
+    .where('id', reviewId)
+    .whereNull('missing_since')
+    .update({
+      review_reply: replyText,
+      reply_updated_at: new Date(),
+    });
+  if ((Array.isArray(updated) ? updated.length : updated) === 0) {
+    return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
+  }
 
   logger.info(`[intelligence-bar:reviews] Posted reply to review ${reviewId} by ${review.reviewer_name}`);
 
