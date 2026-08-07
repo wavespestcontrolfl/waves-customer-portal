@@ -1040,6 +1040,26 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     expect(result.repair.body_self_link_rewrites).toBe(2);
   });
 
+  test('absolute self-links classify by PARSED host — uppercase serialization and explicit :443 are the same hub (Codex r15)', () => {
+    const draft = driftedDraft({
+      body: [
+        'See [shouty form](HTTPS://WWW.WAVESPESTCONTROL.COM/fall-lawn-mistakes-southwest-florida/) and',
+        '[explicit port](https://www.wavespestcontrol.com:443/fall-lawn-mistakes-southwest-florida/) and',
+        '[a foreign host with the same path](https://source.example/fall-lawn-mistakes-southwest-florida/).',
+      ].join(' '),
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.body).not.toContain('WAVESPESTCONTROL.COM/fall-lawn');
+    expect(draft.body).not.toContain(':443');
+    // Both hub forms normalized to the configured origin + pin.
+    const normalized = draft.body.match(new RegExp(`https://www\\.wavespestcontrol\\.com${PINNED.replace(/\//g, '\\/')}`, 'g')) || [];
+    expect(normalized.length).toBe(2);
+    // A foreign host carrying the same pathname is someone else's page.
+    expect(draft.body).toContain('https://source.example/fall-lawn-mistakes-southwest-florida/');
+    expect(result.repair.body_self_link_rewrites).toBe(2);
+  });
+
   test('an http:// hub self-link is the SAME drifted route — matched regardless of the configured scheme (Codex r14)', () => {
     const draft = driftedDraft({
       body: 'See [http www form](http://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/) and [http apex form](http://wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/).',

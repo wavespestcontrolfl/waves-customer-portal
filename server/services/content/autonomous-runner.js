@@ -3474,13 +3474,10 @@ function applyOperatorSlugRepair(brief, draft) {
   // pin's segment in the published route.
   const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
   // Hub host equivalence (apex ≡ www) — mirrors the publisher's
-  // isFleetCanonicalHost contract. The body self-link rewrite uses the hub
-  // variants; the canonical foreign-check uses the FULL fleet set — both
-  // derive from this one block so the classifiers never diverge (Codex r7).
+  // isFleetCanonicalHost contract; the canonical foreign-check and the
+  // self-link origin classifier both derive from this one parse so the
+  // classifiers never diverge (Codex r7/r15).
   const hubUrl = (() => { try { return new URL(hub); } catch { return null; } })();
-  const hubHostVariants = hubUrl
-    ? [...new Set([hubUrl.host, hubUrl.host.startsWith('www.') ? hubUrl.host.slice(4) : `www.${hubUrl.host}`])]
-    : [];
   // "Foreign" for a canonical means OFF-FLEET (Codex r8): the publisher's
   // isFleetCanonicalHost accepts the hub AND every spoke host
   // (www-insensitive), so a spoke-host canonical "preserved" here would pass
@@ -3631,30 +3628,28 @@ function applyOperatorSlugRepair(brief, draft) {
     // route and must be repaired (Codex r6). Rewrites normalize the prefix to
     // the configured hub origin.
     // BOTH schemes of every host variant are the writer's own drifted route
-    // (Codex r14) — the guardrails' HUB_URL_CANDIDATE_RE accepts http and
-    // https for the same reason. Rewrites normalize to the configured
-    // (https) origin.
-    const hubOrigins = hubUrl
-      ? ['https:', 'http:'].flatMap((proto) => hubHostVariants.map((h) => `${proto}//${h}`))
-      : [hub];
-    // The targeted spoke's host forms are the writer's own drifted route too
-    // (Codex r9): a spoke-seeded draft may self-link absolutely on its own
-    // spoke, and leaving the old destination intact publishes a link to the
-    // writer's nonexistent route. OTHER spokes' hosts stay untouched — a
-    // link to a different fleet site is someone else's page, not a
-    // self-link. Spoke matches normalize to the spoke's canonical (www)
-    // origin, hub matches to the configured hub origin.
-    const spokeOrigins = [];
-    if (publishOrigin.spoke) {
-      const spokeUrl = (() => { try { return new URL(publishOrigin.origin); } catch { return null; } })();
-      if (spokeUrl) {
-        for (const h of new Set([spokeUrl.host, spokeUrl.host.startsWith('www.') ? spokeUrl.host.slice(4) : `www.${spokeUrl.host}`])) {
-          for (const proto of ['https:', 'http:']) spokeOrigins.push(`${proto}//${h}`);
-        }
-      }
-    }
-    const spokeOriginSet = new Set(spokeOrigins);
-    const hubAlternation = [...hubOrigins, ...spokeOrigins].map(escapeRe).join('|');
+    // Absolute self-links are classified by their PARSED hostname, not by a
+    // literal origin alternation (Codex r15): serialized-origin matching
+    // kept missing equivalent forms one at a time (bare-host r6, http
+    // scheme r14, uppercase scheme/host and explicit :443 next), while the
+    // guardrails already classify absolute URLs by parsed host. The regex
+    // matches ANY scheme://authority prefix; the callback parses it —
+    // hub-host and targeted-spoke matches are the writer's own drifted
+    // route (normalized to the configured hub / spoke canonical origin),
+    // any other host is someone else's page and survives verbatim.
+    const originPatternSrc = '(?:[A-Za-z][\\w+.-]*://[^/\\s)"\'<>`]+)?';
+    const hubApex = hubUrl ? hubUrl.hostname.toLowerCase().replace(/^www\./, '') : null;
+    const spokeApex = publishOrigin.spoke ? String(publishOrigin.spoke).toLowerCase() : null;
+    // → true (relative), 'hub', 'spoke', or false (foreign — leave alone).
+    const classifyLinkOrigin = (originText) => {
+      if (!originText) return true;
+      try {
+        const h = new URL(`${originText}/`).hostname.toLowerCase().replace(/^www\./, '');
+        if (hubApex && h === hubApex) return 'hub';
+        if (spokeApex && h === spokeApex) return 'spoke';
+        return false;
+      } catch { return false; }
+    };
     let occurrences = 0;
     for (const oldSlugPath of oldSlugPaths) {
       if (!draft.body.includes(oldSlugPath)) continue;
@@ -3669,11 +3664,13 @@ function applyOperatorSlugRepair(brief, draft) {
       // the relative branch (Codex r7): without it, an old hub URL embedded
       // in a foreign destination's query value (?return=https://hub/old/)
       // would match right after the `=` and mutate someone else's URL.
-      const selfLinkRe = new RegExp(`(^|[\\s("'<\`])((?:${hubAlternation})?)${escapeRe(oldSlugPath)}(?=[)"'\\s<>\`#?]|$)`, 'g');
+      const selfLinkRe = new RegExp(`(^|[\\s("'<\`])(${originPatternSrc})${escapeRe(oldSlugPath)}(?=[)"'\\s<>\`#?]|$)`, 'g');
       draft.body = draft.body.replace(selfLinkRe, (m, pre, origin) => {
+        const cls = classifyLinkOrigin(origin);
+        if (cls === false) return m; // foreign host — not a self-link
         occurrences += 1;
-        if (!origin) return `${pre}${pinned}`;
-        return `${pre}${spokeOriginSet.has(origin) ? publishOrigin.origin : hub}${pinned}`;
+        if (cls === true) return `${pre}${pinned}`;
+        return `${pre}${cls === 'spoke' ? publishOrigin.origin : hub}${pinned}`;
       });
       // UNQUOTED href/src self-links (`<a href=/old-slug/>`) are legal
       // HTML/MDX the body scanners support (content-guardrails
@@ -3687,11 +3684,13 @@ function applyOperatorSlugRepair(brief, draft) {
       // (`<a href=/old/?utm_source=post>`) still identifies the old route —
       // the suffix sits after the match and survives the replacement
       // verbatim (Codex r12).
-      const unquotedAttrRe = new RegExp(`((?:^|\\s)(?:href|src)\\s*=\\s*)((?:${hubAlternation})?)${escapeRe(oldSlugPath)}(?=[\\s>?#]|$)`, 'gi');
+      const unquotedAttrRe = new RegExp(`((?:^|\\s)(?:href|src)\\s*=\\s*)(${originPatternSrc})${escapeRe(oldSlugPath)}(?=[\\s>?#]|$)`, 'gi');
       draft.body = draft.body.replace(unquotedAttrRe, (m, attr, origin) => {
+        const cls = classifyLinkOrigin(origin);
+        if (cls === false) return m; // foreign host — not a self-link
         occurrences += 1;
-        if (!origin) return `${attr}${pinned}`;
-        return `${attr}${spokeOriginSet.has(origin) ? publishOrigin.origin : hub}${pinned}`;
+        if (cls === true) return `${attr}${pinned}`;
+        return `${attr}${cls === 'spoke' ? publishOrigin.origin : hub}${pinned}`;
       });
     }
     repair.body_self_link_rewrites = occurrences;
