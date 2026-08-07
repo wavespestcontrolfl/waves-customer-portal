@@ -1036,8 +1036,8 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     }
   });
 
-  test('an off-site canonical is PRESERVED for the publisher guard — repair must not mask the unsafe input (Codex r1; protocol-relative r2; slash-backslash r9)', () => {
-    for (const foreignCanonical of ['https://competitor.example/their-page/', '//competitor.example/their-page/', '/\\competitor.example/their-page/']) {
+  test('an off-site canonical is PRESERVED for the publisher guard — repair must not mask the unsafe input (Codex r1; protocol-relative r2; slash-backslash r9; network-path r10)', () => {
+    for (const foreignCanonical of ['https://competitor.example/their-page/', '//competitor.example/their-page/', '/\\competitor.example/their-page/', '\\\\competitor.example/their-page/']) {
       const draft = driftedDraft({
         frontmatter: { canonical: foreignCanonical },
       });

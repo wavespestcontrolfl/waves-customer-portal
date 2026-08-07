@@ -823,6 +823,14 @@ describe('autonomous frontmatter normalization (Bucket A generator fixes)', () =
       expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical points off-site/);
       expect(fm.canonical).toBe('/\\evil.example.com/ant-trails/'); // untouched — no silent repair
     });
+
+    test('REJECTS a network-path off-site canonical — \\\\host/… resolves host-bearing against the base (Codex r10)', () => {
+      // A base-less parse THROWS on this form, and the old catch branch then
+      // silently replaced the foreign canonical instead of parking it.
+      const fm = { slug: '/ant-trails/', canonical: '\\\\evil.example.com/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical points off-site/);
+      expect(fm.canonical).toBe('\\\\evil.example.com/ant-trails/'); // untouched — no silent repair
+    });
   });
 
   describe('clampMetaDescription — over-160 is normalized, not rejected', () => {

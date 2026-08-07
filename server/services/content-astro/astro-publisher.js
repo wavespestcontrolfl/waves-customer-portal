@@ -34,8 +34,9 @@ const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
 const { describeHeroForAlt } = require('../content/hero-alt-vision');
 const { normalizeContentUrl } = require('../content/content-registry');
-const { normalizeSpokeSites, SPOKE_SITE_KEYS, HUB_SITE_KEYS, spokeSiteOrigin } = require('./spoke-sites');
+const { normalizeSpokeSites, SPOKE_SITE_KEYS, HUB_SITE_KEYS } = require('./spoke-sites');
 const { spokeBlogNetworkEnabled } = require('../content/spoke-blog-network');
+const { resolveSpokeTarget, blogOriginForSpoke: sharedBlogOriginForSpoke } = require('./spoke-routing');
 const { etDateString } = require('../../utils/datetime-et');
 
 const ASTRO_BLOG_DIR = 'src/content/blog';
@@ -101,37 +102,14 @@ function stampBlogDomains(frontmatter, spokeKey) {
   return frontmatter;
 }
 
-// Resolve the single spoke a blog post targets, from the composed brief
-// (top-level target_sites, or the persisted operator_brief copy). Spoke routing
-// is only well-defined for EXACTLY ONE non-hub spoke (single-domain render +
-// self-canonical); a hub target, an empty target, or multiple spokes all fall
-// back to the hub-only blog policy.
-function resolveSpokeTarget(brief = {}) {
-  const fromBrief = normalizeSpokeSites(brief.target_sites);
-  const fromOverlay = normalizeSpokeSites(brief?.voice_constraints?.operator_brief?.target_sites);
-  const sites = (fromBrief.length ? fromBrief : fromOverlay)
-    .filter((k) => !BLOG_HUB_DOMAINS.includes(k));
-  const spoke = sites.length === 1 ? sites[0] : null;
-  // Kill-switch enforcement at the PUBLISHING chokepoint. The seeder gate stops
-  // NEW spoke topics from being queued, but a spoke-seed row already in
-  // opportunity_queue — or one seeded during a temporary re-enable that is later
-  // turned off — would otherwise still fan out here. Honor the owner directive:
-  // when the network is disabled, no blog post publishes to a spoke; it falls
-  // back to the hub-only policy (null) and publishes on the hub instead.
-  if (spoke && !spokeBlogNetworkEnabled()) {
-    logger.info(`[astro-publisher] spoke blog network disabled — "${spoke}"-targeted post routed to the hub only (set SPOKE_BLOG_NETWORK_ENABLED=true to fan out to spokes)`);
-    return null;
-  }
-  return spoke;
-}
-
-// The canonical origin a blog post publishes under: the spoke's own canonical
-// origin (from the fleet map, mirroring the Astro build's SITE_DOMAIN) when
-// spoke-targeted, else the hub origin. Never assumes a host prefix at the call
-// site — spokeSiteOrigin owns the www/apex decision per domains.json.
+// The publish-origin routing decision (single-spoke resolution + kill switch
+// + origin mapping) lives in the SHARED spoke-routing module — the runner's
+// slug repair makes the same decision, and two copies would let repaired
+// draft.url values and self-links point at a different host than the
+// publisher actually uses (Codex r10). This wrapper only binds the
+// publisher's HUB_ORIGIN default.
 function blogOriginForSpoke(spokeKey) {
-  if (!spokeKey) return HUB_ORIGIN;
-  return spokeSiteOrigin(spokeKey) || HUB_ORIGIN;
+  return sharedBlogOriginForSpoke(spokeKey, HUB_ORIGIN);
 }
 
 // The first remark-substitution token (brandName/siteUrl/…) left un-interpolated
@@ -2715,16 +2693,29 @@ function assertCanonicalMatchesSlug(frontmatter, slug, origin = HUB_ORIGIN) {
   // categoryRouteSlug) is normalized to the slug-derived canonical — those
   // mismatches were wasting whole generations on a field we overwrite anyway.
   if (supplied) {
-    // Only a single-slash path is origin-relative; protocol-relative "//host/…"
-    // carries a host of its own and must go through the off-site check.
-    const isPathRelative = supplied.startsWith('/') && !supplied.startsWith('//');
+    // Route-bearing forms (leading slash or backslash, or an absolute URL)
+    // parse against the expected origin, and the host check below runs on
+    // the RESOLVED hostname (Codex r9/r10): textual prefix tests keep
+    // missing host-bearing forms — protocol-relative `//host/…`,
+    // slash-backslash `/\host/…`, and network-path `\\host/…` all resolve
+    // onto a foreign host under WHATWG rules, while a genuinely relative
+    // path resolves onto the expected origin and passes the fleet check by
+    // construction. A base-less parse is equally wrong in the other
+    // direction: `\\host/…` fails it outright and was silently replaced
+    // instead of parked. Bare junk with no route shape ("not a valid url")
+    // stays OUT of classification — it validly points nowhere, so it is
+    // derived from the slug instead of wasting the generation.
     let suppliedUrl = null;
-    try {
-      if (isPathRelative) suppliedUrl = new URL(supplied, new URL(expected).origin);
-      else if (supplied.startsWith('//')) suppliedUrl = new URL(`https:${supplied}`);
-      else suppliedUrl = new URL(supplied);
-    } catch {
-      suppliedUrl = null; // malformed → derive from slug below
+    let routeBearing = /^[/\\]/.test(supplied);
+    if (!routeBearing) {
+      try { new URL(supplied); routeBearing = true; } catch { /* bare junk → derive */ }
+    }
+    if (routeBearing) {
+      try {
+        suppliedUrl = new URL(supplied, new URL(expected).origin);
+      } catch {
+        suppliedUrl = null; // malformed → derive from slug below
+      }
     }
     if (suppliedUrl) {
       // The off-site check runs on the PARSED hostname regardless of the raw

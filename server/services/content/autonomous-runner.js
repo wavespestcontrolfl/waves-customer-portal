@@ -3385,28 +3385,12 @@ const PINNED_SLUG_PATTERN = /^\/[a-z0-9-]+(\/[a-z0-9-]+)*\/$/;
 const { POST_CATEGORIES: BLOG_POST_CATEGORIES } = require('../content-astro/blog-categories');
 // Spoke fleet keys shared with the publisher's isFleetCanonicalHost — also a
 // dependency-free module (content-guardrails already requires it).
-const {
-  SPOKE_SITE_KEYS: FLEET_SPOKE_SITE_KEYS,
-  HUB_SITE_KEYS: FLEET_HUB_SITE_KEYS,
-  normalizeSpokeSites: normalizeFleetSpokeSites,
-  spokeSiteOrigin: fleetSpokeSiteOrigin,
-} = require('../content-astro/spoke-sites');
-const { spokeBlogNetworkEnabled: fleetSpokeNetworkEnabled } = require('./spoke-blog-network');
-
-// The publish origin a repaired draft will actually land on — a light mirror
-// of the publisher's resolveSpokeTarget + blogOriginForSpoke (astro-publisher
-// can't be required here in the unit env): exactly ONE non-hub spoke target
-// with the spoke network enabled publishes on that spoke's canonical origin;
-// everything else publishes on the hub.
-function resolveDraftPublishOrigin(brief, hub) {
-  const fromBrief = normalizeFleetSpokeSites(brief?.target_sites);
-  const fromOverlay = normalizeFleetSpokeSites(brief?.voice_constraints?.operator_brief?.target_sites);
-  const sites = (fromBrief.length ? fromBrief : fromOverlay)
-    .filter((k) => !FLEET_HUB_SITE_KEYS.includes(k));
-  const spoke = sites.length === 1 ? sites[0] : null;
-  if (!spoke || !fleetSpokeNetworkEnabled()) return { origin: hub, spoke: null };
-  return { origin: fleetSpokeSiteOrigin(spoke) || hub, spoke };
-}
+const { SPOKE_SITE_KEYS: FLEET_SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
+// The SAME publish-origin routing decision the publisher makes (single-spoke
+// resolution + kill switch + origin mapping) — shared module, not a mirror,
+// so repaired draft.url values and self-links can never point at a different
+// host than the publisher actually uses (Codex r10).
+const { resolvePublishOrigin } = require('../content-astro/spoke-routing');
 
 /**
  * applyOperatorSlugRepair(brief, draft) — the operator-pinned slug is
@@ -3528,7 +3512,7 @@ function applyOperatorSlugRepair(brief, draft) {
   // The origin this draft will actually publish on (hub, or its single
   // targeted spoke) — used for the draft.url stamp and spoke self-link
   // rewrites below.
-  const publishOrigin = resolveDraftPublishOrigin(brief, hub);
+  const publishOrigin = resolvePublishOrigin(brief, hub);
   const repair = {
     repaired_at: new Date().toISOString(),
     from_slug: mismatch.draft_slug || null,
