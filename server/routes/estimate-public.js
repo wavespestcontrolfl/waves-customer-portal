@@ -11770,6 +11770,23 @@ async function transferGroupFollowupOwnership(estimate) {
       .orderBy('created_at', 'asc')
       .first('id');
     if (!owner) return;
+    // Only the COMMS OWNER's terminal event transfers ownership (codex
+    // #3248 r1): if any live sibling already has an un-burned stage, that
+    // row IS the armed owner — a published sibling going terminal carries
+    // all-true pre-burned flags, and copying those would silence every
+    // remaining reminder.
+    const armedSibling = await db('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNot({ id: estimate.id })
+      .whereIn('status', ['sent', 'viewed'])
+      .whereNull('archived_at')
+      .where((b) => b
+        .where('followup_unviewed_sent', false)
+        .orWhere('followup_viewed_sent', false)
+        .orWhere('followup_final_sent', false)
+        .orWhere('followup_expiring_sent', false))
+      .first('id');
+    if (armedSibling) return;
     // Inherit the ANCHOR's completed-stage state (codex #3244 r8): the
     // legacy sweeps evaluate flags inside timestamp windows and the ledgers
     // don't dedupe across rows — resetting a stage the anchor already sent

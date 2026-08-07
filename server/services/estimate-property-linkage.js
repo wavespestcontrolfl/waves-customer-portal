@@ -275,24 +275,47 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
 // parseEstimateAddress keeps the WHOLE street portion — "Unit 4, 100 Beach
 // Rd" survives intact where a naive split(',')[0] would keep only "Unit 4"
 // (codex #3244 r5). Returns '' when no street can be extracted.
+// Both helpers delegate to customer-properties' canonical machinery
+// (codex #3248 r1): stripUnitDesignators keeps the unit ID in PLACE (inline
+// "100 Main St Apt 4" and split "100 Main St"+"Apt 4" produce one order),
+// and canonicalizeAddress expands street suffixes ("St" == "Street") without
+// stripping them — the exact drift codex caught between these keys and
+// addressKey. Unit identity stays part of the key ("Unit 4" != "Unit 5").
 function normalizedStampedStreet(line1, line2) {
-  return [line2, line1]
-    .map((v) => String(v || ''))
-    .join(' ')
-    .toLowerCase()
-    .replace(/[^a-z0-9 ]+/g, ' ')
+  const { canonicalizeAddress, stripUnitDesignators } = require('./customer-properties');
+  return canonicalizeAddress(stripUnitDesignators([line1, line2]
+    .map((v) => String(v || '').trim())
+    .filter(Boolean)
+    .join(' ')))
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 function normalizedEstimateStreet(raw) {
   const parts = parseEstimateAddress(raw);
-  // Unit identity is part of the property key (codex #3244 r7): "Unit 4"
-  // and "Unit 5" at one street are different properties — the duplicate
-  // guard must allow the second unit and the scope guards must not merge
-  // their plans. Stamped-row comparisons use normalizedStampedStreet with
-  // BOTH address lines so the two sides stay symmetric.
   return normalizedStampedStreet(parts?.address_line1, parts?.address_line2);
+}
+
+// Full property tuple for DUPLICATE checks (codex #3248 r1): identical
+// street+unit in different cities/ZIPs are DISTINCT properties (mirrors
+// addressKey). City/zip only discriminate when BOTH sides carry them.
+function normalizedEstimatePropertyKey(raw) {
+  const parts = parseEstimateAddress(raw);
+  if (!parts) return null;
+  const { normalizeZip } = require('./customer-properties');
+  return {
+    street: normalizedStampedStreet(parts.address_line1, parts.address_line2),
+    city: String(parts.city || '').toLowerCase().replace(/\s+/g, ' ').trim(),
+    zip: normalizeZip(parts.zip),
+  };
+}
+
+function samePropertyKey(a, b) {
+  if (!a || !b || !a.street || !b.street) return false;
+  if (a.street !== b.street) return false;
+  if (a.city && b.city && a.city !== b.city) return false;
+  if (a.zip && b.zip && a.zip !== b.zip) return false;
+  return true;
 }
 
 // Does this estimate quote the CUSTOMER's on-file address? Full canonical
@@ -309,7 +332,10 @@ function estimateQuotesCustomerAddress(estimateAddressRaw, customerRow = {}) {
   if (!estimateKey || !customerKey || estimateKey !== customerKey) return false;
   const norm = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
   if (parts.city && customerRow.city && norm(parts.city) !== norm(customerRow.city)) return false;
-  if (parts.zip && customerRow.zip && String(parts.zip) !== String(customerRow.zip)) return false;
+  const { normalizeZip } = require('./customer-properties');
+  const estimateZip = normalizeZip(parts.zip);
+  const customerZip = normalizeZip(customerRow.zip);
+  if (estimateZip && customerZip && estimateZip !== customerZip) return false;
   return true;
 }
 
@@ -317,6 +343,8 @@ module.exports = {
   parseEstimateAddress,
   normalizedEstimateStreet,
   normalizedStampedStreet,
+  normalizedEstimatePropertyKey,
+  samePropertyKey,
   estimateQuotesCustomerAddress,
   refreshHasMultiHome,
   linkAcceptedEstimateProperty,
