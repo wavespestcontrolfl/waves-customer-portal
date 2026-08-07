@@ -518,7 +518,12 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     try {
       v1Input = translate(req.profile, Array.isArray(req.selectedServices) ? req.selectedServices : [], req.options || {});
       source = 'ENGINE_REQUEST';
-    } catch (_) {
+    } catch (err) {
+      // failClosed = a policy rejection (e.g. a gated add-on in the replayed
+      // request), never engine breakage: swallowing it here would fall through
+      // to NO_INPUTS → CLIENT_FALLBACK and persist the very thing the
+      // validation rejected (codex #3272 r1). Propagate; the save 400s.
+      if (err && err.failClosed === true) throw err;
       v1Input = null;
     }
   }
@@ -636,6 +641,10 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
       : null) || null;
     return { recomputed: true, source, serverResult, serverTotals, pestPricingVersion };
   } catch (error) {
+    // failClosed policy rejections (gated/invalid add-on inside the replayed
+    // inputs) propagate — wrapping them as ENGINE_ERROR would hand them to
+    // the fail-open CLIENT_FALLBACK rail and persist the rejected price.
+    if (error && error.failClosed === true) throw error;
     return { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
 }
@@ -663,8 +672,16 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   try {
     result = await recomputeFn(estimateData, { now, priorQualifyingServices, recurringCustomer });
   } catch (error) {
+    // Fail-open is for BROKEN engines only. A failClosed policy rejection
+    // (gated/invalid add-on in the replay) must block the save outright —
+    // stamping it CLIENT_FALLBACK would persist and send the rejected price.
+    if (error && error.failClosed === true) throw error;
     result = { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
+  // Belt-and-suspenders for injected/legacy recompute fns that WRAP the
+  // error instead of throwing: a wrapped failClosed rejection must not
+  // reach the CLIENT_FALLBACK branch either.
+  if (result && result.error && result.error.failClosed === true) throw result.error;
 
   if (result.recomputed) {
     // Overwrite the embedded result so the stored blob and the persisted

@@ -355,6 +355,19 @@ async function markEstimateManuallyAccepted({
     if (estimateDataHasUnresolvedManagerApproval(estimate.estimate_data || estimate.estimateData)) {
       throw httpError('Manager approval is required before this estimate can be manually accepted.', 400);
     }
+    // Same live-gate rule as the public accept route (codex #3272 r5): the
+    // canonical manual-acceptance path (admin Mark Won + linked-estimate
+    // booking) converts from stored rows without re-entering priceLawnCare,
+    // so a persisted suppression estimate must not be accepted/billed/
+    // scheduled while GATE_BERMUDA_SUPPRESSION is off. Already-accepted
+    // retries returned above stay untouched.
+    {
+      const { estimateDataCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
+      if (estimateDataCarriesBermudaSuppression(estimate.estimate_data || estimate.estimateData)
+        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+        throw httpError('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before accepting.', 409);
+      }
+    }
     if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {
       throw httpError('Set the commercial business type before accepting — it sets the pest/rodent service cadence.', 400);
     }

@@ -1193,6 +1193,14 @@ const gates = {
   completionCommsGuard: process.env.GATE_COMPLETION_COMMS_GUARD === 'true',
 };
 
+// Parse a gate env var at CALL time (for request-time availability checks
+// and gates enforced inside the pricing engine, where a flip must not need
+// a client redeploy and tests mutate the env at runtime). One parser, one
+// truth: '1' / 'true' / 'on', case-insensitive.
+function gateEnvValue(envName) {
+  return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
+}
+
 function isEnabled(gate) {
   const enabled = gates[gate];
   if (enabled === undefined) {
@@ -1209,5 +1217,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue };
 // gates 1775330914

@@ -1978,6 +1978,11 @@ function priceLawnCare(property, options = {}) {
     // must not inherit the recurring program minimum). NOT wired to
     // estimate-engine input — sold recurring plans always get the floor.
     applyProgramMinimum = true,
+    // Bermuda-in-St.-Augustine suppression add-on: per-application adder
+    // baked into every tier's per-app price (owner ruling 2026-08-07).
+    // St. Augustine track only — the Recognition + Fusilade II 2(ee) is a
+    // remove-bermuda-FROM-St.-Augustine program.
+    bermudaSuppression = false,
   } = options;
 
   const normalizedTrack = normalizeGrassType(track);
@@ -2026,6 +2031,46 @@ function priceLawnCare(property, options = {}) {
     && Number.isFinite(programMinimumMonthly) && programMinimumMonthly > 0
     ? Math.round(programMinimumMonthly * 12 * 100) / 100
     : 0;
+  // Bermuda suppression adder: eligibility is the St. Augustine track only.
+  // The adder rides INSIDE the lawn line (annual/monthly recomputed from the
+  // raised per-app), so WaveGuard discounting, plan-rate sum semantics, and
+  // the audit shape all see one lawn price. Suppression materials are not in
+  // the cost-floor model (floors are disarmed; margin stays reporting-only).
+  const bsCfg = LAWN_PRICING_V2.bermudaSuppression || {};
+  const bermudaSuppressionEligible = normalizedTrack === 'st_augustine';
+  let bermudaSuppressionPerApp = 0;
+  if (bermudaSuppression === true && bermudaSuppressionEligible) {
+    // Gate enforcement lives HERE, the deepest chokepoint, so every entry
+    // point — the V2 translator, persisted estimateData.engineInputs
+    // replays, direct generateEstimate/priceLawnCare callers — hits the
+    // same wall (codex: translator-only enforcement was bypassable).
+    // failClosed rides the persistence rethrow rail, never CLIENT_FALLBACK.
+    // Shared parser so the UI-availability check and enforcement can never
+    // disagree on what counts as "on".
+    if (!require('../../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+      const err = new Error('Bermudagrass suppression is not enabled on this environment (GATE_BERMUDA_SUPPRESSION) — uncheck the add-on or flip the gate.');
+      err.statusCode = 400;
+      err.code = 'BERMUDA_SUPPRESSION_GATED';
+      err.failClosed = true;
+      throw err;
+    }
+    // A selected add-on must price POSITIVE or fail the calculation — a
+    // malformed admin edit to the DB knobs (missing key, non-numeric, zero)
+    // silently zeroing the adder would return a successful unchanged lawn
+    // price for a checked option (codex #3272 r1). Fail closed instead;
+    // persistence rethrows failClosed errors rather than CLIENT_FALLBACK.
+    const base = Number(bsCfg.perAppBase);
+    const per1000 = Number(bsCfg.perAppPer1000Sqft);
+    const adder = Math.round((base + per1000 * (lawnSqFt / 1000)) * 100) / 100;
+    if (!Number.isFinite(base) || base < 0 || !Number.isFinite(per1000) || per1000 < 0 || !(adder > 0)) {
+      const err = new Error('Bermudagrass suppression pricing knobs are invalid (lawn_pricing_v2.bermudaSuppression) — fix perAppBase/perAppPer1000Sqft; a selected add-on never silently prices $0.');
+      err.statusCode = 400;
+      err.code = 'BERMUDA_SUPPRESSION_KNOBS_INVALID';
+      err.failClosed = true;
+      throw err;
+    }
+    bermudaSuppressionPerApp = adder;
+  }
   const allTiers = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
@@ -2043,8 +2088,23 @@ function priceLawnCare(property, options = {}) {
     let ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
     const programMinimumApplied = programMinimumAnnual > 0 && ann < programMinimumAnnual;
     if (programMinimumApplied) ann = Math.ceil(programMinimumAnnual / tc.freq) * tc.freq;
+    // Bermuda suppression bakes into the per-app AFTER floor/minimum
+    // resolution — the adder is add-on revenue, never a way to satisfy them.
+    // INTENTIONAL plan-spread pricing (owner ruling 2026-08-07, "a number
+    // baked into the per application"): the adder raises EVERY application's
+    // price, annualizing the program — the plan then INCLUDES up to 2
+    // suppression treatments per growing season (the label ceiling) plus the
+    // week-5-6 inspection, the same way plan pricing already spreads
+    // seasonal work (pre-emergent, fungicide windows) across level
+    // payments. It is NOT a per-treatment fee: on a 12x plan the owner
+    // chose +adder x 12/yr as the program's annual price, with material
+    // cost ~$6.54/1,000 sqft per treatment x2 covered by it. Display and
+    // completion billing agree by construction — both read the same raised
+    // per-app.
+    if (bermudaSuppressionPerApp > 0) ann = Math.round((ann + bermudaSuppressionPerApp * tc.freq) * 100) / 100;
     const perApp = Math.round(ann / tc.freq * 100) / 100;
     return {
+      bermudaSuppressionPerApp: bermudaSuppressionPerApp > 0 ? bermudaSuppressionPerApp : null,
       tier: t,
       index: tc.index,
       visits: tc.freq,
@@ -2104,9 +2164,20 @@ function priceLawnCare(property, options = {}) {
     pricingBasis: selected.pricingBasis,
     pricingSource: selected.pricingSource,
     customQuoteFlag,
-    notes: customQuoteFlag
-      ? [`Turf area exceeds ${LAWN_TABLE_MAX_SQFT.toLocaleString()} sq ft. Pricing was extrapolated and requires field verification/custom quote.`]
-      : [],
+    // Cadence-independent by design: the per-app adder is the same on every
+    // tier, and a tier-stamped annual would go stale when the customer accepts
+    // a different cadence (annual = perApp x accepted tier's visits).
+    bermudaSuppression: bermudaSuppressionPerApp > 0
+      ? { perApp: bermudaSuppressionPerApp }
+      : null,
+    notes: [
+      ...(customQuoteFlag
+        ? [`Turf area exceeds ${LAWN_TABLE_MAX_SQFT.toLocaleString()} sq ft. Pricing was extrapolated and requires field verification/custom quote.`]
+        : []),
+      ...(bermudaSuppression === true && !bermudaSuppressionEligible
+        ? ['Bermudagrass suppression applies to St. Augustine lawns only — not included in this price.']
+        : []),
+    ],
     marketMonthly: selected.marketMonthly,
     marketAnnual: selected.marketAnnual,
     // Lawn V2 is cost-floor authoritative; the bracket table is reference-only.

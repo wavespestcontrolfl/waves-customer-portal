@@ -796,6 +796,7 @@ function generateEstimate(input) {
         lawnMaterialCostPerK: services.lawn.lawnMaterialCostPerK ?? input.lawnMaterialCostPerK,
         lawnLaborMinutesBase: services.lawn.lawnLaborMinutesBase ?? input.lawnLaborMinutesBase,
         lawnLaborMinutesPerK: services.lawn.lawnLaborMinutesPerK ?? input.lawnLaborMinutesPerK,
+        bermudaSuppression: services.lawn.bermudaSuppression === true,
       });
       lineItems.push(result);
       activeServiceKeys.push('lawn_care');
