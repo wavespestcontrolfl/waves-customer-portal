@@ -99,6 +99,13 @@ describe('message/send', () => {
     expect(a.messageId).not.toBe(b.messageId);
   });
 
+  test('well-formed file and data parts are accepted', async () => {
+    for (const part of [{ kind: 'file', file: { uri: 'https://example.com/photo.jpg' } }, { kind: 'data', data: { any: 'thing' } }]) {
+      const { body } = await rpc({ jsonrpc: '2.0', id: 1, method: 'message/send', params: { message: { kind: 'message', messageId: 'client-msg-5', role: 'user', parts: [part] } } });
+      expect(body.result.kind).toBe('message');
+    }
+  });
+
   test('missing or malformed MessageSendParams → -32602', async () => {
     const valid = { kind: 'message', messageId: 'client-msg-4', role: 'user', parts: [{ kind: 'text', text: 'x' }] };
     for (const params of [undefined, {}, { message: 'hello' },
@@ -106,6 +113,8 @@ describe('message/send', () => {
       { message: { ...valid, parts: [] } },
       { message: { ...valid, parts: [{}] } },
       { message: { ...valid, parts: [{ kind: 'text' }] } },
+      { message: { ...valid, parts: [{ kind: 'file', file: {} }] } },
+      { message: { ...valid, parts: [{ kind: 'file', file: { bytes: 42 } }] } },
       { message: { ...valid, role: 'bogus' } },
       { message: { ...valid, messageId: undefined } },
       { message: { ...valid, messageId: '' } },

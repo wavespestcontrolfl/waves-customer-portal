@@ -95,7 +95,12 @@ const VALID_ROLES = new Set(['user', 'agent']);
 function isValidPart(p) {
   if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
   if (p.kind === 'text') return typeof p.text === 'string';
-  if (p.kind === 'file') return Boolean(p.file && typeof p.file === 'object' && !Array.isArray(p.file));
+  if (p.kind === 'file') {
+    const f = p.file;
+    if (!f || typeof f !== 'object' || Array.isArray(f)) return false;
+    // A2A file payloads are a discriminated union too: bytes (base64) or uri.
+    return typeof f.bytes === 'string' || typeof f.uri === 'string';
+  }
   if (p.kind === 'data') return Boolean(p.data && typeof p.data === 'object' && !Array.isArray(p.data));
   return false;
 }
