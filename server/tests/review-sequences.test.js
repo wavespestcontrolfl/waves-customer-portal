@@ -2003,6 +2003,72 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(exempt).toContain('seq-ot-excl');
   });
 
+  test('r26: a same-day exclusion opener anchors the walk window, and a failing park write propagates', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // ① Exclusion opener 9am + its generic check 1pm the SAME day: the
+    // opener anchors hop 1 with the 14-day exclusion window, so the old
+    // program at d-16 stays out of the exemption walk.
+    const mock = makeMock({
+      scheduled_services: [
+        { id: 'sd-old', customer_id: 'sdo', service_id: 'svc-excl', status: 'completed', scheduled_date: d(16), service_key: 'rodent_exclusion', follow_up_interval_days: 7 },
+        { id: 'sd-open', customer_id: 'sdo', service_id: 'svc-excl', status: 'completed', scheduled_date: d(0), service_key: 'rodent_exclusion', follow_up_interval_days: 7, window_start: '09:00' },
+        { id: 'sd-fin', customer_id: 'sdo', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3, window_start: '13:00' },
+      ],
+      review_sequences: [
+        { id: 'seq-sd-old', customer_id: 'sdo', scheduled_service_id: 'sd-old', status: 'completed' },
+        { id: 'seq-sd-open', customer_id: 'sdo', scheduled_service_id: 'sd-open', status: 'completed' },
+      ],
+    });
+    db.mockImplementation(mock);
+    const exempt = await ReviewService._seriesExemptSequenceIds('sdo', { scheduledServiceId: 'sd-fin' });
+    expect(exempt).toContain('seq-sd-open');
+    expect(exempt).not.toContain('seq-sd-old');
+
+    // ② A parking-write failure PROPAGATES instead of degrading into
+    // already_active with no durable retry.
+    const base = makeMock({
+      customers: [{ id: 'pw', first_name: 'Al', last_name: 'S', phone: '+19410000070', nearest_location_id: 'bradenton' }],
+      scheduled_services: [
+        { id: 'pw-1', customer_id: 'pw', service_id: 'svc-wt', status: 'completed', scheduled_date: d(2), service_key: 'wildlife_trapping' },
+        { id: 'pw-2', customer_id: 'pw', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+      ],
+      review_sequences: [{ id: 'seq-hung2', customer_id: 'pw', scheduled_service_id: 'pw-1', status: 'active', current_step: 0, next_run_at: null, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]) }],
+    });
+    let armed = false;
+    const failInsert = jest.fn((tbl) => {
+      const q = base(tbl);
+      if (armed && String(tbl) === 'review_sequences') {
+        const origInsert = q.insert.bind(q);
+        q.insert = (row) => {
+          if (row && row.status === 'deferred') throw new Error('pg blip on park');
+          return origInsert(row);
+        };
+      }
+      return q;
+    });
+    failInsert.__state = base.__state;
+    db.mockImplementation(failInsert);
+    armed = true;
+    const prev = ReviewService._SUPERSEDE_RETRY_DELAY_MS;
+    ReviewService._SUPERSEDE_RETRY_DELAY_MS = 1;
+    let threw = false;
+    try {
+      await ReviewService.startReviewSequence({
+        customerId: 'pw',
+        plan: [{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }],
+        seriesFinal: true,
+        scheduledServiceId: 'pw-2',
+      });
+    } catch (err) {
+      threw = true;
+    } finally {
+      ReviewService._SUPERSEDE_RETRY_DELAY_MS = prev;
+    }
+    expect(threw).toBe(true);
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);

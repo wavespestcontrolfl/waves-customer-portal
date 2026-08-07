@@ -2797,6 +2797,7 @@ const ReviewService = {
       // briefly and re-check — supersede a still-zero-sent opener, or
       // enroll fresh once it completed.
       let proceedFresh = false;
+      let parkFinal = false;
       if (seriesFinal) {
         try {
           const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId });
@@ -2825,46 +2826,48 @@ const ReviewService = {
                   break;
                 }
               }
-              if (!supersedeOpenerId && !proceedFresh) {
-                // A provider call can outlive the bounded wait (codex #3243
-                // r21 P2 — dispatchToProvider has no matching timeout), and
-                // a single-trigger final has no natural retry. PARK the
-                // enrollment durably: a 'deferred' row (outside the
-                // one-active index) that the sequence cron redeems once the
-                // opener settles. started_at carries the intended
-                // firstTouchAt; completed_at records the parking time for
-                // the 24h age cap.
-                const existingPark = await db("review_sequences")
-                  .where({ customer_id: customerId })
-                  .whereIn("status", ["deferred", "redeeming"])
-                  .first();
-                if (!existingPark) {
-                  await db("review_sequences").insert({
-                    customer_id: customerId,
-                    location_id: locationId || customer.nearest_location_id || null,
-                    status: "deferred",
-                    stop_reason: "opener_in_flight",
-                    plan: JSON.stringify(Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN),
-                    current_step: 0,
-                    touches_sent: 0,
-                    next_run_at: new Date(Date.now() + 10 * 60 * 1000),
-                    series_final: seriesFinal === true,
-                    service_record_id: serviceRecordId || null,
-                    scheduled_service_id: scheduledServiceId || null,
-                    tech_name: techName || null,
-                    service_type: serviceType || null,
-                    started_by: startedBy || null,
-                    started_at: firstTouchAt || null,
-                    completed_at: new Date(),
-                  });
-                }
-                return { started: false, reason: "deferred_inflight", deferred: true };
-              }
+              if (!supersedeOpenerId && !proceedFresh) parkFinal = true;
             }
           }
         } catch (err) {
           logger.warn(`[review] opener-supersede check failed (customerId=${customerId}): ${err.message} — keeping already_active`);
         }
+      }
+      if (parkFinal) {
+        // A provider call can outlive the bounded wait (codex #3243 r21
+        // P2 — dispatchToProvider has no matching timeout), and a
+        // single-trigger final has no natural retry. PARK the enrollment
+        // durably: a 'deferred' row (outside the one-active index) that
+        // the sequence cron redeems once the opener settles. started_at
+        // carries the intended firstTouchAt; completed_at records the
+        // parking time for the 24h age cap. Deliberately OUTSIDE the
+        // proof's catch (r26 P2): a parking-write failure must propagate
+        // to the caller, never degrade into already_active with no retry.
+        const existingPark = await db("review_sequences")
+          .where({ customer_id: customerId })
+          .whereIn("status", ["deferred", "redeeming"])
+          .first();
+        if (!existingPark) {
+          await db("review_sequences").insert({
+            customer_id: customerId,
+            location_id: locationId || customer.nearest_location_id || null,
+            status: "deferred",
+            stop_reason: "opener_in_flight",
+            plan: JSON.stringify(Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN),
+            current_step: 0,
+            touches_sent: 0,
+            next_run_at: new Date(Date.now() + 10 * 60 * 1000),
+            series_final: seriesFinal === true,
+            service_record_id: serviceRecordId || null,
+            scheduled_service_id: scheduledServiceId || null,
+            tech_name: techName || null,
+            service_type: serviceType || null,
+            started_by: startedBy || null,
+            started_at: firstTouchAt || null,
+            completed_at: new Date(),
+          });
+        }
+        return { started: false, reason: "deferred_inflight", deferred: true };
       }
       if (!supersedeOpenerId && !proceedFresh) return { started: false, reason: "already_active", sequence: active };
     }
@@ -3736,6 +3739,17 @@ const ReviewService = {
             .whereIn("psv.service_key", seriesKeys)
             .orderBy("ps.scheduled_date", "desc")
             .select(...walkSelect);
+          // A same-day opener (exclusion set up the morning of its first
+          // check) sits outside the strict earlier-date window (codex
+          // #3243 r26 P2) — include earlier-same-day candidates.
+          const sameDayOrigin = await db("scheduled_services as ps")
+            .leftJoin("services as psv", "ps.service_id", "psv.id")
+            .where("ps.customer_id", customerId)
+            .where("ps.status", "completed")
+            .where("ps.scheduled_date", peekW.anchorStr)
+            .whereIn("psv.service_key", seriesKeys)
+            .select(...walkSelect);
+          nearestRows.push(...sameDayOrigin.filter((r) => r.id !== visit.id && compareSameDayVisits(r, visit) < 0));
           // The origin is the most recent BASE-key row — generic middle
           // checks ride the followup SKU and must not reset the boundary
           // to the 30-day check floor (codex #3243 r18 P2). Same-date ties
