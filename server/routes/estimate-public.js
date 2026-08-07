@@ -11762,50 +11762,51 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
 async function transferGroupFollowupOwnership(estimate) {
   try {
     if (!estimate?.estimate_group_id) return;
-    const owner = await db('estimates')
-      .where({ estimate_group_id: estimate.estimate_group_id })
-      .whereNot({ id: estimate.id })
-      .whereIn('status', ['sent', 'viewed'])
-      .whereNull('archived_at')
-      .orderBy('created_at', 'asc')
-      .first('id');
-    if (!owner) return;
-    // Only the COMMS OWNER's terminal event transfers ownership (codex
-    // #3248 r1): if any live sibling already has an un-burned stage, that
-    // row IS the armed owner — a published sibling going terminal carries
-    // all-true pre-burned flags, and copying those would silence every
-    // remaining reminder.
-    const armedSibling = await db('estimates')
-      .where({ estimate_group_id: estimate.estimate_group_id })
-      .whereNot({ id: estimate.id })
-      .whereIn('status', ['sent', 'viewed'])
-      .whereNull('archived_at')
-      .where((b) => b
-        .where('followup_unviewed_sent', false)
-        .orWhere('followup_viewed_sent', false)
-        .orWhere('followup_final_sent', false)
-        .orWhere('followup_expiring_sent', false))
-      .first('id');
-    if (armedSibling) return;
-    // Inherit the ANCHOR's completed-stage state (codex #3244 r8): the
-    // legacy sweeps evaluate flags inside timestamp windows and the ledgers
-    // don't dedupe across rows — resetting a stage the anchor already sent
-    // would message the customer the same reminder twice. A stage the
-    // anchor hadn't reached re-arms (false) on the new owner.
+    // Anchor's completed-stage state (fresh read — codex #3244 r8) seeds the
+    // new owner so an already-sent stage never repeats.
     const anchorFlags = await db('estimates')
       .where({ id: estimate.id })
       .first('followup_unviewed_sent', 'followup_viewed_sent', 'followup_final_sent', 'followup_expiring_sent');
-    await db('estimates')
-      .where({ id: owner.id })
-      .whereIn('status', ['sent', 'viewed'])
-      .update({
-        followup_unviewed_sent: anchorFlags?.followup_unviewed_sent === true,
-        followup_viewed_sent: anchorFlags?.followup_viewed_sent === true,
-        followup_final_sent: anchorFlags?.followup_final_sent === true,
-        followup_expiring_sent: anchorFlags?.followup_expiring_sent === true,
-        updated_at: db.fn.now(),
-      });
-    logger.info(`[estimate-public] group ${estimate.estimate_group_id}: follow-up ownership transferred to sibling ${owner.id} after ${estimate.id} went terminal`);
+    if (!anchorFlags) return;
+    // ONE atomic statement (local codex P1, 2026-08-07): owner pick +
+    // armed-sibling guard + flag write together. Two concurrent terminal
+    // events target the same deterministic owner row; the loser blocks on
+    // its row lock, re-evaluates NOT EXISTS against the winner's committed
+    // un-burned flags, and updates zero rows — never two armed owners.
+    const result = await db.raw(
+      `UPDATE estimates AS o SET
+         followup_unviewed_sent = ?,
+         followup_viewed_sent = ?,
+         followup_final_sent = ?,
+         followup_expiring_sent = ?,
+         updated_at = NOW()
+       WHERE o.id = (
+         SELECT id FROM estimates
+         WHERE estimate_group_id = ? AND id <> ?
+           AND status IN ('sent','viewed') AND archived_at IS NULL
+         ORDER BY created_at ASC LIMIT 1
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM estimates s
+         WHERE s.estimate_group_id = ? AND s.id <> ?
+           AND s.status IN ('sent','viewed') AND s.archived_at IS NULL
+           AND (s.followup_unviewed_sent = false OR s.followup_viewed_sent = false
+             OR s.followup_final_sent = false OR s.followup_expiring_sent = false)
+       )
+       RETURNING o.id`,
+      [
+        anchorFlags.followup_unviewed_sent === true,
+        anchorFlags.followup_viewed_sent === true,
+        anchorFlags.followup_final_sent === true,
+        anchorFlags.followup_expiring_sent === true,
+        String(estimate.estimate_group_id), String(estimate.id),
+        String(estimate.estimate_group_id), String(estimate.id),
+      ],
+    );
+    const ownerId = result?.rows?.[0]?.id;
+    if (ownerId) {
+      logger.info(`[estimate-public] group ${estimate.estimate_group_id}: follow-up ownership transferred to sibling ${ownerId} after ${estimate.id} went terminal`);
+    }
   } catch (e) {
     logger.warn(`[estimate-public] follow-up ownership transfer failed for estimate ${estimate?.id}: ${e.message}`);
   }
