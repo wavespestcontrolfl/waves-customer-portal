@@ -32,6 +32,7 @@ const {
   listicleFamilyKey,
   clusterListicleFamilies,
   listicleFamilyDedupeKey,
+  listicleFamilyEligible,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
 
 const { WEIGHTS } = require('../services/content/scoring-config');
@@ -732,6 +733,27 @@ describe('listicle_family scoring + action mapping', () => {
     // 450 impressions / informational lawn family — must clear blogMinScoreToAct
     // (45) or the bucket is silently inert (Codex r1 P1).
     expect(total).toBeGreaterThanOrEqual(45);
+  });
+
+  test('admission: rep-below-floor + sum-above-floor + outside top-3 + ≥2 variants', () => {
+    const fam = (over = {}) => ({
+      variants: [{ impressions: 48 }, { impressions: 30 }, { impressions: 24 }],
+      impressions: 102,
+      position: 18,
+      ...over,
+    });
+    expect(listicleFamilyEligible(fam())).toBe(true);
+    // Representative alone clears the floor → the query-level buckets can
+    // already emit it; mining here too would queue two rows for one intent.
+    expect(listicleFamilyEligible(fam({ variants: [{ impressions: 60 }, { impressions: 42 }], impressions: 102 }))).toBe(false);
+    // Single-variant family → existing buckets' territory.
+    expect(listicleFamilyEligible(fam({ variants: [{ impressions: 48 }] }))).toBe(false);
+    // Family sum under the floor.
+    expect(listicleFamilyEligible(fam({ impressions: 40, variants: [{ impressions: 25 }, { impressions: 15 }] }))).toBe(false);
+    // Top-3 weighted position = won intent.
+    expect(listicleFamilyEligible(fam({ position: 2.4 }))).toBe(false);
+    // Position 0 (no data) does not trip the top-3 exclusion.
+    expect(listicleFamilyEligible(fam({ position: 0 }))).toBe(true);
   });
 
   test('dedupe key is stable under representative/classification churn (family key, not query)', () => {

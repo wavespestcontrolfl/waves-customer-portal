@@ -891,10 +891,13 @@ const gates = {
   // into families whose SUMMED impressions clear the scoring floor, then
   // emits a new_supporting_blog opportunity on the family's top real query.
   // Feeds the listicle brief overlay (same list-shape grammar via
-  // listicle-query.js). Default OFF in prod: ships dormant so the first
-  // mined batch can be eyeballed before the blog lane starts consuming it
-  // (GATE_LISTICLE_FAMILY_MINING=true to enable). When off, the bucket
-  // miner returns [].
+  // listicle-query.js) and REQUIRES listicleBriefs to also be on — the
+  // miner returns [] unless both gates are true, because mining without
+  // the overlay would persist rows whose briefs come out as ordinary
+  // supporting blogs (lane looks enabled, produces no listicles).
+  // Default OFF in prod: ships dormant so the first mined batch can be
+  // eyeballed before the blog lane starts consuming it
+  // (GATE_LISTICLE_FAMILY_MINING=true to enable).
   listicleFamilyMining: isProd ? process.env.GATE_LISTICLE_FAMILY_MINING === 'true' : true,
   // Email-reply approval loop for parked autonomous content runs (owner
   // directive 2026-07-28). Explicit opt-in in EVERY environment — a dev

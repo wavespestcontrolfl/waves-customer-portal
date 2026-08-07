@@ -324,6 +324,24 @@ function clusterListicleFamilies(rows) {
   });
 }
 
+// Family admission (pure). A family mines only when:
+//  - ≥2 variants — fragmentation is the bucket's reason to exist;
+//  - the REPRESENTATIVE alone is under minImpressionsToScore — a rep that
+//    clears the floor by itself is already reachable through the query-level
+//    buckets (no_content_yet / striking_distance / seasonal_rising), and
+//    emitting it here too would queue two independently-claimable rows for
+//    one intent (their dedupe keys differ by construction);
+//  - the family SUM clears the floor — the whole point;
+//  - weighted position is outside the top-3 — that intent is already won by
+//    an own page (same "-3" anchor as striking_distance).
+function listicleFamilyEligible(fam, thresholds = THRESHOLDS) {
+  if (!fam || fam.variants.length < 2) return false;
+  if ((fam.variants[0]?.impressions || 0) >= thresholds.minImpressionsToScore) return false;
+  if (fam.impressions < thresholds.minImpressionsToScore) return false;
+  if (fam.position > 0 && fam.position < 4) return false;
+  return true;
+}
+
 // Family-stable dedupe key. Deliberately NOT dedupeKey(opp): that keys on
 // the representative query + service/city, all of which can flip between
 // mining runs as close variants trade places — minting fresh rows for one
@@ -1465,7 +1483,11 @@ class GscOpportunityMiner {
   }
 
   async mineListicleFamily(since) {
-    if (!isEnabled('listicleFamilyMining')) return []; // dormant until explicitly enabled
+    // BOTH gates required: mining with the brief overlay off would persist
+    // listicle_family rows whose briefs come out as ORDINARY supporting
+    // blogs — the lane would look enabled while producing none of the
+    // count-in-title/numbered-H2 architecture it exists to test.
+    if (!isEnabled('listicleFamilyMining') || !isEnabled('listicleBriefs')) return [];
     // Grouping by (query, service, city) mirrors the other query buckets;
     // clusterListicleFamilies re-merges split classifications by token
     // identity anyway, so a variant classified under two cities still
@@ -1473,6 +1495,10 @@ class GscOpportunityMiner {
     const rows = await db('gsc_queries')
       .where('date', '>=', since)
       .where('is_branded', false)
+      // Blog publishes are HUB-ONLY (hubOnlyBlogDomains in the publisher);
+      // gsc_queries also holds every spoke property, and spoke-observed
+      // demand must never mint a hub post it doesn't have.
+      .where('domain', 'wavespestcontrol.com')
       .select('query', 'service_category', 'city_target')
       .sum('impressions as impressions')
       // Impressions-weighted, matching mineAnswerGap: each stored position is
@@ -1483,17 +1509,7 @@ class GscOpportunityMiner {
 
     const out = [];
     for (const fam of clusterListicleFamilies(rows)) {
-      // Fragmentation is this bucket's reason to exist: a single-variant
-      // list query strong enough to clear the floor alone is already
-      // reachable through striking_distance / no_content_yet / seasonal.
-      if (fam.variants.length < 2) continue;
-      if (fam.impressions < THRESHOLDS.minImpressionsToScore) continue;
-      // A family already ranking top-3 is won intent — an own page serves it,
-      // and a new blog would compete with ourselves. Same "-3" anchor as
-      // striking_distance's distance math: inside it there is no distance to
-      // strike. (Weighted position, so a dominant variant can't be masked by
-      // a stray deep-ranking one.)
-      if (fam.position > 0 && fam.position < 4) continue;
+      if (!listicleFamilyEligible(fam)) continue;
       const rep = fam.variants[0];
       const city = normalizeCity(rep.city_target) || inferCityFromQuery(rep.query);
       const service = rep.service_category || inferServiceFromQuery(rep.query);
@@ -1742,6 +1758,7 @@ module.exports._internals = {
   listicleFamilyKey,
   clusterListicleFamilies,
   listicleFamilyDedupeKey,
+  listicleFamilyEligible,
   answerGapStem,
   stemmedTokenSet,
   queryContentTerms,
