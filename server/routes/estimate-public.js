@@ -918,14 +918,17 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     const candidateAtQuotedProperty = async (cand) => {
       if (!adoptionEstimateStreet) return true;
       let candStreet = adoptStampedStreetOf(cand.service_address_line1, cand.service_address_line2, cand.service_address_city, cand.service_address_zip);
-      if ((!candStreet || adoptKeyLacksLocality(candStreet)) && cand.source_estimate_id) {
-        try {
-          const src = await conn('estimates').where({ id: cand.source_estimate_id }).first('address');
-          candStreet = adoptStreetOf(src?.address);
-        } catch { /* fall through */ }
-      }
+      // Candidates here always carry source_estimate_id IS NULL (the query
+      // adopts only unclaimed rows), so source-estimate locality recovery
+      // can never apply (codex #3248 r7). Adoption consumes a real visit —
+      // the HIGHEST-stakes scope consumer — so it fails CLOSED: a
+      // street-only stamped candidate that cannot prove its locality is
+      // not adoptable by a grouped estimate; the slot picker books the
+      // quoted property a fresh visit instead. Fully-unstamped rows still
+      // fall back to the customer's fully-qualified primary address.
       candStreet = candStreet || adoptionPrimaryStreet;
-      return !!candStreet && adoptSameScope(candStreet, adoptionEstimateStreet);
+      if (!candStreet || adoptKeyLacksLocality(candStreet)) return false;
+      return adoptSameScope(candStreet, adoptionEstimateStreet);
     };
     if (familyKeys.size > 0) {
       // Page through the candidate list until a same-family row appears — a
