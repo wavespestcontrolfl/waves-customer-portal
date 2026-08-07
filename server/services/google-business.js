@@ -561,7 +561,23 @@ class GoogleBusinessService {
         if (err?.code !== '23505') throw err;
         const winner = await db('google_reviews').where({ google_review_id: normalized.google_review_id }).first();
         if (!winner) throw err;
-        await db('google_reviews').where({ id: winner.id }).update(row);
+        // Recompute the loser's update from the CURRENT winner row, not the
+        // pre-insert null snapshot: the winner may already carry a local
+        // draft reply or a manual customer match, and blindly applying `row`
+        // (built with existing = null) would overwrite both and bypass the
+        // draft-preservation rule above.
+        const { review_reply: _loserReply, reply_updated_at: _loserReplyAt, ...providerRow } = row;
+        const winnerReplyFields = isDraftReply(winner.review_reply)
+          ? {}
+          : {
+              review_reply: normalized.owner_reply,
+              reply_updated_at: normalized.owner_reply ? normalized.owner_reply_updated_at || db.fn.now() : null,
+            };
+        await db('google_reviews').where({ id: winner.id }).update({
+          ...providerRow,
+          customer_id: customerId || winner.customer_id || null,
+          ...winnerReplyFields,
+        });
         result = { id: winner.id, inserted: false };
       }
     }
@@ -704,8 +720,15 @@ class GoogleBusinessService {
           review_text: review.text || null,
           reviewer_photo_url: review.profile_photo_url || null,
           customer_id: customerId || existing.customer_id,
-          synced_at: db.fn.now(),
         };
+        // synced_at participates in the authoritative reconcile's claim
+        // predicate (synced_at < syncStart ⇒ stampable) — refreshing it
+        // asserts "seen live just now". An uncorroborated same-name match
+        // hasn't proven that about THIS row, and refreshing would let a
+        // copycat's Places appearance suppress a concurrent GBP removal
+        // stamp — so liveness freshness requires the same identity proof
+        // as the stamp clear.
+        if (identityCorroborated) upd.synced_at = db.fn.now();
         if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
           upd.review_reply = ownerReply;
           upd.reply_updated_at = db.fn.now();

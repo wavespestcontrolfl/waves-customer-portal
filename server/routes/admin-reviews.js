@@ -58,7 +58,12 @@ async function getReviewLocationStatuses() {
       }
     }
     statuses[loc.id] = {
-      reviewsSource: hasGbpAccess ? 'gbp' : 'places_fallback',
+      // Without a Maps key the Places fallback cannot run — a non-GBP
+      // location is then fully offline ('none'), and the UI must not claim
+      // a partial feed remains active.
+      reviewsSource: hasGbpAccess
+        ? 'gbp'
+        : (process.env.GOOGLE_MAPS_API_KEY ? 'places_fallback' : 'none'),
       hasGbpAccess,
       authError,
     };
@@ -160,23 +165,23 @@ router.get('/', async (req, res, next) => {
     // Scoped to currently-configured WAVES_LOCATIONS so unreplied reviews
     // from retired/renamed GBPs don't pad the unresponded count and
     // skew the response-rate math (denominator already excludes them).
+    // Live rows only, across EVERY overview aggregate: the stats bar reports
+    // current Google state, and rows Google removed are retained evidence —
+    // they stay reachable through the list's dedicated Removed filter, but
+    // must not inflate Total Reviews / averages / star bars. (This also keeps
+    // the reply metrics symmetric: every reply path rejects stamped rows, so
+    // counting them on either side would distort the response rate.)
     const reviewsOnly = db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .whereIn('location_id', activeLocationIds);
     const [totals, unresponded, respondedCountRow, thisMonth, perLocation] = await Promise.all([
       reviewsOnly.clone().select(
         db.raw('COUNT(*) as total'),
         db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
       ).first(),
-      // Stamped (removed-from-Google) rows are excluded from BOTH reply
-      // metrics: every reply path rejects them, so counting them in
-      // unresponded would permanently degrade the No Portal Reply card —
-      // and counting them in responded while excluding them from
-      // unresponded would inflate the responded/(responded+unresponded)
-      // rate whenever replied reviews get removed. Same live population on
-      // both sides keeps the ratio honest.
-      reviewsOnly.clone().modify(whereNeedsRealReply).modify(whereNotDismissed).whereNull('missing_since').count('* as count').first(),
-      reviewsOnly.clone().modify(whereHasRealReply).whereNull('missing_since').count('* as count').first(),
+      reviewsOnly.clone().modify(whereNeedsRealReply).modify(whereNotDismissed).count('* as count').first(),
+      reviewsOnly.clone().modify(whereHasRealReply).count('* as count').first(),
       reviewsOnly.clone().where('review_created_at', '>=', startOfETMonth().toISOString()).count('* as count').first(),
       reviewsOnly.clone().select('location_id')
         .count('* as count')
@@ -184,9 +189,10 @@ router.get('/', async (req, res, next) => {
         .groupBy('location_id'),
     ]);
 
-    // Star breakdown (exclude stats rows; scope to active locations).
+    // Star breakdown (exclude stats rows and removed rows; active locations).
     const breakdown = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .whereIn('location_id', activeLocationIds)
       .select('star_rating').count('* as count')
       .groupBy('star_rating').orderBy('star_rating', 'desc');

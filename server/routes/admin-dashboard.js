@@ -292,10 +292,17 @@ router.get('/', dashboardCache, async (req, res, next) => {
           // removed or Places keeps failing, the stale rows would otherwise
           // keep this branch selected forever, and the Rating tile would
           // ignore removals the GBP reconciliation has since stamped.
+          // Completeness matters too: a PARTIAL fresh set (one location's
+          // stats failing for >24h while the rest refresh) would silently
+          // drop that location's whole count — require a fresh row for
+          // EVERY configured location or use the live-row fallback.
+          const { WAVES_LOCATIONS: dashLocations } = require('../config/locations');
           const statsFreshCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
           const statsRows = await db('google_reviews')
             .where({ reviewer_name: '_stats' })
             .where('synced_at', '>', statsFreshCutoff);
+          const freshStatsLocationIds = new Set(statsRows.map(r => r.location_id));
+          const statsComplete = dashLocations.every(l => freshStatsLocationIds.has(l.id));
           let totalFromPlaces = 0, ratingSum = 0, ratingCount = 0;
           for (const row of statsRows) {
             try {
@@ -309,7 +316,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
               logger.warn(`[admin-dashboard] google_reviews _stats parse failed (id=${row.id}): ${parseErr.message}`);
             }
           }
-          if (totalFromPlaces > 0) {
+          if (statsComplete && totalFromPlaces > 0) {
             // Dismissed reviews are deliberately left unreplied — keep them
             // out of the actionable count (matches /admin/reviews stats).
             const unresponded = await db('google_reviews')

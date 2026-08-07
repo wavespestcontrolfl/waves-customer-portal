@@ -1707,6 +1707,10 @@ export default function ReviewsPage() {
   const pageRef = useRef(1);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  // Append failures stay OUT of the page-level `error`: replacing the whole
+  // page with the failed state would discard the evidence already loaded and
+  // restart pagination from page 1 on retry.
+  const [loadMoreError, setLoadMoreError] = useState(null);
 
   const buildParams = useCallback((pageNum) => {
     const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
@@ -1731,6 +1735,7 @@ export default function ReviewsPage() {
     // by the sequence check without ever clearing this flag) — reset it so
     // the new result's Load More button isn't permanently disabled.
     setLoadingMore(false);
+    setLoadMoreError(null);
     adminFetch(`/admin/reviews?${buildParams(1).toString()}`)
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
@@ -1750,6 +1755,7 @@ export default function ReviewsPage() {
     const loadSeq = loadSeqRef.current;
     const nextPage = pageRef.current + 1;
     setLoadingMore(true);
+    setLoadMoreError(null);
     adminFetch(`/admin/reviews?${buildParams(nextPage).toString()}`)
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
@@ -1770,7 +1776,7 @@ export default function ReviewsPage() {
       .catch((e) => {
         if (loadSeq !== loadSeqRef.current) return;
         setLoadingMore(false);
-        setError(e.message);
+        setLoadMoreError(e.message);
       });
   }, [buildParams]);
 
@@ -1903,7 +1909,12 @@ export default function ReviewsPage() {
     REVIEWS_TAB_GROUPS.find((g) => g.tabs.includes(activeTab)) ||
     REVIEWS_TAB_GROUPS[0];
   const fallbackLocations = locations.filter(
-    (l) => l.reviewsSource && l.reviewsSource !== "gbp",
+    (l) => l.reviewsSource === "places_fallback",
+  );
+  // 'none' = no GBP access AND no Places key — review tracking is fully
+  // offline for these locations; saying "fallback" would overstate it.
+  const offlineLocations = locations.filter(
+    (l) => l.reviewsSource === "none",
   );
 
   return (
@@ -2038,6 +2049,24 @@ export default function ReviewsPage() {
                   {fallbackLocations.map((l) => l.name).join(", ")} currently
                   use Places review fallback until GBP Reviews API access is
                   available.
+                </div>
+              )}
+              {offlineLocations.length > 0 && (
+                <div
+                  style={{
+                    border: `1px solid ${D.red}`,
+                    background: "#FEF2F2",
+                    color: D.red,
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    marginBottom: 14,
+                    fontSize: 13,
+                  }}
+                >
+                  Review tracking is offline for{" "}
+                  {offlineLocations.map((l) => l.name).join(", ")} — no GBP
+                  Reviews API access and no Places API key, so new reviews and
+                  removals are not being detected.
                 </div>
               )}
               {/* Page header + Sync Reviews button removed: the page tab
@@ -2219,6 +2248,19 @@ export default function ReviewsPage() {
               )}
               {hasMore && (
                 <div style={{ textAlign: "center", marginTop: 12 }}>
+                  {loadMoreError && (
+                    <div
+                      style={{
+                        color: D.red,
+                        fontSize: 13,
+                        fontFamily: "Roboto, Arial, sans-serif",
+                        marginBottom: 8,
+                      }}
+                    >
+                      Couldn&apos;t load more reviews ({loadMoreError}) — the
+                      reviews above are still loaded; retry below.
+                    </div>
+                  )}
                   <button
                     onClick={loadMore}
                     disabled={loadingMore}
