@@ -10585,15 +10585,42 @@ router.put('/:token/accept', async (req, res, next) => {
                   capturedAt: new Date().toISOString(),
                 },
                 entryPoint: 'estimate_accept_onetime_booking',
-                // Send-window live-request provenance: the customer just
-                // clicked Accept and is ON the page (which also shows the
-                // booking link) — the SMS is a mid-session convenience copy,
-                // the self-service class the window never defers.
-                conversationalContext: true,
                 metadata: { original_message_type: 'estimate_accepted_onetime' },
               });
-              if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-              logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+              // Send-window hold: a web acceptance is not an SMS reply, so
+              // the text defers — the page and the acceptance email carry
+              // the moment; the booking-link SMS queues for 8:00 AM.
+              if (!sendResult.sent && sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
+                try {
+                  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                  await db('sms_log').insert({
+                    customer_id: customerId || null,
+                    direction: 'outbound',
+                    from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                    to_phone: estimate.customer_phone,
+                    message_body: customerBody,
+                    status: 'scheduled',
+                    scheduled_for: new Date(sendResult.nextAllowedAt),
+                    message_type: 'estimate_accepted_onetime',
+                    metadata: JSON.stringify({
+                      entry_point: 'estimate_accept_onetime_booking_deferred',
+                      estimate_id: estimate.id,
+                      original_block_code: sendResult.code,
+                      replay_purpose: 'estimate_followup',
+                      ...(customerId
+                        ? { refresh_customer_phone: true, resolve_from_by_customer: true }
+                        : { consent_basis: { status: 'transactional_allowed', source: 'estimate_token_acceptance' } }),
+                    }),
+                  });
+                  logger.info(`[estimate-accept] Booking SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
+                } catch (queueErr) {
+                  logger.error(`[estimate-accept] Held booking SMS requeue failed for estimate ${estimate.id}: ${queueErr.message}`);
+                }
+              } else if (sendResult.blocked || sendResult.sent === false) {
+                throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+              } else {
+                logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+              }
             }
           } else {
             const scheduledDate = dateOnly(confirmedAppointmentRow?.scheduled_date);
@@ -10737,13 +10764,41 @@ router.put('/:token/accept', async (req, res, next) => {
                 capturedAt: new Date().toISOString(),
               },
               entryPoint: 'estimate_accept_annual_prepay',
-              // Send-window live-request provenance — same accept-session
-              // rationale as the one-time booking SMS above.
-              conversationalContext: true,
               metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
             });
-            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-            logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
+            // Send-window hold — same web-acceptance deferral as the
+            // one-time booking SMS above.
+            if (!sendResult.sent && sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
+              try {
+                const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                await db('sms_log').insert({
+                  customer_id: customerId || null,
+                  direction: 'outbound',
+                  from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                  to_phone: estimate.customer_phone,
+                  message_body: customerBody,
+                  status: 'scheduled',
+                  scheduled_for: new Date(sendResult.nextAllowedAt),
+                  message_type: 'estimate_accepted_annual_prepay',
+                  metadata: JSON.stringify({
+                    entry_point: 'estimate_accept_annual_prepay_deferred',
+                    estimate_id: estimate.id,
+                    original_block_code: sendResult.code,
+                    replay_purpose: 'estimate_followup',
+                    ...(customerId
+                      ? { refresh_customer_phone: true, resolve_from_by_customer: true }
+                      : { consent_basis: { status: 'transactional_allowed', source: 'estimate_token_acceptance' } }),
+                  }),
+                });
+                logger.info(`[estimate-accept] Annual-prepay SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
+              } catch (queueErr) {
+                logger.error(`[estimate-accept] Held annual-prepay SMS requeue failed for estimate ${estimate.id}: ${queueErr.message}`);
+              }
+            } else if (sendResult.blocked || sendResult.sent === false) {
+              throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+            } else {
+              logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
+            }
           }
         }
         // Standard recurring accepts no longer send a separate acceptance SMS;

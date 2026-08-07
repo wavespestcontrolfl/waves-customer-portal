@@ -228,18 +228,38 @@ router.post('/', async (req, res, next) => {
           customerId: customer.id,
           identityTrustLevel: 'phone_matches_customer',
           entryPoint: 'satisfaction_promoter_review',
-          // Send-window inbound-reply provenance: the customer is ON the
-          // satisfaction page right now and just rated us — this texts THEM
-          // their own review link mid-session, the live self-service class
-          // the window never defers (a morning requeue would land after
-          // the moment passed).
-          conversationalContext: true,
           metadata: {
             original_message_type: 'review_request',
             service_record_id: serviceRecordId,
           },
         });
-        if (!smsResult.sent) {
+        if (!smsResult.sent && smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred && smsResult.nextAllowedAt) {
+          // Send-window hold: a portal/web action is not an SMS reply, so the
+          // text defers — queued on the scheduled-SMS rail for 8:00 AM.
+          try {
+            const TWILIO_NUMBERS = require('../config/twilio-numbers');
+            await db('sms_log').insert({
+              customer_id: customer.id,
+              direction: 'outbound',
+              from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+              to_phone: customer.phone,
+              message_body: body,
+              status: 'scheduled',
+              scheduled_for: new Date(smsResult.nextAllowedAt),
+              message_type: 'review_request',
+              metadata: JSON.stringify({
+                entry_point: 'satisfaction_promoter_review_deferred',
+                original_block_code: smsResult.code,
+                replay_purpose: 'review_request',
+                refresh_customer_phone: true,
+                resolve_from_by_customer: true,
+              }),
+            });
+            logger.info(`[satisfaction] promoter review SMS held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+          } catch (queueErr) {
+            logger.error(`[satisfaction] promoter review held-SMS requeue failed: ${queueErr.message}`);
+          }
+        } else if (!smsResult.sent) {
           logger.warn(`Review SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
         }
       } catch (smsErr) {

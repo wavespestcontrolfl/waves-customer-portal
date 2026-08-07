@@ -337,10 +337,6 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         channel: 'sms',
         audience: 'customer',
         purpose: 'support_resolution',
-        // Send-window live-request provenance: the authenticated customer
-        // just submitted this request/cancellation in the portal — the
-        // confirmation answers their own mid-session action.
-        conversationalContext: true,
         customerId: req.customer.id,
         identityTrustLevel: 'authenticated_portal',
         entryPoint: 'customer_service_request',
@@ -351,7 +347,33 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         },
       });
       confirmationSmsSent = !!smsResult.sent;
-      if (!smsResult.sent) {
+      if (!smsResult.sent && smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred && smsResult.nextAllowedAt) {
+        // Send-window hold: a portal/web action is not an SMS reply, so the
+        // text defers — queued on the scheduled-SMS rail for 8:00 AM.
+        try {
+          const TWILIO_NUMBERS = require('../config/twilio-numbers');
+          await db('sms_log').insert({
+            customer_id: req.customer.id,
+            direction: 'outbound',
+            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+            to_phone: req.customer.phone,
+            message_body: body,
+            status: 'scheduled',
+            scheduled_for: new Date(smsResult.nextAllowedAt),
+            message_type: smsTemplateKey,
+            metadata: JSON.stringify({
+              entry_point: 'customer_service_request_deferred',
+              original_block_code: smsResult.code,
+              replay_purpose: 'support_resolution',
+              refresh_customer_phone: true,
+              resolve_from_by_customer: true,
+            }),
+          });
+          logger.info(`[requests] confirmation SMS held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+        } catch (queueErr) {
+          logger.error(`[requests] confirmation held-SMS requeue failed: ${queueErr.message}`);
+        }
+      } else if (!smsResult.sent) {
         logger.warn(`Request confirmation SMS blocked/failed for customer ${req.customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
       }
     } catch (smsErr) {
