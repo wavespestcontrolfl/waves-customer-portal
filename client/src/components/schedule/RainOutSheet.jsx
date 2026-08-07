@@ -111,7 +111,7 @@ const ERROR_COPY = {
 // advisory here so the dispatcher sees the problem before tapping Move;
 // the server is the enforcer.
 const NOTE_MAX_CHARS = 200;
-const NOTE_SHORTENER_RE = /(?:^|[\s/.@])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[\s/:.])/i;
+const NOTE_SHORTENER_RE = /(?:^|[^a-z0-9-])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[^a-z0-9-])/i;
 
 // Sentinel selection key for the custom-time option (distinct from the preset
 // keys, which are `${kind}:${date}:${start}`).
@@ -557,7 +557,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                     {noteBlocked
                       ? <span style={{ color: '#B91C1C' }}>{ERROR_COPY.note_link_blocked}</span>
                       : (scope === 'route' && routeCount > 0 && note.trim()
-                        ? `This note goes to every moved customer (${routeCount + 1} stops).`
+                        ? "Note goes to this stop's customer only — the rest of the route gets the standard text."
                         : '')}
                   </span>
                   {note.length > 0 && <span style={{ flexShrink: 0 }}>{note.length}/{NOTE_MAX_CHARS}</span>}

@@ -72,12 +72,16 @@ function isValidReason(reasonCode) {
 //     note lets one tap send a novel.
 //   - no link shorteners — a shortened URL in an A2P campaign message is
 //     a carrier violation the campaign can NOT be resubmitted after.
-// On a route-scope move the same note goes to EVERY texted customer, so
-// the sheet warns the dispatcher when scope=route.
+// On a route-scope move the note rides the ANCHOR stop's SMS only — the
+// canonical note is stop-specific (gate codes, pet warnings), and fanning
+// it to every remaining customer would disclose one customer's access
+// details to strangers (codex pre-push P1). Siblings get the standard text.
 const CUSTOMER_NOTE_MAX_CHARS = 200;
-// Trailing char class includes '.' — `bit.ly./abc` is a VALID FQDN form
-// (trailing root dot) that would otherwise slip the guard (codex pre-push P1).
-const NOTE_SHORTENER_RE = /(?:^|[\s/.@])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[\s/:.])/i;
+// Host boundaries = any non-domain character (or start/end): catches
+// `(bit.ly/abc)`, `[t.co/x]`, and the valid trailing-root-dot form
+// `bit.ly./abc`, while still passing lookalike words like `habit.ly`
+// whose match is preceded by a domain character (codex pre-push P1 ×2).
+const NOTE_SHORTENER_RE = /(?:^|[^a-z0-9-])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[^a-z0-9-])/i;
 function sanitizeCustomerNote(raw) {
   if (raw == null) return { note: null };
   if (typeof raw !== 'string') return { error: 'note_invalid' };
@@ -642,9 +646,10 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
  *                                       order survives; day moves keep each sibling's own window.
  * @param {boolean} [args.notifyCustomer=true]
  * @param {string}  [args.customerNote]       optional dispatcher-typed note appended
- *                                            to every moved-SMS this commit sends
- *                                            (route scope: every texted customer
- *                                            gets it). ≤200 chars, no link
+ *                                            to the ANCHOR stop's moved-SMS only
+ *                                            (route siblings get the standard
+ *                                            text — a stop-specific note must not
+ *                                            fan out). ≤200 chars, no link
  *                                            shorteners — rejected as note_too_long
  *                                            / note_link_blocked / note_invalid.
  * @param {string} [args.initiatedBy='tech']  actor recorded on each reschedule
@@ -1007,7 +1012,13 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             zip: service.zip, latitude: service.customer_latitude, longitude: service.customer_longitude,
           }
           : await db('customers').where({ id: job.customer_id }).first('id', 'phone', 'first_name', 'zip', 'latitude', 'longitude');
-        sms = await sendMovedSms({ job, customer, reasonCode, chosen, serviceId: job.id, customerNote: note, forecastHealth });
+        sms = await sendMovedSms({
+          job, customer, reasonCode, chosen, serviceId: job.id,
+          // Anchor only — a stop-specific note (gate code, pet warning)
+          // must never fan out to the rest of the route's customers.
+          customerNote: job.id === serviceId ? note : null,
+          forecastHealth,
+        });
       } catch (err) {
         logger.warn(`[rain-out] post-move notification failed for ${job.id}: ${err.message}`);
         sms = { sent: false, reason: err.message };

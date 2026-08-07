@@ -1415,6 +1415,9 @@ describe('rain-out service', () => {
       // Trailing root dot is a valid FQDN spelling of the same host —
       // must not slip the guard (codex pre-push P1).
       expect(sanitize()('go to https://bit.ly./abc now')).toEqual({ error: 'note_link_blocked' });
+      // Punctuation-wrapped naked links are still valid links (codex P1).
+      expect(sanitize()('details (bit.ly/abc)')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('see [t.co/xyz] for info')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()(42)).toEqual({ error: 'note_invalid' });
       // Lookalike words that merely CONTAIN a shortener host must pass.
       expect(sanitize()('a habit.ly no wait, a habit truly')).toEqual({ note: 'a habit.ly no wait, a habit truly' });
@@ -1439,6 +1442,38 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       expect(sendCustomerMessage.mock.calls[0][0].body)
         .toBe('rendered body\n\nNote from our team: Sorry for the shuffle — see you Friday!');
+    });
+
+    test('route scope: the note rides the ANCHOR SMS only — siblings get the standard text', async () => {
+      // Same wiring as the route-scope suite: anchor + one phone-having
+      // sibling; a stop-specific note (gate code) must never fan out.
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ rows: [{ id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-11', window_start: '11:30', window_end: '13:30', customer_id: 'cust-2', service_type: 'Lawn Care' }] }),
+        ],
+        customers: [
+          chain({ first: jest.fn().mockResolvedValue({ id: 'cust-2', phone: '+19415550002', first_name: 'Sam', zip: '34203' }) }),
+        ],
+        reschedule_log: [chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) }), chain()],
+      });
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
+        notifyCustomer: true,
+        customerNote: 'Gate code 4482 still works.',
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.movedCount).toBe(2);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      const bodies = sendCustomerMessage.mock.calls.map((c) => c[0].body);
+      expect(bodies[0]).toBe('rendered body\n\nNote from our team: Gate code 4482 still works.');
+      expect(bodies[1]).toBe('rendered body');
     });
 
     test('commit rejects a shortener note BEFORE moving anything', async () => {
