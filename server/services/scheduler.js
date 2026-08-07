@@ -2958,7 +2958,16 @@ function initScheduledJobs() {
               .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(msg.id)])
               .first('id');
             const failedAt = new Date();
-            if (providerRow) {
+            // The provider log is best-effort (TwilioService.sendSMS
+            // swallows its own insert failure), so its absence proves
+            // nothing when the error itself carries the provider outcome:
+            // sendCustomerMessage attaches the KNOWN outcome to an
+            // audit-write throw precisely so send-once callers can tell an
+            // accepted-but-unaudited send from a pre-accept failure.
+            // sent:true = Twilio accepted — settle, never retry (a
+            // duplicate customer text is the worse failure). sent:false or
+            // no providerOutcome = genuinely pre-accept, retry below.
+            if (providerRow || err?.providerOutcome?.sent === true) {
               // Same finalize_pending stamp as the normal settlement: a
               // deferred replay settled through THIS crash path also
               // delivered without its finalization running — the
@@ -3060,6 +3069,26 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Service report delivery cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN — Re-run ACH processing acknowledgments whose one-shot
+  // claim was released (held-SMS enqueue failure in the detached webhook
+  // worker) or never taken (crash before the worker ran). The released
+  // claim is the durable retry state — Stripe won't redeliver an acked
+  // event, and in-process timers die with a restart. SMS-only by design;
+  // the sweep function documents the bounds.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const { sweepUnacknowledgedAchProcessingAcks } = require('../routes/stripe-webhook');
+      const result = await sweepUnacknowledgedAchProcessingAcks();
+      if (result.candidates) {
+        logger.info(`ACH acknowledgment sweep: ${result.candidates} unacknowledged processing invoice(s) re-attempted`);
+      }
+    } catch (err) {
+      logger.error(`ACH acknowledgment sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

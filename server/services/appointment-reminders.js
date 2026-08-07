@@ -322,10 +322,16 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   if (ch === 'both') {
     const smsOk = await runSms();
     if (!smsOk && smsHeld()) {
-      // Same contract as reminderSendWindowHold's pre-check: 'both' holds
-      // the WHOLE notice, so one deferral covers both legs — sending the
-      // email now would strand the SMS leg once the caller marks the row.
-      logger.info(`[appt-remind] ${kind} SMS leg for ${customerId} held at the send-window boundary — whole notice deferred`);
+      // The SMS leg defers to the window; the EMAIL leg is not subject to
+      // it and goes out NOW. Returning false still leaves the caller's row
+      // unmarked, so the sweep/next tick re-runs this notice for the SMS
+      // leg alone — the email send is idempotent per occurrence, so the
+      // replay cannot double-deliver it. Holding the email with the SMS
+      // (the old shape) lost BOTH legs for a night booking of a pre-8AM
+      // visit: at 08:00 the past-appointment guard closes the row before
+      // the sweep can deliver anything.
+      const heldEmailRes = await sendAppointmentNoticeEmail(emailArgs);
+      logger.info(`[appt-remind] ${kind} SMS leg for ${customerId} held at the send-window boundary — SMS deferred, email leg ${heldEmailRes?.ok ? 'sent now' : `not sent (${heldEmailRes?.reason || heldEmailRes?.error || 'unknown'})`}`);
       return false;
     }
     const emailRes = await sendAppointmentNoticeEmail(emailArgs);
@@ -1069,6 +1075,18 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // canonical-path block collapses to false here, the email fallback
       // fires at night, and the unconditional mark below ends all retries.
       if (reminderSendWindowHold(prefs.confirmationChannel, { smsEnabled: prefs.smsEnabled })) {
+        // 'both': the customer's requested EMAIL is not subject to the SMS
+        // window — send it NOW and defer only the SMS leg via the unmarked
+        // row. Idempotent per occurrence, so the sweep's replay (which
+        // re-enters through deliverAppointmentNotice) can't double-send it.
+        // Without this, an after-20:00 booking of an 08:00 visit delivered
+        // NEITHER leg: the sweep's every-15-min replay stayed held all
+        // night, and at 08:00 the past-appointment guard above closes the
+        // row before the window ever admits the SMS.
+        if (apptChannel(prefs.confirmationChannel) === 'both') {
+          const heldEmailRes = await sendAppointmentNoticeEmail({ kind: 'confirmation', customerId, scheduledServiceId, apptTime, serviceLabel });
+          logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} held — email leg ${heldEmailRes?.ok ? 'sent now' : `not sent (${heldEmailRes?.reason || heldEmailRes?.error || 'unknown'})`}, SMS deferred`);
+        }
         logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} deferred — outside 8AM-8PM ET send window`);
         return false;
       }

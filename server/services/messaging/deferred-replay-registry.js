@@ -108,6 +108,36 @@ const REGISTRY = {
     durableFinalize: true,
   },
 
+  autopay_completion_decline_deferred: {
+    async recheck(meta) {
+      // The decline notice carries an amount + pay link for a SPECIFIC
+      // failed charge — suppress once the invoice went terminal overnight
+      // (customer paid through another rail, admin voided) or moved onto a
+      // third-party payer (the AP contact owns collection, and billing
+      // texts must never reach the homeowner on payer-billed invoices).
+      try {
+        if (!meta.invoice_id) return { eligible: true };
+        const { isTerminalInvoice } = require('../invoice-followups');
+        const inv = await db('invoices').where({ id: meta.invoice_id }).first();
+        if (!inv) return { eligible: false, reason: 'invoice-missing' };
+        if (isTerminalInvoice(inv)) return { eligible: false, reason: `invoice-terminal:${inv.status}` };
+        if (inv.payer_id) return { eligible: false, reason: 'payer-billed' };
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('decline-notice', meta.invoice_id, err);
+      }
+    },
+    async finalize(meta) {
+      const { finalizeDeferredDeclineNotice } = require('../dispatch-completion-deferred');
+      return finalizeDeferredDeclineNotice(meta);
+    },
+    async onTerminal(meta) {
+      const { terminalDeferredDeclineNotice } = require('../dispatch-completion-deferred');
+      await terminalDeferredDeclineNotice(meta);
+    },
+    durableFinalize: true,
+  },
+
   lead_webhook_auto_reply_deferred: {
     async recheck(meta) {
       // The intake menu opens the state machine; if the lead independently
@@ -240,9 +270,14 @@ const REGISTRY = {
       // before 8:00 AM (the customer retried and the success webhook
       // updated the invoice) — a frozen failure message must not follow a
       // successful payment. Suppress when the linked invoice went terminal
-      // (paid/prepaid/void); setup-verification notices without an invoice
-      // link stay eligible — their copy directs to the billing page, which
-      // always shows current state.
+      // (paid/prepaid/void). Setup-verification failure notices carry no
+      // invoice, so their staleness signal is the customer's CURRENT bank
+      // state: setup_intent.succeeded flips the saved method's ach_status
+      // to 'verified' (and removed methods are hard-deleted), so any
+      // verified bank row means the customer fixed it overnight and
+      // "bank verification failed" would contradict the portal. Other
+      // no-invoice notices stay eligible — their copy directs to the
+      // billing page, which always shows current state.
       try {
         let invoiceId = meta.invoice_id || null;
         if (!invoiceId && meta.stripe_payment_intent_id) {
@@ -251,7 +286,17 @@ const REGISTRY = {
             .first('id');
           invoiceId = inv?.id || null;
         }
-        if (!invoiceId) return { eligible: true };
+        if (!invoiceId) {
+          if (meta.original_message_type === 'bank_verification_failed' && meta.waves_customer_id) {
+            const verified = await db('payment_methods')
+              .where({ customer_id: meta.waves_customer_id })
+              .whereIn('method_type', ['ach', 'us_bank_account'])
+              .where({ ach_status: 'verified' })
+              .first('id');
+            if (verified) return { eligible: false, reason: 'bank-method-verified' };
+          }
+          return { eligible: true };
+        }
         return invoiceStillCollectible({ invoice_id: invoiceId });
       } catch (err) {
         return failClosed('stripe-billing', meta.stripe_payment_intent_id || meta.invoice_id, err);
@@ -326,6 +371,16 @@ const REGISTRY = {
       } catch (err) {
         return failClosed('card-request', meta.scheduled_service_id, err);
       }
+    },
+    async finalize(meta) {
+      // The owner's both-channels rule: the replayed SMS just delivered,
+      // so send the email twin now (the immediate path fires it right
+      // after a confirmed SMS dispatch; the held path skipped it). Best-
+      // effort by the same contract as the inline fire-and-forget — not
+      // durable, and never ok:false, because an email miss must not fake
+      // an undelivered SMS back onto a retry rail.
+      const { sendDeferredInvitationEmailLeg } = require('../appointment-card-request');
+      return sendDeferredInvitationEmailLeg(meta);
     },
     async onTerminal(meta) {
       // The link provably never delivered — release the stamp-guarded

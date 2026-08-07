@@ -108,4 +108,56 @@ async function finalizeDeferredCompletionSend(claimMeta = {}, { retry = false } 
   return { ok };
 }
 
-module.exports = { finalizeDeferredCompletionSend };
+// Post-delivery finalization for the DECLINE NOTICE (`payment_failed`
+// template) held by the send window at completion time. The inline success
+// path finalizes the invoice as delivered (the notice carried the pay
+// link) and stamps the structured-notes status; a deferred send must run
+// the same transitions at actual delivery. Both steps idempotent — rides
+// the finalize_pending durability rail.
+async function finalizeDeferredDeclineNotice(claimMeta = {}) {
+  let ok = true;
+  if (claimMeta.invoice_id) {
+    try {
+      const InvoiceService = require('./invoice');
+      await InvoiceService.markDeliverySent(claimMeta.invoice_id, {
+        sms: true,
+        source: 'payment_failed_notice',
+        payUrl: claimMeta.pay_url || null,
+      });
+    } catch (err) {
+      ok = false;
+      logger.warn(`[completion-deferred] decline-notice invoice delivery sync failed for ${claimMeta.invoice_id}: ${err.message}`);
+    }
+  }
+  if (claimMeta.service_record_id) {
+    try {
+      await db('service_records').where({ id: claimMeta.service_record_id }).update({
+        structured_notes: db.raw(
+          "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ paymentFailedNoticeStatus: 'sent', paymentFailedNoticeSentAt: new Date().toISOString() })],
+        ),
+      });
+    } catch (err) {
+      ok = false;
+      logger.warn(`[completion-deferred] decline-notice notes update failed for record ${claimMeta.service_record_id}: ${err.message}`);
+    }
+  }
+  return { ok };
+}
+
+// Terminally-blocked decline-notice replay: restore the inline-failure
+// state ('failed', which a later completion resume may retry) instead of
+// leaving 'deferred' — the resume dedupe treats 'deferred' as handled, so
+// a stuck 'deferred' would block every future re-attempt of the notice.
+async function terminalDeferredDeclineNotice(claimMeta = {}) {
+  if (!claimMeta.service_record_id) return;
+  await db('service_records').where({ id: claimMeta.service_record_id }).update({
+    structured_notes: db.raw(
+      "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+      [JSON.stringify({ paymentFailedNoticeStatus: 'failed', paymentFailedNoticeError: 'deferred replay terminally blocked' })],
+    ),
+  });
+  logger.warn(`[completion-deferred] decline notice for record ${claimMeta.service_record_id} terminally blocked — status restored to failed`);
+}
+
+module.exports = { finalizeDeferredCompletionSend, finalizeDeferredDeclineNotice, terminalDeferredDeclineNotice };

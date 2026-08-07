@@ -13,6 +13,17 @@ jest.mock('../models/db', () => {
   return mockDb;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/invoice-followups', () => ({
+  isTerminalInvoice: jest.fn((inv) => ['paid', 'prepaid', 'void'].includes(String(inv?.status || ''))),
+}));
+jest.mock('../services/dispatch-completion-deferred', () => ({
+  finalizeDeferredCompletionSend: jest.fn(async () => ({ ok: true })),
+  finalizeDeferredDeclineNotice: jest.fn(async () => ({ ok: true })),
+  terminalDeferredDeclineNotice: jest.fn(async () => {}),
+}));
+jest.mock('../services/appointment-card-request', () => ({
+  sendDeferredInvitationEmailLeg: jest.fn(async () => ({ ok: true })),
+}));
 
 const db = require('../models/db');
 const {
@@ -105,6 +116,66 @@ describe('deferred-replay registry', () => {
     const res = await recheckDeferredReplay('cancellation_save_deferred', { sequence_id: 'seq-1' });
     expect(res.eligible).toBe(false);
     expect(res.retryable).toBe(true);
+  });
+
+  test('decline notice (r14): terminal or payer-billed invoices suppress, open ones pass', async () => {
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'paid', payer_id: null }));
+    const paid = await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1' });
+    expect(paid.eligible).toBe(false);
+    expect(paid.reason).toBe('invoice-terminal:paid');
+
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: 'payer-9' }));
+    const payerBilled = await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1' });
+    expect(payerBilled.eligible).toBe(false);
+    expect(payerBilled.reason).toBe('payer-billed');
+
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
+    const open = await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1' });
+    expect(open.eligible).toBe(true);
+  });
+
+  test('decline notice (r14): rides the durable finalize rail and delegates its hooks', async () => {
+    expect(requiresDurableFinalize('autopay_completion_decline_deferred')).toBe(true);
+    const { finalizeDeferredDeclineNotice, terminalDeferredDeclineNotice } = require('../services/dispatch-completion-deferred');
+    const meta = { invoice_id: 'inv-1', service_record_id: 'rec-1', pay_url: 'https://p' };
+    await finalizeDeferredReplay('autopay_completion_decline_deferred', meta, {});
+    expect(finalizeDeferredDeclineNotice).toHaveBeenCalledWith(meta);
+    await onTerminalDeferredReplay('autopay_completion_decline_deferred', meta);
+    expect(terminalDeferredDeclineNotice).toHaveBeenCalledWith(meta);
+  });
+
+  test('setup-failure notice (r14): suppresses once the customer holds a VERIFIED bank method', async () => {
+    db.mockReturnValueOnce(firstChain({ id: 'pm-1' }));
+    const fixedOvernight = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'bank_verification_failed',
+      waves_customer_id: 'cust-1',
+    });
+    expect(fixedOvernight.eligible).toBe(false);
+    expect(fixedOvernight.reason).toBe('bank-method-verified');
+
+    db.mockReturnValueOnce(firstChain(null));
+    const stillBroken = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'bank_verification_failed',
+      waves_customer_id: 'cust-1',
+    });
+    expect(stillBroken.eligible).toBe(true);
+
+    // Legacy rows queued before the linkage existed keep today's behavior.
+    const legacy = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'bank_verification_failed',
+    });
+    expect(legacy.eligible).toBe(true);
+  });
+
+  test('card request (r14): finalize delivers the email twin via the extracted leg', async () => {
+    const { sendDeferredInvitationEmailLeg } = require('../services/appointment-card-request');
+    const meta = { scheduled_service_id: 'ss-1', card_secure_url: 'https://s', card_template_key: 'secure_appointment_card' };
+    const res = await finalizeDeferredReplay('appointment_card_request_deferred', meta, {});
+    expect(sendDeferredInvitationEmailLeg).toHaveBeenCalledWith(meta);
+    expect(res.ok).toBe(true);
+    // Deliberately NOT durable: an email miss must never fake an
+    // undelivered SMS back onto a retry rail.
+    expect(requiresDurableFinalize('appointment_card_request_deferred')).toBe(false);
   });
 
   test('lead-menu finalize stamps real sids and releases sentinel outcomes', async () => {

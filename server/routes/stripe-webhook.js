@@ -4154,8 +4154,11 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
 // Extracted (and exported for unit tests) so the claim/release semantics
 // are testable without driving the full webhook handler; the setImmediate
 // caller logs any rejection. `amount` is the ACH cash amount the handler
-// validated above.
-async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, eventCreated, eventId }) {
+// validated above. `smsOnly` is the unacknowledged-ack sweep's mode: the
+// inline run already attempted the email leg (it follows the SMS catch
+// unconditionally, keyed on the Stripe event id), so a swept re-run must
+// not repeat it under a different idempotency key.
+async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, eventCreated, eventId, smsOnly = false }) {
   const freshInvoice = await db('invoices').where({ id: invoiceId }).first();
   if (!freshInvoice) return;
   if (freshInvoice.ach_processing_notified_at) return;
@@ -4220,9 +4223,14 @@ async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, ev
         // lands in the outer catch below and the failure is swallowed
         // with the one-shot claim consumed and the email leg skipped.
         // Release the claim instead (guarded by PI + status so a
-        // meanwhile-succeeded payment is untouched) so a Stripe
-        // redelivery or the failed-payment per-attempt clear re-runs
-        // this acknowledgment, and fall through to the email leg now.
+        // meanwhile-succeeded payment is untouched) and fall through to
+        // the email leg now. The release alone creates no retry
+        // obligation (the acked event's redelivery is discarded by the
+        // processed-event dedupe) — the released NULL is durable state
+        // that the 15-minute unacknowledged-ack sweep picks up and
+        // re-runs SMS-only, so the acknowledgment survives even a
+        // process restart. The failed-payment per-attempt clear remains
+        // a second rescue when the payment later fails.
         try {
           await db('invoices')
             .where({ id: freshInvoice.id, stripe_payment_intent_id: piId, status: 'processing' })
@@ -4237,6 +4245,10 @@ async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, ev
       }
     }
   }
+
+  // Sweep mode stops here: the email leg already ran on the inline pass
+  // (see the smsOnly note on the signature).
+  if (smsOnly) return;
 
   // Anchor on the Stripe event's recorded transition time — that's
   // the closest proxy for "customer authorized the transfer." Never
@@ -4274,6 +4286,51 @@ async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, ev
       logger.warn(`[stripe-webhook] ACH processing email not sent for invoice ${freshInvoice.invoice_number}: ${reason}`);
     }
   }
+}
+
+// Durable backstop for the detached ACH acknowledgment. The enqueue-
+// failure release above cannot rely on Stripe for a retry (the event was
+// acked, so redelivery is discarded by the processed-event dedupe before
+// the worker runs again), and any in-process timer dies with a restart —
+// but the released claim itself is durable state: status='processing' +
+// ach_processing_notified_at NULL. This sweep (scheduler, every 15 min)
+// re-runs the worker from that state, SMS-only. The age floor lets the
+// inline setImmediate worker finish first; the 3-day ceiling matches the
+// ACH decision window and keeps the sweep off legacy/stuck processing
+// invoices that predate the acknowledgment claim (texting "we got your
+// bank transfer" about a weeks-old anomaly would be wrong, not late).
+// Re-claiming goes through the worker's own atomic UPDATE, so a webhook
+// racing the sweep still yields at-most-once.
+async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
+  const youngerThan = new Date(Date.now() - 3 * 24 * 3600 * 1000);
+  const olderThan = new Date(Date.now() - 10 * 60 * 1000);
+  const rows = await db('invoices')
+    .where({ status: 'processing' })
+    .whereNull('ach_processing_notified_at')
+    .whereNull('payer_id')
+    // The worker returns BEFORE claiming for these two guards — without
+    // the mirrors here the sweep would re-find such rows every tick.
+    .whereNotNull('customer_id')
+    .whereNotNull('stripe_payment_intent_id')
+    .where('updated_at', '>', youngerThan)
+    .where('updated_at', '<', olderThan)
+    .orderBy('updated_at', 'asc')
+    .limit(limit)
+    .select('id', 'stripe_payment_intent_id', 'invoice_number');
+  for (const row of rows) {
+    logger.warn(`[stripe-webhook] ACH ack sweep re-running acknowledgment for invoice ${row.invoice_number || row.id} (claim was released or never taken)`);
+    await dispatchAchProcessingAcknowledgment({
+      invoiceId: row.id,
+      piId: row.stripe_payment_intent_id,
+      amount: null,
+      eventCreated: null,
+      eventId: null,
+      smsOnly: true,
+    }).catch((err) => {
+      logger.error(`[stripe-webhook] ACH ack sweep failed for invoice ${row.id}: ${err.message}`);
+    });
+  }
+  return { candidates: rows.length };
 }
 
 /**
@@ -5183,7 +5240,17 @@ async function handleSetupIntentFailed(setupIntent) {
         const smsResult = await sendBillingSms(
           customer,
           body,
-          { original_message_type: 'bank_verification_failed', stripe_setup_intent_id: setupIntent.id }
+          {
+            original_message_type: 'bank_verification_failed',
+            stripe_setup_intent_id: setupIntent.id,
+            // Customer linkage for the deferred-replay recheck: a night-
+            // held copy of this notice must suppress at 8 AM if the
+            // customer added/verified a replacement bank method overnight
+            // — "verification failed" after the portal shows a verified
+            // method reads broken. (sms_log.customer_id exists on the
+            // queued row, but the executor hands rechecks METADATA only.)
+            waves_customer_id: customer.id,
+          }
         );
         if (!smsResult.sent) {
           logger.warn(`[stripe-webhook] Setup-failed SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
@@ -5205,6 +5272,7 @@ module.exports._handleSetupIntentFailed = handleSetupIntentFailed;
 module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucceededPaymentIntentIfSettled;
 module.exports._handlePaymentIntentFailed = handlePaymentIntentFailed;
 module.exports._dispatchAchProcessingAcknowledgment = dispatchAchProcessingAcknowledgment;
+module.exports.sweepUnacknowledgedAchProcessingAcks = sweepUnacknowledgedAchProcessingAcks;
 module.exports._handleAchFailure = handleAchFailure;
 module.exports._armMonthlyAutopayRetryForAsyncFailure = armMonthlyAutopayRetryForAsyncFailure;
 module.exports._handlePaymentIntentSucceeded = handlePaymentIntentSucceeded;

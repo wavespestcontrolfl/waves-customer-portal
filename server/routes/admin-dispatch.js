@@ -9848,12 +9848,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // was marked succeeded would text the same decline twice. 'sending' also
     // counts as handled for DEDUPE (a crash mid-send has an unknown outcome
     // and a duplicate payment text is worse than a drop — the admin
-    // payment-failed bell covers the drop), but only a confirmed 'sent'
-    // suppresses the completion SMS's pay link.
+    // payment-failed bell covers the drop), as does 'deferred' (a queued
+    // scheduled-rail row owns the one notice; its registry hooks settle the
+    // status to sent/failed), but only a confirmed 'sent' suppresses the
+    // completion SMS's pay link.
     const priorPaymentFailedNoticeStatus = String(recordStructuredNotes.paymentFailedNoticeStatus || '');
     if (priorPaymentFailedNoticeStatus === 'sent') {
       paymentFailedNoticeSent = true;
-    } else if (paymentFailedSmsContext && priorPaymentFailedNoticeStatus !== 'sending'
+    } else if (paymentFailedSmsContext && !['sending', 'deferred'].includes(priorPaymentFailedNoticeStatus)
       && svc.cust_phone && invoice?.id && invoiceCreated && payUrl
       && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
       && !invoice.payer_id
@@ -9906,17 +9908,61 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice.id },
           });
           paymentFailedNoticeSent = !!failResult.sent;
-          recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : 'failed';
+          // Send-window hold: the decline is deliberately independent of
+          // completion messaging — when the operator skipped the separate
+          // completion SMS, this notice is the ONLY carrier of the failure
+          // + pay link, and an unqueued 'failed' silently commits an unpaid
+          // invoice with no customer-facing collection path. Queue the
+          // exact rendered notice on the scheduled rail; the registry's
+          // recheck suppresses a meanwhile-paid/payer-billed invoice, its
+          // finalize runs the same markDeliverySent + notes flip as the
+          // inline success below, and its onTerminal restores 'failed'.
+          // The completion SMS keeps its pay link either way (only a
+          // confirmed 'sent' drops it) — a morning double-link is coherent
+          // copy; a night with no link is not.
+          let paymentFailedNoticeDeferred = false;
+          if (!failResult.sent && failResult.code === 'QUIET_HOURS_HOLD' && failResult.deferred && failResult.nextAllowedAt) {
+            try {
+              const TWILIO_NUMBERS = require('../config/twilio-numbers');
+              await db('sms_log').insert({
+                customer_id: svc.customer_id,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                to_phone: svc.cust_phone,
+                message_body: paymentFailedBody,
+                status: 'scheduled',
+                scheduled_for: new Date(failResult.nextAllowedAt),
+                message_type: 'payment_failed',
+                metadata: JSON.stringify({
+                  entry_point: 'autopay_completion_decline_deferred',
+                  service_record_id: record.id,
+                  invoice_id: invoice.id,
+                  pay_url: payUrl,
+                  original_message_type: 'payment_failed',
+                  original_block_code: failResult.code,
+                  replay_purpose: 'payment_failure',
+                  refresh_customer_phone: true,
+                  resolve_from_by_customer: true,
+                }),
+              });
+              paymentFailedNoticeDeferred = true;
+            } catch (queueErr) {
+              logger.error(`[dispatch] held payment-failed notice requeue failed for invoice ${invoice.id} — recording failed (completion SMS keeps the pay link): ${queueErr.message}`);
+            }
+          }
+          recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : (paymentFailedNoticeDeferred ? 'deferred' : 'failed');
           if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
-          else recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
+          else if (!paymentFailedNoticeDeferred) recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
           await mergeRecordNotesKeys(record.id, {
             paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
             ...(failResult.sent
               ? { paymentFailedNoticeSentAt: recordStructuredNotes.paymentFailedNoticeSentAt }
-              : { paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError }),
+              : (paymentFailedNoticeDeferred ? {} : { paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError })),
           }).catch((noteErr) => logger.warn(`[dispatch] payment-failed notice status write failed: ${noteErr.message}`));
           record.structured_notes = recordStructuredNotes;
-          if (!failResult.sent) {
+          if (paymentFailedNoticeDeferred) {
+            logger.info(`[dispatch] payment-failed notice for invoice ${invoice.id} held outside the 8AM-8PM ET send window — queued for ${failResult.nextAllowedAt}`);
+          } else if (!failResult.sent) {
             logger.warn(`[dispatch] payment-failed notice not sent for invoice ${invoice.id} (completion SMS keeps the pay link): ${failResult.code || failResult.reason || 'unknown'}`);
           } else {
             // The notice DELIVERED the pay link — the invoice must finalize

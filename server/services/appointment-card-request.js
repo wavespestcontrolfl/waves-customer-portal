@@ -726,6 +726,11 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
               refresh_customer_phone: true,
               resolve_from_by_customer: true,
               card_claim_stamp: stamp.toISOString(),
+              // For the finalize's email twin (both-channels rule). The
+              // body above already carries the tokenized link, so the
+              // metadata copy adds no new exposure.
+              card_secure_url: secureUrl,
+              card_template_key: usedTemplateKey,
               // Token only when THIS call owns the pending row (the body
               // already carries the tokenized link, so no new exposure);
               // a reused /book row must never be deleted by onTerminal.
@@ -751,60 +756,16 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // BOTH channels). Strictly after a CONFIRMED-dispatched text — the
     // uncertain/blocked paths above send nothing on either channel, so the
     // email can never outrun the one-text rails or reach a visit the
-    // funnel skipped. Best-effort fire-and-forget: the gate being off, no
-    // email on file, or a SendGrid failure never changes the funnel result.
+    // funnel skipped. (The window-held path is the one exception: its
+    // queued SMS row owns the text, and the deferred-replay finalize runs
+    // this same helper after that SMS delivers.) Best-effort
+    // fire-and-forget: the gate being off, no email on file, or a
+    // SendGrid failure never changes the funnel result.
     try {
-      const { sendAutopaySetupInvitation } = require('./card-enrollment-email');
-      // The EMAIL's disclosed fee terms become another monotonic bound on
-      // the row BEFORE the email leaves (Codex #3153 r21 P1): a config
-      // change between this invitation and the customer's later /secure
-      // render must never let the row enforce wider/higher terms than the
-      // invitation stated. If the stamp cannot be persisted, the email
-      // omits the fee sentence entirely — never a term we didn't freeze.
-      let emailFeeDisclosure = readCancelFeeDisclosure();
-      if (emailFeeDisclosure) {
-        try {
-          const stampedRows = await db('appointment_card_requests')
-            .where({ scheduled_service_id: visit.id, status: 'pending' })
-            .update({
-              no_show_fee_amount: db.raw(
-                'CASE WHEN cancel_window_hours = 0 THEN NULL ELSE LEAST(COALESCE(no_show_fee_amount, ?::numeric), ?::numeric) END',
-                [emailFeeDisclosure.feeAmount, emailFeeDisclosure.feeAmount],
-              ),
-              cancel_window_hours: db.raw(
-                'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
-                [emailFeeDisclosure.windowHours, emailFeeDisclosure.windowHours],
-              ),
-              updated_at: new Date(),
-            });
-          if (stampedRows !== 1) {
-            // The row left 'pending' between our read and this stamp
-            // (Codex #3153 r22 P1) — the email must not state terms the
-            // row is not bound by. Omit the sentence entirely.
-            logger.warn(`[appt-card-request] email disclosure stamp hit ${stampedRows} rows for visit ${visit.id} — omitting the fee sentence`);
-            emailFeeDisclosure = null;
-          }
-        } catch (stampErr) {
-          logger.warn(`[appt-card-request] email disclosure stamp failed for visit ${visit.id} — omitting the fee sentence: ${stampErr.message}`);
-          emailFeeDisclosure = null;
-        }
-      }
-      sendAutopaySetupInvitation({
-        customerId: visit.customer_id,
-        scheduledServiceId: visit.id,
-        serviceType: visit.service_type || 'service',
-        dateLine: dateLineFor(visit.scheduled_date),
-        secureUrl,
-        feeDisclosure: emailFeeDisclosure,
-        // The email variant follows the copy that ACTUALLY went out on the
-        // SMS leg — not the raw probe — so the two legs of one invite can
-        // never contradict each other (base SMS's unconditional "only
-        // charged after service" next to a prepay pitch). Activating the
-        // SMS variant in /admin templates is the single copy lever.
-        planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY,
-      }).catch((emailErr) => {
-        logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
-      });
+      runInvitationEmailLeg({ visit, secureUrl, planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY })
+        .catch((emailErr) => {
+          logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
+        });
     } catch (emailErr) {
       logger.warn(`[appt-card-request] invitation email leg failed to start for visit ${visit.id}: ${emailErr.message}`);
     }
@@ -814,6 +775,84 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     logger.error(`[appt-card-request] request failed for visit ${scheduledServiceId}: ${err.message}`);
     return skip(`error:${err.message}`);
   }
+}
+
+// Email twin of the secure-card invite, shared by the immediate path
+// (fire-and-forget above) and the deferred-replay finalize (after the
+// window-held SMS delivers the next morning) so both channels always
+// travel together. The EMAIL's disclosed fee terms become another
+// monotonic bound on the row BEFORE the email leaves (Codex #3153 r21
+// P1): a config change between this invitation and the customer's later
+// /secure render must never let the row enforce wider/higher terms than
+// the invitation stated. If the stamp cannot be persisted — or the row
+// left 'pending' between read and stamp (Codex #3153 r22 P1) — the email
+// omits the fee sentence entirely; never a term we didn't freeze.
+async function runInvitationEmailLeg({ visit, secureUrl, planChoice }) {
+  const { sendAutopaySetupInvitation } = require('./card-enrollment-email');
+  let emailFeeDisclosure = readCancelFeeDisclosure();
+  if (emailFeeDisclosure) {
+    try {
+      const stampedRows = await db('appointment_card_requests')
+        .where({ scheduled_service_id: visit.id, status: 'pending' })
+        .update({
+          no_show_fee_amount: db.raw(
+            'CASE WHEN cancel_window_hours = 0 THEN NULL ELSE LEAST(COALESCE(no_show_fee_amount, ?::numeric), ?::numeric) END',
+            [emailFeeDisclosure.feeAmount, emailFeeDisclosure.feeAmount],
+          ),
+          cancel_window_hours: db.raw(
+            'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
+            [emailFeeDisclosure.windowHours, emailFeeDisclosure.windowHours],
+          ),
+          updated_at: new Date(),
+        });
+      if (stampedRows !== 1) {
+        logger.warn(`[appt-card-request] email disclosure stamp hit ${stampedRows} rows for visit ${visit.id} — omitting the fee sentence`);
+        emailFeeDisclosure = null;
+      }
+    } catch (stampErr) {
+      logger.warn(`[appt-card-request] email disclosure stamp failed for visit ${visit.id} — omitting the fee sentence: ${stampErr.message}`);
+      emailFeeDisclosure = null;
+    }
+  }
+  await sendAutopaySetupInvitation({
+    customerId: visit.customer_id,
+    scheduledServiceId: visit.id,
+    serviceType: visit.service_type || 'service',
+    dateLine: dateLineFor(visit.scheduled_date),
+    secureUrl,
+    feeDisclosure: emailFeeDisclosure,
+    // The email variant follows the copy that ACTUALLY went out on the
+    // SMS leg — not the raw probe — so the two legs of one invite can
+    // never contradict each other (base SMS's unconditional "only
+    // charged after service" next to a prepay pitch). Activating the
+    // SMS variant in /admin templates is the single copy lever.
+    planChoice,
+  });
+}
+
+// Deferred-replay finalize for `appointment_card_request_deferred`: the
+// queued card-link SMS just delivered, so the owner's both-channels rule
+// now owes the email twin. Best-effort with the same contract as the
+// immediate path's fire-and-forget — an email failure never unwinds the
+// replay settlement, so this reports ok:true unconditionally (no durable
+// retry rail; the inline path has none either). Rows queued before the
+// secure-url metadata existed skip quietly.
+async function sendDeferredInvitationEmailLeg(meta = {}) {
+  try {
+    if (!meta.scheduled_service_id || !meta.card_secure_url) return { ok: true };
+    const visit = await db('scheduled_services')
+      .where({ id: meta.scheduled_service_id })
+      .first('id', 'customer_id', 'service_type', 'scheduled_date');
+    if (!visit) return { ok: true };
+    await runInvitationEmailLeg({
+      visit,
+      secureUrl: meta.card_secure_url,
+      planChoice: meta.card_template_key === PLAN_TEMPLATE_KEY,
+    });
+  } catch (emailErr) {
+    logger.warn(`[appt-card-request] deferred invitation email leg failed for visit ${meta.scheduled_service_id}: ${emailErr.message}`);
+  }
+  return { ok: true };
 }
 
 // ── /secure/:token capture lifecycle (card-on-file spec §3 Phase 5.2) ──
@@ -2644,6 +2683,7 @@ module.exports = {
   settleAppointmentNoShowFee,
   resettleAppointmentFeeFromPi,
   isWithinApptCancelWindow,
+  sendDeferredInvitationEmailLeg,
   _test: {
     dateLineFor,
     resolveExemption,

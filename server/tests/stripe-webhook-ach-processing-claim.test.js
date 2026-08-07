@@ -69,6 +69,7 @@ function resetMockState() {
     customer: { id: 'cust-1', first_name: 'Pat', phone: '+15550001111' },
     failSmsLogInsert: false,
     failRelease: false,
+    sweepRows: [],
     updates: [], // { table, wheres, patch }
   });
 }
@@ -84,6 +85,9 @@ function mockMakeBuilder(table) {
   });
   b.whereNull = (col) => { b._wheres.push({ whereNull: col }); return b; };
   b.whereNotNull = (col) => { b._wheres.push({ whereNotNull: col }); return b; };
+  b.limit = () => b;
+  // Terminal select (the sweep's candidate query): resolves rows.
+  b.select = async () => (table === 'invoices' ? (mockState.sweepRows || []) : []);
   b.first = async () => {
     if (table === 'invoices') return mockState.invoiceRow;
     if (table === 'customers') return mockState.customer;
@@ -110,7 +114,10 @@ jest.mock('../models/db', () => {
   return db;
 });
 
-const { _dispatchAchProcessingAcknowledgment: dispatchAck } = require('../routes/stripe-webhook');
+const {
+  _dispatchAchProcessingAcknowledgment: dispatchAck,
+  sweepUnacknowledgedAchProcessingAcks: sweepAcks,
+} = require('../routes/stripe-webhook');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const logger = require('../services/logger');
@@ -193,4 +200,35 @@ test('plain delivery failure (no enqueue throw) keeps the claim', async () => {
   expect(claimUpdates()).toHaveLength(1);
   expect(releaseUpdates()).toHaveLength(0);
   expect(PaymentLifecycleEmail.sendAchProcessing).toHaveBeenCalledTimes(1);
+});
+
+test('smsOnly (r14): claims and sends the SMS but never repeats the email leg', async () => {
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  await dispatchAck({ ...WORKER_INPUT, smsOnly: true });
+
+  expect(claimUpdates()).toHaveLength(1);
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  // The inline pass already attempted the email under the event-id
+  // idempotency key — a swept re-run must not double-email under the
+  // (invoice, PI) fallback key.
+  expect(PaymentLifecycleEmail.sendAchProcessing).not.toHaveBeenCalled();
+});
+
+test('sweep (r14): re-runs a released/never-taken claim SMS-only through the atomic claim', async () => {
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  mockState.sweepRows = [{ id: 'inv-1', stripe_payment_intent_id: 'pi_1', invoice_number: 'WPC-2026-0091' }];
+
+  const result = await sweepAcks();
+
+  expect(result.candidates).toBe(1);
+  expect(claimUpdates()).toHaveLength(1);
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(PaymentLifecycleEmail.sendAchProcessing).not.toHaveBeenCalled();
+});
+
+test('sweep (r14): a worker failure is contained per invoice, never rejects the sweep', async () => {
+  sendCustomerMessage.mockRejectedValue(new Error('twilio down'));
+  mockState.sweepRows = [{ id: 'inv-1', stripe_payment_intent_id: 'pi_1', invoice_number: 'WPC-2026-0091' }];
+
+  await expect(sweepAcks()).resolves.toEqual({ candidates: 1 });
 });
