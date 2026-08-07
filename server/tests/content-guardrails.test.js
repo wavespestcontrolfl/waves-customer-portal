@@ -3080,6 +3080,15 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(wordRange.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const spelledRange = guardrails.evaluate({ body: 'Wait one to two hours before re-entering.' }, {});
     expect(spelledRange.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const approx = guardrails.evaluate({ body: 'The application dries in about 30 minutes.' }, {});
+    expect(approx.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const avoidArea = guardrails.evaluate({ body: 'Avoid the treated area for 30 minutes.' }, {});
+    expect(avoidArea.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const qualifier = guardrails.evaluate({ body: 'Our pesticide is environmentally safe.' }, {});
+    expect(qualifier.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // Negated predicate stays a disclaimer despite the generic qualifier gap.
+    const negated = guardrails.evaluate({ body: 'No pesticide is truly safe while wet, which is why the label interval matters.' }, {});
+    expect(negated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
     // Adverbial "safely" without BOTH idiom parts blocks; with dry-condition
     // AND technician confirmation it is the approved idiom.
     const adverbBare = guardrails.evaluate({ body: 'You can safely re-enter once dry.' }, {});
@@ -3160,9 +3169,13 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(info.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
   });
 
-  test('"call Waves for insulation" blocks', () => {
+  test('"call Waves for insulation" blocks — and contact/ask variants', () => {
     const r = guardrails.evaluate({ body: 'Call Waves for attic insulation quotes while we are on site.' }, {});
     expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const contact = guardrails.evaluate({ body: 'Contact Waves for wildlife trapping in Manatee County.' }, {});
+    expect(contact.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const ask = guardrails.evaluate({ body: 'Ask us about attic insulation during your next visit.' }, {});
+    expect(ask.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('informational mention stays legal — no first-person service anchor', () => {

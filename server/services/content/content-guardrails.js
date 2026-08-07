@@ -2900,7 +2900,11 @@ const REENTRY_SAFETY_SRCS = [
   "\\bre-?entry\\s+(?:is|becomes?|will\\s+be)\\s+(?:completely\\s+|totally\\s+|perfectly\\s+)?(?:safe|harmless|risk[-\\s]?free)\\b",
   "\\bsafe\\s+(?:for\\s+)?re-?entry\\b",
   // "the treatment/product/pesticide/lawn is safe (for kids/pets/around …)"
-  "\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:completely\\s+|totally\\s+|perfectly\\s+|entirely\\s+|100\\s?%\\s+)?safe\\b",
+  // — any non-negating qualifier(s) before "safe" ("completely safe",
+  // "environmentally safe", "perfectly pet safe") count as the same claim;
+  // the qualifier gap is negation-guarded so "is not safe" stays a
+  // disclaimer handled by the polarity guards.
+  `\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?safe\\b`,
   // "safe for/around kids, pets, pollinators…"
   "\\bsafe\\s+(?:for|around)\\s+(?:your\\s+)?(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies)|pollinators?|bees?|wildlife)\\b",
   // "pet-safe" / "child-safe" / "kid-safe" / "family-safe" compounds
@@ -2917,8 +2921,10 @@ const REENTRY_SAFETY_SRCS = [
   // minutes"), duration-then-action ("wait 30 minutes before re-entering",
   // "allow 30 minutes of drying time"), and keep-off forms ("keep pets off
   // the lawn for 30 minutes").
-  `\\b(?:re-?enter|re-?entry|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+${REENTRY_DURATION_SRC}\\b`,
-  `\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:re-?enter|re-?entry|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  // "avoid the treated area for 30 minutes"
+  `\\bavoid\\s+(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawns?|yards?|rooms?|surfaces?)\\b[^.!?\\n]{0,30}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
   `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry|return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*|dry\\w*|drying)`,
   `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
@@ -3023,7 +3029,7 @@ const BANNED_TOPIC_SRCS = [
   // THIRD-PARTY referral stays legal via the negative lookahead: "schedule
   // tenting with a licensed structural fumigator" directs elsewhere.
   `\\b(?:schedule|book)\\s+(?:your\\s+|a\\s+|an\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?))?\\b(?!\\s+(?:with|through)\\s+(?!us\\b|waves\\b))`,
-  `\\bcall\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\s+(?:today\\s+)?for\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
+  `\\b(?:call|contact|text|email|ask)\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\s+(?:today\\s+)?(?:for|about)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
 ];
 
 function bannedTopicFinding(text) {
