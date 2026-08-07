@@ -555,12 +555,21 @@ async function recordLeadAutoReplyDelivered({ leadId = null, customerId = null }
     }).catch(() => {});
     const lead = await db('leads').where('id', leadId).whereNull('deleted_at').first();
     if (lead?.first_contact_at) {
+      // MONOTONIC: the replay lands hours after enqueue, and the lead may
+      // have advanced overnight (estimated/booked/won via other channels) —
+      // 'contacted' must only ever move a lead FORWARD from a pre-contact
+      // state, never overwrite an advanced one. The funnel bridge is
+      // already monotonic in SQL, so it runs regardless.
       const responseMinutes = Math.round((Date.now() - new Date(lead.first_contact_at).getTime()) / 60000);
-      await db('leads').where('id', leadId).whereNull('deleted_at').update({
-        response_time_minutes: responseMinutes,
-        status: 'contacted',
-        updated_at: new Date(),
-      });
+      await db('leads')
+        .where('id', leadId)
+        .whereNull('deleted_at')
+        .where((q) => q.whereIn('status', ['new', 'pending', 'started', 'contacted']).orWhereNull('status'))
+        .update({
+          response_time_minutes: responseMinutes,
+          status: 'contacted',
+          updated_at: new Date(),
+        });
       const { bridgeLeadFunnelStage } = require('./lead-funnel-bridge');
       await bridgeLeadFunnelStage(leadId, 'contacted');
     }
