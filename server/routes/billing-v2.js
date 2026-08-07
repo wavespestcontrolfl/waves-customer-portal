@@ -179,6 +179,13 @@ router.get('/', async (req, res, next) => {
       try {
         const invoiceRows = await db('invoices')
           .where({ customer_id: req.customerId })
+          // A payer-billed invoice still hangs off the homeowner's customer
+          // row, and its receipt is a PERMANENT bearer token exposing the AP
+          // payer's billing identity. The payment-history payer filter above
+          // only catches rows linked by metadata.invoice_id, so the alias /
+          // PaymentIntent / invoice-number paths added here would slip past
+          // it — exclude payer-billed invoices outright (pre-push P0).
+          .whereNull('payer_id')
           .whereIn('status', ['paid', 'refunded'])
           .where((qb) => {
             if (invoiceIds.length) qb.orWhereIn('id', invoiceIds);
