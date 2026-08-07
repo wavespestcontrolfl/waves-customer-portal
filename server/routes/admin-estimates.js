@@ -723,27 +723,38 @@ router.post('/:id/send', async (req, res, next) => {
 // one) — two concurrent sends of different group members serialize, the loser
 // aborts pre-delivery. Returns the claimed rows for later publish/release.
 async function claimGroupSiblingsForPublish(estimate) {
-  // A sibling already mid-send is a concurrent publisher (another pod's
-  // scheduled batch, or a parallel operator click): its send will publish
-  // this group with its own message, so this send must abort rather than
-  // deliver a second one. The scheduler claims one member per group per
-  // batch, so this only trips on true cross-process races.
-  const midSendSibling = await db('estimates')
-    .where({ estimate_group_id: estimate.estimate_group_id, status: 'sending' })
-    .whereNot({ id: estimate.id })
-    .first('id');
-  if (midSendSibling) {
-    const err = new Error('Another send is publishing this multi-property group — wait a moment and retry.');
-    err.statusCode = 409;
-    throw err;
-  }
-  const siblings = await db('estimates')
-    .where({ estimate_group_id: estimate.estimate_group_id })
-    .whereNot({ id: estimate.id })
-    .whereNull('archived_at')
-    .whereNull('price_locked_at')
-    .whereIn('status', ['draft', 'scheduled', 'send_failed']);
-  if (!siblings.length) return [];
+  // Mid-send check, sibling enumeration, and the claims run in ONE
+  // transaction under a group-scoped advisory xact lock (codex #3244 r8):
+  // without it, two overlapping immediate sends of different members could
+  // interleave check→claim so that A publishes while B's row was neither
+  // claimed by A nor allowed to send itself. The lock releases at commit;
+  // a competing route-level anchor claim serializes against the row-status
+  // guards either way.
+  return db.transaction(async (trx) => {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['estimate-group-send', String(estimate.estimate_group_id)],
+    );
+    // A sibling already mid-send is a concurrent publisher (another pod's
+    // scheduled batch, or a parallel operator click): its send will publish
+    // this group with its own message, so this send must abort rather than
+    // deliver a second one.
+    const midSendSibling = await trx('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id, status: 'sending' })
+      .whereNot({ id: estimate.id })
+      .first('id');
+    if (midSendSibling) {
+      const err = new Error('Another send is publishing this multi-property group — wait a moment and retry.');
+      err.statusCode = 409;
+      throw err;
+    }
+    const siblings = await trx('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNot({ id: estimate.id })
+      .whereNull('archived_at')
+      .whereNull('price_locked_at')
+      .whereIn('status', ['draft', 'scheduled', 'send_failed']);
+    if (!siblings.length) return [];
   for (const sibling of siblings) {
     try {
       // Acknowledgment is PER ESTIMATE (codex #3244 r4): the anchor's
@@ -762,25 +773,26 @@ async function claimGroupSiblingsForPublish(estimate) {
       throw err;
     }
   }
-  const claimed = [];
-  for (const sibling of siblings) {
-    // updated_at joins the claim predicate (codex #3244 r5): a revision
-    // between this function's read and the claim bumps updated_at, so the
-    // claim misses and the group send aborts instead of publishing (and
-    // snapshotting) a stale validation of a newly quote-required revision.
-    const won = await db('estimates')
-      .where({ id: sibling.id, status: sibling.status, updated_at: sibling.updated_at })
-      .whereNull('price_locked_at')
-      .update({ status: 'sending', updated_at: db.fn.now() });
-    if (won) claimed.push(sibling);
-  }
-  if (claimed.length !== siblings.length) {
-    await releaseGroupSiblingClaims(claimed);
-    const err = new Error('Another send is publishing this multi-property group — wait a moment and retry.');
-    err.statusCode = 409;
-    throw err;
-  }
-  return claimed;
+    const claimed = [];
+    for (const sibling of siblings) {
+      // updated_at joins the claim predicate (codex #3244 r5): a revision
+      // between this transaction's read and the claim bumps updated_at, so
+      // the claim misses and the group send aborts instead of publishing
+      // (and snapshotting) a stale validation.
+      const won = await trx('estimates')
+        .where({ id: sibling.id, status: sibling.status, updated_at: sibling.updated_at })
+        .whereNull('price_locked_at')
+        .update({ status: 'sending', updated_at: trx.fn.now() });
+      if (won) claimed.push(sibling);
+    }
+    if (claimed.length !== siblings.length) {
+      // Transaction rollback releases the partial claims atomically.
+      const err = new Error('Another send is publishing this multi-property group — wait a moment and retry.');
+      err.statusCode = 409;
+      throw err;
+    }
+    return claimed;
+  });
 }
 
 // Hand claimed siblings back to their pre-claim status. Scoped to rows still

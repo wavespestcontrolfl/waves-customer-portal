@@ -169,6 +169,12 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         .whereNull('archived_at')
         .whereNull('price_locked_at')
         .whereIn('status', ['sent', 'viewed', 'expired', 'send_failed'])
+        // A send_failed sibling with NO delivery evidence (no sent_at) was
+        // never published — often deliberately, after its pricing snapshot
+        // refused to freeze. Reviving it here would expose a live-repricing
+        // token the publication path rejected (codex #3244 r8); it stays
+        // down until an explicit re-send.
+        .where((b) => b.whereNot('status', 'send_failed').orWhereNotNull('sent_at'))
         .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', newExpiry))
         .update({
           expires_at: newExpiry,

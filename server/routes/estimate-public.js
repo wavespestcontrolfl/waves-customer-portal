@@ -900,6 +900,33 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // cross-family accepts fall through to the standard slot pick.
   if (!row && estimate.customer_id
     && featureGates.isEnabled('estimateExistingApptCustomerWide')) {
+    // PROPERTY-SCOPED for grouped estimates (codex #3244 r8): a secondary
+    // property's accept must not adopt an upcoming visit at the customer's
+    // primary property — the adopted row gets stamped to this estimate,
+    // repriced, and the accepted property ends up with NO booked visit
+    // while linkage can no longer correct the already-linked row. Fail
+    // CLOSED on candidates whose property can't be located.
+    const { normalizedEstimateStreet: adoptStreetOf, normalizedStampedStreet: adoptStampedStreetOf } = require('../services/estimate-property-linkage');
+    const adoptionEstimateStreet = estimate.estimate_group_id ? adoptStreetOf(estimate.address) : '';
+    let adoptionPrimaryStreet = '';
+    if (adoptionEstimateStreet) {
+      try {
+        const adoptCust = await conn('customers').where({ id: estimate.customer_id }).first('address_line1', 'address_line2');
+        adoptionPrimaryStreet = adoptStampedStreetOf(adoptCust?.address_line1, adoptCust?.address_line2);
+      } catch { /* candidates fall back to stamped/source streets only */ }
+    }
+    const candidateAtQuotedProperty = async (cand) => {
+      if (!adoptionEstimateStreet) return true;
+      let candStreet = adoptStampedStreetOf(cand.service_address_line1, cand.service_address_line2);
+      if (!candStreet && cand.source_estimate_id) {
+        try {
+          const src = await conn('estimates').where({ id: cand.source_estimate_id }).first('address');
+          candStreet = adoptStreetOf(src?.address);
+        } catch { /* fall through */ }
+      }
+      candStreet = candStreet || adoptionPrimaryStreet;
+      return !!candStreet && candStreet === adoptionEstimateStreet;
+    };
     if (familyKeys.size > 0) {
       // Page through the candidate list until a same-family row appears — a
       // fixed pre-filter LIMIT would hide a valid later appointment behind a
@@ -923,9 +950,13 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
         if (requestedId) cw.where('scheduled_services.id', requestedId);
         const candidates = await cw.limit(CANDIDATE_PAGE_SIZE).offset(offset);
         if (!Array.isArray(candidates) || candidates.length === 0) break;
-        row = candidates.find(
-          (cand) => appointmentMatchesEstimateFamily(cand, familyKeys),
-        ) || null;
+        row = null;
+        for (const cand of candidates) {
+          if (!appointmentMatchesEstimateFamily(cand, familyKeys)) continue;
+          if (!(await candidateAtQuotedProperty(cand))) continue;
+          row = cand;
+          break;
+        }
         if (candidates.length < CANDIDATE_PAGE_SIZE) break;
       }
     }
@@ -11739,14 +11770,22 @@ async function transferGroupFollowupOwnership(estimate) {
       .orderBy('created_at', 'asc')
       .first('id');
     if (!owner) return;
+    // Inherit the ANCHOR's completed-stage state (codex #3244 r8): the
+    // legacy sweeps evaluate flags inside timestamp windows and the ledgers
+    // don't dedupe across rows — resetting a stage the anchor already sent
+    // would message the customer the same reminder twice. A stage the
+    // anchor hadn't reached re-arms (false) on the new owner.
+    const anchorFlags = await db('estimates')
+      .where({ id: estimate.id })
+      .first('followup_unviewed_sent', 'followup_viewed_sent', 'followup_final_sent', 'followup_expiring_sent');
     await db('estimates')
       .where({ id: owner.id })
       .whereIn('status', ['sent', 'viewed'])
       .update({
-        followup_unviewed_sent: false,
-        followup_viewed_sent: false,
-        followup_final_sent: false,
-        followup_expiring_sent: false,
+        followup_unviewed_sent: anchorFlags?.followup_unviewed_sent === true,
+        followup_viewed_sent: anchorFlags?.followup_viewed_sent === true,
+        followup_final_sent: anchorFlags?.followup_final_sent === true,
+        followup_expiring_sent: anchorFlags?.followup_expiring_sent === true,
         updated_at: db.fn.now(),
       });
     logger.info(`[estimate-public] group ${estimate.estimate_group_id}: follow-up ownership transferred to sibling ${owner.id} after ${estimate.id} went terminal`);

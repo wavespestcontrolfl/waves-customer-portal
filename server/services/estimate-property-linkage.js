@@ -58,7 +58,17 @@ function parseEstimateAddress(raw) {
     shaped.address_line2 = unit[1].trim();
     shaped.address_line1 = unit[2].trim();
   } else {
-    shaped.address_line2 = null;
+    // INLINE trailing form too ("100 Beach Rd Apt 4" — codex #3244 r8): the
+    // same property is commonly stored as line1 "100 Beach Rd" + line2
+    // "Apt 4", so leaving the unit inline breaks every canonical-order
+    // compare. Split only when a real street remains in front of it.
+    const inline = shaped.address_line1.match(/^(.+?\S)\s+((?:unit|apt|apartment|suite|ste|#)\s*[\w-]+)$/i);
+    if (inline && inline[1].trim().split(/\s+/).length >= 2) {
+      shaped.address_line1 = inline[1].trim();
+      shaped.address_line2 = inline[2].trim();
+    } else {
+      shaped.address_line2 = null;
+    }
   }
   return shaped;
 }
@@ -285,10 +295,29 @@ function normalizedEstimateStreet(raw) {
   return normalizedStampedStreet(parts?.address_line1, parts?.address_line2);
 }
 
+// Does this estimate quote the CUSTOMER's on-file address? Full canonical
+// tuple compare (street+unit, and city/zip when both sides have them) — a
+// street-prefix test let "100 Main St, Sarasota" reuse the Bradenton
+// primary's coordinates and capacity zone (codex #3244 r8). Uncertain parses
+// return false (treat as a different property — the safe direction for
+// routing/zone decisions).
+function estimateQuotesCustomerAddress(estimateAddressRaw, customerRow = {}) {
+  const parts = parseEstimateAddress(estimateAddressRaw);
+  if (!parts) return true; // no quoted address at all — nothing contradicts the customer record
+  const estimateKey = normalizedStampedStreet(parts.address_line1, parts.address_line2);
+  const customerKey = normalizedStampedStreet(customerRow.address_line1, customerRow.address_line2);
+  if (!estimateKey || !customerKey || estimateKey !== customerKey) return false;
+  const norm = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  if (parts.city && customerRow.city && norm(parts.city) !== norm(customerRow.city)) return false;
+  if (parts.zip && customerRow.zip && String(parts.zip) !== String(customerRow.zip)) return false;
+  return true;
+}
+
 module.exports = {
   parseEstimateAddress,
   normalizedEstimateStreet,
   normalizedStampedStreet,
+  estimateQuotesCustomerAddress,
   refreshHasMultiHome,
   linkAcceptedEstimateProperty,
 };

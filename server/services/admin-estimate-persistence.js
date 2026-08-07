@@ -1549,8 +1549,30 @@ async function reviseAdminEstimate({
     || String(writeFields.customer_phone ?? '') !== String(estimate.customer_phone ?? '')
     || String(writeFields.customer_email ?? '') !== String(estimate.customer_email ?? '')
   );
+  const groupAddressChanged = writeFields.estimate_group_id
+    && writeFields.address !== undefined
+    && String(writeFields.address || '') !== String(estimate.address || '');
   if (groupIdChanged || groupIdentityChanged) {
     await assertGroupAssignmentAllowed(database, writeFields.estimate_group_id, writeFields, estimate.id);
+  }
+  // An address-only revision of a grouped sibling must not land on another
+  // member's property (codex #3244 r8): the duplicate copy would keep its
+  // multi-home discount while accept-time linkage dedupes to one property.
+  if (groupAddressChanged) {
+    const { normalizedEstimateStreet } = require('./estimate-property-linkage');
+    const revisedStreet = normalizedEstimateStreet(writeFields.address);
+    if (revisedStreet) {
+      const members = await database('estimates')
+        .where({ estimate_group_id: writeFields.estimate_group_id })
+        .whereNot({ id: estimate.id })
+        .whereNull('archived_at')
+        .select('address');
+      for (const member of members) {
+        if (normalizedEstimateStreet(member.address) === revisedStreet) {
+          throw errorWithStatus('This address is already in the group — each property is quoted once', 400);
+        }
+      }
+    }
   }
 
   // Carry the linkage keys across the wholesale estimate_data rewrite.
