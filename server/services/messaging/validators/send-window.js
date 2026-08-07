@@ -6,16 +6,20 @@
  * Exemptions, deliberately narrow:
  *   - Gate off (GATE_SMS_SEND_WINDOW unset) — dark until Adam flips it.
  *   - Non-SMS channels and internal/admin audiences.
- *   - purpose 'conversational' — a reply into an active thread answers a
- *     customer who just texted us; deferring an instant reply to 8 AM is
- *     worse than answering at 9:30 PM.
- *   - input `conversationalContext: true` — the same rationale for sends
- *     whose purpose must stay stricter than the conversational policy
- *     (e.g. the reschedule-reply confirmation keeps purpose 'appointment'
- *     for its service_contact_authorized trust floor, but IS an immediate
- *     answer to a customer's "1"/"2" reply). Only inbound-reply handlers
- *     may set it; an automation/cron passing it defeats the window and is
- *     a review-blocking bug.
+ *   - input `conversationalContext: true` — an immediate answer to a
+ *     message the customer just sent us; deferring an instant reply to
+ *     8 AM is worse than answering at 9:30 PM. This is EXPLICIT
+ *     inbound-reply provenance, set per call site — purpose
+ *     'conversational' alone is deliberately NOT exempt, because cold
+ *     automated sends (the lead-webhook form auto-reply, the lead-response
+ *     agent) reuse that policy for its consent/trust shape while being
+ *     exactly the machine-initiated night texts the window fences (the
+ *     dropped-call speed-play text has honored this same 8-8 fence since
+ *     before the gate). It also serves sends whose purpose must stay
+ *     stricter than the conversational policy (the reschedule-reply
+ *     confirmation keeps purpose 'appointment' for its trust floor).
+ *     Only inbound-reply handlers may set it; an automation/cron passing
+ *     it defeats the window and is a review-blocking bug.
  *   - resolved identity trust 'admin_operator' — an operator clicking send
  *     (manual SMS, estimate sends, IB drafts) chose the moment on purpose;
  *     the owner works nights and the moratorium is for machine-initiated
@@ -60,6 +64,7 @@ const OPERATOR_ENTRY_POINTS = new Set([
   'admin_estimate_send',
   'admin_estimate_send_booking_link',
   'admin_lawn_service_outline_send',
+  'admin_leads_send_sms',
   'admin_prep_guide_send',
   'admin_pricing_strategy_upsell',
   'admin_project_report_send',
@@ -80,10 +85,10 @@ function checkSendWindow(input, policy, contactState, now = new Date()) {
   if (!isEnabled('smsSendWindow')) return { ok: true };
   if (input.channel !== 'sms') return { ok: true };
   if (!['customer', 'lead'].includes(input.audience)) return { ok: true };
-  if (input.purpose === 'conversational') return { ok: true };
-  // Inbound-reply marker for sends that need a stricter purpose policy than
-  // 'conversational' (see header). Same trust model as operatorInitiated:
-  // only the handler answering a customer's just-received text may set it.
+  // Explicit inbound-reply provenance (see header) — purpose
+  // 'conversational' alone is NOT exempt. Same trust model as
+  // operatorInitiated: only the handler answering a customer's
+  // just-received message may set it.
   if (input.conversationalContext === true) return { ok: true };
   // Explicit operator-origin marker for SHARED services (invoice sends,
   // card requests) whose entry point serves both operator clicks and

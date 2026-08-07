@@ -113,11 +113,20 @@ describe('checkSendWindow validator', () => {
     expect(checkSendWindow(SMS, null, null, MIDDAY_ET)).toEqual({ ok: true });
   });
 
-  test('exemptions: non-sms channel, internal audience, conversational purpose, admin operator', () => {
+  test('exemptions: non-sms channel, internal audience, admin operator', () => {
     expect(checkSendWindow({ ...SMS, channel: 'email' }, null, null, EVENING_ET)).toEqual({ ok: true });
     expect(checkSendWindow({ ...SMS, audience: 'internal' }, null, null, EVENING_ET)).toEqual({ ok: true });
-    expect(checkSendWindow({ ...SMS, purpose: 'conversational' }, null, null, EVENING_ET)).toEqual({ ok: true });
     expect(checkSendWindow({ ...SMS, identityTrustLevel: 'admin_operator' }, null, null, EVENING_ET)).toEqual({ ok: true });
+  });
+
+  test('purpose conversational alone is NOT exempt — explicit inbound-reply provenance is', () => {
+    // Cold automated sends (lead-webhook form auto-reply, lead-response
+    // agent) reuse the conversational policy for its consent/trust shape;
+    // only a send marked as an actual inbound reply passes at night.
+    const cold = checkSendWindow({ ...SMS, purpose: 'conversational', entryPoint: 'lead_webhook_auto_reply' }, null, null, EVENING_ET);
+    expect(cold.ok).toBe(false);
+    expect(cold.code).toBe('QUIET_HOURS_HOLD');
+    expect(checkSendWindow({ ...SMS, purpose: 'conversational', conversationalContext: true }, null, null, EVENING_ET)).toEqual({ ok: true });
   });
 
   test('conversationalContext marker exempts an inbound-reply send that keeps a stricter purpose', () => {
@@ -153,6 +162,14 @@ describe('checkSendWindow validator', () => {
   test('booking side-effect and automation entry points stay fenced', () => {
     for (const entryPoint of ['admin_recurring_appointment_created', 'appointment_reminder_cron', 'invoice_followup_sequence']) {
       const res = checkSendWindow({ ...SMS, entryPoint }, null, null, EVENING_ET);
+      expect(res.ok).toBe(false);
+      expect(res.code).toBe('QUIET_HOURS_HOLD');
+    }
+    // Cold conversational-policy automations stay fenced too (no
+    // inbound-reply provenance): form auto-replies, the lead-response
+    // agent, the quote-wizard booking text.
+    for (const entryPoint of ['lead_webhook_auto_reply', 'lead_response_auto_reply', 'public_quote_booking_sms']) {
+      const res = checkSendWindow({ ...SMS, purpose: 'conversational', entryPoint }, null, null, EVENING_ET);
       expect(res.ok).toBe(false);
       expect(res.code).toBe('QUIET_HOURS_HOLD');
     }

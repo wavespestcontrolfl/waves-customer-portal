@@ -40,6 +40,11 @@ router.post('/send', async (req, res) => {
       expectedCount: Number(req.body?.expectedCount),
       expectedDigest: req.body?.expectedDigest || null,
       actorId: req.technicianId || null,
+      // Authenticated preview→confirm click — the batch SMS leg is exempt
+      // from the 8AM-8PM send window (operator-initiated, not
+      // machine-initiated). Threaded from here, never assumed in the
+      // service, so a future cron caller stays fenced by default.
+      operatorInitiated: true,
     });
     if (!result.ok && result.reason === 'count_drift') {
       return res.status(409).json({ error: `The list is now ${result.count} customers (you previewed ${req.body?.expectedCount}). Preview again to confirm the current list.`, count: result.count });

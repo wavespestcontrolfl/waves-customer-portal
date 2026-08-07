@@ -30,6 +30,11 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   // under the transactional-grade conversational policy with the forwarded
   // consent basis — payment_receipt would hard-require a customerId.
   if (type === 'deposit_receipt') return hasCustomer ? 'payment_receipt' : 'conversational';
+  // Deferred completion texts (service_complete*, service_report_v1*) replay
+  // under the appointment purpose the immediate dispatch send enforced.
+  // Checked BEFORE the billing branch: service_complete_with_invoice would
+  // otherwise match includes('invoice') and replay under the wrong policy.
+  if (type.includes('service_complete') || type.includes('service_report')) return 'appointment';
   if (type.includes('billing') || type.includes('payment') || type.includes('invoice')) return 'billing';
   if (type.includes('review')) return 'review_request';
   if (type.includes('referral')) return 'referral';

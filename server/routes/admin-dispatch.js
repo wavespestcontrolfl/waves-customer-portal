@@ -9663,6 +9663,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && Date.now() - completionSmsAttemptedAt < 10 * 60 * 1000;
     const completionSmsAlreadyHandled = !!recordStructuredNotes.sentSmsBody
       || recordStructuredNotes.completionSmsStatus === 'sent'
+      // 'deferred' = a send-window hold requeued the text on the
+      // scheduled-SMS rail; that queued row owns the obligation, so a
+      // re-completion must not send a second copy.
+      || recordStructuredNotes.completionSmsStatus === 'deferred'
       || completionSmsSendingFresh;
     // The pest-recap path (services/pest-recap.js) writes its own
     // service_records row and claims recap_sms_sent_at when it texts the
@@ -10250,7 +10254,53 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
             sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
-          if (!smsResult.sent) {
+          // Send-window hold: a late completion (catch-up bookkeeping after
+          // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
+          // worker retries a 'blocked' status — so the held text is requeued
+          // on the scheduled-SMS rail and goes out at the window open.
+          // Queued as the plain-SMS body (no MMS attachment): the executor
+          // replays text-only, mirroring this route's own MMS→SMS fallback.
+          // The bundled review link rides inside the queued body, so the
+          // review claim is NOT marked failed on this path. If the enqueue
+          // itself fails, fall through to the ordinary blocked handling.
+          let completionHoldQueued = false;
+          if (!smsResult.sent
+            && smsResult.code === 'QUIET_HOURS_HOLD'
+            && smsResult.deferred
+            && smsResult.nextAllowedAt) {
+            try {
+              const TWILIO_NUMBERS = require('../config/twilio-numbers');
+              await db('sms_log').insert({
+                customer_id: svc.customer_id,
+                direction: 'outbound',
+                from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                to_phone: svc.cust_phone,
+                message_body: sentSmsBody,
+                status: 'scheduled',
+                scheduled_for: new Date(smsResult.nextAllowedAt),
+                message_type: sentSmsType,
+                metadata: JSON.stringify({
+                  entry_point: 'dispatch_completion_deferred',
+                  service_record_id: record.id,
+                  original_block_code: smsResult.code,
+                  refresh_customer_phone: true,
+                }),
+              });
+              completionHoldQueued = true;
+            } catch (queueErr) {
+              logger.error(`[dispatch] Completion SMS requeue failed for record ${record.id}: ${queueErr.message}`);
+            }
+          }
+          if (completionHoldQueued) {
+            Object.assign(smsNotesDelta, {
+              completionSmsStatus: 'deferred',
+              completionSmsDeferredTo: smsResult.nextAllowedAt,
+            });
+            const deferredNotes = { ...sendingNotes, ...smsNotesDelta };
+            await mergeRecordNotesKeys(record.id, smsNotesDelta);
+            record.structured_notes = deferredNotes;
+            logger.info(`[dispatch] Completion SMS for customer ${svc.customer_id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+          } else if (!smsResult.sent) {
             Object.assign(smsNotesDelta, {
               completionSmsStatus: smsResult.blocked ? 'blocked' : 'failed',
               completionSmsError: smsResult.reason || smsResult.code || 'SMS send failed',

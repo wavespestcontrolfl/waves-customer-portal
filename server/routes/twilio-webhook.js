@@ -836,6 +836,10 @@ router.post('/sms', async (req, res) => {
               customerId: customer?.id || null,
               identityTrustLevel: customer ? 'phone_matches_customer' : 'phone_provided_unverified',
               entryPoint: 'twilio_inbound_ai_assistant',
+              // Send-window inbound-reply provenance: this reply answers the
+              // SMS the customer sent seconds ago — the one send class the
+              // window deliberately never defers.
+              conversationalContext: true,
               metadata: { fromNumber: To },
             });
             if (!sendResult.sent) {
