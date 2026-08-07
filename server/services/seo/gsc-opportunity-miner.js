@@ -1894,9 +1894,20 @@ class GscOpportunityMiner {
     // so a transient data gap self-heals on the next mine.
     if (mutateQueue) {
       try {
+        // Allowlist = keys that will actually SURVIVE persistAll's floor —
+        // an out candidate below its floor never reaches the upsert, so
+        // protecting its key would leave the old higher-score row claimable
+        // on a signal that no longer qualifies (mirrors persistAll's
+        // family-aware floor exactly).
+        const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
+        const persistableKeys = out
+          .filter((o) => o.score >= (familyFloorActions.includes(o.action_type)
+            ? minScoreToActFor('new_supporting_blog')
+            : minScoreToActFor(o.action_type)))
+          .map((o) => o.dedupe_key);
         await db('opportunity_queue')
           .where({ bucket: 'listicle_family', status: 'pending' })
-          .whereNotIn('dedupe_key', out.map((o) => o.dedupe_key))
+          .whereNotIn('dedupe_key', persistableKeys)
           .update({ status: 'expired', skip_reason: 'family_signal_gone', updated_at: new Date() });
       } catch (err) {
         logger.warn(`[gsc-opp-miner] listicle_family: stale-family sweep failed: ${err.message}`);

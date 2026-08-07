@@ -1084,7 +1084,10 @@ describe('listicle_family scoring + action mapping', () => {
     // went ineligible / unresolvable / hubless-cityless) expires instead of
     // staying claimable for 14 days (Codex r12).
     expect(mineSrc).toMatch(/skip_reason: 'family_signal_gone'/);
-    expect(mineSrc).toMatch(/whereNotIn\('dedupe_key', out\.map\(\(o\) => o\.dedupe_key\)\)/);
+    expect(mineSrc).toMatch(/whereNotIn\('dedupe_key', persistableKeys\)/);
+    // Allowlist is POST-floor: a below-floor candidate never persists, so
+    // its key must not protect a stale higher-score row from expiry.
+    expect(mineSrc).toMatch(/o\.score >= \(familyFloorActions\.includes\(o\.action_type\)/);
     // Both cleanups touch ONLY pending rows — frozen states stay records.
     expect(mineSrc).toMatch(/status: 'pending',\s*\n\s*action_type: 'new_supporting_blog'/);
     // And both are mutateQueue-guarded: mineAll({ persist: false }) is a
