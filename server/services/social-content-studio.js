@@ -1525,20 +1525,37 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     }
 
     const guid = `${AUTONOMOUS_SOURCE}_${startedAt.toISOString()}`;
-    const publishResult = await SocialMediaService.publishToAll({
-      title: plan.topic,
-      description: plan.service,
-      link: finalPreview.suggestedLink,
-      guid,
-      source: AUTONOMOUS_SOURCE,
-      customContent: finalPreview.drafts,
-      channels: plan.channels,
-      imageUrl,
-      gbpImageUrl,
-      gbpImageBranded: true, // deterministic card render — chrome carries the logo
-      noAiImage: true, // brand card only — never a literal AI image
-      gbpLocationIds: finalPreview.inputs?.locationId ? [finalPreview.inputs.locationId] : [locationForCity(plan.city).id],
-    });
+    // The snapshot gate above rejects cheaply; the lock closes its TOCTOU —
+    // the reconcile cannot stamp the source row between here and the post.
+    const publishOutcome = await publishWithReviewLivenessLock(
+      isReviewRun ? plan.reviewGraphic.googleReviewId : null,
+      () => SocialMediaService.publishToAll({
+        title: plan.topic,
+        description: plan.service,
+        link: finalPreview.suggestedLink,
+        guid,
+        source: AUTONOMOUS_SOURCE,
+        customContent: finalPreview.drafts,
+        channels: plan.channels,
+        imageUrl,
+        gbpImageUrl,
+        gbpImageBranded: true, // deterministic card render — chrome carries the logo
+        noAiImage: true, // brand card only — never a literal AI image
+        gbpLocationIds: finalPreview.inputs?.locationId ? [finalPreview.inputs.locationId] : [locationForCity(plan.city).id],
+      }),
+    );
+    if (publishOutcome.blocked) {
+      const reason = publishOutcome.missing
+        ? 'source Google review no longer exists — testimonial publish blocked'
+        : 'source Google review has been removed from Google — testimonial publish blocked';
+      await updateAutonomousRun(run?.id, {
+        status: 'failed',
+        preview: finalPreview,
+        skipReason: reason,
+      });
+      return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
+    }
+    const publishResult = publishOutcome.result;
 
     const post = await db('social_media_posts')
       .where({ source_guid: guid })
@@ -1605,6 +1622,39 @@ function cityFromLocationId(locationId) {
 // Resolve the publishable variant list for a run preview. Creative-engine runs
 // carry preview.visual.variants; legacy single-card drafts collapse to a
 // one-entry list so the same approve path serves both.
+/**
+ * Serialize a testimonial's liveness decision with the reconcile's stamping
+ * UPDATE. The snapshot gates in runAutonomous/approveAutonomousRun are
+ * TOCTOU: `_reconcileMissingReviews` can stamp the source review between
+ * the read and publishToAll. FOR UPDATE on the source row makes the hourly
+ * claim (an UPDATE on the same row) queue behind the publish, so "checked
+ * live" and "published" are one atomic decision — a stamp that loses the
+ * race lands after commit, where it is a genuinely concurrent removal (the
+ * watchdog alert still fires and stamped rows drop off every surface).
+ * publishFn must not touch google_reviews (it writes social tables on its
+ * own connections); the lock is held for the duration of the external
+ * posting, which only delays the hourly reconcile for that window.
+ * Non-review publishes (no sourceReviewId) pass straight through.
+ */
+async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
+  if (!sourceReviewId || !(await hasTable('google_reviews'))) {
+    return { blocked: false, result: await publishFn() };
+  }
+  let outcome = null;
+  await db.transaction(async (trx) => {
+    const src = await trx('google_reviews')
+      .where({ id: sourceReviewId })
+      .forUpdate()
+      .first();
+    if (!src || src.missing_since) {
+      outcome = { blocked: true, missing: !src };
+      return;
+    }
+    outcome = { blocked: false, result: await publishFn() };
+  });
+  return outcome;
+}
+
 function runVariants(preview = {}) {
   const visual = preview.visual || {};
   if (Array.isArray(visual.variants) && visual.variants.length) return visual.variants;
@@ -1751,8 +1801,10 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
 
     // Nothing left to attempt → assess purely from the record (defensive; a
     // fully-posted run normally finalizes on the attempt that completed it).
-    const publishResult = remainingChannels.length
-      ? await SocialMediaService.publishToAll({
+    // The liveness gate above is a snapshot; the lock closes its TOCTOU
+    // against the reconcile stamping the source review mid-approval.
+    const publishOutcome = remainingChannels.length
+      ? await publishWithReviewLivenessLock(sourceReviewId, () => SocialMediaService.publishToAll({
         title: run.topic || preview.inputs?.topic || 'Waves update',
         description: run.service || preview.inputs?.service || '',
         link: preview.suggestedLink,
@@ -1773,8 +1825,18 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         noAiImage: true, // stored visual only — never a fresh literal AI image
         gbpLocationIds: [gbpLocationId],
         postId: run.social_media_post_id || null,
-      })
-      : { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' };
+      }))
+      : { blocked: false, result: { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' } };
+    if (publishOutcome.blocked) {
+      return {
+        ok: false,
+        status: 409,
+        error: publishOutcome.missing
+          ? 'source Google review no longer exists — testimonial cannot be published'
+          : 'source Google review has been removed from Google — testimonial cannot be published',
+      };
+    }
+    const publishResult = publishOutcome.result;
 
     // A VIDEO approval only finalizes when the video itself posted AND no
     // requested Meta channel is left attempted-but-failed (see

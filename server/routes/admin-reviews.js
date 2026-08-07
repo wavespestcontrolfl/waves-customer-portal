@@ -351,6 +351,14 @@ router.post('/:id/reply', async (req, res, next) => {
       }
 
       if (resourceName) {
+        // Revalidate liveness immediately before the external post — the
+        // hourly reconcile can stamp the row after the snapshot read at the
+        // top of this handler, and Google may still accept replies on a
+        // filtered-but-not-deleted review.
+        const fresh = await db('google_reviews').where({ id: req.params.id }).select('missing_since').first();
+        if (fresh?.missing_since) {
+          return res.status(409).json({ error: 'This review has been removed from Google — replies are disabled.' });
+        }
         try {
           await gbp.replyToReview(resourceName, replyText, review.location_id);
           googlePosted = true;
@@ -370,9 +378,22 @@ router.post('/:id/reply', async (req, res, next) => {
       });
     }
 
-    await db('google_reviews').where({ id: req.params.id }).update({
-      review_reply: replyText, reply_updated_at: db.fn.now(),
-    });
+    // Conditional write, mirroring the IB submit path: the reconcile can
+    // stamp the row at any point after the checks above, and an
+    // unconditional update would record a reply that falsely reports as
+    // visible on Google. Zero rows updated ⇒ the stamp won the race.
+    const updated = await db('google_reviews')
+      .where({ id: req.params.id })
+      .whereNull('missing_since')
+      .update({
+        review_reply: replyText, reply_updated_at: db.fn.now(),
+      });
+    if ((Array.isArray(updated) ? updated.length : updated) === 0) {
+      return res.status(409).json({
+        error: 'This review was removed from Google while replying — the reply was not recorded locally.',
+        googlePosted,
+      });
+    }
 
     await db('activity_log').insert({
       admin_user_id: req.technicianId, action: 'review_replied',
