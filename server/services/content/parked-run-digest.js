@@ -26,8 +26,8 @@
  *
  * Buckets:
  *  - active: every opportunity_queue row at status='pending_review', paired
- *    with its latest non-shadow run (the portal review queue's own read
- *    model) — genuinely awaiting a decision WHATEVER outcome the run
+ *    with its latest run (the portal review queue's own read model) —
+ *    genuinely awaiting a decision WHATEVER outcome the run
  *    finalized with (fail-closed paths park with skipped_gate_fail, not
  *    completed_pending_review, and still route to pending_review).
  *    astro_pr_pending_merge runs are excluded: those were ALREADY approved
@@ -173,28 +173,27 @@ function parkedAt(item) {
   return value ? new Date(value) : null;
 }
 
-function latestDate(...values) {
-  let best = null;
-  for (const value of values) {
-    if (!value) continue;
-    const d = new Date(value);
-    if (!Number.isNaN(d.getTime()) && (!best || d > best)) best = d;
-  }
-  return best;
-}
-
 // When an ACTIVE item became digest-eligible — the moment the row entered
 // its CURRENT review state, not the run's original completion. The
 // named-competitor janitor converts a stuck publish back into an actionable
-// review item by rewriting outcome/skip_reason/updated_at while deliberately
-// preserving the run's old completed_at (autonomous-runner janitor) — dating
-// the converted item to its original approval request would land it behind
-// the watermark and keep the interruption silent until Sunday (Codex r4).
-// run/opp updated_at both stamp that transition; take the latest.
+// review item by rewriting the RUN's outcome/skip_reason/updated_at (both
+// janitor paths bump run.updated_at) while deliberately preserving the old
+// completed_at — dating the converted item by completion would land it
+// behind the watermark and keep the interruption silent until Sunday
+// (Codex r4). opp.updated_at is deliberately NOT consulted when a run
+// exists: the daily miner upsert re-touches pending_review rows (status
+// preserved by its CASE, updated_at = now()), so an unchanged backlog
+// would re-classify as "new" every morning and defeat the watermark.
 function activeParkedAt(run, opp) {
-  return latestDate(run?.updated_at, opp?.updated_at)
-    || (run?.completed_at ? new Date(run.completed_at) : null)
-    || (run?.created_at ? new Date(run.created_at) : null);
+  if (run) {
+    const value = run.updated_at || run.completed_at || run.created_at;
+    return value ? new Date(value) : null;
+  }
+  // Run-less pending_review rows: completed_at is stamped by the review
+  // transition (e.g. the janitor's opportunity path) and never touched by
+  // the miner upsert; created_at as last resort.
+  const value = opp?.completed_at || opp?.created_at;
+  return value ? new Date(value) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -231,9 +230,9 @@ async function advanceWatermark(sentAt) {
 async function loadParkedSet() {
   // ACTIVE — mirror the portal review queue's read model
   // (autonomous-review-queue.listReviewItems): every opportunity sitting at
-  // status='pending_review', paired with its LATEST non-shadow run
-  // (claimed_at desc, the queue's latest-run rule), whatever outcome that
-  // run finalized with. Keying the active set off
+  // status='pending_review', paired with its LATEST run (claimed_at desc,
+  // the queue's exact latest-run rule), whatever outcome that run
+  // finalized with. Keying the active set off
   // outcome='completed_pending_review' alone silently dropped the
   // fail-closed engine paths that park with outcome='skipped_gate_fail'
   // (claims-ledger/guardrails unavailable, refresh-load failures) yet still
@@ -241,13 +240,16 @@ async function loadParkedSet() {
   // (Codex r4).
   const activeOpps = await db('opportunity_queue')
     .where('status', 'pending_review')
-    .orderBy('updated_at', 'asc')
-    .select('id', 'status', 'skip_reason', 'query', 'updated_at');
+    .orderBy('created_at', 'asc')
+    .select('id', 'status', 'skip_reason', 'query', 'completed_at', 'created_at');
   const runsByOpp = new Map();
   if (activeOpps.length) {
+    // Same latest-run selection as the review queue (claimed_at desc, NO
+    // shadow filter) — filtering shadow runs here could pick an OLDER live
+    // run than the one the portal shows and classify the item off stale
+    // state (Codex r4 pre-push audit).
     const runRows = await db('autonomous_runs')
       .whereIn('opportunity_id', activeOpps.map((o) => o.id))
-      .where('shadow_mode', false)
       .orderBy('claimed_at', 'desc')
       .select('id', 'opportunity_id', 'skip_reason', 'reviewer_notes', 'draft_payload', 'created_at', 'completed_at', 'updated_at');
     for (const row of runRows) {

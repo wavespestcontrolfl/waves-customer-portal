@@ -459,14 +459,18 @@ describe('Codex r4: active set mirrors the portal queue; janitor conversions get
     expect(activeParkedAt(run, opp)).toEqual(new Date('2026-08-06T02:00:00Z'));
   });
 
-  test('an opportunity transitioned by the janitor (opp bumped, run stale) also uses the transition time', () => {
+  test("a daily miner re-touch of a pending_review row does NOT re-date the item (opp.updated_at is never consulted when a run exists)", () => {
+    // The miner upsert preserves pending_review via its status CASE but
+    // stamps opportunity_queue.updated_at = now() every morning — using it
+    // would classify the unchanged backlog as "new" daily.
     const run = { completed_at: '2026-08-01T10:00:00Z', created_at: '2026-08-01T09:00:00Z', updated_at: '2026-08-01T10:00:00Z' };
-    const opp = { updated_at: '2026-08-06T02:00:00Z' };
-    expect(activeParkedAt(run, opp)).toEqual(new Date('2026-08-06T02:00:00Z'));
+    const opp = { updated_at: '2026-08-07T08:00:00Z', completed_at: null, created_at: '2026-07-01T00:00:00Z' };
+    expect(activeParkedAt(run, opp)).toEqual(new Date('2026-08-01T10:00:00Z'));
   });
 
-  test('a pending_review opportunity with no run at all still gets a timestamp from the opportunity', () => {
-    expect(activeParkedAt(null, { updated_at: '2026-08-05T10:00:00Z' })).toEqual(new Date('2026-08-05T10:00:00Z'));
+  test('a pending_review opportunity with no run at all dates from its miner-untouched completed_at', () => {
+    expect(activeParkedAt(null, { updated_at: '2026-08-07T08:00:00Z', completed_at: '2026-08-05T10:00:00Z' }))
+      .toEqual(new Date('2026-08-05T10:00:00Z'));
   });
 
   test('source pin: the active set derives from opportunity_queue pending_review state, not a single run outcome', () => {
