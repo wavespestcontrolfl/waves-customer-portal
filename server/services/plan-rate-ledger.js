@@ -83,21 +83,28 @@ async function ledgerTableExists(database) {
 // slicer AND the add-on classifier so they can never disagree.
 function acceptedRecurringBillingLines(estimateData = {}) {
   const { recurringServicesWithSupplements } = require('../routes/estimate-public');
-  const { recurringServiceKey } = require('./estimate-converter');
-  // MERGE containers, never select one (codex #3245 r19): a blob carrying
-  // BOTH raw engineResult.lineItems and mapped result.recurring supplements
-  // must contribute lines from each. Mapped-result rows win duplicate keys
-  // (they carry the post-discount stamps).
+  const { recurringServicesFromEstimateData, recurringServiceKey } = require('./estimate-converter');
+  const byKey = new Map();
+  const add = (line) => {
+    if (!line || typeof line !== 'object') return;
+    const key = recurringServiceKey(line) || `__raw:${String(line?.name || line?.service || byKey.size)}`;
+    if (!byKey.has(key)) byKey.set(key, line);
+  };
+  // The converter's OWN row normalization first (codex #3245 r20): it
+  // consumes every supported row container — recurring.services, nested
+  // result/results shapes, flat estimate_data.services, and raw engine
+  // lineItems (which keep their post-discount stamps). First-add wins, so
+  // these canonical rows beat any rebuilt duplicate below.
+  for (const line of recurringServicesFromEstimateData(estimateData)) add(line);
+  // The acceptance path's supplement reconstruction second (codex r18/r19):
+  // rodent and palm scalar shapes across every result root — the rows the
+  // container normalization above cannot see.
   const roots = [];
   if (estimateData?.result && typeof estimateData.result === 'object') roots.push(estimateData.result);
   if (estimateData?.engineResult && typeof estimateData.engineResult === 'object') roots.push(estimateData.engineResult);
   if (!roots.length) roots.push(estimateData);
-  const byKey = new Map();
   for (const root of roots) {
-    for (const line of recurringServicesWithSupplements(root)) {
-      const key = recurringServiceKey(line) || `__raw:${String(line?.name || line?.service || byKey.size)}`;
-      if (!byKey.has(key)) byKey.set(key, line);
-    }
+    for (const line of recurringServicesWithSupplements(root)) add(line);
   }
   return [...byKey.values()];
 }

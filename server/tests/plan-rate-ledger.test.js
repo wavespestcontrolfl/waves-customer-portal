@@ -631,6 +631,37 @@ describe('zero-priced accepted families (codex r2)', () => {
     expect(slices.lawn_care).toBe(50);
   });
 
+  test('flat services and nested results containers slice too (codex r20)', () => {
+    const flat = estimateFamilySlices({
+      estimateData: {
+        services: [
+          { name: 'Quarterly Pest Control Service', service: 'pest_control', recurring: true, mo: 40 },
+          { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', frequency: 'bimonthly', mo: 50 },
+        ],
+      },
+      monthlyRate: 90,
+    });
+    expect(flat.pest_control).toBe(40);
+    expect(flat.lawn_care).toBe(50);
+    const nested = estimateFamilySlices({
+      estimateData: {
+        result: {
+          results: {
+            recurring: {
+              services: [
+                { name: 'Quarterly Pest Control Service', service: 'pest_control', mo: 40 },
+                { name: 'Monthly Mosquito Control', service: 'mosquito', mo: 30 },
+              ],
+            },
+          },
+        },
+      },
+      monthlyRate: 70,
+    });
+    expect(nested.pest_control).toBe(40);
+    expect(nested.mosquito).toBe(30);
+  });
+
   test('result and engineResult containers MERGE — neither shadows the other (codex r19)', () => {
     const slices = estimateFamilySlices({
       estimateData: {
