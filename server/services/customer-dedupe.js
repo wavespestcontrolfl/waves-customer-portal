@@ -438,7 +438,14 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
 
 // Never repointed: the journal must keep pointing at the historical loser, a
 // dismissal pair must not collapse into a self-pair.
-const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals']);
+// customer_plan_rates is deliberately excluded from the generic FK repoint
+// (codex #3245 r8): the merge never copies customers.monthly_rate (a
+// positive loser rate is an auto-merge blocker; a manual merge drops it),
+// so the loser's per-family attribution must die with the loser too —
+// repointing would import components the winner's scalar knows nothing
+// about (and same-family rows would abort the merge on the unique
+// constraint). The loser's rows are explicitly deleted instead.
+const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates']);
 
 // Above this many rows in one table the journal records count-only instead of
 // per-row ids (an unbounded id list would bloat the journal row); the revert
@@ -1020,6 +1027,31 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         }
       }
     }
+    // The loser's plan-rate components die with the loser (codex #3245 r8
+    // — excluded from the FK sweep above): the merge never copies
+    // customers.monthly_rate, so importing the loser's attribution would
+    // desync the winner's ledger from their scalar. The FULL rows are
+    // journaled first (local codex P0) so the merge UNDO can rebuild them
+    // — an undone multi-plan customer with a positive scalar and an empty
+    // ledger would hand their next gate-on re-quote the whole-scalar
+    // replace. Savepoint-confined: a missing table (pre-migration env)
+    // must not poison the merge.
+    let loserPlanRateRows = [];
+    try {
+      await trx.transaction(async (sp) => {
+        if (await sp.schema.hasTable('customer_plan_rates')) {
+          loserPlanRateRows = await sp('customer_plan_rates')
+            .where({ customer_id: loserId })
+            .select('family_key', 'monthly_rate', 'source', 'source_estimate_id');
+          const dropped = await sp('customer_plan_rates').where({ customer_id: loserId }).del();
+          if (dropped) repointed['customer_plan_rates.dropped_with_loser'] = dropped;
+        }
+      });
+    } catch (planRateErr) {
+      loserPlanRateRows = [];
+      logger.warn(`[customer-dedupe] loser plan-rate cleanup failed (merge continues): ${planRateErr.message}`);
+    }
+
     // Normalize payment-method defaults now that the loser's cards moved:
     // the winner's own pre-merge default stays the ONE default/autopay card.
     if (winnerHadDefault && loserCardIds.length) {
@@ -1404,6 +1436,9 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       repointed_ids: JSON.stringify({
         version: 1,
         tables: repointedIds,
+        // Deleted loser plan-rate components, restored verbatim on undo
+        // (local codex P0 on #3245). No PII — family keys and amounts only.
+        plan_rate_rows: loserPlanRateRows,
         stripe_transferred_id: backfills.stripe_customer_id || null,
         // Source of the transferred id: null (nothing transferred),
         // 'loser' (the loser's row named it — the classic transfer), or
@@ -3630,6 +3665,34 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // half-restoring the identity.
       if (!(e && e.code === '23505')) throw e;
       refuse("The merged-away customer's email address is now used by another live customer — restoring the account with it would leave its communications targeting someone else's mailbox; resolve the address conflict first, then revert");
+    }
+
+    // Rebuild the loser's plan-rate components deleted by the merge (local
+    // codex P0 on #3245): the restored customer keeps their positive
+    // scalar, so an empty ledger would hand their next gate-on re-quote
+    // the whole-scalar replace. Journaled rows restore verbatim; a journal
+    // predating the capture restores nothing (the accept-time review alert
+    // covers those customers). Fail-closed: a restore failure aborts the
+    // undo rather than half-restoring billing state.
+    const planRateRows = Array.isArray(recorded.plan_rate_rows) ? recorded.plan_rate_rows : [];
+    if (planRateRows.length) {
+      await trx.transaction(async (sp) => {
+        if (!(await sp.schema.hasTable('customer_plan_rates'))) return;
+        for (const row of planRateRows) {
+          await sp('customer_plan_rates')
+            .insert({
+              customer_id: loserId,
+              family_key: row.family_key,
+              monthly_rate: row.monthly_rate,
+              source: row.source || 'merge_undo',
+              source_estimate_id: row.source_estimate_id || null,
+              effective_at: new Date(),
+              updated_at: new Date(),
+            })
+            .onConflict(['customer_id', 'family_key'])
+            .merge({ monthly_rate: row.monthly_rate, updated_at: new Date() });
+        }
+      });
     }
 
     await trx('customer_merge_journal').where({ id: journalId }).update({

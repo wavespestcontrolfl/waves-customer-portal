@@ -40,12 +40,20 @@ router.get('/', async (req, res, next) => {
     // exclusion can't be a SQL filter without casting arbitrary payment metadata
     // to jsonb table-wide). Payer payments are a small minority, so a padded
     // buffer fills the page in realistic cases.
+    let payerLookupFailed = false;
     const payerInvRows = await db('invoices')
       .where({ customer_id: req.customerId })
       .whereNotNull('payer_id')
-      .select('id')
-      .catch(() => []);
+      .select('id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
+      .catch(() => { payerLookupFailed = true; return []; });
     const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
+    // Payer ownership must be recognized through EVERY linkage the receipt
+    // resolution below understands — an id-only filter let alias / PaymentIntent
+    // / invoice-number-linked payer rows through, and their hosted Stripe
+    // receipt exposes the AP payer's identity to the homeowner (pre-push P0).
+    const payerIntentIds = new Set(payerInvRows.map((r) => r.stripe_payment_intent_id).filter(Boolean));
+    const payerChargeIds = new Set(payerInvRows.map((r) => r.stripe_charge_id).filter(Boolean));
+    const payerInvoiceNumbers = new Set(payerInvRows.map((r) => r.invoice_number).filter(Boolean));
     const invoiceIdOf = (p) => {
       try {
         const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
@@ -54,9 +62,24 @@ router.get('/', async (req, res, next) => {
         return null;
       }
     };
+    const aliasInvoiceIdOf = (p) => {
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        const alias = m?.dispute_invoice_id || m?.waves_invoice_id;
+        return alias != null ? String(alias) : null;
+      } catch { return null; }
+    };
+    const descriptionInvoiceNumberOf = (p) => {
+      const m = /^Invoice\s+([A-Za-z0-9-]+)\s+—/.exec(String(p.description || ''));
+      return m ? m[1] : null;
+    };
     const isPayerLinked = (p) => {
-      const invId = invoiceIdOf(p);
-      return !!(invId && payerInvoiceIds.has(invId));
+      const invId = invoiceIdOf(p) || aliasInvoiceIdOf(p);
+      if (invId && payerInvoiceIds.has(invId)) return true;
+      if (p.stripe_payment_intent_id && payerIntentIds.has(p.stripe_payment_intent_id)) return true;
+      if (p.stripe_charge_id && payerChargeIds.has(p.stripe_charge_id)) return true;
+      const num = descriptionInvoiceNumberOf(p);
+      return !!(num && payerInvoiceNumbers.has(num));
     };
     let total;
     if (payerInvoiceIds.size === 0) {
@@ -68,7 +91,11 @@ router.get('/', async (req, res, next) => {
     } else {
       const rows = await db('payments')
         .where({ customer_id: req.customerId })
-        .select('metadata');
+        // Every field isPayerLinked reads — metadata alone under-counts the
+        // exclusion for rows payer-linked only through their PaymentIntent or
+        // invoice-number description, leaving `total` above the number of
+        // rows pagination will ever serve (pre-push P1).
+        .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description');
       total = rows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
     }
 
@@ -121,6 +148,90 @@ router.get('/', async (req, res, next) => {
       return (p.description || '').includes('WaveGuard Monthly');
     };
 
+    // Receipt links per payment row. Two sources, in preference order:
+    //   1. The Waves receipt — invoice.token drives the permanent
+    //      /receipt/:token page + its PDF (receipt-v2). Only for invoices the
+    //      PDF route will actually serve (paid/refunded), so the portal never
+    //      offers a download that 409s.
+    //   2. Stripe's hosted receipt — recurring autopay rows carry no
+    //      invoice_id but do stamp metadata.stripe_receipt_url (the same link
+    //      the payment-success SMS/email uses). View-only, no PDF.
+    // Customer-scoped lookup: a token is only ever returned for an invoice
+    // belonging to the requesting customer.
+    // invoiceIdOf is already defined above (payer-link filtering) — reuse it.
+    const stripeReceiptOf = (p) => {
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        return m?.stripe_receipt_url || p.receipt_url || null;
+      } catch { return p.receipt_url || null; }
+    };
+    // Invoice resolution mirrors the canonical webhook resolver
+    // (stripe-webhook.js): metadata.invoice_id, then the dispute/legacy
+    // aliases, then the payment's Stripe PaymentIntent matched against
+    // invoices.stripe_payment_intent_id — the last one is what rescues
+    // self-pay cash/check/Zelle rows, which admin-invoices.js writes with no
+    // metadata at all and which would otherwise show no Waves receipt.
+    const anyInvoiceIdOf = (p) => invoiceIdOf(p) || aliasInvoiceIdOf(p);
+    // Manual self-pay rows (cash/check/Zelle) are written with NEITHER
+    // metadata nor a PaymentIntent — admin-invoices.js only stamps metadata
+    // for payer-billed or credit-applied invoices. Their description is
+    // deterministic though: `Invoice <number> — <method>`, so the invoice
+    // number is the only link back and the receipt would otherwise never
+    // appear on a cash/check payment (codex r2 P1).
+    const invoiceNumberOf = descriptionInvoiceNumberOf;
+    // Same UUID shape-filter the balance path already applies below: historic
+    // rows can carry a non-UUID metadata.invoice_id, and invoices.id is a uuid
+    // column — an unfiltered whereIn makes Postgres throw on the cast, and the
+    // catch would then leave EVERY receipt link null (codex r3 P2).
+    const RECEIPT_UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const invoiceIds = [...new Set(visiblePayments.map(anyInvoiceIdOf).filter(Boolean))]
+      .filter((id) => RECEIPT_UUID_SHAPE.test(id));
+    const intentIds = [...new Set(visiblePayments.map(p => p.stripe_payment_intent_id).filter(Boolean))];
+    // Historical reconciled rows can be bound to their invoice ONLY through
+    // payments.stripe_charge_id ↔ invoices.stripe_charge_id — the canonical
+    // webhook resolver and receipt-v2's payment lookup both honor it, so the
+    // billing history must too or those rows show a Stripe link (or nothing)
+    // instead of the permanent Waves receipt (codex r7 P1).
+    const chargeIds = [...new Set(visiblePayments.map(p => p.stripe_charge_id).filter(Boolean))];
+    const invoiceNumbers = [...new Set(visiblePayments.map(invoiceNumberOf).filter(Boolean))];
+    const receiptTokenByInvoiceId = new Map();
+    const receiptTokenByIntentId = new Map();
+    const receiptTokenByChargeId = new Map();
+    const receiptTokenByNumber = new Map();
+    if (invoiceIds.length || intentIds.length || chargeIds.length || invoiceNumbers.length) {
+      try {
+        const invoiceRows = await db('invoices')
+          .where({ customer_id: req.customerId })
+          // A payer-billed invoice still hangs off the homeowner's customer
+          // row, and its receipt is a PERMANENT bearer token exposing the AP
+          // payer's billing identity. The payment-history payer filter above
+          // only catches rows linked by metadata.invoice_id, so the alias /
+          // PaymentIntent / invoice-number paths added here would slip past
+          // it — exclude payer-billed invoices outright (pre-push P0).
+          .whereNull('payer_id')
+          .whereIn('status', ['paid', 'refunded'])
+          .where((qb) => {
+            if (invoiceIds.length) qb.orWhereIn('id', invoiceIds);
+            if (intentIds.length) qb.orWhereIn('stripe_payment_intent_id', intentIds);
+            if (chargeIds.length) qb.orWhereIn('stripe_charge_id', chargeIds);
+            if (invoiceNumbers.length) qb.orWhereIn('invoice_number', invoiceNumbers);
+          })
+          .select('id', 'token', 'invoice_number', 'stripe_payment_intent_id', 'stripe_charge_id');
+        invoiceRows.forEach((row) => {
+          if (!row.token) return;
+          const entry = { token: row.token, invoiceNumber: row.invoice_number };
+          receiptTokenByInvoiceId.set(row.id, entry);
+          if (row.stripe_payment_intent_id) receiptTokenByIntentId.set(row.stripe_payment_intent_id, entry);
+          if (row.stripe_charge_id) receiptTokenByChargeId.set(row.stripe_charge_id, entry);
+          if (row.invoice_number) receiptTokenByNumber.set(row.invoice_number, entry);
+        });
+      } catch (err) {
+        // Best-effort: a receipt-link lookup failure must not break the
+        // payment history itself.
+        logger.warn(`[billing] receipt token lookup failed for customer ${req.customerId}: ${err.message}`);
+      }
+    }
+
     res.json({
       payments: visiblePayments.map(p => ({
         id: p.id,
@@ -139,6 +250,33 @@ router.get('/', async (req, res, next) => {
         stripePaymentIntentId: p.stripe_payment_intent_id || null,
         refundAmount: p.refund_amount ? parseFloat(p.refund_amount) : null,
         refundStatus: p.refund_status || null,
+        // Receipt surfaces (see the resolution block above). All three are
+        // null when this payment has no retrievable receipt — the row simply
+        // renders no receipt action.
+        ...(() => {
+          // A FAILED attempt can carry the same metadata.invoice_id as the
+          // retry that later succeeded (stripe.js persists failed saved-card
+          // attempts with it). Attaching the invoice receipt to that row would
+          // show a receipt beside a FAILED badge for money this row never
+          // took — only settled rows get one (codex r2 P1).
+          // Fail closed: if payer ownership couldn't be resolved we cannot
+          // prove this row is self-pay, so no receipt link is emitted.
+          const settled = !payerLookupFailed
+            && ['paid', 'processing', 'refunded'].includes(String(p.status || '').toLowerCase());
+          const inv = !settled ? null : (
+            receiptTokenByInvoiceId.get(anyInvoiceIdOf(p))
+            || (p.stripe_payment_intent_id ? receiptTokenByIntentId.get(p.stripe_payment_intent_id) : null)
+            || (p.stripe_charge_id ? receiptTokenByChargeId.get(p.stripe_charge_id) : null)
+            || receiptTokenByNumber.get(invoiceNumberOf(p))
+          );
+          const stripeReceiptUrl = stripeReceiptOf(p);
+          return {
+            receiptUrl: inv ? `/receipt/${inv.token}` : null,
+            receiptPdfUrl: inv ? `/api/receipt/${inv.token}/pdf` : null,
+            receiptNumber: inv?.invoiceNumber || null,
+            stripeReceiptUrl: (inv || !settled) ? null : stripeReceiptUrl,
+          };
+        })(),
       })),
       total,
       limit: requestedLimit,

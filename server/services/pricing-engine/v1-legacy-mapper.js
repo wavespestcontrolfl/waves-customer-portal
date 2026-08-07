@@ -464,6 +464,7 @@ function mapV1ToLegacyShape(v1Result) {
         costFloorAnnual: t.costFloorAnnual ?? null,
         programMinimumApplied: !!t.programMinimumApplied,
         programMinimumMonthly: t.programMinimumMonthly ?? null,
+        bermudaSuppressionPerApp: t.bermudaSuppressionPerApp ?? null,
         margin: t.costFloorDetails && Number(t.annual) > 0
           ? Math.round((1 - t.costFloorDetails.annualCost / t.annual) * 1000) / 1000
           : null,
@@ -491,6 +492,14 @@ function mapV1ToLegacyShape(v1Result) {
       costFloorApplied: !!lawnLI.costFloorApplied,
       programMinimumApplied: !!lawnLI.programMinimumApplied,
       programMinimumMonthly: lawnLI.programMinimumMonthly ?? null,
+      // Cadence-INDEPENDENT provenance only: the per-app adder is identical on
+      // every tier, while an annual figure stamped for the generated tier goes
+      // stale when the customer accepts a different cadence
+      // (applySelectedLawnTierToEstimateData never rewrites lawnMeta). Annual
+      // is always perApp x the accepted tier's visits.
+      bermudaSuppression: lawnLI.bermudaSuppression
+        ? { perApp: lawnLI.bermudaSuppression.perApp }
+        : null,
       costs: lawnLI.costs || null,
       margin: lawnLI.margin ?? null,
     };
@@ -664,6 +673,12 @@ function mapV1ToLegacyShape(v1Result) {
       ...measurementMetadataFields(li), ...extra,
     });
   };
+  // Name stays the canonical 'Lawn Care' even with the bermuda-suppression
+  // adder: this string becomes scheduled_services.service_type on acceptance
+  // and the lawn completion-profile fallback resolves by EXACT catalog name
+  // (pre-push codex P1 — a synthetic name would drop completed visits into
+  // the generic flow). The add-on travels as structured metadata:
+  // R.lawnMeta.bermudaSuppression + per-tier prov.bermudaSuppressionPerApp.
   svcAdd('Lawn Care', lawnLI, {
     service: 'lawn_care',
     discountable: true,
@@ -1154,4 +1169,29 @@ function mapV1ToLegacyShape(v1Result) {
   };
 }
 
-module.exports = { mapV1ToLegacyShape };
+// Does a persisted estimate carry the bermuda-suppression add-on? Checked at
+// the SEND and ACCEPT boundaries: a gate-on quote saved before the gate went
+// off would otherwise serve its stored v1-shaped rows without ever re-entering
+// priceLawnCare, letting a disabled add-on be published/accepted/billed
+// (codex #3272 r2). All three persisted carriers are checked — the replayable
+// request, the raw engine inputs, and the mapped result metadata (this module
+// defines that shape, which is why the detector lives here — several route
+// tests jest.mock admin-estimate-persistence with partial factories, so the
+// detector must not ride that module).
+function estimateDataCarriesBermudaSuppression(estimateDataRaw) {
+  let d = estimateDataRaw;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch (_) { return false; }
+  }
+  if (!d || typeof d !== 'object') return false;
+  return d.engineRequest?.options?.bermudaSuppression === true
+    || d.engineInputs?.services?.lawn?.bermudaSuppression === true
+    // The mapped envelope nests the meta at result.results.lawnMeta (the
+    // `results: R` wrapper above — codex #3272 r4 caught the flat path
+    // checking a level that doesn't exist); the flat variant is kept for
+    // callers holding a bare R.
+    || !!d.result?.results?.lawnMeta?.bermudaSuppression
+    || !!d.result?.lawnMeta?.bermudaSuppression;
+}
+
+module.exports = { mapV1ToLegacyShape, estimateDataCarriesBermudaSuppression };

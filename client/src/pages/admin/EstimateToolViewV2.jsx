@@ -556,6 +556,16 @@ const RODENT_GUARANTEE_ELIGIBILITY_KEYS = [
   "rgNoActivityAfterFinalCheck",
 ];
 
+// Per-job eligibility confirmations that must never survive a property/
+// customer identity change or a "next estimate" reset: the rodent-guarantee
+// flags plus the bermuda-suppression add-on (its cultivar / season / turf-
+// stress / %-infestation eligibility is verified per lawn, never carried to
+// another property).
+const PER_JOB_ELIGIBILITY_KEYS = [
+  ...RODENT_GUARANTEE_ELIGIBILITY_KEYS,
+  "bermudaSuppression",
+];
+
 const MOSQUITO_PROTOCOL_STEPS = [
   "Inspect shaded foliage, fence lines, lanai perimeter, pool cage edges, drains, planters, and any standing-water source before treatment.",
   "Use a gas-powered backpack sprayer for a directed barrier application to mosquito resting zones. Keep applications off blooms and avoid pollinator activity windows.",
@@ -2170,6 +2180,7 @@ export default function EstimateToolViewV2({
     roachFeeOverride: "",
     standaloneRoachFeeOverride: "",
     lawnFreq: "9",
+    bermudaSuppression: false,
     measuredTurfSf: "",
     pestFreq: "4",
     plugArea: "",
@@ -2358,13 +2369,15 @@ export default function EstimateToolViewV2({
     initialServiceInterest,
   ]);
 
-  // Rodent-guarantee eligibility confirmations are per-job. A rep can change the
+  // Per-job eligibility confirmations (rodent-guarantee flags + the bermuda-
+  // suppression add-on) never survive an identity change. A rep can change the
   // property/customer identity through many paths (prefill props, address
   // autocomplete, property lookup, customer search, manual edits) that each call
   // setForm directly, so enforce the reset centrally: whenever the address or
-  // customer identity changes, drop the four rg* flags so the guarantee can't be
-  // re-priced for a new property without fresh confirmation. (toggle() still
-  // clears them when the guarantee is switched off; nextEstimate resets too.)
+  // customer identity changes, drop the flags so neither the guarantee nor the
+  // cultivar/season-gated suppression program can be re-priced for a new
+  // property without fresh confirmation. (toggle() still clears the rg* flags
+  // when the guarantee is switched off; nextEstimate resets everything.)
   const rgIdentityKey = `${form.address || ""}|${form.customerId || ""}|${form.customerName || ""}|${form.customerEmail || ""}`;
   const rgIdentityRef = useRef(rgIdentityKey);
   useEffect(() => {
@@ -2372,10 +2385,10 @@ export default function EstimateToolViewV2({
     rgIdentityRef.current = rgIdentityKey;
     // Only act when confirmations were actually set, so a plain address/contact
     // edit on a non-guarantee estimate never needlessly wipes a valid quote.
-    if (!RODENT_GUARANTEE_ELIGIBILITY_KEYS.some((k) => form[k])) return;
+    if (!PER_JOB_ELIGIBILITY_KEYS.some((k) => form[k])) return;
     setForm((f) => {
       const next = { ...f };
-      for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
+      for (const k of PER_JOB_ELIGIBILITY_KEYS) next[k] = false;
       return next;
     });
     // The generated estimate baked the (now-reset) flags into its engineRequest;
@@ -2384,6 +2397,16 @@ export default function EstimateToolViewV2({
     setSavedId(null);
     setSavedViewUrl(null);
   }, [rgIdentityKey, form]);
+
+  // Leaving the St. Augustine track clears the suppression confirmation too —
+  // hiding the checkbox alone would let a track round-trip restore it checked
+  // and price the add-on without fresh cultivar/season verification (same
+  // per-job rule as the lawn-deselect / identity / next-estimate resets).
+  useEffect(() => {
+    if (form.grassType !== "st_augustine" && form.bermudaSuppression) {
+      setForm((f) => ({ ...f, bermudaSuppression: false }));
+    }
+  }, [form.grassType, form.bermudaSuppression]);
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
@@ -2643,6 +2666,93 @@ export default function EstimateToolViewV2({
   const [editMode, setEditMode] = useState(null);
   const [editLoadError, setEditLoadError] = useState(null);
 
+  // Multi-property group: anchor id set when the operator chains "Add another
+  // property" off a saved estimate (the next save joins the anchor's group via
+  // groupWithEstimateId), plus the sibling list the group strip renders.
+  const [groupAnchorId, setGroupAnchorId] = useState(null);
+  const [groupEstimates, setGroupEstimates] = useState([]);
+  const groupSourceId = savedId || editMode?.id || groupAnchorId;
+  useEffect(() => {
+    if (!groupSourceId) {
+      setGroupEstimates([]);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/admin/estimates/${groupSourceId}/group`, {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          },
+        });
+        if (!r.ok) return;
+        const d = await r.json().catch(() => ({}));
+        if (!cancelled) {
+          setGroupEstimates(Array.isArray(d.estimates) ? d.estimates : []);
+        }
+      } catch {
+        /* the group strip is informational — never block the builder */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [groupSourceId]);
+
+  // Call-intake tie-in: when this estimate is being built from a lead whose
+  // call extraction captured ADDITIONAL properties ("my home and my rental"),
+  // surface them so the operator can chain grouped estimates instead of the
+  // extra addresses dying in leads.extracted_data.
+  const [leadAdditionalProperties, setLeadAdditionalProperties] = useState([]);
+  const activeLeadId = form.leadId || initialLeadId || "";
+  useEffect(() => {
+    if (!activeLeadId) {
+      // Mid-group chaining drops form.leadId (the sibling draft must not
+      // re-link the lead), but the extracted address list must survive so a
+      // 3+ property call can keep chaining (codex #3244 r3). Only a true
+      // context reset (no group in progress) clears it.
+      if (!groupAnchorId) setLeadAdditionalProperties([]);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/admin/leads/${activeLeadId}`, {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          },
+        });
+        if (!r.ok) return;
+        const d = await r.json().catch(() => ({}));
+        let extracted = d?.lead?.extracted_data;
+        if (typeof extracted === "string") {
+          try {
+            extracted = JSON.parse(extracted);
+          } catch {
+            extracted = null;
+          }
+        }
+        const list = Array.isArray(extracted?.additional_properties)
+          ? extracted.additional_properties.filter(
+            (p) => p && String(p.address_line1 || "").trim(),
+          )
+          : [];
+        if (!cancelled) setLeadAdditionalProperties(list);
+      } catch {
+        /* informational only — never block the builder */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // groupAnchorId is a dependency so a group RESET (anchor cleared with no
+    // lead active) reruns the empty-ID branch and clears the extracted list —
+    // otherwise a previous lead's addresses could chain onto the next
+    // customer's group (codex #3244 r4).
+  }, [activeLeadId, groupAnchorId]);
+
   useEffect(() => {
     if (!editEstimateId) return undefined;
     let cancelled = false;
@@ -2730,6 +2840,7 @@ export default function EstimateToolViewV2({
     setSavedId(null);
     setSavedViewUrl(null);
     setPriceRecomputeNotice(null);
+    setGroupAnchorId(null);
   }
 
   const set = useCallback((key, val) => {
@@ -2782,6 +2893,12 @@ export default function EstimateToolViewV2({
       // they can't be silently reused if it's re-enabled for a different scope.
       if (key === "svcRodentGuarantee" && f.svcRodentGuarantee) {
         for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
+      }
+      // Same per-job rule for the bermuda-suppression confirmation: deselecting
+      // Lawn Care clears it, so reselecting never restores a checked add-on
+      // without fresh verification.
+      if (key === "svcLawn" && f.svcLawn) {
+        next.bermudaSuppression = false;
       }
       if (key === "svcInjection" && !f.svcInjection && String(f.palmTreatmentCount || "").trim() === "") {
         next.palmTreatmentCount = f.palmCount || "";
@@ -3117,6 +3234,9 @@ export default function EstimateToolViewV2({
     setExistingCustomerMatch(null);
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
+    // A fresh lead/customer prefill is a new job — never chain it into a
+    // previous customer's multi-property group.
+    setGroupAnchorId(null);
   }, [
     initialAddress,
     initialCustomerEmail,
@@ -3138,6 +3258,27 @@ export default function EstimateToolViewV2({
   // the choice, so the save-time recompute check sees no drift to warn about
   // (codex P1). Fail closed: null/false hides the control entirely.
   const [termiteRentalAvailable, setTermiteRentalAvailable] = useState(false);
+  // Bermuda-suppression add-on availability (GATE_BERMUDA_SUPPRESSION, read
+  // at request time server-side). Explicit true only — 404 / transport
+  // failure / older server all keep the option hidden rather than offering
+  // a control the engine would reject with a 400.
+  const [bermudaSuppressionAvailable, setBermudaSuppressionAvailable] = useState(false);
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const r = await adminFetch("/admin/pricing-config/lawn_pricing_v2");
+        if (!r.ok) return;
+        const row = await r.json();
+        if (active) setBermudaSuppressionAvailable(row?.subFeaturesAvailable?.bermudaSuppression === true);
+      } catch {
+        /* ignore — stays unavailable */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
   useEffect(() => {
     (async () => {
       try {
@@ -3239,6 +3380,54 @@ export default function EstimateToolViewV2({
       manualDiscountValue: isCustomDiscountTemplate(d) ? "" : String(d.amount || 0),
       manualDiscountLabel: d.name,
     }));
+  }
+
+  // "Add another property": chain a sibling estimate for the same customer —
+  // keeps the contact identity, clears the property/services/quote, and links
+  // the next save into the anchor's group (groupWithEstimateId). The catalog
+  // Multi-Home Discount is pre-selected on the new draft (owner decision
+  // 2026-08-06: the 10% applies to EVERY property in a multi-property group —
+  // add it to the first estimate too via Edit if it was saved without one).
+  // The lead link is NOT carried over: a lead attaches to one estimate.
+  function addAnotherProperty(prefill = {}) {
+    const anchorId = savedId || editMode?.id;
+    if (!anchorId) return;
+    setGroupAnchorId(anchorId);
+    setEditMode(null);
+    setEditLoadError(null);
+    const multiHome = discountPresets.find((x) => x.discount_key === "multi_home");
+    setForm((f) => ({
+      ...buildDefaultEstimateForm({
+        customerId: f.customerId,
+        customerName: f.customerName,
+        customerPhone: f.customerPhone,
+        customerEmail: f.customerEmail,
+        address: prefill.address || "",
+      }),
+      // Account-level facts survive the property reset (codex #3244 r7):
+      // the recurring-customer 15% one-time perk belongs to the PERSON —
+      // resetting it silently overcharges a member's second property, and
+      // the new address's lookup can't rediscover membership keyed to the
+      // primary address.
+      isRecurringCustomer: f.isRecurringCustomer,
+      ...(multiHome
+        ? {
+          manualDiscountPreset: "multi_home",
+          manualDiscountType: manualDiscountTypeForCatalogRow(multiHome),
+          manualDiscountValue: String(multiHome.amount || 0),
+          manualDiscountLabel: multiHome.name,
+        }
+        : {}),
+    }));
+    setEnrichedProfile(null);
+    setSatelliteData(null);
+    setSatelliteStatus({ type: "", msg: "" });
+    setLookupStatus({ type: "", msg: "" });
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+    setPriceRecomputeNotice(null);
+    setShowSendForm(false);
   }
 
   function toggleServiceSpecificDiscount(key) {
@@ -3786,6 +3975,20 @@ export default function EstimateToolViewV2({
       const options = {
         grassType: form.grassType || "st_augustine",
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
+        // Availability gates only the CHECKBOX (new selections); a selection
+        // already in the form — e.g. seeded from a saved estimate's inputs
+        // while the availability probe is still in flight — is ALWAYS
+        // forwarded, and the server's live gate rejects it loudly if off.
+        // Silently dropping it here priced an ordinary lawn ladder under a
+        // checked box (codex #3272 r2). Commercial estimates are excluded:
+        // the engine's commercial branch ignores the option, so forwarding
+        // it would stamp a suppression-bearing engineRequest onto an
+        // ordinary commercial quote and falsely trip the send/accept gate
+        // later (codex #3272 r5).
+        ...(form.svcLawn && form.grassType === "st_augustine" && form.bermudaSuppression
+          && !isCommercialEstimateInput(form)
+          ? { bermudaSuppression: true }
+          : {}),
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
         manualDiscount,
         serviceSpecificDiscounts,
@@ -4231,6 +4434,12 @@ export default function EstimateToolViewV2({
         satelliteUrl: satelliteData?.imageUrl || null,
         showOneTimeOption: !!form.showOneTimeOption,
         billByInvoice: !!form.billByInvoice,
+        // Multi-property chain: a create started via "Add another property"
+        // joins (or starts) the anchor estimate's group server-side. Never
+        // sent on a revise — the row keeps its stored group linkage.
+        ...(!isEditRevision && groupAnchorId
+          ? { groupWithEstimateId: groupAnchorId }
+          : {}),
       };
       // Edit mode publishes on save (same id + token — the customer's link
       // starts showing the updated quote), so a server-side reprice must be
@@ -4397,10 +4606,18 @@ export default function EstimateToolViewV2({
               ? "Email sent"
               : `Email failed: ${d.channels.email.error}`,
           );
+        if (d.groupPublicationFailures > 0) {
+          parts.push(
+            `${d.groupPublicationFailures} grouped propert${d.groupPublicationFailures === 1 ? "y" : "ies"} could NOT be published — they were returned to unsent; re-send them so the customer's link shows every property`,
+          );
+        }
         const anyFail =
           (d.channels.sms && !d.channels.sms.ok) ||
-          (d.channels.email && !d.channels.email.ok);
+          (d.channels.email && !d.channels.email.ok) ||
+          d.groupPublicationFailures > 0;
         alert((anyFail ? "Send had issues: " : "Sent: ") + parts.join(" / "));
+      } else if (d.groupPublicationFailures > 0) {
+        alert(`Estimate sent via ${label}, but ${d.groupPublicationFailures} grouped propert${d.groupPublicationFailures === 1 ? "y" : "ies"} could NOT be published — re-send them so the customer's link shows every property.`);
       } else {
         alert(`Estimate sent via ${label}!`);
       }
@@ -4411,6 +4628,11 @@ export default function EstimateToolViewV2({
   }
 
   function nextEstimate() {
+    // A fresh estimate is OUTSIDE any group build: a stale anchor would make
+    // the next unrelated save carry groupWithEstimateId and 400 on the
+    // same-customer guard (codex #3244 r5). Clearing it also lets the
+    // intake-list effect clear extracted addresses.
+    setGroupAnchorId(null);
     setForm((f) => ({
       ...f,
       address: "",
@@ -4506,7 +4728,7 @@ export default function EstimateToolViewV2({
       _boracareSqftAuto: false,
       _preslabSqftAuto: false,
       // Guarantee eligibility is per-job; the next property must re-confirm.
-      ...Object.fromEntries(RODENT_GUARANTEE_ELIGIBILITY_KEYS.map((k) => [k, false])),
+      ...Object.fromEntries(PER_JOB_ELIGIBILITY_KEYS.map((k) => [k, false])),
     }));
     // Starting the next customer's quote ends any in-place edit — otherwise
     // Save changes would still PUT the new quote over the estimate that was
@@ -4989,6 +5211,122 @@ export default function EstimateToolViewV2({
               Exit edit mode
             </Button>
           </div>
+        )}
+        {(groupEstimates.length > 1 || groupAnchorId) && (
+          <Card className="p-4 mb-5">
+            <PanelTitle description="One customer, several service addresses. Sending any estimate in the group delivers a single link that shows every property; each is accepted on its own.">
+              Multi-Property Group
+            </PanelTitle>
+            <div className="flex flex-col">
+              {groupEstimates.map((g) => (
+                <div
+                  key={g.id}
+                  className="flex items-center gap-3 py-2 border-b-hairline border-zinc-200 last:border-b-0"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-14 text-zinc-900 truncate">
+                      {g.address || "(no address)"}
+                    </div>
+                    <div className="text-12 text-ink-secondary">
+                      {g.monthlyTotal != null && g.monthlyTotal > 0
+                        ? `$${Number(g.monthlyTotal).toFixed(2)}/mo`
+                        : g.onetimeTotal != null && g.onetimeTotal > 0
+                          ? `$${Number(g.onetimeTotal).toFixed(2)} one-time`
+                          : "no total yet"}
+                    </div>
+                  </div>
+                  <Badge>{g.status}</Badge>
+                  {editMode?.id === g.id || savedId === g.id ? (
+                    <span className="text-12 text-ink-secondary">
+                      on screen
+                    </span>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        navigate(`/admin/estimates?editEstimateId=${g.id}`)
+                      }
+                    >
+                      Edit
+                    </Button>
+                  )}
+                </div>
+              ))}
+              {groupAnchorId && !savedId && (
+                <div className="flex items-center gap-3 py-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-14 text-zinc-900 truncate">
+                      {form.address || "New property — enter address"}
+                    </div>
+                    <div className="text-12 text-ink-secondary">
+                      current draft, not saved yet
+                    </div>
+                  </div>
+                  <Badge>unsaved</Badge>
+                </div>
+              )}
+            </div>
+            <div className="text-12 text-ink-secondary mt-2">
+              The 10% Multi-Home Discount applies to ADDED properties only —
+              it is pre-selected on each new draft here. The first property
+              stays full price (owner ruling 2026-08-06); do not add the
+              discount to the anchor estimate.
+            </div>
+          </Card>
+        )}
+        {leadAdditionalProperties.length > 0 && (
+          <Card className="p-4 mb-5">
+            <PanelTitle description="The call for this lead mentioned more than one service address. Quote each as its own estimate — chained estimates group under one customer link.">
+              Caller Mentioned Additional Properties
+            </PanelTitle>
+            <div className="flex flex-col">
+              {leadAdditionalProperties.map((p, i) => {
+                const composedAddress = [
+                  [p.address_line1, p.address_line2].filter(Boolean).join(" "),
+                  p.city,
+                  [p.state || "FL", p.zip].filter(Boolean).join(" "),
+                ]
+                  .filter(Boolean)
+                  .join(", ");
+                return (
+                  <div
+                    key={`${p.address_line1}-${i}`}
+                    className="flex items-center gap-3 py-2 border-b-hairline border-zinc-200 last:border-b-0"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="text-14 text-zinc-900 truncate">
+                        {composedAddress}
+                      </div>
+                      <div className="text-12 text-ink-secondary">
+                        {[
+                          p.is_rental ? "rental" : null,
+                          p.property_type || null,
+                          p.notes || null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ") || "no extra details from the call"}
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={!savedId && !editMode?.id}
+                      onClick={() => addAnotherProperty({ address: composedAddress })}
+                    >
+                      Quote next
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+            {!savedId && !editMode?.id && (
+              <div className="text-12 text-ink-secondary mt-2">
+                Save the current estimate first — then each of these can be
+                quoted as the next property in the group.
+              </div>
+            )}
+          </Card>
         )}
         <div className="grid gap-7 grid-cols-1 lg:grid-cols-[440px_1fr]">
           {/* ═══ LEFT COLUMN: FORM ═══ */}
@@ -5730,6 +6068,42 @@ export default function EstimateToolViewV2({
                       />
                     </FieldV2>
                   </div>{" "}
+                  {/* Bermuda-in-St.-Augustine suppression add-on — dark behind
+                      GATE_BERMUDA_SUPPRESSION. The control renders when the
+                      server reports the gate on (subFeaturesAvailable) OR the
+                      form already carries a saved selection — while gated off
+                      the checkbox is the only way to UNCHECK a reopened saved
+                      estimate (every regeneration/send 409s until it's
+                      removed). The engine additionally fails closed, so a
+                      stale client can never produce a silent unchanged price.
+                      St. Augustine track only. */}
+                  {(bermudaSuppressionAvailable || form.bermudaSuppression) && form.grassType === "st_augustine" && (
+                    <div className="mt-3">
+                      <CheckboxV2
+                        k="bermudaSuppression"
+                        label="Bermudagrass suppression add-on (baked into per-application price)"
+                      />
+                      {form.bermudaSuppression && !bermudaSuppressionAvailable && (
+                        <div className="ml-7 mb-1 text-12 text-zinc-600">
+                          This add-on is currently disabled (GATE_BERMUDA_SUPPRESSION) — uncheck it
+                          to reprice, send, or accept this estimate without it.
+                        </div>
+                      )}
+                      {form.bermudaSuppression && (
+                        <div className="ml-7 mb-1 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-12 text-zinc-600">
+                          Recognition + Fusilade II tank mix under the FL 2(ee) — max 2 applications
+                          per growing season, spring only. Verify before quoting: cultivar
+                          (ProVista/Captiva excluded; Seville do-not-treat; CitraBlue or unknown
+                          cultivar needs a test area first), lawn is not already mostly bermuda
+                          (recommend renovation instead), turf unstressed. Torpedograss is
+                          suppression-only — never sell as removal. Pricing is plan-spread by
+                          design (owner ruling): the adder raises every application, annualizing
+                          a program that includes up to 2 suppression treatments each spring
+                          plus the follow-up inspection.
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               {hasTurfPricedSelection && (
@@ -7597,6 +7971,16 @@ export default function EstimateToolViewV2({
                   ? "Changes saved — the customer's link now shows the updated estimate. Resend to notify them."
                   : `Saved — ID #${savedId}.`}
               </div>
+            )}
+            {(savedId || editMode?.id) && (
+              <Button
+                variant="secondary"
+                size="md"
+                className="mt-2"
+                onClick={() => addAnotherProperty()}
+              >
+                Add another property for this customer
+              </Button>
             )}
 
             {priceRecomputeNotice && (

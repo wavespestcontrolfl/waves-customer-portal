@@ -549,6 +549,15 @@ async function findActiveRecurringSeries(conn, {
   serviceId = null,
   serviceType = null,
   excludeParentId = null,
+  // Per-property scope (codex #3244 r1): a multi-property group's second
+  // estimate resolves to the SAME customer, so a customer+family match alone
+  // reads the first property's series as a duplicate and skips seeding the
+  // second property's schedule entirely. When set ({ estimateStreet,
+  // customerPrimaryStreet }, both normalized), a parent series only counts as
+  // a duplicate when its service address (stamped service_address_line1, or
+  // the customer's primary street for unstamped/legacy rows) matches the
+  // accepting estimate's street. Null → exact legacy behavior.
+  serviceAddressScope = null,
 } = {}) {
   if (!conn || !customerId || (serviceId == null && !serviceType)) return [];
   const columns = await scheduledServiceColumns(conn);
@@ -559,6 +568,10 @@ async function findActiveRecurringSeries(conn, {
     .whereNotIn('status', ['cancelled', 'rescheduled'])
     .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
   if (columns.service_id) query.select('service_id');
+  if (columns.service_address_line1) query.select('service_address_line1');
+  if (columns.service_address_line2) query.select('service_address_line2');
+  if (columns.service_address_city) query.select('service_address_city');
+  if (columns.service_address_zip) query.select('service_address_zip');
   // Which estimate created the existing series — lets the duplicate-conflict
   // payload prove to a retrying client that the series IS the one its
   // partial save already created (codex r21 P0).
@@ -574,6 +587,24 @@ async function findActiveRecurringSeries(conn, {
     const keyMatch = targetKey != null && parent.service_type
       && serviceKeyFor({ service_type: parent.service_type }) === targetKey;
     if (!idMatch && !keyMatch) continue;
+    if (serviceAddressScope && columns.service_address_line1 && serviceAddressScope.estimateStreet) {
+      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
+      let parentStreet = normalizedStampedStreet(parent.service_address_line1, parent.service_address_line2, parent.service_address_city, parent.service_address_zip);
+      if ((!parentStreet || scopeKeyLacksLocality(parentStreet)) && parent.source_estimate_id) {
+        // Unstamped parent: the post-commit linkage hook may not have run yet
+        // (or the gate is off), and under concurrent group accepts the other
+        // property's fresh series would otherwise read as the customer's
+        // primary street and falsely match (codex #3244 r2). The creating
+        // estimate's address committed in the SAME transaction as the parent,
+        // so it is authoritative and race-free.
+        try {
+          const src = await conn('estimates').where({ id: parent.source_estimate_id }).first('address');
+          parentStreet = normalizedEstimateStreet(src?.address);
+        } catch { /* fall back to the primary-street heuristic below */ }
+      }
+      parentStreet = parentStreet || String(serviceAddressScope.customerPrimaryStreet || '');
+      if (parentStreet && !sameScopeKey(parentStreet, serviceAddressScope.estimateStreet)) continue;
+    }
     const upcoming = await conn('scheduled_services')
       .where(function () {
         this.where({ recurring_parent_id: parent.id }).orWhere({ id: parent.id });

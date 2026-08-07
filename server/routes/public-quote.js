@@ -601,6 +601,16 @@ async function sendQuoteRequestEmail({
   }
 }
 
+// The service keys /calculate accepts in its `services` map — hoisted to
+// module scope (and exported) so the public MCP `how_to_request_quote` tool
+// documents the exact same list instead of a divergent copy.
+const PUBLIC_QUOTE_SERVICE_KEYS = [
+  'pest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
+  'flea', 'stinging', 'rodentTrapping', 'exclusion', 'sanitation',
+  'trenching', 'preSlab', 'oneTimeLawn', 'dethatching', 'plugging', 'topDressing',
+  'lawnPestControl', 'bedBug',
+];
+
 const quoteLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
@@ -662,13 +672,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     if (!contactFirstName || !contactLastName || !contactEmail || !contactPhone || !quoteAddress) {
       return res.status(400).json({ error: 'Missing required contact or address fields.' });
     }
-    const ACCEPTED_KEYS = [
-      'pest', 'lawn', 'mosquito', 'termite', 'rodentBait', 'treeShrub', 'palm',
-      'flea', 'stinging', 'rodentTrapping', 'exclusion', 'sanitation',
-      'trenching', 'preSlab', 'oneTimeLawn', 'dethatching', 'plugging', 'topDressing',
-      'lawnPestControl', 'bedBug',
-    ];
-    if (!services || !ACCEPTED_KEYS.some(k => services[k])) {
+    if (!services || !PUBLIC_QUOTE_SERVICE_KEYS.some(k => services[k])) {
       return res.status(400).json({ error: 'Select at least one service.' });
     }
 
@@ -1901,3 +1905,4 @@ module.exports._internals = {
   resolveEntryChannel,
   unitOnMultiUnitParcelForcesSiteQuote,
 };
+module.exports.PUBLIC_QUOTE_SERVICE_KEYS = PUBLIC_QUOTE_SERVICE_KEYS;

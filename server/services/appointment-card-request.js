@@ -1170,7 +1170,7 @@ async function loadSecureCardPageData(token) {
   // heal the pending row to satisfied (mirrors the autopay heal below) and
   // render secured; a live unpaid prepay invoice renders the
   // prepay_selected state at the bottom (pay link + card fallback).
-  const { prepaySelectionState, buildSecurePlanContext } = require('./secure-appointment-plans');
+  const { prepaySelectionState, deriveSecurePlanContext } = require('./secure-appointment-plans');
   const planState = await prepaySelectionState(request);
   if (planState?.state === 'secured') {
     await db('appointment_card_requests')
@@ -1277,11 +1277,28 @@ async function loadSecureCardPageData(token) {
   const intent = await createSecureCardSetupIntent(request);
   if (!intent) return { state: 'unavailable', ...base };
   // planContext is attached ONLY when the plan-choice gate is on and the
-  // booked series yields sound pricing (buildSecurePlanContext returns null
+  // booked series yields sound pricing (deriveSecurePlanContext returns null
   // otherwise) — its absence is the client's signal to render the original
   // card-only page. prepay_selected keeps the SetupIntent alive so the
   // "save a card and pay per visit instead" fallback works on that state.
-  const planContext = await buildSecurePlanContext({ request, visitId: request.scheduled_service_id });
+  //
+  // Transient failure ≠ no-price (PR #3175 origin follow-up): the stamp
+  // below reads a null context as "the page deliberately displayed no
+  // price" and pins the STICKY accepted_amount=0 consent sentinel —
+  // permanent by design (monotonic-down CASE + one request row per visit,
+  // ever), leaving the visit manual-collect forever. A thrown derivation
+  // (db hiccup, dependency error) must not collapse into that consent
+  // statement: policy nulls (gate off, unsound inputs) still flow through
+  // and stamp exactly as before, while a derivation FAILURE renders
+  // 'unavailable' (no form, no SetupIntent handed out, nothing stamped) —
+  // a reload retries against healthy dependencies.
+  let planContext = null;
+  try {
+    planContext = await deriveSecurePlanContext({ request, visitId: request.scheduled_service_id });
+  } catch (err) {
+    logger.warn(`[appt-card-request] plan-context derivation failed for request ${request.id} — rendering unavailable, nothing stamped: ${err.message}`);
+    return { state: 'unavailable', ...base };
+  }
 
   // Freeze what THIS render discloses (Codex #3153 r1 P1): the fee the page
   // shows is the fee the rail may later charge, and the price shown is the
@@ -1296,6 +1313,7 @@ async function loadSecureCardPageData(token) {
   // that case render 'unavailable' (no form, no SetupIntent handed out);
   // a reload retries, and a row that raced to completed re-renders secured.
   let disclosureStamped = false;
+  let noPricePinTransition = false;
   try {
     const disclosure = { updated_at: new Date() };
     // Monotonic-DOWN with sticky "nothing disclosed" sentinels (Codex #3153
@@ -1344,6 +1362,15 @@ async function loadSecureCardPageData(token) {
       );
     } else {
       disclosure.accepted_amount = 0;
+      // Pin-time bell arming: fire only when this stamp TRANSITIONS the
+      // row to the 0 sentinel — a re-render of an already-pinned row stays
+      // silent. Prior value comes from this GET's own row read; two
+      // concurrent FIRST renders can therefore double-fire, which fails
+      // open toward alerting (a duplicate bell is noise; a missed pin is a
+      // silently unchargeable visit). NULL prior is a transition — Number(
+      // null) is 0, so the null check is explicit.
+      noPricePinTransition = !(request.accepted_amount != null
+        && Number(request.accepted_amount) === 0);
     }
     const stamped = await db('appointment_card_requests')
       .where({ id: request.id, status: 'pending' })
@@ -1355,6 +1382,32 @@ async function loadSecureCardPageData(token) {
   if (!disclosureStamped) {
     logger.warn(`[appt-card-request] disclosure not persisted for request ${request.id} — rendering unavailable instead of the form`);
     return { state: 'unavailable', ...base };
+  }
+  if (noPricePinTransition) {
+    // The pin just made this visit manual-collect only, permanently for
+    // this link (the completion reads fail closed with their own bells,
+    // but nothing else announces the pin itself — this was the lane's one
+    // silent moment). Best-effort: a bell failure never blocks the render.
+    try {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'Secure page rendered without a price — visit is manual-collect only',
+        'The /secure card page displayed no price for this visit, so no completion amount was accepted (accepted_amount pinned to 0 — permanent for this link). Auto-charge will never run for this visit; collect manually at completion.',
+        {
+          link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
+          metadata: {
+            // customerId feeds the internal-test-account suppression in
+            // notification-service.js — without it the demo account rings.
+            customerId: request.customer_id,
+            scheduledServiceId: request.scheduled_service_id,
+            appointmentCardRequestId: request.id,
+            reason: 'no_price_displayed',
+          },
+        },
+      );
+    } catch (e) {
+      logger.warn(`[appt-card-request] no-price pin bell failed for request ${request.id}: ${e.message}`);
+    }
   }
 
   if (planState?.state === 'prepay_selected') {

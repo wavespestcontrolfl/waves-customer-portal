@@ -406,7 +406,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                -- only when admin-authored.
                AND (ci.interaction_type = 'call_outbound' OR ci.admin_user_id IS NOT NULL)
                AND ci.created_at > t.created_at
-           ))
+           )))
     -- Newest-first (codex r8): oldest-first returned the same stuck 12
     -- forever and newer tasks never surfaced with details; yesterday's
     -- rows were already reported and live on in the overflow count.
@@ -512,7 +512,13 @@ async function loadUnansweredThreads(cutoff = new Date()) {
 }
 
 // Pure composition: null = the day is fully worked (the common, quiet case).
-function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered = [] } = {}) {
+// laneFailures ({ lane, message }) come from the per-lane fail-soft in
+// runUnworkedCommsWatcher: a failed lane's queue is INVISIBLE, so the digest
+// must still send (even with zero surviving items), name the failed lane in
+// the subject (FIX: — Adam's action is fixing the lane), and say the counts
+// are incomplete — a crashed lane must never read as a quiet day.
+function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered = [] } = {}, laneFailures = []) {
+  const failures = (laneFailures || []).filter(Boolean);
   const a = (callbacks || []).filter(Boolean);
   const b = (followUps || []).filter(Boolean);
   const c = (unanswered || []).filter(Boolean);
@@ -526,13 +532,24 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   const bTotal = laneTotal(b);
   const cTotal = laneTotal(c);
   const total = aTotal + bTotal + cTotal;
-  if (!total) return null;
+  if (!total && !failures.length) return null;
   const moreLine = (shown, totalCount) => (totalCount > shown ? [`…and ${totalCount - shown} more not shown`] : []);
 
-  const subject = `ACT: ${total} unworked comm${total === 1 ? '' : 's'} at end of day — ${aTotal} callback${aTotal === 1 ? '' : 's'}, ${bTotal} follow-up${bTotal === 1 ? '' : 's'}, ${cTotal} unanswered text${cTotal === 1 ? '' : 's'}`;
+  const failedLaneNames = failures.map((f) => f.lane).join(', ');
+  const subject = failures.length
+    ? `FIX: comms digest lane${failures.length === 1 ? '' : 's'} failed (${failedLaneNames}) — ${total ? `${total} unworked comm${total === 1 ? '' : 's'} in surviving lanes` : 'surviving lanes clear'}`
+    : `ACT: ${total} unworked comm${total === 1 ? '' : 's'} at end of day — ${aTotal} callback${aTotal === 1 ? '' : 's'}, ${bTotal} follow-up${bTotal === 1 ? '' : 's'}, ${cTotal} unanswered text${cTotal === 1 ? '' : 's'}`;
 
   const sectionText = [];
   const sectionHtml = [];
+
+  if (failures.length) {
+    sectionText.push(`LANE FAILURE — this digest is INCOMPLETE. Failed lane${failures.length === 1 ? '' : 's'}:`);
+    sectionText.push(...failures.map((f) => `- ${f.lane}: ${f.message || 'query failed'}`));
+    sectionText.push('That lane\'s queue is invisible until the query is fixed — do not read the sections below as the whole day.');
+    sectionText.push('');
+    sectionHtml.push(`<p style="border:1px solid #b91c1c;padding:8px 10px;"><strong>LANE FAILURE — this digest is INCOMPLETE.</strong> Failed lane${failures.length === 1 ? '' : 's'}:</p><ul style="margin:0 0 12px 18px;padding:0;">${failures.map((f) => `<li style="margin:0 0 6px 0;">${esc(f.lane)}: ${esc(f.message || 'query failed')}</li>`).join('')}</ul><p>That lane's queue is invisible until the query is fixed — do not read the sections below as the whole day.</p>`);
+  }
 
   if (a.length) {
     sectionText.push('Callbacks requested on calls today (nothing else tracks these):');
@@ -570,7 +587,16 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
   ].join('\n');
 
-  return { subject, text, html, total, callbacks: aTotal, followUps: bTotal, unanswered: cTotal };
+  return {
+    subject,
+    text,
+    html,
+    total,
+    callbacks: aTotal,
+    followUps: bTotal,
+    unanswered: cTotal,
+    ...(failures.length ? { failedLanes: failures.map((f) => f.lane) } : {}),
+  };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js.
@@ -606,20 +632,36 @@ async function runUnworkedCommsWatcher(opts = {}) {
   if (await (opts.sentRecently || sentRecently)()) return { skipped: 'recent_send' };
   const windowCutoff = new Date();
 
-  let sections;
-  try {
-    const [callbacks, followUps, unanswered] = await Promise.all([
-      (opts.loadCallbackCalls || loadCallbackCalls)(windowCutoff),
-      (opts.loadDroppedFollowUps || loadDroppedFollowUps)(windowCutoff),
-      (opts.loadUnansweredThreads || loadUnansweredThreads)(windowCutoff),
-    ]);
-    sections = { callbacks, followUps, unanswered };
-  } catch (err) {
-    logger.error(`[unworked-comms] query failed: ${err.message}`);
+  // Per-lane fail-soft (2026-08-07 incident): the three lanes ran in one
+  // Promise.all, so one lane's SQL error killed the whole digest every run —
+  // and a crashed watcher looked identical to a quiet day. Each lane now
+  // fails independently: survivors still send, the failed lane is NAMED in
+  // the email, and only an all-lanes failure keeps the query_failed
+  // contract (the scheduler wrapper turns that into a job_health failure).
+  const lanes = [
+    { key: 'callbacks', label: 'callbacks', load: opts.loadCallbackCalls || loadCallbackCalls },
+    { key: 'followUps', label: 'follow-ups', load: opts.loadDroppedFollowUps || loadDroppedFollowUps },
+    { key: 'unanswered', label: 'unanswered texts', load: opts.loadUnansweredThreads || loadUnansweredThreads },
+  ];
+  const settled = await Promise.allSettled(lanes.map((lane) => lane.load(windowCutoff)));
+  const sections = {};
+  const laneFailures = [];
+  settled.forEach((result, i) => {
+    if (result.status === 'fulfilled') {
+      sections[lanes[i].key] = result.value;
+    } else {
+      sections[lanes[i].key] = [];
+      const message = result.reason?.message || String(result.reason);
+      laneFailures.push({ lane: lanes[i].label, message });
+      logger.error(`[unworked-comms] ${lanes[i].label} lane query failed: ${message}`);
+    }
+  });
+  if (laneFailures.length === lanes.length) {
+    logger.error('[unworked-comms] all lanes failed — nothing to send');
     return { skipped: 'query_failed' };
   }
 
-  const composed = composeUnworkedCommsDigest(sections);
+  const composed = composeUnworkedCommsDigest(sections, laneFailures);
   if (!composed) return { skipped: 'nothing_found' };
 
   if (watcherDisabled()) {

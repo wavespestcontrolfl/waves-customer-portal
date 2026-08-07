@@ -196,90 +196,25 @@ const MCP_TOOLS = [
   },
 ];
 
-async function executeMcpTool(name, args = {}) {
-  const tool = MCP_TOOLS.find((t) => t.name === name);
-  if (!tool) return { error: `unknown tool: ${name}` };
-  try {
-    return await tool.execute(args || {});
-  } catch (err) {
-    logger.error(`[mcp] tool ${name} failed: ${err.message}`);
-    return { error: 'tool execution failed' };
-  }
-}
+// ── JSON-RPC plumbing (shared with /api/public/mcp — services/mcp-rpc.js) ──
 
-// ── JSON-RPC plumbing ───────────────────────────────────────────────
+const { createMcpRpc, createBodyErrorHandler } = require('../services/mcp-rpc');
 
-const rpcResult = (id, result) => ({ jsonrpc: '2.0', id, result });
-const rpcError = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
-
-async function handleRpc(message) {
-  if (!message || message.jsonrpc !== '2.0' || typeof message.method !== 'string') {
-    return rpcError(message?.id ?? null, -32600, 'invalid request');
-  }
-  const { id, method, params } = message;
-  const isNotification = id === undefined || id === null;
-  // JSON-RPC: notifications execute but are never answered.
-  const respond = (result) => (isNotification ? null : rpcResult(id, result));
-
-  switch (method) {
-    case 'initialize':
-      return respond({
-        protocolVersion: PROTOCOL_VERSION,
-        capabilities: { tools: {} },
-        serverInfo: { name: 'waves-knowledge', version: '1.0.0' },
-      });
-    case 'ping':
-      return respond({});
-    case 'tools/list':
-      return respond({ tools: MCP_TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) });
-    case 'tools/call': {
-      const result = await executeMcpTool(params?.name, params?.arguments);
-      return respond({
-        content: [{ type: 'text', text: JSON.stringify(result) }],
-        isError: Boolean(result && result.error),
-      });
-    }
-    default:
-      if (isNotification) return null; // notifications/initialized etc. — accepted silently
-      return rpcError(id, -32601, `method not found: ${method}`);
-  }
-}
+const rpc = createMcpRpc({
+  tools: MCP_TOOLS,
+  serverInfo: { name: 'waves-knowledge', version: '1.0.0' },
+  protocolVersion: PROTOCOL_VERSION,
+  logPrefix: 'mcp',
+});
+const executeMcpTool = rpc.executeTool;
+const handleRpc = rpc.handleRpc;
 
 // Body parsing: server/index.js mounts mcpPreParsers (below) on /api/mcp
 // BEFORE the legacy 50 MB global parsers — auth runs first, then a small
 // capped parse, so unauthenticated callers can't force large JSON parse
 // work (same pattern as staff auth). mcpAuth also runs here so the router
 // stays fail-closed even if mounted without the pre-chain.
-router.post('/', mcpAuth, async (req, res) => {
-  const body = req.body;
-  try {
-    if (Array.isArray(body)) {
-      if (body.length === 0) {
-        return res.status(200).json(rpcError(null, -32600, 'empty batch'));
-      }
-      if (body.length > MAX_BATCH) {
-        return res.status(200).json(rpcError(null, -32600, `batch too large (max ${MAX_BATCH})`));
-      }
-      const toolCalls = body.filter((m) => m && m.method === 'tools/call').length;
-      if (toolCalls > MAX_BATCH_TOOL_CALLS) {
-        return res.status(200).json(rpcError(null, -32600, `too many tools/call in batch (max ${MAX_BATCH_TOOL_CALLS})`));
-      }
-      // Sequential on purpose: one request must not run tools in parallel
-      // and multiply DB/embedding load past what a single call costs.
-      const responses = [];
-      for (const message of body) {
-        const response = await handleRpc(message);  
-        if (response) responses.push(response);
-      }
-      return responses.length ? res.json(responses) : res.status(202).end();
-    }
-    const response = await handleRpc(body);
-    return response ? res.json(response) : res.status(202).end();
-  } catch (err) {
-    logger.error(`[mcp] rpc failed: ${err.message}`);
-    return res.status(200).json(rpcError(body?.id ?? null, -32603, 'internal error'));
-  }
-});
+router.post('/', mcpAuth, rpc.createPostHandler({ maxBatch: MAX_BATCH, maxBatchToolCalls: MAX_BATCH_TOOL_CALLS }));
 
 // Stateless server: no SSE stream to offer.
 router.get('/', mcpAuth, (req, res) => res.status(405).json({ error: 'streaming not supported; POST JSON-RPC' }));
@@ -288,15 +223,7 @@ router.get('/', mcpAuth, (req, res) => res.status(405).json({ error: 'streaming 
 // parsers: authenticate first, then parse with a small cap. The trailing
 // error handler turns parser failures into JSON-RPC shapes (auth has
 // already passed by the time they can fire).
-const mcpBodyErrorHandler = (err, req, res, next) => {
-  if (err && err.type === 'entity.too.large') {
-    return res.status(413).json(rpcError(null, -32600, 'payload too large (max 256kb)'));
-  }
-  if (err && err.status === 400) {
-    return res.status(200).json(rpcError(null, -32700, 'parse error'));
-  }
-  return next(err);
-};
+const mcpBodyErrorHandler = createBodyErrorHandler({ limitLabel: '256kb' });
 const mcpPreParsers = [mcpAuth, express.json({ limit: '256kb' }), mcpBodyErrorHandler];
 
 module.exports = router;

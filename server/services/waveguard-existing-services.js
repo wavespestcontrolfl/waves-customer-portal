@@ -64,6 +64,18 @@ async function isActivePlanCustomer(database, customerId) {
 // line label) to a WaveGuard qualifying service key. Scoped to the five
 // qualifiers — palm_injection and rodent_bait are explicitly NOT qualifiers,
 // and one-time treatments (one_time_pest etc.) never count toward the tier.
+// One rodent-token regex for qualification AND ownership — a second copy
+// would drift (the qualifying classifier additionally requires the row to be
+// rodent-LED; ownership below must not).
+const RODENT_TOKEN_RE = /\b(rodent|rats?|mouse|mice)\b/;
+
+// Rodent-LED text: a rodent token that is not the rodent half of an explicit
+// pest-primary combined name ("Pest & Rodent Control"). Single definition —
+// toQualifyingKeys and ownershipKeysForRow both read it.
+function isRodentLedText(s) {
+  return RODENT_TOKEN_RE.test(s) && !/\bpest\b.*\brodent\b/.test(s);
+}
+
 function toQualifyingKeys(raw) {
   const s = String(raw || '').toLowerCase();
   if (!s) return [];
@@ -77,7 +89,7 @@ function toQualifyingKeys(raw) {
   // canonical label) are rodent service rows, not pest coverage. Mirror
   // detectServiceLine / recurring-appointment-seeder's serviceKeyFor: only a
   // "pest ... rodent" combined name ("Pest & Rodent Control") is pest-primary.
-  const rodentService = /\b(rodent|rats?|mouse|mice)\b/.test(s) && !/\bpest\b.*\brodent\b/.test(s);
+  const rodentService = isRodentLedText(s);
   if (s.includes('pest') && !rodentService) keys.add('pest_control');
   if (s.includes('lawn') || s.includes('turf')) keys.add('lawn_care');
   // A palm token ("Palm Tree Injections") names the non-qualifying palm
@@ -110,13 +122,19 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   if (hasIsRecurring) {
     query = query.where({ is_recurring: true });
   }
-  const selectCols = ['id', 'service_type', 'scheduled_date'];
+  // status: filtered in SQL (whereNotIn TERMINAL) but also read row-side by
+  // the ownership lifecycle filter (live en_route/on_site rows bypass the
+  // date cutoff — codex #3253 r7).
+  const selectCols = ['id', 'service_type', 'scheduled_date', 'status'];
   if (cols.estimated_price) selectCols.push('estimated_price');
   if (cols.annual_prepay_term_id) selectCols.push('annual_prepay_term_id');
   // Carried for the gated qualifying-row filter below — additive for every
   // other consumer of these rows.
   if (cols.is_callback) selectCols.push('is_callback');
   if (cols.source) selectCols.push('source');
+  // For per-property tier scoping: an unstamped row resolves its property via
+  // the estimate that created it (codex #3244 r6).
+  if (cols.source_estimate_id) selectCols.push('source_estimate_id');
   const hasStampedAddress = !!cols.service_address_line1;
   if (hasStampedAddress) {
     selectCols.push('service_address_line1');
@@ -159,10 +177,16 @@ function qualifyingRowDateKey(value) {
   return null;
 }
 
+// One callback-truthiness predicate — the gated pricing evidence AND the
+// ownership lifecycle filter both read it; a second copy would drift.
+function isCallbackRow(row) {
+  return row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true';
+}
+
 function rowPassesGatedPricingEvidence(row, today) {
   const rowDate = qualifyingRowDateKey(row.scheduled_date);
   if (!rowDate || rowDate < today) return false;
-  if (row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true') return false;
+  if (isCallbackRow(row)) return false;
   // Lazy require: self-booking-plan-sync requires this module at load time,
   // so a top-level require back at it would be a cycle.
   const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
@@ -178,6 +202,10 @@ function rowPassesGatedPricingEvidence(row, today) {
 // Bronze-stamped customer at Silver. Best-effort: where the catalog is
 // absent (older environments) the filter degrades to service_type-only,
 // exactly the legacy behavior.
+// Returns null on failure — NOT an empty Map — so callers can distinguish
+// "no catalog rows" from "the join failed" (codex #3253 r4: a hidden join
+// failure misclassifies generic service rows). The qualifying caller keeps
+// its legacy degrade-to-empty behavior; the ownership caller fails closed.
 async function loadCatalogFieldsByRowId(database, customerId) {
   try {
     const catalogRows = await database('scheduled_services as s')
@@ -186,7 +214,7 @@ async function loadCatalogFieldsByRowId(database, customerId) {
       .select('s.id', 'svc.service_key', 'svc.name as service_name');
     return new Map(catalogRows.map((row) => [row.id, row]));
   } catch {
-    return new Map();
+    return null;
   }
 }
 
@@ -208,7 +236,9 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
   // excluded from pricing evidence exactly as tier derivation excludes it —
   // otherwise pricing counts a family the tier does not).
   const { isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
-  const catalogById = await loadCatalogFieldsByRowId(database, customerId);
+  // Legacy degrade: a failed join classifies on service_type alone here,
+  // exactly the pre-null-return behavior (ownership fails closed instead).
+  const catalogById = (await loadCatalogFieldsByRowId(database, customerId)) || new Map();
   const today = etDateString();
   // The kept rows are returned ENRICHED with their catalog identity (Codex
   // #3011 r11 P1): downstream reducers (qualifyingKeysFromRows and the
@@ -261,9 +291,169 @@ function qualifyingKeysFromRows(rows = []) {
 }
 
 // Convenience: just the distinct qualifying keys for a customer.
-async function loadExistingQualifyingServiceKeys(database, customerId) {
+//
+// streetScope ({ estimateStreet, customerPrimaryStreet }, both from
+// normalizedEstimateStreet) scopes the keys to ONE property (codex #3244 r6):
+// a grouped/secondary-property estimate must count qualifying services already
+// active at THAT property (same-property add-ons keep their real tier) while
+// excluding the other properties' plans. Stamped rows compare by
+// service_address_line1; unstamped rows resolve via their creating estimate's
+// address, then the customer's primary street; a row that still can't be
+// located is EXCLUDED (counting an unlocatable plan toward another property's
+// tier would hand out an unearned discount).
+async function loadExistingQualifyingServiceKeys(database, customerId, { streetScope = null } = {}) {
   const rows = await loadExistingRecurringQualifyingRows(database, customerId);
-  return qualifyingKeysFromRows(rows);
+  return qualifyingKeysFromRows(await filterRowsToStreet(database, rows, streetScope));
+}
+
+// One street filter for every per-property consumer (qualifying keys AND the
+// pricing-AI ownership set below) — a second copy of the stamped → creating
+// estimate → primary-street resolution would drift from this one. Matching
+// carries main's #3248 locality-qualified scope-key semantics (city/zip
+// segments, sameScopeKey wildcard-on-empty, locality-less stamped keys
+// re-resolved via the creating estimate).
+async function filterRowsToStreet(database, rows, streetScope) {
+  if (!streetScope || !streetScope.estimateStreet) return rows;
+  const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
+  const kept = [];
+  for (const row of rows) {
+    let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
+    if ((!street || scopeKeyLacksLocality(street)) && row.source_estimate_id) {
+      try {
+        const src = await database('estimates').where({ id: row.source_estimate_id }).first('address');
+        street = normalizedEstimateStreet(src?.address);
+      } catch { /* fall through to the primary-street default */ }
+    }
+    street = street || String(streetScope.customerPrimaryStreet || '');
+    if (street && sameScopeKey(street, streetScope.estimateStreet)) kept.push(row);
+  }
+  return kept;
+}
+
+// Ownership classification for the portal pricing AI (codex #3253 r2): a
+// customer "has" a service for never-re-price purposes even when the row can
+// never raise a WaveGuard tier — recurring Rodent Monitoring is the canonical
+// case. Reuses the catalog-authoritative row classifier and adds ONLY the
+// rodent family that toQualifyingKeys deliberately excludes; qualification
+// itself stays untouched.
+// Ownership families in one text: the qualifying families PLUS the recurring
+// families qualification deliberately excludes. Over-recognition of an OWNED
+// family is the safe direction (routes to a Waves conversation instead of a
+// self-serve re-quote) — but only for products that ARE the same obligation:
+//  - commercial recurring rows never qualify (flat pricing, no tier) yet the
+//    customer owns the family — Commercial Pest Control must block a fresh
+//    residential pest quote (codex #3253 r3). Tokens mirror
+//    recurringServiceKey's commercial block (estimate-converter.js), mapped
+//    to residential families. Direct reuse is not possible: that classifier
+//    returns ONE primary key (cannot express combined pest+rodent
+//    ownership), requires the literal 'bait' token for residential termite
+//    (would drop "Termite Monitoring Service"), and estimate-converter
+//    already requires this module at load.
+//  - the rodent COMPONENT counts whether the row is rodent-led or a
+//    pest-primary combined plan.
+//  - termite counts ONLY for bait/station/monitoring products — a recurring
+//    termite BOND (termite_bond_1yr) is a distinct warranty product and must
+//    not block a bait-monitoring quote (codex #3253 r3).
+function ownershipFamiliesFromText(raw) {
+  // Key-shaped text ('rodent_bait', 'pest_rodent_quarterly' in an unlinked
+  // row's service_type) must match the token regexes — underscores are word
+  // characters, so without this normalization \brodent\b never fires and a
+  // key-shaped owned row goes unrecognized (codex #3253 r5). Catalog text
+  // arrives pre-normalized; doing it again is harmless.
+  const s = String(raw || '').toLowerCase().replace(/[_-]+/g, ' ');
+  // One-time identities are never an owned recurring obligation — mirrors
+  // toQualifyingKeys' own first check, which only guards the qualifying
+  // families; without this, rodent_general_one_time's repeated joined text
+  // defeats the pest-before-rodent ordering heuristic and reads as the
+  // combined plan (codex #3253 r4).
+  if (/one[\s_-]?time|onetime/.test(s)) return [];
+  const keys = toQualifyingKeys(s);
+  const add = (key) => { if (!keys.includes(key)) keys.push(key); };
+  if (s.includes('commercial')) {
+    const rodentLed = isRodentLedText(s);
+    if (s.includes('pest') && !rodentLed) add('pest_control');
+    if (s.includes('lawn') || s.includes('turf')) add('lawn_care');
+    if (!/\bpalms?\b/.test(s) && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) add('tree_shrub');
+    if (s.includes('mosquito')) add('mosquito');
+  }
+  // Rodent ownership means the BAIT-MONITORING product (codex #3253 r4):
+  // trapping / exclusion / rodent_general_one_time are distinct specialties
+  // (estimate-converter maps only bait|station|monitor identities to
+  // rodent_bait) and must not suppress a bait-station quote. The explicit
+  // pest-primary combined plan ("Pest & Rodent Control") is the one carrier
+  // of rodent coverage without those tokens.
+  if (RODENT_TOKEN_RE.test(s)) {
+    const combinedPestRodent = /\bpest\b/.test(s) && !isRodentLedText(s);
+    if (/\b(bait|station|monitor)/.test(s) || combinedPestRodent) add('rodent_bait');
+  }
+  if (/\btermite\b/.test(s) && /\b(bait|station|monitor)/.test(s)) add('termite_bait');
+  return keys;
+}
+
+function ownershipKeysForRow(row = {}) {
+  // Same catalog-authority shape as qualifyingKeysForRow (pre-push P1 #2): a
+  // catalog identity that resolves ownership families on its own is the
+  // truth — a rodent_monitoring or termite_monitoring catalog row under a
+  // stale generic 'Pest Control' service_type must not inherit pest from
+  // that stale text and falsely block a valid pest quote. Only an
+  // uninformative catalog falls back to the joined text.
+  const catalogText = [row.service_key, row.service_name]
+    .filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
+  if (catalogText) {
+    // An INFORMATIVE catalog identity — one naming any service family — is
+    // authoritative even when it resolves to NO owned family (pre-push P1
+    // ×2): termite bonds, rodent trapping/exclusion, palm and other
+    // recognized specialties must stay unowned rather than fall through and
+    // inherit a stale service_type family (a rodent_trapping row under a
+    // stale 'Pest Control' must own NOTHING, not pest). Only a catalog with
+    // no family tokens at all ("Premium Home Plan") defers to service_type.
+    const s = catalogText.toLowerCase();
+    const informative = /\b(pest|lawn|turf|tree|shrub|ornamental|mosquito|termite|palms?)\b/.test(s)
+      || RODENT_TOKEN_RE.test(s);
+    if (informative) return ownershipFamiliesFromText(catalogText);
+  }
+  return ownershipFamiliesFromText(`${String(row.service_type || '')} ${catalogText}`.trim());
+}
+
+// Distinct owned recurring service keys — BROADER than qualification (all
+// active recurring rows, rodent included; no membership gate, because a
+// non-member with recurring rodent still owns rodent service). streetScope
+// behaves exactly as in loadExistingQualifyingServiceKeys.
+async function loadOwnedRecurringServiceKeys(database, customerId, { streetScope = null } = {}) {
+  const rows = await loadActiveRecurringServiceRows(database, customerId);
+  // Same catalog join as the qualifying loader: a generic service_type
+  // ("Pest Control") whose catalog identity is rodent must classify as
+  // rodent here too, not as owned pest coverage. FAIL CLOSED on a join
+  // failure (codex #3253 r4) — classifying on service_type alone could
+  // misread what the customer owns, so the caller must not price at all.
+  const catalogById = await loadCatalogFieldsByRowId(database, customerId);
+  if (!catalogById) throw new Error('ownership catalog join failed');
+  let joined = rows.map((r) => ({ ...r, ...(catalogById.get(r.id) || {}) }));
+  // Same lifecycle evidence as the qualifying loader, applied
+  // UNCONDITIONALLY (pre-push P1 ×2): a past phantom row, a callback, or a
+  // one-time booking source is not a live recurring obligation and must not
+  // suppress a legitimate quote. Ownership is a NEW rule with no legacy
+  // behavior to preserve, so the autoWaveguardTierEnroll gate — which exists
+  // to keep the QUALIFYING path byte-identical when off — does not apply.
+  // Only the lifecycle predicate is shared; the qualifying loader's
+  // commercial/rodent exclusions are qualification-only.
+  // EXCEPT live in-progress rows (codex #3253 r7, same precedent as the
+  // billed-plan logic per #3241 r5): a visit still en_route/on_site across
+  // ET midnight is the customer's plan all the same — those bypass the date
+  // cutoff but never the callback/one-time exclusions.
+  const { etDateString } = require('../utils/datetime-et');
+  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
+  const LIVE_IN_PROGRESS_STATUSES = new Set(['en_route', 'on_site', 'in_progress']);
+  const today = etDateString();
+  joined = joined.filter((r) => (
+    LIVE_IN_PROGRESS_STATUSES.has(String(r.status || '').toLowerCase())
+      ? (!isCallbackRow(r) && !isOneTimeBookingSource(r.source))
+      : rowPassesGatedPricingEvidence(r, today)
+  ));
+  const scoped = await filterRowsToStreet(database, joined, streetScope);
+  const keys = new Set();
+  for (const row of scoped) ownershipKeysForRow(row).forEach((key) => keys.add(key));
+  return [...keys];
 }
 
 module.exports = {
@@ -275,6 +465,8 @@ module.exports = {
   qualifyingKeysForRow,
   qualifyingKeysFromRows,
   loadExistingQualifyingServiceKeys,
+  loadOwnedRecurringServiceKeys,
+  ownershipKeysForRow,
   isMembershipCustomerRow,
   isActivePlanCustomer,
 };

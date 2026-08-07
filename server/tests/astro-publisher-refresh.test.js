@@ -389,3 +389,139 @@ describe('publishMetadataRewrite protected metaTitle (owner rule 2026-07-16)', (
     expect(gh.putFile).not.toHaveBeenCalled();
   });
 });
+
+// A LEGACY (pre-schema-v2) live blog post that never carried post_type /
+// service_areas_tag. The refresh/metadata lanes freeze the live frontmatter,
+// so without the backfill both fields re-validated as missing and every
+// attempt hard-failed with "post_type is required; service_areas_tag is
+// required" — a mechanical park (prod 2026-08-07), not a content problem.
+const LEGACY_BLOG_FILE_PATH = 'src/content/blog/fall-lawn-mistakes-sarasota.md';
+const LEGACY_BLOG = [
+  '---',
+  'title: "Fall Lawn Mistakes Sarasota Homeowners Make"',
+  'slug: "/blog/fall-lawn-mistakes-sarasota/"',
+  'meta_description: "Avoid the fall lawn mistakes Sarasota homeowners make most: late fertilizing, wrong mowing height, and fungus-friendly night watering habits."',
+  'primary_keyword: "fall lawn mistakes"',
+  'secondary_keywords:',
+  '  - "fall lawn care"',
+  'category: "lawn-care"',
+  'related_services: []',
+  'spoke_links: []',
+  'author:',
+  '  name: "Adam Benetti"',
+  '  role: "Lead Technician"',
+  '  bio_url: "/about/authors/adam-benetti"',
+  'technically_reviewed_by:',
+  '  name: "Adam Benetti"',
+  '  credential: "FDACS Certified Operator"',
+  '  bio_url: "/about/authors/adam-benetti"',
+  'published: "2026-05-01"',
+  'updated: "2026-05-01"',
+  'technically_reviewed: "2026-05-01"',
+  'fact_checked: "2026-05-01"',
+  'review_cadence: "quarterly"',
+  'reading_time_min: 4',
+  'hero_image:',
+  '  src: "/images/blog/fall-lawn/hero.webp"',
+  '  alt: "Sarasota lawn in autumn"',
+  'og_image: "/images/blog/fall-lawn/hero.webp"',
+  'canonical: "https://www.wavespestcontrol.com/blog/fall-lawn-mistakes-sarasota/"',
+  'schema_types:',
+  '  - "Article"',
+  'disclosure:',
+  '  type: "none"',
+  '---',
+  'Original legacy fall lawn body content.',
+].join('\n');
+
+describe('legacy blog frontmatter backfill (missing post_type + service_areas_tag self-heal)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue({ content: LEGACY_BLOG, sha: 'legacy-sha' });
+    gh.putFile.mockResolvedValue({ commit: { sha: 'new-sha' } });
+    gh.createPr.mockResolvedValue({ number: 91, html_url: 'https://github.com/x/y/pull/91', head: { sha: 'h' } });
+    gh.createIssueComment.mockResolvedValue({});
+  });
+
+  test('publishRefresh backfills the absent required fields when the legacy page_type maps reliably', async () => {
+    // page_type "how-to" maps to post_type "protocol" via POST_TYPE_ALIASES —
+    // a RELIABLE signal, so the backfill heals it (Codex r11: the old
+    // 'location' default misclassified seasonal/cost/comparison content).
+    const mappable = LEGACY_BLOG.replace(
+      'category: "lawn-care"',
+      ['category: "lawn-care"', 'page_type: "how-to"'].join('\n'),
+    );
+    gh.getFile.mockResolvedValue({ content: mappable, sha: 'legacy-sha' });
+
+    const res = await pub.publishRefresh({
+      type: 'draft',
+      file_path: LEGACY_BLOG_FILE_PATH,
+      page_url: '/blog/fall-lawn-mistakes-sarasota/',
+      frontmatter: {},
+      body: 'Refreshed fall lawn guidance for Sarasota yards with updated fungicide timing and mowing-height advice for St. Augustine turf.',
+    }, { action_type: 'refresh_existing_page', target_url: '/blog/fall-lawn-mistakes-sarasota/', city: 'Sarasota' });
+
+    expect(res.status).toBe('pr_open');
+    const { data } = fm.parse(gh.putFile.mock.calls[0][0].content);
+    expect(data.post_type).toBe('protocol'); // mapped from page_type, never the 'location' default
+    expect(data.service_areas_tag).toEqual(['Sarasota']); // inferred from title/brief haystack
+    // Untouched live fields stay frozen.
+    expect(data.canonical).toBe('https://www.wavespestcontrol.com/blog/fall-lawn-mistakes-sarasota/');
+    expect(data.category).toBe('lawn-care');
+  });
+
+  test('publishRefresh PARKS a legacy post with no mappable page_type — one-time human classification, never a location default (Codex r11)', async () => {
+    // The base legacy fixture carries no page_type at all: post_type stays
+    // missing and schema validation rejects the row (deterministic park).
+    await expect(pub.publishRefresh({
+      type: 'draft',
+      file_path: LEGACY_BLOG_FILE_PATH,
+      page_url: '/blog/fall-lawn-mistakes-sarasota/',
+      frontmatter: {},
+      body: 'Refreshed fall lawn guidance for Sarasota yards with updated fungicide timing and mowing-height advice for St. Augustine turf.',
+    }, { action_type: 'refresh_existing_page', target_url: '/blog/fall-lawn-mistakes-sarasota/', city: 'Sarasota' }))
+      .rejects.toMatchObject({ code: 'BLOG_FRONTMATTER_INVALID' });
+  });
+
+  test('publishRefresh leaves PRESENT valid post_type/service_areas_tag alone', async () => {
+    const withFields = LEGACY_BLOG.replace(
+      "category: \"lawn-care\"",
+      ['category: "lawn-care"', 'post_type: "seasonal"', 'service_areas_tag:', '  - "Venice"'].join('\n'),
+    );
+    gh.getFile.mockResolvedValue({ content: withFields, sha: 'legacy-sha' });
+
+    await pub.publishRefresh({
+      type: 'draft',
+      file_path: LEGACY_BLOG_FILE_PATH,
+      page_url: '/blog/fall-lawn-mistakes-sarasota/',
+      frontmatter: {},
+      body: 'Refreshed fall lawn guidance for Sarasota yards with updated fungicide timing and mowing-height advice for St. Augustine turf.',
+    }, { action_type: 'refresh_existing_page', target_url: '/blog/fall-lawn-mistakes-sarasota/', city: 'Sarasota' });
+
+    const { data } = fm.parse(gh.putFile.mock.calls[0][0].content);
+    expect(data.post_type).toBe('seasonal');
+    expect(data.service_areas_tag).toEqual(['Venice']);
+  });
+
+  test('publishMetadataRewrite backfills the same absent fields on a legacy blog target with a mappable page_type', async () => {
+    const mappable = LEGACY_BLOG.replace(
+      'category: "lawn-care"',
+      ['category: "lawn-care"', 'page_type: "how-to"'].join('\n'),
+    );
+    gh.getFile.mockResolvedValue({ content: mappable, sha: 'legacy-sha' });
+
+    const res = await pub.publishMetadataRewrite({
+      type: 'metadata',
+      file_path: LEGACY_BLOG_FILE_PATH,
+      title: 'Fall Lawn Mistakes Sarasota Homeowners Keep Making',
+      meta_description: 'Avoid the fall lawn mistakes Sarasota homeowners make most, from late fertilizing to fungus-friendly night watering on St. Augustine turf.',
+    }, { action_type: 'rewrite_title_meta', target_url: '/blog/fall-lawn-mistakes-sarasota/' });
+
+    expect(res.status).toBe('pr_open');
+    const { data } = fm.parse(gh.putFile.mock.calls[0][0].content);
+    expect(data.post_type).toBe('protocol'); // mapped, never the 'location' default (Codex r11)
+    expect(data.service_areas_tag).toEqual(['Sarasota']);
+    expect(data.title).toBe('Fall Lawn Mistakes Sarasota Homeowners Keep Making');
+  });
+});

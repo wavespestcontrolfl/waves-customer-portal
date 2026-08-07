@@ -368,29 +368,47 @@ describe('snapshotSources', () => {
 
 // ── operator slug pin — machine-checked, not just prompt-binding ────
 
-describe('operatorSlugMismatch', () => {
-  const { operatorSlugMismatch } = require('../services/content/autonomous-runner')._internals;
+describe('applyOperatorSlugRepair drift detection (single definition of slug drift — Codex r9)', () => {
+  const { applyOperatorSlugRepair } = require('../services/content/autonomous-runner')._internals;
   const briefFor = (slug) => ({ voice_constraints: { operator_brief: { slug } } });
 
-  test('matching slugs (incl. slash/case normalization) pass', () => {
-    expect(operatorSlugMismatch(briefFor('/pest-control/can-another-company-service-taexx/'), {
-      frontmatter: { slug: '/pest-control/can-another-company-service-taexx/' },
-    })).toBeNull();
-    expect(operatorSlugMismatch(briefFor('/pest-control/x/'), {
-      frontmatter: { slug: 'pest-control/X' },
-    })).toBeNull();
+  test('an exactly matching draft (slug AND category) passes with only the own-route URL stamped (Codex r13)', () => {
+    const draft = {
+      frontmatter: { slug: '/pest-control/can-another-company-service-taexx/', category: 'pest-control' },
+      body: '',
+    };
+    expect(applyOperatorSlugRepair(briefFor('/pest-control/can-another-company-service-taexx/'), draft)).toBeNull();
+    // The drift-free path still stamps draft.url so a parked run has a
+    // non-null review target; frontmatter and body stay untouched.
+    expect(draft.url).toBe('https://www.wavespestcontrol.com/pest-control/can-another-company-service-taexx/');
+    expect(draft.frontmatter).toEqual({ slug: '/pest-control/can-another-company-service-taexx/', category: 'pest-control' });
+    expect(draft.body).toBe('');
   });
 
-  test('a drifted or missing draft slug is reported for review parking', () => {
-    expect(operatorSlugMismatch(briefFor('/pest-control/a/'), { frontmatter: { slug: '/pest-control/b/' } }))
-      .toEqual({ expected_slug: '/pest-control/a/', draft_slug: '/pest-control/b/' });
-    expect(operatorSlugMismatch(briefFor('/pest-control/a/'), { frontmatter: {} }))
-      .toEqual({ expected_slug: '/pest-control/a/', draft_slug: null });
+  test('a case/boundary-drifted draft slug is REPAIRED to the pin — comparison is exact, not normalized (Codex r4)', () => {
+    const draft = { frontmatter: { slug: 'pest-control/X' }, body: '' };
+    const result = applyOperatorSlugRepair(briefFor('/pest-control/x/'), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.slug).toBe('/pest-control/x/');
+  });
+
+  test('a drifted or missing draft slug is repaired with the drift recorded', () => {
+    const drifted = { frontmatter: { slug: '/pest-control/b/', category: 'pest-control' }, body: '' };
+    const r1 = applyOperatorSlugRepair(briefFor('/pest-control/a/'), drifted);
+    expect(r1.ok).toBe(true);
+    expect(r1.repair).toMatchObject({ from_slug: '/pest-control/b/', to_slug: '/pest-control/a/' });
+    expect(drifted.frontmatter.slug).toBe('/pest-control/a/');
+
+    const missing = { frontmatter: {}, body: '' };
+    const r2 = applyOperatorSlugRepair(briefFor('/pest-control/a/'), missing);
+    expect(r2.ok).toBe(true);
+    expect(r2.repair).toMatchObject({ from_slug: null, to_slug: '/pest-control/a/' });
+    expect(missing.frontmatter.slug).toBe('/pest-control/a/');
   });
 
   test('briefs without an operator slug (refresh / mined) skip the check', () => {
-    expect(operatorSlugMismatch(briefFor(null), { frontmatter: { slug: '/anything/' } })).toBeNull();
-    expect(operatorSlugMismatch({ voice_constraints: {} }, { frontmatter: { slug: '/anything/' } })).toBeNull();
+    expect(applyOperatorSlugRepair(briefFor(null), { frontmatter: { slug: '/anything/' } })).toBeNull();
+    expect(applyOperatorSlugRepair({ voice_constraints: {} }, { frontmatter: { slug: '/anything/' } })).toBeNull();
   });
 });
 

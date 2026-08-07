@@ -1249,6 +1249,37 @@ violations at the severity noted.
   Sentry (tagged `source=client`), and the client scrubs token-like path
   segments out of the reported URL. No reads, no PII persistence, no writes to
   app data — it only forwards to Sentry).
+  `/api/public/mcp` (POST; ANONYMOUS read-only MCP JSON-RPC server for
+  third-party AI agents — the surface the hub's /.well-known agent-readiness
+  cards point at. No token BY DESIGN (the audience is anonymous agents);
+  guarded instead by GATE_MCP_PUBLIC (404 dark until flipped), a per-IP rate
+  limit (60/15min), a 64kb body cap ahead of the global parsers, and the
+  /api/mcp batch caps, sharing the same JSON-RPC plumbing
+  (services/mcp-rpc.js). Tools are READ-ONLY, side-effect-free, LLM-free, and
+  expose only already-public data: customer-visible catalog rows (price
+  columns excluded AND `description` excluded — tighter than /api/mcp
+  get_service, because catalog descriptions are admin-editable free text
+  that is neither compliance-curated nor price-synced and must not reach an
+  anonymous surface),
+  the /api/public/pricing-ranges payload via its shared fail-closed producer,
+  the service-areas table, and a static description of the
+  /api/public/quote/calculate HTTP contract (how_to_request_quote). No
+  customer-PII tools and no write tools may be added here — exact quotes and
+  lead capture stay on /api/public/quote/calculate behind its four-field
+  contact gate; this surface documents that endpoint, never wraps it. Treat
+  the gate, the rate limit, and the read-only tool surface as
+  security-critical).
+  `/api/public/a2a` (POST; ANONYMOUS informational A2A (Agent2Agent) JSON-RPC
+  endpoint — the service behind the hub's /.well-known/agent-card.json.
+  Deliberately minimal: `message/send` returns ONE static, deterministic,
+  compliance-reviewed informational Message pointing agents at the public
+  MCP server and published pricing/quote surfaces; A2A task/streaming/push
+  methods return UnsupportedOperationError (-32004). No tasks, no state, no
+  LLM calls by construction, no PII, no writes — none may be added. Guards
+  mirror /api/public/mcp: GATE_A2A_PUBLIC (404 dark until flipped), per-client
+  rate limit (60/15min via the shared /64-collapsing key), 64kb body cap
+  ahead of the global parsers, GET 405. Treat the gate, the rate limit, and
+  the static-reply-only surface as security-critical).
   New public routes outside this list are P0.
   The public estimate ask route must keep the estimate token format gate,
   a short-lived signed `askToken` bound to estimate id + estimate-token hash,

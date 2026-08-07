@@ -6596,27 +6596,16 @@ const LAWN_ASSESSMENT_METRICS = [
   { key: "stress_damage", label: "Stress" },
 ];
 
-const LAWN_STRESS_FLAGS = [
-  { key: "drought_stress", label: "Dry / heat" },
-  { key: "shade_stress", label: "Shade" },
-  { key: "disease_suspicion", label: "Disease" },
-  { key: "recent_scalp", label: "Scalp" },
-  { key: "new_sod", label: "New sod" },
-];
-
-const EMPTY_LAWN_STRESS_FLAGS = Object.fromEntries(
-  LAWN_STRESS_FLAGS.map((flag) => [flag.key, false]),
-);
-
-const EMPTY_PROTOCOL_FIELD_CHECKS = {
-  thatchMeasurementIn: "",
-  chinchFloatTestDone: false,
-  chinchCountPerSqft: "",
-  nematodeAssayFlag: false,
-  soilKPpm: "",
-  largePatchHistoryObserved: false,
-  notes: "",
-};
+// Stress flags and the "Protocol field checks" inputs (thatch, chinch pair,
+// nematode/large-patch pills, Soil K, protocol notes) were removed from this
+// sheet entirely (owner trim 2026-08-07) — nearly all were captured on every
+// visit and read by nothing, and the owner ruled the rest off too. The
+// completion capture is now photos, the gauge reading, and the four score
+// counters. The server endpoints still accept the retired keys from old
+// payloads. Soil K no longer has a client input anywhere, so the plan
+// engine's profile-completeness check no longer requires it; drought_stress
+// likewise no longer reaches the planner's drought-prep selection — both are
+// deliberate owner rulings, not oversights.
 
 function lawnScoreColor(value) {
   const n = Number(value) || 0;
@@ -6681,45 +6670,6 @@ function parseAssessmentScores(row = {}) {
   return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
 }
 
-function parseStressFlags(value) {
-  if (!value) return EMPTY_LAWN_STRESS_FLAGS;
-  const parsed =
-    typeof value === "string"
-      ? (() => {
-          try {
-            return JSON.parse(value);
-          } catch {
-            return {};
-          }
-        })()
-      : value;
-  return { ...EMPTY_LAWN_STRESS_FLAGS, ...(parsed || {}) };
-}
-
-function parseProtocolFieldChecks(value) {
-  const parsed =
-    typeof value === "string"
-      ? (() => {
-          try {
-            return JSON.parse(value);
-          } catch {
-            return {};
-          }
-        })()
-      : value || {};
-  return {
-    ...EMPTY_PROTOCOL_FIELD_CHECKS,
-    thatchMeasurementIn: parsed.thatchMeasurementIn ?? parsed.thatch_measurement_in ?? "",
-    chinchFloatTestDone: !!(parsed.chinchFloatTestDone ?? parsed.chinch_float_test_done),
-    chinchCountPerSqft: parsed.chinchCountPerSqft ?? parsed.chinch_count_per_sqft ?? "",
-    nematodeAssayFlag: !!(parsed.nematodeAssayFlag ?? parsed.nematode_assay_flag),
-    soilKPpm: parsed.soilKPpm ?? parsed.soil_k_ppm ?? "",
-    largePatchHistoryObserved: !!(
-      parsed.largePatchHistoryObserved ?? parsed.large_patch_history_observed
-    ),
-    notes: parsed.notes ?? parsed.protocol_field_notes ?? "",
-  };
-}
 
 function LawnAssessmentCompletionBlock({
   service,
@@ -6746,10 +6696,6 @@ function LawnAssessmentCompletionBlock({
   const [photos, setPhotos] = useState([]);
   const [result, setResult] = useState(null);
   const [techScores, setTechScores] = useState(null);
-  const [stressFlags, setStressFlags] = useState(EMPTY_LAWN_STRESS_FLAGS);
-  const [protocolFieldChecks, setProtocolFieldChecks] = useState(
-    EMPTY_PROTOCOL_FIELD_CHECKS,
-  );
   const [confirmedId, setConfirmedId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -6773,8 +6719,6 @@ function LawnAssessmentCompletionBlock({
     setPhotos([]);
     setResult(null);
     setTechScores(null);
-    setStressFlags(EMPTY_LAWN_STRESS_FLAGS);
-    setProtocolFieldChecks(EMPTY_PROTOCOL_FIELD_CHECKS);
     setConfirmedId(null);
     setError("");
     onConfirmed?.(null);
@@ -6798,10 +6742,6 @@ function LawnAssessmentCompletionBlock({
           observations: assessment.observations || "",
         });
         setTechScores(scores);
-        setStressFlags(parseStressFlags(assessment.stress_flags));
-        setProtocolFieldChecks(
-          parseProtocolFieldChecks(assessment.protocol_field_checks || assessment),
-        );
         if (assessment.confirmed_by_tech) {
           setConfirmedId(assessment.id);
           onConfirmed?.(assessment.id);
@@ -6911,17 +6851,6 @@ function LawnAssessmentCompletionBlock({
         body: JSON.stringify({
           assessmentId: result.assessment.id,
           adjustedScores: techScores || result.adjustedScores || result.displayScores,
-          stress_flags: stressFlags,
-          protocol_field_checks: {
-            thatchMeasurementIn: protocolFieldChecks.thatchMeasurementIn,
-            chinchFloatTestDone: protocolFieldChecks.chinchFloatTestDone,
-            chinchCountPerSqft: protocolFieldChecks.chinchCountPerSqft,
-            nematodeAssayFlag: protocolFieldChecks.nematodeAssayFlag,
-            soilKPpm: protocolFieldChecks.soilKPpm,
-            largePatchHistoryObserved:
-              protocolFieldChecks.largePatchHistoryObserved,
-            notes: protocolFieldChecks.notes,
-          },
         }),
       });
       const assessmentId = response?.assessment?.id || result.assessment.id;
@@ -7141,135 +7070,6 @@ function LawnAssessmentCompletionBlock({
               );
             })}
           </div>
-          {!confirmed && (
-            <div>
-              <div style={{ fontSize: 11, color: D.muted, fontWeight: 500, marginBottom: 6 }}>
-                Stress flags
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {LAWN_STRESS_FLAGS.map((flag) => {
-                  const selected = !!stressFlags[flag.key];
-                  return (
-                    <button
-                      key={flag.key}
-                      type="button"
-                      onClick={() => setStressFlags((prev) => ({ ...prev, [flag.key]: !prev[flag.key] }))}
-                      style={{
-                        padding: "7px 10px",
-                        borderRadius: 999,
-                        border: `1px solid ${selected ? D.amber : D.border}`,
-                        background: selected ? `${D.amber}18` : D.white,
-                        color: selected ? D.amber : D.text,
-                        fontSize: 12,
-                        fontWeight: 500,
-                        cursor: "pointer",
-                      }}
-                    >
-                      {selected ? "Selected " : ""}
-                      {flag.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {!confirmed && (
-            <div>
-              <div style={{ fontSize: 11, color: D.muted, fontWeight: 500, marginBottom: 6 }}>
-                Protocol field checks
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 8 }}>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="Thatch inches"
-                  value={protocolFieldChecks.thatchMeasurementIn}
-                  onChange={(e) =>
-                    setProtocolFieldChecks((prev) => ({
-                      ...prev,
-                      thatchMeasurementIn: e.target.value,
-                    }))
-                  }
-                  style={inputStyle}
-                />
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  placeholder="Chinch / sqft"
-                  value={protocolFieldChecks.chinchCountPerSqft}
-                  onChange={(e) =>
-                    setProtocolFieldChecks((prev) => ({
-                      ...prev,
-                      chinchCountPerSqft: e.target.value,
-                    }))
-                  }
-                  style={inputStyle}
-                />
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  placeholder="Soil K ppm"
-                  value={protocolFieldChecks.soilKPpm}
-                  onChange={(e) =>
-                    setProtocolFieldChecks((prev) => ({
-                      ...prev,
-                      soilKPpm: e.target.value,
-                    }))
-                  }
-                  style={inputStyle}
-                />
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                {[
-                  ["chinchFloatTestDone", "Chinch float test done"],
-                  ["nematodeAssayFlag", "Nematode assay flag"],
-                  ["largePatchHistoryObserved", "Large patch history"],
-                ].map(([key, label]) => {
-                  const selected = !!protocolFieldChecks[key];
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() =>
-                        setProtocolFieldChecks((prev) => ({
-                          ...prev,
-                          [key]: !prev[key],
-                        }))
-                      }
-                      style={{
-                        padding: "7px 10px",
-                        borderRadius: 999,
-                        border: `1px solid ${selected ? D.green : D.border}`,
-                        background: selected ? `${D.green}14` : D.white,
-                        color: selected ? D.green : D.text,
-                        fontSize: 12,
-                        fontWeight: 500,
-                        cursor: "pointer",
-                      }}
-                    >
-                      {selected ? "Selected " : ""}
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-              <textarea
-                rows={2}
-                placeholder="Protocol notes"
-                value={protocolFieldChecks.notes}
-                onChange={(e) =>
-                  setProtocolFieldChecks((prev) => ({
-                    ...prev,
-                    notes: e.target.value,
-                  }))
-                }
-                style={{ ...inputStyle, marginTop: 8, resize: "vertical" }}
-              />
-            </div>
-          )}
           <div style={{ display: "flex", gap: 8 }}>
             {confirmed ? (
               <div
@@ -7313,7 +7113,6 @@ function LawnAssessmentCompletionBlock({
                 setPhotos([]);
                 setResult(null);
                 setTechScores(null);
-                setProtocolFieldChecks(EMPTY_PROTOCOL_FIELD_CHECKS);
                 setConfirmedId(null);
                 setError("");
                 onConfirmed?.(null);
@@ -17268,6 +17067,16 @@ export const ALL_TARGET_LINES = ["pest", "lawn", "tree_shrub", "termite", "mosqu
 const LAWN_ONLY_TARGET_RE =
   /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|bahiagrass|foxtail|kyllinga|dollarweed|doveweed|chamberbitter|chickweed|burweed|pusley|buttonweed|spurge|clover|nutsedge|\bsedge\b|flatsedge|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|leaf spot|anthracnose|summer patch|take-?all|fairy ring|pythium|yellow tuft|turf/i;
 
+// Bed/hardscape work happens on lawn AND tree & shrub visits — the quarterly
+// T&S protocol applies Snapshot for bed pre-emergence, and the bed-only
+// herbicides (SureGuard, Fusilade, Segment) are directed bed/border work
+// wherever they ride. Checked BEFORE the turf pattern because these strings
+// contain "weeds", which the lawn regex would otherwise claim lawn-only and
+// filterLabelTargetsForLine would drop the whole list on a T&S completion
+// (codex P2 r1 on the 20260807200000 fills).
+const BED_WORK_TARGET_RE =
+  /landscape bed|bed & border|non-selective weed|driveway & sidewalk/i;
+
 // Ornamental-only targets (tree & shrub / palm work): sap feeders, mites,
 // borers, and foliar issues. Checked BEFORE the structural set so "Spider
 // mites" classifies as ornamental instead of matching the spider pattern.
@@ -17351,6 +17160,7 @@ export function labelTargetLines(target) {
   if (NO_CONTROL_TARGET_RE.test(target)) return [];
   if (/fire ant/i.test(target)) return ["pest", "lawn"];
   if (ORNAMENTAL_DISEASE_RE.test(target)) return ["tree_shrub"];
+  if (BED_WORK_TARGET_RE.test(target)) return ["lawn", "tree_shrub"];
   if (LAWN_ONLY_TARGET_RE.test(target)) return ["lawn"];
   if (CATERPILLAR_TARGET_RE.test(target)) return ["tree_shrub", "lawn"];
   if (ORNAMENTAL_ONLY_TARGET_RE.test(target)) return ["tree_shrub"];

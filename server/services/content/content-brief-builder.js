@@ -205,9 +205,12 @@ function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, 
 // natural…"), layer the citable-listicle architecture on top of the normal
 // supporting-blog contract: exact count in the title, one numbered H2 per
 // item, a quick-answer summary in the first 60 words, a sourced "how we put
-// this together" note, and a visible dated line. List-format pages are the
-// most-cited content class in answer engines (Ahrefs 2026 citation study),
-// and the same structural rules lift informational lists. Deliberately
+// this together" note, a visible dated line, FAQPage schema (the visible FAQ
+// is already in the supporting-blog contract), a per-item concrete-figure
+// note, and — for question-shaped queries — question-form item headings.
+// List-format pages are the most-cited content class in answer engines
+// (Ahrefs 2026 citation study), and the same structural rules lift
+// informational lists. Deliberately
 // INFORMATIONAL-ONLY: ranked vendor roundups stay out of the blog lane
 // (operator directive — the router's terminal near-me guard already parks
 // transactional queries), so "best company" intent never reaches this
@@ -229,6 +232,13 @@ const LISTICLE_NOUN_RE = /\b(signs?|symptoms|ways|tips|ideas|mistakes|myths|type
 // buyer-guide/comparison handling. Conservative by design: excluding e.g.
 // "best plants for shade" only costs the list formatting, never the post.
 const LISTICLE_VENDOR_RE = /\b(best|top|cheapest|company|companies|providers?|services?|exterminators?|reviews?|vs)\b/i;
+
+// Question-shaped list queries ("what are the signs of termites") get a
+// question-header variant: each numbered H2 is phrased as the exact
+// sub-question that item answers, so the heading itself matches how the
+// query was asked. Interrogative-lead only — a bare noun query ("signs of
+// termites") keeps declarative headings.
+const LISTICLE_QUESTION_RE = /^\s*(what|why|which|how|when|where|is|are|can|do|does|should)\b/i;
 
 function isListicleQuery(query) {
   const q = String(query || '').trim();
@@ -253,8 +263,12 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, operator
   // constraints (title structure, 60-word quick answer, dated line) go FIRST
   // so they can't be buried under the body/FAQ/CTA sections; the sourced
   // methodology note reads naturally after the list body, so it appends.
+  const questionShaped = LISTICLE_QUESTION_RE.test(String(query));
   const sections = [
     'listicle structure: exact item count in the title (e.g. "7 Signs of Termite Damage in Bradenton Homes"), one numbered H2 per item, and the same internal shape for every item (what it is → why it matters in SWFL → what to do)',
+    ...(questionShaped ? [
+      'question-form item headings: the query is question-shaped, so phrase each numbered H2 as the exact sub-question that item answers, the way a SWFL homeowner would ask it (e.g. "3. Are Mud Tubes on the Foundation a Termite Sign?") — keep the leading number, and the first sentence under each heading answers its question directly',
+    ] : []),
     'quick-answer summary inside the first 60 words that names every list item in one scannable sentence or tight list',
     'visible "Last updated: [Month Year]" line under the title — use the current month and year (the publisher stamps frontmatter `updated` to the PR-open date, so month+year granularity stays consistent with it; never an older or invented date)',
     ...requiredSections,
@@ -266,12 +280,20 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, operator
       'The item count in the title MUST equal the number of numbered H2 sections — recount before finishing.',
       "Each item's first sentence is self-contained and declarative so it can be quoted standalone by an answer engine.",
       'No filler between an item heading and its answer — the payoff sentence comes first, color commentary after.',
+      'Anchor each item with one concrete figure from the brief\'s facts pack or a brief-named source (a measurement, timeframe, temperature, count) where one exists — answer engines cite numbers over vague claims. NEVER invent a figure, and never a dollar amount (cost questions link /pest-control-calculator/ instead).',
       'This is an informational list, never a ranked vendor roundup — do not rank or compare companies.',
     ],
   };
-  // Schema unchanged: Article/BreadcrumbList from the supporting-blog
-  // contract (FAQPage only ever arrives via the AEO overlay upstream).
-  return { requiredSections: sections, schemaTypes, voiceConstraints: voice, listicle: true };
+  // The supporting-blog contract already requires a visible FAQ section, so
+  // requesting FAQPage schema here keeps seo-completion-gate's
+  // FAQ_SCHEMA_WITHOUT_VISIBLE_FAQ invariant satisfied; answer engines parse
+  // FAQPage regardless of Google's rich-result deprecation (same reasoning as
+  // the AEO overlay, which may have added it already — the Set dedupes).
+  // FAQ-blocked services are handled downstream: _composeBrief runs
+  // stripFaqRequirements AFTER this overlay, removing both the section and
+  // the schema type.
+  const schema = Array.from(new Set([...schemaTypes, 'FAQPage']));
+  return { requiredSections: sections, schemaTypes: schema, voiceConstraints: voice, listicle: true };
 }
 
 // NO-FAQ policy at the BRIEF level. FAQ-blocked topics (content-guardrails.
@@ -297,14 +319,30 @@ const GATE_RETRY_INSTRUCTIONS = {
   HARDCODED_PRICE: 'Do NOT write any specific dollar amount or price anywhere in the draft — link /pest-control-calculator/ wherever cost comes up.',
   FAQ_BLOCKED_SERVICE: 'Do NOT include an FAQ section or FAQ-style Q&A for this service — FAQ treatment is policy-blocked for it. Cover the material as normal prose sections instead.',
   DISALLOWED_EXTERNAL_LINK: 'Only link external domains from the approved source list already cited in the brief/facts pack; remove every other external link.',
+  UNKNOWN_INTERNAL_ROUTE: 'Remove or replace every internal link that is not in the brief\'s internal_links_to_add, the allowlisted site pages, or a real /{service-slug}-{city}-fl/ city page — never link a guessed or remembered route; if unsure a page exists, link the hub or calculator instead.',
+  CITATION_TOKEN_RESIDUE: 'Strip ALL citation markup — <cite> tags, index="N" tokens, [^footnote] markers, citeturn/oaicite/:contentReference tokens, 【…】 brackets. Attribute sources in plain prose ("per UF/IFAS…") with no scaffolding of any kind.',
+  OFF_FOOTPRINT_CITY_CLAIM: 'Remove every service claim naming a city outside the Waves footprint — either drop the city or rewrite it as a purely educational mention with NO serve/schedule/call/book/your-home language attached. The gate attaches that language across structure, not just sentences: a heading, colon-terminated list introduction ("We serve these cities:"), or table header carrying service/CTA wording taints EVERY bullet/cell under it — restructure those too, not only same-sentence wording.',
+  PRODUCT_CLAIM: 'Remove active-ingredient names and every recommendation/usage/efficacy claim about professional products — never state or imply what Waves technicians carry, use, or recommend. A professional product may remain as the INFORMATIONAL TOPIC of the piece (what it is, how it is designed to work per its label), so keep the brief\'s target keyword and title intact and strip only the offending claim sentences.',
+  PREVENTION_PROMISE: 'Remove every promise that pests are prevented, eliminated, or won\'t return — describe REDUCED recurrence instead, always conditional, never guaranteed. Mention free re-treatment between visits ONLY if the piece concerns recurring WaveGuard plan coverage; one-time, termite, rodent, mosquito, and tree-and-shrub-only topics and DIY guides are not re-service eligible, so soften the outcome claim there WITHOUT promising a callback.',
+  COMPARISON_RIGGED_RANKING: 'Remove all ranking/winner framing ("#1", "best", "top-rated", "winner") from the comparison and the title/meta — present neutral trade-offs and let the reader conclude (highlight={} column emphasis is layout and stays fine; a declared winner is not).',
+  COMPARISON_COMPETITOR_IN_PROSE: 'Move the SPECIFIC competitor(s) this finding names out of prose, title, and meta — outside your operator brief, a competitor may be named ONLY inside the <ComparisonTable> itself; in the surrounding copy say "national chains" or "other providers" instead. Competitors your operator brief itself names (its binding title/thesis/outline) are authorized and MUST stay as briefed — do not remove those.',
+  COMPARISON_UNKNOWN_COMPETITOR: 'Remove every business name that get_competitor_facts did not return — replace each with a generic provider category ("national chain", "local SWFL company", "DIY"); never invent a business name or pull one from web search. EXCEPTION: a business your operator brief itself names (its binding title/thesis/outline) MUST stay in prose/title/meta as briefed — remove it only from the <ComparisonTable> block (columns, cells, headers), where its attributes cannot be validated; keep the table options generic and make the briefed comparison in prose instead.',
   COMPARISON_DISPARAGEMENT: 'Remove all negative or disparaging language about named businesses; comparisons must be neutral and factual.',
   COMPARISON_UNCLASSIFIED_OPTION: 'Every comparison-table option must be either a generic category (no business names) or a competitor from the curated allowlist — replace unlisted names with generic categories.',
 };
 
 function buildRetryDirectives(gateRetry) {
   const findings = Array.isArray(gateRetry?.findings) ? gateRetry.findings : [];
-  const directives = findings.map((f) => GATE_RETRY_INSTRUCTIONS[f.code]
-    || `Previous draft failed ${f.severity || 'P0'} ${f.code || 'gate check'}${f.message ? `: ${f.message}` : ''} — do not repeat it.`);
+  // Always carry the gate's own finding text alongside the canonical
+  // directive: the message names the OFFENDING entity (which competitor,
+  // which city, which product), and without it a directive like "move the
+  // competitor this finding names" gives the sole redraft nothing to act on
+  // (Codex r4).
+  const directives = findings.map((f) => {
+    const canonical = GATE_RETRY_INSTRUCTIONS[f.code];
+    if (!canonical) return `Previous draft failed ${f.severity || 'P0'} ${f.code || 'gate check'}${f.message ? `: ${f.message}` : ''} — do not repeat it.`;
+    return f.message ? `${canonical} [Gate reported: ${f.message}]` : canonical;
+  });
   return [
     'PREVIOUS ATTEMPT REJECTED by hard content gates. This is the final attempt — the draft is discarded (never published, never reviewed) if any of these repeat:',
     ...Array.from(new Set(directives)),

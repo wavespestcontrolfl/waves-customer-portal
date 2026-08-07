@@ -1,6 +1,6 @@
 const pricingEngine = require('./pricing-engine');
 const logger = require('./logger');
-const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
+const { loadExistingQualifyingServiceKeys, loadOwnedRecurringServiceKeys } = require('./waveguard-existing-services');
 
 const RECURRING_SERVICE_ORDER = ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub'];
 const TIER_MIN_SERVICE_COUNT = {
@@ -107,9 +107,6 @@ function inferRequestedServices(prompt, currentServiceKeys = new Set()) {
     .slice(0, 4);
 }
 
-function hasUpgradeIntent(prompt) {
-  return /\b(upgrade|premium|enhanced|more frequent|monthly|higher|better plan|bigger plan)\b/i.test(String(prompt || ''));
-}
 
 function currentServiceObjectsFor(keys, context) {
   const services = {};
@@ -258,16 +255,56 @@ async function safeSelect(db, table, buildQuery) {
 }
 
 async function loadCurrentServiceKeys(db, customer) {
-  if (!db || !customer?.id) return [];
+  if (!db || !customer?.id) return { currentServiceKeys: [], ownedServiceKeys: [] };
   try {
-    // WaveGuard is count-based across the customer's actual active recurring
-    // qualifying services. A tier label alone never identifies which services
-    // the customer bought, so it must not seed a Pest/Lawn/Mosquito basket.
-    const keys = await loadExistingQualifyingServiceKeys(db, customer.id);
-    return keys.map(key => key === 'termite_bait' ? 'termite' : key);
+    // Scope BOTH sets to the property being priced (codex #3253 r2): this
+    // panel prices the customer's PRIMARY address, so a plan active only at a
+    // secondary property must neither model the baseline nor block a quote
+    // here. Same stamped → creating-estimate → primary-street resolution as
+    // estimate scoping (#3244); an empty primary street keeps the
+    // conservative account-wide set.
+    const { normalizedStampedStreet } = require('./estimate-property-linkage');
+    // Locality-qualified per #3248: city/zip segments keep two same-named
+    // streets in different cities from merging (empty segments wildcard).
+    const primaryStreet = normalizedStampedStreet(customer.address_line1, customer.address_line2, customer.city, customer.zip);
+    const streetScope = primaryStreet
+      ? { estimateStreet: primaryStreet, customerPrimaryStreet: primaryStreet }
+      : null;
+    const mapKey = key => key === 'termite_bait' ? 'termite' : key;
+    // Each lookup fails INDEPENDENTLY (codex #3253 r4): a transient failure
+    // in the broader ownership query must not discard already-known
+    // qualifying keys — that would treat an existing customer as owning
+    // nothing and emit the fresh quote this module exists to prohibit (and
+    // undercount earned tiers). ownedSet is unioned with the qualifying keys
+    // downstream, so a failed ownership lookup degrades to qualifying-only.
+    let currentServiceKeys = [];
+    try {
+      // WaveGuard is count-based across the customer's actual active
+      // recurring qualifying services. A tier label alone never identifies
+      // which services the customer bought, so it must not seed a
+      // Pest/Lawn/Mosquito basket.
+      currentServiceKeys = (await loadExistingQualifyingServiceKeys(db, customer.id, { streetScope })).map(mapKey);
+    } catch (err) {
+      logger.warn(`[customer-pricing-ai] qualifying service lookup skipped: ${err.message}`);
+    }
+    let ownedServiceKeys = [];
+    let ownershipLookupFailed = false;
+    try {
+      // Ownership is BROADER than qualification (codex #3253 r2): recurring
+      // rodent bait monitoring never raises a tier but absolutely means the
+      // customer has rodent service — the never-re-price rule must see it.
+      ownedServiceKeys = (await loadOwnedRecurringServiceKeys(db, customer.id, { streetScope })).map(mapKey);
+    } catch (err) {
+      // FAIL CLOSED (codex #3253 r4): unknown ownership must not price —
+      // the caller returns manual review instead of a fresh quote the
+      // customer may already be paying a different rate for.
+      ownershipLookupFailed = true;
+      logger.warn(`[customer-pricing-ai] ownership lookup failed — pricing withheld: ${err.message}`);
+    }
+    return { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed };
   } catch (err) {
-    logger.warn(`[customer-pricing-ai] active service lookup skipped: ${err.message}`);
-    return [];
+    logger.warn(`[customer-pricing-ai] active service lookup failed — pricing withheld: ${err.message}`);
+    return { currentServiceKeys: [], ownedServiceKeys: [], ownershipLookupFailed: true };
   }
 }
 
@@ -393,6 +430,11 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
 }
 
 function missingPropertyFor(serviceKeys, context) {
+  // Nothing to price → nothing to measure. An owned-only request must reach
+  // the not-re-pricing answer even when the profile lacks a home square
+  // footage — the unconditional home_sqft check below otherwise turns it
+  // into PROPERTY_DETAILS_NEEDED (codex #3253 r2).
+  if (!serviceKeys.length) return null;
   if (!context.hasHomeSqFt) return 'home_sqft';
   const needsOutdoor = serviceKeys.some(key => ['lawn_care', 'mosquito', 'tree_shrub', 'one_time_lawn', 'one_time_mosquito'].includes(key));
   if (needsOutdoor && !context.hasLotSqFt && !context.hasLawnSqFt) return 'outdoor_sqft';
@@ -442,6 +484,7 @@ function buildQuoteOption({
   propertyContext,
   showEstimatedPlanMonthly = true,
   baselineMismatch = false,
+  ownedRequestNote = '',
 }) {
   const line = findLineItem(estimate, option.serviceKey);
   const amount = quoteAmountFromLine(line);
@@ -483,6 +526,10 @@ function buildQuoteOption({
       amount.dueAtStart ? `Estimated setup: $${amount.dueAtStart}.` : null,
       planMonthly ? `Estimated plan total after change: $${planMonthly}/mo.` : null,
       estimate?.waveGuard?.tier ? `Estimated WaveGuard tier: ${estimate.waveGuard.tier}.` : null,
+      // Mixed prompt: the owned half of the request must reach staff through
+      // the option the customer actually submits — the client sends this
+      // requestDescription, not result.message (codex #3253 r2).
+      ownedRequestNote || null,
     ].filter(Boolean).join(' '),
   };
 }
@@ -494,12 +541,26 @@ async function maybeSyncPricingEngine(db) {
   }
 }
 
+// Repeatable purchases: quotable even for a current customer, because they are
+// not an existing recurring obligation whose rate could disagree.
+const REPEATABLE_ONE_TIME_KEYS = ['palm', 'one_time_lawn', 'one_time_mosquito'];
+
+/** Owned by this customer AND not a repeatable one-time purchase. */
+function ownedAndNotRepeatable(serviceKey, currentSet) {
+  return currentSet.has(serviceKey) && !REPEATABLE_ONE_TIME_KEYS.includes(serviceKey);
+}
+
 async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, propertyLookup }) {
   const text = String(prompt || '').trim();
-  const currentServiceKeys = await loadCurrentServiceKeys(db, customer);
+  const { currentServiceKeys, ownedServiceKeys, ownershipLookupFailed } = await loadCurrentServiceKeys(db, customer);
+  // Two sets on purpose (codex #3253 r2): currentServiceKeys (WaveGuard
+  // qualifying) keeps modeling the baseline plan/tier exactly as before;
+  // ownedSet is the superset every never-re-price decision reads, so a
+  // non-qualifying recurring service (rodent) still blocks its own re-quote.
   const currentSet = new Set(currentServiceKeys);
+  const ownedSet = new Set([...currentServiceKeys, ...ownedServiceKeys]);
   const normalizedTargetTier = normalizeWaveGuardTier(targetTier);
-  const requestedServices = inferRequestedServices(text, currentSet);
+  const requestedServices = inferRequestedServices(text, ownedSet);
 
   if (normalizedTargetTier) {
     const requiredCount = TIER_MIN_SERVICE_COUNT[normalizedTargetTier];
@@ -522,10 +583,41 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
     };
   }
 
+  // FAIL CLOSED (codex #3253 r4): if what the customer owns could not be
+  // established, no PRICE may be generated — a fresh quote for a service
+  // they already pay a (possibly different) rate for is the exact dispute
+  // this module exists to prevent. Manual review instead. Checked AFTER the
+  // target-tier branch (codex r5 P2): tier answers report qualifying counts,
+  // never prices, so an ownership failure must not block them.
+  if (ownershipLookupFailed) {
+    return {
+      ok: false,
+      code: 'PRICING_UNAVAILABLE',
+      message: 'I could not verify your current services just now, so I did not generate prices. Send Waves a request and we will price it with you.',
+      currentServices: currentServiceKeys.map(toKeyLabel),
+      requestedServices: [],
+      alreadyIncluded: [],
+      options: [],
+    };
+  }
+
   const turfProfile = await loadTurfProfile(db, customer.id);
 
+  // A service the customer ALREADY has is never re-priced from the property
+  // profile — owner ruling 2026-08-06. Their live rate may predate a price
+  // change, or have been set by hand at estimate time; quoting a fresh number
+  // beside it invites a "why is this different?" dispute. Upgrade wording no
+  // longer opens that door (it previously did): an upgrade is a conversation,
+  // routed to Waves, not a self-serve re-quote. The one-time keys stay
+  // exempt — those are repeatable purchases, not an existing obligation.
+  // Computed BEFORE property resolution (codex #3253 r4 P2): an owned-only
+  // request generates no quote, so it must not trigger the external
+  // geocoding/AI property lookup (cache writes, provider cost, latency).
+  const alreadyIncluded = requestedServices.filter(key => ownedAndNotRepeatable(key, ownedSet));
+  const servicesToPrice = requestedServices.filter(key => !alreadyIncluded.includes(key));
+
   let lookupFn = propertyLookup;
-  if (!lookupFn) {
+  if (!lookupFn && servicesToPrice.length) {
     try {
       ({ performPropertyLookup: lookupFn } = require('../routes/property-lookup-v2'));
     } catch {
@@ -533,16 +625,18 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
     }
   }
 
-  const propertyContext = await resolvePropertyContext({ customer, turfProfile, propertyLookup: lookupFn });
-  const missing = missingPropertyFor(requestedServices, propertyContext);
-  const upgradeIntent = hasUpgradeIntent(text);
+  // Null lookup → resolvePropertyContext stays profile-only (no external
+  // calls), which is all an owned-only response needs for its summary.
+  const propertyContext = await resolvePropertyContext({
+    customer,
+    turfProfile,
+    propertyLookup: servicesToPrice.length ? lookupFn : null,
+  });
 
-  const alreadyIncluded = requestedServices.filter(key =>
-    currentSet.has(key) &&
-    !upgradeIntent &&
-    !['palm', 'one_time_lawn', 'one_time_mosquito'].includes(key)
-  );
-  const servicesToPrice = requestedServices.filter(key => !alreadyIncluded.includes(key));
+  // Measured AFTER the exclusion: an owned service missing a measurement must
+  // not short-circuit the request into PROPERTY_DETAILS_NEEDED — we are not
+  // pricing it, so its gaps are irrelevant to what we CAN price (codex r1 P2).
+  const missing = missingPropertyFor(servicesToPrice, propertyContext);
 
   if (missing) {
     return {
@@ -579,6 +673,11 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
 
   const options = [];
   const generic = !text;
+  // Composed BEFORE the option loop so every priced option carries the owned
+  // half of a mixed request into what staff receive (codex #3253 r2).
+  const ownedRequestNote = alreadyIncluded.length
+    ? `Customer also asked about ${alreadyIncluded.map(toKeyLabel).join(', ')}, already active on this account — not re-priced in the portal; review that change with them.`
+    : '';
   for (const serviceKey of servicesToPrice) {
     for (const option of variantsForService(serviceKey, text, generic)) {
       const targetServices = {
@@ -598,16 +697,26 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
         propertyContext,
         showEstimatedPlanMonthly: !billingModelMismatch,
         baselineMismatch: billingModelMismatch,
+        ownedRequestNote,
       });
+      // Belt-and-braces on the money rule, sharing the SAME predicate as the
+      // servicesToPrice filter above (no second definition to drift): if a
+      // future path ever routes an owned service here, no price for it can
+      // still reach the customer.
+      if (ownedAndNotRepeatable(option.serviceKey, ownedSet)) continue;
       if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) options.push(quoted);
     }
   }
 
-  const message = alreadyIncluded.length && !options.length
-    ? `You already have ${alreadyIncluded.map(toKeyLabel).join(', ')} on this property.`
-    : options.length
-      ? `I priced ${[...new Set(servicesToPrice.map(toKeyLabel))].join(', ')} using the property tied to your portal.`
-      : 'I could not price that request automatically. Waves can review it manually.';
+  // A mixed prompt ("upgrade my lawn care and add mosquito") must not lose the
+  // owned half just because the new half priced (codex r1 P2).
+  const ownedNote = alreadyIncluded.length
+    ? `You already have ${alreadyIncluded.map(toKeyLabel).join(', ')} on this property, so I am not re-pricing that here — your current rate stands. Send Waves a request and we will review it with you.`
+    : '';
+  const message = options.length
+    ? [`I priced ${[...new Set(servicesToPrice.map(toKeyLabel))].join(', ')} using the property tied to your portal.`, ownedNote]
+      .filter(Boolean).join(' ')
+    : ownedNote || 'I could not price that request automatically. Waves can review it manually.';
 
   return {
     ok: true,

@@ -315,6 +315,8 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   // cancellation-notice obligation; read by the post-commit worker.
   let cancelNoticeClaimTs = null;
   let cancelNoticeLateClaim = false;
+  let cancelNoticeCallerClaim = false;
+  let cancelNoticeOutboxTs = null;
 
   async function doWrites(t) {
     // A pending outbound-callback booking (AI call pipeline, held for office
@@ -428,6 +430,13 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             .where({ scheduled_service_id: jobId })
             .whereNotNull('cancellation_notice_state')
             .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+          // The restoration also voids any caller-intent outbox row IN
+          // THIS TRANSACTION (codex #3238 r12): waiting for the sweep's
+          // live-visit void leaves a window where a re-cancel inherits
+          // the previous cycle's notify intent.
+          await sp('ops_email_send_state')
+            .where({ email_key: `cn-ci-${jobId}` })
+            .del();
         });
       } catch (clearErr) {
         logger.warn(`[job-status] cancellation-marker clear failed for ${jobId}: ${clearErr.message}`);
@@ -494,6 +503,35 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
         // The transition still commits; the post-commit worker attempts a
         // LATE claim so the obligation isn't lost (codex r20).
         cancelNoticeLateClaim = notifyCustomer === undefined || notifyCustomer === true;
+        // Durable caller-intent OUTBOX in the committing transaction
+        // (codex #3238 r7): the fire-and-forget repair below can die with
+        // the process — this row survives the commit, and the sweep's
+        // late-claim mints pending_notify instead of evidence-gated
+        // plain pending when it finds it. Own savepoint: its failure
+        // must never roll back the transition.
+        if (notifyCustomer === 'caller') {
+          try {
+            // Key stays under email_key's varchar(60): 'cn-ci-' + UUID =
+            // 42 chars (codex r8). The VALUE is the shared claim token so
+            // partial series failures regroup with their successfully
+            // claimed siblings instead of splitting into two notices.
+            const outboxTs = cancelNoticeToken instanceof Date ? cancelNoticeToken : nextClaimTs();
+            cancelNoticeOutboxTs = outboxTs;
+            await t.transaction(async (osp) => {
+              await osp('ops_email_send_state')
+                .insert({ email_key: `cn-ci-${jobId}`, last_sent_at: outboxTs, updated_at: osp.fn.now() })
+                .onConflict('email_key')
+                .merge(['last_sent_at', 'updated_at']);
+            });
+          } catch (obErr) {
+            logger.warn(`[job-status] caller-intent outbox write failed for ${jobId}: ${obErr.message}`);
+          }
+        }
+        // Caller-owned transitions repair their claim too (codex r45+):
+        // the route may die before handleCancellation, and the sweep's
+        // late-claim would recreate the row as evidence-gated plain
+        // 'pending', silently dropping the operator's notify intent.
+        cancelNoticeCallerClaim = notifyCustomer === 'caller';
         logger.warn(`[job-status] cancellation-notice claim failed for ${jobId}: ${claimErr.message}`);
       }
     }
@@ -522,14 +560,122 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // Evidence = THIS visit's messaging_audit_log rows (sms_log never
     // stores the visit id) with provider acceptance and a genuine Twilio
     // SID; sends predating the linkage close silently via the sweep.
-    if (!cancelNoticeClaimTs && !cancelNoticeLateClaim) return;
+    if (!cancelNoticeClaimTs && !cancelNoticeLateClaim && !cancelNoticeCallerClaim) return;
     void (async () => {
       try {
+        if (!cancelNoticeClaimTs && cancelNoticeCallerClaim) {
+          // Cycle fence (codex r15): a delayed worker from a PREVIOUS
+          // cancellation cycle must not stamp (or consume the outbox of)
+          // a restore-and-recancel's new cycle — proceed only while the
+          // outbox row still carries THIS worker's token.
+          const ownRow = await db('ops_email_send_state')
+            .where({ email_key: `cn-ci-${jobId}` })
+            .first('last_sent_at')
+            .catch(() => null);
+          if (!ownRow || !cancelNoticeOutboxTs
+            || new Date(ownRow.last_sent_at).getTime() !== cancelNoticeOutboxTs.getTime()) return;
+          // CLAIM-ONLY repair preserving the caller's notify intent as
+          // durable 'pending_notify' — the route adopts it immediately
+          // (ownable singleton) and the sweep settles it without
+          // re-deriving delivery evidence if the route died. Never
+          // worker-sends: caller-owned notices are the route's to send.
+          // Reuse the route's SHARED series token when supplied (codex
+          // #3238 r1): an independent timestamp would read as a foreign
+          // owner to handleSeriesCancellation's adoption fence and block
+          // the combined notice.
+          const callerTs = cancelNoticeToken instanceof Date ? cancelNoticeToken : nextClaimTs();
+          // Era fence applies to the caller repair too (codex #3238 r7).
+          const eraOpen = await db('ops_email_send_state')
+            .whereRaw("COALESCE((SELECT es.last_sent_at FROM ops_email_send_state es WHERE es.email_key = 'cancel-notice-hook-enabled-at'), '-infinity'::timestamptz) > COALESCE((SELECT ds.last_sent_at FROM ops_email_send_state ds WHERE ds.email_key = 'cancel-notice-hook-disabled-at'), '-infinity'::timestamptz)")
+            .first(db.raw('1'))
+            .catch(() => null);
+          if (!eraOpen) return;
+          // Merged-slot survivor check, same as the in-trx claim (codex
+          // #3238 r2): if the customer still has a live visit at this
+          // slot, the repaired claim must be terminal 'suppressed' — a
+          // pending_notify would read as unconditional operator intent
+          // and the sweep would text against a live visit.
+          let repairState = 'pending_notify';
+          try {
+            const own = await db('appointment_reminders')
+              .where({ scheduled_service_id: jobId })
+              .first('customer_id', 'appointment_time');
+            if (own) {
+              const survivor = await db('appointment_reminders')
+                .where({ customer_id: own.customer_id, appointment_time: own.appointment_time, cancelled: false })
+                .whereNot('scheduled_service_id', jobId)
+                .first('id');
+              if (survivor) repairState = 'suppressed';
+            }
+          } catch (classifyErr) {
+            // Classification failed — do NOT stamp (codex #3238 r3): a
+            // defaulted pending_notify would read as unconditional
+            // operator intent and could text against a live merged-slot
+            // sibling. The marker stays unclaimed; the sweep's late-claim
+            // recovers it evidence-gated, and silence beats a wrong text.
+            logger.warn(`[job-status] caller claim repair classification failed for ${jobId}: ${classifyErr.message}`);
+            return;
+          }
+          const repaired = await db('appointment_reminders')
+            .where({ scheduled_service_id: jobId })
+            .where(function claimable() {
+              this.whereNull('cancellation_notice_at')
+                .orWhere(function stale() {
+                  this.whereIn('cancellation_notice_state', ['pending', 'pending_notify'])
+                    .where('cancellation_notice_at', '<', db.raw("now() - interval '15 minutes'"))
+                    .whereRaw('NOT EXISTS (SELECT 1 FROM appointment_reminders sib WHERE sib.cancellation_notice_at = appointment_reminders.cancellation_notice_at AND sib.id <> appointment_reminders.id AND sib.cancellation_notice_state IN (\'pending\', \'pending_notify\'))');
+                });
+            })
+            .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status = 'cancelled')")
+            // Current-interval fence (codex r16): a worker delayed across
+            // an on-off-on cycle must not stamp a cancellation that
+            // predates the CURRENT enable boundary; fail-closed when the
+            // boundary is absent.
+            .whereRaw("COALESCE((SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled'), '-infinity'::timestamptz) >= COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-enabled-at'), 'infinity'::timestamptz)")
+            // Token fence IN the stamp (codex #3238 r17): the ownRow read
+            // above is not atomic with this update — a restore-and-recancel
+            // between them replaces the outbox token, and stamping the old
+            // cycle's callerTs would read as a foreign owner to series
+            // adoption. The claim lands only while the outbox still carries
+            // THIS worker's exact token.
+            .whereRaw('EXISTS (SELECT 1 FROM ops_email_send_state ob WHERE ob.email_key = ? AND ob.last_sent_at = ?)', [`cn-ci-${jobId}`, cancelNoticeOutboxTs])
+            // Survivor guard IN the stamp (codex #3238 r4): a live
+            // same-customer/same-slot sibling appearing between the
+            // classification read and this update must void the
+            // pending_notify — zero rows stamped leaves the marker
+            // unclaimed for the evidence-gated late-claim.
+            .modify((q) => {
+              if (repairState === 'pending_notify') {
+                q.whereRaw("NOT EXISTS (SELECT 1 FROM appointment_reminders sib2 WHERE sib2.customer_id = appointment_reminders.customer_id AND sib2.appointment_time = appointment_reminders.appointment_time AND sib2.cancelled = false AND sib2.scheduled_service_id IS DISTINCT FROM appointment_reminders.scheduled_service_id)");
+              }
+            })
+            .update({ cancellation_notice_at: callerTs, cancellation_notice_state: repairState, updated_at: callerTs });
+          // Consume the outbox ONLY when this repair actually recorded
+          // the intent (codex r10): zero rows means the route's own
+          // plain-pending claim won the race — the outbox must survive
+          // so the sweep's upgrade pass can apply it if the route dies.
+          if (repaired) {
+            await db('ops_email_send_state')
+              .where({ email_key: `cn-ci-${jobId}` })
+              // Token-fenced (codex r15): never consume a newer cycle's row.
+              .where('last_sent_at', cancelNoticeOutboxTs)
+              .del()
+              .catch(() => {});
+          }
+          return;
+        }
         if (!cancelNoticeClaimTs && cancelNoticeLateClaim) {
           // In-trx claim failed (r20): take it now, outside the trx.
           const lateTs = nextClaimTs();
           const won = await db('appointment_reminders')
             .where({ scheduled_service_id: jobId })
+            // Era fence (codex #3238 r7): a draining gate-on pod must not
+            // late-claim after a newer disable was stamped — same guard
+            // as the sweep's late-claim.
+            .whereRaw("COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-enabled-at'), '-infinity'::timestamptz) > COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-disabled-at'), '-infinity'::timestamptz)")
+            // Current-interval fence (codex r16): the cancellation itself
+            // must fall within the current enable interval.
+            .whereRaw("COALESCE((SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled'), '-infinity'::timestamptz) >= COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-enabled-at'), 'infinity'::timestamptz)")
             .where(function claimable() {
               this.whereNull('cancellation_notice_at')
                 .orWhere(function stale() {

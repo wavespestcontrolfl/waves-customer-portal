@@ -59,6 +59,7 @@ jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => n
 const { ANNUAL_PREPAY_DISCOUNT_PCT } = require('../services/pricing-engine/constants');
 const {
   buildSecurePlanContext,
+  deriveSecurePlanContext,
   prepaySelectionState,
   _test,
 } = require('../services/secure-appointment-plans');
@@ -99,6 +100,24 @@ beforeEach(() => {
 describe('buildSecurePlanContext', () => {
   test('gate off → null (page payload stays card-only)', async () => {
     mockGateOn = false;
+    expect(await buildSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
+  });
+
+  // Failure vs policy (#3175 hardening): the /secure render stamp reads a
+  // null context as "the page displayed no price" and pins the permanent
+  // accepted_amount=0 sentinel — so the strict core must THROW on a
+  // derivation failure instead of collapsing it into the policy null,
+  // while the wrapper keeps the historical never-throws contract for
+  // every caller that only needs the card-only fallback.
+  test('derivation FAILURE: deriveSecurePlanContext throws, buildSecurePlanContext still returns null', async () => {
+    mockTableHandlers.scheduled_services = { first: () => { throw new Error('db timeout'); } };
+    await expect(deriveSecurePlanContext({ request, visitId: 'v1' })).rejects.toThrow('db timeout');
+    expect(await buildSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
+  });
+
+  test('null-by-POLICY is identical across both entry points (gate off never throws)', async () => {
+    mockGateOn = false;
+    expect(await deriveSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
     expect(await buildSecurePlanContext({ request, visitId: 'v1' })).toBeNull();
   });
 

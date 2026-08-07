@@ -10,7 +10,11 @@ const {
   pricingBundleLacksManualDiscountNetting,
   estimateTotalsReflectManualDiscount,
 } = require('../routes/estimate-public');
-const { addOnPreservedMonthlyRateBase } = require('../services/estimate-converter');
+const { classifyAddOnAcceptContext } = require('../services/estimate-converter');
+// The scalar-returning wrapper was removed with the plan-rate ledger
+// (#3245 — production calls classifyAddOnAcceptContext directly); these
+// behavioral assertions consume the context's addOnBase.
+const addOnPreservedMonthlyRateBase = async (args) => (await classifyAddOnAcceptContext(args)).addOnBase;
 
 // ── shared fixtures ─────────────────────────────────────────────────────────
 

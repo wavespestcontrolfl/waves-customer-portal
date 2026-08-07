@@ -123,7 +123,9 @@ describe('notification preference updates', () => {
       service_reminder_72h_channel: 'both',
       service_reminder_24h_channel: 'sms',
       en_route_channel: 'email',
-      tech_arrived_channel: 'both',
+      // Arrival alerts are SMS-only (email twin retired 2026-08-06): the key
+      // stays writable for bulk-shortcut compat but always persists 'sms'.
+      tech_arrived_channel: 'sms',
     });
   });
 
@@ -142,8 +144,10 @@ describe('notification preference updates', () => {
 
   test('exposes the tech-tracking delivery channels with sms defaults', () => {
     expect(preferencePayload({})).toMatchObject({ enRouteChannel: 'sms', techArrivedChannel: 'sms' });
+    // A stored legacy email/both arrival value must never surface — the read
+    // side reports 'sms' unconditionally (email twin retired 2026-08-06).
     expect(preferencePayload({ en_route_channel: 'email', tech_arrived_channel: 'both' }))
-      .toMatchObject({ enRouteChannel: 'email', techArrivedChannel: 'both' });
+      .toMatchObject({ enRouteChannel: 'email', techArrivedChannel: 'sms' });
   });
 
   test('labels a tech-tracking delivery-channel change with its from/to channel names', () => {

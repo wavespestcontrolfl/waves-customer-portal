@@ -329,6 +329,32 @@ async function reserveSlot({
   // into a Postgres INTERVAL string below.
   const holdMins = Math.max(1, Math.min(120, Number(holdMinutes) || DEFAULT_HOLD_MINUTES));
 
+  // Resolve the estimate's coordinates BEFORE the transaction (geocode is a
+  // network call — 24h-cached and warm from the slots fetch, but never worth
+  // holding the occupancy/row locks for). Stamped onto the hold row below so
+  // find-time treats a live hold as a route anchor: without coords a hold is
+  // silently zero drive time in the detour math, and a multi-property group's
+  // second slot picker can't rank same-day/nearby windows around the first
+  // property's fresh hold. Best-effort — a geocode miss books exactly as
+  // before.
+  let holdCoords = null;
+  let holdCoordsAddress = null;
+  try {
+    const estimateForCoords = await db('estimates').where({ id: estimateId }).first('id', 'customer_id', 'address');
+    if (estimateForCoords && typeof estimateSlotAvailability.resolveEstimateCoords === 'function') {
+      const coords = await estimateSlotAvailability.resolveEstimateCoords(estimateForCoords);
+      if (coords && Number.isFinite(Number(coords.lat)) && Number.isFinite(Number(coords.lng))) {
+        holdCoords = { lat: Number(coords.lat), lng: Number(coords.lng) };
+        // Snapshot the address these coords describe: the reservation txn
+        // re-reads the estimate under lock and must drop the coords if a
+        // concurrent revision changed the property (codex #3244 r7).
+        holdCoordsAddress = String(estimateForCoords.address || '');
+      }
+    }
+  } catch (geoErr) {
+    logger.warn(`[slot-reservation] hold coords resolve skipped for estimate ${estimateId}: ${geoErr.message}`);
+  }
+
   try {
     const reserved = await db.transaction(async (trx) => {
       // RUNG 1 — date-wide occupancy lock, FIRST, before ANY row lock this
@@ -721,6 +747,17 @@ async function reserveSlot({
         payment_method_preference: null,
         estimated_duration_minutes: effectiveDurationMinutes,
         notes,
+        // Geo stamp (best-effort): coords make the hold a real route anchor
+        // for find-time's detour math; the zone slug lets the zone-capacity
+        // conflict check see holds directly instead of via the (absent)
+        // customer city. Both were previously never written on holds.
+        // Coords only when the locked row still quotes the address they were
+        // geocoded from — a concurrent revision that moved the property must
+        // not anchor routing at the old location (codex #3244 r7). Address
+        // drift drops the geo stamp; the hold books exactly as before.
+        ...(holdCoords && holdCoordsAddress === String(estimate.address || '')
+          ? { lat: holdCoords.lat, lng: holdCoords.lng } : {}),
+        ...(zoneSlugOf(reserveZone) ? { zone: zoneSlugOf(reserveZone) } : {}),
         // One-time accepts are a single visit — pin is_recurring=false so
         // dispatch job-classification and recurring-only sweeps never treat
         // them as a series. Recurring reserves are left to the column default

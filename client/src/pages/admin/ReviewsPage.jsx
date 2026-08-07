@@ -898,6 +898,74 @@ function PolicyInfoCard({ Icon, label, value, sub, color = D.teal }) {
   );
 }
 
+// One customer row in the attribution repair panel — used by both the
+// click-correlated "likely reviewers" list (with a badge) and the plain
+// name/phone/address search results.
+function RepairCandidateCard({ review, candidate, matching, onAttribute, badge }) {
+  return (
+    <div
+      style={{
+        border: `1px solid ${D.border}`,
+        borderRadius: 8,
+        background: D.card,
+        padding: 10,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 13, fontWeight: 800, color: D.heading }}>
+          {candidate.name}
+        </span>
+        {badge}
+      </div>
+      <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+        {[candidate.address, candidate.city, candidate.phone].filter(Boolean).join(" | ")}
+      </div>
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          flexWrap: "wrap",
+          marginTop: 10,
+        }}
+      >
+        {(candidate.services || []).length === 0 ? (
+          <span style={{ color: D.muted, fontSize: 12 }}>
+            No recent technician visits.
+          </span>
+        ) : (
+          candidate.services.map((service) => {
+            const matchKey = `${review.id}:${candidate.id}:${service.id}`;
+            return (
+              <button
+                key={service.id}
+                onClick={() => onAttribute(review, candidate, service)}
+                disabled={Boolean(matching[matchKey]) || !service.technicianId}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: `1px solid ${D.border}`,
+                  background: D.bg,
+                  color: service.technicianId ? D.text : D.muted,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: service.technicianId ? "pointer" : "not-allowed",
+                  opacity: matching[matchKey] ? 0.55 : 1,
+                }}
+              >
+                <UserCheck size={14} />
+                {matching[matchKey] ? "Matching..." : `${service.technicianName} | ${fmtShortDate(service.serviceDate)}`}
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ReviewIncentivesPanel() {
   const [days, setDays] = useState("30");
   const [data, setData] = useState(null);
@@ -910,8 +978,14 @@ function ReviewIncentivesPanel() {
   const [activeRepairId, setActiveRepairId] = useState(null);
   const [candidateSearch, setCandidateSearch] = useState("");
   const [candidateResults, setCandidateResults] = useState([]);
+  const [likelyReviewers, setLikelyReviewers] = useState([]);
   const [candidateLoading, setCandidateLoading] = useState(false);
   const [matching, setMatching] = useState({});
+  // Monotonic guard: candidate state is shared across repair panels, so a
+  // slow response for review A must never land after review B's panel opened
+  // — the rendered candidates would belong to A while the attribute POST
+  // carries B's review id (pre-push codex P1).
+  const candidateReqRef = useRef(0);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -1003,25 +1077,36 @@ function ReviewIncentivesPanel() {
 
   const openRepair = (review) => {
     const isOpen = activeRepairId === review.id;
+    // Invalidate any in-flight candidate request — its response belongs to a
+    // panel that is no longer the active one.
+    candidateReqRef.current += 1;
     setActiveRepairId(isOpen ? null : review.id);
     setCandidateSearch(isOpen ? "" : review.reviewerName || "");
     setCandidateResults([]);
+    setLikelyReviewers([]);
+    setCandidateLoading(false);
+    // Auto-search on open so the click-correlated "likely reviewers" show up
+    // without a keystroke. qOverride avoids the just-set-state stale closure.
+    if (!isOpen) searchCandidates(review, review.reviewerName || "");
   };
 
-  const searchCandidates = async (review) => {
+  const searchCandidates = async (review, qOverride) => {
+    const reqId = ++candidateReqRef.current;
     setCandidateLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams({
         reviewId: review.id,
-        q: candidateSearch || review.reviewerName || "",
+        q: qOverride ?? (candidateSearch || review.reviewerName || ""),
       });
       const result = await adminFetch(`/admin/reviews/incentives/attribution-candidates?${params.toString()}`);
+      if (candidateReqRef.current !== reqId) return; // superseded — drop stale response
       setCandidateResults(result.candidates || []);
+      setLikelyReviewers(result.likelyReviewers || []);
     } catch (e) {
-      setError(e.message);
+      if (candidateReqRef.current === reqId) setError(e.message);
     } finally {
-      setCandidateLoading(false);
+      if (candidateReqRef.current === reqId) setCandidateLoading(false);
     }
   };
 
@@ -1448,72 +1533,62 @@ function ReviewIncentivesPanel() {
 
                           {candidateLoading ? (
                             <div style={{ color: D.muted, fontSize: 13 }}>Searching...</div>
-                          ) : candidateResults.length === 0 ? (
-                            <div style={{ color: D.muted, fontSize: 13 }}>
-                              No candidate results.
-                            </div>
                           ) : (
                             <div style={{ display: "grid", gap: 8 }}>
-                              {candidateResults.map((candidate) => (
-                                <div
-                                  key={candidate.id}
-                                  style={{
-                                    border: `1px solid ${D.border}`,
-                                    borderRadius: 8,
-                                    background: D.card,
-                                    padding: 10,
-                                  }}
-                                >
-                                  <div style={{ fontSize: 13, fontWeight: 800, color: D.heading }}>
-                                    {candidate.name}
+                              {likelyReviewers.length > 0 && (
+                                <>
+                                  <div style={{ fontSize: 12, fontWeight: 800, color: D.heading }}>
+                                    Likely reviewers
+                                    <span style={{ fontWeight: 400, color: D.muted }}>
+                                      {" — tapped their review link near this review's timestamp"}
+                                    </span>
                                   </div>
-                                  <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-                                    {[candidate.address, candidate.city, candidate.phone].filter(Boolean).join(" | ")}
-                                  </div>
-                                  <div
-                                    style={{
-                                      display: "flex",
-                                      gap: 8,
-                                      flexWrap: "wrap",
-                                      marginTop: 10,
-                                    }}
-                                  >
-                                    {(candidate.services || []).length === 0 ? (
-                                      <span style={{ color: D.muted, fontSize: 12 }}>
-                                        No recent technician visits.
-                                      </span>
-                                    ) : (
-                                      candidate.services.map((service) => {
-                                        const matchKey = `${review.id}:${candidate.id}:${service.id}`;
-                                        return (
-                                          <button
-                                            key={service.id}
-                                            onClick={() => attributeCandidate(review, candidate, service)}
-                                            disabled={Boolean(matching[matchKey]) || !service.technicianId}
-                                            style={{
-                                              display: "inline-flex",
-                                              alignItems: "center",
-                                              gap: 6,
-                                              padding: "8px 10px",
-                                              borderRadius: 8,
-                                              border: `1px solid ${D.border}`,
-                                              background: D.bg,
-                                              color: service.technicianId ? D.text : D.muted,
-                                              fontSize: 12,
-                                              fontWeight: 700,
-                                              cursor: service.technicianId ? "pointer" : "not-allowed",
-                                              opacity: matching[matchKey] ? 0.55 : 1,
-                                            }}
-                                          >
-                                            <UserCheck size={14} />
-                                            {matching[matchKey] ? "Matching..." : `${service.technicianName} | ${fmtShortDate(service.serviceDate)}`}
-                                          </button>
-                                        );
-                                      })
-                                    )}
-                                  </div>
+                                  {likelyReviewers.map((candidate) => (
+                                    <RepairCandidateCard
+                                      key={`likely-${candidate.id}`}
+                                      review={review}
+                                      candidate={candidate}
+                                      matching={matching}
+                                      onAttribute={attributeCandidate}
+                                      badge={
+                                        <span
+                                          style={{
+                                            fontSize: 12,
+                                            fontWeight: 700,
+                                            color: D.green,
+                                            border: `1px solid ${D.border}`,
+                                            borderRadius: 999,
+                                            padding: "2px 8px",
+                                          }}
+                                        >
+                                          Tapped link {candidate.clickOffsetLabel}
+                                          {candidate.locationMatch ? " | same location" : ""}
+                                        </span>
+                                      }
+                                    />
+                                  ))}
+                                  {candidateResults.length > 0 && (
+                                    <div style={{ fontSize: 12, fontWeight: 800, color: D.heading, marginTop: 4 }}>
+                                      Name search
+                                    </div>
+                                  )}
+                                </>
+                              )}
+                              {candidateResults.length === 0 && likelyReviewers.length === 0 ? (
+                                <div style={{ color: D.muted, fontSize: 13 }}>
+                                  No candidate results.
                                 </div>
-                              ))}
+                              ) : (
+                                candidateResults.map((candidate) => (
+                                  <RepairCandidateCard
+                                    key={candidate.id}
+                                    review={review}
+                                    candidate={candidate}
+                                    matching={matching}
+                                    onAttribute={attributeCandidate}
+                                  />
+                                ))
+                              )}
                             </div>
                           )}
                         </div>

@@ -936,6 +936,19 @@ async function depositStillRecordable(estimateId) {
   // Accepted, and this PI wasn't consumed (caller checked) — the customer
   // completed acceptance via prepay/another path; this payment is surplus.
   if (estimate.status === 'accepted') return { recordable: false, reason: 'accepted_without_this_deposit' };
+  // Kill-switch race (codex #3272 r7): a wallet can confirm an already-minted
+  // deposit PI client-side with no further server call, so a charge can land
+  // AFTER GATE_BERMUDA_SUPPRESSION goes off even though every route preflight
+  // now 409s. The webhook is the guaranteed post-charge touchpoint — treat the
+  // gated deposit as unrecordable so the existing stale-deposit rail refunds
+  // it automatically (accept would 409 the customer anyway).
+  {
+    const { estimateDataCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
+    if (estimateDataCarriesBermudaSuppression(estimate.estimate_data)
+      && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+      return { recordable: false, reason: 'bermuda_suppression_gated' };
+    }
+  }
 
   let gates = null;
   try {

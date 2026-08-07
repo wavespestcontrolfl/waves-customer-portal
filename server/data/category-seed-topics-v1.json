@@ -905,24 +905,27 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "Common bermudagrass invades St. Augustine through runners and seed, thrives on the same conditions, and can't be selectively sprayed out — making it one of the most frustrating turf conflicts in SWFL, managed mostly through competition.",
+      "thesis": "Common bermudagrass invades St. Augustine through runners and seed and thrives on the same conditions. Competition — mowing height, density, clean edging — is still the foundation of managing it, but there IS now a labeled selective option: the professional Recognition + Fusilade II tank mix under Florida's 2(ee) recommendation, a strict 2-application spring program with cultivar limits.",
       "outline": [
         "ID: fine texture, gray-green color, aggressive runners visibly crossing sidewalks and beds",
-        "Why there's no easy selective kill in St. Augustine (per UF/IFAS herbicide guidance)",
         "How it gets in: seed, contaminated fill, mower transfer, thin turf",
         "The competition strategy: mowing height and density management that favors St. Augustine",
+        "The selective option: the Recognition + Fusilade II tank mix under Florida's 2(ee) — capped at 2 applications per growing season (spring), cultivar restrictions, why it's a professional program (link the full protocol post)",
         "Spot-treatment realities and the resod decision for heavy takeover",
         "Keeping it out of beds and preventing reintroduction"
       ],
       "sources": [
         "https://edis.ifas.ufl.edu/",
-        "Pull current UF/IFAS guidance on bermudagrass control in St. Augustinegrass; verify the no-selective-option claim as currently stated; snapshot at draft."
+        "Pull current UF/IFAS guidance on bermudagrass control in St. Augustinegrass; cross-check every selective-option claim against /lawn-care/remove-bermudagrass-from-st-augustine/ (the canonical Waves protocol post, fact-checked 2026-08-05) and the Syngenta Recognition / Fusilade II labels plus the Florida 2(ee); snapshot at draft."
       ],
       "internal_links": [
-        "/lawn-care/types-of-grass-sarasota-fl/"
+        "/lawn-care/types-of-grass-sarasota-fl/",
+        "/lawn-care/remove-bermudagrass-from-st-augustine/"
       ],
       "verify_notes": [
-        "Verify /lawn-care/types-of-grass-sarasota-fl/ resolves on the live sitemap before including it."
+        "Verify /lawn-care/types-of-grass-sarasota-fl/ resolves on the live sitemap before including it.",
+        "Verify /lawn-care/remove-bermudagrass-from-st-augustine/ resolves on the live sitemap before including it.",
+        "Do NOT restate the retired 'can't be selectively sprayed out' claim — it was superseded by the 2(ee) tank-mix protocol post published 2026-08-05."
       ]
     },
     {

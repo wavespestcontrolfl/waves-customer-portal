@@ -309,6 +309,36 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     if (!Number.isInteger(quarters) || quarters < 1 || quarters > 120) {
       return fail('termite_rental.recovery_quarters must be a whole number of quarters between 1 and 120');
     }
+  } else if (configKey === 'lawn_pricing_v2' && data?.bermudaSuppression !== undefined) {
+    // DB-editable per-application adder knobs for the bermuda-suppression
+    // add-on. Strict numbers only (no numeric strings), both keys required,
+    // whole cents, bounded — an admin typo must not massively overprice a
+    // lawn ladder, and a would-be-zero adder is rejected because the engine
+    // fails a SELECTED add-on closed rather than pricing $0. The knobs only
+    // TUNE the price; disabling the add-on is GATE_BERMUDA_SUPPRESSION
+    // (key removal is neither possible through this API's drop guard nor
+    // effective — db-bridge rebases absent knobs to the in-code defaults).
+    const bs = data.bermudaSuppression;
+    if (!bs || typeof bs !== 'object' || Array.isArray(bs)) {
+      return fail('lawn_pricing_v2.bermudaSuppression must be an object with perAppBase and perAppPer1000Sqft');
+    }
+    const base = num(bs.perAppBase);
+    const per1000 = num(bs.perAppPer1000Sqft);
+    if (!Number.isFinite(base) || base < 0 || base > 200) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppBase must be a dollar amount between 0 and 200');
+    }
+    if (!Number.isFinite(per1000) || per1000 < 0 || per1000 > 50) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppPer1000Sqft must be a dollar amount between 0 and 50 (per 1,000 sqft per application)');
+    }
+    if (Math.abs(base * 100 - Math.round(base * 100)) > 1e-6) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppBase must not have sub-cent precision');
+    }
+    if (Math.abs(per1000 * 100 - Math.round(per1000 * 100)) > 1e-6) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppPer1000Sqft must not have sub-cent precision');
+    }
+    if (!(base + per1000 > 0)) {
+      return fail('lawn_pricing_v2.bermudaSuppression must produce a positive adder — these knobs only tune the price; to disable the add-on, turn off GATE_BERMUDA_SUPPRESSION');
+    }
   } else if (configKey === 'pest_base') {
     // Validate every field the sync consumes — not just base. A row like
     // { base: 117, floor: -1 } would otherwise persist, then
@@ -939,20 +969,39 @@ const CONFIG_KEY_FEATURE_GATES = {
   termite_rental: 'GATE_TERMITE_STATION_RENTAL',
 };
 
+// Gated SUB-features that live inside a broader config row (the row itself
+// stays available). Same read-at-request-time semantics as featureAvailable,
+// so a gate flip needs no client redeploy.
+const CONFIG_KEY_SUB_FEATURE_GATES = {
+  lawn_pricing_v2: { bermudaSuppression: 'GATE_BERMUDA_SUPPRESSION' },
+};
+
+// One shared call-time parser (feature-gates.gateEnvValue) so availability
+// and engine enforcement can never disagree on what counts as "on".
+const { gateEnvValue: gateEnvOn } = require('../config/feature-gates');
+
 function configKeyFeatureAvailable(key) {
   const gate = CONFIG_KEY_FEATURE_GATES[key];
   if (!gate) return true;
-  return ['1', 'true', 'on'].includes(String(process.env[gate] || '').toLowerCase());
+  return gateEnvOn(gate);
+}
+
+function configKeySubFeaturesAvailable(key) {
+  const subs = CONFIG_KEY_SUB_FEATURE_GATES[key];
+  if (!subs) return undefined;
+  return Object.fromEntries(Object.entries(subs).map(([name, gate]) => [name, gateEnvOn(gate)]));
 }
 
 router.get('/:key', async (req, res, next) => {
   try {
     const config = await db('pricing_config').where({ config_key: req.params.key }).first();
     if (!config) return res.status(404).json({ error: 'Config not found' });
+    const subFeaturesAvailable = configKeySubFeaturesAvailable(req.params.key);
     res.json({
       ...normalizePricingConfigRow(config),
       // Read at request time so a gate flip needs no redeploy of the client.
       featureAvailable: configKeyFeatureAvailable(req.params.key),
+      ...(subFeaturesAvailable ? { subFeaturesAvailable } : {}),
     });
   } catch (err) { next(err); }
 });

@@ -23,10 +23,18 @@ async function resolveEstimateZone(dbc, estimate) {
   if (!estimate) return null;
   const zones = await dbc('service_zones').select('id', 'cities', 'zone_name');
   let zone = null;
+  // Customer-city resolution only applies when the estimate quotes the
+  // customer's on-file address. A multi-property estimate keeps customer_id
+  // while quoting a DIFFERENT address (codex #3244 r2) — resolving its zone
+  // from the primary property's city would point the capacity check and
+  // advisory lock at the wrong pool. Mirrors resolveEstimateCoords.
   if (estimate.customer_id) {
-    const holder = await dbc('customers').where({ id: estimate.customer_id }).first('city');
+    const holder = await dbc('customers').where({ id: estimate.customer_id }).first('city', 'address_line1', 'address_line2', 'zip');
+    // Full canonical tuple — mirrors resolveEstimateCoords (codex #3244 r8).
+    const { estimateQuotesCustomerAddress } = require('./estimate-property-linkage');
+    const quotesCustomerAddress = estimateQuotesCustomerAddress(estimate.address, holder || {});
     const holderCity = String(holder?.city || '').toLowerCase();
-    if (holderCity) {
+    if (quotesCustomerAddress && holderCity) {
       zone = zones.find((z) => (z.cities || []).some((c) => String(c).toLowerCase() === holderCity)) || null;
     }
   }

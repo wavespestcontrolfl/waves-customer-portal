@@ -875,6 +875,11 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // post-discount and public-ladder margin-floor caps.
     constants.LAWN_PRICING_V2.programMinimumMonthly = 0;
     constants.LAWN_PRICING_V2.useLawnCostFloor = false;
+    // Same rebase rule for the bermuda-suppression knobs: the singleton is
+    // mutated in place across syncs, so deleting the DB key (or the row)
+    // after an admin edit must restore the in-code defaults on the next
+    // sync, never leave the edited values resident until restart.
+    constants.LAWN_PRICING_V2.bermudaSuppression = { perAppBase: 15, perAppPer1000Sqft: 2 };
     if (config.lawn_pricing_v2) {
       deepMergePlainObject(constants.LAWN_PRICING_V2, config.lawn_pricing_v2);
       // Tier availability: the row's per-tier metadata drives which lawn

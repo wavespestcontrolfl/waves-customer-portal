@@ -518,7 +518,12 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     try {
       v1Input = translate(req.profile, Array.isArray(req.selectedServices) ? req.selectedServices : [], req.options || {});
       source = 'ENGINE_REQUEST';
-    } catch (_) {
+    } catch (err) {
+      // failClosed = a policy rejection (e.g. a gated add-on in the replayed
+      // request), never engine breakage: swallowing it here would fall through
+      // to NO_INPUTS → CLIENT_FALLBACK and persist the very thing the
+      // validation rejected (codex #3272 r1). Propagate; the save 400s.
+      if (err && err.failClosed === true) throw err;
       v1Input = null;
     }
   }
@@ -636,6 +641,10 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
       : null) || null;
     return { recomputed: true, source, serverResult, serverTotals, pestPricingVersion };
   } catch (error) {
+    // failClosed policy rejections (gated/invalid add-on inside the replayed
+    // inputs) propagate — wrapping them as ENGINE_ERROR would hand them to
+    // the fail-open CLIENT_FALLBACK rail and persist the rejected price.
+    if (error && error.failClosed === true) throw error;
     return { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
 }
@@ -663,8 +672,16 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   try {
     result = await recomputeFn(estimateData, { now, priorQualifyingServices, recurringCustomer });
   } catch (error) {
+    // Fail-open is for BROKEN engines only. A failClosed policy rejection
+    // (gated/invalid add-on in the replay) must block the save outright —
+    // stamping it CLIENT_FALLBACK would persist and send the rejected price.
+    if (error && error.failClosed === true) throw error;
     result = { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
+  // Belt-and-suspenders for injected/legacy recompute fns that WRAP the
+  // error instead of throwing: a wrapped failClosed rejection must not
+  // reach the CLIENT_FALLBACK branch either.
+  if (result && result.error && result.error.failClosed === true) throw result.error;
 
   if (result.recomputed) {
     // Overwrite the embedded result so the stored blob and the persisted
@@ -708,6 +725,129 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
     logger.warn(`[pricing-authority] CLIENT_FALLBACK reason=${result.reason} — no replayable engine input; persisted client preview`);
   }
   return { totals: clientPreview, audit };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Multi-property linkage (migration 20260806200000): resolve the OPTIONAL
+// property_id / estimate_group_id write fields. Keys are only present in the
+// returned object when the caller explicitly sent them — revise spreads these
+// fields over the existing row, so a save from a caller that never loaded the
+// linkage must leave the stored values untouched rather than null them.
+async function resolveEstimatePropertyLinkage(database, body) {
+  const fields = {};
+  if (body.propertyId !== undefined) {
+    if (body.propertyId === null || body.propertyId === '') {
+      fields.property_id = null;
+    } else {
+      const propertyId = String(body.propertyId);
+      if (!UUID_RE.test(propertyId)) throw errorWithStatus('propertyId must be a UUID', 400);
+      const property = await database('customer_properties').where({ id: propertyId }).first();
+      if (!property || property.active === false) throw errorWithStatus('Property not found', 404);
+      if (body.customerId && String(property.customer_id) !== String(body.customerId)) {
+        throw errorWithStatus('Property belongs to a different customer', 400);
+      }
+      fields.property_id = propertyId;
+    }
+  }
+  if (body.estimateGroupId !== undefined) {
+    if (body.estimateGroupId === null || body.estimateGroupId === '') {
+      fields.estimate_group_id = null;
+    } else {
+      const groupId = String(body.estimateGroupId);
+      if (!UUID_RE.test(groupId)) throw errorWithStatus('estimateGroupId must be a UUID', 400);
+      fields.estimate_group_id = groupId;
+    }
+  }
+  return fields;
+}
+
+// Ensure the anchor estimate of a group has an estimate_group_id, minting one
+// on first use. Locks the anchor row so two concurrent "add another property"
+// saves against the same anchor converge on a single group id.
+//
+// Same-customer guard (codex #3244 r1): a group is ONE customer's properties —
+// the group publishes under one bearer link that exposes every sibling's
+// token, address, and totals, and acceptance can reuse a sibling's customer
+// account. If the operator switched customers after "Add another property",
+// refuse the group rather than silently linking strangers. Identity =
+// customer_id when both sides have one; otherwise a matching normalized
+// phone OR email (the builder clones contact info, so a legitimate sibling
+// always matches).
+async function ensureEstimateGroupId(trx, anchorEstimateId, sibling = {}, randomUUID = crypto.randomUUID) {
+  const anchorId = String(anchorEstimateId);
+  if (!UUID_RE.test(anchorId)) throw errorWithStatus('groupWithEstimateId must be a UUID', 400);
+  const anchor = await firstForUpdate(trx('estimates').where({ id: anchorId }));
+  if (!anchor) throw errorWithStatus('Estimate to group with not found', 404);
+  const normPhone = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const normEmail = (v) => String(v || '').trim().toLowerCase();
+  const anchorCustomerId = anchor.customer_id ? String(anchor.customer_id) : null;
+  const siblingCustomerId = sibling.customer_id ? String(sibling.customer_id) : null;
+  const sameCustomer = anchorCustomerId || siblingCustomerId
+    ? anchorCustomerId === siblingCustomerId
+    : (
+      (normPhone(anchor.customer_phone).length === 10
+        && normPhone(anchor.customer_phone) === normPhone(sibling.customer_phone))
+      || (normEmail(anchor.customer_email)
+        && normEmail(anchor.customer_email) === normEmail(sibling.customer_email))
+    );
+  if (!sameCustomer) {
+    throw errorWithStatus('Grouped estimates must belong to the same customer as the anchor estimate', 400);
+  }
+  // Duplicate-address guard (codex #3244 r5): quoting the same street twice
+  // in one group would double-message one property and hand the added copy
+  // an unearned 10% multi-home preset. Compare normalized streets against
+  // every live member (the anchor alone when minting).
+  const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
+  const siblingKey = normalizedEstimatePropertyKey(sibling.address);
+  if (siblingKey?.street) {
+    const members = anchor.estimate_group_id
+      ? await trx('estimates').where({ estimate_group_id: anchor.estimate_group_id }).whereNull('archived_at').select('address')
+      : [anchor];
+    for (const member of members) {
+      // Full property tuple (codex #3248 r1): identical street+unit in
+      // different cities/ZIPs are DISTINCT properties.
+      if (samePropertyKey(normalizedEstimatePropertyKey(member.address), siblingKey)) {
+        throw errorWithStatus('This address is already in the group — each property is quoted once', 400);
+      }
+    }
+  }
+  if (anchor.estimate_group_id) return anchor.estimate_group_id;
+  const groupId = randomUUID();
+  await trx('estimates').where({ id: anchorId }).update({ estimate_group_id: groupId });
+  return groupId;
+}
+
+// Direct estimateGroupId assignments (create/revision payloads) must clear
+// the same same-customer bar as the anchor path (codex #3244 r4): without
+// this, any caller-supplied UUID joins two strangers' estimates under one
+// bearer link. Every existing member (excluding self on revision) must match
+// the writing estimate's identity — customer_id when either side has one,
+// else normalized phone/email.
+async function assertGroupAssignmentAllowed(dbc, groupId, identity = {}, selfId = null) {
+  const members = await dbc('estimates')
+    .where({ estimate_group_id: groupId })
+    .whereNull('archived_at')
+    .select('id', 'customer_id', 'customer_phone', 'customer_email');
+  const others = members.filter((m) => !selfId || String(m.id) !== String(selfId));
+  if (!others.length) return;
+  const normPhone = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const normEmail = (v) => String(v || '').trim().toLowerCase();
+  const identityCustomerId = identity.customer_id ? String(identity.customer_id) : null;
+  for (const member of others) {
+    const memberCustomerId = member.customer_id ? String(member.customer_id) : null;
+    const same = identityCustomerId || memberCustomerId
+      ? identityCustomerId === memberCustomerId
+      : (
+        (normPhone(member.customer_phone).length === 10
+          && normPhone(member.customer_phone) === normPhone(identity.customer_phone))
+        || (normEmail(member.customer_email)
+          && normEmail(member.customer_email) === normEmail(identity.customer_email))
+      );
+    if (!same) {
+      throw errorWithStatus('estimateGroupId belongs to a different customer\'s group', 400);
+    }
+  }
 }
 
 function buildEstimatePersistenceFields(body, context = {}) {
@@ -1022,11 +1162,57 @@ async function resolveEstimateWritePayload({
   // Fail-closed to false: a lookup miss/error charges as a non-member, never
   // silently grants the perk — same posture as isActivePlanCustomer itself.
   let recurringCustomer = false;
-  if (body.customerId) {
+  // Per-property tier scoping (codex #3244 r1; owner ruling 2026-08-06: each
+  // property is its OWN WaveGuard plan at its OWN service-count tier — no
+  // combined-account bump). A grouped estimate quotes a different property on
+  // the same customer, so the account's existing services must not feed its
+  // tier context; it prices standalone. The recurring-customer 15% one-time
+  // perk below stays account-level — the person IS a recurring customer.
+  let groupedEstimate = !!(body.groupWithEstimateId || body.estimateGroupId);
+  // Per-property street context (codex #3244 r5+r6). The ANCHOR of a future
+  // group is saved before any group exists: an existing customer quoting a
+  // NON-primary address must already price per-property, or the anchor keeps
+  // the combined account tier forever (grouping later never reprices it).
+  // Both streets must parse cleanly to flip — parse uncertainty keeps the
+  // long-standing combined behavior for same-property requotes with
+  // formatting drift.
+  let perPropertyStreetScope = null;
+  if (body.customerId && body.address) {
     try {
-      priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId);
+      const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
+      const custRow = await database('customers').where({ id: body.customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+      const estimateStreet = normalizedEstimateStreet(body.address);
+      const customerStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
+      if (estimateStreet) {
+        perPropertyStreetScope = { estimateStreet, customerPrimaryStreet: customerStreet };
+      }
+      const { sameScopeKey } = require('./estimate-property-linkage');
+      if (!groupedEstimate && estimateStreet && customerStreet && !sameScopeKey(estimateStreet, customerStreet)) {
+        groupedEstimate = true;
+      }
     } catch (err) {
-      logger.warn(`[admin-estimate] prior qualifying services lookup skipped: ${err.message}`);
+      logger.warn(`[admin-estimate] per-property tier address check skipped: ${err.message}`);
+    }
+  }
+  if (body.customerId) {
+    if (!groupedEstimate) {
+      try {
+        priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId);
+      } catch (err) {
+        logger.warn(`[admin-estimate] prior qualifying services lookup skipped: ${err.message}`);
+      }
+    } else if (perPropertyStreetScope) {
+      // Grouped / non-primary property: qualifying services ALREADY ACTIVE at
+      // THIS property still count toward its own service-count tier (an
+      // add-on to a serviced secondary property keeps its real tier — codex
+      // #3244 r6); other properties' plans stay excluded.
+      try {
+        priorQualifyingServices = await loadExistingQualifyingServiceKeys(database, body.customerId, {
+          streetScope: perPropertyStreetScope,
+        });
+      } catch (err) {
+        logger.warn(`[admin-estimate] property-scoped qualifying services lookup skipped: ${err.message}`);
+      }
     }
     try {
       recurringCustomer = await isActivePlanCustomer(database, body.customerId);
@@ -1137,6 +1323,7 @@ async function resolveEstimateWritePayload({
       { ...body, waveguardTier: resolvedWaveguardTier, estimateData: trustedEstimateData },
       { technician, technicianId, now, pricingAuthority: pricing.audit?.pricing_authority },
     ),
+    ...(await resolveEstimatePropertyLinkage(database, body)),
     ...pricing.audit,
   };
 }
@@ -1163,6 +1350,16 @@ async function createOrReuseAdminEstimate({
 
   return database.transaction(async (trx) => {
     let canReplaceLinkedEstimate = false;
+
+    // "Add another property": the builder passes the FIRST estimate's id and
+    // the new sibling joins (or starts) its group. Resolved inside the
+    // transaction so the anchor's minted group id and the sibling's insert
+    // commit together.
+    if (body.groupWithEstimateId) {
+      writeFields.estimate_group_id = await ensureEstimateGroupId(trx, body.groupWithEstimateId, writeFields);
+    } else if (writeFields.estimate_group_id) {
+      await assertGroupAssignmentAllowed(trx, writeFields.estimate_group_id, writeFields);
+    }
 
     if (linkedLeadId) {
       const lead = await firstForUpdate(trx('leads').where({ id: linkedLeadId }).whereNull('deleted_at'));
@@ -1346,6 +1543,11 @@ async function reviseAdminEstimate({
     body: {
       ...body,
       customerId: body.customerId || estimate.customer_id || null,
+      // The V2 revision payload sends no grouping fields — derive them from
+      // the row so a revision of a grouped estimate keeps its per-property
+      // tier scoping instead of repricing at the combined account tier
+      // (codex #3244 r3).
+      estimateGroupId: body.estimateGroupId ?? (estimate.estimate_group_id || undefined),
       satelliteUrl: body.satelliteUrl || (sameAddress ? estimate.satellite_url : null) || null,
     },
     technicianId,
@@ -1353,6 +1555,34 @@ async function reviseAdminEstimate({
     now,
     recompute,
   });
+
+  // A revision that changes or introduces a group id — OR changes the
+  // estimate's contact identity while grouped (codex #3244 r5: a lead-only
+  // sibling has no customer_id, so an in-place contact edit could hand its
+  // group slot to a different person) — must clear the same same-customer
+  // bar as creation. The unchanged self-derived id with unchanged identity
+  // passes trivially.
+  const groupIdChanged = writeFields.estimate_group_id
+    && String(writeFields.estimate_group_id) !== String(estimate.estimate_group_id || '');
+  const groupIdentityChanged = writeFields.estimate_group_id && (
+    String(writeFields.customer_id ?? '') !== String(estimate.customer_id ?? '')
+    || String(writeFields.customer_phone ?? '') !== String(estimate.customer_phone ?? '')
+    || String(writeFields.customer_email ?? '') !== String(estimate.customer_email ?? '')
+  );
+  const groupAddressChanged = writeFields.estimate_group_id
+    && writeFields.address !== undefined
+    && String(writeFields.address || '') !== String(estimate.address || '');
+  if (groupIdChanged || groupIdentityChanged) {
+    await assertGroupAssignmentAllowed(database, writeFields.estimate_group_id, writeFields, estimate.id);
+  }
+  // An address-only revision of a grouped sibling must not land on another
+  // member's property (codex #3244 r8): the duplicate copy would keep its
+  // multi-home discount while accept-time linkage dedupes to one property.
+  // Serialized + tuple-compared inside the write transaction (codex #3248
+  // r1): two operators revising different siblings to the same address must
+  // not both pass a pre-transaction read, and same street in different
+  // cities is NOT a duplicate. The flag rides to the transaction below.
+  const groupDuplicateRecheckNeeded = !!groupAddressChanged;
 
   // Carry the linkage keys across the wholesale estimate_data rewrite.
   if (writeFields.estimate_data) {
@@ -1457,8 +1687,28 @@ async function reviseAdminEstimate({
 
   // Preflight stops here: same guards, same pricing pipeline, no write — the
   // returned totals let the builder confirm a server reprice with the
-  // operator before anything reaches the customer's live link.
+  // operator before anything reaches the customer's live link. The grouped
+  // duplicate-address guard runs here too (codex #3248 r2): without it the
+  // preflight reports success and walks the operator through a reprice
+  // confirm, only for the identical real save to 400. Best-effort unlocked
+  // read — the serialized in-transaction recheck below stays authoritative.
   if (dryRun) {
+    if (groupDuplicateRecheckNeeded) {
+      const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
+      const revisedKey = normalizedEstimatePropertyKey(writeFields.address);
+      if (revisedKey?.street) {
+        const members = await database('estimates')
+          .where({ estimate_group_id: writeFields.estimate_group_id })
+          .whereNot({ id: estimate.id })
+          .whereNull('archived_at')
+          .select('address');
+        for (const member of members) {
+          if (samePropertyKey(normalizedEstimatePropertyKey(member.address), revisedKey)) {
+            throw errorWithStatus('This address is already in the group — each property is quoted once', 400);
+          }
+        }
+      }
+    }
     return { estimate: { ...estimate, ...writeFields }, dryRun: true };
   }
 
@@ -1474,6 +1724,26 @@ async function reviseAdminEstimate({
   // described the PREVIOUS quote (the public view falls back to live pricing
   // until the next send re-stamps a snapshot).
   const updated = await database.transaction(async (trx) => {
+    if (groupDuplicateRecheckNeeded) {
+      const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-revise', String(writeFields.estimate_group_id)],
+      );
+      const revisedKey = normalizedEstimatePropertyKey(writeFields.address);
+      if (revisedKey?.street) {
+        const members = await trx('estimates')
+          .where({ estimate_group_id: writeFields.estimate_group_id })
+          .whereNot({ id: estimate.id })
+          .whereNull('archived_at')
+          .select('address');
+        for (const member of members) {
+          if (samePropertyKey(normalizedEstimatePropertyKey(member.address), revisedKey)) {
+            throw errorWithStatus('This address is already in the group — each property is quoted once', 400);
+          }
+        }
+      }
+    }
     // Re-read the row under its lock before rewriting: the pre-read
     // `estimate` above goes stale during payload resolution, and an Agent
     // Estimate recomposition landing in that gap replaces the composition
@@ -1525,6 +1795,8 @@ module.exports = {
   assertLiveTermiteRentalRates,
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
+  ensureEstimateGroupId,
+  resolveEstimatePropertyLinkage,
   estimateExpiresAt,
   ESTIMATE_SEND_EXPIRY_DAYS,
   estimateViewUrl,

@@ -41,8 +41,12 @@ exports.up = async (knex) => {
   await knex.raw(
     "CREATE INDEX IF NOT EXISTS idx_job_status_history_cancelled_at ON job_status_history (transitioned_at) WHERE to_status = 'cancelled'",
   );
-  // The terminal-marker repair drives from recent RESTORATIONS
-  // (cancelled -> live) the same way (codex r35).
+  // Superseded by 20260806170000 (which drops it in favor of the
+  // live-visit-driven repair) but retained here so every migration
+  // history is symmetric (codex #3238 r6): environments at THIS
+  // migration's code level run the history-driven repair and need the
+  // index; fresh installs create it briefly and the next migration
+  // removes it.
   await knex.raw(
     "CREATE INDEX IF NOT EXISTS idx_job_status_history_restored_at ON job_status_history (transitioned_at) WHERE from_status = 'cancelled'",
   );
@@ -61,6 +65,11 @@ exports.up = async (knex) => {
 
 exports.down = async (knex) => {
   await knex.raw("DELETE FROM ops_email_send_state WHERE email_key = 'cancel-notice-linkage-epoch'");
+  // No longer created by this migration's up() (superseded, see
+  // 20260806170000), but batch rollbacks reach here AFTER the newer
+  // migration's down() recreates it — drop IF EXISTS so both
+  // single-migration and full-batch rollbacks restore the same schema
+  // (codex #3238 r5).
   await knex.raw('DROP INDEX IF EXISTS idx_job_status_history_restored_at');
   await knex.raw('DROP INDEX IF EXISTS idx_job_status_history_cancelled_at');
   await knex.raw('DROP INDEX IF EXISTS idx_appt_reminders_cancel_pending');

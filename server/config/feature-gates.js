@@ -36,6 +36,7 @@
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
+ *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -190,6 +191,18 @@ const gates = {
   // Read-only by construction; opt-in in EVERY environment. Kill switch:
   // unset — the endpoint 403s.
   mcpReadTools: process.env.GATE_MCP_READ_TOOLS === 'true',
+
+  // Public MCP server: the /api/public/mcp anonymous read-only tool surface
+  // for third-party AI agents (catalog, pricing ranges, service areas, quote
+  // contract). No auth BY DESIGN; rate-limited; opt-in in EVERY environment.
+  // Kill switch: unset — the endpoint 404s (dark).
+  mcpPublic: process.env.GATE_MCP_PUBLIC === 'true',
+
+  // Public A2A endpoint: /api/public/a2a — the informational Agent2Agent
+  // server behind the hub's agent-card.json. Static single-reply, LLM-free,
+  // read-only. No auth BY DESIGN; rate-limited; opt-in in EVERY environment.
+  // Kill switch: unset — the endpoint 404s (dark).
+  a2aPublic: process.env.GATE_A2A_PUBLIC === 'true',
 
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
@@ -710,6 +723,14 @@ const gates = {
   // appointment_cancelled template instead of vanishing silently
   // (2026-08-05 silent-cancel incident). Fail-closed; owner flips.
   cancelNoticeHook: process.env.GATE_CANCEL_NOTICE_HOOK === 'true',
+  // Per-family plan-rate ledger (owner ruling 2026-08-06): with the gate ON,
+  // an accept's customers.monthly_rate becomes the SUM of the customer's
+  // customer_plan_rates components, so a multi-plan customer's same-family
+  // re-quote replaces only that family's slice instead of the whole scalar.
+  // OFF, accepts keep the legacy #3241 scalar semantics byte-for-byte while
+  // the ledger dual-writes advisorily (data accumulates pre-flip). Kill
+  // switch = unset; owner flips after the ops backfill seeds components.
+  planRateLedger: process.env.GATE_PLAN_RATE_LEDGER === 'true',
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
   // past-dated visits stuck in on_site/en_route (performed but never
   // completed → no service record, invoice, report, or post-service SMS;
@@ -1158,7 +1179,27 @@ const gates = {
   // promises and pauses redemption. Kill switch: unset or any non-'true'
   // value.
   inspectionCredit: process.env.GATE_INSPECTION_CREDIT === 'true',
+
+  // Completion-path comms guard (2026-08-07): when a dispatch /complete
+  // lands while the customer has a pending reschedule/away flag (#3232's
+  // comms_guards agent_decisions rows) or an unanswered inbound text, the
+  // post-commit hook surfaces one admin exception — bell notification +
+  // dispatch_alerts card, deduped per visit. Detection/surface ONLY: it
+  // NEVER blocks completion or invoicing and sends no customer
+  // communications. Opt-in in EVERY environment (payerStatements pattern):
+  // dark until the owner flips it after eyeballing the first flagged
+  // completion. Kill switch: unset or any non-'true' value — completions
+  // behave byte-identically to today.
+  completionCommsGuard: process.env.GATE_COMPLETION_COMMS_GUARD === 'true',
 };
+
+// Parse a gate env var at CALL time (for request-time availability checks
+// and gates enforced inside the pricing engine, where a flip must not need
+// a client redeploy and tests mutate the env at runtime). One parser, one
+// truth: '1' / 'true' / 'on', case-insensitive.
+function gateEnvValue(envName) {
+  return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
+}
 
 function isEnabled(gate) {
   const enabled = gates[gate];
@@ -1176,5 +1217,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue };
 // gates 1775330914

@@ -26,7 +26,7 @@ import {
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
 import { isNativeApp, nativePlatform } from '../native/platform';
-import { canSaveNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
+import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
 
@@ -57,6 +57,60 @@ async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
   const blob = await r.blob();
   // In the Capacitor shell the programmatic <a download> click below is a
   // silent no-op — hand the bytes to the OS share sheet instead (F-017).
+  if (await saveBlobNative(blob, fileName)) return;
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
+// Public (token-authenticated) PDF download — receipts. No Bearer needed, but
+// the same two traps as downloadAuthedPdf apply: a root-relative path misses a
+// configured VITE_API_URL origin, and in the Capacitor shell a programmatic
+// <a download> click is a silent no-op, so hand the bytes to the OS instead.
+// Absolute URL for a public receipt endpoint — the native share/save plugin
+// fetches the URL itself, so it needs a real origin (and must honor a
+// configured cross-origin VITE_API_URL, same splice as downloadPublicPdf).
+function receiptApiUrl(path) {
+  const spliced = path.startsWith('/api/') ? `${API_BASE}${path.slice(4)}` : path;
+  try { return new URL(spliced, window.location.origin).toString(); } catch { return spliced; }
+}
+
+async function downloadPublicPdf(path, fileName = 'Waves_Receipt.pdf') {
+  // Server sends an app-absolute '/api/...' path; API_BASE already ends in
+  // '/api' (default '/api', or a full cross-origin API URL), so splice.
+  const abs = path.startsWith('/api/') ? `${API_BASE}${path.slice(4)}` : path;
+  const r = await fetch(abs);
+  if (!r.ok) throw new Error(`Download failed (${r.status})`);
+  const blob = await r.blob();
+  if (await saveBlobNative(blob, fileName)) return;
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
+// The visit .ics is a PUBLIC token endpoint (no Bearer needed), but it shares
+// two traps with downloadAuthedPdf: a root-relative href misses a configured
+// VITE_API_URL origin, and in the Capacitor shell a programmatic <a download>
+// click is a silent no-op. Resolve against API_BASE and hand the bytes to the
+// OS — share sheet on native, <a download> on web — so the .ics opens in the
+// calendar app (codex #3249 r1).
+async function downloadCalendarIcs(path, fileName = 'Waves_Visit.ics') {
+  // Server sends the app-absolute '/api/...' path; API_BASE already ends in
+  // '/api' (default '/api', or a full cross-origin API URL), so splice.
+  const abs = path.startsWith('/api/') ? `${API_BASE}${path.slice(4)}` : path;
+  const r = await fetch(abs);
+  if (!r.ok) throw new Error(`Calendar download failed (${r.status})`);
+  const blob = await r.blob();
   if (await saveBlobNative(blob, fileName)) return;
   const blobUrl = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -138,6 +192,25 @@ const arrivalWindowEnd = (windowStart) => {
   if (Number.isNaN(d.getTime())) return null;
   return new Date(d.getTime() + 120 * 60000).toISOString();
 };
+
+// True while the visit's quoted arrival window has not closed — mirrors
+// services/appointment-ics-eligibility on the server, so a long-open tab
+// stops offering a calendar file the route will refuse.
+// The deadline is SERVER-OWNED (schedule payload's calendarExpiresAt, from
+// services/appointment-ics-eligibility). The client parses no dates and holds
+// no copy of the arrival-window constant, so it can't drift from the endpoint
+// that serves the file (codex #3249 r6 P1).
+const calendarLinkEndsAt = (svc) => {
+  if (!svc?.calendarExpiresAt) return null;
+  const endsAt = new Date(svc.calendarExpiresAt);
+  return Number.isNaN(endsAt.getTime()) ? null : endsAt;
+};
+
+const calendarLinkStillLive = (svc) => {
+  const endsAt = calendarLinkEndsAt(svc);
+  return !!endsAt && endsAt.getTime() >= Date.now();
+};
+
 
 // ---------------------------------------------------------------------------
 // Waves AI bar — the wavespestcontrol.com "Ask Waves" intake, embedded on
@@ -1485,6 +1558,23 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
 function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   const compact = useIsMobile(720);
   const [nextService, setNextService] = useState(null);
+  // The Add-to-Calendar button hides itself once the arrival window closes,
+  // but an idle dashboard never rerenders to notice. Fire a one-shot timer at
+  // the deadline so the button disappears on its own (codex #3249 r4 P2).
+  const [calendarWindowTick, setCalendarWindowTick] = useState(0);
+  useEffect(() => {
+    const endsAt = calendarLinkEndsAt(nextService);
+    if (!nextService?.calendarUrl || !endsAt) return undefined;
+    const ms = endsAt.getTime() - Date.now();
+    if (ms <= 0) return undefined;
+    // setTimeout saturates past ~24.8 days; the window is hours away, but
+    // clamp so a far-future visit can't wrap to an immediate fire.
+    const timer = setTimeout(() => setCalendarWindowTick(t => t + 1), Math.min(ms, 2147483647));
+    return () => clearTimeout(timer);
+    // calendarWindowTick is a dependency ON PURPOSE: when the delay saturates
+    // the setTimeout ceiling the timer fires early, and without re-running
+    // here it would never be rescheduled toward the real deadline (codex r5).
+  }, [nextService, calendarWindowTick]);
   const [nextServiceStatus, setNextServiceStatus] = useState('loading');
   const [confirmingVisit, setConfirmingVisit] = useState(false);
   const [stats, setStats] = useState(null);
@@ -2032,6 +2122,25 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                 textDecoration: 'none',
                 position: 'relative',
               }}>Reschedule</a>
+              {/* Tokenized .ics from the public appointment page — drops the
+                  visit (2-hour arrival window) into the phone's calendar.
+                  Server nulls calendarUrl for every case the route would 404
+                  (gate dark, pre-token row, no window, window elapsed), so no
+                  fallback needed here. */}
+              {/* The dashboard fetches the next visit once, so a page left
+                  open past the arrival window would keep a calendarUrl the
+                  .ics route now 404s. Re-check the window client-side on each
+                  render against the same 2-hour promise (codex r3 P2). */}
+              {nextService.calendarUrl && calendarLinkStillLive(nextService) && (
+                <button type="button" onClick={() => {
+                  downloadCalendarIcs(nextService.calendarUrl).catch(() => {
+                    showCustomerAlert('Could not download the calendar file. Please try again.');
+                  });
+                }} data-glass-accent="" style={{
+                  ...dashboardSecondaryButton,
+                  position: 'relative',
+                }}>Add to Calendar</button>
+              )}
             </div>
           ) : nextServiceReady ? (
             <div style={{ padding: 20 }}>
@@ -3085,7 +3194,9 @@ const APPOINTMENT_CHANNEL_KEYS = [
   'serviceReminder72hChannel',
   'serviceReminder24hChannel',
   'enRouteChannel',
-  'techArrivedChannel',
+  // techArrivedChannel intentionally absent: the arrival alert is SMS-only
+  // (the appointment.tech_arrived email twin was retired 2026-08-06), so the
+  // bulk "updates by email" shortcut must not claim to route it to email.
 ];
 
 function ScheduleTab({ customer, properties = [], onRequestVisit }) {
@@ -3793,7 +3904,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 // Arrival alert — fires when the tracker flips to on-site, the
                 // moment the tech reaches the property. Independent of the
                 // en-route text so a customer can keep one and mute the other.
-                { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Tech Arrived Alert', desc: 'A message the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
+                // SMS-only (no channelKey): the arrival email twin was
+                // retired 2026-08-06 — offering Email/Both here would show a
+                // choice the server no longer honors.
+                { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
                 // Owner ruling 2026-07-09: the list stops at the appointment
                 // alerts. Auto En Route from GPS (internal detail of the
                 // en-route alert above), Service Complete Report (locked
@@ -5115,11 +5229,21 @@ function BillingTab({ customer }) {
             Saving {Math.round(discount * 100)}% on every service with your {tierName} bundle
           </div>
         )}
-        {activeTierName && tierName !== 'Platinum' && (TIER_DISCOUNTS.Platinum || 0) > discount && (
-          <div style={{ marginTop: 10, fontSize: 14, color: muted, fontWeight: 700 }}>
-            Platinum bumps that to {Math.round((TIER_DISCOUNTS.Platinum || 0.20) * 100)}% off every service.
-          </div>
-        )}
+        {/* Name the NEXT tier up, not always the top one — telling a Bronze
+            customer about Platinum skips the step they'd actually take
+            (owner, 2026-08-06). Nothing renders on the top tier. */}
+        {(() => {
+          if (!activeTierName) return null;
+          const idx = TIER_ORDER.indexOf(tierName);
+          const nextTier = idx >= 0 ? TIER_ORDER[idx + 1] : null;
+          const nextDiscount = nextTier ? (TIER_DISCOUNTS[nextTier] || 0) : 0;
+          if (!nextTier || nextDiscount <= discount) return null;
+          return (
+            <div style={{ marginTop: 10, fontSize: 14, color: muted, fontWeight: 700 }}>
+              {nextTier} bumps that to {Math.round(nextDiscount * 100)}% off every service.
+            </div>
+          );
+        })()}
       </div>
 
       <div id="billing-payment-methods" data-glass="card" style={{ ...card, padding: 20 }}>
@@ -5439,6 +5563,85 @@ function BillingTab({ customer }) {
                     bank payment never reads "Card ending in …". */}
                 {p.lastFour && ` - ${isBankMethod(p.methodType) ? (p.bankName || 'Bank account') : (p.cardBrand || 'Card')} ending in ${p.lastFour}`}
               </div>
+              {/* Receipt actions. Waves receipts (invoice-backed) get a View
+                  page + a PDF download; recurring autopay rows carry only
+                  Stripe's hosted receipt, so they get View alone. The server
+                  nulls every field when no receipt is retrievable. */}
+              {(() => {
+                // Native shells can't use target=_blank (F-017: strands the
+                // SPA with no back path) and can't use a blob <a download>
+                // (silent no-op in both webviews). Binaries WITHOUT the
+                // Filesystem+Share plugins have no safe path at all
+                // (canSaveNative() === false), so render nothing there rather
+                // than controls that dead-end or do nothing. Web is unchanged.
+                const native = isNativeApp();
+                // Save (Filesystem+Share) opens the PDF; Share alone can still
+                // hand over a link. Binaries with NEITHER have no safe path —
+                // only those render nothing (codex r3 P2).
+                const nativeCapable = native && canSaveNative();
+                const nativeShareOnly = native && !nativeCapable && canShareNative();
+                if (native && !nativeCapable && !nativeShareOnly) return null;
+                if (!p.receiptUrl && !p.stripeReceiptUrl) return null;
+                const receiptName = `Waves_Receipt_${p.receiptNumber || String(p.id).slice(0, 8)}.pdf`;
+                const btn = {
+                  minHeight: 36, padding: '7px 10px', borderRadius: 8,
+                  border: `1px solid ${PORTAL_SHELL.border}`, background: '#fff',
+                  color: B.glassNavy, fontSize: 12, fontWeight: 800,
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                };
+                return (
+                  <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {(nativeCapable || nativeShareOnly) ? (
+                      // In-app: hand the receipt to the OS. PDF via
+                      // saveUrlNative (preview + save/share sheet); a
+                      // Stripe-only row shares its hosted link instead.
+                      <button
+                        type="button"
+                        onClick={() => {
+                          // Share-only binaries can't save the file, but can
+                          // share a link — send the receipt page (or Stripe's).
+                          const task = (nativeCapable && p.receiptPdfUrl)
+                            ? saveUrlNative(receiptApiUrl(p.receiptPdfUrl), receiptName)
+                            : shareUrlNative(p.receiptUrl ? receiptApiUrl(p.receiptUrl) : p.stripeReceiptUrl, 'Waves receipt');
+                          Promise.resolve(task).catch(() => {
+                            showCustomerAlert('Could not open this receipt. Please try again.');
+                          });
+                        }}
+                        aria-label={`Open receipt for ${p.description || 'this payment'}`}
+                        style={{ ...btn, cursor: 'pointer' }}
+                      >
+                        <Icon name="document" size={14} strokeWidth={1.75} /> Receipt
+                      </button>
+                    ) : (
+                      <>
+                        <a
+                          href={p.receiptUrl || p.stripeReceiptUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          aria-label={`View receipt for ${p.description || 'this payment'}`}
+                          style={{ ...btn, textDecoration: 'none' }}
+                        >
+                          <Icon name="document" size={14} strokeWidth={1.75} /> View receipt
+                        </a>
+                        {p.receiptPdfUrl && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              downloadPublicPdf(p.receiptPdfUrl, receiptName).catch(() => {
+                                showCustomerAlert('Could not download this receipt. Please try again.');
+                              });
+                            }}
+                            aria-label={`Download receipt PDF for ${p.description || 'this payment'}`}
+                            style={{ ...btn, cursor: 'pointer' }}
+                          >
+                            <Icon name="download" size={14} strokeWidth={1.75} /> Download
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
               {p.status === 'failed' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                   {primaryOpenInvoice && (
@@ -5555,8 +5758,42 @@ function BillingTab({ customer }) {
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
           <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Payment confirmation texts</div>
-            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get a text when your payment processes.</div>
+            {/* Channel-aware copy: the dropdown beside this row offers
+                Text / Email / Text & Email, so hardcoded "texts" copy read as
+                false the moment a customer picked Email. */}
+            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>
+              {(() => {
+                // The toggle beside this row turns the TEXT leg off on its own,
+                // for any channel — copy must never promise a text the customer
+                // just disabled (codex r4 P2 extends the Both-only fix).
+                // Effective channel, not stored: the select and the save path
+                // both coerce to SMS when no deliverable billing email exists,
+                // so a stale persisted email/both must not drive an email
+                // promise here either (codex r5 P2).
+                const channel = hasBillingEmail ? paymentConfirmationChannel : 'sms';
+                const emailLeg = channel === 'email' || channel === 'both';
+                const textLeg = channel !== 'email' && paymentSmsEnabled;
+                if (textLeg && emailLeg) return 'Payment confirmations';
+                if (emailLeg) return 'Payment confirmation emails';
+                if (textLeg) return 'Payment confirmation texts';
+                return 'Payment confirmations';
+              })()}
+            </div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
+              {/* The toggle beside this row can switch the text leg off while
+                  the channel stays Text & Email — the copy must not keep
+                  promising a text the customer just disabled (codex r1 P2). */}
+              {(() => {
+                // Same effective-channel rule as the title above (codex r5 P2).
+                const channel = hasBillingEmail ? paymentConfirmationChannel : 'sms';
+                const emailLeg = channel === 'email' || channel === 'both';
+                const textLeg = channel !== 'email' && paymentSmsEnabled;
+                if (textLeg && emailLeg) return 'Get a text and an email when your payment processes.';
+                if (emailLeg) return 'Get an email when your payment processes.';
+                if (textLeg) return 'Get a text when your payment processes.';
+                return 'Payment confirmations are off.';
+              })()}
+            </div>
           </div>
           {(() => {
             const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
@@ -5673,7 +5910,7 @@ function PropertySection({ title, icon = 'document', summary, defaultOpen, child
           <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: '#475569', transform: open ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
         </span>
       </button>
-      {open && <div style={{ padding: '0 18px 18px' }}>{children}</div>}
+      {open && <div style={{ padding: '8px 18px 18px' }}>{children}</div>}
     </section>
   );
 }
@@ -7325,13 +7562,21 @@ function LearnTab({ customer }) {
           marginTop: 22,
         }}>
           {[
-            { label: 'Blog Posts', value: sortedBlogPosts.length, sub: 'wavespestcontrol.com' },
-            { label: 'Expert Sources', value: expertPosts.length, sub: 'UF/IFAS and references' },
+            // "Recent Posts", not "Blog Posts": the value is the feed's
+            // most-recent slice (capped at 6 by /feed/blog), NOT the size of
+            // the blog library — the old label undersold a 150+ post archive.
+            { label: 'Recent Posts', value: sortedBlogPosts.length, sub: 'wavespestcontrol.com' },
+            { label: 'Expert Articles', value: expertPosts.length, sub: 'UF/IFAS and references' },
             { label: 'FAQ Answers', value: totalFaqQuestions, sub: 'Service and lawn topics' },
             {
               label: 'Latest',
               value: latestDate && !isNaN(latestDate) ? latestDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'None',
-              sub: latestContent?.title || 'No articles loaded yet',
+              // Latest pools Waves posts + UF/IFAS + LOCAL NEWS — name the
+              // source so a Tampa Bay Times headline sitting beside the
+              // wavespestcontrol.com tile can't read as a Waves post.
+              sub: latestContent
+                ? [latestContent.sourceName, latestContent.title].filter(Boolean).join(' · ')
+                : 'No articles loaded yet',
             },
           ].map(item => (
             <div key={item.label} style={{
@@ -11264,7 +11509,12 @@ function DocumentsTab({ customer, onSwitchTab }) {
 
   const getExpirationBadge = (expDate) => {
     if (!expDate) return null;
-    const exp = new Date(expDate + 'T12:00:00');
+    // expirationDate arrives as either a bare YYYY-MM-DD or a full ISO
+    // timestamp; concatenating a time onto the latter yields Invalid Date and
+    // rendered literally as "Valid through Invalid Date". Normalize to the
+    // date part, then bail if it still won't parse (same guard formatDate has).
+    const exp = new Date(String(expDate).slice(0, 10) + 'T12:00:00');
+    if (Number.isNaN(exp.getTime())) return null;
     const now = new Date();
     const daysUntil = Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
 

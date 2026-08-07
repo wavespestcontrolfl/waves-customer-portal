@@ -8,7 +8,10 @@ const callOrder = [];
 jest.mock('../models/db', () => {
   const mock = jest.fn((...args) => mockDbHandler(...args));
   mock.fn = { now: jest.fn(() => 'NOW') };
-  mock.transaction = jest.fn(async (cb) => cb({}));
+  // The trx handed to callbacks must be the callable knex mock itself —
+  // the tier-clear + plan-rate-ledger sync now run inside one transaction
+  // (codex #3245 r3) and call trx('customers')/trx.fn.now like real knex.
+  mock.transaction = jest.fn(async (cb) => cb(mock));
   return mock;
 });
 jest.mock('../services/logger', () => ({
