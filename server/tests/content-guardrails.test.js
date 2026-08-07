@@ -3057,6 +3057,12 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(hyphenated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const fractional = guardrails.evaluate({ body: 'Wait half an hour before re-entering.' }, {});
     expect(fractional.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const requires = guardrails.evaluate({ body: 'Applications require 30 minutes before people can re-enter.' }, {});
+    expect(requires.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const until = guardrails.evaluate({ body: 'Keep children away until 30 minutes after application.' }, {});
+    expect(until.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const unhyphenated = guardrails.evaluate({ body: 'Plan for a 30 minute re-entry interval.' }, {});
+    expect(unhyphenated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     // Adverbial "safely" without BOTH idiom parts blocks; with dry-condition
     // AND technician confirmation it is the approved idiom.
     const adverbBare = guardrails.evaluate({ body: 'You can safely re-enter once dry.' }, {});
@@ -3113,6 +3119,16 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
     const r2 = guardrails.evaluate({ body: 'We can help with wildlife removal when raccoons move into the attic.' }, {});
     expect(r2.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('direct banned-service verbs block — "We fumigate homes", "Our technicians tent homes"', () => {
+    const fumigate = guardrails.evaluate({ body: 'We fumigate homes for drywood termites.' }, {});
+    expect(fumigate.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const tent = guardrails.evaluate({ body: 'Our technicians tent homes across Sarasota.' }, {});
+    expect(tent.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    // The negated disclaimer form stays legal.
+    const disclaimer = guardrails.evaluate({ body: 'We do not fumigate homes — tenting is a referral to a licensed structural fumigator.' }, {});
+    expect(disclaimer.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
   });
 
   test('topic-specific ownership verbs block — install/trap/remove', () => {

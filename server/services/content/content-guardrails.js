@@ -2917,19 +2917,19 @@ const REENTRY_SAFETY_SRCS = [
   // the lawn for 30 minutes").
   `\\b(?:re-?enter|re-?entry|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+${REENTRY_DURATION_SRC}\\b`,
   `\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+${REENTRY_DURATION_SRC}\\b`,
-  `\\b(?:wait|allow|give\\s+it)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry|return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*|dry\\w*|drying)`,
-  `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\bfor\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry|return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*|dry\\w*|drying)`,
+  `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
-  `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\bfor\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
   `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*)\\b[^.!?\\n]{0,30}?\\bfor\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "needs 30 minutes to dry", "30 minutes of drying"
   `\\b${REENTRY_DURATION_SRC}\\s+(?:to\\s+dry|of\\s+drying)\\b`,
   // Noun-first drying figures: "drying takes 30 minutes", "the drying time
   // is 30 minutes"
   `\\bdry(?:ing)?(?:\\s+time|\\s+period|\\s+window)?\\s+(?:takes?|is|runs?|lasts?)\\s+(?:about\\s+|around\\s+|roughly\\s+)?${REENTRY_DURATION_SRC}\\b`,
-  // Hyphenated attributive figures: "a 30-minute drying period",
-  // "a 45-minute re-entry window"
-  "\\b(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)[-‑]\\s?(?:minute|min|hour|hr)\\s+(?:dry(?:ing)?|re-?entry|wait(?:ing)?)\\b",
+  // Attributive figures, hyphenated or not: "a 30-minute drying period",
+  // "a 30 minute re-entry interval", "a 45-minute re-entry window"
+  "\\b(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)[-‑\\s]\\s?(?:minute|min|hour|hr)\\s+(?:dry(?:ing)?|re-?entry|wait(?:ing)?)\\b",
 ];
 
 // The APPROVED conditional idiom has TWO required parts (AGENTS.md): the
@@ -3006,6 +3006,9 @@ const BANNED_TOPIC_SRCS = [
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}installs?\\s+${BANNED_TOPIC_GAP_SRC}insulation\\b`,
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:sell|market|canvass)\\w*\\s+${BANNED_TOPIC_GAP_SRC}door[-\\s]?to[-\\s]?door\\b`,
+  // Direct banned-service verbs: "we fumigate homes", "our technicians
+  // tent homes across Sarasota" — ownership expressed as the action itself.
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:fumigat\\w+|tents?\\b)`,
   // "schedule/book (your) fumigation …" — on OUR pages a bare CTA presents
   // the topic as our service even without "with us" (Codex audit). A
   // THIRD-PARTY referral stays legal via the negative lookahead: "schedule
