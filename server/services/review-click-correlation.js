@@ -95,18 +95,16 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT } 
 
     // A customer already linked to a synced review is attributed — their click
     // explains their OWN review, not this one. Excluded rather than annotated
-    // so the list only holds open questions.
-    let linked = new Set();
-    try {
-      const ids = [...new Set(clicks.map((r) => r.customer_id))];
-      const linkedRows = await conn('google_reviews')
-        .whereIn('customer_id', ids)
-        .where('reviewer_name', '!=', '_stats')
-        .select('customer_id');
-      linked = new Set(linkedRows.map((r) => r.customer_id));
-    } catch {
-      /* google_reviews may not exist in some deploys — skip the exclusion */
-    }
+    // so the list only holds open questions. No inner catch: if this lookup
+    // fails, suggestions without the exclusion could steer the office toward
+    // a wrong attribution, so the outer catch returns [] instead (codex #3264
+    // r1 P2). Both callers hold a google_reviews row, so the table exists.
+    const ids = [...new Set(clicks.map((r) => r.customer_id))];
+    const linkedRows = await conn('google_reviews')
+      .whereIn('customer_id', ids)
+      .where('reviewer_name', '!=', '_stats')
+      .select('customer_id');
+    const linked = new Set(linkedRows.map((r) => r.customer_id));
 
     // One entry per customer, nearest click wins.
     const byCustomer = new Map();

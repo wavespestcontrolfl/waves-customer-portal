@@ -27,7 +27,7 @@ function clickRow(overrides = {}) {
 
 // Chainable capture mock: filters are SQL-side in prod, so the mock returns
 // the configured rows verbatim and records where() args for window assertions.
-function makeConn({ clickRows = [], linkedRows = [], failClicks = false } = {}) {
+function makeConn({ clickRows = [], linkedRows = [], failClicks = false, failLinked = false } = {}) {
   const captured = { where: [] };
   const conn = (table) => {
     const isClicks = String(table).startsWith('review_requests');
@@ -47,7 +47,7 @@ function makeConn({ clickRows = [], linkedRows = [], failClicks = false } = {}) 
       if (isClicks) {
         return failClicks ? Promise.reject(new Error('boom')) : Promise.resolve(clickRows);
       }
-      return Promise.resolve(linkedRows);
+      return failLinked ? Promise.reject(new Error('linked boom')) : Promise.resolve(linkedRows);
     };
     return q;
   };
@@ -139,6 +139,13 @@ describe('findLikelyReviewers', () => {
 
   test('fails open (empty list + warn log) when the click query errors', async () => {
     const conn = makeConn({ failClicks: true });
+    const result = await findLikelyReviewers({ review_created_at: REVIEW_AT }, { conn });
+    expect(result).toEqual([]);
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  test('returns [] when the linked-review exclusion lookup errors — never suggests without the exclusion', async () => {
+    const conn = makeConn({ clickRows: [clickRow()], failLinked: true });
     const result = await findLikelyReviewers({ review_created_at: REVIEW_AT }, { conn });
     expect(result).toEqual([]);
     expect(logger.warn).toHaveBeenCalled();
