@@ -10,6 +10,10 @@
  * owner had never seen). This module computes that parked set and emails an
  * ACT: rollup, grouped by skip_reason, with a deep link to the review queue
  * (/admin/blog?tab=autopilot — the AutonomousContentReviewPage embed).
+ * The approvable kinds are excluded ONLY while contentEmailApprovals is
+ * enabled — that gate is an independent opt-in, and with it off the per-item
+ * approval email is skipped as gate_off, so the digest keeps those kinds
+ * rather than leaving them invisible to both notification lanes.
  *
  * Visibility ONLY — this is not an approval surface: no tokens, no reply
  * parsing, no decisions, and it NEVER mutates run or opportunity state. Its
@@ -77,6 +81,14 @@ const MAX_ITEMS_PER_GROUP = 8;
 function digestEnabled() {
   const { isEnabled } = require('../../config/feature-gates');
   return isEnabled('parkedRunDigest');
+}
+
+// Whether email-approvals' per-item lane can actually send — the same gate
+// its own entrypoints check before skipping as gate_off. The digest's
+// approvable-kind exclusion only holds while this is true.
+function approvalEmailsEnabled() {
+  const { isEnabled } = require('../../config/feature-gates');
+  return isEnabled('contentEmailApprovals');
 }
 
 function digestRecipient() {
@@ -222,6 +234,11 @@ async function advanceWatermark(sentAt) {
 // ---------------------------------------------------------------------------
 
 async function loadParkedSet() {
+  // Evaluated once per load: with the approval-email gate OFF, approvable
+  // kinds get no per-item email (email-approvals skips gate_off), so
+  // excluding them here would silence them in BOTH lanes (Codex r5).
+  const approvalEmailsOn = approvalEmailsEnabled();
+
   // ACTIVE — mirror the portal review queue's read model
   // (autonomous-review-queue.listReviewItems): every opportunity sitting at
   // status='pending_review', paired with its LATEST run (claimed_at desc,
@@ -313,8 +330,9 @@ async function loadParkedSet() {
     const run = runsByOpp.get(opp.id) || null;
     const skipReason = run?.skip_reason || opp.skip_reason || 'unspecified';
     // Approvable kinds are email-approvals' territory (per-item approval
-    // emails) — one decision, one notification (Codex r1/r2).
-    if (isApprovableKind(skipReason)) continue;
+    // emails) — one decision, one notification (Codex r1/r2) — but ONLY
+    // while that lane can send; gate off → the digest keeps them (r5).
+    if (approvalEmailsOn && isApprovableKind(skipReason)) continue;
     // Already approved in the portal — the PR poller owns it, not the
     // owner's review decision; it is not "awaiting a decision".
     if (skipReason === 'astro_pr_pending_merge') continue;
@@ -334,8 +352,9 @@ async function loadParkedSet() {
   for (const row of staleRows) {
     // Same approvable exclusion on the stale side: a dismissed or decided
     // approvable run must not resurface here and double-notify one
-    // decision (Codex r2).
-    if (isApprovableKind(row.skip_reason)) continue;
+    // decision (Codex r2). Same gate condition as the active side — with
+    // approval emails off there was no first notification to double (r5).
+    if (approvalEmailsOn && isApprovableKind(row.skip_reason)) continue;
     stale.push({
       run_id: row.run_id,
       opportunity_id: row.opportunity_id,
@@ -370,6 +389,7 @@ function groupBySkipReason(items) {
 function itemHtml(item) {
   const url = reviewQueueUrl();
   const meta = [
+    item.is_new ? 'NEW' : null,
     item.query ? `query: ${esc(item.query)}` : null,
     item.page_type ? esc(item.page_type) : null,
     item.parked_at ? `parked ${esc(String(etDateString(new Date(item.parked_at))))}` : null,
@@ -386,8 +406,18 @@ function itemHtml(item) {
 
 function groupsHtml(items) {
   return groupBySkipReason(items).map(([reason, groupItems]) => {
-    const shown = groupItems.slice(0, MAX_ITEMS_PER_GROUP);
-    const more = groupItems.length - shown.length;
+    // Post-watermark items claim the capped slots FIRST: the load order is
+    // oldest-first, so in a group already holding MAX_ITEMS_PER_GROUP
+    // backlog entries the new park that TRIGGERED this send would fall off
+    // the slice and the email would report a nonzero new count while
+    // showing only old drafts (Codex r5). Within each tier the oldest-first
+    // order is preserved.
+    const prioritized = [
+      ...groupItems.filter((i) => i.is_new),
+      ...groupItems.filter((i) => !i.is_new),
+    ];
+    const shown = prioritized.slice(0, MAX_ITEMS_PER_GROUP);
+    const more = prioritized.length - shown.length;
     return [
       `<p style="margin:18px 0 6px 0;"><strong>${esc(reason)}</strong> (${groupItems.length})</p>`,
       `<ul style="margin:0 0 4px 18px;padding:0;">${shown.map(itemHtml).join('')}</ul>`,
@@ -436,7 +466,7 @@ async function runParkedRunDigest(opts = {}) {
     logger.error(`[parked-run-digest] parked-set query failed: ${err.message}`);
     return { skipped: 'query_failed' };
   }
-  const { active = [], stale: staleAll = [] } = parkedSet || {};
+  const { active: activeAll = [], stale: staleAll = [] } = parkedSet || {};
 
   const watermark = await (opts.getWatermark || getWatermark)();
   const isNew = (item) => {
@@ -444,15 +474,19 @@ async function runParkedRunDigest(opts = {}) {
     const at = parkedAt(item);
     return !!at && at > watermark;
   };
+  // Active rows are ANNOTATED, not filtered: composition needs is_new to
+  // hand post-watermark items the capped per-group slots first and to tag
+  // them NEW in the email (Codex r5).
+  const active = activeAll.map((item) => ({ ...item, is_new: isNew(item) }));
   // Stale rows are surfaced ONCE: the whole backlog on the first digest
   // (no watermark), then only rows that parked after the last sent digest.
   // The portal review queue only lists pending_review opportunities, so a
   // dismissed run's row can never be cleared there — without this filter
   // the Sunday full digest would resend the same stale rows forever
-  // (Codex r1).
-  const stale = staleAll.filter(isNew);
+  // (Codex r1). Every survivor is post-watermark by construction.
+  const stale = staleAll.filter(isNew).map((item) => ({ ...item, is_new: true }));
   if (active.length + stale.length === 0) return { skipped: 'no_parked_runs' };
-  const newCount = [...active, ...stale].filter(isNew).length;
+  const newCount = [...active, ...stale].filter((item) => item.is_new).length;
 
   // Exception-based cadence: daily sends need NEW parks; Sundays send the
   // full digest anyway while ACTIONABLE (active) rows exist (never twice in

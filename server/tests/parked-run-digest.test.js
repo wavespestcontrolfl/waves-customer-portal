@@ -493,3 +493,57 @@ describe('Codex r4: active set mirrors the portal queue; janitor conversions get
     expect(outcomeIdx).toBeGreaterThan(activeIdx);
   });
 });
+
+// ── Codex r5 behaviors: gate-conditional approvable exclusion + new-item
+// priority in the capped per-group slice ──────────────────────────────────
+
+describe('Codex r5: approvable kinds stay in the digest while the approval-email gate is off', () => {
+  test('source pin: BOTH exclusions are conditioned on the contentEmailApprovals gate', () => {
+    // With GATE_CONTENT_EMAIL_APPROVALS unset, email-approvals skips every
+    // per-item send as gate_off — an unconditional exclusion here would
+    // make named_competitor_review / trust_build_* invisible to both lanes.
+    const src = require('fs').readFileSync(require.resolve('../services/content/parked-run-digest'), 'utf8');
+    expect(src).toMatch(/isEnabled\('contentEmailApprovals'\)/);
+    expect(src).toMatch(/approvalEmailsOn && isApprovableKind\(skipReason\)/); // active side
+    expect(src).toMatch(/approvalEmailsOn && isApprovableKind\(row\.skip_reason\)/); // stale side
+    // No unconditional call survives anywhere.
+    expect(src).not.toMatch(/(?<!approvalEmailsOn && )isApprovableKind\((?:skipReason|row\.skip_reason)\)/);
+  });
+});
+
+describe('Codex r5: newly parked items claim the capped per-group slots first', () => {
+  test('a new park is shown even when its group already holds a full slice of older backlog', () => {
+    const olds = Array.from({ length: 8 }, (_, i) => item({ title: `Old draft ${i + 1}`, is_new: false }));
+    const fresh = item({ title: 'Fresh draft', is_new: true });
+    // Load order is oldest-first, so the fresh item arrives LAST.
+    const composed = composeParkedRunDigest({ active: [...olds, fresh], stale: [], newCount: 1 });
+    expect(composed.bodyHtml).toContain('Fresh draft'); // in, despite arriving 9th of 9
+    expect(composed.bodyHtml).not.toContain('Old draft 8'); // displaced into the "…and N more" tail
+    expect(composed.bodyHtml).toContain('Old draft 7');
+    expect(composed.bodyHtml).toContain('…and 1 more in this group.');
+  });
+
+  test('new items carry a NEW marker; backlog items do not', () => {
+    const composed = composeParkedRunDigest({
+      active: [item({ title: 'Fresh draft', is_new: true }), item({ title: 'Old draft', is_new: false })],
+      stale: [],
+      newCount: 1,
+    });
+    const freshLi = composed.bodyHtml.split('<li').find((chunk) => chunk.includes('Fresh draft'));
+    const oldLi = composed.bodyHtml.split('<li').find((chunk) => chunk.includes('Old draft'));
+    expect(freshLi).toContain('NEW');
+    expect(oldLi).not.toContain('NEW');
+  });
+
+  test('the runner annotates is_new from the watermark, so the triggering park reaches the email', async () => {
+    const olds = Array.from({ length: 8 }, (_, i) => item({ title: `Backlog ${i + 1}`, parked_at: '2026-07-01T10:00:00Z' }));
+    const fresh = item({ title: 'Fresh park', parked_at: '2026-08-05T10:00:00Z' });
+    const d = deps({ active: [...olds, fresh], watermark: '2026-08-01T00:00:00Z', now: THURSDAY });
+    const r = await runParkedRunDigest(d);
+    expect(r.sent).toBe(true);
+    expect(r.newCount).toBe(1);
+    const body = email.send.mock.calls[0][0].body;
+    expect(body).toContain('Fresh park');
+    expect(body).not.toContain('Backlog 8'); // oldest-first slice alone would have hidden the trigger instead
+  });
+});
