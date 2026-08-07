@@ -124,6 +124,14 @@ describe('hasWorkableLeadSignal anonymous-caller (no phone) path', () => {
       voicemail: true,
     })).toBe(false);
   });
+
+  test('a phone-less voicemail with a valid spoken email IS workable (same branch as live calls)', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'pest control', email: 'jeff@example.com' },
+      phone: null,
+      voicemail: true,
+    })).toBe(true);
+  });
 });
 
 describe('findReusableCallLead identity keys', () => {
@@ -151,7 +159,7 @@ describe('findReusableCallLead identity keys', () => {
     expect(db.calls.some(([m]) => m === 'whereRaw')).toBe(false);
   });
 
-  test('no phone: matches by lowercased trimmed email', async () => {
+  test('no phone: matches by lowercased trimmed email, unclaimed leads only', async () => {
     const db = makeDb({ id: 'lead-2' });
     const found = await findReusableCallLead(db, {
       phone: null,
@@ -162,6 +170,8 @@ describe('findReusableCallLead identity keys', () => {
     const raw = db.calls.find(([m]) => m === 'whereRaw');
     expect(raw[1][1]).toEqual(['jbrooks00005@gmail.com']);
     expect(db.calls.some(([m, a]) => m === 'where' && a[0] === 'phone')).toBe(false);
+    // Weak identity: an email match must never land on a customer-owned lead.
+    expect(db.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(true);
   });
 
   test('no phone and no email: returns null without querying', async () => {

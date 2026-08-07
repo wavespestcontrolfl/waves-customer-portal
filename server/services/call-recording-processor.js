@@ -2195,10 +2195,14 @@ async function findReusableCallLead(database, { phone, email = null, customerId,
   let query = database('leads').whereNull('deleted_at');
   // Email matching engages ONLY when there is no phone: a phone match stays
   // the sole identity key for identified callers (an email-also match could
-  // absorb a different household member's lead sharing one inbox).
+  // absorb a different household member's lead sharing one inbox). And an
+  // email match may only land on an UNCLAIMED lead — a spoken email is weak
+  // identity (shared inbox, transcription collision), so a lead a customer
+  // owns is invisible here and the ambiguous caller gets a fresh row instead
+  // of overwriting someone else's lead (codex P1, PR #3275).
   query = phone
     ? query.where('phone', phone)
-    : query.whereRaw('LOWER(TRIM(email)) = ?', [emailLc]);
+    : query.whereRaw('LOWER(TRIM(email)) = ?', [emailLc]).whereNull('customer_id');
   if (workableUnnamedLead) {
     query = query.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
   }
@@ -5491,10 +5495,17 @@ const CallRecordingProcessor = {
     let voicemailLeadPath = false;
     if (voicemailChannel && !extracted.is_spam && !isOutboundCall(call) && !voicemailContentVeto) {
       const vmPhone = resolveCallContactPhone(call, extracted.phone);
-      if (vmPhone && hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) {
+      // A blocked-caller-ID voicemail (vmPhone null) rides the same
+      // email-backed branch as a live anonymous call: hasWorkableLeadSignal
+      // demands a VALID spoken email when there is no phone, so "call me
+      // back" voicemails with no reachback still terminal-skip. The
+      // quote-link text-back downstream fails closed in the service
+      // (missing_input) — a phone-less voicemail lead is email-reachback
+      // only (codex P1, PR #3275).
+      if (hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) {
         const vmCustomer = call.customer_id
           ? { id: call.customer_id }
-          : await findCustomerForCallContact(vmPhone, extracted).catch(() => null);
+          : (vmPhone ? await findCustomerForCallContact(vmPhone, extracted).catch(() => null) : null);
         voicemailLeadPath = !vmCustomer;
       }
     }
@@ -7670,6 +7681,12 @@ const CallRecordingProcessor = {
           let enrichmentWrite = db('leads').where({ id: leadId });
           if (customerId) {
             enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+          } else if (!phone) {
+            // Email-matched reuse (anonymous caller): weak identity, so a
+            // lead claimed by ANY customer between the lookup and this write
+            // stays untouched — same race backstop as the customer-attached
+            // branch, unclaimed-only flavor (codex P1, PR #3275).
+            enrichmentWrite = enrichmentWrite.whereNull('customer_id');
           }
           const enriched = await enrichmentWrite.update(leadUpdates);
 
