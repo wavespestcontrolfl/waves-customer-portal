@@ -6,7 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
-const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, etCalendarDayOf } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
 // Add-to-calendar link for a visit row, or null. Mirrors the guardrails of
@@ -20,7 +20,12 @@ function calendarUrlFor(row, now = new Date()) {
   if (!['pending', 'confirmed'].includes(String(row.status || '').toLowerCase())) return null;
   const start = String(row.window_start || '').slice(0, 5);
   if (!row.scheduled_date || !start) return null;
-  const dateStr = etDateString(row.scheduled_date);
+  // DATE-column normalization, NOT etDateString: knex hands back a UTC-midnight
+  // Date for a pg DATE, which etDateString would render as the PRECEDING
+  // Eastern day — that would mark today's visit elapsed and drop tomorrow's
+  // link early. etCalendarDayOf is the canonical date-only helper and matches
+  // what appointment-public's own apptDateStr resolves (codex r2 P1).
+  const dateStr = etCalendarDayOf(row.scheduled_date);
   const startAt = dateStr ? parseETDateTime(`${dateStr}T${start}`) : null;
   if (!startAt || Number.isNaN(startAt.getTime())) return null;
   if (startAt.getTime() + ARRIVAL_WINDOW_MINUTES * 60000 < now.getTime()) return null;
