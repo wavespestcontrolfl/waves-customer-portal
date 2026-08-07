@@ -629,7 +629,7 @@ function buildListicleFamilyRefreshOpp(entries) {
   opp.score = total;
   opp.score_breakdown = breakdown;
   opp.action_type = actionForOpportunity(opp);
-  opp.dedupe_key = listicleFamilyRefreshDedupeKey(opp.page_url, opp.service, opp.city);
+  opp.dedupe_key = listicleFamilyRefreshDedupeKey(opp.page_url, opp.service, opp.city, sorted.map((e) => e.fam.key));
   return opp;
 }
 
@@ -705,16 +705,24 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
   return false;
 }
 
-// Subgroup-stable refresh key: (page, service, city). Within a subgroup a
-// primary-family flip never changes the key (the r16 duplicate-row bug);
-// ACROSS subgroups the keys differ by design — but the mine emits at most
-// ONE subgroup per page at a time (see the sequenced emission), so two
-// claimable rows can still never coexist for one URL, and a completed
-// (frozen) subgroup rotates emission to the next one instead of starving
-// it behind a page-wide key (Codex r22 audit).
-function listicleFamilyRefreshDedupeKey(pageUrl, service, city) {
+// Subgroup-stable refresh key: (page, service, city, covered family set).
+// Within a subgroup a primary-family flip never changes the key — the
+// family-key set is SORTED, so order is irrelevant (the r16 duplicate-row
+// bug stays fixed). A done/skipped row freezes exactly the work it
+// covered: a NEWLY EMERGING family changes the set, hence the key, and
+// reopens the subgroup instead of being starved behind completed work
+// (Codex r23) — while the one-subgroup-per-page sequencing still ensures
+// two claimable rows never coexist for one URL (an in-flight
+// old-generation row makes the new key WAIT; the sweep expires orphaned
+// pending generations).
+function listicleFamilyRefreshDedupeKey(pageUrl, service, city, familyKeys = []) {
   const page = String(pageUrl || '');
-  const dims = `${page}::${service || '_'}::${String(city || '_').toLowerCase()}`;
+  const dims = [
+    page,
+    service || '_',
+    String(city || '_').toLowerCase(),
+    familyKeys.slice().sort().join('|'),
+  ].join('::');
   const digest = crypto.createHash('sha256').update(dims).digest('hex').slice(0, 16);
   return ['listicle_family', 'page', page.slice(0, 100), digest].join('::');
 }
@@ -2295,7 +2303,7 @@ class GscOpportunityMiner {
         .map((entries) => ({
           entries,
           impressions: entries.reduce((sum, e) => sum + e.fam.impressions, 0),
-          key: listicleFamilyRefreshDedupeKey(pageUrl, entries[0].service, entries[0].city),
+          key: listicleFamilyRefreshDedupeKey(pageUrl, entries[0].service, entries[0].city, entries.map((e) => e.fam.key)),
         }))
         .sort((a, b) => b.impressions - a.impressions);
       const rowsForPage = familyRefreshState.get(pageUrl) || [];

@@ -1091,12 +1091,16 @@ describe('listicle_family scoring + action mapping', () => {
         { query: 'florida types of important documents', service_category: 'pest', city_target: null },
       ],
     }, helpers).service).toBeNull();
-    // Page-stable refresh key: a primary-family flip (service/city churn)
-    // must not mint a second claimable edit of the same URL.
+    // Subgroup-stable refresh key: order-insensitive over the covered
+    // family set (primary flips never mint a second row), distinct per
+    // page AND per family set — a newly emerging family reopens a
+    // completed subgroup under a new key (Codex r23).
     const page = 'https://wavespestcontrol.com/blog/florida-native-plants/';
-    expect(listicleFamilyRefreshDedupeKey(page)).toBe(listicleFamilyRefreshDedupeKey(page));
-    expect(listicleFamilyRefreshDedupeKey(page)).toContain('listicle_family::page::');
-    expect(listicleFamilyRefreshDedupeKey(page)).not.toBe(listicleFamilyRefreshDedupeKey('https://wavespestcontrol.com/blog/other/'));
+    const k = (fams) => listicleFamilyRefreshDedupeKey(page, 'tree-shrub', null, fams);
+    expect(k(['a', 'b'])).toBe(k(['b', 'a'])); // sorted — order-insensitive
+    expect(k(['a', 'b'])).toContain('listicle_family::page::');
+    expect(k(['a', 'b'])).not.toBe(k(['a', 'b', 'c'])); // new family → new key
+    expect(k(['a', 'b'])).not.toBe(listicleFamilyRefreshDedupeKey('https://wavespestcontrol.com/blog/other/', 'tree-shrub', null, ['a', 'b']));
   });
 
   test('served families route to a page refresh, never a drop and never map-existence (query-page map)', () => {
