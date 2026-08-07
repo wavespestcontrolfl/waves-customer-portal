@@ -69,6 +69,17 @@ describe('writer-agent-config HARD PUBLISH GATES section', () => {
     expect(system).toMatch(/ONLY inside the <ComparisonTable>[\s\S]{0,80}never\s+in prose, title, or meta/);
   });
 
+  test('checklist preserves the operator-brief exceptions the gates actually carry (Codex r1)', () => {
+    // FAQ block: an operator faq_required mandate WINS over the blocked list
+    // (writer-agent-config FAQ POLICY + intercept-brief-seeder mandate).
+    expect(system).toMatch(/faq_required=true[\s\S]{0,80}WINS over the block/);
+    // Comparison prose ban: operator-named competitors are authorized in
+    // prose/title/meta (comparison-table-gate authorizes operatorBriefText
+    // names and routes those drafts to human review).
+    expect(system).toMatch(/competitor the OPERATOR brief[\s\S]{0,120}authorized in[\s\S]{0,40}prose\/title\/meta/);
+    expect(system).toMatch(/never add a competitor the brief didn't name/);
+  });
+
   test('citation rule names the exact token families the residue detector blocks', () => {
     for (const token of ['<cite', 'index="N"', '[^footnote', 'citeturn', 'oaicite', ':contentReference', '【']) {
       expect(system).toContain(token);
