@@ -1866,10 +1866,20 @@ function leadContactCompleteness(fields = {}) {
 // definition, and that number IS the reachback (we text the quote link / call
 // back). Requiring email/address would drop exactly the "call me back about
 // pest control" messages the voicemail lead path exists to capture.
+// A caller with NO usable phone at all (blocked/anonymous caller ID — the
+// sentinel filter nulls it) can still be a workable lead, but only when they
+// spoke a VALID email: with no callback number the email is the office's only
+// way to reach them, so an address alone (locatable, not contactable) is not
+// enough, and the voicemail waiver can't apply — the reachback it waives INTO
+// is the phone. Without this branch a fully-identified prospect calling from
+// a blocked number produced no lead row anywhere (name + email + address +
+// quote promised → invisible in Leads/Customers, triage cards only).
 function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false } = {}) {
-  if (!phone) return false;
   const text = (v) => String(v == null ? '' : v).trim();
   const hasServiceIntent = !!(text(extracted.matched_service) || text(extracted.requested_service));
+  if (!phone) {
+    return hasServiceIntent && EMAIL_RE.test(text(extracted.email).toLowerCase());
+  }
   const hasReachback = !!(text(extracted.email) || text(extracted.address_line1));
   return hasServiceIntent && (hasReachback || voicemail === true);
 }
@@ -2164,7 +2174,9 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
   // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 }
 
-// Resolve which existing lead (if any) this call should reuse, by caller phone.
+// Resolve which existing lead (if any) this call should reuse, by caller phone
+// — or, when the caller ID was blocked/anonymous (phone null), by the spoken
+// email, so a repeat anonymous caller doesn't mint a duplicate lead per call.
 // Soft-deleted leads never absorb a new call — a fresh lead is made.
 // - Customer-less recovery path (workableUnnamedLead): only an ACTIVE lead
 //   (status not terminal, not converted), so a recovered inquiry lands on an
@@ -2177,9 +2189,16 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 //   and the booking-conversion ownership guard would then (rightly) refuse to
 //   close it — stranding this caller's booked deal with no convertible lead.
 //   A foreign-owned lead is invisible here; the caller gets a fresh row.
-async function findReusableCallLead(database, { phone, customerId, workableUnnamedLead, unclaimedOnly }) {
-  if (!phone) return null;
-  let query = database('leads').where('phone', phone).whereNull('deleted_at');
+async function findReusableCallLead(database, { phone, email = null, customerId, workableUnnamedLead, unclaimedOnly }) {
+  const emailLc = String(email || '').trim().toLowerCase();
+  if (!phone && !emailLc) return null;
+  let query = database('leads').whereNull('deleted_at');
+  // Email matching engages ONLY when there is no phone: a phone match stays
+  // the sole identity key for identified callers (an email-also match could
+  // absorb a different household member's lead sharing one inbox).
+  query = phone
+    ? query.where('phone', phone)
+    : query.whereRaw('LOWER(TRIM(email)) = ?', [emailLc]);
   if (workableUnnamedLead) {
     query = query.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
   }
@@ -7213,8 +7232,9 @@ const CallRecordingProcessor = {
     }
     if (shouldCreateLead) {
       try {
-        // Check if lead already exists for this phone (see findReusableCallLead
-        // for the per-path filters: soft-deleted excluded always; active-only
+        // Check if lead already exists for this phone — or by spoken email
+        // when the caller ID was blocked (see findReusableCallLead for the
+        // per-path filters: soft-deleted excluded always; active-only
         // on the customer-less recovery path; unclaimed-or-ours on the
         // customer-attached path, so a shared-phone lead owned by another
         // customer is never reused/overwritten; UNCLAIMED-only when the phone
@@ -7222,6 +7242,7 @@ const CallRecordingProcessor = {
         // one of the candidates owns while the office adjudicates).
         const existingLead = await findReusableCallLead(db, {
           phone,
+          email: phone ? null : (extracted.email || null),
           customerId,
           workableUnnamedLead,
           unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
