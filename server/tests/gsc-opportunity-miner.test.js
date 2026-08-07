@@ -781,9 +781,12 @@ describe('listicle_family scoring + action mapping', () => {
     expect(gscOpportunityScore('listicle_family', 18, 1.0)).toBe(Math.round(WEIGHTS.gscOpportunity * 0.7));
   });
 
-  test('maps to new_supporting_blog; transactional representative still demoted', () => {
+  test('maps to new_supporting_blog unserved, refresh_existing_page when page-anchored; transactional still demoted', () => {
     expect(actionForOpportunity({ bucket: 'listicle_family', page_url: null, query: 'kinds of ants in florida' }))
       .toBe('new_supporting_blog');
+    // Served family rides as a page-anchored refresh — same convention as answer_gap.
+    expect(actionForOpportunity({ bucket: 'listicle_family', page_url: 'https://wavespestcontrol.com/blog/x/', query: 'kinds of ants in florida' }))
+      .toBe('refresh_existing_page');
     // The wrapper's transactional demotion applies to this bucket like any other.
     expect(actionForOpportunity({ bucket: 'listicle_family', page_url: null, query: 'signs you need pest control near me' }))
       .toBe('do_not_publish');
@@ -895,17 +898,72 @@ describe('listicle_family scoring + action mapping', () => {
       hit: { page_url: 'https://wavespestcontrol.com/blog/florida-native-plants/', position: 8.2 },
     };
     const opp = buildListicleFamilyRefreshOpp(fam, served, 'tree-shrub', null);
-    expect(opp.bucket).toBe('striking_distance');
+    // listicle_family bucket, NOT striking_distance: PAGE_ANCHORED_BUCKETS
+    // is what stops the SERP profiler swapping the refresh back into a
+    // competing blog and keeps page_type 'refresh' with its hard
+    // improvement_over_prior guard (Codex r10) — and the bucket keeps the
+    // family contentGap/0.7× scoring.
+    expect(opp.bucket).toBe('listicle_family');
     expect(opp.page_url).toBe(served.hit.page_url);
     expect(opp.query).toBe('florida drought tolerant plants');
     expect(opp.signal_metadata.impressions).toBe(102); // family-aggregated demand
     expect(opp.signal_metadata.source).toBe('listicle_family');
     expect(opp.signal_metadata.family_size).toBe(3);
-    expect(opp.action_type).not.toBe('new_supporting_blog'); // refresh, not a competing post
-    // Standard page-keyed dedupe: merges with a genuine striking_distance
-    // row for the same page instead of queueing a duplicate.
-    expect(opp.dedupe_key).toContain('striking_distance::');
+    expect(opp.action_type).toBe('refresh_existing_page'); // refresh, not a competing post
+    // Page-keyed dedupe: two families served by the same page merge.
+    expect(opp.dedupe_key).toContain('listicle_family::');
     expect(opp.dedupe_key).toContain(served.hit.page_url.slice(0, 60));
+    // Router anchoring contract this bucket relies on.
+    const routerSrc = require('fs').readFileSync(require.resolve('../services/content/decision-router'), 'utf8');
+    expect(routerSrc).toMatch(/PAGE_ANCHORED_BUCKETS = new Set\(\[.*'listicle_family'.*\]\)/);
+  });
+
+  test('served-family refresh clears the persistAll floor via the family exception (Codex r10)', async () => {
+    const db = require('../models/db');
+    const calls = [];
+    db.raw = jest.fn((sql, bindings) => {
+      calls.push({ sql, bindings });
+      return Promise.resolve({ rowCount: 1 });
+    });
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const miner = new GscOpportunityMiner();
+    const refresh = (over = {}) => ({
+      bucket: 'listicle_family',
+      action_type: 'refresh_existing_page',
+      query: 'drought tolerant plants florida',
+      page_url: 'https://wavespestcontrol.com/blog/florida-native-plants/',
+      service: 'tree-shrub',
+      city: null,
+      score: 60,
+      score_breakdown: { base: 60 },
+      signal_metadata: { source: 'listicle_family' },
+      dedupe_key: 'listicle_family::tree-shrub::_::x',
+      ...over,
+    });
+    // Family refresh at 60 persists (blog floor 45, not the global 75)...
+    expect(await miner.persistAll([refresh()])).toBe(1);
+    expect(calls.length).toBe(1);
+    // ...while an ordinary refresh bucket at the same score is dropped.
+    calls.length = 0;
+    const dropped = await miner.persistAll([refresh({ bucket: 'striking_distance', dedupe_key: 'striking_distance::x' })]);
+    expect(dropped).toBe(0);
+    expect(calls.length).toBe(0);
+  });
+
+  test('served/unserved transitions retire the stale opposite row (Codex r10)', () => {
+    // Earlier-run pending blog row + newly served family → the blog must be
+    // skipped (family_intent_now_served) or it drafts the competing post
+    // until expiry; mirror: page drops out of striking distance → the stale
+    // pending refresh row is skipped (family_no_longer_served).
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    const mineSrc = src.slice(src.indexOf('async mineListicleFamily'), src.indexOf('async mineNoContentYet'));
+    expect(mineSrc).toMatch(/skip_reason: 'family_intent_now_served'/);
+    expect(mineSrc).toMatch(/dedupe_key: listicleFamilyDedupeKey\(fam\.key\)/);
+    expect(mineSrc).toMatch(/skip_reason: 'family_no_longer_served'/);
+    expect(mineSrc).toMatch(/signal_metadata->>'family_key' = \?/);
+    // Both cleanups touch ONLY pending rows — frozen states stay records.
+    expect(mineSrc).toMatch(/status: 'pending',\s*\n\s*action_type: 'new_supporting_blog'/);
   });
 
   test('service resolves across EVERY variant, not just the representative (Codex r9)', () => {

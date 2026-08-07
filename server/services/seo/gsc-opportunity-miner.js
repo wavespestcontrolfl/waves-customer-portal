@@ -279,10 +279,14 @@ function baseActionForOpportunity({ bucket, query, page_url, city, service }) {
     return page_url ? 'refresh_existing_page' : 'do_not_publish';
   }
   // listicle_family demand is enumerable-informational by construction
-  // (isListicleQuery excludes vendor/roundup intent) — always a new blog
-  // post; the actionForOpportunity wrapper still demotes a transactional
+  // (isListicleQuery excludes vendor/roundup intent). An unserved family
+  // mints a new blog post; a SERVED family (owned page already in striking
+  // distance for a variant) rides as a page-anchored refresh of that page —
+  // same page_url convention as answer_gap, same router anchoring (action
+  // preserved, page_type 'refresh' with the improvement_over_prior guard).
+  // The actionForOpportunity wrapper still demotes a transactional
   // representative query like any other bucket.
-  if (bucket === 'listicle_family') return 'new_supporting_blog';
+  if (bucket === 'listicle_family') return page_url ? 'refresh_existing_page' : 'new_supporting_blog';
   return 'do_not_publish';
 }
 
@@ -417,15 +421,20 @@ function resolveListicleFamilyServiceCity(fam, { canonicalize, inferService, nor
 }
 
 // A served family (owned page in striking distance for a variant) becomes a
-// family-aggregated refresh of that page, in the striking_distance bucket so
-// the page-anchored action/scoring machinery applies wholesale. dedupeKey
-// intentionally standard: it keys on the PAGE, so this merges with any
-// genuine striking_distance row for the same page instead of queueing a
-// duplicate. The family variants ride in signal_metadata so the refresh
+// family-aggregated refresh of that page — kept in the listicle_family
+// bucket, NOT striking_distance: PAGE_ANCHORED_BUCKETS in decision-router
+// contains only answer_gap and listicle_family, so this labeling is what
+// stops the SERP profiler from swapping the refresh back into a competing
+// blog and keeps page_type 'refresh' (with its hard improvement_over_prior
+// guard). It also keeps the family's contentGap/0.7× scoring. The overlay
+// is action-guarded (applyListicleTreatment requires new_supporting_blog),
+// so a refresh never receives listicle restructure mandates. dedupeKey is
+// standard page-keyed: two families served by the same page merge into one
+// refresh row. The family variants ride in signal_metadata so the refresh
 // brief sees the full fragmented demand it is satisfying.
 function buildListicleFamilyRefreshOpp(fam, served, service, city) {
   const opp = {
-    bucket: 'striking_distance',
+    bucket: 'listicle_family',
     query: served.variant.query,
     page_url: served.hit.page_url,
     service,
@@ -1696,10 +1705,39 @@ class GscOpportunityMiner {
         .filter((s) => s.hit)
         .sort((a, b) => a.hit.position - b.hit.position)[0] || null;
       if (served) {
+        // A family that minted a pending BLOG row on an earlier (unserved)
+        // run must retire it the moment a page serves the intent — the
+        // refresh keys differently, so without this the old blog stays
+        // claimable until expiry and drafts the competing post this routing
+        // exists to prevent. Fail-soft, same posture as the near-me cleanup.
+        try {
+          await db('opportunity_queue')
+            .where({
+              dedupe_key: listicleFamilyDedupeKey(fam.key),
+              status: 'pending',
+              action_type: 'new_supporting_blog',
+            })
+            .update({ status: 'skipped', skip_reason: 'family_intent_now_served', updated_at: new Date() });
+        } catch (err) {
+          logger.warn(`[gsc-opp-miner] listicle_family: stale blog retirement failed (${fam.key}): ${err.message}`);
+        }
         if (served.hit.position >= THRESHOLDS.strikingDistancePositionMin) {
           out.push(buildListicleFamilyRefreshOpp(fam, served, service, city));
         }
         continue;
+      }
+
+      // Mirror direction: the family's page dropped back OUT of striking
+      // distance, so it re-becomes a blog candidate — retire any stale
+      // pending refresh row (matched via its family_key provenance) before
+      // minting the blog, or both would sit claimable at once.
+      try {
+        await db('opportunity_queue')
+          .where({ bucket: 'listicle_family', status: 'pending', action_type: 'refresh_existing_page' })
+          .whereRaw("signal_metadata->>'family_key' = ?", [fam.key])
+          .update({ status: 'skipped', skip_reason: 'family_no_longer_served', updated_at: new Date() });
+      } catch (err) {
+        logger.warn(`[gsc-opp-miner] listicle_family: stale refresh retirement failed (${fam.key}): ${err.message}`);
       }
 
       // Cityless family on a hubless service can never publish (see above).
@@ -1813,8 +1851,16 @@ class GscOpportunityMiner {
       // worth acting on — action-aware: new_supporting_blog uses the lower
       // blog floor, everything else the global one. mineAll's return still
       // exposes every candidate (including the dropped ones) so calibration
-      // can see why the cut landed where it did.
-      if (o.score < minScoreToActFor(o.action_type)) {
+      // can see why the cut landed where it did. One family exception:
+      // listicle_family rows keep the BLOG floor even when routed as a page
+      // refresh — the same aggregated sub-50-imp demand admitted as a blog
+      // at 45 must not be discarded for taking the SAFER page-refresh
+      // route; the global 75 floor calibrates ordinary refresh rows built
+      // from single ≥50-imp queries, which family sums rarely reach.
+      const scoreFloor = o.bucket === 'listicle_family'
+        ? minScoreToActFor('new_supporting_blog')
+        : minScoreToActFor(o.action_type);
+      if (o.score < scoreFloor) {
         // Rollout hygiene for the near-me demotion: a previously persisted
         // new_supporting_blog row shares this candidate's dedupe_key, but a
         // demoted candidate dropped here never reaches the ON CONFLICT
