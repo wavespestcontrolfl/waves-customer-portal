@@ -6009,8 +6009,10 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   </div>{" "}
                   {/* Bermuda-in-St.-Augustine suppression add-on — dark behind
-                      GATE_BERMUDA_SUPPRESSION server-side (the option is
-                      stripped while the gate is off). St. Augustine track only. */}
+                      GATE_BERMUDA_SUPPRESSION server-side. Requesting it while
+                      the gate is off FAILS the calculation with an explicit
+                      error (never a silent unchanged price). St. Augustine
+                      track only. */}
                   {form.grassType === "st_augustine" && (
                     <div className="mt-3">
                       <CheckboxV2

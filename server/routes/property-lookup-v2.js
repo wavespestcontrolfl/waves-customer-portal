@@ -3063,6 +3063,16 @@ function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
   return true;
 }
 
+// Bermuda suppression is dark until GATE_BERMUDA_SUPPRESSION is flipped.
+// Requested-while-dark fails CLOSED with a 400 the builder surfaces verbatim.
+function requireBermudaSuppressionGate() {
+  if (process.env.GATE_BERMUDA_SUPPRESSION === 'true') return true;
+  const err = new Error('Bermudagrass suppression is not enabled on this environment (GATE_BERMUDA_SUPPRESSION) — uncheck the add-on or flip the gate.');
+  err.statusCode = 400;
+  err.code = 'BERMUDA_SUPPRESSION_GATED';
+  throw err;
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -3224,8 +3234,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       // Operator-selected in the admin builder only — deliberately NOT in
       // PUBLIC_QUOTE_SERVICE_KEYS passthrough or the estimator-MCP intent
       // schema (eligibility is a manual call: cultivar, %-bermuda, season).
-      ...(process.env.GATE_BERMUDA_SUPPRESSION === 'true' && o.bermudaSuppression === true
-        ? { bermudaSuppression: true }
+      // FAIL CLOSED while dark: a requested-but-gated selection is REJECTED,
+      // never silently stripped — stripping would let the operator send an
+      // unchanged lawn price believing the adder was baked in (pre-push
+      // codex P0 on this branch).
+      ...(o.bermudaSuppression === true
+        ? { bermudaSuppression: requireBermudaSuppressionGate() }
         : {}),
       useLawnCostFloor: o.useLawnCostFloor != null ? !!o.useLawnCostFloor : undefined,
       targetLawnGrossMargin: o.targetLawnGrossMargin,

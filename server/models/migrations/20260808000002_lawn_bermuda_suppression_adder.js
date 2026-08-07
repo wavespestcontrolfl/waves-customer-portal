@@ -16,8 +16,12 @@ const MIGRATION_TAG = 'migration:20260808000002';
 const UP_REASON = 'Bermuda suppression per-application adder knobs (owner ruling 2026-08-07: number baked into per application)';
 const DEFAULT_KNOBS = { perAppBase: 15, perAppPer1000Sqft: 2 };
 const CHANGELOG_IDENTITY = {
-  version_from: 'LAWN_PRICING_V2_GRID_500',
-  version_to: 'LAWN_PRICING_V2_GRID_500',
+  // pricing_changelog.version_from/to are varchar(10) — the full
+  // LAWN_PRICING_V2_GRID_500 tag lives in before/after_value instead
+  // (pre-push codex P1: the long tag would fail the insert and block
+  // the whole migration chain).
+  version_from: 'GRID_500',
+  version_to: 'GRID_500',
   changed_by: 'claude-2026-08-08',
   category: 'rule',
   summary: 'Add bermudagrass-suppression per-application adder knobs to lawn_pricing_v2.',
@@ -85,7 +89,15 @@ exports.down = async function (knex) {
   const loaded = await loadRow(knex);
   if (loaded) {
     const { data } = loaded;
-    if (data.bermudaSuppression) {
+    // Remove ONLY the untouched default this migration wrote — an admin who
+    // has since tuned the knobs keeps the edited object (rollbacks never
+    // erase later operator edits). Compared semantically, not as strings:
+    // jsonb round-trips don't preserve key order.
+    const cur = data.bermudaSuppression;
+    const untouchedDefault = cur && typeof cur === 'object' && !Array.isArray(cur)
+      && Object.keys(cur).length === Object.keys(DEFAULT_KNOBS).length
+      && Object.entries(DEFAULT_KNOBS).every(([k, v]) => Number(cur[k]) === v);
+    if (untouchedDefault) {
       const newData = { ...data };
       delete newData.bermudaSuppression;
       await saveRow(knex, data, newData, 'Rollback: remove bermuda suppression adder knobs');

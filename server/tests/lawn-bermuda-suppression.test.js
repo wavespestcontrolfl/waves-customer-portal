@@ -79,10 +79,17 @@ describe('translateV2CallToV1Input GATE_BERMUDA_SUPPRESSION', () => {
     else process.env.GATE_BERMUDA_SUPPRESSION = prevGate;
   });
 
-  test('dark by default: option stripped when the gate is off', () => {
+  test('dark by default: a gated selection FAILS CLOSED (400), never a silent unchanged price', () => {
     delete process.env.GATE_BERMUDA_SUPPRESSION;
-    const input = translateV2CallToV1Input(PROFILE, ['LAWN'], { bermudaSuppression: true });
-    expect(input.services.lawn.bermudaSuppression).toBeUndefined();
+    let thrown;
+    try {
+      translateV2CallToV1Input(PROFILE, ['LAWN'], { bermudaSuppression: true });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeTruthy();
+    expect(thrown.statusCode).toBe(400);
+    expect(thrown.code).toBe('BERMUDA_SUPPRESSION_GATED');
   });
 
   test('gate on: option threads through to services.lawn', () => {
