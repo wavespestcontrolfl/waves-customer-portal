@@ -3496,6 +3496,13 @@ function applyOperatorSlugRepair(brief, draft) {
     rawDraftPath,
   ].filter(Boolean))].filter((p) => p !== pinned);
   const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+  // Hub host equivalence (apex ≡ www) — mirrors the publisher's
+  // isFleetCanonicalHost contract. Shared by the canonical foreign-check and
+  // the body self-link rewrite so the two never diverge (Codex r7).
+  const hubUrl = (() => { try { return new URL(hub); } catch { return null; } })();
+  const hubHostVariants = hubUrl
+    ? [...new Set([hubUrl.host, hubUrl.host.startsWith('www.') ? hubUrl.host.slice(4) : `www.${hubUrl.host}`])]
+    : [];
   const repair = {
     repaired_at: new Date().toISOString(),
     from_slug: mismatch.draft_slug || null,
@@ -3525,7 +3532,14 @@ function applyOperatorSlugRepair(brief, draft) {
     // repair over it (Codex r2).
     try {
       const parsed = new URL(oldCanonical.startsWith('//') ? `https:${oldCanonical}` : oldCanonical);
-      canonicalIsForeign = parsed.host !== new URL(hub).host;
+      // Apex and www are the SAME hub (Codex r7): an exact-host comparison
+      // would misclassify an apex-host canonical as foreign, preserve the
+      // stale old-leaf canonical, and the publisher would then park a draft
+      // whose repair should have succeeded (fleet host accepted, old leaf
+      // rejected).
+      canonicalIsForeign = hubHostVariants.length
+        ? !hubHostVariants.includes(parsed.host)
+        : parsed.host !== new URL(hub).host;
     } catch { canonicalIsForeign = false; }
   }
   if (!canonicalIsForeign && oldCanonical !== newCanonical) {
@@ -3546,12 +3560,7 @@ function applyOperatorSlugRepair(brief, draft) {
     // so absolute self-links on EITHER host form are the writer's own drifted
     // route and must be repaired (Codex r6). Rewrites normalize the prefix to
     // the configured hub origin.
-    const hubUrl = (() => { try { return new URL(hub); } catch { return null; } })();
-    const hubOrigins = hubUrl
-      ? [...new Set([hubUrl.host, hubUrl.host.startsWith('www.') ? hubUrl.host.slice(4) : `www.${hubUrl.host}`])]
-        .map((h) => `${hubUrl.protocol}//${h}`)
-      : [hub];
-    const hubOriginSet = new Set(hubOrigins);
+    const hubOrigins = hubUrl ? hubHostVariants.map((h) => `${hubUrl.protocol}//${h}`) : [hub];
     const hubAlternation = hubOrigins.map(escapeRe).join('|');
     let occurrences = 0;
     for (const oldSlugPath of oldSlugPaths) {
@@ -3563,10 +3572,14 @@ function applyOperatorSlugRepair(brief, draft) {
       // terminate here (close-paren/quote/whitespace/fragment/query/EOF), so
       // child routes with non-alphanumeric next segments (/old-slug/.well-known/,
       // /old-slug/%61rchive/) are different pathnames and survive (Codex r5).
-      const selfLinkRe = new RegExp(`(${hubAlternation}|[\\s("'<\`]|^)${escapeRe(oldSlugPath)}(?=[)"'\\s<>\`#?]|$)`, 'g');
-      draft.body = draft.body.replace(selfLinkRe, (m, pre) => {
+      // The hub-absolute branch needs the SAME destination-start boundary as
+      // the relative branch (Codex r7): without it, an old hub URL embedded
+      // in a foreign destination's query value (?return=https://hub/old/)
+      // would match right after the `=` and mutate someone else's URL.
+      const selfLinkRe = new RegExp(`(^|[\\s("'<\`])((?:${hubAlternation})?)${escapeRe(oldSlugPath)}(?=[)"'\\s<>\`#?]|$)`, 'g');
+      draft.body = draft.body.replace(selfLinkRe, (m, pre, origin) => {
         occurrences += 1;
-        return `${hubOriginSet.has(pre) ? hub : pre}${pinned}`;
+        return `${pre}${origin ? hub : ''}${pinned}`;
       });
     }
     repair.body_self_link_rewrites = occurrences;

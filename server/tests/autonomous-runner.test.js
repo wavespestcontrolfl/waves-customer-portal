@@ -911,6 +911,7 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
         '[an exact foreign path](https://source.example/fall-lawn-mistakes-southwest-florida/) plus',
         '[a longer internal route](/fall-lawn-mistakes-southwest-florida/archive/) and',
         '[a query value](https://source.example/report?return=/fall-lawn-mistakes-southwest-florida/) and',
+        '[an absolute query value](https://source.example/r?return=https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/) and',
         '[a dot-prefixed child](/fall-lawn-mistakes-southwest-florida/.well-known/security.txt) and',
         '[a percent-encoded child](/fall-lawn-mistakes-southwest-florida/%61rchive/).',
       ].join(' '),
@@ -928,12 +929,27 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     expect(draft.body).toContain('[an exact foreign path](https://source.example/fall-lawn-mistakes-southwest-florida/)');
     expect(draft.body).toContain('(/fall-lawn-mistakes-southwest-florida/archive/)');
     // A query VALUE embedding the old path is part of a different
-    // destination, not a self-link (Codex r2).
+    // destination, not a self-link (Codex r2) — including the ABSOLUTE hub
+    // form embedded in a foreign destination's query (Codex r7).
     expect(draft.body).toContain('?return=/fall-lawn-mistakes-southwest-florida/');
+    expect(draft.body).toContain('?return=https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/');
     // Child routes whose next segment starts with a non-alphanumeric URL
     // char are DIFFERENT pathnames (Codex r5).
     expect(draft.body).toContain('(/fall-lawn-mistakes-southwest-florida/.well-known/security.txt)');
     expect(draft.body).toContain('(/fall-lawn-mistakes-southwest-florida/%61rchive/)');
+  });
+
+  test('an APEX-host canonical is the SAME hub — repaired, not preserved as foreign (Codex r7)', () => {
+    // Exact-host comparison would call this foreign, preserve the stale
+    // old-leaf canonical, and the publisher would park a draft whose repair
+    // should have succeeded.
+    const draft = driftedDraft({
+      frontmatter: { canonical: 'https://wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/' },
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(result.repair.canonical_rewritten).toBe(true);
   });
 
   test('an off-site canonical is PRESERVED for the publisher guard — repair must not mask the unsafe input (Codex r1; protocol-relative r2)', () => {
