@@ -1033,6 +1033,9 @@ class GscOpportunityMiner {
     // Unresolved served pages/families collected by the family mine —
     // their pending rows are exempt from this run's destructive sweep.
     const familyExemptions = { pages: new Set(), blogKeys: new Set() };
+    // One facts-readiness verdict per city::service per run — shared by
+    // family subgroup selection AND the boost (Codex r32).
+    const factsReadyCache = new Map();
     const since = sinceDate(periodDays);
     const priorSince = sinceDate(periodDays * 2);
 
@@ -1153,7 +1156,7 @@ class GscOpportunityMiner {
           familyRefreshState = null;
           runState.familyRefreshStateFailed = true;
         }
-        return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightRefreshQueries, inflightFamily, familyRefreshState, reconcileExemptions: familyExemptions });
+        return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightRefreshQueries, inflightFamily, familyRefreshState, reconcileExemptions: familyExemptions, factsReadyCache });
       }],
     ];
 
@@ -1170,7 +1173,7 @@ class GscOpportunityMiner {
     // Facts-readiness boost — applied before persistAll so well-supported
     // rewrite opportunities can clear the global minScoreToAct floor.
     const minedOpportunities = Object.values(buckets).flat();
-    await this._applyFactsReadinessBoost(minedOpportunities);
+    await this._applyFactsReadinessBoost(minedOpportunities, factsReadyCache);
 
     // Derived bucket — no GSC query of its own. Underperforming pages get an
     // inbound internal-link companion alongside their rewrite/refresh.
@@ -1272,36 +1275,17 @@ class GscOpportunityMiner {
     return ready;
   }
 
-  async _applyFactsReadinessBoost(opportunities = []) {
-    let factsSufficiency;
-    try {
-      factsSufficiency = require('../content/facts-sufficiency');
-    } catch (err) {
-      logger.warn(`[gsc-opp-miner] facts-sufficiency unavailable; skipping readiness boost: ${err.message}`);
-      return;
-    }
-    const cache = new Map();
+  async _applyFactsReadinessBoost(opportunities = [], factsReadyCache = new Map()) {
+    // ONE readiness verdict per city::service per run (Codex r32): the
+    // family subgroup selection shares this cache, so a below-floor
+    // subgroup marked persistable by _factsReadyFor is guaranteed the
+    // matching boost here — two independent remote-backed lookups could
+    // split verdicts on a transient failure, strand the selected row under
+    // the floor, and let the sweep expire its pending predecessor.
     for (const opp of opportunities) {
       if (opp.action_type !== 'refresh_existing_page') continue;
       if (!opp.city || !opp.service) continue;
-      const key = `${String(opp.city).toLowerCase()}::${String(opp.service).toLowerCase()}`;
-      let ready = cache.get(key);
-      if (ready === undefined) {
-        try {
-          // Mirror the runner: call check() with no opts so the facts-bank
-          // loader resolves ASTRO_REPO_DIR or falls back to GitHub.
-          const verdict = await factsSufficiency.check({
-            action_type: 'refresh_existing_page',
-            city: opp.city,
-            service: opp.service,
-          });
-          ready = !!(verdict && verdict.applicable !== false && verdict.sufficient);
-        } catch (err) {
-          logger.warn(`[gsc-opp-miner] facts readiness check failed for ${key}: ${err.message}`);
-          ready = false;
-        }
-        cache.set(key, ready);
-      }
+      const ready = await this._factsReadyFor(opp.service, opp.city, factsReadyCache);
       if (!ready) continue;
       opp.score += WEIGHTS.factsReady;
       if (opp.score_breakdown && typeof opp.score_breakdown === 'object') {
@@ -2138,7 +2122,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightRefreshQueries = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() }, familyRefreshState = new Map(), reconcileExemptions = { pages: new Set(), blogKeys: new Set() } } = {}) {
+  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightRefreshQueries = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() }, familyRefreshState = new Map(), reconcileExemptions = { pages: new Set(), blogKeys: new Set() }, factsReadyCache = new Map() } = {}) {
     // null familyRefreshState = the state lookup FAILED — sequencing is
     // blind, so no refresh may be emitted this run (fail closed).
     const refreshStateAvailable = familyRefreshState instanceof Map;
@@ -2493,7 +2477,6 @@ class GscOpportunityMiner {
       opp.dedupe_key = listicleFamilyDedupeKey(fam.key);
       out.push(opp);
     }
-    const factsReadyCache = new Map();
     for (const [pageUrl, group] of (refreshStateAvailable ? refreshGroups.entries() : [])) {
       // One facts contract per brief → SUBGROUPS by (service, city), each
       // with its own stable key; one subgroup emitted per page at a time,

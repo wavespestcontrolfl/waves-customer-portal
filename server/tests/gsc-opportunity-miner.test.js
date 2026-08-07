@@ -1241,6 +1241,9 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/await this\._factsReadyFor\(g\.entries\[0\]\.service, g\.city, factsReadyCache\)/);
     expect(src).toMatch(/async _factsReadyFor\(service, city, cache = new Map\(\)\)/);
     expect(src).toMatch(/verdict\.applicable !== false && verdict\.sufficient/);
+    // r32: ONE verdict cache per run shared by selection AND the boost.
+    expect(src).toMatch(/_applyFactsReadinessBoost\(minedOpportunities, factsReadyCache\)/);
+    expect(src).toMatch(/_applyFactsReadinessBoost\(opportunities = \[\], factsReadyCache = new Map\(\)\)/);
     expect(mineSrc).toMatch(/nonEditableCache\.set\(pageUrl, now \+ GscOpportunityMiner\.NON_EDITABLE_TTL_MS\)/);
     expect(mineSrc).toMatch(/if \(nonEditableCache\.has\(url\)\) pageState\.set\(url, 'not_editable'\)/);
     expect(src).toMatch(/static _nonEditablePages = new Map\(\)/);
