@@ -193,7 +193,9 @@ function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
       serviceReminder72hChannel: channelValue(prefs.service_reminder_72h_channel),
       serviceReminder24hChannel: channelValue(prefs.service_reminder_24h_channel),
       enRouteChannel: channelValue(prefs.en_route_channel),
-      techArrivedChannel: channelValue(prefs.tech_arrived_channel),
+      // Always 'sms': arrival alerts are SMS-only (email twin retired
+      // 2026-08-06) — never surface a stored legacy value the sender ignores.
+      techArrivedChannel: 'sms',
       // Billing delivery channels reuse the migration-104 columns so the
       // portal, the consent gate, and the channel-aware receipt senders
       // (estimate-deposits / estimate-card-holds) all read ONE preference.
@@ -241,7 +243,11 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.serviceReminder72hChannel !== undefined) dbUpdates.service_reminder_72h_channel = channelValue(updates.serviceReminder72hChannel);
   if (updates.serviceReminder24hChannel !== undefined) dbUpdates.service_reminder_24h_channel = channelValue(updates.serviceReminder24hChannel);
   if (updates.enRouteChannel !== undefined) dbUpdates.en_route_channel = channelValue(updates.enRouteChannel);
-  if (updates.techArrivedChannel !== undefined) dbUpdates.tech_arrived_channel = channelValue(updates.techArrivedChannel);
+  // Arrival alerts are SMS-only (email twin retired 2026-08-06). The key stays
+  // accepted so the portal's bulk appointment-channel shortcut and older
+  // clients don't 400, but every write normalizes to 'sms' — never persist a
+  // channel the sender won't honor.
+  if (updates.techArrivedChannel !== undefined) dbUpdates.tech_arrived_channel = 'sms';
   if (updates.billingReminderChannel !== undefined) dbUpdates.billing_channel = channelValue(updates.billingReminderChannel);
   if (updates.paymentConfirmationChannel !== undefined) dbUpdates.payment_receipt_channel = channelValue(updates.paymentConfirmationChannel);
   return dbUpdates;
