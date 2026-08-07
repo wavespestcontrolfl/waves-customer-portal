@@ -7712,9 +7712,22 @@ const CallRecordingProcessor = {
             // lead someone else now owns — downstream writers (triage
             // activity, text-back, follow-ups) would target the foreign
             // row. Mint the fresh unclaimed lead this caller would have
-            // gotten on a lookup miss, carrying the same enrichment; on
-            // mint failure, drop leadId so downstream skips cleanly.
+            // gotten on a lookup miss — built from THIS call's extraction
+            // ONLY: leadUpdates was computed fill-only against the old
+            // candidate as `current`, so spreading it would drop fields the
+            // candidate already had and could carry a qualification judged
+            // on ITS contact info (codex P1 r3). The fresh row stays
+            // UNqualified (schema default) with completeness recomputed
+            // against the extraction alone, so it surfaces in Needs Review
+            // fail-closed. On mint failure, drop leadId so downstream skips
+            // cleanly.
             try {
+              const raceContact = leadContactCompleteness({
+                first_name: extracted.first_name,
+                last_name: extracted.last_name,
+                service_address: extracted.address_line1,
+                email: extracted.email,
+              });
               const [raceFresh] = await db('leads').insert({
                 lead_source_id: leadSourceId,
                 customer_id: null,
@@ -7722,6 +7735,9 @@ const CallRecordingProcessor = {
                 first_name: capitalizeName(extracted.first_name) || null,
                 last_name: capitalizeName(extracted.last_name) || null,
                 email: extracted.email || null,
+                address: extracted.address_line1 || null,
+                city: extracted.city || null,
+                zip: extracted.zip || null,
                 lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
                 first_contact_at: new Date(),
                 first_contact_channel: 'call',
@@ -7729,7 +7745,16 @@ const CallRecordingProcessor = {
                 call_duration_seconds: call.duration_seconds,
                 call_recording_url: call.recording_url,
                 status: 'new',
-                ...leadUpdates,
+                ...(extracted.call_summary ? { transcript_summary: extracted.call_summary } : {}),
+                extracted_data: JSON.stringify({
+                  pain_points: extracted.pain_points,
+                  preferred_date_time: extracted.preferred_date_time,
+                  sentiment: extracted.sentiment,
+                  call_type: extracted.call_type || null,
+                  ...(extracted.is_voicemail ? { voicemail: true } : {}),
+                  ...(raceContact.missing.length ? { missing_for_qualification: raceContact.missing } : {}),
+                  claim_race_recovery: true,
+                }),
               }).returning('*');
               logger.warn(`[call-proc] email-matched lead ${leadId} lost the claim race — minted fresh lead ${raceFresh.id}`);
               leadId = raceFresh.id;
