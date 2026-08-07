@@ -1189,6 +1189,12 @@ describe('listicle_family scoring + action mapping', () => {
     const { extractSpecialtyTopic } = require('../services/seo/gsc-opportunity-miner')._internals;
     expect(extractSpecialtyTopic(['types of wasps in florida'])).toBe('wasp');
     expect(extractSpecialtyTopic(['signs of bed bugs sarasota'])).toBe('bed-bug');
+    // r33: derived from the guardrail's FULL vocabulary — collapsed lawn
+    // subtopics and plural forms included; ids exclusive to the vocabulary
+    // must resolve.
+    expect(extractSpecialtyTopic(['types of lawn aeration'])).toBe('lawn-aeration'); // longest id wins
+    expect(extractSpecialtyTopic(['kinds of cockroaches in florida'])).toBe('cockroach');
+    expect(extractSpecialtyTopic(['lawn pest control ideas'])).toBe('lawn-pest-control'); // longest id wins
     expect(extractSpecialtyTopic(['drought tolerant plants florida'])).toBeNull();
     expect(mineSrc).toMatch(/specialty_topic: extractSpecialtyTopic/);
     expect(mineSrc).toMatch(/const coveredByFrozen = \(g\) => frozenRows\.some/);
@@ -1247,6 +1253,13 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/nonEditableCache\.set\(pageUrl, now \+ GscOpportunityMiner\.NON_EDITABLE_TTL_MS\)/);
     expect(mineSrc).toMatch(/if \(nonEditableCache\.has\(url\)\) pageState\.set\(url, 'not_editable'\)/);
     expect(src).toMatch(/static _nonEditablePages = new Map\(\)/);
+    // r33: pending predecessors block transitions when the mine cannot
+    // sweep (noncanonical window); non-family in-flight pages count as
+    // occupied in the probe rotation; topic patterns come from the
+    // guardrail vocabulary, not a hand-kept list.
+    expect(src).toMatch(/\? \['claimed', 'pending_review'\]\s*\n\s*: \['claimed', 'pending_review', 'pending'\]/);
+    expect(mineSrc).toMatch(/answerGapPages\.has\(pageUrl\)/);
+    expect(src).toMatch(/const \{ FAQ_BLOCKED_SERVICES \} = require\('\.\.\/content\/content-guardrails'\)/);
     expect(mineSrc).toMatch(/pageCityByUrl\.get\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/reconcileExemptions\.pages\.add\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/inflightKeys\.has\(g\.key\) && eligible\(g\)/);

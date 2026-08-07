@@ -140,21 +140,36 @@ function classifierValidationRes() {
   }
   return CLASSIFIER_VALIDATION_RES;
 }
-// The specific FAQ-blocked topic hiding behind specialty→pest
-// canonicalization: 'wasp' etc. are individually blocked in
-// content-guardrails while broad 'pest' is not, so the topic must ride
-// the opportunity's metadata into the brief-builder's policy inputs
-// instead of vanishing at canonicalization (Codex r24). Ids match
-// FAQ_BLOCKED_SERVICES ('bed bug' → 'bed-bug').
-const SPECIALTY_TOPIC_PATTERNS = [
-  ['bed-bug', /\bbed\s*bugs?\b/i],
-  ['wasp', /\bwasps?\b/i],
-  ['cockroach', /\b(?:cockroach|roach)(?:es)?\b/i],
-  ['spider', /\bspiders?\b/i],
-];
+// The specific FAQ-blocked topic hiding behind coarse service resolution:
+// 'wasp' (specialty→pest), 'aeration'/'lawn-pest' (→lawn) etc. are
+// individually blocked in content-guardrails while the broad service is
+// not, so the topic must ride the opportunity's metadata into the FAQ
+// policy inputs instead of vanishing at canonicalization (Codex r24/r33).
+// Patterns derive from the guardrail's OWN FAQ_BLOCKED_SERVICES vocabulary
+// — a hand-kept partial list drifts. Each id becomes a boundary-safe,
+// plural-tolerant phrase regex ('bed-bug' → bed bugs, 'cockroach' →
+// cockroaches); longer ids match first so 'termite-control' beats
+// 'termite'. Fail closed to no-topic on unavailability.
+let FAQ_TOPIC_PATTERNS = null;
+function faqTopicPatterns() {
+  if (FAQ_TOPIC_PATTERNS) return FAQ_TOPIC_PATTERNS;
+  FAQ_TOPIC_PATTERNS = [];
+  try {
+    const { FAQ_BLOCKED_SERVICES } = require('../content/content-guardrails');
+    const ids = Array.from(FAQ_BLOCKED_SERVICES).sort((a, b) => b.length - a.length);
+    for (const id of ids) {
+      const toks = String(id).split('-').filter(Boolean);
+      const body = toks.map((t) => `${t}(?:s|es)?`).join('\\s*');
+      FAQ_TOPIC_PATTERNS.push([id, new RegExp(`\\b${body}\\b`, 'i')]);
+    }
+  } catch (err) {
+    logger.warn(`[gsc-opp-miner] FAQ topic vocabulary unavailable (${err.message}) — specialty topics disabled`);
+  }
+  return FAQ_TOPIC_PATTERNS;
+}
 function extractSpecialtyTopic(queries = []) {
   for (const q of queries) {
-    for (const [topic, re] of SPECIALTY_TOPIC_PATTERNS) {
+    for (const [topic, re] of faqTopicPatterns()) {
       if (re.test(String(q || ''))) return topic;
     }
   }
@@ -1115,10 +1130,18 @@ class GscOpportunityMiner {
         // transition defers to the next mine after the work completes
         // (Codex r20). Fail-soft like the fence.
         const inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() };
+        // A NONCANONICAL mine never sweeps, so a pending predecessor would
+        // survive beside its replacement — treat pending rows as
+        // transition blockers too in that case (Codex r33); the canonical
+        // mine keeps the narrower claimed/review set because its sweep
+        // retires pending predecessors atomically with the persist.
+        const blockerStatuses = periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS
+          ? ['claimed', 'pending_review']
+          : ['claimed', 'pending_review', 'pending'];
         try {
           const rows = await db('opportunity_queue')
             .where({ bucket: 'listicle_family' })
-            .whereIn('status', ['claimed', 'pending_review'])
+            .whereIn('status', blockerStatuses)
             .select('dedupe_key', 'action_type', db.raw("signal_metadata->'family_keys' as family_keys"));
           for (const r of rows) {
             if (r.action_type === 'new_supporting_blog') inflightFamily.blogKeys.add(r.dedupe_key);
@@ -2278,7 +2301,11 @@ class GscOpportunityMiner {
       // a completed one only needs probing when budget remains (the r23
       // reopen path), so the top of the budget always goes to pages that
       // have never enqueued their first opportunity.
-      const pageHasRows = (pageUrl) => (((refreshStateAvailable && familyRefreshState.get(pageUrl)) || []).length > 0 ? 1 : 0);
+      // Occupied = family rows OR a non-family in-flight edit
+      // (answerGapPages — those served families are fenced this run
+      // anyway, so probing them first wastes the budget; Codex r33).
+      const pageHasRows = (pageUrl) => ((((refreshStateAvailable && familyRefreshState.get(pageUrl)) || []).length > 0
+        || answerGapPages.has(pageUrl)) ? 1 : 0);
       // Cached non-editable pages resolve WITHOUT a probe and never enter
       // the budget.
       for (const url of demandByPage.keys()) {
