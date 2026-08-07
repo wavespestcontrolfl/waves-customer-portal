@@ -7374,7 +7374,11 @@ const CallRecordingProcessor = {
     // before that block would otherwise be swallowed by the section's
     // non-blocking catch and finalize the call with missing or stale
     // linkage (audit P1 r21) — the catch escalates while this is set.
-    let phoneLessLinkagePending = false;
+    // ARMED FROM THE PRIOR STAMP AT DECLARATION, not after the reuse
+    // lookup: a transient findReusableCallLead failure on a stamped retry
+    // would otherwise finalize with the old stamp unrevalidated (codex P1
+    // r14).
+    let phoneLessLinkagePending = !!priorStampedLeadId;
     if (shouldCreateLead) {
       try {
         // Check if lead already exists for this phone — or by spoken email
@@ -7411,9 +7415,9 @@ const CallRecordingProcessor = {
           && ((call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid)
             || (priorStampedLeadId && String(existingLead.id) === priorStampedLeadId)));
         // A fresh phone-less insert with no prior stamp self-links via its
-        // own sid at insert time — phone-less reuse OR any leftover stamp
-        // (even on a retry that gained a phone) puts linkage state in play.
-        if ((!phone && existingLead) || priorStampedLeadId) phoneLessLinkagePending = true;
+        // own sid at insert time — phone-less REUSE puts linkage state in
+        // play (a leftover stamp already armed the flag at declaration).
+        if (!phone && existingLead) phoneLessLinkagePending = true;
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.

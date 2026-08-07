@@ -328,14 +328,18 @@ async function buildAgentEstimateContext(leadId) {
   const sharedPhone = externalPhone ? await phoneIsShared(lead) : false;
   const phoneKey = externalPhone && !sharedPhone ? externalPhone : null;
   const rawCalls = await loadCalls(lead, phoneKey);
-  // Disambiguate the customer match ONLY with the extraction from THIS lead's
-  // own call (SID match) — the newest phone-matched call can belong to a
+  // Disambiguate the customer match ONLY with the extraction from THIS
+  // lead's OWN call — the newest phone-matched call can belong to a
   // different person on a shared/family line, and its caller name would
-  // confidently select the wrong customer profile. With no SID-matched call,
-  // a multi-customer phone stays ambiguous and history stays suppressed.
-  const leadCall = lead.twilio_call_sid
-    ? rawCalls.find((call) => call.call_sid === lead.twilio_call_sid)
-    : null;
+  // confidently select the wrong customer profile. Own = the SID-matched
+  // call, or (for a SID-less lead reused by an anonymous call) the newest
+  // metadata-STAMPED call — both carry for_this_lead, and a stamped call is
+  // exactly as much this lead's evidence as a SID one (codex P1 r14: with
+  // null here, a multi-customer phone stayed ambiguous and tier/dup-service
+  // context was skipped even though the stamped extraction could resolve
+  // it). Phone-matched rows never carry the marker, so a shared-line call
+  // still cannot steer the match. rawCalls is sorted newest-first.
+  const leadCall = rawCalls.find((call) => call.for_this_lead && !String(call.id).startsWith('lead-summary:')) || null;
   const {
     customer,
     ambiguous: customerAmbiguous,
