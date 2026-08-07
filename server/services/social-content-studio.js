@@ -1654,6 +1654,22 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
 
     const preview = toJson(run.preview, {});
     const input = toJson(run.input, {});
+    // A review-testimonial draft must not publish a review Google has since
+    // removed — the stored draft copy would post as a "current Google
+    // review". createReviewGraphic re-checks eligibility, but only AFTER a
+    // successful publish (bookkeeping); this is the pre-publish gate. Also
+    // blocks partial-publish retries: stopping further spread beats
+    // completing the channel set with a removed review.
+    const sourceReviewId = input.reviewGraphic?.googleReviewId || null;
+    if (sourceReviewId && (await hasTable('google_reviews'))) {
+      const srcReview = await db('google_reviews').where({ id: sourceReviewId }).first().catch(() => null);
+      if (!srcReview) {
+        return { ok: false, status: 409, error: 'source Google review no longer exists — testimonial cannot be published' };
+      }
+      if (srcReview.missing_since) {
+        return { ok: false, status: 409, error: 'source Google review has been removed from Google — testimonial cannot be published' };
+      }
+    }
     const variants = runVariants(preview);
     const priorRecordFull = toJson(run.publish_result, {});
     const priorHasSuccess = Array.isArray(priorRecordFull?.platforms)

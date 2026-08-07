@@ -110,7 +110,15 @@ router.get('/', async (req, res, next) => {
     if (location && location !== 'all') query = query.where('google_reviews.location_id', location);
     if (rating) query = query.where('google_reviews.star_rating', parseInt(rating));
     if (responded === 'true') query = query.modify(whereHasRealReply);
-    if (responded === 'false') query = query.modify(whereNeedsRealReply);
+    if (responded === 'false') {
+      // The default "Needs Reply" view must still surface reviews Google has
+      // removed (missing_since stamped) even when they were already replied
+      // to — the removal notification links here, and a replied-to removed
+      // review would otherwise be invisible in the default list.
+      query = query.where(function () {
+        this.modify(whereNeedsRealReply).orWhereNotNull('google_reviews.missing_since');
+      });
+    }
     if (search) query = query.where(function () {
       this.whereILike('google_reviews.reviewer_name', `%${search}%`)
         .orWhereILike('google_reviews.review_text', `%${search}%`)

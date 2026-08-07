@@ -661,6 +661,11 @@ class GoogleBusinessService {
           reviewer_photo_url: review.profile_photo_url || null,
           customer_id: customerId || existing.customer_id,
           synced_at: db.fn.now(),
+          // This row is in Google's CURRENT Places sample — positive proof
+          // the review is live. Clear a missing stamp here too, or during a
+          // GBP credential outage a reinstated review stays labeled and
+          // suppressed until the authoritative feed recovers.
+          missing_since: null,
         };
         if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
           upd.review_reply = ownerReply;
@@ -821,42 +826,51 @@ class GoogleBusinessService {
         .select('id', 'reviewer_name', 'star_rating', 'review_created_at');
       if (candidates.length === 0) return;
 
-      // Atomic claim: the hourly job and the manual admin sync (or two
-      // instances overlapping during a deploy) can both select the same
-      // rows. Conditioning the update on missing_since IS NULL means only
-      // one runner claims each row, so only one notification fires.
-      const claimedRows = await db('google_reviews')
-        .whereIn('id', candidates.map(r => r.id))
-        .whereNull('missing_since')
-        .update({ missing_since: db.fn.now() }, ['id']);
-      const claimedIds = new Set((claimedRows || []).map(r => r.id));
-      const gone = candidates.filter(r => claimedIds.has(r.id));
-      if (gone.length === 0) return;
+      // Atomic claim + alert in ONE transaction: the hourly job and the
+      // manual admin sync (or two instances overlapping during a deploy) can
+      // both select the same rows — conditioning the update on missing_since
+      // IS NULL means only one runner claims each row, so only one
+      // notification fires. And because the claim is one-shot (stamped rows
+      // are excluded from every later reconcile), a lost notification insert
+      // would silence the alert forever — notifyAdmin swallows insert errors
+      // and returns null, so a null return throws INSIDE the transaction and
+      // the rollback releases the claim atomically (a separate compensating
+      // update could fail in the same outage that broke the insert). The
+      // next sync then re-claims and re-notifies. Intentional suppression
+      // returns a truthy sentinel and commits (stamp kept).
+      let gone = [];
+      try {
+        await db.transaction(async (trx) => {
+          const claimedRows = await trx('google_reviews')
+            .whereIn('id', candidates.map(r => r.id))
+            .whereNull('missing_since')
+            .update({ missing_since: db.fn.now() }, ['id']);
+          const claimedIds = new Set((claimedRows || []).map(r => r.id));
+          gone = candidates.filter(r => claimedIds.has(r.id));
+          if (gone.length === 0) return;
 
-      const names = gone.slice(0, 15)
-        .map(r => `${r.reviewer_name || 'Anonymous'} (${Number(r.star_rating) || 0}-star)`)
-        .join(', ');
-      const suffix = gone.length > 15 ? ` and ${gone.length - 15} more` : '';
-      const notif = await NotificationService.notifyAdmin(
-        'review',
-        `${gone.length} Google review${gone.length === 1 ? '' : 's'} removed at ${loc.name}`,
-        `Google no longer returns these reviews for ${loc.name}: ${names}${suffix}. The full text is kept in the portal. If they are legitimate customer reviews caught in a spam sweep, file a missing-reviews case with Google Business Profile support and escalate by replying in-thread.`,
-        {
-          bell: true,
-          link: '/admin/reviews',
-          metadata: { locationId: loc.id, reason: 'reviews_missing', count: gone.length, reviewIds: gone.map(r => r.id) },
-        },
-      );
-      // notifyAdmin swallows insert errors and returns null; the claim is
-      // one-shot (stamped rows are excluded from every later reconcile), so
-      // a lost insert would silence the alert forever. Release the claim and
-      // let the next hourly run re-claim and re-notify. Intentional
-      // suppression returns a truthy sentinel and keeps the stamp.
-      if (!notif) {
-        await db('google_reviews').whereIn('id', gone.map(r => r.id)).update({ missing_since: null });
-        logger.warn(`[gbp] Removal alert insert failed for ${loc.name} — released ${gone.length} missing_since claim(s) for retry next sync`);
+          const names = gone.slice(0, 15)
+            .map(r => `${r.reviewer_name || 'Anonymous'} (${Number(r.star_rating) || 0}-star)`)
+            .join(', ');
+          const suffix = gone.length > 15 ? ` and ${gone.length - 15} more` : '';
+          const notif = await NotificationService.notifyAdmin(
+            'review',
+            `${gone.length} Google review${gone.length === 1 ? '' : 's'} removed at ${loc.name}`,
+            `Google no longer returns these reviews for ${loc.name}: ${names}${suffix}. The full text is kept in the portal. If they are legitimate customer reviews caught in a spam sweep, file a missing-reviews case with Google Business Profile support and escalate by replying in-thread.`,
+            {
+              bell: true,
+              link: '/admin/reviews',
+              metadata: { locationId: loc.id, reason: 'reviews_missing', count: gone.length, reviewIds: gone.map(r => r.id) },
+              connection: trx,
+            },
+          );
+          if (!notif) throw new Error('removal-alert notification insert failed');
+        });
+      } catch (err) {
+        logger.warn(`[gbp] Removal alert for ${loc.name} rolled back (${err.message}) — claim released, retrying next sync`);
         return;
       }
+      if (gone.length === 0) return;
       // Count only — reviewer display names are PII and ride in the admin
       // notification, not the plaintext log.
       logger.warn(`[gbp] ${gone.length} review(s) at ${loc.name} disappeared from the GBP feed — stamped missing_since, admin notified`);

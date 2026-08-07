@@ -183,6 +183,18 @@ function createDbMock(initialRows = {}) {
   // Real Date, not a sentinel string — the missing-review reconcile compares
   // synced_at against the sync start time.
   db.fn = { now: jest.fn(() => new Date()) };
+  // Snapshot-rollback transaction: a throw inside the callback restores all
+  // table state, mirroring the claim+alert atomicity under test.
+  db.transaction = async (fn) => {
+    const snapshot = JSON.parse(JSON.stringify(state.rows));
+    try {
+      return await fn(db);
+    } catch (err) {
+      for (const key of Object.keys(state.rows)) delete state.rows[key];
+      Object.assign(state.rows, snapshot);
+      throw err;
+    }
+  };
   db.__state = state;
   return db;
 }
@@ -860,6 +872,34 @@ describe('Google Business review sync', () => {
     expect(db.__state.rows.google_reviews.find(r => r.id === 'gone-1').missing_since).toBeTruthy();
     expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(1);
     spy.mockRestore();
+  });
+
+  test('Places fallback clears missing_since when the sample confirms the review is live again', async () => {
+    // GBP credentials down, review reinstated: the Places sample is positive
+    // proof of liveness — the stamp must not persist until GBP recovers.
+    seedSyncedReview({
+      id: 'back-via-places',
+      reviewer_name: 'Jackie Lopez',
+      review_text: 'Edited text',
+      star_rating: 5,
+      missing_since: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+    });
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Jackie Lopez',
+          rating: 5,
+          text: 'Edited text',
+          time: 1779307832,
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'back-via-places').missing_since).toBeNull();
   });
 
   test('never stamps a Places-sampled row without an authoritative GBP identity', async () => {
