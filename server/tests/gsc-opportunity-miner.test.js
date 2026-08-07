@@ -1285,6 +1285,11 @@ describe('listicle_family scoring + action mapping', () => {
     const sweepSrc2 = src.slice(src.indexOf('async _sweepStaleFamilyRows'), src.indexOf('async mineNoContentYet'));
     expect(sweepSrc2).toMatch(/\$\{ROUTE_IDENTITY_SQL\} NOT IN/);
     expect(sweepSrc2).toMatch(/exemptions\.blogKeys/);
+    // r34 follow-up: an unresolved family exempts its rows EVERYWHERE they
+    // live — the pending refresh may target a different page than the one
+    // that failed to probe.
+    expect(mineSrc).toMatch(/reconcileExemptions\.familyKeys\.add\(fam\.key\)/);
+    expect(sweepSrc2).toMatch(/jsonb_exists\(coalesce\(signal_metadata->'family_keys', '\[\]'::jsonb\), \?\)/);
     expect(mineSrc).toMatch(/pageState\.get\(cand\.page_url\) \|\| 'error'/);
     expect(mineSrc).toMatch(/city: pageCityByUrl\.get\(served\.hit\.page_url\) \?\? inferCityFromUrl\(served\.hit\.page_url\)/);
     expect(src).toMatch(/pg_advisory_xact_lock\(hashtext\('opportunity_page_edit'\)\)/);

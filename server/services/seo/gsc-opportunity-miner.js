@@ -1074,7 +1074,7 @@ class GscOpportunityMiner {
     const runState = { familyRefreshStateFailed: false };
     // Unresolved served pages/families collected by the family mine —
     // their pending rows are exempt from this run's destructive sweep.
-    const familyExemptions = { pages: new Set(), blogKeys: new Set() };
+    const familyExemptions = { pages: new Set(), blogKeys: new Set(), familyKeys: new Set() };
     // One facts-readiness verdict per city::service per run — shared by
     // family subgroup selection AND the boost (Codex r32).
     const factsReadyCache = new Map();
@@ -2173,7 +2173,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightRefreshQueries = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() }, familyRefreshState = new Map(), reconcileExemptions = { pages: new Set(), blogKeys: new Set() }, factsReadyCache = new Map() } = {}) {
+  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightRefreshQueries = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() }, familyRefreshState = new Map(), reconcileExemptions = { pages: new Set(), blogKeys: new Set(), familyKeys: new Set() }, factsReadyCache = new Map() } = {}) {
     // null familyRefreshState = the state lookup FAILED — sequencing is
     // blind, so no refresh may be emitted this run (fail closed).
     const refreshStateAvailable = familyRefreshState instanceof Map;
@@ -2442,6 +2442,12 @@ class GscOpportunityMiner {
         if (served.hit.unresolved) {
           reconcileExemptions.pages.add(served.hit.page_url);
           reconcileExemptions.blogKeys.add(listicleFamilyDedupeKey(fam.key));
+          // The FAMILY key too (r34 follow-up): the family's pending
+          // refresh may live on a DIFFERENT page than the one that failed
+          // to probe (GSC newly prefers page B, the row targets page A) —
+          // the sweep keeps any row whose family_keys carry an unresolved
+          // family, or transient I/O would expire valid queued work.
+          reconcileExemptions.familyKeys.add(fam.key);
           continue;
         }
         // An in-flight non-family edit of any VARIANT query defers the
@@ -2816,7 +2822,7 @@ class GscOpportunityMiner {
     });
   }
 
-  async _sweepStaleFamilyRows(familyOpps = [], batch = [], trx = null, exemptions = { pages: new Set(), blogKeys: new Set() }) {
+  async _sweepStaleFamilyRows(familyOpps = [], batch = [], trx = null, exemptions = { pages: new Set(), blogKeys: new Set(), familyKeys: new Set() }) {
     const runner = trx || db;
     try {
       // (Errors re-throw under a transaction — see catch below.)
@@ -2844,6 +2850,20 @@ class GscOpportunityMiner {
             `${ROUTE_IDENTITY_SQL} NOT IN (${exemptIdentities.map(() => '?').join(', ')})`,
             exemptIdentities
           );
+        });
+      }
+      // A probe-failed FAMILY keeps its pending rows wherever they live
+      // (r34 follow-up): the family's existing refresh may target a
+      // DIFFERENT page than the one that failed to probe, so the page
+      // exemption alone would expire it as family_signal_gone on
+      // transient I/O. jsonb_exists (not the ?-operators) — a literal '?'
+      // in knex raw collides with bind placeholders.
+      const exemptFamilyKeys = Array.from(exemptions.familyKeys || []);
+      if (exemptFamilyKeys.length) {
+        sweep = sweep.whereNot(function familyKeyExemption() {
+          for (const key of exemptFamilyKeys) {
+            this.orWhereRaw("jsonb_exists(coalesce(signal_metadata->'family_keys', '[]'::jsonb), ?)", [key]);
+          }
         });
       }
       await sweep.update({ status: 'expired', skip_reason: 'family_signal_gone', updated_at: new Date() });
