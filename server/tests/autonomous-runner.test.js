@@ -1040,6 +1040,18 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     expect(result.repair.body_self_link_rewrites).toBe(2);
   });
 
+  test('an http:// hub self-link is the SAME drifted route — matched regardless of the configured scheme (Codex r14)', () => {
+    const draft = driftedDraft({
+      body: 'See [http www form](http://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/) and [http apex form](http://wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/).',
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    // Both rewritten AND normalized to the configured https origin.
+    expect(draft.body).not.toContain('http://');
+    expect(draft.body).toContain(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(result.repair.body_self_link_rewrites).toBe(2);
+  });
+
   test('draft.url is stamped even when the writer omitted it — emit_draft never captures a url field (Codex r9)', () => {
     const draft = driftedDraft();
     delete draft.url;

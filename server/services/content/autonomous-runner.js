@@ -3630,7 +3630,13 @@ function applyOperatorSlugRepair(brief, draft) {
     // so absolute self-links on EITHER host form are the writer's own drifted
     // route and must be repaired (Codex r6). Rewrites normalize the prefix to
     // the configured hub origin.
-    const hubOrigins = hubUrl ? hubHostVariants.map((h) => `${hubUrl.protocol}//${h}`) : [hub];
+    // BOTH schemes of every host variant are the writer's own drifted route
+    // (Codex r14) — the guardrails' HUB_URL_CANDIDATE_RE accepts http and
+    // https for the same reason. Rewrites normalize to the configured
+    // (https) origin.
+    const hubOrigins = hubUrl
+      ? ['https:', 'http:'].flatMap((proto) => hubHostVariants.map((h) => `${proto}//${h}`))
+      : [hub];
     // The targeted spoke's host forms are the writer's own drifted route too
     // (Codex r9): a spoke-seeded draft may self-link absolutely on its own
     // spoke, and leaving the old destination intact publishes a link to the
@@ -3643,7 +3649,7 @@ function applyOperatorSlugRepair(brief, draft) {
       const spokeUrl = (() => { try { return new URL(publishOrigin.origin); } catch { return null; } })();
       if (spokeUrl) {
         for (const h of new Set([spokeUrl.host, spokeUrl.host.startsWith('www.') ? spokeUrl.host.slice(4) : `www.${spokeUrl.host}`])) {
-          spokeOrigins.push(`${spokeUrl.protocol}//${h}`);
+          for (const proto of ['https:', 'http:']) spokeOrigins.push(`${proto}//${h}`);
         }
       }
     }
