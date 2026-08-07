@@ -107,16 +107,20 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
     const numeric = Number(value);
     return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
   };
+  // Every recurring price field the converter's own dollar-field inventory
+  // recognizes (codex #3245 r16 — RECURRING_DOLLAR_FIELDS in
+  // estimate-converter), post-discount forms first within each shape.
   const lineMonthly = (line) => {
     for (const value of [line?.manualFinalAnnual, line?.annualAfterDiscount, line?.annualAfterCredits]) {
       const annual = priceValue(value);
       if (annual != null) return annual / 12;
     }
-    for (const value of [line?.monthly, line?.mo]) {
+    for (const value of [line?.monthlyAfterDiscount, line?.monthlyAfterCredits, line?.monthly, line?.mo,
+      line?.monthlyTotal, line?.monthly_total]) {
       const monthly = priceValue(value);
       if (monthly != null) return monthly;
     }
-    for (const value of [line?.annual, line?.ann]) {
+    for (const value of [line?.annual, line?.ann, line?.annualTotal, line?.annual_total]) {
       const annual = priceValue(value);
       if (annual != null) return annual / 12;
     }
@@ -153,6 +157,27 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
     const family = boundedFamilyKey(serviceFamilyKeyForAdoption(line) || UNATTRIBUTED);
     if (recurringFamilies.has(family)) continue;
     addLine(line);
+  }
+  // Palm injection rides OUTSIDE recurring.services as mapper scalars
+  // (recurring.palmInjectionMo/Ann — codex #3245 r16), exactly like the
+  // rodent supplement; without its own slice a Pest+Palm accept normalizes
+  // the palm dollars onto pest_control and the next pest re-quote drops
+  // them. Same family dedupe as the supplements above.
+  {
+    const root = estimateData?.result && typeof estimateData.result === 'object'
+      ? estimateData.result
+      : estimateData;
+    const palmRecurring = (estimateData?.recurring && typeof estimateData.recurring === 'object')
+      ? estimateData.recurring
+      : (root?.recurring && typeof root.recurring === 'object' ? root.recurring : {});
+    const palmMonthly = priceValue(palmRecurring.palmInjectionMo)
+      ?? (priceValue(palmRecurring.palmInjectionAnn) != null
+        ? priceValue(palmRecurring.palmInjectionAnn) / 12
+        : null);
+    if (palmMonthly != null && palmMonthly > 0
+      && !recurringFamilies.has(boundedFamilyKey('palm_injection'))) {
+      addLine({ service: 'palm_injection', name: 'Palm Injection', monthly: palmMonthly });
+    }
   }
   const families = Object.keys(raw);
   const withZeroFamilies = (slices) => {

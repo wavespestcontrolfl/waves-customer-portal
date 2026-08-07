@@ -613,6 +613,40 @@ describe('zero-priced accepted families (codex r2)', () => {
     expect(db.store.some((r) => r.family_key === 'pest_control')).toBe(false);
   });
 
+  test('monthlyAfterDiscount/monthlyTotal/annualTotal shapes price their lines (codex r16)', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control', monthlyAfterDiscount: 40 },
+              { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', annualTotal: 600 },
+            ],
+          },
+        },
+      },
+      monthlyRate: 90,
+    });
+    expect(slices.pest_control).toBe(40);
+    expect(slices.lawn_care).toBe(50);
+  });
+
+  test('palm-injection mapper scalars get their own slice (codex r16)', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [{ name: 'Quarterly Pest Control Service', service: 'pest_control', mo: 50 }],
+            palmInjectionMo: 55,
+          },
+        },
+      },
+      monthlyRate: 105,
+    });
+    expect(slices.pest_control).toBe(50);
+    expect(slices.palm_injection).toBe(55);
+  });
+
   test('null placeholders never read as comps — the next price field wins (codex r15)', () => {
     const slices = estimateFamilySlices({
       estimateData: {
