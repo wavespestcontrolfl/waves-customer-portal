@@ -156,34 +156,73 @@ Celsius WG (thiencarbazone-methyl + iodosulfuron + dicamba) is limited to a MAXI
 ## Alternatives After Cap
 - Dismiss NXT (sulfentrazone + prodiamine) — different MOA, no annual cap concern
 - Certainty (sulfosulfuron) — good for sedge pressure
-- Fusilade II — specifically for Bermuda/Bahia eradication in St. Augustine`,
+- Recognition + Fusilade II tank mix — bermudagrass suppression in St. Augustine (bermudagrass ONLY — bahiagrass is not in the 2026 Fusilade II weed table; NEVER Fusilade alone over St. Augustine; see the Recognition + Fusilade II article)`,
+      // Correction (2026-08-07): the alternatives list pointed at Fusilade II
+      // ALONE for bermuda in St. Augustine — the solo-application injury
+      // failure mode. forceUpdate re-seeds this row in place on a manual
+      // re-run; migration 20260808000001 corrects the live row on deploy.
+      forceUpdate: true,
     },
     {
-      title: 'Fusilade II — Bermuda & Bahia Eradication Protocol',
+      title: 'Recognition + Fusilade II — Bermudagrass Suppression in St. Augustine',
+      // Slug kept from the original (wrong) article so the live row is
+      // corrected in place rather than orphaned alongside a duplicate.
       slug: 'fusilade-ii-bermuda-bahia-eradication',
       category: 'chemicals',
-      tags: ['fusilade', 'bermuda', 'bahia', 'st-augustine', 'grass-type-conversion'],
+      tags: ['fusilade', 'recognition', 'bermuda', 'st-augustine', 'tank-mix', '2ee'],
       confidence: 'high',
-      content: `# Fusilade II — Selective Removal of Bermuda/Bahia in St. Augustine
+      // Correction (2026-08-07): the original article taught Fusilade II ALONE
+      // at 1 oz/gal per 1,000 sq ft — 4-8x the labeled turf rate, on a use
+      // (over-the-top St. Augustine) the standalone Fusilade label does not
+      // allow. Rewritten to the Recognition + Fusilade II tank-mix protocol
+      // (matches the published blog protocol, fact-checked 2026-08-05).
+      // forceUpdate re-seeds in place; migration 20260808000001 fixes prod.
+      forceUpdate: true,
+      content: `# Recognition + Fusilade II — Bermudagrass Suppression in St. Augustine (TANK MIX ONLY)
 
-## Purpose
-Fusilade II (fluazifop-P-butyl) selectively kills Bermudagrass and Bahiagrass without harming St. Augustine. Used when these grasses are invading a St. Augustine lawn.
+## ⛔ Never Fusilade alone
+An earlier version of this article described Fusilade II by itself at 1 oz per gallon per 1,000 sq ft. That is 4-8x the labeled turf rate, and St. Augustine is NOT a labeled turf for over-the-top Fusilade at all — solo application injures the lawn. The ONLY sanctioned use is the tank mix below, under the Florida FIFRA 2(ee) recommendation (dated 2023-05-11).
 
-## Rate
-- 1 oz per gallon of water per 1,000 sq ft
-- Add non-ionic surfactant at 0.25% v/v
+## How it works
+- Fusilade II (fluazifop-P-butyl, Group 1 ACCase inhibitor) is what kills the bermudagrass.
+- Recognition (trifloxysulfuron-sodium 20.4% + the safener metcamifen) is what lets St. Augustine tolerate it. The safener changes plant metabolism — it does not neutralize or shield anything.
+- Monument or any plain trifloxysulfuron product is NOT a substitute for Recognition — no safener, no program.
+- Resistance note: Recognition's Group 2 active does not control bermudagrass, so for bermuda this is a SINGLE mode-of-action program.
 
-## Protocol
-1. Confirm lawn is St. Augustine (NOT Bermuda or Zoysia — those would be killed)
-2. Apply when target grass is actively growing (warm season)
-3. Repeat application in 14-21 days — single app rarely kills completely
-4. May need 3 applications for heavy infestations
-5. Do NOT mow for 7 days after application
+## Rates (per application)
+- Recognition: 1.95 oz/acre = 0.045 oz per 1,000 sq ft (the FL 2(ee) allows down to 1.29 oz/acre)
+- Fusilade II: 24 fl oz/acre for bermudagrass (0.55 fl oz per 1,000 sq ft) — Syngenta recommends the full rate for bermuda; label range is 12-24
+- Non-ionic surfactant (>=80% active): 0.25-0.5% of spray volume
+- Mix order: water -> agitation -> Recognition fully dispersed -> Fusilade -> surfactant LAST. No MSO/COC, no acidifiers, no organophosphate insecticides/nematicides in the tank. Buffer toward pH 7 if carrier water is below 5.5.
 
-## Critical Warning
-- Will KILL Bermudagrass, Bahiagrass, and Zoysiagrass
-- Only safe on St. Augustine and Centipede
-- Do NOT apply to any lawn that is not confirmed St. Augustine`,
+## Application limits — HARD CEILING: 2 per growing season
+- Recognition label alone: min 28 days between applications, max 1.95 oz/acre per application, 6.26 oz/acre/yr.
+- The 2026 Fusilade II master label (EPA-accepted 2026-07-15) resistance clause caps this MOA at 2 applications per season, and there is no overlapping-MOA exception for bermuda (see above). A 3rd application waits for the NEXT spring.
+- Fusilade annual cap: 1.125 lb fluazifop-P-butyl per acre per year.
+
+## Timing and follow-up
+- Spring only (UF/IFAS). Avoid late summer/fall applications.
+- Symptoms in 7-14 days; control at 10-21 days; rhizome regrowth appears weeks 4-6.
+- Application 2 lands in weeks 5-6, triggered by OBSERVED regrowth — not the calendar.
+
+## Eligibility gates (check BEFORE quoting)
+- Cultivars: Floratam / Palmetto / Raleigh / SunClipse -> proceed. CitraBlue -> test area first. Seville -> do NOT treat. ProVista and Captiva -> EXCLUDED (the 2(ee) prohibits Captiva). Unknown cultivar -> test area watched 3-4 weeks. Wait 4 weeks after new sod/sprigs/seed.
+- Do NOT treat stressed turf (drought stress, saturated soil, chinch damage, active disease, nematodes, recent scalping) — the safener relies on healthy plant metabolism.
+- Mostly-bermuda lawns: do not treat — recommend renovation/re-sod instead.
+- Torpedograss: SUPPRESSION only. Never sell this program as torpedograss removal.
+
+## Field rules
+- No mowing 7 days before OR after application.
+- 3-hour dry minimum (Recognition rainfast 3 hr, Fusilade 1 hr); avoid rain/irrigation within 48 hr.
+- 12-month replant interval before planting anything but turfgrass in a treated area.
+- Sprayer cleanout: 2.5 oz household ammonia per gallon, recirculate 15+ min, repeat, rinse.
+
+## Critical warnings
+- The mix kills bermudagrass AND zoysiagrass — confirm the lawn is St. Augustine first.
+- Bahiagrass is NOT in the 2026 Fusilade II weed table — do not sell or apply this program for bahia.
+- Single-MOA for bermuda: never exceed the 2-application season ceiling — that is how resistant bermudagrass gets selected.
+
+Source of truth: the published blog protocol /lawn-care/remove-bermudagrass-from-st-augustine/ (fact-checked 2026-08-05), the Syngenta Recognition and Fusilade II labels, and the Florida 2(ee).`,
     },
     {
       title: 'WaveGuard Membership Tiers — Discount Structure',
