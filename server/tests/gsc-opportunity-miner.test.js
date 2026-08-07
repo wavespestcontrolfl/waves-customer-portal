@@ -557,6 +557,14 @@ describe('persistAll upsert binding integrity (07-31 regression)', () => {
     calls.length = 0;
     expect(await miner.persistAll([fam])).toBe(1);
     expect(calls[0].bindings[12]).toBe('listicle_family::page::x');
+    // Frozen-aware arbitration (r20): the lookup lives in
+    // _arbitratedRefreshPages — a candidate whose dedupe row is done or
+    // skipped lands nothing and must not suppress the family refresh.
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    const arbSrc = src.slice(src.indexOf('async _arbitratedRefreshPages'), src.indexOf('async _sweepStaleFamilyRows'));
+    expect(arbSrc).toMatch(/whereIn\('status', \['done', 'skipped'\]\)/);
+    expect(arbSrc).toMatch(/!frozenKeys\.has\(o\.dedupe_key\)/);
   });
 
   test('a frozen-row conflict (rowCount 0) does not count as persisted', async () => {
@@ -1096,10 +1104,15 @@ describe('listicle_family scoring + action mapping', () => {
     // fence set is floor-filtered where mineAll builds it.
     expect(mineSrc).toMatch(/if \(answerGapPages\.has\(served\.hit\.page_url\)\) continue;/);
     expect(src).toMatch(/const answerGapPages = new Set\(\(buckets\.answer_gap \|\| \[\]\)[\s\S]{0,200}minScoreToActFor\(o\.action_type\)/);
-    // In-flight answer-gap rows (pending/claimed/pending_review) join the
-    // fence — an occupied page is absent from this run's bucket output but
-    // its edit must not race a family refresh (Codex r19).
-    expect(src).toMatch(/whereIn\('status', \['pending', 'claimed', 'pending_review'\]\)[\s\S]{0,120}whereNotNull\('page_url'\)/);
+    // In-flight refresh rows from EVERY other bucket join the fence — an
+    // occupied page can be absent from this run's batch (recovered
+    // decay_refresh signal) but its still-open edit must not race a family
+    // refresh (Codex r19/r20).
+    expect(src).toMatch(/whereNot\('bucket', 'listicle_family'\)[\s\S]{0,120}whereIn\('status', \['pending', 'claimed', 'pending_review'\]\)[\s\S]{0,120}whereNotNull\('page_url'\)/);
+    // Blog↔refresh transitions defer while the family's prior work is
+    // claimed or in review (Codex r20).
+    expect(mineSrc).toMatch(/inflightFamily\.blogKeys\.has\(listicleFamilyDedupeKey\(fam\.key\)\)/);
+    expect(mineSrc).toMatch(/inflightFamily\.refreshFamilyKeys\.has\(fam\.key\)/);
   });
 
   test('a served family becomes a striking_distance refresh of the mapped page with family provenance (Codex r9)', () => {
@@ -1255,7 +1268,7 @@ describe('listicle_family scoring + action mapping', () => {
   test('ALL stale-row transitions reconcile via the post-persist sweep; the mine loop never mutates the queue (Codex r10/r15)', () => {
     const fs = require('fs');
     const src = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
-    const mineSrc = src.slice(src.indexOf('async mineListicleFamily'), src.indexOf('async _sweepStaleFamilyRows'));
+    const mineSrc = src.slice(src.indexOf('async mineListicleFamily'), src.indexOf('async _arbitratedRefreshPages'));
     const sweepSrc = src.slice(src.indexOf('async _sweepStaleFamilyRows'), src.indexOf('async mineNoContentYet'));
     // The mine loop is READ-ONLY: retiring a row before its replacement
     // persisted was non-atomic — a failed upsert left old work retired
@@ -1275,7 +1288,10 @@ describe('listicle_family scoring + action mapping', () => {
     // Ordering + guards in mineAll: sweep ONLY after a successful
     // persistAll, only when the lane ran (gates on, no miner error).
     expect(src).toMatch(/persisted = await this\.persistAll\(allOpportunities\);[\s\S]{0,700}_sweepStaleFamilyRows\(buckets\.listicle_family \|\| \[\], allOpportunities\)/);
-    expect(src).toMatch(/!errors\.listicle_family && isEnabled\('listicleFamilyMining'\) && isEnabled\('listicleBriefs'\)/);
+    expect(src).toMatch(/!errors\.listicle_family[\s\S]{0,140}CANONICAL_MINE_PERIOD_DAYS[\s\S]{0,140}isEnabled\('listicleFamilyMining'\) && isEnabled\('listicleBriefs'\)/);
+    // Destructive sweeping only under the authoritative window — a manual
+    // 7-day mine must not expire valid 28-day rows (Codex r20 P2).
+    expect(src).toMatch(/periodDays === GscOpportunityMiner\.CANONICAL_MINE_PERIOD_DAYS/);
   });
 
   test('service resolves across EVERY variant, not just the representative (Codex r9)', () => {

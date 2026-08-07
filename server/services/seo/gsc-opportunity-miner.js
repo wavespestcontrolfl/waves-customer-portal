@@ -932,7 +932,12 @@ function classifyAnswerGapQueries(queries = [], body = '') {
 // ── miner class ──────────────────────────────────────────────────────
 
 class GscOpportunityMiner {
-  async mineAll({ periodDays = 28, persist = true } = {}) {
+  // The scheduled mine's authoritative lookback. Manual/CLI mines may use
+  // other windows — those persist normally but never run the destructive
+  // family sweep (a 7-day dataset would expire valid 28-day rows).
+  static CANONICAL_MINE_PERIOD_DAYS = 28;
+
+  async mineAll({ periodDays = GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS, persist = true } = {}) {
     const since = sinceDate(periodDays);
     const priorSince = sinceDate(periodDays * 2);
 
@@ -970,11 +975,11 @@ class GscOpportunityMiner {
       // Runs AFTER answer_gap by list order: its persistable refresh pages
       // fence the family refreshes — two buckets must not queue
       // independently claimable edits of one page (their dedupe keys
-      // differ by construction). The fence ALSO covers IN-FLIGHT
-      // answer-gap rows (pending/claimed/pending_review in the queue):
-      // an occupied page is deliberately absent from this run's bucket
-      // output, but an in-progress or review-stage edit must not race a
-      // family refresh (Codex r19). Fail-soft: a lookup error just
+      // differ by construction). The fence ALSO covers IN-FLIGHT refresh
+      // rows from EVERY other bucket (pending/claimed/pending_review): a
+      // pending-review decay_refresh whose signal recovered is absent
+      // from this run's batch, but its still-open edit must not race a
+      // family refresh (Codex r19/r20). Fail-soft: a lookup error just
       // weakens the fence for one run.
       ['listicle_family', async () => {
         const answerGapPages = new Set((buckets.answer_gap || [])
@@ -983,15 +988,37 @@ class GscOpportunityMiner {
           .filter(Boolean));
         try {
           const inflight = await db('opportunity_queue')
-            .where({ bucket: 'answer_gap', action_type: 'refresh_existing_page' })
+            .where('action_type', 'refresh_existing_page')
+            .whereNot('bucket', 'listicle_family')
             .whereIn('status', ['pending', 'claimed', 'pending_review'])
             .whereNotNull('page_url')
             .select('page_url');
           for (const r of inflight) answerGapPages.add(r.page_url);
         } catch (err) {
-          logger.warn(`[gsc-opp-miner] in-flight answer_gap fence lookup failed: ${err.message}`);
+          logger.warn(`[gsc-opp-miner] in-flight refresh fence lookup failed: ${err.message}`);
         }
-        return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages });
+        // In-flight FAMILY work blocks blog↔refresh transitions: a family
+        // crossing the served threshold while its blog is claimed/in
+        // review (or the reverse) must not emit the opposite action under
+        // a different key beside the un-sweepable in-flight row — the
+        // transition defers to the next mine after the work completes
+        // (Codex r20). Fail-soft like the fence.
+        const inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() };
+        try {
+          const rows = await db('opportunity_queue')
+            .where({ bucket: 'listicle_family' })
+            .whereIn('status', ['claimed', 'pending_review'])
+            .select('dedupe_key', 'action_type', db.raw("signal_metadata->'family_keys' as family_keys"));
+          for (const r of rows) {
+            if (r.action_type === 'new_supporting_blog') inflightFamily.blogKeys.add(r.dedupe_key);
+            for (const k of (Array.isArray(r.family_keys) ? r.family_keys : [])) {
+              inflightFamily.refreshFamilyKeys.add(k);
+            }
+          }
+        } catch (err) {
+          logger.warn(`[gsc-opp-miner] in-flight family transition lookup failed: ${err.message}`);
+        }
+        return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightFamily });
       }],
     ];
 
@@ -1046,7 +1073,9 @@ class GscOpportunityMiner {
       // sweep + failed persist would empty the lane until the next run),
       // only when the lane actually ran (gates on, no miner error — an
       // empty bucket then means "didn't run", not "no signal").
-      if (!errors.listicle_family && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs')) {
+      if (!errors.listicle_family
+        && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS
+        && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs')) {
         await this._sweepStaleFamilyRows(buckets.listicle_family || [], allOpportunities);
       }
     }
@@ -1931,7 +1960,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set() } = {}) {
+  async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() } } = {}) {
     // BOTH gates required: mining with the brief overlay off would persist
     // listicle_family rows whose briefs come out as ORDINARY supporting
     // blogs — the lane would look enabled while producing none of the
@@ -2081,6 +2110,10 @@ class GscOpportunityMiner {
         // emits, so the post-persist sweep expires it. Retiring here,
         // BEFORE persistAll, was non-atomic: a failed upsert left the old
         // work retired while its replacement never queued (Codex r15).
+        // Transition deferral: the family's prior BLOG is claimed or in
+        // review — finishing that work wins; the refresh waits for a
+        // later mine (Codex r20).
+        if (inflightFamily.blogKeys.has(listicleFamilyDedupeKey(fam.key))) continue;
         // An answer_gap refresh already targeting this page this run makes
         // a family refresh a SECOND claimable edit of the same URL (their
         // keys differ by construction) — the answer-gap brief covers the
@@ -2101,6 +2134,10 @@ class GscOpportunityMiner {
         group.entries.push({ fam, served, service, city });
         continue;
       }
+
+      // Mirror deferral: a refresh covering this family is claimed or in
+      // review — the blog transition waits for it to complete (Codex r20).
+      if (inflightFamily.refreshFamilyKeys.has(fam.key)) continue;
 
       // Cityless family on a hubless service can never publish (see above).
       if (!city && (!hublessServices || hublessServices.has(service))) continue;
@@ -2168,17 +2205,43 @@ class GscOpportunityMiner {
   // persistAll must not protect a stale higher-score row (pre-push audit).
   // Gates-off or a thrown family mine must NOT sweep (an empty bucket then
   // means "didn't run", not "no signal") — mineAll enforces both.
+  // The pages another bucket's refresh will ACTUALLY occupy this batch:
+  // floor-cleared (evaluated post-facts-boost, which reachability runs too
+  // early to see — Codex r19) AND not aimed at a frozen row. A candidate
+  // whose dedupe row is already done/skipped lands nothing (the upsert's
+  // WHERE guard refuses frozen rows), so letting it suppress the family
+  // refresh would strand the distinct family demand indefinitely (Codex
+  // r20). claimed/pending_review rows are NOT excluded — their edit is in
+  // flight, and yielding to it is exactly right. Fail-soft: a lookup error
+  // keeps every candidate (the pre-r20 behavior).
+  async _arbitratedRefreshPages(batch = []) {
+    const candidates = batch.filter((o) => o.bucket !== 'listicle_family'
+      && o.action_type === 'refresh_existing_page'
+      && o.page_url
+      && o.score >= minScoreToActFor(o.action_type));
+    let frozenKeys = new Set();
+    try {
+      if (candidates.length) {
+        const rows = await db('opportunity_queue')
+          .whereIn('dedupe_key', candidates.map((o) => o.dedupe_key))
+          .whereIn('status', ['done', 'skipped'])
+          .select('dedupe_key');
+        frozenKeys = new Set(rows.map((r) => r.dedupe_key));
+      }
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] refresh arbitration frozen-key lookup failed: ${err.message}`);
+    }
+    return new Set(candidates
+      .filter((o) => !frozenKeys.has(o.dedupe_key))
+      .map((o) => o.page_url));
+  }
+
   async _sweepStaleFamilyRows(familyOpps = [], batch = []) {
     try {
       // Mirror persistAll's one-refresh-per-page yield: a family refresh
       // that yielded to another bucket's refresh never persisted, so its
       // key must not protect a stale pending row either.
-      const otherRefreshPages = new Set(batch
-        .filter((o) => o.bucket !== 'listicle_family'
-          && o.action_type === 'refresh_existing_page'
-          && o.page_url
-          && o.score >= minScoreToActFor(o.action_type))
-        .map((o) => o.page_url));
+      const otherRefreshPages = await this._arbitratedRefreshPages(batch);
       const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
       const persistableKeys = familyOpps
         .filter((o) => !(o.action_type === 'refresh_existing_page' && otherRefreshPages.has(o.page_url)))
@@ -2255,17 +2318,8 @@ class GscOpportunityMiner {
     const now = new Date();
     const expiresAt = new Date(Date.now() + 14 * 86400_000);
 
-    // One refresh per page per batch: the family bucket is the
-    // aggregator-of-last-resort, so when any OTHER bucket's refresh of
-    // the same canonical page survives its floor in this batch —
-    // including via the post-mine facts boost, which reachability runs
-    // too early to see — the family refresh yields (Codex r19).
-    const otherRefreshPages = new Set(opportunities
-      .filter((o) => o.bucket !== 'listicle_family'
-        && o.action_type === 'refresh_existing_page'
-        && o.page_url
-        && o.score >= minScoreToActFor(o.action_type))
-      .map((o) => o.page_url));
+    // One refresh per page per batch — see _arbitratedRefreshPages.
+    const otherRefreshPages = await this._arbitratedRefreshPages(opportunities);
     const admitted = opportunities.filter((o) => !(
       o.bucket === 'listicle_family'
       && o.action_type === 'refresh_existing_page'
