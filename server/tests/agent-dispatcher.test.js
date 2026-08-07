@@ -286,6 +286,33 @@ describe('emit_draft in-loop self-lint (W1)', () => {
     clearDraft('lint-6');
   });
 
+  test('emit_metadata_only self-lints too — meta text ships on every customer surface', async () => {
+    registerSessionLint('lint-8', {});
+    const bad = await executeBriefTool('emit_metadata_only', {
+      title: 'Pet-Safe Lawn Treatments in Sarasota',
+      meta_description: 'Our EPA-approved treatments keep your family protected across Sarasota and Bradenton, with free estimates in under two minutes.',
+    }, { sessionId: 'lint-8' });
+    expect(bad.ok).toBe(false);
+    expect(bad.metadata_rejected).toBe(true);
+    expect(getDraft('lint-8')).toBeNull();
+    const clean = await executeBriefTool('emit_metadata_only', {
+      title: 'Lawn Treatments in Sarasota — What to Expect',
+      meta_description: 'What a Sarasota lawn treatment visit covers, how the label re-entry directions work, and when to expect results on St. Augustine turf.',
+    }, { sessionId: 'lint-8' });
+    expect(clean.ok).toBe(true);
+    expect(getDraft('lint-8').type).toBe('metadata');
+    clearDraft('lint-8');
+    // The contract-REQUIRED {{cityPhone}} token must not trip the .mdx-body
+    // expression P0 — page metas carry it by rule.
+    registerSessionLint('lint-9', {});
+    const tokenMeta = await executeBriefTool('emit_metadata_only', {
+      title: 'Pest Control in Lakewood Ranch, FL | Waves',
+      meta_description: 'Need pest control in Lakewood Ranch? Waves treats common Southwest Florida pest problems. Call {{cityPhone}} for an estimate.',
+    }, { sessionId: 'lint-9' });
+    expect(tokenMeta.ok).toBe(true);
+    clearDraft('lint-9');
+  });
+
   test('sessions without registered lint options capture exactly as before', async () => {
     const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-5' });
     expect(r.ok).toBe(true);

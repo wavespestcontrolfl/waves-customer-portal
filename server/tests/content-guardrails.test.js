@@ -3036,6 +3036,18 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(spelled.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('duration-before-action and keep-off word orders block too', () => {
+    const wait = guardrails.evaluate({ body: 'Wait 30 minutes before re-entering the treated area.' }, {});
+    expect(wait.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const keepOff = guardrails.evaluate({ body: 'Keep pets off the lawn for 30 minutes.' }, {});
+    expect(keepOff.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const allow = guardrails.evaluate({ body: 'Allow 30 minutes of drying time before returning.' }, {});
+    expect(allow.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // No figure, label-directed — legal.
+    const legal = guardrails.evaluate({ body: 'Keep pets off the lawn until it is dry per the label, and your technician confirms timing.' }, {});
+    expect(legal.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
   test('"safe … when wet or dry" is a claim of safety in EVERY state, never the conditional idiom', () => {
     const r = guardrails.evaluate({
       body: 'The granules are safe for pets when wet or dry, and your technician confirms timing.',

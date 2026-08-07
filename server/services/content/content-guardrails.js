@@ -2880,6 +2880,8 @@ function preventionPromiseFinding(text) {
 // timing — so a "safe" match governed by a once/when/after-dry condition in
 // the same sentence stays legal, as do negated disclaimers ("no product is
 // completely safe…"), via the prevention section's negation guards.
+// A "figure" is a digit, a range, or a common spelled number, with its unit.
+const REENTRY_DURATION_SRC = "(?:\\d+(?:\\s*[-–—]\\s*\\d+)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:\\s*[-–—]\\s*\\w+)?)\\s*(?:minutes?|mins?|hours?|hrs?)";
 const REENTRY_SAFETY_SRCS = [
   // "safe to re-enter / return / go back inside", "re-entry is safe",
   // "safe for kids and pets to return"
@@ -2898,12 +2900,16 @@ const REENTRY_SAFETY_SRCS = [
   // ONLY "EPA-approved" is banned — "EPA-registered"/"EPA-exempt" is the
   // wording AGENTS.md requires.
   "\\bEPA[-\\s]?approved\\b",
-  // Fixed re-entry/drying figures ("re-enter after 30 minutes", "dry within
-  // 20 minutes", "after 30–60 minutes", "after thirty minutes") — the
-  // approved idiom carries NO number; the technician confirms timing.
-  // Ranges (30–60) and common spelled numbers count as figures too.
-  `\\b(?:re-?enter|re-?entry|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+${'(?:\\d+(?:\\s*[-–—]\\s*\\d+)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:\\s*[-–—]\\s*\\w+)?)'}\\s*(?:minutes?|mins?|hours?|hrs?)\\b`,
-  `\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+${'(?:\\d+(?:\\s*[-–—]\\s*\\d+)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:\\s*[-–—]\\s*\\w+)?)'}\\s*(?:minutes?|mins?|hours?|hrs?)\\b`,
+  // Fixed re-entry/drying figures — the approved idiom carries NO number;
+  // the technician confirms timing. Ranges (30–60), spelled numbers, and
+  // BOTH word orders count: action-then-duration ("re-enter after 30
+  // minutes"), duration-then-action ("wait 30 minutes before re-entering",
+  // "allow 30 minutes of drying time"), and keep-off forms ("keep pets off
+  // the lawn for 30 minutes").
+  `\\b(?:re-?enter|re-?entry|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+${REENTRY_DURATION_SRC}\\b`,
+  `\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:wait|allow|give\\s+it)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry|return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*|dry\\w*|drying)`,
+  `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\bfor\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
 ];
 
 // The APPROVED conditional idiom has TWO required parts (AGENTS.md): the
@@ -3279,6 +3285,13 @@ module.exports = {
   stripCitationResidue,
   PAGE_CITY_SLUGS,
   OUT_OF_AREA_CITY_CANDIDATES,
+  // The 2026-07-29 meta contract REQUIRES {{cityPhone}} in non-blog meta
+  // descriptions; it renders through the domains pipeline, not MDX, so the
+  // metadata-only lanes scrub it before running this evaluator (the MDX
+  // expression P0 exists for .mdx BODIES, where any {{ }} crashes the
+  // build). Single-sourced here so the in-loop lint and the runner's
+  // metadata handler scrub identically.
+  SANCTIONED_META_TOKEN_RE: /\{\{\s*cityPhone\s*\}\}/g,
   outOfAreaCities,
   _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },
 };

@@ -493,6 +493,53 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       if (!sessionId) return { error: 'session context missing — dispatcher must pass sessionId' };
       const { title, meta_description, notes_for_reviewer } = input || {};
       if (!title || !meta_description) return { error: 'title + meta_description required' };
+      // W1 in-loop self-lint, metadata edition: meta text ships on every
+      // customer surface, so the publishable-text guardrails (compliance,
+      // price, product claims, prevention promises, tenure) run at capture
+      // exactly like emit_draft's — same registered options, same cap,
+      // same fail-open posture. The runner's metadata handler applies the
+      // authoritative fail-closed pass.
+      {
+        const metaLintOptions = sessionLintOptions.get(sessionId);
+        const metaGuardrails = getContentGuardrails();
+        if (metaLintOptions && metaGuardrails?.evaluate) {
+          const attempts = sessionLintAttempts.get(sessionId) || 0;
+          if (attempts < SELF_LINT_MAX_REDRAFTS) {
+            let lintResult = null;
+            try {
+              // Scrub the contract-REQUIRED {{cityPhone}} token (renders via
+              // the domains pipeline, not MDX) — same scrub the runner's
+              // metadata handler applies.
+              const scrubbedMeta = metaGuardrails.SANCTIONED_META_TOKEN_RE
+                ? String(meta_description).replace(metaGuardrails.SANCTIONED_META_TOKEN_RE, '')
+                : meta_description;
+              lintResult = metaGuardrails.evaluate({ frontmatter: { title, meta_description: scrubbedMeta }, body: '' }, metaLintOptions);
+            } catch (err) {
+              logger.warn(`[brief-driven-tools] emit_metadata_only(${sessionId}): self-lint evaluator threw (${err.message}) — capturing without in-loop lint`);
+            }
+            const blocking = (lintResult?.findings || [])
+              .filter((f) => (f.severity === 'P0' || f.severity === 'P1') && f.code !== 'OFF_FOOTPRINT_CITY_CLAIM');
+            if (blocking.length) {
+              sessionLintAttempts.set(sessionId, attempts + 1);
+              const retryModule = getGateRetryDirectives();
+              const directives = retryModule?.buildRetryDirectives
+                ? retryModule.buildRetryDirectives(
+                  { findings: blocking },
+                  { header: `METADATA REJECTED by the hard content gates (in-session attempt ${attempts + 1} of ${SELF_LINT_MAX_REDRAFTS + 1}). Revise per the directives below and call emit_metadata_only again:` },
+                )
+                : blocking.map((f) => `${f.severity} ${f.code}${f.message ? `: ${f.message}` : ''}`);
+              logger.warn(`[brief-driven-tools] emit_metadata_only(${sessionId}): self-lint rejected metadata (redraft ${attempts + 1}/${SELF_LINT_MAX_REDRAFTS}): ${blocking.map((f) => f.code).join(', ')}`);
+              return {
+                ok: false,
+                metadata_rejected: true,
+                redrafts_remaining: SELF_LINT_MAX_REDRAFTS - attempts - 1,
+                error: 'Metadata failed hard content gates — NOT captured. Revise per `directives` and call emit_metadata_only again.',
+                directives,
+              };
+            }
+          }
+        }
+      }
       // Captured metadata is a delta, not a full draft. The Step 11
       // runner is responsible for hydrating a gate-friendly draft by
       // loading the live page (body + schema + canonical) and

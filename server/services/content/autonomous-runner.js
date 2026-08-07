@@ -537,7 +537,7 @@ class AutonomousRunner {
     if (brief.action_type === 'rewrite_title_meta') {
       let result;
       try {
-        result = await this._handleMetadataRewriteAction(brief, draft, run);
+        result = await this._handleMetadataRewriteAction(opp, brief, draft, run);
       } catch (err) {
         if (isDeterministicPublishError(err)) {
           const finalized = await finalize(run, t0, {
@@ -1817,7 +1817,7 @@ class AutonomousRunner {
     } catch { return 0; }
   }
 
-  async _handleMetadataRewriteAction(brief, draft, run) {
+  async _handleMetadataRewriteAction(opp, brief, draft, run) {
     const spamGate = getTitleMetaSpamGate();
     if (!spamGate?.evaluateTitleMetaSpam) {
       return {
@@ -1894,6 +1894,61 @@ class AutonomousRunner {
           outcome: 'completed_pending_review',
           skip_reason: 'metadata_gate_fail',
           reviewer_notes: `Title/meta spam gate blocked PR creation: ${(gateResult.hard_failures || []).map((f) => f.code || f.reason).join(', ') || 'failed'}.`,
+        },
+      };
+    }
+
+    // Content guardrails on the metadata TEXT (fail closed, same posture as
+    // gate 3c): meta descriptions ship on every customer surface, so the
+    // compliance codes (REENTRY_SAFETY_CLAIM, BANNED_TOPIC) and the other
+    // publishable-text rules (price, product claims, prevention promises,
+    // tenure) apply here exactly as on full drafts — this lane returned
+    // before gate 3c and previously skipped them entirely. A protected
+    // title is discarded by the publisher, so only the shipping
+    // description-side text is evaluated (same posture as the spam gate).
+    const metadataGuardrails = getContentGuardrails();
+    if (!metadataGuardrails?.evaluate) {
+      return {
+        notes: 'metadata_guardrails_unavailable',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'content_guardrails_unavailable',
+          reviewer_notes: 'Content-guardrails module failed to load — failing closed; metadata rewrite routed to review instead of publishing without the compliance/price checks.',
+        },
+      };
+    }
+    const metaGuardResult = metadataGuardrails.evaluate({
+      frontmatter: {
+        title: protectedTitle ? '' : draft.title,
+        // The REQUIRED {{cityPhone}} token renders via the domains
+        // pipeline, not MDX — scrub it so the .mdx-body expression P0
+        // doesn't false-positive on contract-compliant page metas.
+        meta_description: metadataGuardrails.SANCTIONED_META_TOKEN_RE
+          ? String(draft.meta_description || '').replace(metadataGuardrails.SANCTIONED_META_TOKEN_RE, '')
+          : draft.meta_description,
+      },
+      body: '',
+    }, deriveSyncGuardrailOptions(opp, brief));
+    // Same footprint refinement gate 3c applies: an LLM-dismissible
+    // OFF_FOOTPRINT_CITY_CLAIM false positive must not park the rewrite;
+    // classifier/module failure keeps the deterministic findings (fail
+    // closed).
+    if (!metaGuardResult.pass) {
+      const metaClassifier = getFootprintClassifier();
+      if (metaClassifier) {
+        metaGuardResult.findings = await metaClassifier.refineFootprintFindings(metaGuardResult.findings);
+        metaGuardResult.pass = !metaGuardResult.findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
+      }
+    }
+    run.content_guardrails_result = metaGuardResult;
+    const metaBlocking = (metaGuardResult.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1');
+    if (metaBlocking.length) {
+      return {
+        notes: 'metadata_guardrails_fail',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'content_guardrails_failed',
+          reviewer_notes: `Content guardrails blocked the metadata rewrite: ${metaBlocking.map((f) => `${f.severity} ${f.code}`).join('; ')} — review before publishing.`,
         },
       };
     }
