@@ -383,3 +383,34 @@ describe('ownershipKeysForRow catalog authority', () => {
     expect(ownershipKeysForRow({ service_type: 'Quarterly Pest Control' })).toEqual(['pest_control']);
   });
 });
+
+// Pre-push P1 #3: recurring termite monitoring lacks the 'bait' token the
+// qualifier requires — ownership must still see it.
+describe('termite monitoring ownership', () => {
+  const { ownershipKeysForRow } = require('../services/waveguard-existing-services');
+
+  test('plain recurring termite monitoring row is owned termite', () => {
+    expect(ownershipKeysForRow({ service_type: 'Termite Monitoring Service' }))
+      .toEqual(['termite_bait']);
+  });
+
+  test('termite catalog identity under a stale generic service_type owns termite only', () => {
+    expect(ownershipKeysForRow({
+      service_type: 'Pest Control',
+      service_key: 'termite_monitoring',
+      service_name: 'Termite Monitoring Service',
+    })).toEqual(['termite_bait']);
+  });
+
+  test('an owned termite monitoring plan blocks a fresh termite quote', async () => {
+    const customer = propertyCustomer({ id: 'cust-termite', waveguard_tier: 'Bronze' });
+    const result = await buildCustomerPricingResponse({
+      db: activePlanDb(customer.id, ['Termite Monitoring Service'], 'Bronze'),
+      propertyLookup: null,
+      prompt: 'How much is termite protection?',
+      customer,
+    });
+
+    expect(result.options.every(o => o.serviceKey !== 'termite')).toBe(true);
+  });
+});

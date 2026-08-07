@@ -318,24 +318,34 @@ async function filterRowsToStreet(database, rows, streetScope) {
 // case. Reuses the catalog-authoritative row classifier and adds ONLY the
 // rodent family that toQualifyingKeys deliberately excludes; qualification
 // itself stays untouched.
-function ownershipKeysForRow(row = {}) {
-  // Catalog authority first (pre-push P1 #2): a rodent-led CATALOG identity
-  // (rodent_monitoring linked under a stale generic 'Pest Control'
-  // service_type) owns RODENT only — letting qualifyingKeysForRow fall back
-  // to the combined text would inherit pest from the stale service_type and
-  // falsely block a valid pest quote.
-  const catalogText = [row.service_key, row.service_name]
-    .filter(Boolean).join(' ').replace(/[_-]+/g, ' ').toLowerCase();
-  if (catalogText && isRodentLedText(catalogText)) return ['rodent_bait'];
-  const keys = qualifyingKeysForRow(row);
-  // The rodent COMPONENT, not just rodent-LED rows (pre-push P1): a combined
-  // "Pest & Rodent Control" / pest_rodent_* plan is pest-primary for
-  // qualification, but the customer still owns rodent service — any rodent
-  // token in the row's joined identity counts as rodent ownership.
-  const text = [row.service_key, row.service_name, row.service_type]
-    .filter(Boolean).join(' ').replace(/[_-]+/g, ' ').toLowerCase();
-  if (RODENT_TOKEN_RE.test(text) && !keys.includes('rodent_bait')) keys.push('rodent_bait');
+// Ownership families in one text: the qualifying families PLUS the recurring
+// families qualification deliberately excludes — the rodent COMPONENT (led or
+// pest-primary combined) and termite rows without the 'bait' token
+// ("Termite Monitoring Service" — the qualifier requires termite AND bait).
+// Over-recognition is the safe direction here: an owned service routes to a
+// Waves conversation instead of a self-serve re-quote.
+function ownershipFamiliesFromText(raw) {
+  const s = String(raw || '').toLowerCase();
+  const keys = toQualifyingKeys(s);
+  if (RODENT_TOKEN_RE.test(s) && !keys.includes('rodent_bait')) keys.push('rodent_bait');
+  if (/\btermite\b/.test(s) && !keys.includes('termite_bait')) keys.push('termite_bait');
   return keys;
+}
+
+function ownershipKeysForRow(row = {}) {
+  // Same catalog-authority shape as qualifyingKeysForRow (pre-push P1 #2): a
+  // catalog identity that resolves ownership families on its own is the
+  // truth — a rodent_monitoring or termite_monitoring catalog row under a
+  // stale generic 'Pest Control' service_type must not inherit pest from
+  // that stale text and falsely block a valid pest quote. Only an
+  // uninformative catalog falls back to the joined text.
+  const catalogText = [row.service_key, row.service_name]
+    .filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
+  if (catalogText) {
+    const catalogKeys = ownershipFamiliesFromText(catalogText);
+    if (catalogKeys.length) return catalogKeys;
+  }
+  return ownershipFamiliesFromText(`${String(row.service_type || '')} ${catalogText}`.trim());
 }
 
 // Distinct owned recurring service keys — BROADER than qualification (all
