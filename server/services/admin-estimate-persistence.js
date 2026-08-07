@@ -1163,13 +1163,14 @@ async function resolveEstimateWritePayload({
   if (body.customerId && body.address) {
     try {
       const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
-      const custRow = await database('customers').where({ id: body.customerId }).first('address_line1', 'address_line2');
+      const custRow = await database('customers').where({ id: body.customerId }).first('address_line1', 'address_line2', 'city', 'zip');
       const estimateStreet = normalizedEstimateStreet(body.address);
-      const customerStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2);
+      const customerStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
       if (estimateStreet) {
         perPropertyStreetScope = { estimateStreet, customerPrimaryStreet: customerStreet };
       }
-      if (!groupedEstimate && estimateStreet && customerStreet && estimateStreet !== customerStreet) {
+      const { sameScopeKey } = require('./estimate-property-linkage');
+      if (!groupedEstimate && estimateStreet && customerStreet && !sameScopeKey(estimateStreet, customerStreet)) {
         groupedEstimate = true;
       }
     } catch (err) {
@@ -1669,8 +1670,28 @@ async function reviseAdminEstimate({
 
   // Preflight stops here: same guards, same pricing pipeline, no write — the
   // returned totals let the builder confirm a server reprice with the
-  // operator before anything reaches the customer's live link.
+  // operator before anything reaches the customer's live link. The grouped
+  // duplicate-address guard runs here too (codex #3248 r2): without it the
+  // preflight reports success and walks the operator through a reprice
+  // confirm, only for the identical real save to 400. Best-effort unlocked
+  // read — the serialized in-transaction recheck below stays authoritative.
   if (dryRun) {
+    if (groupDuplicateRecheckNeeded) {
+      const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
+      const revisedKey = normalizedEstimatePropertyKey(writeFields.address);
+      if (revisedKey?.street) {
+        const members = await database('estimates')
+          .where({ estimate_group_id: writeFields.estimate_group_id })
+          .whereNot({ id: estimate.id })
+          .whereNull('archived_at')
+          .select('address');
+        for (const member of members) {
+          if (samePropertyKey(normalizedEstimatePropertyKey(member.address), revisedKey)) {
+            throw errorWithStatus('This address is already in the group — each property is quoted once', 400);
+          }
+        }
+      }
+    }
     return { estimate: { ...estimate, ...writeFields }, dryRun: true };
   }
 

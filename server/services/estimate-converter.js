@@ -586,6 +586,8 @@ async function addOnPreservedMonthlyRateBase({
         'scheduled_services.is_callback',
         'scheduled_services.service_address_line1',
         'scheduled_services.service_address_line2',
+        'scheduled_services.service_address_city',
+        'scheduled_services.service_address_zip',
         'scheduled_services.source_estimate_id',
         'services.service_key as catalog_service_key',
         'services.name as catalog_service_name',
@@ -633,20 +635,20 @@ async function addOnPreservedMonthlyRateBase({
     // grouped estimates take this path — ungrouped accepts are byte-identical.
     async function scopePlanRowsToEstimateProperty(rows) {
       if (!(estimate?.estimate_group_id && estimate.address)) return rows;
-      const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
+      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey } = require('./estimate-property-linkage');
       const estimateStreet = normalizedEstimateStreet(estimate.address);
       if (!estimateStreet) return rows;
       return database.transaction(async (sp) => {
-        const customerPrimaryStreet = normalizedStampedStreet(customer?.address_line1, customer?.address_line2);
+        const customerPrimaryStreet = normalizedStampedStreet(customer?.address_line1, customer?.address_line2, customer?.city, customer?.zip);
         const kept = [];
         for (const row of rows) {
-          let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2);
+          let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
           if (!street && row.source_estimate_id) {
             const src = await sp('estimates').where({ id: row.source_estimate_id }).first('address');
             street = normalizedEstimateStreet(src?.address);
           }
           street = street || customerPrimaryStreet;
-          if (!street || street === estimateStreet) kept.push(row);
+          if (!street || sameScopeKey(street, estimateStreet)) kept.push(row);
         }
         return kept;
       });
@@ -2286,8 +2288,8 @@ const EstimateConverter = {
       const estimateStreet = normalizedEstimateStreet(estimate.address);
       let customerPrimaryStreet = '';
       try {
-        const custRow = await database('customers').where({ id: customerId }).first('address_line1', 'address_line2');
-        customerPrimaryStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2);
+        const custRow = await database('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+        customerPrimaryStreet = normalizedStampedStreet(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
       } catch { /* scope falls back to stamped addresses only */ }
       if (estimateStreet) seriesAddressScope = { estimateStreet, customerPrimaryStreet };
     }

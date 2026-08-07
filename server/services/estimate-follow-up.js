@@ -204,6 +204,28 @@ async function releaseStage(estId, flag) {
   await db("estimates")
     .where({ id: estId })
     .update({ [flag]: false });
+  // Group-aware release (codex #3248 r2): if this estimate went TERMINAL
+  // while the stage was mid-flight, transferGroupFollowupOwnership already
+  // copied its transiently-true flag onto the new comms owner — a send that
+  // never completed would stay burned there. Clear the same flag on the
+  // transfer's deterministic pick (earliest live sent/viewed sibling) so it
+  // retries. Ordinary releases (row still live) change nothing here, and
+  // non-owner pre-burned siblings are never touched.
+  try {
+    const row = await db('estimates').where({ id: estId }).first('estimate_group_id', 'status');
+    if (row?.estimate_group_id && ['accepted', 'declined'].includes(String(row.status || ''))) {
+      const owner = await db('estimates')
+        .where({ estimate_group_id: row.estimate_group_id })
+        .whereNot({ id: estId })
+        .whereIn('status', ['sent', 'viewed'])
+        .whereNull('archived_at')
+        .orderBy('created_at', 'asc')
+        .first('id');
+      if (owner) {
+        await db('estimates').where({ id: owner.id }).update({ [flag]: false });
+      }
+    }
+  } catch { /* best-effort — the primary release above already succeeded */ }
 }
 
 function moneySummary(est = {}) {

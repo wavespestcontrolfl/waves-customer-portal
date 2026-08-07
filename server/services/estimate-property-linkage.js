@@ -281,19 +281,39 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
 // and canonicalizeAddress expands street suffixes ("St" == "Street") without
 // stripping them — the exact drift codex caught between these keys and
 // addressKey. Unit identity stays part of the key ("Unit 4" != "Unit 5").
-function normalizedStampedStreet(line1, line2) {
-  const { canonicalizeAddress, stripUnitDesignators } = require('./customer-properties');
-  return canonicalizeAddress(stripUnitDesignators([line1, line2]
+function normalizedStampedStreet(line1, line2, city, zip) {
+  const { canonicalizeAddress, stripUnitDesignators, normalizeZip } = require('./customer-properties');
+  const street = canonicalizeAddress(stripUnitDesignators([line1, line2]
     .map((v) => String(v || '').trim())
     .filter(Boolean)
     .join(' ')))
     .replace(/\s+/g, ' ')
     .trim();
+  if (!street) return '';
+  // Locality-QUALIFIED key (codex #3248 r2): the duplicate guard admits the
+  // same street+unit in different cities as distinct properties, so every
+  // scope compare must carry locality too or accept-time consumers would
+  // still merge them. City is punctuation-insensitive ("St. Petersburg" ==
+  // "St Petersburg"); segments are empty when unknown and sameScopeKey
+  // treats empty as wildcard.
+  const cityKey = String(city || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return `${street}|${cityKey}|${normalizeZip(zip)}`;
+}
+
+// Strict on street, wildcard on locality segments either side lacks.
+function sameScopeKey(a, b) {
+  if (!a || !b) return false;
+  const [as, ac, az] = String(a).split('|');
+  const [bs, bc, bz] = String(b).split('|');
+  if (!as || !bs || as !== bs) return false;
+  if (ac && bc && ac !== bc) return false;
+  if (az && bz && az !== bz) return false;
+  return true;
 }
 
 function normalizedEstimateStreet(raw) {
   const parts = parseEstimateAddress(raw);
-  return normalizedStampedStreet(parts?.address_line1, parts?.address_line2);
+  return normalizedStampedStreet(parts?.address_line1, parts?.address_line2, parts?.city, parts?.zip);
 }
 
 // Full property tuple for DUPLICATE checks (codex #3248 r1): identical
@@ -305,7 +325,7 @@ function normalizedEstimatePropertyKey(raw) {
   const { normalizeZip } = require('./customer-properties');
   return {
     street: normalizedStampedStreet(parts.address_line1, parts.address_line2),
-    city: String(parts.city || '').toLowerCase().replace(/\s+/g, ' ').trim(),
+    city: String(parts.city || '').toLowerCase().replace(/[^a-z0-9]+/g, ''),
     zip: normalizeZip(parts.zip),
   };
 }
@@ -343,6 +363,7 @@ module.exports = {
   parseEstimateAddress,
   normalizedEstimateStreet,
   normalizedStampedStreet,
+  sameScopeKey,
   normalizedEstimatePropertyKey,
   samePropertyKey,
   estimateQuotesCustomerAddress,

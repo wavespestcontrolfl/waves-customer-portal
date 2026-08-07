@@ -570,6 +570,8 @@ async function findActiveRecurringSeries(conn, {
   if (columns.service_id) query.select('service_id');
   if (columns.service_address_line1) query.select('service_address_line1');
   if (columns.service_address_line2) query.select('service_address_line2');
+  if (columns.service_address_city) query.select('service_address_city');
+  if (columns.service_address_zip) query.select('service_address_zip');
   // Which estimate created the existing series — lets the duplicate-conflict
   // payload prove to a retrying client that the series IS the one its
   // partial save already created (codex r21 P0).
@@ -586,8 +588,8 @@ async function findActiveRecurringSeries(conn, {
       && serviceKeyFor({ service_type: parent.service_type }) === targetKey;
     if (!idMatch && !keyMatch) continue;
     if (serviceAddressScope && columns.service_address_line1 && serviceAddressScope.estimateStreet) {
-      const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
-      let parentStreet = normalizedStampedStreet(parent.service_address_line1, parent.service_address_line2);
+      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey } = require('./estimate-property-linkage');
+      let parentStreet = normalizedStampedStreet(parent.service_address_line1, parent.service_address_line2, parent.service_address_city, parent.service_address_zip);
       if (!parentStreet && parent.source_estimate_id) {
         // Unstamped parent: the post-commit linkage hook may not have run yet
         // (or the gate is off), and under concurrent group accepts the other
@@ -601,7 +603,7 @@ async function findActiveRecurringSeries(conn, {
         } catch { /* fall back to the primary-street heuristic below */ }
       }
       parentStreet = parentStreet || String(serviceAddressScope.customerPrimaryStreet || '');
-      if (parentStreet && parentStreet !== serviceAddressScope.estimateStreet) continue;
+      if (parentStreet && !sameScopeKey(parentStreet, serviceAddressScope.estimateStreet)) continue;
     }
     const upcoming = await conn('scheduled_services')
       .where(function () {

@@ -277,10 +277,10 @@ function qualifyingKeysFromRows(rows = []) {
 async function loadExistingQualifyingServiceKeys(database, customerId, { streetScope = null } = {}) {
   const rows = await loadExistingRecurringQualifyingRows(database, customerId);
   if (!streetScope || !streetScope.estimateStreet) return qualifyingKeysFromRows(rows);
-  const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
+  const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey } = require('./estimate-property-linkage');
   const kept = [];
   for (const row of rows) {
-    let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2);
+    let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
     if (!street && row.source_estimate_id) {
       try {
         const src = await database('estimates').where({ id: row.source_estimate_id }).first('address');
@@ -288,7 +288,7 @@ async function loadExistingQualifyingServiceKeys(database, customerId, { streetS
       } catch { /* fall through to the primary-street default */ }
     }
     street = street || String(streetScope.customerPrimaryStreet || '');
-    if (street && street === streetScope.estimateStreet) kept.push(row);
+    if (street && sameScopeKey(street, streetScope.estimateStreet)) kept.push(row);
   }
   return qualifyingKeysFromRows(kept);
 }

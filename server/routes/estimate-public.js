@@ -906,18 +906,18 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     // repriced, and the accepted property ends up with NO booked visit
     // while linkage can no longer correct the already-linked row. Fail
     // CLOSED on candidates whose property can't be located.
-    const { normalizedEstimateStreet: adoptStreetOf, normalizedStampedStreet: adoptStampedStreetOf } = require('../services/estimate-property-linkage');
+    const { normalizedEstimateStreet: adoptStreetOf, normalizedStampedStreet: adoptStampedStreetOf, sameScopeKey: adoptSameScope } = require('../services/estimate-property-linkage');
     const adoptionEstimateStreet = estimate.estimate_group_id ? adoptStreetOf(estimate.address) : '';
     let adoptionPrimaryStreet = '';
     if (adoptionEstimateStreet) {
       try {
-        const adoptCust = await conn('customers').where({ id: estimate.customer_id }).first('address_line1', 'address_line2');
-        adoptionPrimaryStreet = adoptStampedStreetOf(adoptCust?.address_line1, adoptCust?.address_line2);
+        const adoptCust = await conn('customers').where({ id: estimate.customer_id }).first('address_line1', 'address_line2', 'city', 'zip');
+        adoptionPrimaryStreet = adoptStampedStreetOf(adoptCust?.address_line1, adoptCust?.address_line2, adoptCust?.city, adoptCust?.zip);
       } catch { /* candidates fall back to stamped/source streets only */ }
     }
     const candidateAtQuotedProperty = async (cand) => {
       if (!adoptionEstimateStreet) return true;
-      let candStreet = adoptStampedStreetOf(cand.service_address_line1, cand.service_address_line2);
+      let candStreet = adoptStampedStreetOf(cand.service_address_line1, cand.service_address_line2, cand.service_address_city, cand.service_address_zip);
       if (!candStreet && cand.source_estimate_id) {
         try {
           const src = await conn('estimates').where({ id: cand.source_estimate_id }).first('address');
@@ -925,7 +925,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
         } catch { /* fall through */ }
       }
       candStreet = candStreet || adoptionPrimaryStreet;
-      return !!candStreet && candStreet === adoptionEstimateStreet;
+      return !!candStreet && adoptSameScope(candStreet, adoptionEstimateStreet);
     };
     if (familyKeys.size > 0) {
       // Page through the candidate list until a same-family row appears — a
