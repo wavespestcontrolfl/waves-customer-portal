@@ -68,6 +68,30 @@ async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
   URL.revokeObjectURL(blobUrl);
 }
 
+// The visit .ics is a PUBLIC token endpoint (no Bearer needed), but it shares
+// two traps with downloadAuthedPdf: a root-relative href misses a configured
+// VITE_API_URL origin, and in the Capacitor shell a programmatic <a download>
+// click is a silent no-op. Resolve against API_BASE and hand the bytes to the
+// OS — share sheet on native, <a download> on web — so the .ics opens in the
+// calendar app (codex #3249 r1).
+async function downloadCalendarIcs(path, fileName = 'Waves_Visit.ics') {
+  // Server sends the app-absolute '/api/...' path; API_BASE already ends in
+  // '/api' (default '/api', or a full cross-origin API URL), so splice.
+  const abs = path.startsWith('/api/') ? `${API_BASE}${path.slice(4)}` : path;
+  const r = await fetch(abs);
+  if (!r.ok) throw new Error(`Calendar download failed (${r.status})`);
+  const blob = await r.blob();
+  if (await saveBlobNative(blob, fileName)) return;
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
 // Authenticated fetch → PDF blob, with the JSON "not ready yet" body turned
 // into a readable error. Shared by the Documents + Visits report flows.
 async function fetchAuthedPdfBlob(url) {
@@ -2032,16 +2056,20 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                 textDecoration: 'none',
                 position: 'relative',
               }}>Reschedule</a>
-              {/* Tokenized .ics from the public appointment page — downloads
-                  the visit (2-hour arrival window) straight into the phone's
-                  calendar. Server sends null while GATE_APPOINTMENT_PAGE is
-                  dark or for legacy pre-token rows, so no fallback needed. */}
+              {/* Tokenized .ics from the public appointment page — drops the
+                  visit (2-hour arrival window) into the phone's calendar.
+                  Server nulls calendarUrl for every case the route would 404
+                  (gate dark, pre-token row, no window, window elapsed), so no
+                  fallback needed here. */}
               {nextService.calendarUrl && (
-                <a href={nextService.calendarUrl} data-glass-accent="" style={{
+                <button type="button" onClick={() => {
+                  downloadCalendarIcs(nextService.calendarUrl).catch(() => {
+                    showCustomerAlert('Could not download the calendar file. Please try again.');
+                  });
+                }} data-glass-accent="" style={{
                   ...dashboardSecondaryButton,
-                  textDecoration: 'none',
                   position: 'relative',
-                }}>Add to Calendar</a>
+                }}>Add to Calendar</button>
               )}
             </div>
           ) : nextServiceReady ? (
