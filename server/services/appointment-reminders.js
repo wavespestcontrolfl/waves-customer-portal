@@ -194,8 +194,13 @@ function apptChannel(value) {
 // reminder sent — a night email plus a burned reminder is exactly the
 // behavior the window exists to stop. Pure-email reminders are untouched;
 // 'both' holds the whole notice so one deferral covers both legs.
-function reminderSendWindowHold(channel) {
+function reminderSendWindowHold(channel, { smsEnabled = true } = {}) {
   if (apptChannel(channel) === 'email') return false;
+  // SMS opt-out: the SMS leg can never send, so holding "for the window"
+  // would only starve the email fallback (and for a pre-8AM visit, kill
+  // the notice entirely) — proceed and let deliverAppointmentNotice's
+  // normal opt-out block route to email immediately.
+  if (smsEnabled === false) return false;
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('smsSendWindow')) return false;
   const { isWithinSendWindowET } = require('./messaging/send-window');
@@ -1057,7 +1062,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // Attempting the send instead would burn the confirmation: the
       // canonical-path block collapses to false here, the email fallback
       // fires at night, and the unconditional mark below ends all retries.
-      if (reminderSendWindowHold(prefs.confirmationChannel)) {
+      if (reminderSendWindowHold(prefs.confirmationChannel, { smsEnabled: prefs.smsEnabled })) {
         logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} deferred — outside 8AM-8PM ET send window`);
         return false;
       }
@@ -1825,7 +1830,7 @@ const AppointmentReminders = {
           // that ages into the 24h band overnight is owned by the 24h
           // branch on the morning tick.) Deliberately not counted as
           // skipped: nothing was decided, only deferred.
-          if (reminderSendWindowHold(channel72)) {
+          if (reminderSendWindowHold(channel72, { smsEnabled: prefs.smsEnabled })) {
             logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} deferred — outside 8AM-8PM ET send window`);
             continue;
           }
@@ -1947,7 +1952,7 @@ const AppointmentReminders = {
           // leg instead of burning the reminder. Same appointment_time-
           // guarded close as the preference skip so a concurrent move's
           // re-arm is never stomped.
-          if (reminderSendWindowHold(channel24)) {
+          if (reminderSendWindowHold(channel24, { smsEnabled: prefs.smsEnabled })) {
             const { nextSendWindowOpenET } = require('./messaging/send-window');
             if (etDateString(nextSendWindowOpenET(now)) < apptDateET) {
               logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} deferred — outside 8AM-8PM ET send window, window reopens before the visit day`);

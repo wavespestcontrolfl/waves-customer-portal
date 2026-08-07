@@ -94,7 +94,15 @@ async function sendBillingSms(customer, body, metadata = {}) {
       logger.info(`[stripe-webhook] Billing SMS for customer ${customer.id} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt} (${metadata.original_message_type || 'billing'})`);
       return { ...result, scheduled: true };
     } catch (queueErr) {
-      logger.error(`[stripe-webhook] Held billing SMS requeue FAILED for customer ${customer.id}: ${queueErr.message} — notice may be lost`);
+      // The queued row is the ONLY durable form of this notice (the Stripe
+      // event dedupes once the handler succeeds) — a lost enqueue must
+      // fail the handler so Stripe redelivers; the ACH replay path's
+      // notice probe then allows the SMS re-attempt without re-counting
+      // the failure.
+      logger.error(`[stripe-webhook] Held billing SMS requeue FAILED for customer ${customer.id}: ${queueErr.message} — failing the handler so the event redelivers`);
+      const err = new Error(`Held billing SMS could not be queued: ${queueErr.message}`);
+      err.code = 'BILLING_NOTICE_ENQUEUE_FAILED';
+      throw err;
     }
   }
   return result;
@@ -3773,10 +3781,42 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     // is idempotent, but the customer SMS and the dunning-hold counter below
     // are NOT — a duplicate webhook delivery must not resend notices or
     // advance/release held follow-up sequences for a failure that already
-    // did both.
+    // did both. EXCEPTION: if the prior delivery's notice never became
+    // durable (the send threw AND its quiet-hours enqueue failed, so the
+    // handler 500'd and Stripe redelivered), no sms_log row exists for this
+    // PI — a full skip would permanently lose the actionable notice, so
+    // fall through to the SMS block only (the follow-up counters below
+    // stay replay-skipped either way).
+    let replaySkipFollowups = false;
     if (achReplay) {
-      logger.info(`[stripe-webhook] ACH failure replay for PI ${piId} — skipping SMS + follow-up side effects`);
-      return;
+      let noticeExists = true;
+      try {
+        // Two durable notice shapes: an immediate send leaves a
+        // provider-accepted messaging_audit_log row (the canonical sender
+        // persists the PI in its metadata); a quiet-hours hold leaves a
+        // queued sms_log row. Either one means the customer's notice is
+        // owned — only their joint absence proves the prior delivery lost
+        // it. Fail closed to skip on a probe error (never double-text).
+        const auditNotice = await db('messaging_audit_log')
+          .where({ entry_point: 'stripe_webhook' })
+          .whereNotNull('provider_message_id')
+          .whereRaw("metadata->>'stripe_payment_intent_id' = ?", [String(piId)])
+          .first('id');
+        const queuedNotice = auditNotice ? null : await db('sms_log')
+          .where({ direction: 'outbound' })
+          .whereIn('status', ['queued', 'sent', 'delivered', 'scheduled', 'sending'])
+          .whereRaw("metadata->>'stripe_payment_intent_id' = ?", [String(piId)])
+          .first('id');
+        noticeExists = !!(auditNotice || queuedNotice);
+      } catch (probeErr) {
+        logger.warn(`[stripe-webhook] ACH replay notice probe failed (skipping resend, fail closed): ${probeErr.message}`);
+      }
+      if (noticeExists) {
+        logger.info(`[stripe-webhook] ACH failure replay for PI ${piId} — skipping SMS + follow-up side effects`);
+        return;
+      }
+      replaySkipFollowups = true;
+      logger.warn(`[stripe-webhook] ACH failure replay for PI ${piId} with NO durable notice — re-attempting the customer SMS only`);
     }
 
     // Send SMS outside the transaction so a slow provider call doesn't
@@ -3816,15 +3856,22 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
         }
       }
     } catch (smsErr) {
+      // A failed durable enqueue must fail the handler (Stripe redelivers;
+      // the replay notice-probe re-attempts the SMS without re-counting).
+      if (smsErr.code === 'BILLING_NOTICE_ENQUEUE_FAILED') throw smsErr;
       logger.error(`[stripe-webhook] ACH failure SMS failed: ${smsErr.message}`);
     }
 
     // Notify the per-invoice follow-up engine — increments autopay-hold counters
-    // and releases sequences once the threshold is crossed.
-    try {
-      await require('../services/invoice-followups').handleAutopayFailure(customer.id);
-    } catch (e) {
-      logger.error(`[invoice-followups] handleAutopayFailure failed: ${e.message}`);
+    // and releases sequences once the threshold is crossed. Skipped on the
+    // notice-only replay path: the original delivery already counted this
+    // failure, only its SMS was lost.
+    if (!replaySkipFollowups) {
+      try {
+        await require('../services/invoice-followups').handleAutopayFailure(customer.id);
+      } catch (e) {
+        logger.error(`[invoice-followups] handleAutopayFailure failed: ${e.message}`);
+      }
     }
   } catch (err) {
     // Rethrow so the router records the error and returns 500 — the event
@@ -4152,6 +4199,7 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
             logger.warn(`[stripe-webhook] ACH processing SMS blocked/failed for invoice ${freshInvoice.invoice_number}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           }
         } catch (smsErr) {
+          if (smsErr.code === 'BILLING_NOTICE_ENQUEUE_FAILED') throw smsErr;
           logger.error(`[stripe-webhook] ACH processing SMS failed for invoice ${freshInvoice.invoice_number}: ${smsErr.message}`);
         }
       }
@@ -4231,6 +4279,7 @@ async function handlePaymentIntentRequiresAction(paymentIntent) {
       }
     }
   } catch (err) {
+    if (err.code === 'BILLING_NOTICE_ENQUEUE_FAILED') throw err;
     logger.error(`[stripe-webhook] requires_action handler failed: ${err.message}`);
   }
 }
@@ -5111,7 +5160,10 @@ async function handleSetupIntentFailed(setupIntent) {
         }
       }
     }
-  } catch { /* non-critical */ }
+  } catch (err) {
+    if (err?.code === 'BILLING_NOTICE_ENQUEUE_FAILED') throw err;
+    /* non-critical otherwise */
+  }
 }
 
 module.exports = router;

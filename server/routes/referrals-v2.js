@@ -281,6 +281,8 @@ router.post('/invite', inviteLimiter, async (req, res, next) => {
           metadata: JSON.stringify({
             entry_point: 'referrals_v2_invite_deferred',
             promoter_id: promoter.id,
+            // onTerminal releases the cooldown reservation written below.
+            invite_phone: cleanPhone,
             original_block_code: smsResult.code,
             replay_purpose: 'referral',
             consent_basis: { status: 'transactional_allowed', source: 'referral_invite_form' },

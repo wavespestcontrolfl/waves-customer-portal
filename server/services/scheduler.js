@@ -2432,7 +2432,35 @@ function initScheduledJobs() {
             const { recheckDeferredReplay, onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
             const recheck = await recheckDeferredReplay(claimMeta.entry_point, claimMeta);
             if (recheck && recheck.eligible === false) {
-              if (recheck.retryable && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+              // A recheck that names its own retry time (a customer quiet
+              // window with a known end) reschedules straight to it and
+              // REFUNDS the claimed attempt — this is a scheduled wait,
+              // not a failed try, and the bounded 15-minute ladder is
+              // reserved for genuinely unverifiable state.
+              const namedRetryAt = recheck.retryAt && !Number.isNaN(new Date(recheck.retryAt).getTime())
+                ? new Date(recheck.retryAt)
+                : null;
+              if (recheck.retryable && namedRetryAt) {
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'scheduled',
+                  scheduled_for: namedRetryAt,
+                  updated_at: new Date(),
+                  metadata: db.raw(`
+                    COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+                      'scheduled_sms_attempts',
+                      GREATEST(
+                        CASE
+                          WHEN COALESCE(metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                            THEN (metadata->>'scheduled_sms_attempts')::int - 1
+                          ELSE 0
+                        END,
+                        0
+                      )
+                    )
+                  `),
+                });
+                logger.info(`[scheduled-sms] deferred replay ${msg.id} (${claimMeta.entry_point}) waiting on ${recheck.reason} — rescheduled for ${namedRetryAt.toISOString()} (attempt refunded)`);
+              } else if (recheck.retryable && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'scheduled',
                   scheduled_for: new Date(Date.now() + 15 * 60 * 1000),

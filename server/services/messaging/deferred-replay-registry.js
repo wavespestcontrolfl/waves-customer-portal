@@ -60,6 +60,17 @@ const REGISTRY = {
     },
   },
 
+  estimate_extension_deferred: {
+    async recheck(meta) {
+      // The refreshed-link text is moot once the estimate goes terminal
+      // overnight (accepted/declined/expired/converted) — the same
+      // safetyGate the follow-up engine uses.
+      if (!meta.estimate_id) return { eligible: true };
+      const { deferredFollowupStillEligible } = require('../estimate-follow-up');
+      return deferredFollowupStillEligible(meta.estimate_id);
+    },
+  },
+
   invoice_send_deferred: {
     async recheck(meta) {
       return invoiceStillCollectible(meta);
@@ -414,24 +425,44 @@ const REGISTRY = {
   referral_engine_invite_deferred: {
     async onTerminal(meta) {
       // The invite provably never delivered — flip the referral into the
-      // admin retry lane instead of leaving it falsely 'contacted'.
+      // admin retry lane. GUARDED to pre-conversion statuses: the
+      // recipient can sign up through a separately shared link while the
+      // replay is pending, and a converted/rewarded row must never be
+      // downgraded to sms_failed.
       if (!meta.referral_id) return;
-      await db('referrals').where({ id: meta.referral_id }).update({ status: 'sms_failed', updated_at: new Date() });
-      logger.info(`[deferred-replay] referral invite ${meta.referral_id} terminally blocked — status sms_failed for admin retry`);
+      await db('referrals')
+        .where({ id: meta.referral_id })
+        .whereIn('status', ['pending', 'contacted'])
+        .update({ status: 'sms_failed', updated_at: new Date() });
+      logger.info(`[deferred-replay] referral invite ${meta.referral_id} terminally blocked — pre-conversion status flipped to sms_failed for admin retry`);
     },
   },
 
   referrals_legacy_invite_deferred: {
     async onTerminal(meta) {
       if (!meta.referral_id) return;
-      await db('referrals').where({ id: meta.referral_id }).update({ status: 'sms_failed', updated_at: new Date() });
-      logger.info(`[deferred-replay] legacy referral invite ${meta.referral_id} terminally blocked — status sms_failed for admin retry`);
+      await db('referrals')
+        .where({ id: meta.referral_id })
+        .whereIn('status', ['pending', 'contacted'])
+        .update({ status: 'sms_failed', updated_at: new Date() });
+      logger.info(`[deferred-replay] legacy referral invite ${meta.referral_id} terminally blocked — pre-conversion status flipped to sms_failed for admin retry`);
     },
   },
 
   referrals_v2_invite_deferred: {
-    // v2 invites track promoter cooldowns only (no referrals row) — nothing
-    // to unwind on terminal block.
+    async onTerminal(meta) {
+      // The invite never delivered — remove the cooldown reservation the
+      // route wrote at enqueue, or a retry to the same phone reads as
+      // deduped for 24 hours while the recipient was never contacted.
+      // (last_share_at is left alone: other shares may own it, and it is
+      // cosmetic history rather than a send gate.)
+      if (!meta.promoter_id || !meta.invite_phone) return;
+      await db('referral_invites')
+        .where({ promoter_id: meta.promoter_id, phone: meta.invite_phone })
+        .del()
+        .catch(() => { /* table may not exist yet — mirrors the route */ });
+      logger.info(`[deferred-replay] v2 invite for promoter ${meta.promoter_id} terminally blocked — cooldown reservation released`);
+    },
   },
 
   project_report_hold_release_deferred: {

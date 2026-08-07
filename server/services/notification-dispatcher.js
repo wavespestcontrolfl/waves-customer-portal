@@ -50,6 +50,23 @@ function inCustomerQuietHours(prefs, at = new Date()) {
     : (currentTime >= start || currentTime < end);
 }
 
+// The next instant the customer's OWN quiet window ends (ET wall-clock,
+// DST-safe via the iterate-and-re-read shape nextSendWindowOpenET uses).
+function nextCustomerQuietHoursEndET(prefs, at = new Date()) {
+  const end = String(prefs?.quiet_hours_end || '').substring(0, 5);
+  const [eh, em] = end.split(':').map(Number);
+  if (!Number.isFinite(eh) || !Number.isFinite(em)) return new Date(at.getTime() + 15 * 60 * 1000);
+  let target = new Date(at.getTime());
+  for (let i = 0; i < 3; i++) {
+    const p = etParts(target);
+    let deltaMinutes = (eh - p.hour) * 60 + (em - p.minute);
+    if (deltaMinutes <= 0 && i === 0) deltaMinutes += 24 * 60;
+    if (deltaMinutes === 0 && p.second === 0) break;
+    target = new Date(target.getTime() + deltaMinutes * 60 * 1000 - p.second * 1000);
+  }
+  return target;
+}
+
 // Replay-time preference recheck for a quiet-hours-deferred notification
 // (deferred-replay registry): the queued row replays through the generic
 // executor, which knows nothing about the dispatcher's per-type toggles,
@@ -70,10 +87,16 @@ async function deferredNotificationStillWanted(notificationType, customerId) {
       return { eligible: false, reason: `channel_${channel}` };
     }
     if (inCustomerQuietHours(prefs)) {
-      // Still wanted, just not YET — retryable so the executor holds the
-      // row (bounded) instead of permanently blocking a notification the
-      // customer's own quiet window merely postpones.
-      return { eligible: false, reason: 'customer_quiet_hours', retryable: true };
+      // Still wanted, just not YET — retryable with the customer's actual
+      // quiet-hours END as the retry time, so the executor reschedules
+      // straight to it (and refunds the attempt) instead of burning the
+      // bounded 15-minute ladder against a window that ends at e.g. 09:00.
+      return {
+        eligible: false,
+        reason: 'customer_quiet_hours',
+        retryable: true,
+        retryAt: nextCustomerQuietHoursEndET(prefs),
+      };
     }
     return { eligible: true };
   } catch (err) {
