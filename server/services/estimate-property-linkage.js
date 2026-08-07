@@ -362,7 +362,9 @@ function estimateQuotesCustomerAddress(estimateAddressRaw, customerRow = {}) {
     ? normalizedStampedStreet(customerRow.address_line1, customerRow.address_line2)
     : streetKey(customerRow.address_line1);
   if (!estimateKey || !customerKey || estimateKey !== customerKey) return false;
-  const norm = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  // Punctuation-folded like the property tuple key (codex #3248 r5):
+  // "St. Petersburg" == "St Petersburg".
+  const norm = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
   if (parts.city && customerRow.city && norm(parts.city) !== norm(customerRow.city)) return false;
   const { normalizeZip } = require('./customer-properties');
   const estimateZip = normalizeZip(parts.zip);
