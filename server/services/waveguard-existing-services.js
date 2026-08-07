@@ -362,6 +362,11 @@ function ownershipKeysForRow(row = {}) {
   const catalogText = [row.service_key, row.service_name]
     .filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
   if (catalogText) {
+    // A RECOGNIZED non-owning catalog product is an authoritative exclusion,
+    // not a fall-through (pre-push P1): a termite_bond_* row with a stale
+    // 'Termite Bait Monitoring' service_type must stay unowned — falling
+    // back to that stale text would resurrect the bond/bait conflation.
+    if (/\btermite\b/i.test(catalogText) && /\bbond\b/i.test(catalogText)) return [];
     const catalogKeys = ownershipFamiliesFromText(catalogText);
     if (catalogKeys.length) return catalogKeys;
   }

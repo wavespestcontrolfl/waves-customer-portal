@@ -463,3 +463,17 @@ describe('commercial ownership and termite bond distinction', () => {
     expect(result.options.some(o => o.serviceKey === 'termite')).toBe(true);
   });
 });
+
+// Pre-push P1 on the r3 batch: a recognized non-owning catalog product is an
+// authoritative exclusion, never a fall-through to stale service_type text.
+describe('bond catalog identity under stale bait service_type', () => {
+  const { ownershipKeysForRow } = require('../services/waveguard-existing-services');
+
+  test('termite bond catalog stays unowned despite a stale bait-monitoring service_type', () => {
+    expect(ownershipKeysForRow({
+      service_type: 'Termite Bait Monitoring',
+      service_key: 'termite_bond_1yr',
+      service_name: 'Termite Bond (1 Year)',
+    })).toEqual([]);
+  });
+});
