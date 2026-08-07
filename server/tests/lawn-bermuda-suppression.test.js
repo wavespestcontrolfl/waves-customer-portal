@@ -134,6 +134,25 @@ describe('priceLawnCare bermudaSuppression adder', () => {
   });
 });
 
+describe('admin pricing-config validation of the suppression knobs', () => {
+  const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+  const ok = (data) => validatePricingConfigData('lawn_pricing_v2', data, null);
+
+  test('accepts valid knobs and rows without the key', () => {
+    expect(ok({ bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2 } }).ok).toBe(true);
+    expect(ok({ programMinimumMonthly: 0 }).ok).toBe(true);
+  });
+
+  test('rejects numeric strings, missing keys, sub-cent, out-of-bound, and would-be-zero knobs', () => {
+    expect(ok({ bermudaSuppression: { perAppBase: '15', perAppPer1000Sqft: 2 } }).ok).toBe(false);
+    expect(ok({ bermudaSuppression: { perAppBase: 15 } }).ok).toBe(false);
+    expect(ok({ bermudaSuppression: { perAppBase: 15.001, perAppPer1000Sqft: 2 } }).ok).toBe(false);
+    expect(ok({ bermudaSuppression: { perAppBase: 5000, perAppPer1000Sqft: 2 } }).ok).toBe(false);
+    expect(ok({ bermudaSuppression: { perAppBase: 0, perAppPer1000Sqft: 0 } }).ok).toBe(false);
+    expect(ok({ bermudaSuppression: [] }).ok).toBe(false);
+  });
+});
+
 describe('save-replay failClosed propagation', () => {
   const { resolveServerAuthoritativePricing } = require('../services/admin-estimate-persistence');
   const clientPreview = { annualTotal: 500 };

@@ -309,6 +309,34 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     if (!Number.isInteger(quarters) || quarters < 1 || quarters > 120) {
       return fail('termite_rental.recovery_quarters must be a whole number of quarters between 1 and 120');
     }
+  } else if (configKey === 'lawn_pricing_v2' && data?.bermudaSuppression !== undefined) {
+    // DB-editable per-application adder knobs for the bermuda-suppression
+    // add-on. Strict numbers only (no numeric strings), both keys required,
+    // whole cents, bounded — an admin typo must not massively overprice a
+    // lawn ladder, and a would-be-zero adder is rejected here because the
+    // engine fails a SELECTED add-on closed rather than pricing $0 (remove
+    // the key entirely to fall back to the in-code defaults instead).
+    const bs = data.bermudaSuppression;
+    if (!bs || typeof bs !== 'object' || Array.isArray(bs)) {
+      return fail('lawn_pricing_v2.bermudaSuppression must be an object with perAppBase and perAppPer1000Sqft');
+    }
+    const base = num(bs.perAppBase);
+    const per1000 = num(bs.perAppPer1000Sqft);
+    if (!Number.isFinite(base) || base < 0 || base > 200) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppBase must be a dollar amount between 0 and 200');
+    }
+    if (!Number.isFinite(per1000) || per1000 < 0 || per1000 > 50) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppPer1000Sqft must be a dollar amount between 0 and 50 (per 1,000 sqft per application)');
+    }
+    if (Math.abs(base * 100 - Math.round(base * 100)) > 1e-6) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppBase must not have sub-cent precision');
+    }
+    if (Math.abs(per1000 * 100 - Math.round(per1000 * 100)) > 1e-6) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppPer1000Sqft must not have sub-cent precision');
+    }
+    if (!(base + per1000 > 0)) {
+      return fail('lawn_pricing_v2.bermudaSuppression must produce a positive adder — remove the key to disable the add-on instead of zeroing it');
+    }
   } else if (configKey === 'pest_base') {
     // Validate every field the sync consumes — not just base. A row like
     // { base: 117, floor: -1 } would otherwise persist, then
