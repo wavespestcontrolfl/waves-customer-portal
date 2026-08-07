@@ -98,8 +98,15 @@ function isValidPart(p) {
   if (p.kind === 'file') {
     const f = p.file;
     if (!f || typeof f !== 'object' || Array.isArray(f)) return false;
-    // A2A file payloads are a discriminated union too: bytes (base64) or uri.
-    return typeof f.bytes === 'string' || typeof f.uri === 'string';
+    // A2A file payloads are a discriminated union too: bytes (base64) or
+    // uri — and the VALUE must conform, not just the type.
+    if (typeof f.bytes === 'string') {
+      return f.bytes.length > 0 && f.bytes.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(f.bytes);
+    }
+    if (typeof f.uri === 'string') {
+      try { new URL(f.uri); return true; } catch { return false; }
+    }
+    return false;
   }
   if (p.kind === 'data') return Boolean(p.data && typeof p.data === 'object' && !Array.isArray(p.data));
   return false;

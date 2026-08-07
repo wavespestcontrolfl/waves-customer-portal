@@ -100,7 +100,7 @@ describe('message/send', () => {
   });
 
   test('well-formed file and data parts are accepted', async () => {
-    for (const part of [{ kind: 'file', file: { uri: 'https://example.com/photo.jpg' } }, { kind: 'data', data: { any: 'thing' } }]) {
+    for (const part of [{ kind: 'file', file: { uri: 'https://example.com/photo.jpg' } }, { kind: 'file', file: { bytes: 'aGVsbG8=' } }, { kind: 'data', data: { any: 'thing' } }]) {
       const { body } = await rpc({ jsonrpc: '2.0', id: 1, method: 'message/send', params: { message: { kind: 'message', messageId: 'client-msg-5', role: 'user', parts: [part] } } });
       expect(body.result.kind).toBe('message');
     }
@@ -115,6 +115,9 @@ describe('message/send', () => {
       { message: { ...valid, parts: [{ kind: 'text' }] } },
       { message: { ...valid, parts: [{ kind: 'file', file: {} }] } },
       { message: { ...valid, parts: [{ kind: 'file', file: { bytes: 42 } }] } },
+      { message: { ...valid, parts: [{ kind: 'file', file: { bytes: 'not base64!' } }] } },
+      { message: { ...valid, parts: [{ kind: 'file', file: { bytes: '' } }] } },
+      { message: { ...valid, parts: [{ kind: 'file', file: { uri: 'not a uri' } }] } },
       { message: { ...valid, role: 'bogus' } },
       { message: { ...valid, messageId: undefined } },
       { message: { ...valid, messageId: '' } },
