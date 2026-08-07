@@ -13,7 +13,7 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 ## Post-push
 - [ ] `git ls-remote origin <branch>` shows my SHA
 - [ ] Re-checked remote tip ~2 min later (external Codex hijack watch)
-- [ ] **(portal only)** `scripts/verify-pr-checks.sh` passed — PR head == my SHA, NOT CONFLICTING, and the `tests` workflow triggered a NEW run for this head (a CONFLICTING PR's workflow silently never fires; a stale green from the old head, or a run left over from a previous push of the same SHA, is not CI). Astro repo: no script — check mergeable + the Pages build by hand.
+- [ ] **(portal only)** `scripts/verify-pr-checks.sh` passed — PR head == my SHA, NOT CONFLICTING, and a `tests` pull_request run exists for this head (a CONFLICTING PR's workflow silently never fires, and a stale green from the OLD head is not CI). Read the "run attribution" line it prints: `exact` only when `VERIFY_PR_PUSH_AFTER` was set before the push; otherwise it is inferred, which cannot distinguish a leftover run from a same-SHA re-push. **After any force-push or recovery push, export that timestamp before pushing.** Astro repo: no script — check mergeable + the Pages build by hand.
 - [ ] `@codex` (fresh PR) or `@codex review` (subsequent push) posted and not bounced
 
 ## Codex clean gate (all four, on the FINAL commit)

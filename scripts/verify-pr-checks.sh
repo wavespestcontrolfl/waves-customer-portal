@@ -97,14 +97,10 @@ if [ "$MERGEABLE" = "UNKNOWN" ]; then
     "If it stays UNKNOWN, check the PR on GitHub directly before trusting any CI state."
 fi
 
-# 4. The tests workflow actually triggered a run for this head SHA — and one
-#    created BY THIS PUSH. Re-pushing the same SHA (the documented hijack
-#    recovery) leaves the previous run visible, so "a run exists for this SHA"
-#    would pass instantly even when the new push triggered nothing.
-#    Baseline: the run IDs already present before we start polling. A run that
-#    appears afterwards is provably new. Set VERIFY_PR_PUSH_AFTER to an ISO8601
-#    timestamp taken immediately BEFORE the push to use createdAt instead —
-#    needed when GitHub creates the run before this script starts.
+# 4. The tests workflow actually triggered a run for this head SHA, attributable
+#    to this push. Re-pushing the same SHA (the documented hijack recovery)
+#    leaves the previous run visible, so "a run exists for this SHA" could pass
+#    even when the new push triggered nothing.
 #    Whether an existing run counts depends on how this SHA reached the tip:
 #      fresh head  — the SHA was never the branch tip before, so ANY run for it
 #                    can only have been created by this push. Accept it.
@@ -129,7 +125,7 @@ fi
 if [ "$PUSH_KIND" = "re-push" ] && [ -z "$PUSH_AFTER" ]; then
   fail "head $LOCAL_SHA was the tip of '$BRANCH' before this push (force-push / recovery) — an existing CI run may predate it and would prove nothing." \
     "Re-run with the timestamp captured immediately BEFORE the push so runs can be told apart:" \
-    "  VERIFY_PR_PUSH_AFTER=\$(date -u +%Y-%m-%dT%H:%M:%SZ)   # BEFORE git push" \
+    "  export VERIFY_PR_PUSH_AFTER=\$(date -u +%Y-%m-%dT%H:%M:%SZ)   # BEFORE git push" \
     "(A normal push of a new commit does not need this — only same-SHA re-pushes do.)"
 fi
 
@@ -153,11 +149,15 @@ while [ "$try" -lt "$WORKFLOW_TRIES" ]; do
   RUNS_JSON="$(gh run list --repo "$REPO_SLUG" --workflow "$WORKFLOW_FILE" \
     --commit "$LOCAL_SHA" --json "$RUN_FIELDS" 2>/dev/null)" \
     || fail "gh run list failed — check gh auth."
+  # Only runs for THIS head, triggered by the PR itself. --commit already
+  # filters by SHA; headSha/event guard against a run attached to another ref.
+  MINE_JSON="$(printf '%s' "$RUNS_JSON" \
+    | jq -r --arg sha "$LOCAL_SHA" '[.[] | select(.headSha == $sha and .event == "pull_request")]')"
   if [ -n "$PUSH_AFTER" ]; then
-    NEW_JSON="$(printf '%s' "$RUNS_JSON" \
+    NEW_JSON="$(printf '%s' "$MINE_JSON" \
       | jq -r --arg after "$PUSH_AFTER" '[.[] | select(.createdAt >= $after)]')"
   else
-    NEW_JSON="$RUNS_JSON"
+    NEW_JSON="$MINE_JSON"
   fi
   [ "$(printf '%s' "$NEW_JSON" | jq -r 'length')" -gt 0 ] && break
   try=$((try + 1))
