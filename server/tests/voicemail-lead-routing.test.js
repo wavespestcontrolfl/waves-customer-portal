@@ -160,13 +160,15 @@ describe('findReusableCallLead identity keys', () => {
   });
 
   test('no phone: matches by lowercased trimmed email, unclaimed leads only', async () => {
-    const db = makeDb({ id: 'lead-2' });
+    const db = makeDb({ id: 'lead-2', first_name: 'Jeff', last_name: 'Brooks' });
     const found = await findReusableCallLead(db, {
       phone: null,
       email: '  JBrooks00005@Example.com ',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
       workableUnnamedLead: true,
     });
-    expect(found).toEqual({ id: 'lead-2' });
+    expect(found).toEqual({ id: 'lead-2', first_name: 'Jeff', last_name: 'Brooks' });
     const raw = db.calls.find(([m]) => m === 'whereRaw');
     expect(raw[1][1]).toEqual(['jbrooks00005@example.com']);
     expect(db.calls.some(([m, a]) => m === 'where' && a[0] === 'phone')).toBe(false);
@@ -203,7 +205,7 @@ describe('findReusableCallLead identity keys', () => {
     expect(found).toBeNull();
   });
 
-  test('email match with a compatible or missing name is still reusable', async () => {
+  test('email match with a POSITIVELY corroborated first name is reusable (case-insensitive)', async () => {
     const sameName = makeDb({ id: 'lead-5', first_name: 'Jeff', last_name: 'Brooks' });
     expect(await findReusableCallLead(sameName, {
       phone: null,
@@ -213,6 +215,21 @@ describe('findReusableCallLead identity keys', () => {
       workableUnnamedLead: true,
     })).toEqual({ id: 'lead-5', first_name: 'Jeff', last_name: 'Brooks' });
 
+    // A missing last name on either side does not block a first-name match.
+    const noLastName = makeDb({ id: 'lead-5b', first_name: 'Jeff', last_name: null });
+    expect(await findReusableCallLead(noLastName, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
+      workableUnnamedLead: true,
+    })).toEqual({ id: 'lead-5b', first_name: 'Jeff', last_name: null });
+  });
+
+  test('email match WITHOUT positive name corroboration forces a fresh lead — missing names never merge', async () => {
+    // Shared inbox: a name-less candidate (or a name-less caller) could be a
+    // DIFFERENT prospect — reusing would overwrite the first prospect's
+    // extraction and swallow the second's new-lead surfacing.
     const namelessCandidate = makeDb({ id: 'lead-6', first_name: null, last_name: null });
     expect(await findReusableCallLead(namelessCandidate, {
       phone: null,
@@ -220,7 +237,16 @@ describe('findReusableCallLead identity keys', () => {
       firstName: 'Jeff',
       lastName: 'Brooks',
       workableUnnamedLead: true,
-    })).toEqual({ id: 'lead-6', first_name: null, last_name: null });
+    })).toBeNull();
+
+    const namelessCaller = makeDb({ id: 'lead-6b', first_name: 'Jeff', last_name: 'Brooks' });
+    expect(await findReusableCallLead(namelessCaller, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: null,
+      lastName: null,
+      workableUnnamedLead: true,
+    })).toBeNull();
   });
 
   test('name conflict never blocks a PHONE match — corroboration is email-path only', async () => {

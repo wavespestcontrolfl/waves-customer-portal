@@ -2222,17 +2222,21 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
     query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
   const candidate = await query.orderBy('created_at', 'desc').first();
-  // Email-matched candidates need a corroborating identity check: two
-  // different anonymous callers can share one inbox (or a transcription
-  // collision can fabricate the overlap), and reusing across them would
-  // overwrite the first prospect's extraction and swallow the second's
-  // new-lead surfacing. A stated name that CONFLICTS with the candidate's
-  // stored name forces a fresh row; a missing name on either side stays
-  // reusable (the recovery path exists for name-less callers).
+  // Email-matched candidates need POSITIVE identity corroboration, not just
+  // absence of conflict: two different anonymous callers can share one inbox
+  // (or a transcription collision can fabricate the overlap), and reusing
+  // across them overwrites the first prospect's rolling extraction and
+  // swallows the second's new-lead surfacing — a silently lost prospect.
+  // Reuse requires the stated first name and the candidate's to BOTH exist
+  // and match, with last names non-conflicting; missing name data on either
+  // side forces a fresh row instead (pre-push audit P1 r7 — the cost is a
+  // recoverable duplicate, fail-closed beats a cross-prospect merge).
   if (candidate && !phone) {
     const norm = (v) => String(v || '').trim().toLowerCase();
     const conflicts = (a, b) => !!(norm(a) && norm(b) && norm(a) !== norm(b));
-    if (conflicts(firstName, candidate.first_name) || conflicts(lastName, candidate.last_name)) {
+    const firstCorroborated = !!(norm(firstName) && norm(candidate.first_name)
+      && norm(firstName) === norm(candidate.first_name));
+    if (!firstCorroborated || conflicts(lastName, candidate.last_name)) {
       return null;
     }
   }
