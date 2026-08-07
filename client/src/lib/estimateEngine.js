@@ -406,6 +406,12 @@ const LAWN_PRICING_V2 = {
   defaultRouteDensity: 'DENSE',
   routeDensityMinutes: { DENSE: 5, NORMAL: 10, LOOSE: 15, SPARSE: 20 },
 };
+// Captured at module load, BEFORE applyServerLawnPricingConfig can mutate
+// the object: the kill-value reset below must restore the declared in-code
+// default, not a duplicated string that goes stale when the version
+// advances (pre-push audit P1 on #3274 — the reset stamped retired
+// _GRID_500 under freshly _FREQ_DISCOUNT-priced fallback estimates).
+const LAWN_PRICING_V2_DEFAULT_VERSION = LAWN_PRICING_V2.pricingVersion;
 // Live server override for the lawn program minimum. The static 0 above is
 // only the DISARMED default — a live DB re-arm (pricing_config
 // lawn_pricing_v2.programMinimumMonthly, the documented no-deploy path) must
@@ -424,7 +430,7 @@ export function applyServerLawnPricingConfig(config) {
   // wins over the baked default; absent/invalid resets the in-code default —
   // the kill-value pattern.
   const version = typeof config?.pricingVersion === 'string' ? config.pricingVersion.trim() : '';
-  LAWN_PRICING_V2.pricingVersion = version || 'LAWN_PRICING_V2_GRID_500';
+  LAWN_PRICING_V2.pricingVersion = version || LAWN_PRICING_V2_DEFAULT_VERSION;
   return LAWN_PRICING_V2.programMinimumMonthly;
 }
 

@@ -111,28 +111,45 @@ async function loadLatestUpAudit(knex) {
   return null;
 }
 
-// Returns null when no stamp happened (table or row missing), else
-// { stamped: true, prior } — the caller needs to distinguish "advanced the
+// Returns null when no stamp could happen (table or row missing), else
+// { stamped, prior } — the caller needs to distinguish "advanced the
 // version from X" from "couldn't stamp at all" to decide whether a capture
 // row is owed (codex #3274 P2). Passing version=null removes the key,
 // restoring a pre-up state that never had one.
-async function mergeConfigVersion(knex, version) {
+//
+// This row carries keys owned by other migrations and live admin saves
+// (tiers metadata, floor kill state), so it is NEVER read-modify-written
+// wholesale (pre-push audit P0: an admin save committing between the read
+// and a whole-object update would be silently overwritten). The prior token
+// is read FOR UPDATE — row-locked until the surrounding migration
+// transaction commits — and the write is a single-key jsonb_set/key-delete
+// that leaves every other key untouched even for a caller outside a
+// transaction. `expectCurrent` (down() only) folds the
+// only-if-nothing-re-advanced-it check into the UPDATE's WHERE so the
+// check-and-set is atomic; stamped: false then means the token was not ours
+// to touch.
+async function mergeConfigVersion(knex, version, expectCurrent) {
   if (!(await knex.schema.hasTable('pricing_config'))) return null;
-  const existing = await knex('pricing_config').where({ config_key: 'lawn_pricing_v2' }).first();
+  const existing = await knex('pricing_config')
+    .where({ config_key: 'lawn_pricing_v2' })
+    .forUpdate()
+    .first();
   if (!existing) return null;
   let data = {};
   try { data = typeof existing.data === 'string' ? JSON.parse(existing.data) : (existing.data || {}); }
   catch { data = {}; }
   const prior = data.pricingVersion ?? null;
-  // Read-modify-write: this row carries keys owned by other migrations and
-  // admin edits (tiers metadata, floor kill state) — merge, never replace.
-  const merged = { ...data };
-  if (version == null) delete merged.pricingVersion;
-  else merged.pricingVersion = version;
-  await knex('pricing_config')
-    .where({ config_key: 'lawn_pricing_v2' })
-    .update({ data: JSON.stringify(merged), updated_at: knex.fn.now() });
-  return { stamped: true, prior };
+  let query = knex('pricing_config').where({ config_key: 'lawn_pricing_v2' });
+  if (expectCurrent !== undefined) {
+    query = query.whereRaw(`data->>'pricingVersion' = ?`, [expectCurrent]);
+  }
+  const updated = await query.update({
+    data: version == null
+      ? knex.raw(`data - 'pricingVersion'`)
+      : knex.raw(`jsonb_set(data, '{pricingVersion}', to_jsonb(?::text), true)`, [version]),
+    updated_at: knex.fn.now(),
+  });
+  return { stamped: updated > 0, prior };
 }
 
 exports.up = async function up(knex) {
@@ -171,7 +188,7 @@ exports.up = async function up(knex) {
 
   const stamp = await mergeConfigVersion(knex, VERSION_TO);
   const priorVersion = stamp ? stamp.prior : null;
-  const versionAdvanced = Boolean(stamp) && stamp.prior !== VERSION_TO;
+  const versionAdvanced = Boolean(stamp && stamp.stamped) && stamp.prior !== VERSION_TO;
 
   // Write a capture whenever this run changed anything — cells, the version
   // token, or both. A version-only run (every cell already under its cap, e.g.
@@ -241,21 +258,14 @@ exports.down = async function down(knex) {
   // Version token unwinds to the CAPTURED prior version (an admin/migration
   // may have stamped something other than GRID_500 before up() ran — the
   // capture is authoritative, never the hardcoded VERSION_FROM; codex #3274
-  // P2); only if nothing re-advanced it since. No capture means up() was a
-  // true no-op — it neither moved cells nor advanced the version — so there
-  // is nothing to unwind and the current token is not this migration's to
-  // touch. A captured prior of null restores the pre-up "no version key"
-  // state verbatim.
-  if (snapshot && (await knex.schema.hasTable('pricing_config'))) {
-    const existing = await knex('pricing_config').where({ config_key: 'lawn_pricing_v2' }).first();
-    if (existing) {
-      let data = {};
-      try { data = typeof existing.data === 'string' ? JSON.parse(existing.data) : (existing.data || {}); }
-      catch { data = {}; }
-      if (data.pricingVersion === VERSION_TO) {
-        await mergeConfigVersion(knex, snapshot.before.pricingVersion ?? null);
-      }
-    }
+  // P2); only if nothing re-advanced it since — expectCurrent folds that
+  // check into the UPDATE itself so it is atomic. No capture means up() was
+  // a true no-op — it neither moved cells nor advanced the version — so
+  // there is nothing to unwind and the current token is not this
+  // migration's to touch. A captured prior of null restores the pre-up
+  // "no version key" state verbatim.
+  if (snapshot) {
+    await mergeConfigVersion(knex, snapshot.before.pricingVersion ?? null, VERSION_TO);
   }
 
   await auditInsert(
