@@ -353,8 +353,12 @@ class RefreshAudit {
     // while leaving the page unrunnable — fall through to the upsert, which
     // resets our own key's budget (same-key row) or seeds a claimable row (a
     // foreign-bucket key; the daily sweep parks the exhausted one for review).
+    // ANY page-editing action conflicts (r34 follow-up): a pending
+    // rewrite_title_meta edits the same Astro file a refresh would — the
+    // miner's arbitration treats the two as one conflict class
+    // (PAGE_EDITING_ACTIONS), so this producer must too.
     const inflightRefreshFor = (runner) => runner('opportunity_queue')
-      .where('action_type', 'refresh_existing_page')
+      .whereIn('action_type', miner.PAGE_EDITING_ACTIONS)
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
       .where(function () {
         this.where('status', '<>', 'pending').orWhere('attempt_count', '<', maxClaimAttempts());

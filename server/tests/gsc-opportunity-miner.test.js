@@ -1288,7 +1288,13 @@ describe('listicle_family scoring + action mapping', () => {
     expect(src).toMatch(/inflightPageKeys\.get\(routeIdentity\(o\.page_url\)\)/);
     expect(src).toMatch(/k !== o\.dedupe_key/);
     expect(src).toMatch(/lockEvenIfEmpty: sweepWillRun/);
-    expect(src).toMatch(/if \(!hasFamily && !lockEvenIfEmpty\) return opportunities;/);
+    // r34 follow-up: the lock also covers batches carrying ANY page-editing
+    // action (refresh-audit's recheck-under-lock is only sound then), and
+    // refresh-audit's in-flight check matches the miner's page-edit
+    // conflict class, not refresh alone.
+    expect(src).toMatch(/if \(!hasFamily && !hasPageEdit && !lockEvenIfEmpty\) return opportunities;/);
+    expect(src).toMatch(/const hasPageEdit = opportunities\.some\(\(o\) => GscOpportunityMiner\.PAGE_EDITING_ACTIONS\.includes\(o\.action_type\)\)/);
+    expect(auditSrc).toMatch(/\.whereIn\('action_type', miner\.PAGE_EDITING_ACTIONS\)/);
     const gateSrc = require('fs').readFileSync(require.resolve('../services/content/content-quality-gate'), 'utf8');
     expect(gateSrc).toMatch(/brief\?\.gsc_signal\?\.specialty_topic/);
     const runnerSrc = require('fs').readFileSync(require.resolve('../services/content/autonomous-runner'), 'utf8');

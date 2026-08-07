@@ -2729,8 +2729,14 @@ class GscOpportunityMiner {
     const hasFamily = opportunities.some((o) => o.bucket === 'listicle_family');
     // The lock must cover every case the SWEEP runs in — an empty family
     // batch still expires pending rows, and an unlocked expiry can race a
-    // concurrent claim (Codex r25 audit).
-    if (!hasFamily && !lockEvenIfEmpty) return opportunities;
+    // concurrent claim (Codex r25 audit). It must ALSO cover any batch
+    // carrying page-editing actions (r34 follow-up): refresh-audit's
+    // recheck-under-lock is only sound if a concurrent miner persist of
+    // ordinary refresh/rewrite rows cannot commit between that recheck
+    // and its insert — so every page-edit persist serializes here, gated
+    // or not.
+    const hasPageEdit = opportunities.some((o) => GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type));
+    if (!hasFamily && !hasPageEdit && !lockEvenIfEmpty) return opportunities;
     // Advisory transaction lock FIRST (Codex r27): FOR UPDATE only locks
     // rows that exist, so two overlapping mines could both see no row for
     // a fresh page and insert competing first refreshes. Every family
@@ -2741,7 +2747,7 @@ class GscOpportunityMiner {
       .where({ bucket: 'listicle_family' })
       .forUpdate()
       .select('dedupe_key', 'action_type', 'status', 'page_url', trx.raw("signal_metadata->'family_keys' as family_keys"));
-    if (!hasFamily) return opportunities; // lock taken for the sweep; nothing to filter
+    if (!hasFamily) return opportunities; // lock taken (sweep / non-family page edits); nothing to filter
     // One-edit-per-page under the LOCK (Codex r25 audit): a concurrent
     // mine can insert a different-subgroup refresh for the same page after
     // the pre-mine state read — with the rows now locked and re-read, a
@@ -3110,6 +3116,9 @@ module.exports._internals = {
   listicleFamilyRefreshDedupeKey,
   listicleFamilyRepReachable,
   buildListicleFamilyRefreshOpp,
+  // The page-edit conflict action set — shared with refresh-audit so every
+  // producer's in-flight check covers the same actions (r34 follow-up).
+  PAGE_EDITING_ACTIONS: GscOpportunityMiner.PAGE_EDITING_ACTIONS,
   canonicalizeServiceCategory,
   answerGapStem,
   stemmedTokenSet,
