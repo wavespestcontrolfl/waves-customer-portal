@@ -1676,24 +1676,39 @@ async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
   if (!source || source.missing_since) {
     return { blocked: true, missing: !source };
   }
+  // The claimed-until value doubles as the ownership token: acquisition is
+  // serialized under the advisory lock, so exactly one publisher can win a
+  // given claim window — and the finally-clear below releases ONLY a claim
+  // this invocation owns, never a successor's.
+  const claimUntil = new Date(Date.now() + PUBLISH_CLAIM_MS).toISOString();
   const decision = await runExclusive(`gbp-review-sync:${source.location_id}`, async () => {
     const claimed = await db('google_reviews')
       .where({ id: sourceReviewId })
       .whereNull('missing_since')
-      .update({ publish_claimed_until: new Date(Date.now() + PUBLISH_CLAIM_MS).toISOString() });
-    return { blocked: (Array.isArray(claimed) ? claimed.length : claimed) === 0 };
+      // Acquire only when unclaimed or expired — a live claim means another
+      // publish of this review is in flight, and accepting anyway would
+      // double-publish and let the first finisher erase the second's claim.
+      .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
+      .update({ publish_claimed_until: claimUntil });
+    return { claimed: (Array.isArray(claimed) ? claimed.length : claimed) > 0 };
   }, { recordHealth: false });
   if (decision?.skipped) {
     return { blocked: true, lockBusy: true };
   }
-  if (decision.blocked) {
-    return { blocked: true, missing: false };
+  if (!decision.claimed) {
+    // Zero rows: stamped/deleted, or another publisher holds a live claim.
+    const fresh = await db('google_reviews').where({ id: sourceReviewId }).first();
+    if (fresh && !fresh.missing_since) {
+      return { blocked: true, lockBusy: true };
+    }
+    return { blocked: true, missing: !fresh };
   }
   try {
     return { blocked: false, result: await publishFn() };
   } finally {
     await db('google_reviews')
       .where({ id: sourceReviewId })
+      .where('publish_claimed_until', claimUntil)
       .update({ publish_claimed_until: null })
       .catch(() => null);
   }

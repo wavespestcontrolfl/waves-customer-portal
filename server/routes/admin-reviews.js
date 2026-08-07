@@ -126,7 +126,12 @@ router.get('/', async (req, res, next) => {
         'customers.first_name as cust_first', 'customers.last_name as cust_last',
         'customers.waveguard_tier as cust_tier'
       )
-      .orderBy('google_reviews.review_created_at', 'desc');
+      .orderBy('google_reviews.review_created_at', 'desc')
+      // Deterministic tie-breaker for offset pagination: rows sharing a
+      // review_created_at (or null legacy timestamps) otherwise have
+      // undefined relative order, and a row that swaps pages between
+      // requests is silently skipped by Load More.
+      .orderBy('google_reviews.id', 'desc');
 
     if (location && location !== 'all') query = query.where('google_reviews.location_id', location);
     if (rating) query = query.where('google_reviews.star_rating', parseInt(rating));
