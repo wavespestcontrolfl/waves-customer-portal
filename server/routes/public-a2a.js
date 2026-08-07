@@ -86,14 +86,27 @@ function isValidRpcId(id) {
   return typeof id === 'string' || (typeof id === 'number' && Number.isInteger(id));
 }
 
-// Minimal MessageSendParams validation: params.message must be an object
-// with a string role and a non-empty parts array. Malformed input gets
-// -32602 so conformance checks can tell a rejected request from an
-// accepted one.
+// MessageSendParams validation: params.message must be a conforming A2A
+// Message — kind "message", non-empty string messageId, role from the spec
+// enum, and ≥1 discriminated Part each carrying its required payload.
+// Malformed input gets -32602 so conformance checks can tell a rejected
+// request from an accepted one.
+const VALID_ROLES = new Set(['user', 'agent']);
+function isValidPart(p) {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
+  if (p.kind === 'text') return typeof p.text === 'string';
+  if (p.kind === 'file') return Boolean(p.file && typeof p.file === 'object' && !Array.isArray(p.file));
+  if (p.kind === 'data') return Boolean(p.data && typeof p.data === 'object' && !Array.isArray(p.data));
+  return false;
+}
 function isValidMessageSendParams(params) {
   const m = params && typeof params === 'object' ? params.message : null;
   return Boolean(m && typeof m === 'object' && !Array.isArray(m)
-    && typeof m.role === 'string' && Array.isArray(m.parts) && m.parts.length > 0);
+    && m.kind === 'message'
+    && typeof m.messageId === 'string' && m.messageId.length > 0
+    && typeof m.role === 'string' && VALID_ROLES.has(m.role)
+    && Array.isArray(m.parts) && m.parts.length > 0
+    && m.parts.every(isValidPart));
 }
 
 function handleA2aRpc(message) {

@@ -289,6 +289,24 @@ app.use('/api/public/secure-card', (req, res, next) => {
   res.set('X-Robots-Tag', 'noindex');
   next();
 });
+// The public agent surfaces (MCP + A2A) carry the same unobservable-when-
+// dark contract as the funnels above: while their gates are off they must
+// read 404 even for an IP that already exhausted the global /api/ limiter
+// (a 429 would reveal the route exists). The full guard chains (gate +
+// per-surface limiter + capped parse) still run at their pre-parser mounts
+// further down.
+app.use('/api/public/mcp', (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('mcpPublic')) {
+    return res.status(404).json({ error: 'not found' });
+  }
+  next();
+});
+app.use('/api/public/a2a', (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('a2aPublic')) {
+    return res.status(404).json({ error: 'not found' });
+  }
+  next();
+});
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints
