@@ -7562,6 +7562,12 @@ const CallRecordingProcessor = {
           let raceRecovered = false;
           for (;;) {
             leadUpdates = {};
+            // A retry can RECOVER a callback number and still reuse the
+            // phone-less lead via sid/stamp identity — without this fill the
+            // lead stayed unreachable by phone forever and later calls
+            // could not reuse it by number (codex P1 r15b). Fill-if-empty
+            // like the other identity fields; an existing phone never moves.
+            if (phone && isEmpty(current?.phone)) leadUpdates.phone = phone;
             if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = capitalizeName(extracted.first_name);
             if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = capitalizeName(extracted.last_name);
             if (extracted.email && isEmpty(current?.email)) leadUpdates.email = extracted.email;
@@ -8267,7 +8273,10 @@ const CallRecordingProcessor = {
         // otherwise finalize with unsettled linkage (audit P1 r21).
         if (leadErr.abortProcessing) throw leadErr;
         if (phoneLessLinkagePending) {
-          const unsettled = new Error(`phone-less call exited with unsettled lead linkage: ${leadErr.message}`);
+          // Sanitized cause only — enrichment DB errors can echo the failing
+          // row's name/email/address, and the outer catch logs this message
+          // with its stack (codex P1 r15b).
+          const unsettled = new Error(`call exited with unsettled lead linkage: ${leadErr.code || leadErr.name || 'error'}`);
           unsettled.abortProcessing = true;
           throw unsettled;
         }
