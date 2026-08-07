@@ -349,6 +349,74 @@ describe('applyAcceptToLedger', () => {
   });
 });
 
+describe('local codex P0 regressions (r8 push audit)', () => {
+  test('a fully comped re-quote emits ZERO slices so seeded components are deleted', async () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control', mo: 40, manualFinalAnnual: 0 },
+              { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', mo: 50, manualFinalAnnual: 0 },
+            ],
+          },
+        },
+      },
+      monthlyRate: 0,
+    });
+    expect(slices).toEqual({ pest_control: 0, lawn_care: 0 });
+    const db = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 40 },
+      { customer_id: 'cust-1', family_key: 'lawn_care', monthly_rate: 50 },
+    ]);
+    const out = await applyAcceptToLedger(db, {
+      customerId: 'cust-1', estimateId: 'est-1', slices, previousScalar: 90, addOnBase: 0,
+    });
+    expect(out.scalar).toBe(0);
+    expect(db.store).toHaveLength(0);
+  });
+
+  test('an unclassifiable slice without proven add-on evidence wipes ambiguous components (fail closed)', async () => {
+    const db = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 40 },
+      { customer_id: 'cust-1', family_key: 'lawn_care', monthly_rate: 50 },
+    ]);
+    const out = await applyAcceptToLedger(db, {
+      customerId: 'cust-1',
+      estimateId: 'est-1',
+      slices: { [UNATTRIBUTED]: 60 },
+      previousScalar: 90,
+      addOnBase: 0,
+    });
+    expect(out.scalar).toBe(60); // legacy replace — never 150
+    expect(out.reviewNeeded).toBe(true);
+    expect(db.store.map((r) => r.family_key)).toEqual([UNATTRIBUTED]);
+  });
+});
+
+describe('seedLedgerComponents (codex r7/r8)', () => {
+  test('replaces existing rows with the provided per-family components', async () => {
+    const { seedLedgerComponents } = require('../services/plan-rate-ledger');
+    const db = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: UNATTRIBUTED, monthly_rate: 90 },
+    ]);
+    db.transaction = async (fn) => fn(db);
+    await seedLedgerComponents(db, 'cust-1', { pest_control: 45, mosquito: 30 }, { source: 'plan_sync' });
+    expect(db.store.map((r) => [r.family_key, r.monthly_rate]).sort())
+      .toEqual([['mosquito', 30], ['pest_control', 45]]);
+  });
+
+  test('authoritative failures throw; advisory failures warn', async () => {
+    const { seedLedgerComponents } = require('../services/plan-rate-ledger');
+    const db = makeLedgerDb([]);
+    db.transaction = async () => { throw new Error('seed boom'); };
+    await expect(seedLedgerComponents(db, 'cust-1', { pest_control: 45 })).resolves.toBeUndefined();
+    featureGates.isEnabled.mockReturnValue(true);
+    await expect(seedLedgerComponents(db, 'cust-1', { pest_control: 45 })).rejects.toThrow('seed boom');
+    featureGates.isEnabled.mockReturnValue(false);
+  });
+});
+
 describe('codex r7 hardening', () => {
   test('a parked unattributed blob MERGES with an accepted unattributed slice on a proven add-on', async () => {
     const db = makeLedgerDb([

@@ -768,10 +768,20 @@ function buildCustomerWaveGuardAlignmentUpdates(customer, detectedPlanKeys, cust
     // writer KNOWS each detected plan's rate — a rate minted without
     // components would hand the customer's first re-quote the
     // empty-ledger whole-scalar replace after the ledger gate flips.
+    // Keys aggregate under the CANONICAL adoption family (codex r8):
+    // representativePlanKeys returns cadence-specific keys
+    // (pest_control_quarterly, termite_bait_active_annual) which the
+    // accept path would never match — a later re-quote would insert a
+    // second component beside the plan-sync one instead of replacing it.
+    // Lazy require: estimate-public and this module already share
+    // function-scope requires to avoid load cycles.
+    const { serviceFamilyKeyForAdoption } = require('../routes/estimate-public');
     planRateComponents = {};
     for (const key of representativePlanKeys(detectedPlanKeys)) {
       const rate = Number(SELF_BOOKING_RECURRING_PLANS[key]?.monthlyRate || 0);
-      if (rate > 0) planRateComponents[key] = (planRateComponents[key] || 0) + rate;
+      if (!(rate > 0)) continue;
+      const family = serviceFamilyKeyForAdoption({ service: key }) || key;
+      planRateComponents[family] = (planRateComponents[family] || 0) + rate;
     }
   }
 

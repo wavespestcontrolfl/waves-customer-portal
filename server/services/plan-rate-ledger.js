@@ -78,7 +78,6 @@ async function ledgerTableExists(database) {
 // sum never silently drops a line.
 function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
   const billedMonthly = roundMoney(monthlyRate);
-  if (!(billedMonthly > 0)) return {};
   // Lazy requires — estimate-public/estimate-converter require this module
   // (or each other) inline only; function-scope requires cannot cycle.
   const { serviceFamilyKeyForAdoption } = require('../routes/estimate-public');
@@ -156,6 +155,18 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
     }
     return slices;
   };
+  // A ZERO billed monthly is a real accepted outcome, not an absence
+  // (local codex P0 on #3245): a fully comped re-quote must emit ZERO
+  // slices for every classifiable family it carries — priced or comped —
+  // so applyAcceptToLedger deletes their components instead of leaving
+  // them to be summed back into a later bill.
+  if (!(billedMonthly > 0)) {
+    const zeroed = {};
+    for (const family of [...families, ...zeroFamilies]) {
+      if (family !== UNATTRIBUTED) zeroed[family] = 0;
+    }
+    return zeroed;
+  }
   if (!families.length) return withZeroFamilies({ [UNATTRIBUTED]: billedMonthly });
   const rawTotal = families.reduce((sum, f) => sum + raw[f], 0);
   if (!(rawTotal > 0)) return withZeroFamilies({ [UNATTRIBUTED]: billedMonthly });
@@ -260,6 +271,20 @@ async function applyAcceptToLedger(database, {
   const components = new Map(existing.map((row) => [row.family_key, roundMoney(row.monthly_rate)]));
   const prior = roundMoney(previousScalar);
   let reviewNeeded = false;
+  // An accept whose OWN slices contain unattributed money is ambiguous
+  // when classification could not prove a disjoint add-on (local codex P0
+  // on #3245): the unclassifiable portion may BE a re-price of any
+  // existing component, so stacking it on top of them ($40 Pest + $50 Lawn
+  // + unclassifiable $60 = $150) overstates the bill. Fail closed to the
+  // legacy replace semantics — wipe the existing components, apply this
+  // accept's slices alone, and flag review.
+  const incomingUnattributed = sliceFamilies.includes(UNATTRIBUTED)
+    && roundMoney(slices[UNATTRIBUTED]) > 0;
+  if (incomingUnattributed && !(addOnBase > 0) && components.size > 0) {
+    components.clear();
+    await database('customer_plan_rates').where({ customer_id: customerId }).del();
+    reviewNeeded = true;
+  }
   // An 'unattributed' component is a QUARANTINED blob, not a seeded ledger
   // (codex #3245 r1): it may CONTAIN the very family this accept re-prices
   // (backfill-parked multi-plan customers, admin resets). It is only safe
@@ -290,8 +315,10 @@ async function applyAcceptToLedger(database, {
         customerId, familyKey: UNATTRIBUTED, monthlyRate: prior, estimateId: null, source: 'legacy_scalar',
       });
     } else if (prior > 0) {
-      // Case 3 — un-splittable legacy scalar being replaced.
-      reviewNeeded = hadOtherLiveFamilies === true;
+      // Case 3 — un-splittable legacy scalar being replaced. OR-accumulate:
+      // an earlier fail-closed wipe already demands review regardless of
+      // the live-family evidence.
+      reviewNeeded = reviewNeeded || hadOtherLiveFamilies === true;
     }
   }
   for (const family of positiveFamilies) {

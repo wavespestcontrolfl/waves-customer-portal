@@ -2096,6 +2096,7 @@ const EstimateConverter = {
     // ledger only dual-writes advisorily. Savepoint-confined + fail-soft:
     // a ledger defect must never block an acceptance.
     let ledgerScalar = null;
+    let ledgerAdvisoryScalar = null;
     let planRateReviewNeeded = false;
     if (!suppressRecurringConversion) {
       try {
@@ -2114,8 +2115,14 @@ const EstimateConverter = {
           hadOtherLiveFamilies: addOnContext.hadOtherLiveFamilies,
           customerIsLive: ['active_customer', 'won', 'at_risk'].includes(effectiveCustomer.pipeline_stage),
         }));
-        if (PlanRateLedger.planRateLedgerEnabled() && ledgerOutcome && Number(ledgerOutcome.scalar) > 0) {
-          ledgerScalar = Math.round(Number(ledgerOutcome.scalar) * 100) / 100;
+        // ZERO is a legitimate authoritative scalar (codex #3245 r8): a
+        // fully comped recurring accept deletes every component and must
+        // write 0, not fall back to a legacy figure over live components.
+        if (ledgerOutcome && Number.isFinite(Number(ledgerOutcome.scalar))) {
+          ledgerAdvisoryScalar = Math.round(Number(ledgerOutcome.scalar) * 100) / 100;
+        }
+        if (PlanRateLedger.planRateLedgerEnabled() && ledgerAdvisoryScalar != null && ledgerAdvisoryScalar >= 0) {
+          ledgerScalar = ledgerAdvisoryScalar;
           planRateReviewNeeded = ledgerOutcome.reviewNeeded === true;
         }
       } catch (ledgerErr) {
@@ -2284,6 +2291,32 @@ const EstimateConverter = {
       if (Number.isFinite(returnedRate) && returnedRate > 0) {
         convertedMonthlyRate = Math.round(returnedRate * 100) / 100;
       }
+    }
+    // Kill-switch consistency (codex #3245 r8): a GATE-OFF accept whose
+    // dual-written component sum diverges from the committed legacy scalar
+    // (a seeded multi-plan re-quote under legacy replace semantics) must
+    // reset the ledger to match — otherwise re-enabling the gate jumps the
+    // next bill to the divergent component sum. Attribution collapses to a
+    // single unattributed component equal to the billed figure; fail-soft
+    // (advisory mode by definition).
+    if (ledgerScalar == null && !suppressRecurringConversion
+      && ledgerAdvisoryScalar != null
+      && Math.round(ledgerAdvisoryScalar * 100) !== Math.round(convertedMonthlyRate * 100)) {
+      try {
+        const PlanRateLedger = require('./plan-rate-ledger');
+        await database.transaction((sp) => PlanRateLedger
+          .resetLedgerToScalar(sp, customerId, convertedMonthlyRate, { source: 'gate_off_divergence' }));
+      } catch (divergenceErr) {
+        logger.warn(`[estimate-converter] gate-off ledger divergence reset failed for customer ${customerId}: ${divergenceErr.message}`);
+      }
+    }
+    // A one-time accept CLEARS the scalar (waveguard_tier 'One-Time',
+    // monthly_rate null) — the attribution clears with it (codex #3245 r8),
+    // or a later recurring accept would sum obsolete components back in.
+    // Gate-aware error policy lives in the helper.
+    if (suppressRecurringConversion) {
+      await require('./plan-rate-ledger')
+        .syncScalarWriteToLedger(database, customerId, null, { source: 'one_time_accept' });
     }
 
     // 1b. Persist grass type captured during the estimate so lawn reports use
