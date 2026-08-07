@@ -6,20 +6,20 @@
  * Lives here, not in either router, so neither has to require the other:
  * one definition, two consumers, no drift between the link and the file.
  */
-const { parseETDateTime } = require('../utils/datetime-et');
+const { parseETDateTime, etCalendarDayOf } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
 // Statuses whose date/window still describe a real, future visit.
 const UPCOMING_STATUSES = new Set(['pending', 'confirmed']);
 
-// scheduled_date is a pg DATE: knex hands back a UTC-midnight Date, so slice
-// the ISO day rather than converting through a timezone (which would render
-// the preceding Eastern day).
+// Date normalization is NOT re-implemented here: utils/datetime-et's
+// etCalendarDayOf is the canonical helper for telling a pg DATE (string or
+// UTC-midnight Date, read literally) from a real timestamp (converted through
+// the ET wall clock). A local slice would mis-handle a non-midnight timestamp
+// (codex #3249 r4 P1).
 function apptDateStr(scheduledDate) {
   if (!scheduledDate) return null;
-  return scheduledDate instanceof Date
-    ? scheduledDate.toISOString().slice(0, 10)
-    : String(scheduledDate).slice(0, 10);
+  return etCalendarDayOf(scheduledDate);
 }
 
 function hhmm(windowStart) {
