@@ -3006,6 +3006,32 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(registered.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
+  test('EPA approval claims block in every word order — passive, active, noun (Codex PR r1)', () => {
+    for (const body of [
+      'These products are approved by the EPA.',
+      'The EPA has approved this pesticide for lawns.',
+      'This pesticide carries EPA approval.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+  });
+
+  test('"between X and Y" duration ranges block (Codex PR r1)', () => {
+    const wait = guardrails.evaluate({ body: 'Wait between 30 and 60 minutes before re-entering the treated room.' }, {});
+    expect(wait.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const keepOut = guardrails.evaluate({ body: 'Keep pets out of the yard for between 30 and 60 minutes.' }, {});
+    expect(keepOut.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('wait/return timing advice WITHOUT re-entry context stays legal (Codex PR r1 false positive)', () => {
+    const r = guardrails.evaluate({ body: 'Wait 30 minutes before returning to check whether ants took the bait.' }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    // With treated-area context the same shape still blocks.
+    const treated = guardrails.evaluate({ body: 'Wait 30 minutes before returning to the treated lawn.' }, {});
+    expect(treated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('the approved CONDITIONAL idiom stays legal — dry condition + technician-confirms, condition before or after the claim', () => {
     const r = guardrails.evaluate({
       body: 'The lawn is safe once dry, and your technician confirms timing. Once the application dries, it is safe for kids and pets to return.',
@@ -3206,6 +3232,32 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
   test('a schedule CTA directing to a THIRD PARTY stays legal', () => {
     const r = guardrails.evaluate({ body: 'For severe drywood cases, schedule tenting with a licensed structural fumigator.' }, {});
     expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('bare possessive ownership blocks — "our fumigation treatment", "our wildlife removal" (Codex PR r1)', () => {
+    for (const body of [
+      'Our fumigation treatment eliminates drywood termites.',
+      'Our insulation work keeps pests out.',
+      'Our wildlife removal keeps your attic quiet.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    }
+    const referral = guardrails.evaluate({ body: 'Our fumigation referral partner handles the tenting itself.' }, {});
+    expect(referral.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('handling EXISTING insulation during inspection stays legal (Codex PR r1 false positive)', () => {
+    for (const body of [
+      'Our technicians handle attic insulation carefully while checking for rodent entry points.',
+      'We handle homes with attic insulation without disturbing the material.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    }
+    // Service-unambiguous insulation verbs still block.
+    const sells = guardrails.evaluate({ body: 'We provide attic insulation for older Sarasota homes.' }, {});
+    expect(sells.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('sales framings block — request-from / get-from / choose-for', () => {

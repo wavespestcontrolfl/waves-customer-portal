@@ -2914,24 +2914,35 @@ const REENTRY_SAFETY_SRCS = [
   // Adjective-before-product forms: "safe pesticides", "our safe treatment
   // options" — the unconditional claim in attributive position.
   "\\bsafe\\s+(?:pesticides?|insecticides?|herbicides?|products?|treatments?|sprays?|applications?|chemicals?|materials?|solutions?|options?|granules?|baits?|formulas?)\\b",
-  // ONLY "EPA-approved" is banned — "EPA-registered"/"EPA-exempt" is the
-  // wording AGENTS.md requires.
+  // ONLY EPA *approval* claims are banned — "EPA-registered"/"EPA-exempt"
+  // is the wording AGENTS.md requires. All word orders count (Codex PR r1):
+  // hyphenated, passive ("approved by the EPA"), active ("the EPA has
+  // approved"), and noun form ("carries EPA approval").
   "\\bEPA[-\\s]?approved\\b",
+  "\\bapproved\\s+by\\s+the\\s+EPA\\b",
+  "\\b(?:the\\s+)?EPA\\s+(?:has\\s+|have\\s+)?approv\\w+\\b",
+  "\\bEPA\\s+approvals?\\b",
   // Fixed re-entry/drying figures — the approved idiom carries NO number;
   // the technician confirms timing. Ranges (30–60), spelled numbers, and
   // BOTH word orders count: action-then-duration ("re-enter after 30
   // minutes"), duration-then-action ("wait 30 minutes before re-entering",
   // "allow 30 minutes of drying time"), and keep-off forms ("keep pets off
   // the lawn for 30 minutes").
-  `\\b(?:re-?enter|re-?entry|return\\w*|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+)?${REENTRY_DURATION_SRC}\\b`,
-  `\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:re-?enter|re-?entry|return\\w*|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+(?:about\\s+|around\\s+|roughly\\s+|approximately\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "avoid the treated area for 30 minutes"
-  `\\bavoid\\s+(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawns?|yards?|rooms?|surfaces?)\\b[^.!?\\n]{0,30}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
-  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry|return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*|dry\\w*|drying)`,
-  `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\bavoid\\s+(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawns?|yards?|rooms?|surfaces?)\\b[^.!?\\n]{0,30}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  // Duration-then-action: the intrinsically-re-entry tails (re-enter,
+  // re-entry, dry) match bare; the AMBIGUOUS tails (return, go back, walk,
+  // play) require treated/application context in the same sentence — "wait
+  // 30 minutes before returning to check whether ants took the bait" is
+  // timing advice, not a re-entry figure (Codex PR r1).
+  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry|dry\\w*|drying)`,
+  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*)\\b[^.!?\\n]{0,50}?\\b(?:treated|treatment|application|sprayed|lawn|yard|turf|grass|inside|indoors|home|house)\\b`,
+  `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
-  `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
-  `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*)\\b[^.!?\\n]{0,30}?\\b(?:for|until|after)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*)\\b[^.!?\\n]{0,30}?\\b(?:for|until|after)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "needs 30 minutes to dry", "30 minutes of drying"
   `\\b${REENTRY_DURATION_SRC}\\s+(?:to\\s+dry|of\\s+drying)\\b`,
   // Noun-first drying figures: "drying takes 30 minutes", "the drying time
@@ -3005,7 +3016,15 @@ function reentrySafetyClaimFinding(text) {
 // fumigation" carries no first-person service anchor). The first-person
 // filler is negation-guarded, so the wanted disclaimer ("we do not offer
 // fumigation — we refer you to…") stays legal too.
-const BANNED_TOPIC_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|insulation|wildlife\\s+(?:trapping|removal|control)|animal\\s+(?:trapping|removal)|(?:raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\s+(?:removal|trapping|eviction|exclusion)|door[-\\s]?to[-\\s]?door)";
+// CORE topics are service-unambiguous in ANY first-person frame.
+// INSULATION is deliberately excluded from the broad-verb ownership pattern
+// (Codex PR r1): "our technicians handle attic insulation carefully while
+// checking for rodent entry points" is accurate INSPECTION copy — insulation
+// only flags with installation/sale/service context (the install pattern,
+// the possessive-service pattern, and the CTA/sales patterns, which are
+// service-context by construction).
+const BANNED_TOPIC_CORE_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|wildlife\\s+(?:trapping|removal|control)|animal\\s+(?:trapping|removal)|(?:raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\s+(?:removal|trapping|eviction|exclusion)|door[-\\s]?to[-\\s]?door)";
+const BANNED_TOPIC_SRC = `(?:${BANNED_TOPIC_CORE_SRC}|insulation)`;
 // The object gap between the service verb and the topic must be
 // negation-guarded exactly like the pre-verb filler — otherwise "We do NOT
 // offer fumigation" matches through the bare "do" verb with "not offer"
@@ -3013,9 +3032,14 @@ const BANNED_TOPIC_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|insu
 const BANNED_TOPIC_GAP_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b)[\\w'’-]+\\s+){0,3}?`;
 const BANNED_TOPIC_SRCS = [
   // "we/Waves/our team|services offer(s)/include(s)/help(s) with … <topic>"
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
-  // "our fumigation/insulation/wildlife-trapping service/program/team"
-  `\\bour\\s+${BANNED_TOPIC_SRC}\\s+(?:services?|programs?|teams?|offerings?|packages?|crews?)\\b`,
+  // — CORE topics only for the BROAD verbs (see BANNED_TOPIC_CORE_SRC).
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_CORE_SRC}`,
+  // Insulation with SERVICE-UNAMBIGUOUS verbs only.
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|sells?|installs?|replaces?)\\s+${BANNED_TOPIC_GAP_SRC}insulation\\b`,
+  // Bare POSSESSIVE ownership — "our fumigation treatment", "our wildlife
+  // removal keeps your attic quiet", with or without a service noun (Codex
+  // PR r1); referral/partner attributions stay legal.
+  `\\bour\\s+${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referral|partners?|specialists?))`,
   // Topic-specific ownership verbs: "we install attic insulation", "our
   // technicians trap wildlife", "we remove raccoons", "we sell
   // door-to-door" — ownership expressed through the ACTION verb rather
