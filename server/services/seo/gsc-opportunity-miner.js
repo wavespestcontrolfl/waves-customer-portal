@@ -1019,6 +1019,12 @@ class GscOpportunityMiner {
   // family sweep (a 7-day dataset would expire valid 28-day rows).
   static CANONICAL_MINE_PERIOD_DAYS = 28;
 
+  // Cross-run memory of CONFIRMED non-Astro refresh targets (Codex r31) —
+  // process-local, TTL'd; a deploy restart just re-probes once.
+  static NON_EDITABLE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+  static _nonEditablePages = new Map();
+
   async mineAll({ periodDays = GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS, persist = true } = {}) {
     // Invocation-LOCAL run state: the exported miner is a singleton, and an
     // overlapping run-now + scheduled mine sharing an instance field let
@@ -1243,6 +1249,29 @@ class GscOpportunityMiner {
    * gate still blocks unverified content, so under-boosting is the safe
    * direction.
    */
+  // Actual facts readiness for one city×service — the SAME verdict
+  // _applyFactsReadinessBoost uses (verdict.sufficient), cached per key by
+  // the caller. False on error/unavailable (no boost will apply).
+  async _factsReadyFor(service, city, cache = new Map()) {
+    if (!service || !city) return false;
+    const key = `${String(city).toLowerCase()}::${String(service).toLowerCase()}`;
+    if (cache.has(key)) return cache.get(key);
+    let ready = false;
+    try {
+      const factsSufficiency = require('../content/facts-sufficiency');
+      const verdict = await factsSufficiency.check({
+        action_type: 'refresh_existing_page',
+        city,
+        service,
+      });
+      ready = !!(verdict && verdict.applicable !== false && verdict.sufficient);
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] facts readiness probe failed for ${key}: ${err.message}`);
+    }
+    cache.set(key, ready);
+    return ready;
+  }
+
   async _applyFactsReadinessBoost(opportunities = []) {
     let factsSufficiency;
     try {
@@ -2243,6 +2272,16 @@ class GscOpportunityMiner {
       // the cap stay unprobed → 'error' → their families skip this run and
       // rotate in next mine.
       const probeBudget = 25;
+      // Confirmed NON-EDITABLE targets are stable (a legacy URL rarely
+      // becomes an Astro page) — remember them across runs so they stop
+      // consuming the probe budget and the tail can enqueue its first
+      // opportunity (Codex r31). Process-local with a TTL: a restart just
+      // re-probes once.
+      const nonEditableCache = GscOpportunityMiner._nonEditablePages;
+      const now = Date.now();
+      for (const [url, exp] of nonEditableCache) {
+        if (exp <= now) nonEditableCache.delete(url);
+      }
       const demandByPage = new Map();
       for (const list of servedCandidates.values()) {
         for (const cand of list) {
@@ -2256,7 +2295,13 @@ class GscOpportunityMiner {
       // reopen path), so the top of the budget always goes to pages that
       // have never enqueued their first opportunity.
       const pageHasRows = (pageUrl) => (((refreshStateAvailable && familyRefreshState.get(pageUrl)) || []).length > 0 ? 1 : 0);
+      // Cached non-editable pages resolve WITHOUT a probe and never enter
+      // the budget.
+      for (const url of demandByPage.keys()) {
+        if (nonEditableCache.has(url)) pageState.set(url, 'not_editable');
+      }
       const probeOrder = Array.from(demandByPage.keys())
+        .filter((url) => !pageState.has(url))
         .sort((a, b) => (pageHasRows(a) - pageHasRows(b)) || (demandByPage.get(b) - demandByPage.get(a)))
         .slice(0, probeBudget);
       for (const pageUrl of probeOrder) {
@@ -2267,6 +2312,9 @@ class GscOpportunityMiner {
         try {
           const loaded = await astroPublisher.loadExistingPageBody(pageUrl);
           pageState.set(pageUrl, loaded && loaded.body ? 'editable' : 'not_editable');
+          if (!(loaded && loaded.body)) {
+            nonEditableCache.set(pageUrl, now + GscOpportunityMiner.NON_EDITABLE_TTL_MS);
+          }
           if (loaded && loaded.body) {
             // Refresh city from the page's OWN metadata (Codex r29): local
             // blog slugs embed cities without the -fl marker URL inference
@@ -2445,6 +2493,7 @@ class GscOpportunityMiner {
       opp.dedupe_key = listicleFamilyDedupeKey(fam.key);
       out.push(opp);
     }
+    const factsReadyCache = new Map();
     for (const [pageUrl, group] of (refreshStateAvailable ? refreshGroups.entries() : [])) {
       // One facts contract per brief → SUBGROUPS by (service, city), each
       // with its own stable key; one subgroup emitted per page at a time,
@@ -2481,15 +2530,25 @@ class GscOpportunityMiner {
             position: primaryEntry.served.hit.position,
             impressions,
           });
-          const persistable = (total + (primaryEntry.city ? WEIGHTS.factsReady : 0)) >= familyRefreshFloor;
           return {
+            baseScore: total,
             entries,
             impressions,
-            persistable,
+            city: primaryEntry.city,
             key: listicleFamilyRefreshDedupeKey(pageUrl, entries[0].service, entries[0].city, entries.map((e) => e.fam.key)),
           };
         })
         .sort((a, b) => b.impressions - a.impressions);
+      // Floor check uses ACTUAL facts readiness (Codex r31): the boost only
+      // ever applies when verdict.sufficient — an insufficient/erroring
+      // city×service must not make a below-floor subgroup 'persistable'
+      // and starve floor-clearing siblings by being picked-and-dropped.
+      for (const g of ranked) {
+        if (g.baseScore >= familyRefreshFloor) { g.persistable = true; continue; }
+        g.persistable = !!(g.city
+          && (g.baseScore + WEIGHTS.factsReady) >= familyRefreshFloor
+          && await this._factsReadyFor(g.entries[0].service, g.city, factsReadyCache));
+      }
       const rowsForPage = familyRefreshState.get(pageUrl) || [];
       const frozenRows = rowsForPage.filter((r) => r.status === 'done' || r.status === 'skipped');
       const frozen = new Set(frozenRows.map((r) => r.dedupe_key));

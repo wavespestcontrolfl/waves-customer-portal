@@ -1235,7 +1235,15 @@ describe('listicle_family scoring + action mapping', () => {
     // pick requires floor-clearing (boost-aware for city-scoped rows).
     expect(mineSrc).toMatch(/tags\.length === 1 \? normalizeCity\(tags\[0\]\) : null/);
     expect(mineSrc).toMatch(/g\.persistable && !frozen\.has\(g\.key\)/);
-    expect(mineSrc).toMatch(/primaryEntry\.city \? WEIGHTS\.factsReady : 0/);
+    // r31: floor headroom uses ACTUAL facts readiness (verdict.sufficient
+    // via the shared _factsReadyFor cache), and confirmed non-editable
+    // pages are TTL-cached out of the probe budget.
+    expect(mineSrc).toMatch(/await this\._factsReadyFor\(g\.entries\[0\]\.service, g\.city, factsReadyCache\)/);
+    expect(src).toMatch(/async _factsReadyFor\(service, city, cache = new Map\(\)\)/);
+    expect(src).toMatch(/verdict\.applicable !== false && verdict\.sufficient/);
+    expect(mineSrc).toMatch(/nonEditableCache\.set\(pageUrl, now \+ GscOpportunityMiner\.NON_EDITABLE_TTL_MS\)/);
+    expect(mineSrc).toMatch(/if \(nonEditableCache\.has\(url\)\) pageState\.set\(url, 'not_editable'\)/);
+    expect(src).toMatch(/static _nonEditablePages = new Map\(\)/);
     expect(mineSrc).toMatch(/pageCityByUrl\.get\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/reconcileExemptions\.pages\.add\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/inflightKeys\.has\(g\.key\) && eligible\(g\)/);
