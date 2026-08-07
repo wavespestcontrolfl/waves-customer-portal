@@ -180,3 +180,64 @@ describe('monthly-billing display identity fails closed on a lookup failure', ()
     await expect(estimateRendersMonthlyBilling({ id: 'est-unlinked' })).resolves.toBe(false);
   });
 });
+
+// #3140 resolution: the membership.started welcome email was the last
+// lane-ungated monthly_rate reader. The converter now hands it the lane the
+// acceptance actually leaves the customer in — explicitly, because the send
+// is fire-and-forget and can race the uncommitted accept transaction.
+describe('membership.started lane comes from the acceptance, not the stale row', () => {
+  const { acceptedBillingLaneForConversion } = require('../services/estimate-converter');
+
+  test('annual prepay accepts hand the email the annual_prepay lane', () => {
+    expect(acceptedBillingLaneForConversion({
+      billingTerm: 'prepay_annual',
+      preservesExistingMembership: false,
+      customerBillingMode: null,
+      waveguardTier: 'Bronze',
+      monthlyRate: 55,
+    })).toBe('annual_prepay');
+  });
+
+  test('a new recurring signup hands the email per_application (owner ruling 2026-07-09)', () => {
+    expect(acceptedBillingLaneForConversion({
+      billingTerm: 'monthly',
+      preservesExistingMembership: false,
+      customerBillingMode: null,
+      waveguardTier: 'Bronze',
+      monthlyRate: 30.33,
+    })).toBe('per_application');
+  });
+
+  test('a current monthly member accepting an add-on keeps the monthly lane', () => {
+    expect(acceptedBillingLaneForConversion({
+      billingTerm: 'monthly',
+      preservesExistingMembership: true,
+      customerBillingMode: null,
+      waveguardTier: 'Silver',
+      monthlyRate: 120,
+    })).toBe('monthly_membership');
+    expect(acceptedBillingLaneForConversion({
+      billingTerm: 'monthly',
+      preservesExistingMembership: true,
+      customerBillingMode: 'monthly_membership',
+      waveguardTier: 'Silver',
+      monthlyRate: 120,
+    })).toBe('monthly_membership');
+  });
+
+  test("source pin: the converter passes the lane AND this acceptance's amount into the email payload", () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
+    const emailStart = src.indexOf('const membershipEmail = {');
+    expect(emailStart).toBeGreaterThan(-1);
+    const emailBlock = src.slice(emailStart, src.indexOf('};', emailStart));
+    expect(emailBlock).toContain('billingLane: acceptedBillingLaneForConversion(');
+    // Codex #3271 r2: the email quotes what was JUST accepted, which on an
+    // add-on accept deliberately differs from the preserved customer-level
+    // stamp (the stamp is the completion fallback for the ORIGINAL series).
+    expect(emailBlock).toContain('perApplicationAmount: emailPerApplicationAmountForConversion(');
+    // The customers-row stamp itself is still the one fallback authority.
+    expect(src).toContain('per_application_fee: stampedPerApplicationFee');
+  });
+});

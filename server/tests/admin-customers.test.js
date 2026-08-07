@@ -979,3 +979,37 @@ describe('admin customers route helpers', () => {
   });
 
 });
+
+// #3140 resolution: the inferred-monthly vector — admin creates/edits that
+// leave (NULL lane + real tier + positive rate) — is closed by stamping the
+// inference explicitly. These are source pins on the route wiring; the stamp
+// decision itself is unit-tested in billing-lane.test.js
+// (impliedMonthlyStampForWrite).
+describe('admin customer writes stamp the implied monthly lane (source pins)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-customers.js'), 'utf8');
+
+  test('the create path inserts an explicit-or-stamped billing_mode', () => {
+    expect(src).toContain('billing_mode: billingModeForCreate');
+    expect(src).toMatch(/const billingModeForCreate = explicitBillingMode \|\| impliedLaneStamp;/);
+  });
+
+  test('the update path stamps only lane-less saves, decided UNDER the row lock', () => {
+    // Never restamp over an operator's own lane decision in the same save…
+    expect(src).toContain('const laneStampEligible = req.body.billingMode === undefined && updates.billing_mode === undefined;');
+    // …and the decision reads the LOCKED row (pre-push codex P0): a
+    // concurrent explicit-lane save that commits before our lock must not
+    // be overwritten by the stamp.
+    expect(src).toContain('impliedLaneStamp = impliedMonthlyStampForWrite(lockedBefore, { ...lockedBefore, ...updates });');
+    expect(src).toContain('if (impliedLaneStamp) updates.billing_mode = impliedLaneStamp;');
+    // The stamp lands after changed/after were snapshotted — both are
+    // patched post-commit so the sensitive audit records the lane write.
+    expect(src).toContain("changed.push('billing_mode');");
+  });
+
+  test('both stamp sites surface an owner review notification', () => {
+    const sites = src.match(/'billing_lane_review'/g) || [];
+    expect(sites.length).toBe(2);
+  });
+});

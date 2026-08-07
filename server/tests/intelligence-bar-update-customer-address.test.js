@@ -11,6 +11,10 @@ jest.mock('../models/db', () => {
   qb.whereIn = jest.fn(() => qb);
   qb.forUpdate = jest.fn(() => qb);
   qb.first = jest.fn();
+  // The bulk fast path pre-reads before-rows (FOR UPDATE) whenever tier or
+  // rate is in the update — for the #3245 rate-changed ledger sync and the
+  // #3140 implied-monthly lane stamp. Empty = no rate changes, no stamps.
+  qb.select = jest.fn(() => Promise.resolve([]));
   qb.update = jest.fn(() => Promise.resolve(1));
   const db = jest.fn(() => qb);
   // trx behaves like db() — the executor only uses trx('customers').where().update()
