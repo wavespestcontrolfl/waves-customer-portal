@@ -9,6 +9,7 @@ const db = require('../models/db');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
 const NotificationService = require('./notification-service');
+const { runExclusive } = require('../utils/cron-lock');
 const DRAFT_REPLY_PREFIX = '[DRAFT]';
 
 function isDraftReply(reply) {
@@ -532,14 +533,22 @@ class GoogleBusinessService {
     if (existing) return existing;
     existing = await db('google_reviews').where({ google_review_id: normalized.google_review_id }).first();
     if (existing) return existing;
+    // The fuzzy name+time fallback must never match a stamped row: a
+    // different account posting under the same display name within the
+    // time tolerance would hijack the retained evidence row — the upsert
+    // would overwrite it and the reinstatement clear would drop its stamp.
+    // Stamped rows are only reachable via the stable GBP identity lookups
+    // above (a genuine reinstatement keeps its review ID); anything else
+    // inserts as a distinct review.
     const candidates = await db('google_reviews')
       .where({ location_id: normalized.location_id })
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .select('id', 'reviewer_name', 'review_created_at');
     return candidates.find(row => sameReviewerAndTime(row, normalized.reviewer_name, normalized.review_created_at)) || null;
   }
 
-  async _upsertGbpReview(normalized, pendingUnlinkedNotifications = null) {
+  async _upsertGbpReview(normalized, syncStart = null, pendingUnlinkedNotifications = null) {
     const existing = await this._findExistingReview(normalized);
     const customerId = await this._findCustomerIdByReviewerName(normalized.reviewer_name);
     const replyFields = isDraftReply(existing?.review_reply)
@@ -558,16 +567,75 @@ class GoogleBusinessService {
       review_text: normalized.review_text,
       review_created_at: normalized.review_created_at,
       customer_id: customerId || existing?.customer_id || null,
-      synced_at: db.fn.now(),
+      // One clock authority for the reconcile ordering tokens: synced_at is
+      // compared against runner fetch-start timestamps (Node clock), so it
+      // must come from the same clock — db.fn.now() (Postgres) behind the
+      // app clock would make rows refreshed THIS run satisfy
+      // `synced_at < syncStart` and let the reconcile stamp every returned
+      // review. "Live as of this runner's fetch start" is also the honest
+      // assertion — the feed was fetched then, not at write time.
+      synced_at: syncStart ? new Date(syncStart).toISOString() : db.fn.now(),
       ...replyFields,
     };
+    // Monotonic liveness: an older overlapping runner must never regress a
+    // newer runner's synced_at — writing its earlier fetch start over a
+    // fresher token would make the newer runner's reconcile see
+    // `synced_at < syncStart` and falsely stamp a review both feeds
+    // returned. GREATEST makes the write a no-op unless it advances.
+    const monotonicSyncedAt = syncStart
+      ? db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [new Date(syncStart).toISOString()])
+      : db.fn.now();
     let result;
     if (existing) {
-      await db('google_reviews').where({ id: existing.id }).update(row);
+      await db('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
       result = { id: existing.id, inserted: false };
     } else {
-      const [insertedReview] = await db('google_reviews').insert(row).returning('id');
-      result = { id: insertedReview?.id || insertedReview, inserted: true };
+      try {
+        const [insertedReview] = await db('google_reviews').insert(row).returning('id');
+        result = { id: insertedReview?.id || insertedReview, inserted: true };
+      } catch (err) {
+        // Overlapping runners (hourly job vs manual sync vs deploy instance)
+        // can both miss the existence check for a newly arrived review; the
+        // loser hits the google_review_id unique constraint. That's a
+        // healthy sync racing itself, not a GBP failure — letting it bubble
+        // would ring the degraded-sync alert. Convert to the update path on
+        // the winner's row.
+        if (err?.code !== '23505') throw err;
+        const winner = await db('google_reviews').where({ google_review_id: normalized.google_review_id }).first();
+        if (!winner) throw err;
+        // Recompute the loser's update from the CURRENT winner row, not the
+        // pre-insert null snapshot: the winner may already carry a local
+        // draft reply or a manual customer match, and blindly applying `row`
+        // (built with existing = null) would overwrite both and bypass the
+        // draft-preservation rule above.
+        const { review_reply: _loserReply, reply_updated_at: _loserReplyAt, ...providerRow } = row;
+        const winnerReplyFields = isDraftReply(winner.review_reply)
+          ? {}
+          : {
+              review_reply: normalized.owner_reply,
+              reply_updated_at: normalized.owner_reply ? normalized.owner_reply_updated_at || db.fn.now() : null,
+            };
+        await db('google_reviews').where({ id: winner.id }).update({
+          ...providerRow,
+          synced_at: monotonicSyncedAt,
+          customer_id: customerId || winner.customer_id || null,
+          ...winnerReplyFields,
+        });
+        result = { id: winner.id, inserted: false };
+      }
+    }
+    // Reinstatement clear — a review present in the feed is not missing. The
+    // main update above deliberately never touches missing_since; the clear
+    // is its own conditional UPDATE evaluated against the CURRENT column
+    // value, so a stamp committed by a newer reconciliation between our
+    // snapshot read and this statement survives (only stamps older than this
+    // runner's fetch start may be cleared). A fresh insert carries no stamp.
+    if (!result.inserted) {
+      const clear = db('google_reviews')
+        .where({ id: result.id })
+        .whereNotNull('missing_since');
+      if (syncStart) clear.where('missing_since', '<', new Date(syncStart).toISOString());
+      await clear.update({ missing_since: null });
     }
     if (row.customer_id) {
       // A matched review means the customer left one — stop asking them.
@@ -633,6 +701,9 @@ class GoogleBusinessService {
 
   async _syncPlacesReviewSampleForLocation(loc, googleKey, pendingUnlinkedNotifications = null) {
     if (!loc.googlePlaceId || !googleKey) return { synced: 0, new: 0 };
+    // Ordering token for the reinstatement clear below — a removal stamp
+    // written after this fetch began is newer information than this sample.
+    const sampleSyncStart = new Date();
     const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${loc.googlePlaceId}&fields=reviews,rating,user_ratings_total,name&reviews_sort=newest&key=${googleKey}`;
     const res = await fetch(url);
     const data = await res.json();
@@ -670,6 +741,21 @@ class GoogleBusinessService {
           const sameContent = (candidate.review_text || null) === (review.text || null)
             && Number(candidate.star_rating) === Number(review.rating || 0);
           if (sameContent) {
+            // A stamped candidate is retained evidence. Same-name+content
+            // alone must not select it: the merge below would overwrite its
+            // photo/customer fields and run attribution side effects for
+            // what may be a copycat account. Only the exact-second identity
+            // proof (Places `time` == stored creation instant — the same
+            // corroboration that gates the stamp clear) may touch a stamped
+            // row; otherwise defer to the authoritative GBP feed.
+            const placesSec = review.time ? Math.floor(review.time) : null;
+            const candidateSec = candidate.review_created_at
+              ? Math.floor(new Date(candidate.review_created_at).getTime() / 1000)
+              : null;
+            if (candidate.missing_since && !(placesSec != null && candidateSec != null && placesSec === candidateSec)) {
+              logger.info(`[gbp] Places sample: same-name match on stamped evidence row ${candidate.id} at ${loc.id} lacks identity corroboration — deferring to GBP feed`);
+              continue;
+            }
             existing = candidate;
           } else {
             logger.info(`[gbp] Places sample: ambiguous same-name review at ${loc.id} (row ${candidate.id}) — deferring to GBP feed`);
@@ -680,18 +766,60 @@ class GoogleBusinessService {
       const ownerReply = review.owner_response?.text || null;
       const customerId = await this._findCustomerIdByReviewerName(reviewerName);
       if (existing) {
+        // A row in Google's CURRENT Places sample is proof a review is live —
+        // but proof about THIS row only when the identity corroborates.
+        // Display names aren't unique across accounts, so the same-name
+        // same-content merge above can be a different reviewer; clearing a
+        // removal stamp on that evidence would revive the removed review for
+        // the testimonial/marketing surfaces. The Places `time` of an
+        // unedited review IS its creation instant — require exact-second
+        // equality with the stored review_created_at (a tolerance window,
+        // however small, readmits a copycat posted near the original's
+        // creation time). If the timestamps disagree, keep the stamp; a
+        // genuine reinstatement still clears on the next authoritative GBP
+        // pull, so failing closed here costs only the outage window.
+        const placesSec = review.time ? Math.floor(review.time) : null;
+        const createdSec = existing.review_created_at
+          ? Math.floor(new Date(existing.review_created_at).getTime() / 1000)
+          : null;
+        const identityCorroborated = placesSec != null && createdSec != null && placesSec === createdSec;
         const upd = {
           star_rating: review.rating || 0,
           review_text: review.text || null,
           reviewer_photo_url: review.profile_photo_url || null,
           customer_id: customerId || existing.customer_id,
-          synced_at: db.fn.now(),
         };
+        // synced_at participates in the authoritative reconcile's claim
+        // predicate (synced_at < syncStart ⇒ stampable) — refreshing it
+        // asserts "seen live just now". An uncorroborated same-name match
+        // hasn't proven that about THIS row, and refreshing would let a
+        // copycat's Places appearance suppress a concurrent GBP removal
+        // stamp — so liveness freshness requires the same identity proof
+        // as the stamp clear.
+        // Fetch-start timestamp, not db.fn.now() — synced_at is an ordering
+        // token compared against runner fetch starts (Node clock); see
+        // _upsertGbpReview for the skew rationale. GREATEST keeps it
+        // monotonic against a newer overlapping runner's token.
+        if (identityCorroborated) {
+          upd.synced_at = db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [sampleSyncStart.toISOString()]);
+        }
         if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
           upd.review_reply = ownerReply;
           upd.reply_updated_at = db.fn.now();
         }
         await db('google_reviews').where({ id: existing.id }).update(upd);
+        // Reinstatement clear, mirroring _upsertGbpReview: the main update
+        // never touches missing_since; the clear is a separate conditional
+        // UPDATE against the CURRENT column value with the ordering token,
+        // so an authoritative stamp committed after this sample's fetch
+        // began survives a concurrent degraded runner.
+        if (identityCorroborated) {
+          await db('google_reviews')
+            .where({ id: existing.id })
+            .whereNotNull('missing_since')
+            .where('missing_since', '<', sampleSyncStart.toISOString())
+            .update({ missing_since: null });
+        }
       } else {
         await db('google_reviews').insert({
           google_review_id: googleId,
@@ -704,7 +832,7 @@ class GoogleBusinessService {
           reply_updated_at: ownerReply ? new Date() : null,
           review_created_at: new Date(review.time * 1000).toISOString(),
           customer_id: customerId,
-          synced_at: db.fn.now(),
+          synced_at: sampleSyncStart.toISOString(),
         }).returning('id');
         newCount++;
       }
@@ -751,10 +879,13 @@ class GoogleBusinessService {
   // REVIEW SYNC - GBP Reviews API primary; Places kept for stats/fallback.
   // =========================================================================
   async syncAllReviews() {
-    const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY;
+    // The Maps key powers only the Places stats + review-sample fallback.
+    // GBP Reviews auth is separate (_getClient), so a missing Maps key must
+    // not stop the authoritative GBP loop — that would also silence the
+    // degraded-sync and removal alerts this watchdog exists to emit.
+    const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || null;
     if (!GOOGLE_KEY) {
-      logger.error('[google-business] GOOGLE_MAPS_API_KEY not set - skipping review sync');
-      return { synced: 0, error: 'GOOGLE_MAPS_API_KEY not configured' };
+      logger.error('[google-business] GOOGLE_MAPS_API_KEY not set — Places stats/fallback disabled; continuing GBP review sync');
     }
     let totalSynced = 0, totalNew = 0;
     const errors = [];
@@ -766,35 +897,86 @@ class GoogleBusinessService {
 
     for (const loc of WAVES_LOCATIONS) {
       try {
-        await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
-          logger.warn(`[gbp] Places stats sync failed for ${loc.name}: ${err.message}`);
-        });
+        // Serialize each location's pull/reconcile/fallback cycle across
+        // overlapping runners (hourly job vs manual sync vs deploy overlap).
+        // The ordering tokens close the update-side races, but an INSERT
+        // has no prior row to order against: an older runner pausing after
+        // its fetch can insert a review AFTER a newer reconcile proved it
+        // absent, leaving an unstamped ghost row with no removal alert.
+        // pg_try_advisory_lock is non-blocking — the loser skips the
+        // location and the holder's cycle (or the next hourly tick) covers
+        // it; a skipped location must NOT ring the degraded alert.
+        const cycle = await runExclusive(`gbp-review-sync:${loc.id}`, async () => {
+        if (GOOGLE_KEY) {
+          await this._syncPlacesStatsForLocation(loc, GOOGLE_KEY).catch(err => {
+            logger.warn(`[gbp] Places stats sync failed for ${loc.name}: ${err.message}`);
+          });
+        }
 
         let usedGbp = false;
+        let gbpFailure = null;
+        const locSyncStart = new Date();
         if (loc.googleLocationResourceName && await this._getClient(loc.id)) {
           try {
-            const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id, 100);
+            // Default page size (50) — the GBP reviews.list API caps
+            // pageSize at 50, and an oversized value risks the whole pull
+            // rejecting, which would push every location into degraded
+            // fallback and stall reconciliation. Pagination fetches all
+            // pages regardless.
+            const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id);
             for (const review of reviews) {
               const normalized = this._normalizeGbpReview(review, loc);
-              const result = await this._upsertGbpReview(normalized, pendingUnlinked);
+              const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked);
               if (result.inserted) totalNew++;
               totalSynced++;
             }
             sources[loc.id] = 'gbp';
             usedGbp = true;
             logger.info(`[gbp] Synced ${reviews.length} reviews for ${loc.name} via GBP Reviews API`);
+            // Authoritative full pull succeeded → anything we synced before
+            // that Google no longer returns has been removed/filtered.
+            // A failed reconcile must NOT hide behind the successful pull:
+            // it silently disables removal detection, so it joins
+            // result.errors and rings the degraded-sync alert (24h-deduped)
+            // — without falling back to Places (the pull itself was fine).
+            const reconcile = await this._reconcileMissingReviews(loc, locSyncStart);
+            if (reconcile && reconcile.ok === false) {
+              errors.push({ location: loc.name, error: reconcile.error, source: 'reconcile' });
+              await this._notifyDegradedSync(loc, `removal reconcile failed: ${reconcile.error}`);
+            }
           } catch (gbpErr) {
+            gbpFailure = gbpErr.message;
             errors.push({ location: loc.name, error: gbpErr.message, source: 'gbp' });
             logger.warn(`[gbp] GBP Reviews sync failed for ${loc.name}; using Places fallback: ${gbpErr.message}`);
           }
+        } else if (loc.googleLocationResourceName) {
+          gbpFailure = 'no_client';
         }
 
         if (!usedGbp) {
-          const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked);
-          totalSynced += sample.synced;
-          totalNew += sample.new;
-          sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
-          logger.info(`[gbp] Synced ${sample.synced} review sample rows for ${loc.name} via Places API fallback`);
+          if (loc.googleLocationResourceName) {
+            // Running blind — removals and most new reviews are invisible
+            // until the GBP credentials work. Alert BEFORE attempting the
+            // fallible Places fallback: if that throws too, the outer catch
+            // would otherwise skip the alert and recreate the silent
+            // failure this watchdog exists to detect.
+            await this._notifyDegradedSync(loc, gbpFailure || 'no_client');
+          }
+          if (GOOGLE_KEY) {
+            const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked);
+            totalSynced += sample.synced;
+            totalNew += sample.new;
+            sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
+            logger.info(`[gbp] Synced ${sample.synced} review sample rows for ${loc.name} via Places API fallback`);
+          } else {
+            sources[loc.id] = 'none';
+          }
+        }
+        return { done: true };
+        }, { recordHealth: false });
+        if (cycle?.skipped) {
+          sources[loc.id] = 'concurrent_skip';
+          logger.info(`[gbp] Review sync for ${loc.name} skipped — another runner holds the location lock (${cycle.reason})`);
         }
       } catch (err) {
         logger.error(`Review sync failed for ${loc.name}: ${err.message}`);
@@ -819,6 +1001,199 @@ class GoogleBusinessService {
     }
 
     return { synced: totalSynced, new: totalNew, errors, sources };
+  }
+
+  /**
+   * After a successful FULL GBP Reviews API pull for a location, stamp
+   * missing_since on previously-synced rows the feed no longer returned —
+   * Google removed or filtered them (Aug 2026: a sweep wiped EVERY review
+   * on the Venice profile and nothing noticed for months). Runs ONLY on
+   * the authoritative GBP path: the Places fallback is a ~5-review sample
+   * and a failed fetch proves nothing, so both fail closed (no stamping).
+   * Rows are never deleted, and a review that reappears clears its stamp
+   * via the upsert. Notifies once per NULL→stamped transition batch, so
+   * repeat hourly syncs don't re-notify. Best-effort — never throws into
+   * the sync loop (a reconcile failure must not trigger the Places
+   * fallback for a location whose GBP pull succeeded).
+   */
+  async _reconcileMissingReviews(loc, syncStart) {
+    try {
+      // Only rows with an authoritative GBP identity: a Places-sampled row
+      // (gbp_review_name null) can go stale legitimately — an edit moves the
+      // Places timestamp, the GBP upsert may insert the same review under
+      // its resource name, and the orphaned sample row would be falsely
+      // reported as removed.
+      const candidates = await db('google_reviews')
+        .where({ location_id: loc.id })
+        .where('reviewer_name', '!=', '_stats')
+        .whereNotNull('gbp_review_name')
+        .whereNull('missing_since')
+        .where('synced_at', '<', syncStart)
+        // A testimonial publisher stamps a short-lived publish claim (under
+        // this location's advisory lock) before its slow external posting —
+        // skip claimed rows so a removal stamp cannot land mid-publication;
+        // an expired claim (crashed publisher) is stampable again.
+        .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
+        .select('id', 'reviewer_name', 'star_rating', 'review_created_at');
+      if (candidates.length === 0) return { ok: true };
+
+      // Atomic claim + alert in ONE transaction: the hourly job and the
+      // manual admin sync (or two instances overlapping during a deploy) can
+      // both select the same rows — conditioning the update on missing_since
+      // IS NULL means only one runner claims each row, so only one
+      // notification fires. And because the claim is one-shot (stamped rows
+      // are excluded from every later reconcile), a lost notification insert
+      // would silence the alert forever — notifyAdmin swallows insert errors
+      // and returns null, so a null return throws INSIDE the transaction and
+      // the rollback releases the claim atomically (a separate compensating
+      // update could fail in the same outage that broke the insert). The
+      // next sync then re-claims and re-notifies. Intentional suppression
+      // returns a truthy sentinel and commits (stamp kept).
+      let gone = [];
+      try {
+        await db.transaction(async (trx) => {
+          const claimedRows = await trx('google_reviews')
+            .whereIn('id', candidates.map(r => r.id))
+            .whereNull('missing_since')
+            // Re-check freshness at claim time: an overlapping runner may have
+            // confirmed a candidate live (refreshed synced_at) between our
+            // candidate select and this update — a stale snapshot must not
+            // stamp a review another sync just proved is on Google.
+            .where('synced_at', '<', syncStart)
+            // Publish-claim re-check at claim time, mirroring the candidate
+            // select — a claim stamped between the select and this update
+            // must also defer the stamp.
+            .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
+            // Stamp with the runner's own fetch start, not db.fn.now() —
+            // the reinstatement clears compare missing_since against other
+            // runners' fetch starts (Node clock), and a Postgres-clock stamp
+            // behind the app clock could be "older" than a fetch that
+            // predates the removal, letting a stale runner clear it.
+            .update({ missing_since: new Date(syncStart).toISOString() }, ['id']);
+          const claimedIds = new Set((claimedRows || []).map(r => r.id));
+          gone = candidates.filter(r => claimedIds.has(r.id));
+          if (gone.length === 0) return;
+
+          const names = gone.slice(0, 15)
+            .map(r => `${r.reviewer_name || 'Anonymous'} (${Number(r.star_rating) || 0}-star)`)
+            .join(', ');
+          const suffix = gone.length > 15 ? ` and ${gone.length - 15} more` : '';
+          const notif = await NotificationService.notifyAdmin(
+            'review',
+            `${gone.length} Google review${gone.length === 1 ? '' : 's'} removed at ${loc.name}`,
+            `Google no longer returns these reviews for ${loc.name}: ${names}${suffix}. The full text is kept in the portal. If they are legitimate customer reviews caught in a spam sweep, file a missing-reviews case with Google Business Profile support and escalate by replying in-thread.`,
+            {
+              bell: true,
+              link: '/admin/reviews',
+              metadata: { locationId: loc.id, reason: 'reviews_missing', count: gone.length, reviewIds: gone.map(r => r.id) },
+              connection: trx,
+            },
+          );
+          if (!notif) throw new Error('removal-alert notification insert failed');
+        });
+      } catch (err) {
+        logger.warn(`[gbp] Removal alert for ${loc.name} rolled back (${err.message}) — claim released, retrying next sync`);
+        return { ok: false, error: `removal-alert transaction rolled back: ${err.message}` };
+      }
+      if (gone.length === 0) return { ok: true };
+      // Count only — reviewer display names are PII and ride in the admin
+      // notification, not the plaintext log.
+      logger.warn(`[gbp] ${gone.length} review(s) at ${loc.name} disappeared from the GBP feed — stamped missing_since, admin notified`);
+      return { ok: true };
+    } catch (err) {
+      // Surfaced to the caller: a silently failing reconcile disables
+      // removal detection while the sync still reports GBP success — the
+      // exact failure mode this watchdog exists to alert on.
+      logger.warn(`[gbp] Missing-review reconcile failed for ${loc.name}: ${err.message}`);
+      return { ok: false, error: err.message };
+    }
+  }
+
+  /**
+   * A location configured for GBP that could not complete an authoritative
+   * Reviews API pull is running blind: removals are undetectable and the
+   * Places sample misses most reviews. This is exactly how the Venice
+   * review wipe went unnoticed — its refresh token was never provisioned,
+   * the sync silently fell back, and zero rows were ever stored. Alerts at
+   * most once per 24h per location (dedupe on the notification title).
+   * Best-effort — never throws into the sync loop.
+   */
+  async _notifyDegradedSync(loc, cause) {
+    try {
+      // The title is the 24h dedupe key, so distinct failure classes need
+      // distinct titles: a pull-failure alert this morning must not
+      // suppress a reconcile-failure alert this afternoon — they have
+      // different remediation and both mean removals go undetected.
+      const reconcileFailure = String(cause || '').startsWith('removal reconcile failed');
+      const title = reconcileFailure
+        ? `Google review removal reconcile failing for ${loc.name}`
+        : `Google review sync degraded for ${loc.name}`;
+      // The advisory lock serializes the check-then-insert across the hourly
+      // job, the manual admin sync, and overlapping deploy instances — a
+      // plain read-then-insert here would double-notify. A held lock means
+      // another runner is already alerting; skipping is correct.
+      await runExclusive(`gbp-degraded-notify:${loc.id}`, async () => {
+        const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const recent = await db('notifications')
+          .where({ recipient_type: 'admin', title })
+          .where('created_at', '>', dayAgo)
+          .first();
+        if (recent) return;
+
+        // A reconcile failure is its own case: the authoritative pull
+        // SUCCEEDED (new reviews still sync, no Places fallback runs), but
+        // removal detection is dead until the reconcile works — the body
+        // must not claim the feed is down or that a fallback will run.
+        const detail = cause === 'no_client'
+          ? `the GBP client could not be initialized: ${await this._describeCredentialGap(loc)}`
+          : `the GBP Reviews API pull failed: ${cause}`;
+        // Without a Maps key the caller skips the Places sample entirely —
+        // the alert must not claim a partial feed remains during what is
+        // actually a complete tracking outage. With a key, this alert fires
+        // BEFORE the fallback runs (deliberately — a fallback failure must
+        // not swallow it), so describe the sample as an attempt, not a fact.
+        const fallbackState = process.env.GOOGLE_MAPS_API_KEY
+          ? `is degraded — the sync will attempt the ~5-review Places sample fallback`
+          : `is fully down — no Places fallback is available (GOOGLE_MAPS_API_KEY is not set)`;
+        const body = reconcileFailure
+          ? `Review sync for ${loc.name} pulled the GBP feed, but the ${cause}. New reviews are still syncing; REMOVALS will not be detected until the reconcile succeeds.`
+          : `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`;
+        await NotificationService.notifyAdmin(
+          'review',
+          title,
+          body,
+          { bell: true, link: '/admin/reviews', metadata: { locationId: loc.id, reason: 'gbp_sync_degraded', cause } },
+        );
+        logger.warn(`[gbp] Review sync degraded for ${loc.name} (${cause === 'no_client' ? 'no client' : 'pull failed'}) — admin notified`);
+      }, { recordHealth: false });
+    } catch (err) {
+      logger.warn(`[gbp] Degraded-sync notify failed for ${loc.name}: ${err.message}`);
+    }
+  }
+
+  /**
+   * Name the credential component that is actually missing, mirroring the
+   * checks _getClient performs (env client id/secret; refresh token from
+   * system_settings first, env fallback) — so the degraded-sync alert sends
+   * the admin to the right knob instead of guessing "token not set".
+   */
+  async _describeCredentialGap(loc) {
+    try {
+      const envKey = LOCATION_ENV_KEYS[loc.id];
+      if (!envKey) return 'no GBP credential mapping exists for this location';
+      const missing = [];
+      if (!process.env[`GBP_CLIENT_ID_${envKey}`] || !process.env[`GBP_CLIENT_SECRET_${envKey}`]) {
+        missing.push(`the OAuth client credentials (GBP_CLIENT_ID_${envKey} / GBP_CLIENT_SECRET_${envKey})`);
+      }
+      const stored = await this._getStoredTokens(loc.id);
+      if (!stored.refresh_token && !process.env[`GBP_REFRESH_TOKEN_${envKey}`]) {
+        missing.push(`a refresh token (connect the location in admin Google settings, or set GBP_REFRESH_TOKEN_${envKey})`);
+      }
+      if (missing.length === 0) return 'credentials are present but the client still failed to initialize';
+      return `missing ${missing.join(' and ')}`;
+    } catch {
+      return 'the GBP credential state could not be determined';
+    }
   }
 
   /**

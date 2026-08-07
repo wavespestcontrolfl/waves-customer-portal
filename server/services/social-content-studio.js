@@ -10,6 +10,7 @@ const {
 const SocialCardRenderer = require('./social-card-renderer');
 const CreativeEngine = require('./social-creative-engine');
 const { runExclusive } = require('../utils/cron-lock');
+const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
 
 const FASTEST_RISER_PROFILES = [
@@ -656,6 +657,8 @@ async function getCampaignContext({ topic, city, service }) {
         .where('reviewer_name', '!=', '_stats')
         .where('star_rating', 5)
         .whereNotNull('review_text')
+        // Never quote a review Google has removed in marketing content.
+        .whereNull('missing_since')
         .where(function activeLocations() {
           this.where('location_id', location.id).orWhereNull('location_id');
         })
@@ -1403,7 +1406,14 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     let gbpImageUrl = null;
     let finalPreview = preview;
     const wantsGbp = Array.isArray(plan.channels) && plan.channels.includes('gbp');
-    const isReviewRun = !!plan.reviewGraphic?.googleReviewId && await hasTable('review_graphics');
+    // Liveness protection derives from the source review id ALONE: hasTable
+    // swallows transient schema-lookup failures as false, and letting it
+    // into this classification reclassified a testimonial as an ordinary
+    // campaign — skipping every source-liveness check on the publish path.
+    // The fallible schema gate only decides whether the graphic can be
+    // PERSISTED after a successful publish.
+    const isReviewRun = !!plan.reviewGraphic?.googleReviewId;
+    const canPersistGraphic = isReviewRun && await hasTable('review_graphics');
 
     // Creative engine first (AI photo scene + deterministic brand overlay,
     // gated by SOCIAL_CREATIVE_ENGINE_ENABLED). An empty result — engine off,
@@ -1498,21 +1508,83 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       return { success: true, mode: effectiveMode, post: saved.post, run: updated, preview: finalPreview };
     }
 
+    // Pre-publish liveness gate (mirrors approveAutonomousRun): the candidate
+    // was selected before the creative render/upload, and the hourly sync can
+    // stamp the review missing inside that window. Re-read the source row so
+    // a removed review never publishes as a "current Google review" — the
+    // post-publish createReviewGraphic re-check is bookkeeping only and its
+    // rejection is swallowed after the post is already live.
+    if (isReviewRun && (await hasTable('google_reviews'))) {
+      const srcReview = await db('google_reviews')
+        .where({ id: plan.reviewGraphic.googleReviewId })
+        .first()
+        .catch(() => null);
+      if (!srcReview || srcReview.missing_since) {
+        const reason = srcReview
+          ? 'source Google review has been removed from Google — testimonial publish blocked'
+          : 'source Google review no longer exists — testimonial publish blocked';
+        await updateAutonomousRun(run?.id, {
+          status: 'failed',
+          preview: finalPreview,
+          skipReason: reason,
+        });
+        return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
+      }
+    }
+
     const guid = `${AUTONOMOUS_SOURCE}_${startedAt.toISOString()}`;
-    const publishResult = await SocialMediaService.publishToAll({
-      title: plan.topic,
-      description: plan.service,
-      link: finalPreview.suggestedLink,
-      guid,
-      source: AUTONOMOUS_SOURCE,
-      customContent: finalPreview.drafts,
-      channels: plan.channels,
-      imageUrl,
-      gbpImageUrl,
-      gbpImageBranded: true, // deterministic card render — chrome carries the logo
-      noAiImage: true, // brand card only — never a literal AI image
-      gbpLocationIds: finalPreview.inputs?.locationId ? [finalPreview.inputs.locationId] : [locationForCity(plan.city).id],
-    });
+    // The snapshot gate above rejects cheaply; the lock closes its TOCTOU —
+    // the reconcile cannot stamp the source row between here and the post.
+    const publishOutcome = await publishWithReviewLivenessLock(
+      isReviewRun ? plan.reviewGraphic.googleReviewId : null,
+      () => SocialMediaService.publishToAll({
+        title: plan.topic,
+        description: plan.service,
+        link: finalPreview.suggestedLink,
+        guid,
+        source: AUTONOMOUS_SOURCE,
+        customContent: finalPreview.drafts,
+        channels: plan.channels,
+        imageUrl,
+        gbpImageUrl,
+        gbpImageBranded: true, // deterministic card render — chrome carries the logo
+        noAiImage: true, // brand card only — never a literal AI image
+        gbpLocationIds: finalPreview.inputs?.locationId ? [finalPreview.inputs.locationId] : [locationForCity(plan.city).id],
+        // Durable stamp at the FIRST provider success — a crash or stall in a
+        // later provider call can no longer outlive the claim TTL with the
+        // testimonial live externally but unrecorded. First-win: the
+        // post-publish stamp below becomes a no-op backstop.
+        onFirstPlatformSuccess: isReviewRun && !SOCIAL_FLAGS.dryRun
+          ? () => recordTestimonialPublished(plan.reviewGraphic.googleReviewId, run?.id)
+          : null,
+      }),
+      { rejectConsumed: true },
+    );
+    if (publishOutcome.blocked) {
+      const reason = publishOutcome.lockBusy
+        ? 'review sync in progress for this location — testimonial publish deferred, retry the run'
+        : publishOutcome.consumed
+          ? 'source Google review was already published as a testimonial — candidate consumed'
+          : publishOutcome.missing
+            ? 'source Google review no longer exists — testimonial publish blocked'
+            : 'source Google review has been removed from Google — testimonial publish blocked';
+      await updateAutonomousRun(run?.id, {
+        status: 'failed',
+        preview: finalPreview,
+        skipReason: reason,
+      });
+      return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
+    }
+    const publishResult = publishOutcome.result;
+    // The claim is held through the durable published stamp below —
+    // releasing it right after the publish would let a second draft run
+    // referencing the same review acquire and double-publish in the
+    // publish→stamp gap. If the STAMP fails after a live publish, the claim
+    // is RETAINED and its release transfers to the detached recovery loop —
+    // the finally must not release it (no durable record plus a cleared
+    // claim IS the double-publish window).
+    let claimRetained = false;
+    try {
 
     const post = await db('social_media_posts')
       .where({ source_guid: guid })
@@ -1527,8 +1599,33 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // failed to render (no CDN/S3 or a sharp/S3 error) the post may still have
     // gone out as text, but consuming the review with a null-image graphic would
     // drop it from the candidate queue forever and it could never be rendered.
-    if (isReviewRun && !SOCIAL_FLAGS.dryRun && publishResult.success && imageUrl) {
-      await createReviewGraphic({
+    // DURABLE published stamp on the FIRST successful external post — before
+    // and independent of the review_graphics bookkeeping. Once it lands,
+    // candidate selection and the publish-time consumed check both reject
+    // this review permanently, so a bookkeeping failure (or a process crash
+    // after this point) can no longer reopen a double-publish window. If
+    // the stamp itself fails, RETAIN the claim and hand recovery to the
+    // detached loop — releasing it with no durable record IS the window.
+    if (isReviewRun && !SOCIAL_FLAGS.dryRun && publishResult.success) {
+      try {
+        await recordTestimonialPublished(plan.reviewGraphic.googleReviewId, run?.id);
+      } catch (err) {
+        logger.error(`[studio] testimonial-published stamp FAILED after publish (review ${plan.reviewGraphic.googleReviewId}): ${err.message} — claim retained, recovery loop will write the durable record`);
+        claimRetained = true;
+        // Intentional fire-and-forget — the helper attaches its own terminal
+        // catch and the claim self-expires if the process dies mid-loop.
+        void holdClaimUntilPublishRecorded({
+          googleReviewId: plan.reviewGraphic.googleReviewId,
+          record: () => recordTestimonialPublished(plan.reviewGraphic.googleReviewId, run?.id),
+          claim: publishOutcome,
+        });
+      }
+    }
+    // Graphic bookkeeping — admin history and the saved-graphics list. The
+    // durable stamp above already blocks reselection, so a failure here is
+    // loud but does not need to hold the claim.
+    if (canPersistGraphic && !SOCIAL_FLAGS.dryRun && publishResult.success && imageUrl) {
+      await persistReviewGraphicWithRetry({
         googleReviewId: plan.reviewGraphic.googleReviewId,
         privacyMode: plan.reviewGraphic.privacyMode || 'first_name_city',
         // Follow the visual that actually published (photo card vs SVG card).
@@ -1536,7 +1633,12 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         channels: plan.channels,
         status: 'approved',
         imageUrl,
-      }).catch(() => null);
+      }).catch((err) => {
+        logger.error(`[studio] review-graphic bookkeeping FAILED after publish (review ${plan.reviewGraphic.googleReviewId}): ${err.message} — graphic record missing from admin history; reselection stays durably blocked by the published stamp`);
+        return null;
+      });
+    } else if (isReviewRun && !canPersistGraphic && !SOCIAL_FLAGS.dryRun && publishResult.success) {
+      logger.error(`[studio] review_graphics table unavailable — published review ${plan.reviewGraphic.googleReviewId} has no graphic bookkeeping row; reselection stays durably blocked by the published stamp`);
     }
 
     const status = SOCIAL_FLAGS.dryRun ? 'dry_run' : publishResult.success ? 'published' : 'failed';
@@ -1557,6 +1659,9 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       preview: finalPreview,
       publishResult,
     };
+    } finally {
+      if (!claimRetained) await publishOutcome.releaseClaim();
+    }
   } catch (err) {
     await updateAutonomousRun(run?.id, {
       status: 'failed',
@@ -1579,6 +1684,159 @@ function cityFromLocationId(locationId) {
 // Resolve the publishable variant list for a run preview. Creative-engine runs
 // carry preview.visual.variants; legacy single-card drafts collapse to a
 // one-entry list so the same approve path serves both.
+/**
+ * Serialize a testimonial's liveness decision with the reconcile's stamping
+ * UPDATE. The snapshot gates in runAutonomous/approveAutonomousRun are
+ * TOCTOU: `_reconcileMissingReviews` can stamp the source review between
+ * the read and publishToAll. FOR UPDATE on the source row makes the hourly
+ * claim (an UPDATE on the same row) queue behind the publish, so "checked
+ * live" and "published" are one atomic decision — a stamp that loses the
+ * race lands after commit, where it is a genuinely concurrent removal (the
+ * watchdog alert still fires and stamped rows drop off every surface).
+ * The liveness DECISION runs under the per-location advisory lock the sync
+ * holds across its whole fetch→reconcile cycle (gbp-review-sync:<loc>):
+ * while the lock is held no cycle is in flight and no stamp is pending
+ * (the reconcile is the only stamp writer and runs inside the same lock).
+ * The decision is a CONDITIONAL CLAIM — one statement that verifies the
+ * row is unstamped and stamps publish_claimed_until — and then the lock
+ * (and its pooled connection) is released BEFORE the slow multi-provider
+ * publish: holding it across provider stalls pinned a pool connection per
+ * in-flight publish and could starve unrelated queries. The durable claim
+ * covers the publish interval instead: the reconcile skips rows with an
+ * unexpired claim, so no removal stamp can land mid-publication either.
+ * The claim self-expires (PUBLISH_CLAIM_MS) and is cleared best-effort
+ * afterwards, so a crashed publisher only defers that row's stamping to
+ * the next hourly cycle. When a LIVE publish cannot get its DURABLE
+ * published stamp written (recordTestimonialPublished), callers retain
+ * the claim instead of releasing it and holdClaimUntilPublishRecorded
+ * owns the release (see its doc).
+ * Non-review publishes (no sourceReviewId) pass straight through.
+ * FAIL CLOSED: no hasTable pre-check — a DB error rejects and the publish
+ * fails loudly.
+ */
+const PUBLISH_CLAIM_MS = 10 * 60 * 1000;
+
+const NOOP_RELEASE = async () => {};
+const NOOP_ABANDON = () => {};
+
+async function publishWithReviewLivenessLock(sourceReviewId, publishFn, { rejectConsumed = false, allowConsumedByRunId = null } = {}) {
+  if (!sourceReviewId) {
+    return { blocked: false, result: await publishFn(), releaseClaim: NOOP_RELEASE, abandonClaim: NOOP_ABANDON };
+  }
+  const source = await db('google_reviews').where({ id: sourceReviewId }).first();
+  if (!source || source.missing_since) {
+    return { blocked: true, missing: !source };
+  }
+  // The claimed-until value doubles as the ownership token: acquisition is
+  // serialized under the advisory lock, so exactly one publisher can win a
+  // given claim window — and releaseClaim below releases ONLY a claim this
+  // invocation owns, never a successor's.
+  const claimUntil = new Date(Date.now() + PUBLISH_CLAIM_MS).toISOString();
+  const decision = await runExclusive(`gbp-review-sync:${source.location_id}`, async () => {
+    if (rejectConsumed) {
+      // Two draft runs can reference the same review (drafts don't insert
+      // review_graphics) — once one approval consumed the candidate, a
+      // second acquisition must fail permanently, not just while the first
+      // claim is live. FAIL CLOSED: duplicate prevention is the whole point
+      // of these lookups, so a transient DB failure must abort the publish
+      // (the error propagates and the run fails loudly) — swallowing it
+      // would treat "couldn't check" as "not consumed" and re-publish a
+      // testimonial another run already posted.
+      const consumedRow = await db('review_graphics')
+        .where({ google_review_id: sourceReviewId, status: 'approved' })
+        .first();
+      if (consumedRow) return { consumed: true };
+      // The DURABLE published stamp — written on the first successful
+      // external post, before and independent of review_graphics
+      // bookkeeping, so it survives bookkeeping failures and process
+      // crashes. Only the OWNING run (a partial approval retrying its
+      // remaining channels) may publish past its own stamp; everyone
+      // else is consumed. Fresh read inside the advisory lock.
+      const currentSource = await db('google_reviews').where({ id: sourceReviewId }).first();
+      if (currentSource?.testimonial_published_at
+        && (allowConsumedByRunId == null
+          || String(currentSource.testimonial_published_run) !== String(allowConsumedByRunId))) {
+        return { consumed: true };
+      }
+    }
+    const claimed = await db('google_reviews')
+      .where({ id: sourceReviewId })
+      .whereNull('missing_since')
+      // Acquire only when unclaimed or expired — a live claim means another
+      // publish of this review is in flight, and accepting anyway would
+      // double-publish and let the first finisher erase the second's claim.
+      .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
+      .update({ publish_claimed_until: claimUntil });
+    return { claimed: (Array.isArray(claimed) ? claimed.length : claimed) > 0 };
+  }, { recordHealth: false });
+  if (decision?.skipped) {
+    return { blocked: true, lockBusy: true };
+  }
+  if (decision.consumed) {
+    return { blocked: true, consumed: true };
+  }
+  if (!decision.claimed) {
+    // Zero rows: stamped/deleted, or another publisher holds a live claim.
+    const fresh = await db('google_reviews').where({ id: sourceReviewId }).first();
+    if (fresh && !fresh.missing_since) {
+      return { blocked: true, lockBusy: true };
+    }
+    return { blocked: true, missing: !fresh };
+  }
+  // Heartbeat: provider requests carry no total deadline, so a stalled
+  // publish could outlive the claim TTL and let the reconcile stamp the
+  // review mid-publication. Renew the OWNED claim (token-matched, so a
+  // successor's claim is never touched) at a third of the TTL. If a
+  // renewal is still in flight when the release runs, the clear can miss
+  // the rotated token — that orphan self-expires within one TTL and only
+  // defers that row's stamping by one cycle.
+  let currentClaim = claimUntil;
+  const heartbeat = setInterval(async () => {
+    try {
+      const next = new Date(Date.now() + PUBLISH_CLAIM_MS).toISOString();
+      const renewed = await db('google_reviews')
+        .where({ id: sourceReviewId })
+        .where('publish_claimed_until', currentClaim)
+        .update({ publish_claimed_until: next });
+      if ((Array.isArray(renewed) ? renewed.length : renewed) > 0) currentClaim = next;
+    } catch { /* best-effort — the TTL still bounds the window */ }
+  }, Math.floor(PUBLISH_CLAIM_MS / 3));
+  heartbeat.unref?.();
+  let released = false;
+  const releaseClaim = async () => {
+    if (released) return;
+    released = true;
+    clearInterval(heartbeat);
+    await db('google_reviews')
+      .where({ id: sourceReviewId })
+      .where('publish_claimed_until', currentClaim)
+      .update({ publish_claimed_until: null })
+      .catch(() => null);
+  };
+  // Abandon = stop renewing but DELIBERATELY leave the claim standing, so it
+  // self-expires within one TTL. Used when a live external publish could not
+  // get its candidate consumption recorded: actively clearing the claim
+  // would re-open reselection (and double-publish) immediately, while an
+  // expiring claim never blocks the reconcile for longer than one TTL after
+  // the heartbeat stops.
+  const abandonClaim = () => {
+    if (released) return;
+    released = true;
+    clearInterval(heartbeat);
+  };
+  try {
+    const result = await publishFn();
+    // The claim deliberately SURVIVES a successful publish: callers hold it
+    // through their post-publish bookkeeping (candidate consumption, local
+    // record) and release via releaseClaim() — otherwise a competitor could
+    // acquire in the publish→consume gap and double-publish.
+    return { blocked: false, result, releaseClaim, abandonClaim };
+  } catch (err) {
+    await releaseClaim();
+    throw err;
+  }
+}
+
 function runVariants(preview = {}) {
   const visual = preview.visual || {};
   if (Array.isArray(visual.variants) && visual.variants.length) return visual.variants;
@@ -1652,6 +1910,22 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
 
     const preview = toJson(run.preview, {});
     const input = toJson(run.input, {});
+    // A review-testimonial draft must not publish a review Google has since
+    // removed — the stored draft copy would post as a "current Google
+    // review". createReviewGraphic re-checks eligibility, but only AFTER a
+    // successful publish (bookkeeping); this is the pre-publish gate. Also
+    // blocks partial-publish retries: stopping further spread beats
+    // completing the channel set with a removed review.
+    const sourceReviewId = input.reviewGraphic?.googleReviewId || null;
+    if (sourceReviewId && (await hasTable('google_reviews'))) {
+      const srcReview = await db('google_reviews').where({ id: sourceReviewId }).first().catch(() => null);
+      if (!srcReview) {
+        return { ok: false, status: 409, error: 'source Google review no longer exists — testimonial cannot be published' };
+      }
+      if (srcReview.missing_since) {
+        return { ok: false, status: 409, error: 'source Google review has been removed from Google — testimonial cannot be published' };
+      }
+    }
     const variants = runVariants(preview);
     const priorRecordFull = toJson(run.publish_result, {});
     const priorHasSuccess = Array.isArray(priorRecordFull?.platforms)
@@ -1709,8 +1983,10 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
 
     // Nothing left to attempt → assess purely from the record (defensive; a
     // fully-posted run normally finalizes on the attempt that completed it).
-    const publishResult = remainingChannels.length
-      ? await SocialMediaService.publishToAll({
+    // The liveness gate above is a snapshot; the lock closes its TOCTOU
+    // against the reconcile stamping the source review mid-approval.
+    const publishOutcome = remainingChannels.length
+      ? await publishWithReviewLivenessLock(sourceReviewId, () => SocialMediaService.publishToAll({
         title: run.topic || preview.inputs?.topic || 'Waves update',
         description: run.service || preview.inputs?.service || '',
         link: preview.suggestedLink,
@@ -1731,8 +2007,36 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         noAiImage: true, // stored visual only — never a fresh literal AI image
         gbpLocationIds: [gbpLocationId],
         postId: run.social_media_post_id || null,
-      })
-      : { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' };
+        // Durable stamp at the FIRST provider success — mirrors the
+        // autonomous path; the post-publish stamp below is the no-op backstop.
+        onFirstPlatformSuccess: input.reviewGraphic?.googleReviewId && !SOCIAL_FLAGS.dryRun
+          ? () => recordTestimonialPublished(input.reviewGraphic.googleReviewId, run.id)
+          : null,
+      // allowConsumedByRunId: a PARTIAL prior attempt stamps this run as the
+      // owner of the testimonial — only this run's retry may publish the
+      // remaining channels past its own stamp; every other run is consumed.
+      }), { rejectConsumed: true, allowConsumedByRunId: run.id })
+      : { blocked: false, result: { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' }, releaseClaim: async () => {}, abandonClaim: () => {} };
+    if (publishOutcome.blocked) {
+      return {
+        ok: false,
+        status: 409,
+        error: publishOutcome.lockBusy
+          ? 'review sync is in progress for this location — approve again in a moment'
+          : publishOutcome.consumed
+            ? 'this review was already published as a testimonial by another run'
+            : publishOutcome.missing
+              ? 'source Google review no longer exists — testimonial cannot be published'
+              : 'source Google review has been removed from Google — testimonial cannot be published',
+      };
+    }
+    const publishResult = publishOutcome.result;
+    // Claim held through the durable published stamp below (see
+    // publishWithReviewLivenessLock) — released in the finally UNLESS the
+    // stamp failed after a live publish, where the claim is retained and
+    // the detached recovery loop owns its release.
+    let claimRetained = false;
+    try {
 
     // A VIDEO approval only finalizes when the video itself posted AND no
     // requested Meta channel is left attempted-but-failed (see
@@ -1752,6 +2056,29 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       conceptKey: chosen.conceptKey || null,
     };
     const published = assessment.complete && !SOCIAL_FLAGS.dryRun;
+
+    // DURABLE published stamp on the FIRST successful external post — on
+    // ANY success, not only completion: a partial attempt (Facebook posted,
+    // Instagram failed) already put this testimonial live externally, and
+    // without the stamp the review stayed selectable by other runs while
+    // this run remained retryable. The stamp records THIS run as owner, so
+    // only this run's retry passes the consumed check for its remaining
+    // channels. Stamp failure retains the claim — recovery loop writes it.
+    if (input.reviewGraphic?.googleReviewId && !SOCIAL_FLAGS.dryRun && assessment.mergedPublishResult.success) {
+      try {
+        await recordTestimonialPublished(input.reviewGraphic.googleReviewId, run.id);
+      } catch (err) {
+        logger.error(`[studio] testimonial-published stamp FAILED after approval publish (review ${input.reviewGraphic.googleReviewId}): ${err.message} — claim retained, recovery loop will write the durable record`);
+        claimRetained = true;
+        // Intentional fire-and-forget — the helper attaches its own terminal
+        // catch and the claim self-expires if the process dies mid-loop.
+        void holdClaimUntilPublishRecorded({
+          googleReviewId: input.reviewGraphic.googleReviewId,
+          record: () => recordTestimonialPublished(input.reviewGraphic.googleReviewId, run.id),
+          claim: publishOutcome,
+        });
+      }
+    }
 
     // publishToAll's postId update wrote only THIS attempt's results to the
     // post-history row; overwrite with the merged cross-attempt record so
@@ -1778,18 +2105,23 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         .catch(() => null);
     }
 
-    // Consume the review from the candidate queue only after a REAL publish —
-    // same invariants as the autonomous publish path (never on dry-run/failure,
-    // never without a hosted image).
-    if (published && input.reviewGraphic?.googleReviewId && await hasTable('review_graphics')) {
-      await createReviewGraphic({
+    // Graphic bookkeeping on completion — admin history and the saved-
+    // graphics list. The durable stamp above already blocks reselection
+    // from the first success, so a failure here is loud but does not need
+    // to hold the claim. No hasTable pre-gate: createReviewGraphic fails
+    // loudly when the table is unreachable instead of silently skipping.
+    if (published && input.reviewGraphic?.googleReviewId) {
+      await persistReviewGraphicWithRetry({
         googleReviewId: input.reviewGraphic.googleReviewId,
         privacyMode: input.reviewGraphic.privacyMode || 'first_name_city',
         templateKey: preview.visual?.templateKey || 'waves_clean_square',
         channels,
         status: 'approved',
         imageUrl: chosenImageUrl,
-      }).catch(() => null);
+      }).catch((err) => {
+        logger.error(`[studio] review-graphic bookkeeping FAILED after approval publish (review ${input.reviewGraphic.googleReviewId}): ${err.message} — graphic record missing from admin history; reselection stays durably blocked by the published stamp`);
+        return null;
+      });
     }
 
     // Promote the chosen variant to the run's primary visual so the audit list
@@ -1827,6 +2159,9 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     });
 
     return { ok: true, published, dryRun: SOCIAL_FLAGS.dryRun, publishResult: assessment.mergedPublishResult, run: updated };
+    } finally {
+      if (!claimRetained) await publishOutcome.releaseClaim();
+    }
     // recordHealth: false — per-run approval lock, not a scheduled job.
   }, { recordHealth: false });
 
@@ -1947,6 +2282,12 @@ async function listReviewGraphicCandidates({ limit = 30 } = {}) {
       .where('gr.star_rating', 5)
       .whereNotNull('gr.review_text')
       .whereRaw("TRIM(gr.review_text) <> ''")
+      // Never offer a review Google has removed as marketing material.
+      .whereNull('gr.missing_since')
+      // Never re-offer a review already published as a testimonial — the
+      // durable stamp survives review_graphics bookkeeping failures, so
+      // this exclusion holds even when no rg row exists.
+      .whereNull('gr.testimonial_published_at')
       .select('gr.id', 'gr.location_id', 'gr.reviewer_name', 'gr.star_rating', 'gr.review_text', 'gr.review_created_at')
       .orderBy('gr.review_created_at', 'desc')
       .limit(safeLimit);
@@ -1976,6 +2317,117 @@ async function listReviewGraphicCandidates({ limit = 30 } = {}) {
   };
 }
 
+/**
+ * Post-publish bookkeeping wrapper: createReviewGraphic consumes the review
+ * from the candidate queue, and a swallowed failure here means the
+ * testimonial is live externally with nothing consuming the candidate — a
+ * later autonomous run would publish the SAME review again. Lock contention
+ * (a sync cycle holding the location lock right after publish) is the
+ * expected transient, so retry through it; sync cycles run seconds, not
+ * minutes. Non-busy errors propagate to the caller's handling.
+ */
+async function persistReviewGraphicWithRetry(input, { attempts = 6, delayMs = 10000 } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await createReviewGraphic(input);
+    } catch (err) {
+      if (err?.code !== 'SYNC_LOCK_BUSY' || attempt >= attempts) throw err;
+      logger.info(`[studio] review-graphic persist deferred by location sync lock (attempt ${attempt}/${attempts}) — retrying in ${delayMs / 1000}s`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
+const CLAIM_RECOVERY_ATTEMPTS = 60;
+const CLAIM_RECOVERY_DELAY_MS = 60 * 1000;
+
+/**
+ * Stamp the DURABLE testimonial-published marker on the source review —
+ * first-win, one conditional UPDATE, executed the moment any external
+ * channel successfully posts the review. This is the record that outlives
+ * bookkeeping failures and process crashes: candidate selection excludes
+ * stamped rows and the publish-time consumed check rejects them (except
+ * the owning run retrying its remaining channels). Throws on DB failure —
+ * the caller retains the publish claim and hands recovery to
+ * holdClaimUntilPublishRecorded. Idempotent for the owner: an existing
+ * own-run stamp is success; a FOREIGN stamp is logged loudly (it means
+ * two publishers raced through a crash-expired claim) but still returns —
+ * the durable protection is in place either way.
+ */
+async function recordTestimonialPublished(googleReviewId, runToken) {
+  const stamped = await db('google_reviews')
+    .where({ id: googleReviewId })
+    .whereNull('testimonial_published_at')
+    .update({
+      testimonial_published_at: new Date().toISOString(),
+      testimonial_published_run: runToken == null ? null : String(runToken),
+    });
+  if ((Array.isArray(stamped) ? stamped.length : stamped) > 0) return;
+  const row = await db('google_reviews').where({ id: googleReviewId }).first();
+  if (!row) return; // review row gone — nothing selectable remains to guard
+  if (row.testimonial_published_at
+    && String(row.testimonial_published_run) !== String(runToken == null ? null : runToken)) {
+    logger.error(`[studio] testimonial-published stamp for review ${googleReviewId} already owned by run ${row.testimonial_published_run} (this publisher: ${runToken}) — two publishers posted this review; investigate the claim window`);
+  }
+}
+
+/**
+ * Detached post-publish recovery: the testimonial is LIVE externally but the
+ * durable published stamp failed to write, so nothing durable stops a later
+ * run from re-selecting and double-publishing the same review. The caller
+ * RETAINS the publish claim (its heartbeat keeps renewing, which blocks
+ * competitor acquisition and defers reconcile stamping) and this loop owns
+ * the claim's release: it keeps retrying `record` until the durable record
+ * lands, then releases. It releases early when the review is stamped
+ * removed or deleted — stamped rows are excluded from every candidate and
+ * approve surface, so no reselection risk remains. An unreadable review
+ * keeps the claim held (never release on unverifiable state). If recovery
+ * exhausts its attempts (~1h of a DB that cannot take one UPDATE), the
+ * claim is ABANDONED rather than cleared: it self-expires within one TTL,
+ * and was never actively released while unrecorded. Crash caveat (same as
+ * the claim design itself): process death in the stamp-failed window lets
+ * the claim expire with no durable record — the error logs are the
+ * operator signal.
+ */
+function holdClaimUntilPublishRecorded({
+  googleReviewId,
+  record,
+  claim,
+  attempts = CLAIM_RECOVERY_ATTEMPTS,
+  delayMs = CLAIM_RECOVERY_DELAY_MS,
+}) {
+  const loop = async () => {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      await new Promise((resolve) => { const t = setTimeout(resolve, delayMs); t.unref?.(); });
+      let review; let readOk = true;
+      try {
+        review = await db('google_reviews').where({ id: googleReviewId }).first();
+      } catch { readOk = false; }
+      if (readOk && (!review || review.missing_since)) {
+        logger.info(`[studio] claim recovery: review ${googleReviewId} is ${review ? 'stamped removed' : 'deleted'} — excluded from every candidate surface, no reselection risk; releasing claim`);
+        await claim.releaseClaim();
+        return;
+      }
+      if (!readOk) continue; // can't verify liveness — keep holding, retry next tick
+      try {
+        await record();
+        logger.info(`[studio] claim recovery: durable publish record landed for review ${googleReviewId} on attempt ${attempt} — releasing claim`);
+        await claim.releaseClaim();
+        return;
+      } catch (err) {
+        logger.warn(`[studio] claim recovery attempt ${attempt}/${attempts} for review ${googleReviewId} failed: ${err.message}`);
+      }
+    }
+    logger.error(`[studio] claim recovery EXHAUSTED for review ${googleReviewId} — abandoning the claim (self-expires within ${Math.round(PUBLISH_CLAIM_MS / 60000)} minutes). The published testimonial has NO durable record and may be re-selected by a later run — investigate google_reviews writes`);
+    claim.abandonClaim();
+  };
+  // Detached promise — never let a rejection escape unhandled.
+  return loop().catch((err) => {
+    logger.error(`[studio] claim recovery loop crashed for review ${googleReviewId}: ${err.message} — abandoning the claim`);
+    claim.abandonClaim();
+  });
+}
+
 async function createReviewGraphic(input) {
   if (!(await hasTable('review_graphics'))) throw new Error('review_graphics table is not available');
   const review = await db('google_reviews').where({ id: input.googleReviewId }).first();
@@ -1985,8 +2437,11 @@ async function createReviewGraphic(input) {
   // graphic from a lower-rated, blank, or stats-sentinel review.
   if (Number(review.star_rating) !== 5
     || !String(review.review_text || '').trim()
-    || review.reviewer_name === '_stats') {
-    throw new Error('Review is not eligible for a 5-star graphic (requires star_rating=5 and non-empty review text)');
+    || review.reviewer_name === '_stats'
+    // Mirror the candidate query: a review Google removed must not become a
+    // "current Google review" marketing card, even by direct ID.
+    || review.missing_since) {
+    throw new Error('Review is not eligible for a 5-star graphic (requires star_rating=5, non-empty review text, and the review still live on Google)');
   }
   const candidate = buildReviewGraphicCandidate(review, input);
   // image_url is persisted then rendered as an <a href>/<img src> in the admin
@@ -2025,11 +2480,37 @@ async function createReviewGraphic(input) {
   };
   if (await hasColumn('review_graphics', 'image_url')) row.image_url = imageUrl || null;
 
-  const [graphic] = await db('review_graphics')
-    .insert({ ...row, created_at: new Date() })
-    .onConflict(['google_review_id', 'template_key'])
-    .merge(row)
-    .returning('*');
+  // The render/upload above can take seconds — long enough for the hourly
+  // sync to stamp the review removed. Re-check and persist ATOMICALLY under
+  // the per-location sync advisory lock: the row-level FOR UPDATE alone only
+  // serializes against the stamping UPDATE, but a sync cycle that already
+  // FETCHED a snapshot without this review could stamp it right after this
+  // persist commits — and callers can pass status:'approved' directly, so
+  // the persisted row would skip the advisory-locked approve gates. Sharing
+  // gbp-review-sync:<loc> (the lock the sync holds across fetch→reconcile)
+  // closes that window; a stamp committed first is seen here (abort), and a
+  // busy lock defers the persist with a retryable error.
+  const outcome = await runExclusive(`gbp-review-sync:${candidate.locationId}`, async () => db.transaction(async (trx) => {
+    const fresh = await trx('google_reviews')
+      .where({ id: input.googleReviewId })
+      .forUpdate()
+      .first();
+    if (!fresh || fresh.missing_since) {
+      throw new Error('Review was removed from Google while the graphic rendered — refusing to persist it');
+    }
+    const [saved] = await trx('review_graphics')
+      .insert({ ...row, created_at: new Date() })
+      .onConflict(['google_review_id', 'template_key'])
+      .merge(row)
+      .returning('*');
+    return saved;
+  }), { recordHealth: false });
+  if (outcome?.skipped) {
+    const busy = new Error('Review sync is in progress for this location — retry creating the graphic in a moment');
+    busy.code = 'SYNC_LOCK_BUSY';
+    throw busy;
+  }
+  const graphic = outcome;
   return { ...graphic, image_url: graphic.image_url || imageUrl || null };
 }
 
@@ -2152,6 +2633,9 @@ async function createCompetitorPost(input) {
 module.exports = {
   AUTONOMOUS_FLAGS,
   AUTONOMOUS_SOURCE,
+  publishWithReviewLivenessLock,
+  holdClaimUntilPublishRecorded,
+  recordTestimonialPublished,
   CHANNELS,
   DEFAULT_COMPETITOR_PATTERNS,
   FASTEST_RISER_PROFILES,

@@ -5,6 +5,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { WAVES_LOCATIONS } = require('../config/locations');
 const { whereLiveCustomer, CONVERSION_DATE_SQL } = require('./customer-stages');
 const { etDateString, etMonthStart, etMonthEnd, etWeekStart, addETDays } = require('../utils/datetime-et');
 
@@ -186,19 +187,60 @@ async function executeBITool(toolName, input) {
       const [stats, thisWeek, unresponded] = await Promise.all([
         (async () => {
           try {
+            // The _stats snapshot is trusted only when EVERY configured
+            // location has a row synced inside the last 24h — the same
+            // freshness/completeness rule as the dashboard. A removed Maps
+            // key leaves stale rows indefinitely and a per-location Places
+            // failure yields a partial total; either must fall through to
+            // the live-row aggregate (which excludes removed reviews).
             const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
-            let total = 0, ratingSum = 0, cnt = 0;
+            const STATS_FRESH_MS = 24 * 60 * 60 * 1000;
+            const freshStats = {};
             for (const row of statsRows) {
-              try { const p = JSON.parse(row.review_text); total += p.totalReviews || 0; if (p.rating) { ratingSum += p.rating; cnt++; } } catch {}
+              const t = new Date(row.synced_at).getTime();
+              if (!(t > 0 && Date.now() - t <= STATS_FRESH_MS)) continue;
+              // A location is complete only when its fresh payload parses
+              // AND carries a usable number — '"corrupt"' or '{}' is valid
+              // JSON that contributes nothing, and counting it would keep
+              // this branch selected on a silently partial total.
+              try {
+                const p = JSON.parse(row.review_text);
+                // Finite totalReviews REQUIRED (rating-only would count the
+                // location complete while contributing zero to the total).
+                if (p && typeof p === 'object'
+                  && Number.isFinite(p.totalReviews)) {
+                  freshStats[row.location_id] = p;
+                }
+              } catch {}
+            }
+            const statsComplete = WAVES_LOCATIONS.length > 0 && WAVES_LOCATIONS.every((l) => freshStats[l.id]);
+            let total = 0, ratingSum = 0, cnt = 0;
+            if (statsComplete) {
+              for (const loc of WAVES_LOCATIONS) {
+                const p = freshStats[loc.id];
+                total += p.totalReviews || 0;
+                if (p.rating) { ratingSum += p.rating; cnt++; }
+              }
             }
             if (total > 0) return { total, rating: cnt > 0 ? (ratingSum / cnt).toFixed(1) : '5.0' };
+            // Fallback aggregates report current Google state, so rows
+            // Google removed (missing_since stamped) are excluded, and only
+            // configured locations count (retired/renamed GBPs' rows would
+            // inflate the total; unstamped legacy rows are kept).
             const fallback = await db('google_reviews').where('reviewer_name', '!=', '_stats')
+              .whereNull('missing_since')
+              .where(function scopeConfiguredLocations() {
+                this.whereIn('location_id', WAVES_LOCATIONS.map((l) => l.id)).orWhereNull('location_id');
+              })
               .select(db.raw('COUNT(*) as total'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as rating')).first();
             return { total: parseInt(fallback?.total || 0), rating: fallback?.rating || '0' };
           } catch { return { total: 0, rating: '0' }; }
         })(),
-        db('google_reviews').where('reviewer_name', '!=', '_stats').where('created_at', '>=', weekAgo).count('* as count').first(),
+        db('google_reviews').where('reviewer_name', '!=', '_stats').whereNull('missing_since')
+          .where('created_at', '>=', weekAgo).count('* as count').first(),
+        // Removed-from-Google rows are not actionable reply targets.
         db('google_reviews').where('reviewer_name', '!=', '_stats').whereNotNull('review_text').modify(whereNeedsRealReviewReply)
+          .whereNull('missing_since')
           .select('reviewer_name', 'star_rating').limit(5),
       ]);
 
@@ -293,6 +335,9 @@ async function executeBITool(toolName, input) {
         const old = await db('google_reviews').where('reviewer_name', '!=', '_stats')
           .whereNotNull('review_text')
           .modify(whereNeedsRealReviewReply)
+          // A removed review can never be responded to — without this filter
+          // the overdue anomaly would fire on every run forever.
+          .whereNull('missing_since')
           .where('created_at', '<', new Date(Date.now() - 48 * 3600000))
           .count('* as count').first();
         if (parseInt(old?.count || 0) > 0) anomalies.push({ type: 'reviews', severity: 'warning', detail: `${old.count} review(s) unresponded >48 hours` });

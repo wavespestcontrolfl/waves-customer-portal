@@ -78,6 +78,10 @@ async function getMarketPosition() {
   // Waves own rating vs competitor average
   const wavesAgg = await db('google_reviews')
     .where('reviewer_name', '!=', '_stats')
+    // Reviews Google has removed are retained as evidence but are not part
+    // of the CURRENT market position — competitors are compared on their
+    // current live values.
+    .whereNull('missing_since')
     .whereNotNull('star_rating')
     .avg('star_rating as avg_rating')
     .count('id as total')
