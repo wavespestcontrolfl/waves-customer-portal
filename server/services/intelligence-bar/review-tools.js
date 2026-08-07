@@ -173,8 +173,12 @@ async function executeReviewTool(toolName, input) {
 async function getReviewStats() {
   const reviews = db('google_reviews').where('reviewer_name', '!=', '_stats');
 
-  const [totals, unresponded, thisMonth, perLocation, breakdown] = await Promise.all([
+  const [totals, liveTotal, unresponded, thisMonth, perLocation, breakdown] = await Promise.all([
     reviews.clone().select(db.raw('COUNT(*) as total'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating')).first(),
+    // Response-rate population: live rows only. Stamped (removed) rows are
+    // excluded from unresponded below, so leaving them in the denominator
+    // would count every removed unreplied review as "responded".
+    reviews.clone().whereNull('missing_since').count('* as count').first(),
     // Stamped (removed) rows are rejected by every reply path — they are not
     // actionable, so they must not degrade the unresponded count either.
     reviews.clone().whereNotNull('review_text').modify(whereNeedsRealReply).whereNull('missing_since').count('* as count').first(),
@@ -184,8 +188,9 @@ async function getReviewStats() {
   ]);
 
   const total = parseInt(totals?.total || 0);
-  const responded = total - parseInt(unresponded?.count || 0);
-  const responseRate = total > 0 ? Math.round(responded / total * 100) : 0;
+  const live = parseInt(liveTotal?.count || 0);
+  const responded = live - parseInt(unresponded?.count || 0);
+  const responseRate = live > 0 ? Math.round(responded / live * 100) : 0;
 
   const starBreakdown = {};
   breakdown.forEach(b => { starBreakdown[b.star_rating] = parseInt(b.count); });

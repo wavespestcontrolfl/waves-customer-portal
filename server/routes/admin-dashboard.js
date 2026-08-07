@@ -309,6 +309,9 @@ router.get('/', dashboardCache, async (req, res, next) => {
               .whereNotNull('review_text')
               .where(function () { this.where('dismissed', false).orWhereNull('dismissed'); })
               .modify(whereNeedsRealReviewReply)
+              // Removed-from-Google rows are not actionable — no reply path
+              // accepts them, so they'd degrade this count forever.
+              .whereNull('missing_since')
               .count('* as c')
               .first();
             return { total: totalFromPlaces, avg_rating: ratingCount > 0 ? (ratingSum / ratingCount).toFixed(1) : '5.0', unresponded: parseInt(unresponded?.c || 0) };
@@ -317,7 +320,7 @@ router.get('/', dashboardCache, async (req, res, next) => {
           return await db('google_reviews').where('reviewer_name', '!=', '_stats').select(
             db.raw('COUNT(*) as total'),
             db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
-            db.raw("COUNT(*) FILTER (WHERE review_text IS NOT NULL AND (review_reply IS NULL OR review_reply LIKE '[DRAFT]%') AND COALESCE(dismissed, false) = false) as unresponded")
+            db.raw("COUNT(*) FILTER (WHERE review_text IS NOT NULL AND (review_reply IS NULL OR review_reply LIKE '[DRAFT]%') AND COALESCE(dismissed, false) = false AND missing_since IS NULL) as unresponded")
           ).first();
         } catch (err) {
           logger.error(`[admin-dashboard] google_reviews query failed: ${err.message}`);

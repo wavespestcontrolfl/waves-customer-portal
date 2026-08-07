@@ -202,6 +202,15 @@ router.post('/review-graphics/:id/approve', requireStudioEnabled, async (req, re
     if (!existing.image_url) {
       return res.status(400).json({ error: 'review graphic has no rendered image; regenerate it before approving' });
     }
+    // Liveness gate, mirroring the autonomous-run approval: the source review
+    // can be stamped removed between draft creation and this approval, and
+    // approving would publish a removed review as a current testimonial.
+    if (existing.google_review_id) {
+      const src = await db('google_reviews').where({ id: existing.google_review_id }).first().catch(() => null);
+      if (!src || src.missing_since) {
+        return res.status(409).json({ error: 'source Google review has been removed from Google — the graphic cannot be approved' });
+      }
+    }
     const [graphic] = await db('review_graphics')
       .where({ id: req.params.id })
       .update({

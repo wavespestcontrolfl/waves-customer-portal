@@ -198,7 +198,9 @@ async function executeBITool(toolName, input) {
           } catch { return { total: 0, rating: '0' }; }
         })(),
         db('google_reviews').where('reviewer_name', '!=', '_stats').where('created_at', '>=', weekAgo).count('* as count').first(),
+        // Removed-from-Google rows are not actionable reply targets.
         db('google_reviews').where('reviewer_name', '!=', '_stats').whereNotNull('review_text').modify(whereNeedsRealReviewReply)
+          .whereNull('missing_since')
           .select('reviewer_name', 'star_rating').limit(5),
       ]);
 
@@ -293,6 +295,9 @@ async function executeBITool(toolName, input) {
         const old = await db('google_reviews').where('reviewer_name', '!=', '_stats')
           .whereNotNull('review_text')
           .modify(whereNeedsRealReviewReply)
+          // A removed review can never be responded to — without this filter
+          // the overdue anomaly would fire on every run forever.
+          .whereNull('missing_since')
           .where('created_at', '<', new Date(Date.now() - 48 * 3600000))
           .count('* as count').first();
         if (parseInt(old?.count || 0) > 0) anomalies.push({ type: 'reviews', severity: 'warning', detail: `${old.count} review(s) unresponded >48 hours` });

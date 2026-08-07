@@ -1085,6 +1085,25 @@ describe('Google Business review sync', () => {
     expect(urls.some(u => u.includes('maps.googleapis.com'))).toBe(false);
   });
 
+  test('an older sync snapshot cannot clear a stamp written by a newer reconciliation', async () => {
+    // The stamp postdates this runner's fetch start (a newer overlapping
+    // runner already decided the review is gone) — the stale snapshot's
+    // upsert must keep the stamp rather than reviving the review.
+    const futureStamp = new Date(Date.now() + 60 * 1000).toISOString();
+    seedSyncedReview({ id: 'keep-1', missing_since: futureStamp });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'keep-1').missing_since).toBe(futureStamp);
+  });
+
   test('an insert race between overlapping runners does not ring the degraded alert', async () => {
     seedSyncedReview({ id: 'keep-1' });
     gbpFeed([{

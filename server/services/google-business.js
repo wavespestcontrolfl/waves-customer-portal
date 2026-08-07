@@ -521,7 +521,7 @@ class GoogleBusinessService {
     return candidates.find(row => sameReviewerAndTime(row, normalized.reviewer_name, normalized.review_created_at)) || null;
   }
 
-  async _upsertGbpReview(normalized) {
+  async _upsertGbpReview(normalized, syncStart = null) {
     const existing = await this._findExistingReview(normalized);
     const customerId = await this._findCustomerIdByReviewerName(normalized.reviewer_name);
     const replyFields = isDraftReply(existing?.review_reply)
@@ -543,7 +543,13 @@ class GoogleBusinessService {
       synced_at: db.fn.now(),
       // A review present in the feed is not missing — clears the stamp when
       // a previously-removed review reappears (e.g. Google reinstated it).
-      missing_since: null,
+      // EXCEPT when the stamp postdates this runner's fetch start: then a
+      // newer reconciliation already decided the review is gone, and this
+      // runner's snapshot is the stale one — an overlapping older sync must
+      // not revive the review for testimonial/marketing surfaces.
+      missing_since: (existing?.missing_since && syncStart && new Date(existing.missing_since) >= new Date(syncStart))
+        ? existing.missing_since
+        : null,
       ...replyFields,
     };
     let result;
@@ -774,7 +780,7 @@ class GoogleBusinessService {
             const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id, 100);
             for (const review of reviews) {
               const normalized = this._normalizeGbpReview(review, loc);
-              const result = await this._upsertGbpReview(normalized);
+              const result = await this._upsertGbpReview(normalized, locSyncStart);
               if (result.inserted) totalNew++;
               totalSynced++;
             }

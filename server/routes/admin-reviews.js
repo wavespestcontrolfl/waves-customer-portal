@@ -1125,6 +1125,8 @@ router.get('/stats', async (req, res, next) => {
     const unansweredRow = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
       .modify(whereNeedsRealReply)
+      // Removed reviews can't be answered — they'd sit in this metric forever.
+      .whereNull('missing_since')
       .where('review_created_at', '<', twentyFourHoursAgo)
       .count('* as count')
       .first();
