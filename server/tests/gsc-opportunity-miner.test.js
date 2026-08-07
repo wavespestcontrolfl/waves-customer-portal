@@ -557,6 +557,19 @@ describe('persistAll upsert binding integrity (07-31 regression)', () => {
     calls.length = 0;
     expect(await miner.persistAll([fam])).toBe(1);
     expect(calls[0].bindings[12]).toBe('listicle_family::page::x');
+    // Family REFRESH query-level arbitration (r27): an ordinary edit of
+    // the same query targeting a DIFFERENT page still wins.
+    calls.length = 0;
+    const famRefreshOtherPage = {
+      bucket: 'listicle_family', action_type: 'refresh_existing_page',
+      query: 'signs of termites florida', page_url: 'https://wavespestcontrol.com/blog/other-page/',
+      service: 'termite', city: null, score: 60, score_breakdown: {},
+      signal_metadata: { family_queries: ['termite signs'] },
+      dedupe_key: 'listicle_family::page::other',
+    };
+    const crossPage = await miner.persistAll([famRefreshOtherPage, boosted]);
+    expect(crossPage).toBe(1);
+    expect(calls[0].bindings[12]).toBe('striking_distance::t::_::x');
     // Family BLOG arbitration (r21): a floor-clearing ordinary refresh
     // whose query is one of the family's variants suppresses the family
     // blog too — same intent, different keys.
@@ -1187,7 +1200,7 @@ describe('listicle_family scoring + action mapping', () => {
     // loadExistingPageBody check as mineAnswerGap); unresolvable → the
     // family stays a blog candidate, and the runtime FAQ guards read
     // gsc_signal.specialty_topic.
-    expect(mineSrc).toMatch(/loadExistingPageBody\(hit\.page_url\)/);
+    expect(mineSrc).toMatch(/loadExistingPageBody\(pageUrl\)/);
     expect(mineSrc).toMatch(/servedBy\.delete\(q\)/);
     // Fail-closed three-way (audit r25): confirmed non-editable → blog
     // fallback; I/O error → the family skips ENTIRELY (no duplicate blog
@@ -1205,6 +1218,13 @@ describe('listicle_family scoring + action mapping', () => {
     expect(src).not.toMatch(/this\._familyRefreshStateFailed/);
     // ALL same-page editing actions arbitrate (rewrite_title_meta too).
     expect(src).toMatch(/PAGE_EDITING_ACTIONS = \['refresh_existing_page', 'rewrite_title_meta'\]/);
+    // r27: bounded probes (biggest demand first; past-budget = unresolved),
+    // URL-derived refresh cities, query-level refresh arbitration, and an
+    // advisory lock covering the no-existing-row insert race.
+    expect(mineSrc).toMatch(/const probeBudget = 25;/);
+    expect(mineSrc).toMatch(/pageState\.get\(hit\.page_url\) \|\| 'error'/);
+    expect(mineSrc).toMatch(/city: inferCityFromUrl\(served\.hit\.page_url\)/);
+    expect(src).toMatch(/pg_advisory_xact_lock\(hashtext\('listicle_family_reconcile'\)\)/);
     // One-edit-per-page re-checked UNDER the transaction lock.
     expect(src).toMatch(/inflightPageKeys\.get\(o\.page_url\)/);
     expect(src).toMatch(/k !== o\.dedupe_key/);

@@ -2226,22 +2226,35 @@ class GscOpportunityMiner {
       // NOT — a transient GitHub read minting a blog beside a live page is
       // duplicate content, so those families skip entirely this run.
       const pageState = new Map();
-      for (const [, hit] of Array.from(servedBy.entries())) {
-        if (pageState.has(hit.page_url)) continue;
+      // Bounded like mineAnswerGap's probes (Codex r27): each resolution is
+      // one-plus GitHub reads, so an unbounded walk over a large GSC window
+      // would serially hammer the API until rate limits mark the tail
+      // unresolved anyway. Probe the highest-demand pages first; pages past
+      // the cap stay unprobed → 'error' → their families skip this run and
+      // rotate in next mine.
+      const probeBudget = 25;
+      const demandByPage = new Map();
+      for (const [, hit] of servedBy.entries()) {
+        demandByPage.set(hit.page_url, (demandByPage.get(hit.page_url) || 0) + 1);
+      }
+      const probeOrder = Array.from(demandByPage.keys())
+        .sort((a, b) => demandByPage.get(b) - demandByPage.get(a))
+        .slice(0, probeBudget);
+      for (const pageUrl of probeOrder) {
         if (!astroPublisher?.loadExistingPageBody) {
-          pageState.set(hit.page_url, 'error');
+          pageState.set(pageUrl, 'error');
           continue;
         }
         try {
-          const loaded = await astroPublisher.loadExistingPageBody(hit.page_url);
-          pageState.set(hit.page_url, loaded && loaded.body ? 'editable' : 'not_editable');
+          const loaded = await astroPublisher.loadExistingPageBody(pageUrl);
+          pageState.set(pageUrl, loaded && loaded.body ? 'editable' : 'not_editable');
         } catch (err) {
-          logger.warn(`[gsc-opp-miner] listicle_family: body load failed for ${hit.page_url}: ${err.message}`);
-          pageState.set(hit.page_url, 'error');
+          logger.warn(`[gsc-opp-miner] listicle_family: body load failed for ${pageUrl}: ${err.message}`);
+          pageState.set(pageUrl, 'error');
         }
       }
       for (const [q, hit] of Array.from(servedBy.entries())) {
-        const state = pageState.get(hit.page_url);
+        const state = pageState.get(hit.page_url) || 'error'; // past the probe budget = unresolved
         if (state === 'not_editable') servedBy.delete(q);
         else if (state === 'error') servedBy.set(q, { ...hit, unresolved: true });
       }
@@ -2297,6 +2310,10 @@ class GscOpportunityMiner {
         // blog (the page may be live — duplicate content); the family
         // skips this run and self-heals next mine (Codex r25 audit).
         if (served.hit.unresolved) continue;
+        // An in-flight non-family edit of any VARIANT query defers the
+        // refresh too — same intent even when the target pages differ
+        // (Codex r27).
+        if (fam.variants.some((v) => inflightRefreshQueries.has(String(v.query || '').toLowerCase()))) continue;
         // NOTE the mine loop performs NO queue mutations: every stale-row
         // transition (an earlier run's blog row once a page serves the
         // intent, a refresh row whose page changed or whose family went
@@ -2320,13 +2337,17 @@ class GscOpportunityMiner {
         // refresh row (emitted after the loop) so no family's demand is
         // dropped. Grouped by PAGE alone: families classified under
         // different services/cities but served by the same URL must not
-        // become independently claimable rows editing one page.
+        // become independently claimable rows editing one page. The
+        // refresh CITY derives from the TARGET URL, never the query — a
+        // Sarasota page ranking for a Bradenton-phrased family must load
+        // Sarasota facts, exactly like mineAnswerGap's URL-only refresh
+        // cities (Codex r27); the query-resolved city still shapes BLOGS.
         let group = refreshGroups.get(served.hit.page_url);
         if (!group) {
           group = { entries: [] };
           refreshGroups.set(served.hit.page_url, group);
         }
-        group.entries.push({ fam, served, service, city });
+        group.entries.push({ fam, served, service, city: inferCityFromUrl(served.hit.page_url) });
         continue;
       }
 
@@ -2496,7 +2517,14 @@ class GscOpportunityMiner {
   // Does this family opp lose page/query arbitration to another bucket?
   static familyOppYields(o, arbitrated) {
     if (o.bucket !== 'listicle_family') return false;
-    if (o.action_type === 'refresh_existing_page') return arbitrated.pages.has(o.page_url);
+    if (o.action_type === 'refresh_existing_page') {
+      if (arbitrated.pages.has(o.page_url)) return true;
+      // Query-level too (Codex r27): an ordinary same-query edit can
+      // target a DIFFERENT page (own-page heuristic vs exact mapping) —
+      // same intent, two claimable edits.
+      const queries = Array.isArray(o.signal_metadata?.family_queries) ? o.signal_metadata.family_queries : [];
+      return [o.query, ...queries].some((q) => q && arbitrated.queries.has(String(q).toLowerCase()));
+    }
     if (o.action_type === 'new_supporting_blog') {
       // family_queries is the COMPLETE set; family_variants is capped at 5
       // for brief metadata and only serves as a legacy fallback.
@@ -2522,6 +2550,12 @@ class GscOpportunityMiner {
     // batch still expires pending rows, and an unlocked expiry can race a
     // concurrent claim (Codex r25 audit).
     if (!hasFamily && !lockEvenIfEmpty) return opportunities;
+    // Advisory transaction lock FIRST (Codex r27): FOR UPDATE only locks
+    // rows that exist, so two overlapping mines could both see no row for
+    // a fresh page and insert competing first refreshes. Every family
+    // persist path serializes here; the second transaction's re-reads then
+    // see the first's committed rows and defer.
+    await trx.raw("SELECT pg_advisory_xact_lock(hashtext('listicle_family_reconcile'))");
     const rows = await trx('opportunity_queue')
       .where({ bucket: 'listicle_family' })
       .forUpdate()
