@@ -266,10 +266,9 @@ async function applyAcceptToLedger(database, {
   const existing = customerIsLive
     ? await database('customer_plan_rates')
       .where({ customer_id: customerId })
-      .select('family_key', 'monthly_rate', 'source')
+      .select('family_key', 'monthly_rate')
     : [];
   const components = new Map(existing.map((row) => [row.family_key, roundMoney(row.monthly_rate)]));
-  const componentSources = new Map(existing.map((row) => [row.family_key, row.source]));
   const prior = roundMoney(previousScalar);
   let reviewNeeded = false;
   // An accept whose OWN slices contain unattributed money is ambiguous
@@ -327,43 +326,18 @@ async function applyAcceptToLedger(database, {
     // add-on) and an accepted UNCLASSIFIABLE slice share the same key —
     // merge, never replace (codex #3245 r7): overwriting the parked $90
     // with a $10 slice would drop $90 from the ledger-derived bill.
+    // (Cross-property same-family collisions cannot reach here: grouped
+    // estimate accepts bypass this function entirely — codex r12 — and
+    // ungrouped classification treats same-family as replace.)
     const parked = family === UNATTRIBUTED ? (components.get(UNATTRIBUTED) || 0) : 0;
-    // A PROVEN add-on whose family already has a component is the
-    // cross-property case (codex #3245 r10, via #3244's grouped accepts):
-    // the classifier property-scoped its replace evidence and proved this
-    // accept re-prices NOTHING live — the existing component is ANOTHER
-    // property's plan of the same family and must survive. Merge the
-    // amounts under the shared key and mark the component so a LATER
-    // replace-path accept of this family knows it cannot split the merged
-    // money (per-property components are the follow-up build).
-    const crossPropertyExisting = (family !== UNATTRIBUTED && addOnBase > 0)
-      ? (components.get(family) || 0)
-      : 0;
-    const amount = roundMoney(parked + crossPropertyExisting + roundMoney(slices[family]));
-    const mergedAcrossProperties = crossPropertyExisting > 0
-      || (componentSources.get(family) === 'cross_property_merge' && addOnBase > 0);
-    // Replacing a previously property-merged component is un-splittable —
-    // the new quote covers ONE property's plan while the component carried
-    // several. The replace proceeds (legacy semantics) but the owner
-    // reviews the total once.
-    if (!(addOnBase > 0) && componentSources.get(family) === 'cross_property_merge') {
-      reviewNeeded = true;
-    }
+    const amount = roundMoney(parked + roundMoney(slices[family]));
     components.set(family, amount);
     await upsertComponent(database, {
-      customerId,
-      familyKey: family,
-      monthlyRate: amount,
-      estimateId,
-      source: mergedAcrossProperties ? 'cross_property_merge' : 'estimate_accept',
+      customerId, familyKey: family, monthlyRate: amount, estimateId, source: 'estimate_accept',
     });
   }
   for (const family of zeroSliceFamilies) {
     if (components.has(family)) {
-      // Comping a family whose component was merged across properties
-      // deletes money that may belong to another property's plan — the
-      // delete proceeds (the accept's zero is explicit) but flags review.
-      if (componentSources.get(family) === 'cross_property_merge') reviewNeeded = true;
       components.delete(family);
       await database('customer_plan_rates')
         .where({ customer_id: customerId, family_key: family })

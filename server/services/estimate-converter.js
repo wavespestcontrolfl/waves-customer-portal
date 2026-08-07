@@ -2131,7 +2131,17 @@ const EstimateConverter = {
     let ledgerScalar = null;
     let ledgerAdvisoryScalar = null;
     let planRateReviewNeeded = false;
-    if (!suppressRecurringConversion) {
+    // GROUPED estimates (#3244 multi-property) bypass ledger ATTRIBUTION
+    // entirely (codex #3245 r12): same-family plans at different properties
+    // share one (customer, family) component key, and no marker scheme can
+    // split a merged component when one property later re-quotes. The
+    // SCALAR keeps #3244's correct legacy math (property-scoped add-on sum
+    // / replace); the ledger resets to a single unattributed component
+    // matching the committed scalar after the update below, with the
+    // review alert when attribution existed. Per-property components are
+    // the follow-up build gated on multi-property going live.
+    const groupedEstimateAccept = !!estimate?.estimate_group_id;
+    if (!suppressRecurringConversion && !groupedEstimateAccept) {
       try {
         const PlanRateLedger = require('./plan-rate-ledger');
         const slices = PlanRateLedger.estimateFamilySlices({ estimateData, monthlyRate });
@@ -2159,23 +2169,19 @@ const EstimateConverter = {
           planRateReviewNeeded = ledgerOutcome.reviewNeeded === true;
         }
       } catch (ledgerErr) {
-        logger.error(`[estimate-converter] plan-rate ledger apply failed for customer ${customerId} (scalar keeps legacy semantics): ${ledgerErr.message}`);
         ledgerScalar = null;
-        // With the gate ON the ledger has scalar authority — falling back
-        // to a legacy scalar while STALE components survive would let the
-        // next successful accept resurrect an obsolete sum (codex #3245
-        // r1). Invalidate the components before falling back; if even the
-        // invalidation fails, abort the acceptance (fail closed — money
-        // math may not proceed on a half-written ledger).
-        try {
-          const PlanRateLedger = require('./plan-rate-ledger');
-          if (PlanRateLedger.planRateLedgerEnabled()) {
-            await database.transaction((sp) => PlanRateLedger.clearLedger(sp, customerId, { source: 'apply_failure' }));
-          }
-        } catch (clearErr) {
-          logger.error(`[estimate-converter] plan-rate ledger invalidation ALSO failed for customer ${customerId} — aborting acceptance: ${clearErr.message}`);
+        // With the gate ON the ledger has scalar authority — the ACCEPT
+        // ABORTS (codex #3245 r12): falling back to legacy whole-scalar
+        // replacement for a seeded multi-plan customer is the exact
+        // underbilling the ledger exists to prevent, and it would commit
+        // with no review signal. The customer gets a retryable error.
+        // Gate OFF, the write is advisory — log and proceed.
+        const PlanRateLedger = require('./plan-rate-ledger');
+        if (PlanRateLedger.planRateLedgerEnabled()) {
+          logger.error(`[estimate-converter] plan-rate ledger apply failed for customer ${customerId} under scalar authority — aborting acceptance: ${ledgerErr.message}`);
           throw ledgerErr;
         }
+        logger.warn(`[estimate-converter] advisory plan-rate ledger apply failed for customer ${customerId}: ${ledgerErr.message}`);
       }
     }
     // Provisional figure for the audit outputs below — the WRITE itself is
@@ -2332,7 +2338,7 @@ const EstimateConverter = {
     // next bill to the divergent component sum. Attribution collapses to a
     // single unattributed component equal to the billed figure; fail-soft
     // (advisory mode by definition).
-    if (ledgerScalar == null && !suppressRecurringConversion
+    if (ledgerScalar == null && !suppressRecurringConversion && !groupedEstimateAccept
       && ledgerAdvisoryScalar != null
       && Math.round(ledgerAdvisoryScalar * 100) !== Math.round(convertedMonthlyRate * 100)) {
       try {
@@ -2341,6 +2347,23 @@ const EstimateConverter = {
           .resetLedgerToScalar(sp, customerId, convertedMonthlyRate, { source: 'gate_off_divergence' }));
       } catch (divergenceErr) {
         logger.warn(`[estimate-converter] gate-off ledger divergence reset failed for customer ${customerId}: ${divergenceErr.message}`);
+      }
+    }
+    // Grouped accepts (bypassed above): the committed scalar is #3244's
+    // legacy math; the ledger resets to a single unattributed component
+    // matching it, and the owner reviews once when finer attribution
+    // existed (codex #3245 r12). Gate-aware policy: authoritative reset
+    // failure fails the accept (the helper throws); advisory warns.
+    if (groupedEstimateAccept && !suppressRecurringConversion) {
+      const PlanRateLedger = require('./plan-rate-ledger');
+      let hadComponents = false;
+      try {
+        const existingComponents = await database.transaction((sp) => PlanRateLedger.loadComponents(sp, customerId));
+        hadComponents = existingComponents.some((row) => row.family_key !== PlanRateLedger.UNATTRIBUTED);
+      } catch { hadComponents = false; }
+      await PlanRateLedger.syncScalarWriteToLedger(database, customerId, convertedMonthlyRate, { source: 'grouped_accept' });
+      if (PlanRateLedger.planRateLedgerEnabled() && hadComponents) {
+        planRateReviewNeeded = true;
       }
     }
     // A one-time accept CLEARS the scalar (waveguard_tier 'One-Time',

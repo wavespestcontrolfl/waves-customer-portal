@@ -2705,6 +2705,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
         company_name: normalized.companyName, property_type: normalized.propertyType, crm_notes: normalized.notes,
       }).returning('*');
 
+      if (Number(normalized.monthlyRate) > 0) {
+        // A rate-bearing customer minted AFTER the one-time ledger backfill
+        // must carry attribution from birth (codex #3245 r12) — an
+        // unattributed component equal to the rate, so their first gate-on
+        // same-family re-quote never reaches the empty-ledger whole-scalar
+        // replace. Gate-aware error policy lives in the helper.
+        await require('../services/plan-rate-ledger')
+          .syncScalarWriteToLedger(trx, created.id, normalized.monthlyRate, { source: 'admin_create' });
+      }
+
       await createDefaultCustomerRows(trx, created.id);
 
       if (tags?.length) {

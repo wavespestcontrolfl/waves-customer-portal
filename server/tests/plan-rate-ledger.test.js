@@ -349,41 +349,6 @@ describe('applyAcceptToLedger', () => {
   });
 });
 
-describe('cross-property same-family components (codex r10)', () => {
-  test('a proven cross-property add-on MERGES the family component instead of replacing it', async () => {
-    const db = makeLedgerDb([
-      { customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 40 },
-    ]);
-    const out = await applyAcceptToLedger(db, {
-      customerId: 'cust-1',
-      estimateId: 'est-b',
-      slices: { pest_control: 50 },
-      previousScalar: 40,
-      addOnBase: 40, // classifier property-scoped the replace evidence away
-    });
-    expect(out.scalar).toBe(90); // $40 property A + $50 property B — never 50
-    const row = db.store.find((r) => r.family_key === 'pest_control');
-    expect(row.monthly_rate).toBe(90);
-    expect(row.source).toBe('cross_property_merge');
-  });
-
-  test('a later REPLACE of a property-merged component proceeds but flags review (un-splittable)', async () => {
-    const db = makeLedgerDb([
-      { customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 90, source: 'cross_property_merge' },
-      { customer_id: 'cust-1', family_key: 'lawn_care', monthly_rate: 30 },
-    ]);
-    const out = await applyAcceptToLedger(db, {
-      customerId: 'cust-1',
-      estimateId: 'est-a2',
-      slices: { pest_control: 45 },
-      previousScalar: 120,
-      addOnBase: 0, // same property re-quote — replace path
-    });
-    expect(out.scalar).toBe(75); // 45 + lawn 30 (legacy replace of the merged key)
-    expect(out.reviewNeeded).toBe(true); // owner verifies the other property's slice
-  });
-});
-
 describe('codex r11 — cross-property termite variants', () => {
   test('a proven add-on never supersedes termite variants at other properties', async () => {
     const db = makeLedgerDb([
