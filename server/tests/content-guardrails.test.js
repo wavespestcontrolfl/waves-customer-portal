@@ -3053,6 +3053,52 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(plainEnter.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('compound spelled range endpoints are figures too (Codex PR r5)', () => {
+    for (const body of [
+      'You can re-enter after twenty-one to twenty-four hours.',
+      'Wait twenty-one to twenty-four hours before re-entering.',
+      'Keep pets off the lawn for thirty-one to forty-five minutes.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+  });
+
+  test('bare drying durations WITHOUT treatment context stay legal (Codex PR r5 false positive)', () => {
+    for (const body of [
+      'Paint drying takes 30 minutes before the second coat.',
+      'The caulk needs 30 minutes to dry before inspection.',
+      'The primer dries in 30 minutes on a warm day.',
+      'Give the wood filler a 30-minute drying period.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    }
+    // The same shapes WITH treatment context still block.
+    const anchored = guardrails.evaluate({ body: 'The spray needs 30 minutes to dry.' }, {});
+    expect(anchored.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('pronoun safety claims with a treatment antecedent block (Codex PR r5)', () => {
+    for (const body of [
+      'The pesticide dries quickly. Then it is safe for pets.',
+      'We apply a granular treatment. It is safe once dry.',
+      'The application is watered in. After that, it is harmless to children.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    // Non-treatment antecedents stay legal.
+    const screen = guardrails.evaluate({ body: 'The repaired screen keeps insects out. It is safe for pets.' }, {});
+    expect(screen.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    // With BOTH idiom parts the pronoun claim is the approved idiom.
+    const idiom = guardrails.evaluate({ body: 'We apply a granular treatment. It is safe once dry, and your technician confirms the timing.' }, {});
+    expect(idiom.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    // "safe to say" is an idiom, not a safety claim.
+    const saying = guardrails.evaluate({ body: 'After any treatment, it is safe to say prevention matters most.' }, {});
+    expect(saying.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
   test('treated-surface subjects reach the idiom check — incomplete idiom blocks (Codex PR r4)', () => {
     const surfaces = guardrails.evaluate({ body: 'Treated surfaces are safe once dry.' }, {});
     expect(surfaces.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3122,7 +3168,7 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(wait.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const keepOff = guardrails.evaluate({ body: 'Keep pets off the lawn for 30 minutes.' }, {});
     expect(keepOff.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
-    const allow = guardrails.evaluate({ body: 'Allow 30 minutes of drying time before returning.' }, {});
+    const allow = guardrails.evaluate({ body: 'Allow 30 minutes of drying time before returning to the treated lawn.' }, {});
     expect(allow.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const stayOff = guardrails.evaluate({ body: 'Stay off the lawn for 30 minutes.' }, {});
     expect(stayOff.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3130,11 +3176,11 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(doNot.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const needsToDry = guardrails.evaluate({ body: 'The treatment needs 30 minutes to dry.' }, {});
     expect(needsToDry.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
-    const dryingTakes = guardrails.evaluate({ body: 'Drying takes 30 minutes in Florida sun.' }, {});
+    const dryingTakes = guardrails.evaluate({ body: 'After a liquid application, drying takes 30 minutes in Florida sun.' }, {});
     expect(dryingTakes.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const dryingTimeIs = guardrails.evaluate({ body: 'The drying time is 30 minutes for granular applications.' }, {});
     expect(dryingTimeIs.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
-    const hyphenated = guardrails.evaluate({ body: 'Expect a 30-minute drying period.' }, {});
+    const hyphenated = guardrails.evaluate({ body: 'Expect a 30-minute drying period after each treatment.' }, {});
     expect(hyphenated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const fractional = guardrails.evaluate({ body: 'Wait half an hour before re-entering.' }, {});
     expect(fractional.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3314,6 +3360,35 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
     }
+  });
+
+  test('generic wildlife relocation/exclusion offerings block (Codex PR r5)', () => {
+    const relocation = guardrails.evaluate({ body: 'Our wildlife relocation service protects your attic.' }, {});
+    expect(relocation.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const exclusion = guardrails.evaluate({ body: 'We offer wildlife exclusion for Sarasota attics.' }, {});
+    expect(exclusion.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    // The county agency in referral copy stays legal.
+    const agency = guardrails.evaluate({ body: 'For an injured raccoon, contact animal control or an FWC-licensed rehabilitator.' }, {});
+    expect(agency.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('informational possessives stay legal — guides/articles/advice introduce the topic, not a service (Codex PR r5)', () => {
+    for (const body of [
+      'Our guide to wildlife removal explains when to call a licensed specialist.',
+      'Our article on structural fumigation explains when tenting may be necessary.',
+      'Our advice about wildlife trapping is to contact an FWC-licensed specialist.',
+      'Our wildlife removal guide covers what licensed trappers actually do.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    }
+  });
+
+  test('Waves possessives are ownership claims (Codex PR r5)', () => {
+    const waves = guardrails.evaluate({ body: "Waves' fumigation service handles drywood termites." }, {});
+    expect(waves.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const wavesPC = guardrails.evaluate({ body: "Waves Pest Control's wildlife trapping service protects attics." }, {});
+    expect(wavesPC.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('handling EXISTING insulation during inspection stays legal (Codex PR r1 false positive)', () => {
