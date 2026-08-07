@@ -187,6 +187,21 @@ function apptChannel(value) {
   return value === 'email' || value === 'both' ? value : 'sms';
 }
 
+// Send-window pre-check for the 72h/24h reminder legs (GATE_SMS_SEND_WINDOW,
+// owner ruling 2026-08-07). Checked BEFORE the send attempt because a
+// canonical-path block inside safeSendAppointment would cascade into the
+// email fallback + the no-reachable-channel alert and still mark the
+// reminder sent — a night email plus a burned reminder is exactly the
+// behavior the window exists to stop. Pure-email reminders are untouched;
+// 'both' holds the whole notice so one deferral covers both legs.
+function reminderSendWindowHold(channel) {
+  if (apptChannel(channel) === 'email') return false;
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('smsSendWindow')) return false;
+  const { isWithinSendWindowET } = require('./messaging/send-window');
+  return !isWithinSendWindowET();
+}
+
 // Send the email version of an appointment notice. Returns the raw send result
 // ({ ok, skipped, blocked, reason, ... }). Idempotent via AppointmentEmail's
 // per-occurrence keys, so calling it as both a fallback and a primary send for
@@ -1749,6 +1764,17 @@ const AppointmentReminders = {
             continue;
           }
 
+          // Outside the send window: leave the row UNMARKED — the
+          // 15-minute cron re-checks it and the reminder goes out when the
+          // window opens at 8:00 AM, still days ahead of the visit. (A row
+          // that ages into the 24h band overnight is owned by the 24h
+          // branch on the morning tick.) Deliberately not counted as
+          // skipped: nothing was decided, only deferred.
+          if (reminderSendWindowHold(channel72)) {
+            logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} deferred — outside 8AM-8PM ET send window`);
+            continue;
+          }
+
           try {
             const { customer } = await getCustomerAndTech(r.customer_id, r.scheduled_service_id);
             if (!customer) { results.skipped++; continue; }
@@ -1841,6 +1867,25 @@ const AppointmentReminders = {
             await db('appointment_reminders')
               .where({ id: r.id })
               .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
+            continue;
+          }
+
+          // Outside the send window (owner ruling 2026-08-07): a deferred
+          // 24h reminder would land on the visit's own day — an 8:00 AM
+          // text for that morning's appointment reminds nobody. Close the
+          // reminder instead. Same appointment_time-guarded close as the
+          // preference skip so a concurrent move's re-arm is never stomped.
+          if (reminderSendWindowHold(channel24)) {
+            const closedWindow24 = await db('appointment_reminders')
+              .where({ id: r.id })
+              .where('appointment_time', r.appointment_time)
+              .update({ reminder_24h_sent: true, reminder_24h_sent_at: new Date() });
+            if (closedWindow24 === 0) {
+              logger.info(`[appt-remind] 24h send-window close skipped for ${r.scheduled_service_id} — appointment moved during scan; leaving re-armed row`);
+            } else {
+              logger.info(`[appt-remind] Skipping 24h reminder for ${r.scheduled_service_id} — outside 8AM-8PM ET send window; a deferred send would land on the visit day`);
+              results.skipped++;
+            }
             continue;
           }
 

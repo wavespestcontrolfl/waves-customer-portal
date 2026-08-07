@@ -44,6 +44,7 @@ const { loadSuppressionState, checkSuppression } = require('./validators/suppres
 const { checkLineType } = require('./validators/line-type');
 const { validateRequiredIds, validateIdentityTrust, resolveTrustLevel } = require('./validators/identity');
 const { validateNoCustomerEmoji } = require('./validators/voice');
+const { checkSendWindow } = require('./validators/send-window');
 const { checkContactCompliance } = require('./compliance-contact-checks');
 const { countSegments } = require('./segment-counter');
 const { normalizeGsmPunctuation } = require('./gsm-normalize');
@@ -184,6 +185,9 @@ async function sendCustomerMessage(input) {
     { name: 'check_autopay_sms_gate',      fn: () => checkAutopayCustomerSmsGate(sendInput) },
     { name: 'validate_identity_trust',    fn: () => validateIdentityTrust(sendInput, policy, contactState) },
     { name: 'validate_no_customer_emoji', fn: () => validateNoCustomerEmoji(sendInput, policy) },
+    // Send window before line-type: a deferred-to-morning send must not pay
+    // for a Lookup it isn't going to use tonight.
+    { name: 'check_send_window',          fn: () => checkSendWindow(sendInput, policy, contactState) },
     // Last: only pay for a Twilio line-type Lookup when the message would
     // otherwise actually send (gated dark behind GATE_PROACTIVE_LINETYPE_LOOKUP).
     { name: 'check_line_type',            fn: () => checkLineType(sendInput, policy, contactState) },
@@ -201,6 +205,13 @@ async function sendCustomerMessage(input) {
         code: result.code,
         reason: result.reason,
         validator: step.name,
+        // Deferral contract (send-window): callers that reschedule off
+        // { retryable, deferred, nextAllowedAt } — review requests, card-
+        // request nudges — must see a window block as "try again at 8 AM",
+        // not a terminal refusal.
+        retryable: result.retryable === true,
+        deferred: result.deferred === true,
+        nextAllowedAt: result.nextAllowedAt || undefined,
       };
       break;
     }
@@ -225,6 +236,9 @@ async function sendCustomerMessage(input) {
       blocked: true,
       code: blockedBy.code,
       reason: blockedBy.reason,
+      ...(blockedBy.retryable ? { retryable: true } : {}),
+      ...(blockedBy.deferred ? { deferred: true } : {}),
+      ...(blockedBy.nextAllowedAt ? { nextAllowedAt: blockedBy.nextAllowedAt } : {}),
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
