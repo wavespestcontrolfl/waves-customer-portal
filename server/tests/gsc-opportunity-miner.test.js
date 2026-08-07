@@ -1189,6 +1189,16 @@ describe('listicle_family scoring + action mapping', () => {
     // gsc_signal.specialty_topic.
     expect(mineSrc).toMatch(/loadExistingPageBody\(hit\.page_url\)/);
     expect(mineSrc).toMatch(/servedBy\.delete\(q\)/);
+    // Fail-closed three-way (audit r25): confirmed non-editable → blog
+    // fallback; I/O error → the family skips ENTIRELY (no duplicate blog
+    // beside a possibly-live page); refresh-state lookup failure → NO
+    // refresh emissions; the reconciliation lock covers empty batches.
+    expect(mineSrc).toMatch(/state === 'error'/);
+    expect(mineSrc).toMatch(/if \(served\.hit\.unresolved\) continue;/);
+    expect(mineSrc).toMatch(/refreshStateAvailable \? refreshGroups\.entries\(\) : \[\]/);
+    expect(src).toMatch(/familyRefreshState = null;/);
+    expect(src).toMatch(/lockEvenIfEmpty: sweepWillRun/);
+    expect(src).toMatch(/if \(!hasFamily && !lockEvenIfEmpty\) return opportunities;/);
     const gateSrc = require('fs').readFileSync(require.resolve('../services/content/content-quality-gate'), 'utf8');
     expect(gateSrc).toMatch(/brief\?\.gsc_signal\?\.specialty_topic/);
     const runnerSrc = require('fs').readFileSync(require.resolve('../services/content/autonomous-runner'), 'utf8');
@@ -1376,7 +1386,7 @@ describe('listicle_family scoring + action mapping', () => {
     // Transactional (r22 audit): lock+revalidate predecessors, then upserts,
     // then sweep — all one transaction so concurrent claimNext can neither
     // race the transition nor observe it halfway.
-    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,400}_revalidateFamilyBatch\(trx, allOpportunities\)[\s\S]{0,200}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1100}_sweepStaleFamilyRows\([\s\S]{0,200}trx[\s\S]{0,40}\)/);
+    expect(src).toMatch(/await db\.transaction\(async \(trx\) => \{[\s\S]{0,900}_revalidateFamilyBatch\(trx, allOpportunities, \{ lockEvenIfEmpty: sweepWillRun \}\)[\s\S]{0,200}persisted = await this\.persistAll\(revalidated, trx\);[\s\S]{0,1100}_sweepStaleFamilyRows\([\s\S]{0,200}trx[\s\S]{0,40}\)/);
     expect(src).toMatch(/\.forUpdate\(\)/);
     // Non-family conflicts re-read INSIDE the transaction (audit r24) —
     // the pre-mine fence query alone left a producer race window.

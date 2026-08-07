@@ -1118,7 +1118,7 @@ class GscOpportunityMiner {
         // in-flight keys make later subgroups wait). Small by construction
         // (this lane's own rows only). Fail-soft: empty state emits the
         // dominant subgroup exactly as before.
-        const familyRefreshState = new Map();
+        let familyRefreshState = new Map();
         try {
           const rows = await db('opportunity_queue')
             .where({ bucket: 'listicle_family', action_type: 'refresh_existing_page' })
@@ -1129,7 +1129,12 @@ class GscOpportunityMiner {
             familyRefreshState.get(r.page_url).push({ dedupe_key: r.dedupe_key, status: r.status, family_keys: r.family_keys });
           }
         } catch (err) {
-          logger.warn(`[gsc-opp-miner] family refresh-state lookup failed: ${err.message}`);
+          // FAIL CLOSED (Codex r25 audit): an empty map would disable the
+          // one-edit-per-page sequencing entirely — null tells the mine to
+          // emit NO refreshes this run (blogs are unaffected; served
+          // families just wait a cycle).
+          logger.warn(`[gsc-opp-miner] family refresh-state lookup failed (${err.message}) — refresh emission suppressed this run`);
+          familyRefreshState = null;
         }
         return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages, inflightRefreshQueries, inflightFamily, familyRefreshState });
       }],
@@ -1188,17 +1193,20 @@ class GscOpportunityMiner {
       // transaction preserves the r15 contract: it runs only after every
       // upsert succeeded, and a failure rolls back both.
       await db.transaction(async (trx) => {
+        const sweepWillRun = !errors.listicle_family
+          && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS
+          && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs');
         // Lock + revalidate family predecessors FIRST — see
         // _revalidateFamilyBatch (a claim between the mine's reads and
         // this transaction defers the transition instead of racing it).
-        const revalidated = await this._revalidateFamilyBatch(trx, allOpportunities);
+        // The lock is taken even for an empty family batch when the sweep
+        // will run.
+        const revalidated = await this._revalidateFamilyBatch(trx, allOpportunities, { lockEvenIfEmpty: sweepWillRun });
         persisted = await this.persistAll(revalidated, trx);
         // Family-lane sweep ONLY after the upserts land, only when the
         // lane actually ran (gates on, no miner error — an empty bucket
         // then means "didn't run", not "no signal").
-        if (!errors.listicle_family
-          && periodDays === GscOpportunityMiner.CANONICAL_MINE_PERIOD_DAYS
-          && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs')) {
+        if (sweepWillRun) {
           await this._sweepStaleFamilyRows(
             revalidated.filter((o) => o.bucket === 'listicle_family'),
             revalidated,
@@ -2089,6 +2097,9 @@ class GscOpportunityMiner {
   }
 
   async mineListicleFamily(since, { ownPagesByServiceCity = new Map(), periodDays = 28, answerGapPages = new Set(), inflightRefreshQueries = new Set(), inflightFamily = { blogKeys: new Set(), refreshFamilyKeys: new Set() }, familyRefreshState = new Map() } = {}) {
+    // null familyRefreshState = the state lookup FAILED — sequencing is
+    // blind, so no refresh may be emitted this run (fail closed).
+    const refreshStateAvailable = familyRefreshState instanceof Map;
     // BOTH gates required: mining with the brief overlay off would persist
     // listicle_family rows whose briefs come out as ORDINARY supporting
     // blogs — the lane would look enabled while producing none of the
@@ -2197,23 +2208,33 @@ class GscOpportunityMiner {
       try {
         astroPublisher = require('../content-astro/astro-publisher');
       } catch (err) {
-        logger.warn(`[gsc-opp-miner] listicle_family: astro-publisher unavailable (${err.message}) — served pages treated as unserved`);
+        logger.warn(`[gsc-opp-miner] listicle_family: astro-publisher unavailable (${err.message}) — served families skipped this run`);
       }
-      const editable = new Map();
-      for (const [q, hit] of Array.from(servedBy.entries())) {
-        if (!editable.has(hit.page_url)) {
-          let ok = false;
-          if (astroPublisher?.loadExistingPageBody) {
-            try {
-              const loaded = await astroPublisher.loadExistingPageBody(hit.page_url);
-              ok = !!(loaded && loaded.body);
-            } catch (err) {
-              logger.warn(`[gsc-opp-miner] listicle_family: body load failed for ${hit.page_url}: ${err.message}`);
-            }
-          }
-          editable.set(hit.page_url, ok);
+      // Three-way page state (Codex r25 audit): 'editable' keeps the
+      // served refresh; a CONFIRMED non-Astro target ('not_editable' —
+      // clean load, no body) is genuinely unserved and may fall through to
+      // a blog; an I/O failure ('error', incl. publisher unavailable) must
+      // NOT — a transient GitHub read minting a blog beside a live page is
+      // duplicate content, so those families skip entirely this run.
+      const pageState = new Map();
+      for (const [, hit] of Array.from(servedBy.entries())) {
+        if (pageState.has(hit.page_url)) continue;
+        if (!astroPublisher?.loadExistingPageBody) {
+          pageState.set(hit.page_url, 'error');
+          continue;
         }
-        if (!editable.get(hit.page_url)) servedBy.delete(q);
+        try {
+          const loaded = await astroPublisher.loadExistingPageBody(hit.page_url);
+          pageState.set(hit.page_url, loaded && loaded.body ? 'editable' : 'not_editable');
+        } catch (err) {
+          logger.warn(`[gsc-opp-miner] listicle_family: body load failed for ${hit.page_url}: ${err.message}`);
+          pageState.set(hit.page_url, 'error');
+        }
+      }
+      for (const [q, hit] of Array.from(servedBy.entries())) {
+        const state = pageState.get(hit.page_url);
+        if (state === 'not_editable') servedBy.delete(q);
+        else if (state === 'error') servedBy.set(q, { ...hit, unresolved: true });
       }
     }
 
@@ -2263,6 +2284,10 @@ class GscOpportunityMiner {
         .filter((s) => s.hit && s.hit.position >= THRESHOLDS.strikingDistancePositionMin)
         .sort((a, b) => a.hit.position - b.hit.position)[0] || null;
       if (served) {
+        // I/O-failed page read: neither refresh (target unverified) nor
+        // blog (the page may be live — duplicate content); the family
+        // skips this run and self-heals next mine (Codex r25 audit).
+        if (served.hit.unresolved) continue;
         // NOTE the mine loop performs NO queue mutations: every stale-row
         // transition (an earlier run's blog row once a page serves the
         // intent, a refresh row whose page changed or whose family went
@@ -2344,7 +2369,7 @@ class GscOpportunityMiner {
       opp.dedupe_key = listicleFamilyDedupeKey(fam.key);
       out.push(opp);
     }
-    for (const [pageUrl, group] of refreshGroups.entries()) {
+    for (const [pageUrl, group] of (refreshStateAvailable ? refreshGroups.entries() : [])) {
       // One facts contract per brief → SUBGROUPS by (service, city), each
       // with its own stable key; one subgroup emitted per page at a time,
       // rotating when the prior completes. This threads three invariants
@@ -2477,13 +2502,17 @@ class GscOpportunityMiner {
   // grab one mid-transition) and re-read statuses as the authority: any
   // family opp whose transition-predecessor turned claimed/pending_review
   // since the mine is DROPPED this run (same deferral semantics as r20).
-  async _revalidateFamilyBatch(trx, opportunities = []) {
+  async _revalidateFamilyBatch(trx, opportunities = [], { lockEvenIfEmpty = false } = {}) {
     const hasFamily = opportunities.some((o) => o.bucket === 'listicle_family');
-    if (!hasFamily) return opportunities;
+    // The lock must cover every case the SWEEP runs in — an empty family
+    // batch still expires pending rows, and an unlocked expiry can race a
+    // concurrent claim (Codex r25 audit).
+    if (!hasFamily && !lockEvenIfEmpty) return opportunities;
     const rows = await trx('opportunity_queue')
       .where({ bucket: 'listicle_family' })
       .forUpdate()
       .select('dedupe_key', 'action_type', 'status', trx.raw("signal_metadata->'family_keys' as family_keys"));
+    if (!hasFamily) return opportunities; // lock taken for the sweep; nothing to filter
     const inflight = rows.filter((r) => r.status === 'claimed' || r.status === 'pending_review');
     const inflightBlogKeys = new Set(inflight
       .filter((r) => r.action_type === 'new_supporting_blog')
