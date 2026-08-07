@@ -1408,6 +1408,29 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 8:10AM ET — Parked-content digest (owner-authorized lane
+  // 2026-08-07). Emails contact@ an ACT: rollup of autonomous runs parked as
+  // completed_pending_review — the non-approvable kinds the email-approval
+  // poller never emails, which otherwise sit invisibly on the review queue.
+  // Exception-based: sends only when NEW runs parked since the last SENT
+  // digest; Sundays send a full digest whenever the parked set is non-empty;
+  // an empty set never sends. Read-only over runs/opportunities — the only
+  // write is its own ops_email_send_state watermark, advanced ONLY after a
+  // confirmed send (fail-closed). runExclusive so a deploy-overlap tick
+  // can't double-send. Kill switch: unset GATE_PARKED_RUN_DIGEST.
+  cron.schedule('10 8 * * *', async () => {
+    if (!isEnabled('parkedRunDigest')) return;
+    try {
+      await runExclusive('parked-run-digest', async () => {
+        const parkedRunDigest = require('./content/parked-run-digest');
+        const result = await parkedRunDigest.runParkedRunDigest();
+        if (result?.sent) {
+          logger.info(`Parked-run digest sent: ${result.total} parked (${result.newCount} new)`);
+        }
+      });
+    } catch (err) { logger.error(`Parked-run digest failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 4AM — Newsletter event ingestion (P3a). Pulls every enabled
   // RSS source from event_sources, upserts into events_raw. Daily cadence
