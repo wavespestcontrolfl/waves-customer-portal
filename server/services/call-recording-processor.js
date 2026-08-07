@@ -7743,19 +7743,26 @@ const CallRecordingProcessor = {
             let enrichmentWrite = db('leads').where({ id: leadId });
             if (customerId) {
               enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
-            } else if (!phone) {
-              // Email-matched reuse (anonymous caller): weak identity, so the
-              // write repeats the FULL lookup eligibility, not just
-              // unclaimed-ness (that alone was codex P1 r2) — an admin
-              // correcting the lead's email or marking it lost/deleted
+            }
+            if (!phone) {
+              // Email-matched reuse (phone-less caller): weak identity, so
+              // the write repeats the FULL lookup eligibility, not just
+              // unclaimed-ness/ownership (that alone was codex P1 r2) — an
+              // admin correcting the lead's email or marking it lost/deleted
               // between the lookup and this write must 0-row into the
               // recovery mint below, never apply this caller's rolling
               // extraction to a row that no longer matches (codex P2 r6).
-              // Predicates mirror findReusableCallLead exactly, including the
-              // workableUnnamedLead conditionality; a pass-2 recovery row
-              // (email from THIS extraction, status 'new') passes them all.
+              // Applied for customer-attached phone-less reuse too, NOT just
+              // anonymous — the ownership guard alone would let that write
+              // overwrite AND claim an admin-corrected lead (audit P1 r9);
+              // the strict unclaimed predicate stays anonymous-only, since a
+              // customer-attached write may land on a row this same customer
+              // just claimed. Predicates mirror findReusableCallLead,
+              // including the workableUnnamedLead conditionality; a pass-2
+              // recovery row (email from THIS extraction, status 'new')
+              // passes them all.
+              if (!customerId) enrichmentWrite = enrichmentWrite.whereNull('customer_id');
               enrichmentWrite = enrichmentWrite
-                .whereNull('customer_id')
                 .whereNull('deleted_at')
                 .whereRaw('LOWER(TRIM(email)) = ?', [String(extracted.email || '').trim().toLowerCase()]);
               if (workableUnnamedLead) {
@@ -7787,21 +7794,23 @@ const CallRecordingProcessor = {
               }
             }
             enriched = await enrichmentWrite.update(leadUpdates);
-            if (!enriched && existingLead && !customerId && !phone && !raceRecovered) {
+            if (!enriched && existingLead && !phone && !raceRecovered) {
               // Recovery is for REUSED email-matched candidates only (hence
               // the existingLead gate): a 0-row write on a lead THIS call
               // just inserted means an admin legitimately claimed our own
               // fresh row mid-flight — it is still this call's lead, so the
-              // enrichment is simply skipped (same as the customer-attached
-              // branch), never re-minted and re-notified as a duplicate
-              // (pre-push audit P1 r6).
-              // The email-matched lead was claimed between lookup and the
-              // guarded write (0 rows). leadId must not keep pointing at a
-              // lead someone else now owns — downstream writers (triage
-              // activity, text-back, follow-ups) would target the foreign
-              // row. Mint the fresh unclaimed lead this caller would have
-              // gotten on a lookup miss — a MINIMAL identity row mirroring
-              // the normal fresh insert — then loop back and re-run the same
+              // enrichment is simply skipped, never re-minted and re-notified
+              // as a duplicate (pre-push audit P1 r6). Customer-attached
+              // phone-less reuse recovers here too now that its write also
+              // carries the full email/name eligibility (audit P1 r9) — its
+              // mint keeps the customer link.
+              // The email-matched lead was claimed or corrected between
+              // lookup and the guarded write (0 rows). leadId must not keep
+              // pointing at a lead that is no longer this caller's —
+              // downstream writers (triage activity, text-back, follow-ups)
+              // would target the foreign row. Mint the fresh lead this caller
+              // would have gotten on a lookup miss — a MINIMAL identity row
+              // mirroring the normal fresh insert — then loop back and re-run the same
               // enrichment pass against it, so the recovered lead keeps every
               // current-call field (service_interest, quote markers, the
               // follow-up deadline) and its qualification/completeness are
@@ -7811,7 +7820,7 @@ const CallRecordingProcessor = {
               try {
                 const [raceFresh] = await db('leads').insert({
                   lead_source_id: leadSourceId,
-                  customer_id: null,
+                  customer_id: customerId || null,
                   phone: null,
                   first_name: capitalizeName(extracted.first_name) || null,
                   last_name: capitalizeName(extracted.last_name) || null,
