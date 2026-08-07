@@ -283,12 +283,13 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
 // addressKey. Unit identity stays part of the key ("Unit 4" != "Unit 5").
 function normalizedStampedStreet(line1, line2, city, zip) {
   const { canonicalizeAddress, stripUnitDesignators, normalizeZip } = require('./customer-properties');
+  // Final fold matches addressKey exactly ([^a-z0-9] stripped — codex
+  // #3248 r3): "100 O'Connor St" and "100 OConnor St" key identically.
   const street = canonicalizeAddress(stripUnitDesignators([line1, line2]
     .map((v) => String(v || '').trim())
     .filter(Boolean)
     .join(' ')))
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/[^a-z0-9]/g, '');
   if (!street) return '';
   // Locality-QUALIFIED key (codex #3248 r2): the duplicate guard admits the
   // same street+unit in different cities as distinct properties, so every
@@ -347,8 +348,19 @@ function samePropertyKey(a, b) {
 function estimateQuotesCustomerAddress(estimateAddressRaw, customerRow = {}) {
   const parts = parseEstimateAddress(estimateAddressRaw);
   if (!parts) return true; // no quoted address at all — nothing contradicts the customer record
-  const estimateKey = normalizedStampedStreet(parts.address_line1, parts.address_line2);
-  const customerKey = normalizedStampedStreet(customerRow.address_line1, customerRow.address_line2);
+  // A unitless estimate ("100 Main St", common on legacy/partial rows) still
+  // quotes the customer's own property when the primary is "100 Main St" +
+  // "Apt 4" (codex #3248 r3): the unit discriminates only when the ESTIMATE
+  // side carries one. streetKey strips trailing units + suffix-canonicalizes
+  // + alnum-folds, mirroring customer-properties.
+  const { streetKey } = require('./customer-properties');
+  const estimateHasUnit = !!String(parts.address_line2 || '').trim();
+  const estimateKey = estimateHasUnit
+    ? normalizedStampedStreet(parts.address_line1, parts.address_line2)
+    : streetKey(parts.address_line1);
+  const customerKey = estimateHasUnit
+    ? normalizedStampedStreet(customerRow.address_line1, customerRow.address_line2)
+    : streetKey(customerRow.address_line1);
   if (!estimateKey || !customerKey || estimateKey !== customerKey) return false;
   const norm = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
   if (parts.city && customerRow.city && norm(parts.city) !== norm(customerRow.city)) return false;
