@@ -2973,9 +2973,18 @@ const AppointmentReminders = {
       // if the route then dies, the outbox is the only record of the
       // operator's notify intent and must upgrade the marker, not be
       // consumed past it.
-      await db.raw(
-        "UPDATE appointment_reminders SET cancellation_notice_state = 'pending_notify', updated_at = now() WHERE cancellation_notice_state = 'pending' AND EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') AND NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id)",
-      ).catch(() => {});
+      try {
+        await db.raw(
+          "UPDATE appointment_reminders SET cancellation_notice_state = 'pending_notify', updated_at = now() WHERE cancellation_notice_state = 'pending' AND EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') AND NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id)",
+        );
+      } catch (upgradeErr) {
+        // Un-applied caller intent must never reach settlement (codex
+        // r14): a plain-pending row with no delivery evidence would be
+        // terminally suppressed and its outbox consumed. Abort this tick;
+        // everything retries in 15 minutes.
+        logger.warn(`[appt-remind] outbox upgrade failed — aborting sweep tick: ${upgradeErr.message}`);
+        return;
+      }
       // Consume outbox rows only once their intent is APPLIED — marker
       // present and no longer plain 'pending' (codex r8/r9) — and age out
       // anything past the 72h horizon.
@@ -3000,19 +3009,21 @@ const AppointmentReminders = {
       // ever-growing terminal-marker history (r35) or a time-bounded
       // restoration window that a >7-day cron outage would out-age (r46).
       // Eligibility persists until the stale marker is actually cleared.
-      await db('appointment_reminders')
-        .whereNotNull('cancellation_notice_state')
-        .whereIn('scheduled_service_id', function liveVisits() {
-          this.select('ss.id').from('scheduled_services as ss')
-            .whereIn('ss.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
-        })
-        .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
-      // Restoration also voids any un-applied caller-intent outbox row
-      // (codex r10): a re-cancel within 72h must not inherit the OLD
-      // cycle's notify intent.
-      await db.raw(
-        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND EXISTS (SELECT 1 FROM scheduled_services ss WHERE 'cn-ci-' || ss.id::text = ok.email_key AND ss.status IN ('pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'))",
-      ).catch(() => {});
+      // Marker clear and outbox void commit or fail TOGETHER (codex
+      // r10/r14): clearing the marker while the void transiently fails
+      // would let a restore-and-recancel inherit the old cycle's intent.
+      await db.transaction(async (rtrx) => {
+        await rtrx('appointment_reminders')
+          .whereNotNull('cancellation_notice_state')
+          .whereIn('scheduled_service_id', function liveVisits() {
+            this.select('ss.id').from('scheduled_services as ss')
+              .whereIn('ss.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
+          })
+          .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+        await rtrx.raw(
+          "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND EXISTS (SELECT 1 FROM scheduled_services ss WHERE 'cn-ci-' || ss.id::text = ok.email_key AND ss.status IN ('pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'))",
+        );
+      });
 
       // Age-out runs regardless of the gate (r12): a notice older than
       // 72h is moot — texting "your visit was cancelled" days later is
