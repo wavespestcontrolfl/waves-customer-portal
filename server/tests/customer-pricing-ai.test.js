@@ -28,12 +28,17 @@ function activePlanDb(customerId, serviceTypes, tier = 'Bronze') {
     scheduled_services: serviceTypes.map((service_type, index) => ({
       id: `svc-${index + 1}`,
       service_type,
-      scheduled_date: '2026-08-01',
+      scheduled_date: FUTURE_SCHEDULED_DATE,
       status: 'scheduled',
       is_recurring: true,
     })),
   });
 }
+
+// Recurring-plan rows must be UPCOMING to count as live obligations (the
+// ownership loader applies the lifecycle evidence unconditionally) — compute
+// the date so the suite never ages out.
+const FUTURE_SCHEDULED_DATE = new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
 const propertyCustomer = (overrides = {}) => ({
   id: 'cust-1',
@@ -305,7 +310,7 @@ describe('never-re-price guard, r2 regressions', () => {
       scheduled_services: [{
         id: 'svc-secondary',
         service_type: 'Lawn Care',
-        scheduled_date: '2026-08-01',
+        scheduled_date: FUTURE_SCHEDULED_DATE,
         status: 'scheduled',
         is_recurring: true,
         service_address_line1: '200 Oak Ave',
@@ -481,18 +486,9 @@ describe('bond catalog identity under stale bait service_type', () => {
 // Pre-push P1 on the r3 batch: ownership shares the qualifying loader's
 // lifecycle evidence (gated) — callbacks / past phantoms / one-time booking
 // sources are not live obligations and must not block quotes.
-describe('ownership lifecycle evidence (gated)', () => {
-  // The gate is read through a LAZY require at call time, so isolateModules
-  // can't scope it — set the env and reset the registry so the next lazy
-  // require re-evaluates, then undo both so later suites stay gate-off.
-  beforeAll(() => {
-    process.env.GATE_AUTO_WAVEGUARD_TIER = 'true';
-    jest.resetModules();
-  });
-  afterAll(() => {
-    delete process.env.GATE_AUTO_WAVEGUARD_TIER;
-    jest.resetModules();
-  });
+describe('ownership lifecycle evidence', () => {
+  // Applied UNCONDITIONALLY (no gate): ownership is a new rule with no
+  // legacy behavior to preserve.
   const loadOwnedGated = () => {
     const { loadOwnedRecurringServiceKeys } = require('../services/waveguard-existing-services');
     return loadOwnedRecurringServiceKeys;

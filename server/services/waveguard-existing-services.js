@@ -384,18 +384,17 @@ async function loadOwnedRecurringServiceKeys(database, customerId, { streetScope
   // rodent here too, not as owned pest coverage.
   const catalogById = await loadCatalogFieldsByRowId(database, customerId);
   let joined = rows.map((r) => ({ ...r, ...(catalogById.get(r.id) || {}) }));
-  // Same lifecycle evidence as the qualifying loader, same gate (pre-push
-  // P1): a past phantom row, a callback, or a one-time booking source is not
-  // a live recurring obligation and must not suppress a legitimate quote.
-  // Only the lifecycle predicate is shared — the qualifying loader's
-  // commercial/rodent exclusions are qualification-only and do NOT apply to
-  // ownership.
-  const { isEnabled } = require('../config/feature-gates');
-  if (isEnabled('autoWaveguardTierEnroll')) {
-    const { etDateString } = require('../utils/datetime-et');
-    const today = etDateString();
-    joined = joined.filter((r) => rowPassesGatedPricingEvidence(r, today));
-  }
+  // Same lifecycle evidence as the qualifying loader, applied
+  // UNCONDITIONALLY (pre-push P1 ×2): a past phantom row, a callback, or a
+  // one-time booking source is not a live recurring obligation and must not
+  // suppress a legitimate quote. Ownership is a NEW rule with no legacy
+  // behavior to preserve, so the autoWaveguardTierEnroll gate — which exists
+  // to keep the QUALIFYING path byte-identical when off — does not apply.
+  // Only the lifecycle predicate is shared; the qualifying loader's
+  // commercial/rodent exclusions are qualification-only.
+  const { etDateString } = require('../utils/datetime-et');
+  const today = etDateString();
+  joined = joined.filter((r) => rowPassesGatedPricingEvidence(r, today));
   const scoped = await filterRowsToStreet(database, joined, streetScope);
   const keys = new Set();
   for (const row of scoped) ownershipKeysForRow(row).forEach((key) => keys.add(key));
