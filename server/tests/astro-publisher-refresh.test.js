@@ -444,7 +444,16 @@ describe('legacy blog frontmatter backfill (missing post_type + service_areas_ta
     gh.createIssueComment.mockResolvedValue({});
   });
 
-  test('publishRefresh backfills the absent required fields instead of hard-failing the refresh', async () => {
+  test('publishRefresh backfills the absent required fields when the legacy page_type maps reliably', async () => {
+    // page_type "how-to" maps to post_type "protocol" via POST_TYPE_ALIASES —
+    // a RELIABLE signal, so the backfill heals it (Codex r11: the old
+    // 'location' default misclassified seasonal/cost/comparison content).
+    const mappable = LEGACY_BLOG.replace(
+      'category: "lawn-care"',
+      ['category: "lawn-care"', 'page_type: "how-to"'].join('\n'),
+    );
+    gh.getFile.mockResolvedValue({ content: mappable, sha: 'legacy-sha' });
+
     const res = await pub.publishRefresh({
       type: 'draft',
       file_path: LEGACY_BLOG_FILE_PATH,
@@ -455,11 +464,24 @@ describe('legacy blog frontmatter backfill (missing post_type + service_areas_ta
 
     expect(res.status).toBe('pr_open');
     const { data } = fm.parse(gh.putFile.mock.calls[0][0].content);
-    expect(data.post_type).toBe('location'); // deterministic default
+    expect(data.post_type).toBe('protocol'); // mapped from page_type, never the 'location' default
     expect(data.service_areas_tag).toEqual(['Sarasota']); // inferred from title/brief haystack
     // Untouched live fields stay frozen.
     expect(data.canonical).toBe('https://www.wavespestcontrol.com/blog/fall-lawn-mistakes-sarasota/');
     expect(data.category).toBe('lawn-care');
+  });
+
+  test('publishRefresh PARKS a legacy post with no mappable page_type — one-time human classification, never a location default (Codex r11)', async () => {
+    // The base legacy fixture carries no page_type at all: post_type stays
+    // missing and schema validation rejects the row (deterministic park).
+    await expect(pub.publishRefresh({
+      type: 'draft',
+      file_path: LEGACY_BLOG_FILE_PATH,
+      page_url: '/blog/fall-lawn-mistakes-sarasota/',
+      frontmatter: {},
+      body: 'Refreshed fall lawn guidance for Sarasota yards with updated fungicide timing and mowing-height advice for St. Augustine turf.',
+    }, { action_type: 'refresh_existing_page', target_url: '/blog/fall-lawn-mistakes-sarasota/', city: 'Sarasota' }))
+      .rejects.toMatchObject({ code: 'BLOG_FRONTMATTER_INVALID' });
   });
 
   test('publishRefresh leaves PRESENT valid post_type/service_areas_tag alone', async () => {
@@ -482,7 +504,13 @@ describe('legacy blog frontmatter backfill (missing post_type + service_areas_ta
     expect(data.service_areas_tag).toEqual(['Venice']);
   });
 
-  test('publishMetadataRewrite backfills the same absent fields on a legacy blog target', async () => {
+  test('publishMetadataRewrite backfills the same absent fields on a legacy blog target with a mappable page_type', async () => {
+    const mappable = LEGACY_BLOG.replace(
+      'category: "lawn-care"',
+      ['category: "lawn-care"', 'page_type: "how-to"'].join('\n'),
+    );
+    gh.getFile.mockResolvedValue({ content: mappable, sha: 'legacy-sha' });
+
     const res = await pub.publishMetadataRewrite({
       type: 'metadata',
       file_path: LEGACY_BLOG_FILE_PATH,
@@ -492,7 +520,7 @@ describe('legacy blog frontmatter backfill (missing post_type + service_areas_ta
 
     expect(res.status).toBe('pr_open');
     const { data } = fm.parse(gh.putFile.mock.calls[0][0].content);
-    expect(data.post_type).toBe('location');
+    expect(data.post_type).toBe('protocol'); // mapped, never the 'location' default (Codex r11)
     expect(data.service_areas_tag).toEqual(['Sarasota']);
     expect(data.title).toBe('Fall Lawn Mistakes Sarasota Homeowners Keep Making');
   });

@@ -3206,12 +3206,36 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
 
   test('backfill covers genuinely absent post_type only — an explicit empty/whitespace value stays for validation to reject (Codex r5)', () => {
     const { backfillLegacyBlogRequiredFields } = AstroPublisher._internals;
-    const absent = { page_type: 'blog', service_areas_tag: ['Sarasota'] };
+    // A page_type that RELIABLY maps (how-to → protocol) is backfilled.
+    const absent = { page_type: 'how-to', service_areas_tag: ['Sarasota'] };
     expect(backfillLegacyBlogRequiredFields(absent, {})).toContain('post_type');
-    expect(absent.post_type).toBeTruthy();
-    const invalid = { post_type: '  ', page_type: 'blog', service_areas_tag: ['Sarasota'] };
+    expect(absent.post_type).toBe('protocol');
+    const invalid = { post_type: '  ', page_type: 'how-to', service_areas_tag: ['Sarasota'] };
     expect(backfillLegacyBlogRequiredFields(invalid, {})).not.toContain('post_type');
     expect(invalid.post_type).toBe('  ');
+  });
+
+  test('backfill never defaults post_type to location — an unmappable legacy page_type parks for human classification (Codex r11)', () => {
+    const { backfillLegacyBlogRequiredFields } = AstroPublisher._internals;
+    // Legacy posts generally carry page_type 'blog' or nothing; the
+    // 'location' fallback misclassifies seasonal/cost/comparison content
+    // and post_type drives structural component requirements.
+    for (const pageType of ['blog', undefined]) {
+      const fm = { page_type: pageType, service_areas_tag: ['Sarasota'] };
+      expect(backfillLegacyBlogRequiredFields(fm, {})).not.toContain('post_type');
+      expect(fm.post_type).toBeUndefined();
+    }
+  });
+
+  test('inferServiceAreas rejects an explicit out-of-area city — all-area fallback is for posts with NO city signal (Codex r11)', () => {
+    const { inferServiceAreas } = AstroPublisher._internals;
+    // Explicit invalid city → corrupt geography data → empty, so schema
+    // validation parks the row instead of tagging every service area.
+    expect(inferServiceAreas({ title: 'Lawn care guide', city: 'Tampa' }, {})).toEqual([]);
+    expect(inferServiceAreas({ title: 'Lawn care guide' }, { city: 'Tampa' })).toEqual([]);
+    // No city signal at all → haystack match, then the all-area fallback.
+    expect(inferServiceAreas({ title: 'Sarasota lawn care guide' }, {})).toEqual(['Sarasota']);
+    expect(inferServiceAreas({ title: 'Generic lawn care guide' }, {}).length).toBeGreaterThan(0);
   });
 
   test('backfill covers genuinely absent service_areas_tag only — an explicit EMPTY array is present data and stays for validation to reject (Codex r11)', () => {

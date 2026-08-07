@@ -359,6 +359,14 @@ function inferServiceAreas(frontmatter = {}, brief = {}) {
   const direct = normalizeServiceAreas(frontmatter.service_areas_tag, frontmatter.city || brief.city);
   if (direct.length > 0) return direct;
 
+  // An EXPLICIT city outside the service-area set is corrupt geography
+  // data, exactly like invalid stored areas — haystack inference (or the
+  // all-area fallback) over it would publish inaccurate metadata. Return
+  // empty so schema validation rejects the row; the fallback chain below is
+  // reserved for genuinely generic posts with NO city signal (Codex r11).
+  const explicitCity = String(frontmatter.city || brief.city || '').trim();
+  if (explicitCity && !SERVICE_AREAS.has(explicitCity)) return [];
+
   const haystack = [
     frontmatter.title,
     frontmatter.primary_keyword,
@@ -377,11 +385,12 @@ function inferServiceAreas(frontmatter = {}, brief = {}) {
 // service_areas_tag re-validates with BOTH missing and hard-fails
 // assertValidBlogFrontmatter ("post_type is required; service_areas_tag is
 // required") on every attempt: a mechanical park, not a content problem.
-// Backfill ONLY absent fields with the same deterministic defaults the
-// autonomous new-post path uses (normalizePostType → 'location';
-// inferServiceAreas → haystack match, DEFAULT_SERVICE_AREAS last). A field
-// that is PRESENT — valid or not — is never touched, so genuinely corrupt
-// values still fail validation loudly.
+// Backfill ONLY absent fields, and only from RELIABLE signals (a page_type
+// that maps to a real post type; inferServiceAreas' haystack, all-area
+// fallback reserved for no-city-signal posts). A field that is PRESENT —
+// valid or not — is never touched, and an absent field with no reliable
+// signal stays absent, so corrupt or unclassifiable rows still fail
+// validation loudly and park for a one-time human fix.
 function backfillLegacyBlogRequiredFields(nextFrontmatter, brief = {}) {
   const healed = [];
   const postType = nextFrontmatter.post_type;
@@ -391,8 +400,22 @@ function backfillLegacyBlogRequiredFields(nextFrontmatter, brief = {}) {
   // could select the wrong structural component requirements) — leave it
   // for validation to reject (Codex r5).
   if (postType == null) {
-    nextFrontmatter.post_type = normalizePostType(nextFrontmatter.page_type);
-    healed.push('post_type');
+    // Only a page_type that RELIABLY maps to a post type is backfilled: the
+    // 'location' fallback misclassifies seasonal/cost/comparison content
+    // (writer contract), and post_type drives structural component
+    // requirements. An unmappable legacy post stays missing and parks for
+    // a one-time human classification (Codex r11).
+    const rawPageType = String(nextFrontmatter.page_type || '').trim();
+    const mapped = POST_TYPES.has(rawPageType) ? rawPageType : POST_TYPE_ALIASES[rawPageType.toLowerCase()];
+    if (mapped) {
+      nextFrontmatter.post_type = mapped;
+      // page_type is a pre-schema-v2 key the blog schema rejects as
+      // unknown — once consumed as the mapping signal it must not ride
+      // into the committed frontmatter. An UNMAPPABLE page_type stays put
+      // so validation parks the row loudly.
+      delete nextFrontmatter.page_type;
+      healed.push('post_type');
+    }
   }
   // Same contract as post_type: an explicit empty array is PRESENT data —
   // someone (or something) wrote it — and inferring areas over it could
