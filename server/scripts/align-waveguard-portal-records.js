@@ -303,6 +303,23 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
   return updates;
 }
 
+// Per-plan components for a rate repair (codex #3245 r13): a scalar minted
+// AFTER the one-time ledger backfill must carry attribution, or the
+// customer's first gate-on same-family re-quote reaches the empty-ledger
+// whole-scalar replace and drops sibling plans. Keys aggregate under the
+// CANONICAL adoption family, mirroring self-booking-plan-sync.
+function planRateComponentsForRepair(detectedKeys) {
+  const { serviceFamilyKeyForAdoption } = require('../routes/estimate-public');
+  const components = {};
+  for (const key of representativePlanKeys(detectedKeys)) {
+    const rate = moneyNumber(SERVICE_PLANS[key]?.monthlyRate);
+    if (!(rate > 0)) continue;
+    const family = serviceFamilyKeyForAdoption({ service: key }) || key;
+    components[family] = (components[family] || 0) + rate;
+  }
+  return components;
+}
+
 // --enroll-no-plan updates: waveguard_tier ONLY, and only for a customer who
 // is NOT already a member (fail-closed via the shared membership predicate —
 // members are re-aligned by buildCustomerUpdates, never double-handled here).
@@ -539,29 +556,63 @@ async function applyCustomerRepair(repair) {
   if (!Object.keys(repair.customerUpdates).length) return;
 
   const isEnrollment = repair.customer.candidate_reason === 'no_plan_upcoming_recurring';
-  let updateQuery = db('customers').where({ id: repair.customer.id });
-  if (isEnrollment) {
-    // Compare-and-swap on the read snapshot, mirroring the runtime enrollment
-    // path (Codex #3011 r2 P1): candidates were read earlier in main(), so a
-    // customer converted to a paid membership mid-run must match zero rows
-    // here — never have the conversion's tier overwritten by a stale label.
-    if (repair.customer.waveguard_tier == null) {
-      updateQuery = updateQuery.whereNull('waveguard_tier');
-    } else {
-      updateQuery = updateQuery.where('waveguard_tier', repair.customer.waveguard_tier);
-    }
-    updateQuery = updateQuery.where(function notPayingRate() {
-      this.whereNull('monthly_rate').orWhere('monthly_rate', '<=', 0);
-    });
-    if ('billing_mode' in repair.customer) {
-      if (repair.customer.billing_mode == null) {
-        updateQuery = updateQuery.whereNull('billing_mode');
+  // ONE transaction for the compare-and-swap update AND the ledger seed
+  // (codex #3245 r14): a seed failure must roll the scalar repair back, and
+  // the customer row lock serializes against concurrent accepts (which take
+  // the same lock before classifying) so a mid-run acceptance can neither
+  // interleave between the statements nor have its components clobbered by
+  // a delayed seed.
+  const updatedCount = await db.transaction(async (trx) => {
+    await trx('customers').where({ id: repair.customer.id }).forUpdate().first('id');
+    let updateQuery = trx('customers').where({ id: repair.customer.id });
+    if (isEnrollment) {
+      // Compare-and-swap on the read snapshot, mirroring the runtime enrollment
+      // path (Codex #3011 r2 P1): candidates were read earlier in main(), so a
+      // customer converted to a paid membership mid-run must match zero rows
+      // here — never have the conversion's tier overwritten by a stale label.
+      if (repair.customer.waveguard_tier == null) {
+        updateQuery = updateQuery.whereNull('waveguard_tier');
       } else {
-        updateQuery = updateQuery.where('billing_mode', repair.customer.billing_mode);
+        updateQuery = updateQuery.where('waveguard_tier', repair.customer.waveguard_tier);
       }
+      updateQuery = updateQuery.where(function notPayingRate() {
+        this.whereNull('monthly_rate').orWhere('monthly_rate', '<=', 0);
+      });
+      if ('billing_mode' in repair.customer) {
+        if (repair.customer.billing_mode == null) {
+          updateQuery = updateQuery.whereNull('billing_mode');
+        } else {
+          updateQuery = updateQuery.where('billing_mode', repair.customer.billing_mode);
+        }
+      }
+    } else if (repair.customerUpdates.monthly_rate !== undefined) {
+      // Rate-bearing member repairs CAS too (local codex #3245 r21 P0): the
+      // minted rate was computed from a pre-lock snapshot whose monthly_rate
+      // was <= 0 (the backfill lane's precondition). If a concurrent accept
+      // committed a real rate while this transaction waited on the row lock,
+      // writing the stale repair would overwrite the accepted rate and the
+      // seed below would clobber its fresh attribution. Re-assert the
+      // precondition under the lock — zero matched rows skips the whole
+      // stale repair (the next run recomputes from live data).
+      updateQuery = updateQuery.where(function notPayingRate() {
+        this.whereNull('monthly_rate').orWhere('monthly_rate', '<=', 0);
+      });
     }
-  }
-  const updatedCount = await updateQuery.update(repair.customerUpdates);
+    const count = await updateQuery.update(repair.customerUpdates);
+    if (count && repair.customerUpdates.monthly_rate !== undefined
+      && Number(repair.customerUpdates.monthly_rate) > 0) {
+      // Seed the repaired rate's per-family attribution (codex #3245 r13) —
+      // gate-aware error policy lives in the helper; an authoritative
+      // failure throws and rolls this whole transaction back.
+      await require('../services/plan-rate-ledger').seedLedgerComponents(
+        trx,
+        repair.customer.id,
+        planRateComponentsForRepair(repair.detectedKeys),
+        { source: 'alignment_repair' },
+      );
+    }
+    return count;
+  });
   if (isEnrollment && !updatedCount) {
     console.error(`enrollment skipped for customer ${repair.customer.id} — customer changed since candidate read`);
     return;

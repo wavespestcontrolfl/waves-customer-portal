@@ -777,6 +777,22 @@ async function markEstimateManuallyAccepted({
         logger.warn(`[estimate-manual-acceptance] tier-upgrade admin notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
       }
     }
+    // Plan-rate review alert — same deferred post-commit contract as the
+    // tier alert above.
+    if (conversion?.planRateReviewNotification) {
+      const planNotify = conversion.planRateReviewNotification;
+      try {
+        const NotificationService = require('./notification-service');
+        void NotificationService.notifyAdmin(
+          planNotify.type,
+          planNotify.title,
+          planNotify.body,
+          planNotify.options,
+        ).catch((err) => logger.warn(`[estimate-manual-acceptance] plan-rate review notify failed for estimate ${acceptedEstimate.id}: ${err.message}`));
+      } catch (err) {
+        logger.warn(`[estimate-manual-acceptance] plan-rate review notify setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
+      }
+    }
   }
 
   return {

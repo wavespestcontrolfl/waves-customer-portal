@@ -710,6 +710,14 @@ const gates = {
   // appointment_cancelled template instead of vanishing silently
   // (2026-08-05 silent-cancel incident). Fail-closed; owner flips.
   cancelNoticeHook: process.env.GATE_CANCEL_NOTICE_HOOK === 'true',
+  // Per-family plan-rate ledger (owner ruling 2026-08-06): with the gate ON,
+  // an accept's customers.monthly_rate becomes the SUM of the customer's
+  // customer_plan_rates components, so a multi-plan customer's same-family
+  // re-quote replaces only that family's slice instead of the whole scalar.
+  // OFF, accepts keep the legacy #3241 scalar semantics byte-for-byte while
+  // the ledger dual-writes advisorily (data accumulates pre-flip). Kill
+  // switch = unset; owner flips after the ops backfill seeds components.
+  planRateLedger: process.env.GATE_PLAN_RATE_LEDGER === 'true',
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
   // past-dated visits stuck in on_site/en_route (performed but never
   // completed → no service record, invoice, report, or post-service SMS;

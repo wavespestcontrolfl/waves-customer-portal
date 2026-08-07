@@ -492,18 +492,29 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
     .where({ id: customerId })
     .first('billing_mode');
   const perApplication = freshCustomer?.billing_mode === 'per_application';
-  const tierCleared = await db('customers')
-    .where({ id: customerId })
-    .where((qb) => {
-      qb.whereNotNull('waveguard_tier').orWhere('monthly_rate', '>', 0);
-      if (perApplication) qb.orWhere('billing_mode', 'per_application');
-    })
-    .update({
-      waveguard_tier: null,
-      monthly_rate: null,
-      ...(perApplication ? { billing_mode: null, per_application_fee: null } : {}),
-      updated_at: db.fn.now(),
-    });
+  // ONE transaction for the scalar clear and the ledger clear (codex #3245
+  // r3): a gate-on ledger failure must roll the rate-null back too —
+  // otherwise the scalar commits while the old authoritative components
+  // survive to be resurrected by a later re-signup. Gate-aware error
+  // policy lives in the helper: advisory failures warn (transaction
+  // commits); authoritative failures throw (everything rolls back).
+  const tierCleared = await db.transaction(async (trx) => {
+    const cleared = await trx('customers')
+      .where({ id: customerId })
+      .where((qb) => {
+        qb.whereNotNull('waveguard_tier').orWhere('monthly_rate', '>', 0);
+        if (perApplication) qb.orWhere('billing_mode', 'per_application');
+      })
+      .update({
+        waveguard_tier: null,
+        monthly_rate: null,
+        ...(perApplication ? { billing_mode: null, per_application_fee: null } : {}),
+        updated_at: trx.fn.now(),
+      });
+    await require('./plan-rate-ledger')
+      .syncScalarWriteToLedger(trx, customerId, null, { source: 'offboarding' });
+    return cleared;
+  });
   result.tierCleared = tierCleared > 0;
 
   // 4. Refund the deposit remainder — but only past a CLEAN sweep. A visit

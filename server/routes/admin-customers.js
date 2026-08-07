@@ -2705,6 +2705,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
         company_name: normalized.companyName, property_type: normalized.propertyType, crm_notes: normalized.notes,
       }).returning('*');
 
+      if (Number(normalized.monthlyRate) > 0) {
+        // A rate-bearing customer minted AFTER the one-time ledger backfill
+        // must carry attribution from birth (codex #3245 r12) — an
+        // unattributed component equal to the rate, so their first gate-on
+        // same-family re-quote never reaches the empty-ledger whole-scalar
+        // replace. Gate-aware error policy lives in the helper.
+        await require('../services/plan-rate-ledger')
+          .syncScalarWriteToLedger(trx, created.id, normalized.monthlyRate, { source: 'admin_create' });
+      }
+
       await createDefaultCustomerRows(trx, created.id);
 
       if (tags?.length) {
@@ -3005,6 +3015,25 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // customer's mailbox; an operator can.
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // Only an ACTUAL rate change invalidates the attribution (codex
+          // #3245 r4): the directory editor posts the whole form on every
+          // save, so a presence check would wipe the seeded components on a
+          // routine name/phone/stage edit and leave one unattributed blob.
+          const rateActuallyChanged = updates.monthly_rate !== undefined
+            && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
+              !== Math.round((Number(updates.monthly_rate) || 0) * 100);
+          if (rateActuallyChanged) {
+            // A blind admin rate edit invalidates any finer per-family
+            // attribution — reset the plan-rate ledger to a single
+            // unattributed component matching the new scalar (cleared when
+            // the rate is zeroed). Gate-aware error policy lives in the
+            // helper (codex #3245 r2): advisory failures warn; failures
+            // while the ledger has scalar authority FAIL the edit, because
+            // committing a new scalar over stale authoritative components
+            // would let the next accept resurrect the old sum.
+            await require('../services/plan-rate-ledger')
+              .syncScalarWriteToLedger(trx, req.params.id, updates.monthly_rate, { source: 'admin_edit' });
+          }
           if (addressChanged) {
             await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);
             // Open leads/estimates snapshot the address at creation and never

@@ -3296,6 +3296,14 @@ function recurringServicesWithSupplements(estResult = {}) {
         mo: monthly || null,
         monthly: monthly || null,
         annual: annual || (monthly ? Math.round(monthly * 12 * 100) / 100 : null),
+        // Post-manual audit stamp survives the rebuild (codex #3245 r19):
+        // the plan-rate ledger sizes components post-discount-first, and
+        // dropping the stamp here recorded pre-discount proportions for
+        // operator-adjusted agent drafts. Additive — display consumers
+        // already prefer it where present.
+        ...(item.manualFinalAnnual != null && Number.isFinite(Number(item.manualFinalAnnual))
+          ? { manualFinalAnnual: Number(item.manualFinalAnnual) }
+          : {}),
         perTreatment: firstPositiveNumber(item.perApp, item.perVisit),
         visitsPerYear: firstPositiveNumber(item.visitsPerYear, item.visits, item.frequency, item.appsPerYear),
         // Carry cadence (foam) so pattern inference / cadence-aware shapers don't
@@ -10494,6 +10502,23 @@ router.put('/:token/accept', async (req, res, next) => {
         ).catch((e) => logger.error(`[estimate-accept] tier-upgrade admin notify failed: ${e.message}`));
       } catch (e) {
         logger.error(`[estimate-accept] tier-upgrade admin notify setup failed: ${e.message}`);
+      }
+    }
+    // Plan-rate review alert — same deferred post-commit contract as the
+    // tier alert above (multi-plan legacy customer's un-splittable scalar
+    // was replaced; owner eyeballs the rate once).
+    if (acceptConversion?.planRateReviewNotification) {
+      const planNotify = acceptConversion.planRateReviewNotification;
+      try {
+        const NotificationService = require('../services/notification-service');
+        void NotificationService.notifyAdmin(
+          planNotify.type,
+          planNotify.title,
+          planNotify.body,
+          planNotify.options,
+        ).catch((e) => logger.error(`[estimate-accept] plan-rate review notify failed: ${e.message}`));
+      } catch (e) {
+        logger.error(`[estimate-accept] plan-rate review notify setup failed: ${e.message}`);
       }
     }
     // The standard conversion runs in-transaction with skipMembershipEmail,
@@ -20386,6 +20411,7 @@ module.exports.extractEngineInputs = extractEngineInputs;
 module.exports.estimateFamilyKeysForAdoption = estimateFamilyKeysForAdoption;
 module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFamily;
 module.exports.serviceFamilyKeyForAdoption = serviceFamilyKeyForAdoption;
+module.exports.recurringServicesWithSupplements = recurringServicesWithSupplements;
 module.exports.adoptionServiceModesForContract = adoptionServiceModesForContract;
 module.exports.netManualDiscountIntoFrequencyRow = netManualDiscountIntoFrequencyRow;
 module.exports.pricingBundleLacksManualDiscountNetting = pricingBundleLacksManualDiscountNetting;
