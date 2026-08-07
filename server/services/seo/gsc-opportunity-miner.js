@@ -73,7 +73,9 @@ const SERVICE_KEYWORDS = [
   { service: 'rodent', re: /\b(rodent|rats?|mice|mouse|exterminator for rodents)\b/i },
   { service: 'mosquito', re: /\b(mosquito|mosquitoes)\b/i },
   { service: 'lawn', re: /\b(lawn|grass|fertiliz|weed control|aeration)\b/i },
-  { service: 'tree-shrub', re: /\b(tree|shrub|palm|ornamental|plants?)\b/i },
+  // "plants" only in horticultural context — a bare noun match would let
+  // "types of house plants" / "power plants" resolve to a Waves service.
+  { service: 'tree-shrub', re: /\b(tree|shrub|palm|ornamental)\b|\b(?:drought|heat|salt|cold|shade|sun)[\s-]*(?:tolerant|resistant)\b[^,.;]{0,30}\bplants?\b|\bplants?\s+that\s+(?:repel|grow|thrive|attract|survive)\b/i },
   { service: 'pest', re: /\b(pest|exterminator|bug|roach|ant|spider|cockroach)\b/i },
 ];
 
@@ -83,6 +85,18 @@ function inferServiceFromQuery(query) {
     if (re.test(query)) return service;
   }
   return null;
+}
+
+// The GSC sync's classifier (search-console-v2 SERVICE_PATTERNS) stores
+// snake_case categories — notably 'tree_shrub' — while everything downstream
+// (facts-sufficiency's SERVICE_CATEGORY_TO_FACTS_ID, category slugs) keys on
+// the hyphenated coarse ids. An un-canonicalized 'tree_shrub' opportunity
+// reaches the runner as facts_unmappable and parks instead of drafting.
+const SERVICE_CATEGORY_CANON = new Set(['pest', 'termite', 'rodent', 'mosquito', 'lawn', 'tree-shrub', 'specialty']);
+function canonicalizeServiceCategory(raw) {
+  if (!raw) return null;
+  const s = String(raw).toLowerCase().trim().replace(/_/g, '-');
+  return SERVICE_CATEGORY_CANON.has(s) ? s : null;
 }
 
 function inferServiceFromUrl(url) {
@@ -1512,7 +1526,7 @@ class GscOpportunityMiner {
       if (!listicleFamilyEligible(fam)) continue;
       const rep = fam.variants[0];
       const city = normalizeCity(rep.city_target) || inferCityFromQuery(rep.query);
-      const service = rep.service_category || inferServiceFromQuery(rep.query);
+      const service = canonicalizeServiceCategory(rep.service_category) || inferServiceFromQuery(rep.query);
       // No resolvable Waves service (classifier AND inference both blank —
       // e.g. an incidental "types of fish in florida" family) → skip:
       // default revenue weight + contentGap would otherwise clear the blog
@@ -1764,6 +1778,7 @@ module.exports._internals = {
   clusterListicleFamilies,
   listicleFamilyDedupeKey,
   listicleFamilyEligible,
+  canonicalizeServiceCategory,
   answerGapStem,
   stemmedTokenSet,
   queryContentTerms,

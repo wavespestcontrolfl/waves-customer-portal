@@ -33,6 +33,7 @@ const {
   clusterListicleFamilies,
   listicleFamilyDedupeKey,
   listicleFamilyEligible,
+  canonicalizeServiceCategory,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
 
 const { WEIGHTS } = require('../services/content/scoring-config');
@@ -719,12 +720,25 @@ describe('listicle_family scoring + action mapping', () => {
       .toBe('do_not_publish');
   });
 
-  test('service inference: plant families resolve to tree-shrub; unrelated families stay null', () => {
+  test('service inference: horticultural plant families resolve to tree-shrub; bare "plants" does not', () => {
     expect(inferServiceFromQuery('drought tolerant plants florida')).toBe('tree-shrub');
+    expect(inferServiceFromQuery('drought tolerant tropical plants')).toBe('tree-shrub');
+    expect(inferServiceFromQuery('plants that grow in sandy soil and full sun florida')).toBe('tree-shrub');
     // mosquito wins by keyword order — repellent-plant lists stay mosquito content
     expect(inferServiceFromQuery('plants that repel mosquitoes')).toBe('mosquito');
+    // Bare/unrelated "plants" senses must NOT resolve (Codex r4)
+    expect(inferServiceFromQuery('types of house plants florida')).toBeNull();
+    expect(inferServiceFromQuery('types of power plants florida')).toBeNull();
     // No Waves service → mineListicleFamily skips the family (off-topic guard)
     expect(inferServiceFromQuery('types of fish in florida')).toBeNull();
+  });
+
+  test('classifier categories canonicalize before enqueueing (tree_shrub → tree-shrub)', () => {
+    expect(canonicalizeServiceCategory('tree_shrub')).toBe('tree-shrub');
+    expect(canonicalizeServiceCategory('LAWN')).toBe('lawn');
+    expect(canonicalizeServiceCategory('specialty')).toBe('specialty');
+    expect(canonicalizeServiceCategory('unknown_bucket')).toBeNull();
+    expect(canonicalizeServiceCategory(null)).toBeNull();
   });
 
   test('family-summed impressions clear the boost floor that individual variants miss', () => {
