@@ -316,6 +316,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   let cancelNoticeClaimTs = null;
   let cancelNoticeLateClaim = false;
   let cancelNoticeCallerClaim = false;
+  let cancelNoticeOutboxTs = null;
 
   async function doWrites(t) {
     // A pending outbound-callback booking (AI call pipeline, held for office
@@ -515,6 +516,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
             // partial series failures regroup with their successfully
             // claimed siblings instead of splitting into two notices.
             const outboxTs = cancelNoticeToken instanceof Date ? cancelNoticeToken : nextClaimTs();
+            cancelNoticeOutboxTs = outboxTs;
             await t.transaction(async (osp) => {
               await osp('ops_email_send_state')
                 .insert({ email_key: `cn-ci-${jobId}`, last_sent_at: outboxTs, updated_at: osp.fn.now() })
@@ -562,6 +564,16 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     void (async () => {
       try {
         if (!cancelNoticeClaimTs && cancelNoticeCallerClaim) {
+          // Cycle fence (codex r15): a delayed worker from a PREVIOUS
+          // cancellation cycle must not stamp (or consume the outbox of)
+          // a restore-and-recancel's new cycle — proceed only while the
+          // outbox row still carries THIS worker's token.
+          const ownRow = await db('ops_email_send_state')
+            .where({ email_key: `cn-ci-${jobId}` })
+            .first('last_sent_at')
+            .catch(() => null);
+          if (!ownRow || !cancelNoticeOutboxTs
+            || new Date(ownRow.last_sent_at).getTime() !== cancelNoticeOutboxTs.getTime()) return;
           // CLAIM-ONLY repair preserving the caller's notify intent as
           // durable 'pending_notify' — the route adopts it immediately
           // (ownable singleton) and the sweep settles it without
@@ -633,6 +645,8 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
           if (repaired) {
             await db('ops_email_send_state')
               .where({ email_key: `cn-ci-${jobId}` })
+              // Token-fenced (codex r15): never consume a newer cycle's row.
+              .where('last_sent_at', cancelNoticeOutboxTs)
               .del()
               .catch(() => {});
           }

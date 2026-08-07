@@ -2974,8 +2974,12 @@ const AppointmentReminders = {
       // operator's notify intent and must upgrade the marker, not be
       // consumed past it.
       try {
+        // Outbox-backed rows classify BOTH ways (codex r15): survivor-free
+        // upgrades to pending_notify; a live-sibling survivor stamps
+        // terminal suppressed so evidence-gated settlement cannot text
+        // against the surviving visit.
         await db.raw(
-          "UPDATE appointment_reminders SET cancellation_notice_state = 'pending_notify', updated_at = now() WHERE cancellation_notice_state = 'pending' AND EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') AND NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id)",
+          "UPDATE appointment_reminders SET cancellation_notice_state = CASE WHEN NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id) THEN 'pending_notify' ELSE 'suppressed' END, updated_at = now() WHERE cancellation_notice_state = 'pending' AND EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours')",
         );
       } catch (upgradeErr) {
         // Un-applied caller intent must never reach settlement (codex
