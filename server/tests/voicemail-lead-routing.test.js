@@ -138,13 +138,32 @@ describe('findReusableCallLead identity keys', () => {
   const makeDb = (rowOrRows = null) => {
     const rows = Array.isArray(rowOrRows) ? rowOrRows : (rowOrRows ? [rowOrRows] : []);
     const calls = [];
+    // The corroboration predicates live in SQL now — interpret the two name
+    // whereRaw shapes so these tests stay behavioral (a mock that returns
+    // rows regardless of WHERE would trivially pass every identity test).
+    const filtered = () => {
+      let out = rows;
+      for (const [m, a] of calls) {
+        if (m !== 'whereRaw') continue;
+        const [sql, binds] = a;
+        if (String(sql).includes('LOWER(TRIM(first_name))')) {
+          out = out.filter((r) => String(r.first_name || '').trim().toLowerCase() === binds[0]);
+        } else if (String(sql).includes('last_name IS NULL')) {
+          out = out.filter((r) => {
+            const ln = String(r.last_name || '').trim().toLowerCase();
+            return !ln || ln === binds[0];
+          });
+        }
+      }
+      return out;
+    };
     const builder = {};
     for (const m of ['where', 'whereNull', 'whereRaw', 'whereNotIn', 'orderBy', 'limit']) {
       builder[m] = (...a) => { calls.push([m, a]); return builder; };
     }
-    builder.first = async () => { calls.push(['first', []]); return rows[0] || null; };
-    // The email path awaits the builder itself (knex builders are thenable).
-    builder.then = (resolve) => resolve(rows);
+    builder.first = async () => { calls.push(['first', []]); return filtered()[0] || null; };
+    // Some paths await the builder itself (knex builders are thenable).
+    builder.then = (resolve) => resolve(filtered());
     const db = (table) => { calls.push(['table', [table]]); return builder; };
     db.calls = calls;
     return db;
