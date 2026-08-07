@@ -3738,10 +3738,17 @@ const ReviewService = {
             .select(...walkSelect);
           // The origin is the most recent BASE-key row — generic middle
           // checks ride the followup SKU and must not reset the boundary
-          // to the 30-day check floor (codex #3243 r18 P2).
-          const originRow = nearestRows.filter(
-            (r) => inPremise(r) && r.service_key && r.service_key !== "rodent_trapping_followup",
-          )[0] || null;
+          // to the 30-day check floor (codex #3243 r18 P2). Same-date ties
+          // break by appointment order (r25 P2) — DB row order must not
+          // pick the wrong origin key/window.
+          const originRow = nearestRows
+            .filter((r) => inPremise(r) && r.service_key && r.service_key !== "rodent_trapping_followup")
+            .sort((a, b) => {
+              const dayA = etDayWindow(a.scheduled_date, 0).anchorStr;
+              const dayB = etDayWindow(b.scheduled_date, 0).anchorStr;
+              if (dayA !== dayB) return dayB < dayA ? -1 : 1;
+              return compareSameDayVisits(b, a) < 0 ? -1 : 1;
+            })[0] || null;
           if (originRow) {
             const ni = Number(originRow.follow_up_interval_days) > 0 ? Number(originRow.follow_up_interval_days) : intervalDays;
             originWindowDays = trappingWindowDaysFor(originRow.service_key, ni);

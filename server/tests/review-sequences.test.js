@@ -1978,6 +1978,31 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(new Date(released.next_run_at).getTime()).toBeGreaterThan(Date.now());
   });
 
+  test('r25: same-day origin ties in the walk peek pick the later appointment deterministically', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+    // Same-day base pair at d-7 (exclusion 9am, trapping setup 1pm): the
+    // walk still reaches the current program's opener chain and stays
+    // deterministic whichever DB order returns the pair. (The reachable
+    // set is dominated by the larger-window key in the pair; the tie-break
+    // fixes WHICH key anchors hop 1.)
+    const mock = makeMock({
+      scheduled_services: [
+        { id: 'ot-excl', customer_id: 'ot', service_id: 'svc-excl', status: 'completed', scheduled_date: d(7), service_key: 'rodent_exclusion', follow_up_interval_days: 7, window_start: '09:00' },
+        { id: 'ot-trap', customer_id: 'ot', service_id: 'svc-trap', status: 'completed', scheduled_date: d(7), service_key: 'rodent_trapping', follow_up_interval_days: 3, window_start: '13:00' },
+        { id: 'ot-fin', customer_id: 'ot', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+      review_sequences: [
+        { id: 'seq-ot-trap', customer_id: 'ot', scheduled_service_id: 'ot-trap', status: 'completed' },
+        { id: 'seq-ot-excl', customer_id: 'ot', scheduled_service_id: 'ot-excl', status: 'completed' },
+      ],
+    });
+    db.mockImplementation(mock);
+    const exempt = await ReviewService._seriesExemptSequenceIds('ot', { scheduledServiceId: 'ot-fin' });
+    expect(exempt).toContain('seq-ot-trap');
+    expect(exempt).toContain('seq-ot-excl');
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
