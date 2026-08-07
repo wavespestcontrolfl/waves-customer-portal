@@ -909,7 +909,16 @@ class GscOpportunityMiner {
     );
 
     let persisted = 0;
-    if (persist) persisted = await this.persistAll(allOpportunities);
+    if (persist) {
+      persisted = await this.persistAll(allOpportunities);
+      // Family-lane sweep ONLY after the upserts land (a pre-persistence
+      // sweep + failed persist would empty the lane until the next run),
+      // only when the lane actually ran (gates on, no miner error — an
+      // empty bucket then means "didn't run", not "no signal").
+      if (!errors.listicle_family && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs')) {
+        await this._sweepStaleFamilyRows(buckets.listicle_family || []);
+      }
+    }
 
     return { counts, errors, persisted, opportunities: allOpportunities };
   }
@@ -1765,7 +1774,7 @@ class GscOpportunityMiner {
       // gsc_queries also holds every spoke property, and spoke-observed
       // demand must never mint a hub post it doesn't have.
       .where('domain', 'wavespestcontrol.com')
-      .select('query', 'service_category', 'city_target')
+      .select('query', 'service_category', 'city_target', 'intent_type')
       .sum('impressions as impressions')
       // Impressions-weighted, matching mineAnswerGap: each stored position is
       // already an impression-level average, so a plain avg() lets a
@@ -1775,7 +1784,11 @@ class GscOpportunityMiner {
       // MINERS' aggregation (they use avg(position)), not the family
       // weighting — volatile rankings make the two diverge wildly.
       .avg('position as plain_avg_position')
-      .groupBy('query', 'service_category', 'city_target');
+      // intent_type included so the preserved tuples match the query
+      // miners' EXACT grouping — they split by intent_type too, and a
+      // 30/25 intent split leaves every miner-side group under the floor
+      // even when the merged tuple clears it (Codex r15).
+      .groupBy('query', 'service_category', 'city_target', 'intent_type');
 
     // No early return on empty fams: the end-of-mine sweep must still run
     // so stale queue rows expire when every family went ineligible.
@@ -1991,37 +2004,41 @@ class GscOpportunityMiner {
       out.push(buildListicleFamilyRefreshOpp(group.entries));
     }
 
-    // Catch-all reconciliation: any pending family row NOT re-emitted by
-    // THIS mine is stale — the family went ineligible (rep reached top-3,
-    // sum fell under the floor, single variant left), lost its resolvable
-    // service, or became hubless-cityless. The targeted transitions above
-    // carry specific reasons; this sweep covers every other exit so a dead
-    // family can't stay claimable for 14 days (Codex r12). Revivable
-    // 'expired' as always — if the signal returns, the upsert revives it.
-    // Runs only after a full successful enumeration (gates on, no throw),
-    // so a transient data gap self-heals on the next mine.
-    if (mutateQueue) {
-      try {
-        // Allowlist = keys that will actually SURVIVE persistAll's floor —
-        // an out candidate below its floor never reaches the upsert, so
-        // protecting its key would leave the old higher-score row claimable
-        // on a signal that no longer qualifies (mirrors persistAll's
-        // family-aware floor exactly).
-        const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
-        const persistableKeys = out
-          .filter((o) => o.score >= (familyFloorActions.includes(o.action_type)
-            ? minScoreToActFor('new_supporting_blog')
-            : minScoreToActFor(o.action_type)))
-          .map((o) => o.dedupe_key);
-        await db('opportunity_queue')
-          .where({ bucket: 'listicle_family', status: 'pending' })
-          .whereNotIn('dedupe_key', persistableKeys)
-          .update({ status: 'expired', skip_reason: 'family_signal_gone', updated_at: new Date() });
-      } catch (err) {
-        logger.warn(`[gsc-opp-miner] listicle_family: stale-family sweep failed: ${err.message}`);
-      }
-    }
+    // Catch-all reconciliation of families that exited every branch above
+    // lives in _sweepStaleFamilyRows — called by mineAll AFTER a successful
+    // persistAll, never here (Codex r15): sweeping pre-persistence could
+    // empty the lane if the upserts then failed (rows expired, replacements
+    // never landed), and the facts-readiness boost mutates refresh scores
+    // post-mine, so the post-floor allowlist is only final after persist.
     return out;
+  }
+
+  // Any pending family row NOT re-emitted (and persistable) by the current
+  // mine is stale — the family went ineligible (rep reached top-3, sum fell
+  // under the floor, single variant left), lost its resolvable service, or
+  // became hubless-cityless. The targeted in-mine transitions carry
+  // specific reasons; this sweep covers every other exit so a dead family
+  // can't stay claimable for 14 days (Codex r12). Revivable 'expired' as
+  // always — if the signal returns, the upsert revives it. The allowlist is
+  // POST-floor AND post-facts-boost: a candidate that will not survive
+  // persistAll must not protect a stale higher-score row (pre-push audit).
+  // Gates-off or a thrown family mine must NOT sweep (an empty bucket then
+  // means "didn't run", not "no signal") — mineAll enforces both.
+  async _sweepStaleFamilyRows(familyOpps = []) {
+    try {
+      const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
+      const persistableKeys = familyOpps
+        .filter((o) => o.score >= (familyFloorActions.includes(o.action_type)
+          ? minScoreToActFor('new_supporting_blog')
+          : minScoreToActFor(o.action_type)))
+        .map((o) => o.dedupe_key);
+      await db('opportunity_queue')
+        .where({ bucket: 'listicle_family', status: 'pending' })
+        .whereNotIn('dedupe_key', persistableKeys)
+        .update({ status: 'expired', skip_reason: 'family_signal_gone', updated_at: new Date() });
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] listicle_family: stale-family sweep failed: ${err.message}`);
+    }
   }
 
   async mineNoContentYet(since, ownPagesByServiceCity = new Map()) {
