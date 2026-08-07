@@ -527,6 +527,38 @@ describe('persistAll upsert binding integrity (07-31 regression)', () => {
     );
   });
 
+  test('a family refresh yields to another bucket refreshing the same page in one batch (Codex r19)', async () => {
+    const db = require('../models/db');
+    const calls = [];
+    db.raw = jest.fn((sql, bindings) => {
+      calls.push({ sql, bindings });
+      return Promise.resolve({ rowCount: 1 });
+    });
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const miner = new GscOpportunityMiner();
+    const page = 'https://wavespestcontrol.com/blog/termite-signs/';
+    const fam = {
+      bucket: 'listicle_family', action_type: 'refresh_existing_page',
+      query: 'signs of termites florida', page_url: page, service: 'termite', city: null,
+      score: 60, score_breakdown: {}, signal_metadata: {}, dedupe_key: 'listicle_family::page::x',
+    };
+    const boosted = {
+      bucket: 'striking_distance', action_type: 'refresh_existing_page',
+      query: 'termite signs', page_url: page, service: 'termite', city: null,
+      score: 76, score_breakdown: {}, signal_metadata: {}, dedupe_key: 'striking_distance::t::_::x',
+    };
+    // Facts-boosted striking refresh clears its floor → the family yields:
+    // one refresh per page per batch.
+    const persisted = await miner.persistAll([fam, boosted]);
+    expect(persisted).toBe(1);
+    expect(calls.length).toBe(1);
+    expect(calls[0].bindings[12]).toBe('striking_distance::t::_::x');
+    // Alone, the same family refresh persists normally.
+    calls.length = 0;
+    expect(await miner.persistAll([fam])).toBe(1);
+    expect(calls[0].bindings[12]).toBe('listicle_family::page::x');
+  });
+
   test('a frozen-row conflict (rowCount 0) does not count as persisted', async () => {
     const db = require('../models/db');
     // The WHERE guard makes Postgres report rowCount 0 when the conflicting
@@ -988,6 +1020,13 @@ describe('listicle_family scoring + action mapping', () => {
     expect(classifierQuerySupported('specialty', 'pest', 'beef prices florida')).toBe(false);
     // Legit inflections still validate ('fertiliz' stem → fertilizer).
     expect(classifierQuerySupported('lawn', 'lawn', 'types of lawn fertilizer florida')).toBe(true);
+    // Per-token inflections (r19): generic suffixes validated 'rates'
+    // (rat+es) and 'tickers' (tick+ers) — the default is plural-s only.
+    expect(classifierQuerySupported('rodent', 'rodent', 'reasons interest rates change')).toBe(false);
+    expect(classifierQuerySupported('specialty', 'pest', 'types of stock tickers')).toBe(false);
+    expect(classifierQuerySupported('rodent', 'rodent', 'types of rats in florida')).toBe(true);
+    expect(classifierQuerySupported('specialty', 'pest', 'kinds of ticks on dogs')).toBe(true);
+    expect(classifierQuerySupported('mosquito', 'mosquito', 'plants that repel mosquitoes')).toBe(true);
     // Resolver integration: unsupported classifier + no inference → null.
     const helpers = {
       canonicalize: canonicalizeServiceCategory,
@@ -1056,7 +1095,11 @@ describe('listicle_family scoring + action mapping', () => {
     // refresh — one claimable edit per page per cycle (Codex r18); the
     // fence set is floor-filtered where mineAll builds it.
     expect(mineSrc).toMatch(/if \(answerGapPages\.has\(served\.hit\.page_url\)\) continue;/);
-    expect(src).toMatch(/answerGapPages: new Set\(\(buckets\.answer_gap \|\| \[\]\)[\s\S]{0,200}minScoreToActFor\(o\.action_type\)/);
+    expect(src).toMatch(/const answerGapPages = new Set\(\(buckets\.answer_gap \|\| \[\]\)[\s\S]{0,200}minScoreToActFor\(o\.action_type\)/);
+    // In-flight answer-gap rows (pending/claimed/pending_review) join the
+    // fence — an occupied page is absent from this run's bucket output but
+    // its edit must not race a family refresh (Codex r19).
+    expect(src).toMatch(/whereIn\('status', \['pending', 'claimed', 'pending_review'\]\)[\s\S]{0,120}whereNotNull\('page_url'\)/);
   });
 
   test('a served family becomes a striking_distance refresh of the mapped page with family provenance (Codex r9)', () => {
@@ -1231,7 +1274,7 @@ describe('listicle_family scoring + action mapping', () => {
     expect(sweepSrc).toMatch(/o\.score >= \(familyFloorActions\.includes\(o\.action_type\)/);
     // Ordering + guards in mineAll: sweep ONLY after a successful
     // persistAll, only when the lane ran (gates on, no miner error).
-    expect(src).toMatch(/persisted = await this\.persistAll\(allOpportunities\);[\s\S]{0,700}_sweepStaleFamilyRows\(buckets\.listicle_family \|\| \[\]\)/);
+    expect(src).toMatch(/persisted = await this\.persistAll\(allOpportunities\);[\s\S]{0,700}_sweepStaleFamilyRows\(buckets\.listicle_family \|\| \[\], allOpportunities\)/);
     expect(src).toMatch(/!errors\.listicle_family && isEnabled\('listicleFamilyMining'\) && isEnabled\('listicleBriefs'\)/);
   });
 

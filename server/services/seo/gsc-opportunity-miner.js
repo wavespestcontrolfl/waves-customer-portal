@@ -113,14 +113,25 @@ function classifierValidationRes() {
   try {
     const { SERVICE_PATTERNS } = require('./search-console-v2')._internals;
     for (const [cat, re] of Object.entries(SERVICE_PATTERNS)) {
-      // Inflections only — a bare [a-z]* tail accepted 'antique' (ant),
-      // 'rating' (rat), 'beef' (bee). The set covers plurals plus the
-      // stems the sync uses as prefixes ('termit'→termite/termites,
-      // 'fertiliz'→fertilizer/fertilization); 'ing'/'ed' stay excluded
-      // (rating/rated must not read as rodent evidence).
+      // PER-TOKEN inflections — one generic suffix set validated 'rates'
+      // (rat+es) and 'tickers' (tick+ers). Default is bare + plural 's';
+      // tokens ending in ch/sh/s/x/z pluralize with 'es' (roaches,
+      // grasses); the sync's stems and irregulars carry explicit forms.
+      // 'ing'/'ed'/'er' stay excluded by default (rating/rated/rater must
+      // not read as rodent evidence).
+      const overrides = new Map([
+        ['fertiliz', '(?:e|es|er|ers|ation|ations)'],
+        ['termit', '(?:e|es)'],
+        ['mosquito', '(?:s|es)?'],
+      ]);
+      const tail = (alt) => {
+        if (overrides.has(alt)) return overrides.get(alt);
+        if (/(?:ch|sh|s|x|z)$/.test(alt)) return '(?:es)?';
+        return 's?';
+      };
       const alts = re.source
         .split('|')
-        .map((alt) => `\\b(?:${alt})(?:e|es|s|er|ers|ation|ations)?\\b`)
+        .map((alt) => `\\b(?:${alt})${tail(alt)}\\b`)
         .join('|');
       CLASSIFIER_VALIDATION_RES.set(cat, new RegExp(alts, 'i'));
     }
@@ -959,15 +970,29 @@ class GscOpportunityMiner {
       // Runs AFTER answer_gap by list order: its persistable refresh pages
       // fence the family refreshes — two buckets must not queue
       // independently claimable edits of one page (their dedupe keys
-      // differ by construction).
-      ['listicle_family', () => this.mineListicleFamily(since, {
-        ownPagesByServiceCity,
-        periodDays,
-        answerGapPages: new Set((buckets.answer_gap || [])
+      // differ by construction). The fence ALSO covers IN-FLIGHT
+      // answer-gap rows (pending/claimed/pending_review in the queue):
+      // an occupied page is deliberately absent from this run's bucket
+      // output, but an in-progress or review-stage edit must not race a
+      // family refresh (Codex r19). Fail-soft: a lookup error just
+      // weakens the fence for one run.
+      ['listicle_family', async () => {
+        const answerGapPages = new Set((buckets.answer_gap || [])
           .filter((o) => o.score >= minScoreToActFor(o.action_type))
           .map((o) => o.page_url)
-          .filter(Boolean)),
-      })],
+          .filter(Boolean));
+        try {
+          const inflight = await db('opportunity_queue')
+            .where({ bucket: 'answer_gap', action_type: 'refresh_existing_page' })
+            .whereIn('status', ['pending', 'claimed', 'pending_review'])
+            .whereNotNull('page_url')
+            .select('page_url');
+          for (const r of inflight) answerGapPages.add(r.page_url);
+        } catch (err) {
+          logger.warn(`[gsc-opp-miner] in-flight answer_gap fence lookup failed: ${err.message}`);
+        }
+        return this.mineListicleFamily(since, { ownPagesByServiceCity, periodDays, answerGapPages });
+      }],
     ];
 
     for (const [name, fn] of runs) {
@@ -1022,7 +1047,7 @@ class GscOpportunityMiner {
       // only when the lane actually ran (gates on, no miner error — an
       // empty bucket then means "didn't run", not "no signal").
       if (!errors.listicle_family && isEnabled('listicleFamilyMining') && isEnabled('listicleBriefs')) {
-        await this._sweepStaleFamilyRows(buckets.listicle_family || []);
+        await this._sweepStaleFamilyRows(buckets.listicle_family || [], allOpportunities);
       }
     }
 
@@ -2143,10 +2168,20 @@ class GscOpportunityMiner {
   // persistAll must not protect a stale higher-score row (pre-push audit).
   // Gates-off or a thrown family mine must NOT sweep (an empty bucket then
   // means "didn't run", not "no signal") — mineAll enforces both.
-  async _sweepStaleFamilyRows(familyOpps = []) {
+  async _sweepStaleFamilyRows(familyOpps = [], batch = []) {
     try {
+      // Mirror persistAll's one-refresh-per-page yield: a family refresh
+      // that yielded to another bucket's refresh never persisted, so its
+      // key must not protect a stale pending row either.
+      const otherRefreshPages = new Set(batch
+        .filter((o) => o.bucket !== 'listicle_family'
+          && o.action_type === 'refresh_existing_page'
+          && o.page_url
+          && o.score >= minScoreToActFor(o.action_type))
+        .map((o) => o.page_url));
       const familyFloorActions = ['new_supporting_blog', 'refresh_existing_page'];
       const persistableKeys = familyOpps
+        .filter((o) => !(o.action_type === 'refresh_existing_page' && otherRefreshPages.has(o.page_url)))
         .filter((o) => o.score >= (familyFloorActions.includes(o.action_type)
           ? minScoreToActFor('new_supporting_blog')
           : minScoreToActFor(o.action_type)))
@@ -2220,9 +2255,26 @@ class GscOpportunityMiner {
     const now = new Date();
     const expiresAt = new Date(Date.now() + 14 * 86400_000);
 
+    // One refresh per page per batch: the family bucket is the
+    // aggregator-of-last-resort, so when any OTHER bucket's refresh of
+    // the same canonical page survives its floor in this batch —
+    // including via the post-mine facts boost, which reachability runs
+    // too early to see — the family refresh yields (Codex r19).
+    const otherRefreshPages = new Set(opportunities
+      .filter((o) => o.bucket !== 'listicle_family'
+        && o.action_type === 'refresh_existing_page'
+        && o.page_url
+        && o.score >= minScoreToActFor(o.action_type))
+      .map((o) => o.page_url));
+    const admitted = opportunities.filter((o) => !(
+      o.bucket === 'listicle_family'
+      && o.action_type === 'refresh_existing_page'
+      && otherRefreshPages.has(o.page_url)
+    ));
+
     // Group by dedupe_key, keep highest-score entry per key.
     const winners = new Map();
-    for (const o of opportunities) {
+    for (const o of admitted) {
       const existing = winners.get(o.dedupe_key);
       if (!existing || o.score > existing.score) winners.set(o.dedupe_key, o);
     }
