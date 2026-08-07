@@ -268,19 +268,33 @@ async function loadCurrentServiceKeys(db, customer) {
     const streetScope = primaryStreet
       ? { estimateStreet: primaryStreet, customerPrimaryStreet: primaryStreet }
       : null;
-    // WaveGuard is count-based across the customer's actual active recurring
-    // qualifying services. A tier label alone never identifies which services
-    // the customer bought, so it must not seed a Pest/Lawn/Mosquito basket.
-    const keys = await loadExistingQualifyingServiceKeys(db, customer.id, { streetScope });
-    // Ownership is BROADER than qualification (codex #3253 r2): recurring
-    // Rodent Monitoring never raises a tier but absolutely means the customer
-    // has rodent service — the never-re-price rule must see it.
-    const owned = await loadOwnedRecurringServiceKeys(db, customer.id, { streetScope });
     const mapKey = key => key === 'termite_bait' ? 'termite' : key;
-    return {
-      currentServiceKeys: keys.map(mapKey),
-      ownedServiceKeys: owned.map(mapKey),
-    };
+    // Each lookup fails INDEPENDENTLY (codex #3253 r4): a transient failure
+    // in the broader ownership query must not discard already-known
+    // qualifying keys — that would treat an existing customer as owning
+    // nothing and emit the fresh quote this module exists to prohibit (and
+    // undercount earned tiers). ownedSet is unioned with the qualifying keys
+    // downstream, so a failed ownership lookup degrades to qualifying-only.
+    let currentServiceKeys = [];
+    try {
+      // WaveGuard is count-based across the customer's actual active
+      // recurring qualifying services. A tier label alone never identifies
+      // which services the customer bought, so it must not seed a
+      // Pest/Lawn/Mosquito basket.
+      currentServiceKeys = (await loadExistingQualifyingServiceKeys(db, customer.id, { streetScope })).map(mapKey);
+    } catch (err) {
+      logger.warn(`[customer-pricing-ai] qualifying service lookup skipped: ${err.message}`);
+    }
+    let ownedServiceKeys = [];
+    try {
+      // Ownership is BROADER than qualification (codex #3253 r2): recurring
+      // rodent bait monitoring never raises a tier but absolutely means the
+      // customer has rodent service — the never-re-price rule must see it.
+      ownedServiceKeys = (await loadOwnedRecurringServiceKeys(db, customer.id, { streetScope })).map(mapKey);
+    } catch (err) {
+      logger.warn(`[customer-pricing-ai] ownership lookup skipped: ${err.message}`);
+    }
+    return { currentServiceKeys, ownedServiceKeys };
   } catch (err) {
     logger.warn(`[customer-pricing-ai] active service lookup skipped: ${err.message}`);
     return { currentServiceKeys: [], ownedServiceKeys: [] };
@@ -564,17 +578,6 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
 
   const turfProfile = await loadTurfProfile(db, customer.id);
 
-  let lookupFn = propertyLookup;
-  if (!lookupFn) {
-    try {
-      ({ performPropertyLookup: lookupFn } = require('../routes/property-lookup-v2'));
-    } catch {
-      lookupFn = null;
-    }
-  }
-
-  const propertyContext = await resolvePropertyContext({ customer, turfProfile, propertyLookup: lookupFn });
-
   // A service the customer ALREADY has is never re-priced from the property
   // profile — owner ruling 2026-08-06. Their live rate may predate a price
   // change, or have been set by hand at estimate time; quoting a fresh number
@@ -582,8 +585,28 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
   // longer opens that door (it previously did): an upgrade is a conversation,
   // routed to Waves, not a self-serve re-quote. The one-time keys stay
   // exempt — those are repeatable purchases, not an existing obligation.
+  // Computed BEFORE property resolution (codex #3253 r4 P2): an owned-only
+  // request generates no quote, so it must not trigger the external
+  // geocoding/AI property lookup (cache writes, provider cost, latency).
   const alreadyIncluded = requestedServices.filter(key => ownedAndNotRepeatable(key, ownedSet));
   const servicesToPrice = requestedServices.filter(key => !alreadyIncluded.includes(key));
+
+  let lookupFn = propertyLookup;
+  if (!lookupFn && servicesToPrice.length) {
+    try {
+      ({ performPropertyLookup: lookupFn } = require('../routes/property-lookup-v2'));
+    } catch {
+      lookupFn = null;
+    }
+  }
+
+  // Null lookup → resolvePropertyContext stays profile-only (no external
+  // calls), which is all an owned-only response needs for its summary.
+  const propertyContext = await resolvePropertyContext({
+    customer,
+    turfProfile,
+    propertyLookup: servicesToPrice.length ? lookupFn : null,
+  });
 
   // Measured AFTER the exclusion: an owned service missing a measurement must
   // not short-circuit the request into PROPERTY_DETAILS_NEEDED — we are not

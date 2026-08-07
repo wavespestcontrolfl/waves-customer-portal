@@ -528,3 +528,50 @@ describe('ownership lifecycle evidence', () => {
     expect(owned).toEqual([]);
   });
 });
+
+// Codex #3253 r4: rodent ownership = bait-monitoring products only; owned-only
+// requests must not trigger the external property lookup.
+describe('r4 regressions', () => {
+  const { ownershipKeysForRow } = require('../services/waveguard-existing-services');
+
+  test('rodent trapping / exclusion / one-time specialties are not bait-monitoring ownership', () => {
+    expect(ownershipKeysForRow({
+      service_type: 'Rodent Trapping', service_key: 'rodent_trapping', service_name: 'Rodent Trapping',
+    })).toEqual([]);
+    expect(ownershipKeysForRow({
+      service_type: 'Rodent Exclusion', service_key: 'rodent_exclusion', service_name: 'Rodent Exclusion',
+    })).toEqual([]);
+    expect(ownershipKeysForRow({
+      service_type: 'Rodent Pest Control', service_key: 'rodent_general_one_time', service_name: 'Rodent Pest Control',
+    })).toEqual([]);
+    // The bait-monitoring product and the combined plan still count.
+    expect(ownershipKeysForRow({ service_type: 'Rodent Monitoring' })).toEqual(['rodent_bait']);
+    expect(ownershipKeysForRow({ service_type: 'Pest & Rodent Control' }).sort())
+      .toEqual(['pest_control', 'rodent_bait']);
+  });
+
+  test('an owned-only request never invokes the property lookup', async () => {
+    const lookupSpy = jest.fn(async () => ({ enriched: { homeSqFt: 2400 } }));
+    const customer = propertyCustomer({
+      id: 'cust-owned-nolookup',
+      waveguard_tier: 'Silver',
+      property_sqft: null,
+      lot_sqft: null,
+      address_line1: '123 Gulf Dr',
+      city: 'Sarasota',
+      state: 'FL',
+      zip: '34236',
+    });
+    const result = await buildCustomerPricingResponse({
+      db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
+      propertyLookup: lookupSpy,
+      prompt: 'I want to upgrade my lawn care',
+      customer,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.alreadyIncluded).toContain('Lawn Care');
+    expect(result.options).toEqual([]);
+    expect(lookupSpy).not.toHaveBeenCalled();
+  });
+});

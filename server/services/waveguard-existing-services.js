@@ -338,6 +338,12 @@ async function filterRowsToStreet(database, rows, streetScope) {
 //    not block a bait-monitoring quote (codex #3253 r3).
 function ownershipFamiliesFromText(raw) {
   const s = String(raw || '').toLowerCase();
+  // One-time identities are never an owned recurring obligation — mirrors
+  // toQualifyingKeys' own first check, which only guards the qualifying
+  // families; without this, rodent_general_one_time's repeated joined text
+  // defeats the pest-before-rodent ordering heuristic and reads as the
+  // combined plan (codex #3253 r4).
+  if (/one[\s_-]?time|onetime/.test(s)) return [];
   const keys = toQualifyingKeys(s);
   const add = (key) => { if (!keys.includes(key)) keys.push(key); };
   if (s.includes('commercial')) {
@@ -347,7 +353,16 @@ function ownershipFamiliesFromText(raw) {
     if (!/\bpalms?\b/.test(s) && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) add('tree_shrub');
     if (s.includes('mosquito')) add('mosquito');
   }
-  if (RODENT_TOKEN_RE.test(s)) add('rodent_bait');
+  // Rodent ownership means the BAIT-MONITORING product (codex #3253 r4):
+  // trapping / exclusion / rodent_general_one_time are distinct specialties
+  // (estimate-converter maps only bait|station|monitor identities to
+  // rodent_bait) and must not suppress a bait-station quote. The explicit
+  // pest-primary combined plan ("Pest & Rodent Control") is the one carrier
+  // of rodent coverage without those tokens.
+  if (RODENT_TOKEN_RE.test(s)) {
+    const combinedPestRodent = /\bpest\b/.test(s) && !isRodentLedText(s);
+    if (/\b(bait|station|monitor)/.test(s) || combinedPestRodent) add('rodent_bait');
+  }
   if (/\btermite\b/.test(s) && /\b(bait|station|monitor)/.test(s)) add('termite_bait');
   return keys;
 }
