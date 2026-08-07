@@ -265,9 +265,20 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
 //             customer is still reached (no admin alert unless BOTH fail)
 //   'both'  → send SMS and email
 // Returns true if the customer was reached on any channel. Best-effort.
-async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt }) {
+//
+// `smsOutcome` (optional): the same out-param object the caller passed into
+// safeSendAppointment. When the SMS leg was refused by the send-window
+// boundary re-check at the provider handoff (blockedCode QUIET_HOURS_HOLD —
+// the reminderSendWindowHold pre-check passed at 19:59 but the clock crossed
+// 20:00 during the template/link/lookup awaits), the notice is DEFERRED, not
+// failed: no email fallback, no no-channel alert. Callers see false + the
+// blockedCode and leave their row unmarked so the next cron tick re-decides
+// (72h/confirmation re-send at 8:00 AM; the 24h branch's own pre-check
+// applies the same-day skip ruling).
+async function deliverAppointmentNotice({ channel, kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, smsAttempt, smsOutcome = null }) {
   const ch = apptChannel(channel);
   const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl };
+  const smsHeld = () => !!smsOutcome && smsOutcome.blockedCode === 'QUIET_HOURS_HOLD';
 
   // Run the caller's SMS closure defensively. Some callers (e.g. the estimate
   // accept flow) throw on a blocked/undeliverable send; for email/both that must
@@ -292,12 +303,26 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     // No usable email (none on file / suppressed) — reach them by text instead.
     logger.info(`[appt-remind] ${kind} email channel unavailable for ${customerId} (${res?.reason || res?.error || 'unknown'}) — falling back to SMS`);
     const smsOk = await runSms();
+    if (!smsOk && smsHeld()) {
+      // Transient window hold, not an unreachable customer — no alert; the
+      // caller leaves its row unmarked and the next tick retries (the email
+      // leg is idempotent per occurrence, so re-running it is safe).
+      logger.info(`[appt-remind] ${kind} SMS fallback for ${customerId} held at the send-window boundary — notice deferred`);
+      return false;
+    }
     if (!smsOk) await alertNoReachableChannel({ customerId, kind, scheduledServiceId, emailReason: emailReasonOf(res) });
     return smsOk;
   }
 
   if (ch === 'both') {
     const smsOk = await runSms();
+    if (!smsOk && smsHeld()) {
+      // Same contract as reminderSendWindowHold's pre-check: 'both' holds
+      // the WHOLE notice, so one deferral covers both legs — sending the
+      // email now would strand the SMS leg once the caller marks the row.
+      logger.info(`[appt-remind] ${kind} SMS leg for ${customerId} held at the send-window boundary — whole notice deferred`);
+      return false;
+    }
     const emailRes = await sendAppointmentNoticeEmail(emailArgs);
     const emailOk = !!emailRes?.ok;
     // Neither channel reached the customer — raise the same human-follow-up
@@ -306,8 +331,14 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     return smsOk || emailOk;
   }
 
-  // 'sms' default — unchanged behavior.
+  // 'sms' default — unchanged behavior (except the boundary hold: a hold is
+  // a deferral, and the night email fallback plus a marked row is exactly
+  // what the send window exists to stop).
   const smsOk = await runSms();
+  if (!smsOk && smsHeld()) {
+    logger.info(`[appt-remind] ${kind} SMS for ${customerId} held at the send-window boundary — notice deferred`);
+    return false;
+  }
   if (!smsOk) await deliverAppointmentEmailFallback(emailArgs);
   return smsOk;
 }
@@ -1040,6 +1071,10 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
       // Honor the customer's channel preference (sms | email | both). The
       // 'sms' default is unchanged: SMS first, email fallback on failure.
+      // smsOutcome carries a provider-handoff QUIET_HOURS_HOLD (the pre-check
+      // above passed, then the clock crossed 20:00 mid-flight) back out so
+      // the hold defers instead of burning the confirmation below.
+      const smsOutcome = {};
       const sent = await deliverAppointmentNotice({
         channel: prefs.confirmationChannel,
         kind: 'confirmation',
@@ -1048,6 +1083,7 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         apptTime,
         serviceLabel,
         rescheduleUrl: reschedule.url,
+        smsOutcome,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
           return renderAppointmentPageTemplate(
@@ -1074,8 +1110,16 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
             { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
           );
-        }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId }),
+        }, 'confirmation', 'appointment_confirmation', { scheduled_service_id: scheduledServiceId }, { sendOutcome: smsOutcome }),
       });
+
+      // Boundary hold — same treatment as the pre-check above: return
+      // WITHOUT marking, so the stranded-confirmation sweep re-calls this
+      // function and the text goes out when the window opens at 8:00 AM.
+      if (!sent && smsOutcome.blockedCode === 'QUIET_HOURS_HOLD') {
+        logger.info(`[appt-remind] Confirmation for ${scheduledServiceId} held at the send-window boundary — deferred, row left unmarked`);
+        return false;
+      }
 
       // Mark sent whether or not delivery succeeded (landline / block) so
       // reminders can proceed and we don't retry the confirmation.
@@ -1804,7 +1848,11 @@ const AppointmentReminders = {
             // for appointment times, so a top-level import would cycle.
             const cardHoldPolicyLine72 = await require('./estimate-card-holds')
               .cardHoldReminderLine(r.scheduled_service_id);
-            await deliverAppointmentNotice({
+            // smsOutcome carries a provider-handoff QUIET_HOURS_HOLD (the
+            // pre-check above passed at 19:59, the clock crossed 20:00
+            // mid-flight) back out so the hold defers instead of marking.
+            const smsOutcome72 = {};
+            const reached72 = await deliverAppointmentNotice({
               channel: channel72,
               kind: '72h',
               customerId: r.customer_id,
@@ -1812,6 +1860,7 @@ const AppointmentReminders = {
               apptTime,
               serviceLabel,
               rescheduleUrl: reschedule.url,
+              smsOutcome: smsOutcome72,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
@@ -1819,8 +1868,16 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
+              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }, { sendOutcome: smsOutcome72 }),
             });
+
+            // Boundary hold — leave the row UNMARKED, same as the pre-check
+            // defer: the 15-minute cron re-selects it and the reminder goes
+            // out at 8:00 AM, still days ahead of the visit.
+            if (!reached72 && smsOutcome72.blockedCode === 'QUIET_HOURS_HOLD') {
+              logger.info(`[appt-remind] 72h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred, row left unmarked`);
+              continue;
+            }
 
             // Guard on appointment_time: a concurrent move re-arms this row
             // (DB sync trigger / handleReschedule) with the NEW time — an
@@ -1922,7 +1979,10 @@ const AppointmentReminders = {
             // Card-hold fee policy clause — see the 72h twin above.
             const cardHoldPolicyLine24 = await require('./estimate-card-holds')
               .cardHoldReminderLine(r.scheduled_service_id);
-            await deliverAppointmentNotice({
+            // smsOutcome carries a provider-handoff QUIET_HOURS_HOLD back
+            // out — see the 72h twin above.
+            const smsOutcome24 = {};
+            const reached24 = await deliverAppointmentNotice({
               channel: channel24,
               kind: '24h',
               customerId: r.customer_id,
@@ -1947,8 +2007,19 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),
+              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }, { sendOutcome: smsOutcome24 }),
+              smsOutcome: smsOutcome24,
             });
+
+            // Boundary hold — leave the row UNMARKED and let the next
+            // 15-minute tick re-decide: its pre-check above applies the
+            // owner's ruling (defer when the window reopens before the
+            // visit day, otherwise skip+close), which this mid-flight
+            // point must not re-implement.
+            if (!reached24 && smsOutcome24.blockedCode === 'QUIET_HOURS_HOLD') {
+              logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred to the next scan's window ruling`);
+              continue;
+            }
 
             // Same appointment_time guard as the 72h flag above — a
             // concurrent move re-armed this row for its new time; don't

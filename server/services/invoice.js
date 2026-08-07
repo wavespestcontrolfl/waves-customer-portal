@@ -2235,18 +2235,34 @@ const InvoiceService = {
       }
     }
 
-    try {
-      const r = await sendInvoiceEmail(invoiceId, {
-        recipientOverride: emailRecipientOverride,
-        payUrlParams,
-      });
-      if (r?.ok) email.ok = true;
-      else if (r?.error) email.error = r.error;
-      if (!payUrl && r?.payUrl) payUrl = r.payUrl;
-      if (r?.recipient) email.recipient = r.recipient;
-      if (r?.messageId) email.messageId = r.messageId;
-    } catch (err) {
-      email.error = err.message;
+    // A send-window hold on a SCHEDULED delivery defers the WHOLE send: a
+    // successful email here would make `ok` true, finalize the invoice and
+    // clear scheduled_send_at — stranding the held SMS pay link with no
+    // retry rail. Skipping the email leg keeps ok=false, so
+    // processScheduledSends moves the due time to nextAllowedAt and both
+    // legs go out together at 8:00 AM. Direct callers (estimate-accept
+    // night sends, admin resends) are NOT deferred: their documented
+    // gate-ON behavior is email-immediate with the SMS leg held.
+    const scheduledSmsHeld = allowClaimed
+      && sms.code === "QUIET_HOURS_HOLD"
+      && Boolean(sms.nextAllowedAt);
+    if (scheduledSmsHeld) {
+      email.error = "Deferred with the held SMS leg — outside 8AM-8PM ET send window";
+      email.code = "QUIET_HOURS_HOLD";
+    } else {
+      try {
+        const r = await sendInvoiceEmail(invoiceId, {
+          recipientOverride: emailRecipientOverride,
+          payUrlParams,
+        });
+        if (r?.ok) email.ok = true;
+        else if (r?.error) email.error = r.error;
+        if (!payUrl && r?.payUrl) payUrl = r.payUrl;
+        if (r?.recipient) email.recipient = r.recipient;
+        if (r?.messageId) email.messageId = r.messageId;
+      } catch (err) {
+        email.error = err.message;
+      }
     }
 
     if (effectiveRequestReview && (sms.ok || email.ok)) {
@@ -2486,18 +2502,33 @@ const InvoiceService = {
     for (const inv of due) {
       if (isEnabled("smsSendWindow") && !isWithinSendWindowET()) {
         const nextOpen = nextSendWindowOpenET();
-        await db("invoices")
+        // Mirror the claim predicates (still due, still attempt-eligible),
+        // not just id+status: an admin can reschedule the invoice between
+        // the due-list read and this update, and a bare id+status match
+        // would overwrite their newly chosen scheduled_send_at with the
+        // window open. 0 rows affected = the row changed underneath — the
+        // newer schedule owns it, count nothing.
+        const deferredRows = await db("invoices")
           .where({ id: inv.id, status: "scheduled" })
+          .whereNotNull("scheduled_send_at")
+          .where("scheduled_send_at", "<=", new Date())
+          .where((q) =>
+            q
+              .whereNull("scheduled_send_attempts")
+              .orWhere("scheduled_send_attempts", "<", 5),
+          )
           .update({
             scheduled_send_at: nextOpen,
             scheduled_send_error:
               "QUIET_HOURS_HOLD — outside 8AM-8PM ET send window, deferred to window open",
             updated_at: new Date(),
           });
-        deferred += 1;
-        logger.info(
-          `[invoice] Scheduled send for ${inv.invoice_number} outside 8AM-8PM ET send window — deferred to ${nextOpen.toISOString()}`,
-        );
+        if (deferredRows) {
+          deferred += 1;
+          logger.info(
+            `[invoice] Scheduled send for ${inv.invoice_number} outside 8AM-8PM ET send window — deferred to ${nextOpen.toISOString()}`,
+          );
+        }
         continue;
       }
       const [claimed] = await db("invoices")

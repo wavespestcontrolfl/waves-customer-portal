@@ -27,6 +27,9 @@ jest.mock('../services/messaging/send-window', () => ({
   isWithinSendWindowET: jest.fn(),
   nextSendWindowOpenET: jest.fn(),
 }));
+jest.mock('../services/invoice-email', () => ({
+  sendInvoiceEmail: jest.fn(async () => ({ ok: true })),
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -38,15 +41,17 @@ const InvoiceService = require('../services/invoice');
 
 const WINDOW_OPEN = new Date('2026-08-07T12:00:00.000Z'); // 8:00 AM ET
 
-function chain({ rows, returning } = {}) {
+function chain({ rows, returning, first, updateCount = 1 } = {}) {
   const q = {};
   for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'orWhere', 'orderBy', 'limit', 'update', 'insert']) {
     q[m] = jest.fn(() => q);
   }
   q.select = jest.fn(async () => rows || []);
   q.returning = jest.fn(async () => returning || []);
-  // Awaiting the chain itself (update/insert paths) resolves via then.
-  q.then = (resolve) => Promise.resolve(rows || []).then(resolve);
+  q.first = jest.fn(async () => first);
+  // Awaiting the chain itself resolves like knex: an update chain resolves
+  // its affected-row count, anything else the row set.
+  q.then = (resolve) => Promise.resolve(q.update.mock.calls.length ? updateCount : (rows || [])).then(resolve);
   return q;
 }
 
@@ -90,6 +95,26 @@ describe('processScheduledSends send-window handling', () => {
     expect(updateArgs.scheduled_send_at).toEqual(WINDOW_OPEN);
     expect(updateArgs.scheduled_send_attempts).toBeUndefined();
     expect(String(updateArgs.scheduled_send_error)).toContain('QUIET_HOURS_HOLD');
+    // The deferral must mirror the claim predicates so a concurrent admin
+    // reschedule (new scheduled_send_at) is never overwritten.
+    expect(deferUpdate.whereNotNull).toHaveBeenCalledWith('scheduled_send_at');
+    expect(deferUpdate.where).toHaveBeenCalledWith('scheduled_send_at', '<=', expect.any(Date));
+  });
+
+  test('a concurrent reschedule (0 rows affected) is not counted as deferred', async () => {
+    isWithinSendWindowET.mockReturnValue(false);
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const deferUpdate = chain({ updateCount: 0 });
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(deferUpdate);
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
   });
 
   test('inside the window: the send proceeds', async () => {
@@ -141,6 +166,74 @@ describe('processScheduledSends send-window handling', () => {
     expect(updateArgs.status).toBe('scheduled');
     expect(updateArgs.scheduled_send_at).toEqual(WINDOW_OPEN);
     expect(updateArgs.scheduled_send_attempts).toBeUndefined();
+  });
+
+  test('sendViaSMSAndEmail (scheduled path): a held SMS leg skips the email leg so the invoice cannot finalize', async () => {
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockImplementation(async () => {
+      const err = new Error('payment-link SMS blocked: QUIET_HOURS_HOLD');
+      err.code = 'QUIET_HOURS_HOLD';
+      err.deferred = true;
+      err.nextAllowedAt = WINDOW_OPEN.toISOString();
+      throw err;
+    });
+    try {
+      const sendingInvoice = {
+        id: 'inv-1',
+        status: 'sending',
+        customer_id: 'cust-1',
+        payer_id: null,
+        scheduled_request_review: false,
+        scheduled_review_delay_minutes: null,
+      };
+      db
+        .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
+        .mockReturnValueOnce(chain({ first: sendingInvoice })); // claimInvoiceForSend read
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { allowClaimed: true });
+
+      expect(sendInvoiceEmail).not.toHaveBeenCalled();
+      expect(result.ok).toBe(false);
+      expect(result.sms.code).toBe('QUIET_HOURS_HOLD');
+      expect(result.sms.nextAllowedAt).toBe(WINDOW_OPEN.toISOString());
+      expect(result.email.code).toBe('QUIET_HOURS_HOLD');
+    } finally {
+      smsSpy.mockRestore();
+    }
+  });
+
+  test('sendViaSMSAndEmail (direct caller): a held SMS leg still sends the email immediately', async () => {
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockImplementation(async () => {
+      const err = new Error('payment-link SMS blocked: QUIET_HOURS_HOLD');
+      err.code = 'QUIET_HOURS_HOLD';
+      err.deferred = true;
+      err.nextAllowedAt = WINDOW_OPEN.toISOString();
+      throw err;
+    });
+    try {
+      const draftInvoice = {
+        id: 'inv-1',
+        status: 'draft',
+        customer_id: 'cust-1',
+        payer_id: null,
+        scheduled_request_review: false,
+        scheduled_review_delay_minutes: null,
+      };
+      db
+        .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
+        .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
+        .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
+        .mockReturnValueOnce(chain()) // finalize update
+        .mockReturnValueOnce(chain({ first: null })); // lead-conversion read (permissive)
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+
+      expect(sendInvoiceEmail).toHaveBeenCalledTimes(1);
+      expect(result.ok).toBe(true);
+    } finally {
+      smsSpy.mockRestore();
+    }
   });
 
   test('an ordinary failure still increments the attempt counter', async () => {
