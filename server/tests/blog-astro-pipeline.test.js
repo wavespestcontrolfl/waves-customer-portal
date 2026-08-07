@@ -259,6 +259,11 @@ describe('blog Astro frontmatter validation', () => {
     expect(invalidWithCity.service_areas_tag).toEqual([]);
     const absentWithCity = await AstroPublisher.buildFrontmatter({ ...base, city: 'Sarasota' });
     expect(absentWithCity.service_areas_tag).toEqual(['Sarasota']);
+    // An explicit EMPTY array is an operator CLEARING the field via the
+    // admin editor — present data, never inferred over (Codex r12); it
+    // reaches validation empty and rejects, same contract as the backfill.
+    const explicitEmpty = await AstroPublisher.buildFrontmatter({ ...base, service_areas_tag: [], city: 'Sarasota' });
+    expect(explicitEmpty.service_areas_tag).toEqual([]);
   });
 
   test('maps pest-family legacy tags to the required pest-control category', async () => {

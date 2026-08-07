@@ -231,8 +231,12 @@ async function buildFrontmatter(post) {
   // stored value (['Tampa']) plus a valid city, letting city stand in would
   // silently replace the corrupt field and publish it — present-but-invalid
   // must normalize to empty so schema validation rejects the row (Codex r3).
-  const storedAreasAbsent = post.service_areas_tag == null
-    || (Array.isArray(post.service_areas_tag) && post.service_areas_tag.length === 0);
+  // ABSENT means null/undefined ONLY: the admin editor can persist an
+  // explicit [] — an operator CLEARING the field — and inferring over it
+  // could publish every default service area; it stays present-but-invalid
+  // for validation to reject, same contract as the legacy backfill
+  // (Codex r12).
+  const storedAreasAbsent = post.service_areas_tag == null;
   const serviceAreas = normalizeServiceAreas(post.service_areas_tag, storedAreasAbsent ? post.city : undefined);
   const relatedServices = normalizeArray(post.related_services);
   // Blog posts from this publisher are hub-only. Spoke/service pages can still
