@@ -2742,3 +2742,55 @@ describe('operator-authorized prose mentions on table-backed drafts', () => {
     expect(r.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
   });
 });
+
+describe('operator authorization: detection-only unknowns + feature-flag exemption on table drafts (Codex r3 on #3256)', () => {
+  const B3_BRIEF = [
+    "Aptive's Cancellation Fee, Explained",
+    'aptive cancellation fee',
+    "What Aptive's contract actually costs, with a trade-off comparison table",
+  ].join('\n');
+  const NEUTRAL_TABLE = `<ComparisonTable
+  columns={["What to weigh","National chain","Local SWFL company","DIY"]}
+  rows={[
+    { label: "Contract length", values: ["Often annual","Month-to-month common","N/A"] }
+  ]}
+  highlight={1}
+  caption="Contract trade-offs to weigh." />`;
+
+  test('detection-only operator-named competitor in prose + table → review, no UNKNOWN_COMPETITOR', () => {
+    const r = gate.evaluate({
+      body: `# Guide\n\nAptive contracts run annual terms; here is what cancelling involves.\n\n${NEUTRAL_TABLE}\n\nClosing prose.`,
+      frontmatter: { title: "Aptive's Cancellation Fee, Explained" },
+    }, { namedCompetitorEnabled: true, operatorBriefText: B3_BRIEF });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(false);
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+  });
+
+  test('the same detection-only name INSIDE a table cell stays fail-closed regardless of authorization', () => {
+    const t = NEUTRAL_TABLE.replace('National chain', 'Aptive');
+    const r = gate.evaluate({
+      body: `# Guide\n\nIntro prose.\n\n${t}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: true, operatorBriefText: B3_BRIEF });
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
+  });
+
+  test('feature flag OFF: operator-authorized prose-only known parks to review instead of NAMED_COMPETITOR_DISABLED', () => {
+    const D1_BRIEF = 'TruGreen Alternatives in Sarasota\ntrugreen alternative sarasota';
+    const r = gate.evaluate({
+      body: `# Guide\n\nMany homeowners start with TruGreen and later want a local option.\n\n${NEUTRAL_TABLE}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: false, operatorBriefText: D1_BRIEF });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(false);
+    expect(r.pass).toBe(true);
+    expect(r.requiresHumanReview).toBe(true);
+  });
+
+  test('feature flag OFF: a known named IN the table still requires the flag', () => {
+    const t = NEUTRAL_TABLE.replace('National chain', 'TruGreen');
+    const r = gate.evaluate({
+      body: `# Guide\n\nIntro prose.\n\n${t}\n\nClosing prose.`,
+    }, { namedCompetitorEnabled: false, operatorBriefText: 'TruGreen Alternatives\ntrugreen alternative' });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(true);
+  });
+});

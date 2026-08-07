@@ -2333,7 +2333,21 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   }
 
   // ── Resolve findings ──
+  // Operator authorization (built above for the caption fill) covers
+  // PROSE-ONLY occurrences on this path too, mirroring evaluateProse: a
+  // detection-only competitor the operator's binding brief names (e.g. the
+  // Aptive cancellation brief + mandated table) routes to human review
+  // instead of hard-blocking — but ONLY when the name never appears inside
+  // a comparison block. Any table occurrence keeps the full fail-closed
+  // treatment: operator provenance answers "who wrote it", never "is this
+  // claim verifiable" (standing rule).
+  const nameInAnyBlock = (nm) => {
+    const re = new RegExp(escapeForNameRe(nm), 'i');
+    return blocks.some((b) => re.test(String(b)));
+  };
+  let operatorAuthorizedProse = false;
   for (const nm of unknown) {
+    if (operatorAuthorized(nm) && !nameInAnyBlock(nm)) { operatorAuthorizedProse = true; continue; }
     findings.push(finding('P0', 'COMPARISON_UNKNOWN_COMPETITOR',
       `Names "${nm}", a recognized competitor not on the curated competitor-facts allowlist — its attributes cannot be verified. Use a provider CATEGORY instead, or add "${nm}" to competitor-facts.js with sourced, dated facts.`));
   }
@@ -2349,23 +2363,20 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
       `Comparison marks a named competitor as lacking a service/reliability criterion (${f}) — a negative reliability claim about a named provider. Routed to human review; state neutral, verifiable attributes only.`));
   }
-  // Operator authorization covers the PROSE-MENTION finding only, mirroring
-  // evaluateProse: an intercept brief whose binding title/outline names the
-  // competitor (e.g. the TruGreen-alternatives brief + mandated trade-off
-  // table) must be writable as briefed — the draft routes to human review
-  // instead of hard-blocking. Table CELLS are untouched: operator provenance
-  // answers "who wrote it", never "is this claim verifiable" (standing
-  // rule), so every curated-facts/caption/negativity check above keeps full
-  // strength. (operatorAuthorized was built above for the caption fill.)
-  let operatorAuthorizedProse = false;
   for (const nm of competitorInProse) {
     if (operatorAuthorized(nm)) { operatorAuthorizedProse = true; continue; }
     findings.push(finding('P1', 'COMPARISON_COMPETITOR_IN_PROSE',
       `Names competitor "${nm}" in prose/title/meta, outside the comparison table — claims there are not validated against competitor-facts.js. Name a competitor ONLY inside the <ComparisonTable> (every cell is checked), not in the surrounding copy.`));
   }
-  if (known.size && !namedCompetitorEnabled) {
+  // Operator-authorized PROSE-ONLY knowns are exempt from the feature-flag
+  // finding (same exemption the table-less path gives them): with the flag
+  // off they park on the approvable named-competitor review path instead of
+  // gate-failing — which the runner's approval re-check would reject anyway.
+  // A known named inside a table block still requires the flag.
+  const flagKnown = [...known].filter((nm) => !(operatorAuthorized(nm) && !nameInAnyBlock(nm)));
+  if (flagKnown.length && !namedCompetitorEnabled) {
     findings.push(finding('P1', 'COMPARISON_NAMED_COMPETITOR_DISABLED',
-      `Names a competitor (${[...known].join(', ')}) but named-competitor comparisons are disabled (GATE_NAMED_COMPETITOR_COMPARISON). Use a category comparison, or enable the flag.`));
+      `Names a competitor (${flagKnown.join(', ')}) but named-competitor comparisons are disabled (GATE_NAMED_COMPETITOR_COMPARISON). Use a category comparison, or enable the flag.`));
   } else if (known.size && unsourcedKnown.size) {
     findings.push(finding('P1', 'COMPARISON_COMPETITOR_UNSOURCED',
       `Names a competitor (${[...unsourcedKnown].join(', ')}) without an "as of <date>" + source caption on the table that names it. Add e.g. caption="Attributes as of June 2026, per each company's public website."`));

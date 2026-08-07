@@ -584,6 +584,9 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(directive('COMPARISON_RIGGED_RANKING')).toMatch(/#1/);
     expect(directive('COMPARISON_RIGGED_RANKING')).toMatch(/neutral trade-offs/);
     expect(directive('COMPARISON_COMPETITOR_IN_PROSE')).toMatch(/ONLY inside the <ComparisonTable>/);
+    expect(directive('COMPARISON_COMPETITOR_IN_PROSE')).toMatch(/SPECIFIC competitor/);
+    expect(directive('COMPARISON_COMPETITOR_IN_PROSE')).toMatch(/operator brief itself names[\s\S]{0,60}MUST stay as briefed/);
+    expect(directive('OFF_FOOTPRINT_CITY_CLAIM')).toMatch(/list introduction[\s\S]{0,60}table header/);
     expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/get_competitor_facts/);
     expect(directive('COMPARISON_UNKNOWN_COMPETITOR')).toMatch(/never invent a business name/);
   });

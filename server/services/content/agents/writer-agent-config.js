@@ -141,6 +141,11 @@ rule follows in later sections, but this checklist is binding on its own:
   (index="N", footnotes) still kill the draft. Attribute sources in prose.
 - [DISALLOWED_EXTERNAL_LINK] External links ONLY to domains the brief /
   facts pack names as sources — every other off-fleet URL is blocked.
+  EXCEPTION: an OPERATOR brief whose source_notes direct you to LOCATE a
+  source (no URL given) makes finding and linking it binding — the
+  guardrail allows the curated citation/competitor-source hosts for
+  exactly that case; never use this to link hosts unrelated to the
+  brief's named sources.
 - [PRODUCT_CLAIM] No professional product names, active ingredients, or
   claims about what Waves techs carry/use — unless the facts pack states it,
   describe the product class generically.
