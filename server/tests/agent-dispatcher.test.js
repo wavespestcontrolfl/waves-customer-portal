@@ -327,6 +327,18 @@ describe('emit_draft in-loop self-lint (W1)', () => {
     }, { sessionId: 'lint-10' });
     expect(r.ok).toBe(true);
     clearDraft('lint-10');
+    // The scrub is DESCRIPTION-only: a {{cityPhone}} in the TITLE has no
+    // sanctioned use and still trips validation.
+    registerSessionLint('lint-11', {});
+    const badTitle = await executeBriefTool('emit_draft', {
+      frontmatter: {
+        title: 'Pest Control {{cityPhone}} | Waves',
+        meta_description: 'Need pest control in Lakewood Ranch? Waves treats common Southwest Florida pest problems.',
+      },
+      body: CLEAN_BODY,
+    }, { sessionId: 'lint-11' });
+    expect(badTitle.ok).toBe(false);
+    clearDraft('lint-11');
   });
 
   test('the agent prompts PERMIT a second sink call after a rejection — the call-once rule must not strand the redraft', () => {

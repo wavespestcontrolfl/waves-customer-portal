@@ -2921,7 +2921,7 @@ const REENTRY_SAFETY_SRCS = [
   `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
   `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
-  `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*)\\b[^.!?\\n]{0,30}?\\bfor\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*)\\b[^.!?\\n]{0,30}?\\b(?:for|until|after)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "needs 30 minutes to dry", "30 minutes of drying"
   `\\b${REENTRY_DURATION_SRC}\\s+(?:to\\s+dry|of\\s+drying)\\b`,
   // Noun-first drying figures: "drying takes 30 minutes", "the drying time
@@ -2953,9 +2953,14 @@ function reentrySafetyClaimFinding(text) {
       const before = s.slice(Math.max(0, m.index - 80), m.index);
       const sentenceBreak = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n'));
       const sameSentence = sentenceBreak >= 0 ? before.slice(sentenceBreak + 1) : before;
+      // A DURATION finding is prohibited in EVERY polarity — "Do not
+      // re-enter after 30 minutes" IS the banned fixed figure, so the
+      // disclaimer exemptions below must not shield it (Codex audit).
+      const isDurationFinding = /\b(?:minutes?|mins?|hours?|hrs?|hour)\b/i.test(m[0]);
       // "no product is completely safe", "we never call a treatment safe",
       // "isn't safe to re-enter until dry" — honest disclaimers, keep.
-      if (DIRECT_NEGATION_BEFORE_RE.test(sameSentence) || NEGATED_SUBJECT_BEFORE_RE.test(sameSentence)) {
+      if (!isDurationFinding
+        && (DIRECT_NEGATION_BEFORE_RE.test(sameSentence) || NEGATED_SUBJECT_BEFORE_RE.test(sameSentence))) {
         if (m.index === re.lastIndex) re.lastIndex += 1;
         continue;
       }
@@ -3182,19 +3187,25 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   // hero_image_alt (often a copied or hallucinated echo of the live page)
   // never ships — parking a refresh on findings in it would gate text that
   // will not be committed.
+  // The 2026-07-29 meta contract REQUIRES {{cityPhone}} in non-blog meta
+  // DESCRIPTIONS; it renders through the domains pipeline, not MDX, so the
+  // executable-expression P0 must not see it there (it exists for .mdx
+  // BODIES, which are scanned unscrubbed). Scrubbed HERE so every caller —
+  // gate 3c, the in-loop self-lints, the metadata handler — inherits one
+  // behavior. DESCRIPTION FIELDS ONLY: a {{cityPhone}} in a title,
+  // metaTitle, or hero alt has no sanctioned use and stays fully validated.
   const editableMeta = ['title', 'metaTitle', 'meta_description', 'metaDescription']
     .concat(isRefresh ? [] : ['hero_image_alt'])
-    .map((f) => frontmatter[f])
+    .map((f) => {
+      const v = frontmatter[f];
+      if (!v) return v;
+      return (f === 'meta_description' || f === 'metaDescription')
+        ? String(v).replace(SANCTIONED_META_TOKEN_RE, '')
+        : v;
+    })
     .concat(isRefresh ? [] : [frontmatter.hero_image?.alt])
     .filter(Boolean)
     .map(String)
-    // The 2026-07-29 meta contract REQUIRES {{cityPhone}} in non-blog meta
-    // descriptions; it renders through the domains pipeline, not MDX, so
-    // the executable-expression P0 must not see it in META fields (it
-    // exists for .mdx BODIES, which are scanned unscrubbed). Scrubbed HERE
-    // so every caller — gate 3c, the in-loop self-lints, the metadata
-    // handler — inherits one behavior.
-    .map((v) => v.replace(SANCTIONED_META_TOKEN_RE, ''))
     .join('\n\n');
   const publishableText = editableMeta ? `${body}\n\n${editableMeta}` : body;
 
