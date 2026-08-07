@@ -2272,8 +2272,13 @@ class GscOpportunityMiner {
             // blog slugs embed cities without the -fl marker URL inference
             // needs, but frontmatter service_areas_tag carries it
             // authoritatively.
+            // URL city first; frontmatter only when UNAMBIGUOUS (exactly
+            // one tag) — multi-area pages (and unscoped pages defaulted to
+            // every area) must not arbitrarily adopt one city's facts
+            // (Codex r30).
             const tags = Array.isArray(loaded.frontmatter?.service_areas_tag) ? loaded.frontmatter.service_areas_tag : [];
-            pageCityByUrl.set(pageUrl, normalizeCity(tags[0]) || inferCityFromUrl(pageUrl) || null);
+            pageCityByUrl.set(pageUrl, inferCityFromUrl(pageUrl)
+              || (tags.length === 1 ? normalizeCity(tags[0]) : null));
           }
         } catch (err) {
           logger.warn(`[gsc-opp-miner] listicle_family: body load failed for ${pageUrl}: ${err.message}`);
@@ -2454,12 +2459,36 @@ class GscOpportunityMiner {
         if (!subgroups.has(sk)) subgroups.set(sk, []);
         subgroups.get(sk).push(e);
       }
+      const familyRefreshFloor = minScoreToActFor('new_supporting_blog');
       const ranked = Array.from(subgroups.values())
-        .map((entries) => ({
-          entries,
-          impressions: entries.reduce((sum, e) => sum + e.fam.impressions, 0),
-          key: listicleFamilyRefreshDedupeKey(pageUrl, entries[0].service, entries[0].city, entries.map((e) => e.fam.key)),
-        }))
+        .map((entries) => {
+          const impressions = entries.reduce((sum, e) => sum + e.fam.impressions, 0);
+          const sortedEntries = entries.slice().sort((a, b) => b.fam.impressions - a.fam.impressions);
+          const primaryEntry = sortedEntries[0];
+          // Pre-score the would-be refresh: a subgroup that cannot clear
+          // the family floor even WITH the facts boost (city-scoped rows
+          // only — facts are city×service) must not be picked, or it
+          // starves a lower-ranked actionable subgroup forever by being
+          // selected and dropped every run (Codex r30).
+          const probe = {
+            bucket: 'listicle_family',
+            query: primaryEntry.served.variant.query,
+            page_url: pageUrl,
+            service: primaryEntry.service,
+            city: primaryEntry.city,
+          };
+          const { total } = scoreOpportunity(probe, {
+            position: primaryEntry.served.hit.position,
+            impressions,
+          });
+          const persistable = (total + (primaryEntry.city ? WEIGHTS.factsReady : 0)) >= familyRefreshFloor;
+          return {
+            entries,
+            impressions,
+            persistable,
+            key: listicleFamilyRefreshDedupeKey(pageUrl, entries[0].service, entries[0].city, entries.map((e) => e.fam.key)),
+          };
+        })
         .sort((a, b) => b.impressions - a.impressions);
       const rowsForPage = familyRefreshState.get(pageUrl) || [];
       const frozenRows = rowsForPage.filter((r) => r.status === 'done' || r.status === 'skipped');
@@ -2486,7 +2515,7 @@ class GscOpportunityMiner {
       const inflightKeys = new Set(rowsForPage
         .filter((r) => ['pending', 'claimed', 'pending_review'].includes(r.status))
         .map((r) => r.dedupe_key));
-      const eligible = (g) => !frozen.has(g.key) && !coveredByFrozen(g);
+      const eligible = (g) => g.persistable && !frozen.has(g.key) && !coveredByFrozen(g);
       const pick = ranked.find((g) => inflightKeys.has(g.key) && eligible(g))
         || ranked.find(eligible);
       if (!pick) continue; // every subgroup already completed/dismissed

@@ -1231,6 +1231,11 @@ describe('listicle_family scoring + action mapping', () => {
     // in-transaction refresh branch also defers on conflict QUERIES.
     expect(mineSrc).toMatch(/if \(state === 'editable'\) \{ resolved = \{ \.\.\.cand \}; break; \}/);
     expect(mineSrc).toMatch(/service_areas_tag/);
+    // r30: URL city first, frontmatter only when UNAMBIGUOUS; subgroup
+    // pick requires floor-clearing (boost-aware for city-scoped rows).
+    expect(mineSrc).toMatch(/tags\.length === 1 \? normalizeCity\(tags\[0\]\) : null/);
+    expect(mineSrc).toMatch(/g\.persistable && !frozen\.has\(g\.key\)/);
+    expect(mineSrc).toMatch(/primaryEntry\.city \? WEIGHTS\.factsReady : 0/);
     expect(mineSrc).toMatch(/pageCityByUrl\.get\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/reconcileExemptions\.pages\.add\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/inflightKeys\.has\(g\.key\) && eligible\(g\)/);
