@@ -389,18 +389,18 @@ describe('Google Business review sync', () => {
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
       location_id: 'bradenton',
-      reviewer_name: 'Jackie Lopez',
+      reviewer_name: 'Paula Placeholder',
       star_rating: 5,
       review_text: 'Edited text',
       review_created_at: '2026-04-09T20:54:35Z',
-      review_reply: 'Hello Jackie! Thanks!',
+      review_reply: 'Hello Paula! Thanks!',
       reply_updated_at: '2026-04-10T00:00:00Z',
     });
     service._getClient = jest.fn(async () => null); // force Places fallback
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('fields=reviews')) {
         return { json: async () => ({ status: 'OK', result: { reviews: [{
-          author_name: 'Jackie Lopez',
+          author_name: 'Paula Placeholder',
           rating: 5,
           text: 'Edited text',
           time: 1779307832, // edit moved the timestamp → brand-new places_* id
@@ -417,7 +417,7 @@ describe('Google Business review sync', () => {
       id: 'gbp-row-1',
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       review_text: 'Edited text',
-      review_reply: 'Hello Jackie! Thanks!', // Places carries no reply data — never downgrade
+      review_reply: 'Hello Paula! Thanks!', // Places carries no reply data — never downgrade
     });
   });
 
@@ -429,18 +429,18 @@ describe('Google Business review sync', () => {
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
       location_id: 'bradenton',
-      reviewer_name: 'Jackie Lopez',
+      reviewer_name: 'Paula Placeholder',
       star_rating: 5,
       review_text: 'Original text',
       review_created_at: '2026-04-09T20:54:35Z',
-      review_reply: 'Hello Jackie! Thanks!',
+      review_reply: 'Hello Paula! Thanks!',
       reply_updated_at: '2026-04-10T00:00:00Z',
     });
     service._getClient = jest.fn(async () => null);
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('fields=reviews')) {
         return { json: async () => ({ status: 'OK', result: { reviews: [{
-          author_name: 'Jackie Lopez',
+          author_name: 'Paula Placeholder',
           rating: 1,
           text: 'Completely different text',
           time: 1779307832,
@@ -457,7 +457,7 @@ describe('Google Business review sync', () => {
       id: 'gbp-row-1',
       star_rating: 5,
       review_text: 'Original text', // untouched
-      review_reply: 'Hello Jackie! Thanks!',
+      review_reply: 'Hello Paula! Thanks!',
     });
   });
 
@@ -467,11 +467,11 @@ describe('Google Business review sync', () => {
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
       location_id: 'bradenton',
-      reviewer_name: 'Jackie Lopez',
+      reviewer_name: 'Paula Placeholder',
       star_rating: 5,
       review_text: 'Original text',
       review_created_at: '2026-04-09T20:54:35Z',
-      review_reply: 'Hello Jackie! Thanks!',
+      review_reply: 'Hello Paula! Thanks!',
       reply_updated_at: '2026-04-10T00:00:00Z',
     });
     service._getClient = jest.fn(async () => null);
@@ -894,7 +894,7 @@ describe('Google Business review sync', () => {
     // proof of liveness — the stamp must not persist until GBP recovers.
     seedSyncedReview({
       id: 'back-via-places',
-      reviewer_name: 'Jackie Lopez',
+      reviewer_name: 'Paula Placeholder',
       review_text: 'Edited text',
       star_rating: 5,
       missing_since: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
@@ -903,7 +903,7 @@ describe('Google Business review sync', () => {
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('fields=reviews')) {
         return { json: async () => ({ status: 'OK', result: { reviews: [{
-          author_name: 'Jackie Lopez',
+          author_name: 'Paula Placeholder',
           rating: 5,
           text: 'Edited text',
           // Corroborates the seeded review_created_at (2026-05-25T12:00:00Z):
@@ -928,7 +928,7 @@ describe('Google Business review sync', () => {
     const stamp = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     seedSyncedReview({
       id: 'stamped-ambig',
-      reviewer_name: 'Jackie Lopez',
+      reviewer_name: 'Paula Placeholder',
       review_text: 'Great service',
       star_rating: 5,
       review_created_at: '2025-11-01T12:00:00Z',
@@ -938,7 +938,7 @@ describe('Google Business review sync', () => {
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('fields=reviews')) {
         return { json: async () => ({ status: 'OK', result: { reviews: [{
-          author_name: 'Jackie Lopez',
+          author_name: 'Paula Placeholder',
           rating: 5,
           text: 'Great service',
           time: Math.floor(new Date('2026-05-25T12:00:00Z').getTime() / 1000),
