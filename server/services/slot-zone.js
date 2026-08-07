@@ -29,12 +29,10 @@ async function resolveEstimateZone(dbc, estimate) {
   // from the primary property's city would point the capacity check and
   // advisory lock at the wrong pool. Mirrors resolveEstimateCoords.
   if (estimate.customer_id) {
-    const holder = await dbc('customers').where({ id: estimate.customer_id }).first('city', 'address_line1');
-    const normalize = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
-    const estimateAddress = normalize(estimate.address);
-    const customerStreet = normalize(holder?.address_line1);
-    const quotesCustomerAddress = !estimateAddress
-      || (!!customerStreet && estimateAddress.startsWith(customerStreet));
+    const holder = await dbc('customers').where({ id: estimate.customer_id }).first('city', 'address_line1', 'address_line2', 'zip');
+    // Full canonical tuple — mirrors resolveEstimateCoords (codex #3244 r8).
+    const { estimateQuotesCustomerAddress } = require('./estimate-property-linkage');
+    const quotesCustomerAddress = estimateQuotesCustomerAddress(estimate.address, holder || {});
     const holderCity = String(holder?.city || '').toLowerCase();
     if (quotesCustomerAddress && holderCity) {
       zone = zones.find((z) => (z.cities || []).some((c) => String(c).toLowerCase() === holderCity)) || null;

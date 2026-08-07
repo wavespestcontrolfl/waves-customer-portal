@@ -299,21 +299,24 @@ async function loadExistingQualifyingServiceKeys(database, customerId, { streetS
 
 // One street filter for every per-property consumer (qualifying keys AND the
 // pricing-AI ownership set below) — a second copy of the stamped → creating
-// estimate → primary-street resolution would drift from this one.
+// estimate → primary-street resolution would drift from this one. Matching
+// carries main's #3248 locality-qualified scope-key semantics (city/zip
+// segments, sameScopeKey wildcard-on-empty, locality-less stamped keys
+// re-resolved via the creating estimate).
 async function filterRowsToStreet(database, rows, streetScope) {
   if (!streetScope || !streetScope.estimateStreet) return rows;
-  const { normalizedEstimateStreet, normalizedStampedStreet } = require('./estimate-property-linkage');
+  const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
   const kept = [];
   for (const row of rows) {
-    let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2);
-    if (!street && row.source_estimate_id) {
+    let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
+    if ((!street || scopeKeyLacksLocality(street)) && row.source_estimate_id) {
       try {
         const src = await database('estimates').where({ id: row.source_estimate_id }).first('address');
         street = normalizedEstimateStreet(src?.address);
       } catch { /* fall through to the primary-street default */ }
     }
     street = street || String(streetScope.customerPrimaryStreet || '');
-    if (street && street === streetScope.estimateStreet) kept.push(row);
+    if (street && sameScopeKey(street, streetScope.estimateStreet)) kept.push(row);
   }
   return kept;
 }

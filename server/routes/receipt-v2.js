@@ -14,7 +14,7 @@ const logger = require('../services/logger');
 // Token is 64-char crypto-random and has no TTL — receipts are records, not
 // actions, so customers may retrieve them months later for bookkeeping.
 
-async function loadPaymentForInvoice(invoiceId, customerId, { stripePaymentIntentId = null, stripeChargeId = null } = {}) {
+async function loadPaymentForInvoice(invoiceId, customerId, { stripePaymentIntentId = null, stripeChargeId = null, invoiceNumber = null } = {}) {
   try {
     const base = () => db('payments')
       .where({ customer_id: customerId })
@@ -34,6 +34,17 @@ async function loadPaymentForInvoice(invoiceId, customerId, { stripePaymentInten
           if (stripePaymentIntentId) this.orWhere('stripe_payment_intent_id', stripePaymentIntentId);
           if (stripeChargeId) this.orWhere('stripe_charge_id', stripeChargeId);
         })
+        .first();
+    }
+    // Manual self-pay rows (cash/check/Zelle) carry NEITHER metadata nor a
+    // PaymentIntent — their only link is the deterministic description
+    // `Invoice <number> — <method>` admin-invoices.js writes. The billing
+    // history resolves receipt links through this same linkage, so without it
+    // here a refunded manual payment shows a Download action that then 409s
+    // at the refund-record guard below (codex r5 P1).
+    if (!row && invoiceNumber && /^[A-Za-z0-9-]+$/.test(String(invoiceNumber))) {
+      row = await base()
+        .where('description', 'like', `Invoice ${invoiceNumber} — %`)
         .first();
     }
     return row || null;
@@ -67,6 +78,7 @@ router.get('/:token', async (req, res, next) => {
     const payment = await loadPaymentForInvoice(data.id, data.customer_id, {
       stripePaymentIntentId: data.stripe_payment_intent_id,
       stripeChargeId: data.stripe_charge_id,
+      invoiceNumber: data.invoice_number,
     });
 
     const refundAmount = payment ? Number(payment.refund_amount || 0) : 0;
@@ -186,6 +198,7 @@ router.get('/:token/pdf', async (req, res, next) => {
     const payment = await loadPaymentForInvoice(data.id, data.customer_id, {
       stripePaymentIntentId: data.stripe_payment_intent_id,
       stripeChargeId: data.stripe_charge_id,
+      invoiceNumber: data.invoice_number,
     });
     // A refunded receipt MUST show the refund — if the payment/refund row can't be
     // resolved (e.g. a legacy row with neither metadata.invoice_id nor a matching

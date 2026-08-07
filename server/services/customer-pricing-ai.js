@@ -264,7 +264,9 @@ async function loadCurrentServiceKeys(db, customer) {
     // estimate scoping (#3244); an empty primary street keeps the
     // conservative account-wide set.
     const { normalizedStampedStreet } = require('./estimate-property-linkage');
-    const primaryStreet = normalizedStampedStreet(customer.address_line1, customer.address_line2);
+    // Locality-qualified per #3248: city/zip segments keep two same-named
+    // streets in different cities from merging (empty segments wildcard).
+    const primaryStreet = normalizedStampedStreet(customer.address_line1, customer.address_line2, customer.city, customer.zip);
     const streetScope = primaryStreet
       ? { estimateStreet: primaryStreet, customerPrimaryStreet: primaryStreet }
       : null;

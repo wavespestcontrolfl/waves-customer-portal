@@ -782,12 +782,12 @@ async function resolveEstimateCoords(estimate) {
     try {
       const cust = await db('customers')
         .where({ id: estimate.customer_id })
-        .first('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip');
-      const normalize = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
-      const estimateAddress = normalize(estimate.address);
-      const customerStreet = normalize(cust?.address_line1);
-      estimateAddressIsCustomerAddress = !estimateAddress
-        || (!!customerStreet && estimateAddress.startsWith(customerStreet));
+        .first('latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+      // Full canonical tuple (street+unit, city, zip) — a street-prefix test
+      // reused the wrong city's coords for same-street-name properties
+      // (codex #3244 r8).
+      const { estimateQuotesCustomerAddress } = require('./estimate-property-linkage');
+      estimateAddressIsCustomerAddress = estimateQuotesCustomerAddress(estimate.address, cust || {});
       const lat = cust?.latitude != null ? Number(cust.latitude) : null;
       const lng = cust?.longitude != null ? Number(cust.longitude) : null;
       if (estimateAddressIsCustomerAddress

@@ -15,6 +15,186 @@ const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 const CAP_TOUCH_SQL = OUTREACH.CAP_TOUCH_SQL;
+// Trapping-family catalog keys (owner ruling 2026-08-06: "rodent/wildlife
+// should be deemed multiple visits") — multi-treatment REVIEW-CADENCE
+// semantics only. Deliberately NOT merged into TWO_TREATMENT_PACKAGE_KEYS:
+// its other consumers (admin-dispatch follow-up alert, typed follow-up
+// obligations) encode exactly-two-visit package semantics that open-ended
+// trapping programs do not share. Keys mirror the prod services catalog —
+// every rodent trapping row plus rodent_exclusion, whose catalog name is
+// "Rodent Exclusion & Trapping Service" (7-day return visit standard).
+const RODENT_TRAPPING_SERIES_KEYS = new Set([
+  "rodent_trapping",
+  "rodent_trapping_followup",
+  "rodent_trapping_exclusion",
+  "rodent_trapping_exclusion_sanitation",
+  "rodent_trapping_sanitation",
+  "rodent_exclusion",
+]);
+const TRAPPING_MULTI_TREATMENT_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS, "wildlife_trapping"]);
+// Rodent BASE bookings (everything but the generic return-check SKU): an
+// unlinked future booking under one of these is a NEW program's opener at
+// booking level, before any report exists to declare it (codex #3243 r18
+// P2). Wildlife is excluded — its checks share the base key.
+const BASE_OPENER_KEYS = new Set([...RODENT_TRAPPING_SERIES_KEYS].filter((k) => k !== "rodent_trapping_followup"));
+// ...but plain rodent_trapping ALSO covers trap-check visits (the schema
+// makes the tech's trap_visit_type authoritative — codex #3243 r23 P2), so
+// booking-level opener inference is conclusive only for the combo packages
+// (sold as initial programs) and undeclarable exclusion.
+const BOOKING_OPENER_KEYS = new Set([...BASE_OPENER_KEYS].filter((k) => k !== "rodent_trapping"));
+// Types whose reports genuinely CANNOT declare a position (no
+// trap_visit_type on the schema): only these bound completed history as
+// booking-level openers — a report-less base rodent row may simply be a
+// follow-up whose report doesn't exist yet (codex #3243 r20 P1).
+const UNDECLARABLE_OPENER_KEYS = new Set(["rodent_exclusion"]);
+// Series position crosses keys only within ONE service line (codex #3243 r2
+// P2): a wildlife job must not read as a rodent program's prior/next visit.
+// Wildlife has a single catalog row, so it matches only itself; the rodent
+// SKUs cross-match because the return check has its own row.
+function trappingSeriesKeysFor(serviceKey) {
+  return serviceKey === "wildlife_trapping" ? ["wildlife_trapping"] : [...RODENT_TRAPPING_SERIES_KEYS];
+}
+// Position-window policy (codex #3243 r15 P2): plain exclusion carries no
+// trap_visit_type to declare a series boundary, and its return visit runs
+// ~7 days — so its tight 2x-interval window IS the boundary signal, and a
+// new exclusion program a few weeks later never inherits the old one's
+// position. Check-based programs stretch across weeks and keep the 30-day
+// floor (r2).
+function trappingWindowDaysFor(serviceKey, intervalDays) {
+  if (serviceKey === "rodent_exclusion") return Math.min(60, intervalDays * 2);
+  return Math.min(60, Math.max(30, intervalDays * 2));
+}
+// Premise identity helpers live in the canonical stamped-address module
+// (codex #3243 r21 P1 — one implementation shared with GPS/tracking).
+const { premiseStampConflicts, inheritReferenceUnit } = require("./stamped-address");
+// Premise predicate for trapping history (codex #3243 r2+r3+r5 P2): a linked
+// NON-primary property (rental, second home) is strict; the primary premise
+// spans BOTH legacy NULL rows and rows carrying the backfilled primary
+// property id — call-booked visits stamp the primary row's id while older
+// rows for the same address carry NULL (same equivalence the re-service
+// premise classifier documents in call-recording-processor). BUT NULL also
+// means an UNMATCHED caller-stated address, distinguished only by the
+// stamped service_address_* fields — so when BOTH rows carry stamps and
+// they differ, they are different premises regardless of the NULL fallback.
+// Takes the enrolling visit ROW, returns a predicate over candidate rows
+// ({property_id, service_address_line1, service_address_zip}), applied
+// JS-side. Fail-open to customer-wide matching — scoping is a refinement,
+// not a guarantee.
+async function trappingPremiseMatcher(customerId, visit) {
+  // FAIL CLOSED (codex #3243 r7 P2): a lookup error here must propagate —
+  // resolveSequencePlanForEnrollment's retry/plan_resolution_failed path
+  // suppresses the uncertain enrollment, and the exemption walk's own catch
+  // degrades to NO exemption (fewer sends). A customer-wide fallback would
+  // instead let another property's visit rewrite this one's cadence.
+  if (visit.property_id) {
+    const prop = await db("customer_properties")
+      .where({ id: visit.property_id })
+      .select("id", "is_primary", "address_line1", "address_line2", "city", "zip")
+      .first();
+    if (prop && !prop.is_primary) {
+      // Accept the property id OR a canonically equal stamp (codex #3243
+      // r8 P2): a rental's earlier visits can PREDATE its property row —
+      // property recording is feature-gated while address stamping is not —
+      // so the opener carries only NULL + the stamped address. Positive
+      // street match against the property's own address is required; an
+      // unstamped legacy row is the primary premise, never the rental.
+      const { streetKey } = require("./customer-properties");
+      const propStamp = {
+        service_address_line1: prop.address_line1,
+        service_address_line2: prop.address_line2,
+        service_address_city: prop.city,
+        service_address_zip: prop.zip,
+      };
+      const propStreet = streetKey(prop.address_line1);
+      return (row) => {
+        if (row.property_id === visit.property_id) return true;
+        if (row.property_id != null || !propStreet) return false;
+        const rowN = inheritReferenceUnit(row, propStamp);
+        return streetKey(rowN?.service_address_line1) === propStreet
+          && !premiseStampConflicts(rowN, propStamp);
+      };
+    }
+  }
+  // Primary-or-NULL visit. NULL is ambiguous — legacy primary OR an
+  // unmatched caller-stated address (codex #3243 r6 P2; the linkage
+  // migration adds the stamp columns WITHOUT backfilling legacy rows) —
+  // so a lone stamp is judged against the customer's on-file primary
+  // address before the NULL fallback applies.
+  const cust = await db("customers").where({ id: customerId }).select("address_line1", "address_line2", "city", "zip").first();
+  const primaryStamp = {
+    service_address_line1: cust?.address_line1,
+    service_address_line2: cust?.address_line2,
+    service_address_city: cust?.city,
+    service_address_zip: cust?.zip,
+  };
+  const primary = await db("customer_properties").where({ customer_id: customerId, is_primary: true }).select("id").first();
+  const primaryId = primary?.id || null;
+  // Missing stamped units inherit the primary's unit before any conflict
+  // decision (codex #3243 r12 P2) — phone extractions often omit line 2.
+  const { streetKey: streetKeyFn } = require("./customer-properties");
+  const visitN = inheritReferenceUnit(visit, primaryStamp);
+  // The relaxed-requirements migration allows customers with NO primary
+  // street at all (codex #3243 r14 P2) — with no street identity to judge
+  // against, a stamped visit is an UNMATCHED premise, never mergeable with
+  // unstamped legacy rows.
+  const primaryHasStreet = !!streetKeyFn(primaryStamp.service_address_line1);
+  if (premiseStampConflicts(visitN, primaryStamp)
+    || (!primaryHasStreet && !!streetKeyFn(visitN?.service_address_line1))) {
+    // The visit is a stamped UNMATCHED premise (a rental the property
+    // table doesn't know): only rows stamped with the SAME address are
+    // the same series — unstamped legacy rows are the primary, not it.
+    return (row) => {
+      if (!streetKeyFn(row?.service_address_line1)) return false;
+      // A stamp that reads as the PRIMARY premise — matches the on-file
+      // address with no unit evidence of its own — is the primary, not
+      // this unmatched premise (r10 preserved: a sub-unit never merges
+      // with the whole-street primary). Classified AGAINST THE PRIMARY
+      // FIRST with the primary's unit inherited (codex #3243 r17 P2): a
+      // unit-omitting phone stamp of an "Apt 3" primary must read as the
+      // primary, not inherit the visit's "Apt 4" and join the rental.
+      const { unitKey, streetEmbeddedUnitKey } = require("./customer-properties");
+      const rowUnit = unitKey(row.service_address_line2) || streetEmbeddedUnitKey(row.service_address_line1);
+      if (primaryHasStreet && !rowUnit
+        && !premiseStampConflicts(inheritReferenceUnit(row, primaryStamp), primaryStamp)) {
+        return false;
+      }
+      // Between two stamps of the SAME unmatched premise, an omitted unit
+      // inherits (codex #3243 r15 P2 — phone extractions often skip it).
+      const rowN = inheritReferenceUnit(row, visitN);
+      return !premiseStampConflicts(rowN, visitN);
+    };
+  }
+  // The visit IS the primary premise: legacy NULL rows and rows carrying
+  // the backfilled primary id match; a row stamped with a DIFFERENT
+  // address than the primary does not, whatever its property_id — and with
+  // NO primary street identity on file, a stamped row is uncertain and
+  // never merges into the unstamped premise.
+  return (row) => {
+    const rowN = inheritReferenceUnit(row, primaryStamp);
+    if (!primaryHasStreet && streetKeyFn(rowN?.service_address_line1)) return false;
+    return !premiseStampConflicts(rowN, primaryStamp)
+      && !premiseStampConflicts(rowN, visitN)
+      && (row.property_id == null
+        || row.property_id === visit.property_id
+        || (primaryId != null && row.property_id === primaryId));
+  };
+}
+// Order two visits sharing a scheduled_date (codex #3243 r5 P2: trap setup
+// and same-day capture/removal). window_start is a time-of-day string and
+// compares lexically; created_at breaks ties. 0 = indeterminate.
+function compareSameDayVisits(a, b) {
+  if (a?.window_start && b?.window_start) {
+    const x = String(a.window_start);
+    const y = String(b.window_start);
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  if (a?.created_at && b?.created_at) {
+    const x = new Date(a.created_at).getTime();
+    const y = new Date(b.created_at).getTime();
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
 const { toE164 } = require("../utils/phone");
 const { runExclusive } = require("../utils/cron-lock");
 
@@ -530,7 +710,7 @@ const ReviewService = {
           svc = await db("scheduled_services as s")
             .leftJoin("services as sv", "s.service_id", "sv.id")
             .where("s.id", visitId)
-            .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "sv.service_key", "sv.follow_up_interval_days")
+            .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.is_recurring", "s.service_id", "s.scheduled_date", "s.property_id", "s.service_address_line1", "s.service_address_line2", "s.service_address_city", "s.service_address_zip", "s.window_start", "s.created_at", "sv.service_key", "sv.follow_up_interval_days")
             .first();
         }
       }
@@ -556,20 +736,184 @@ const ReviewService = {
         //   visit must not classify as final.
         //   OUTSTANDING — is a child still coming (non-dead AND not
         //   completed)? That decides first-visit ask vs stand-down.
+        const isTrappingSeries = TRAPPING_MULTI_TREATMENT_KEYS.has(svc.service_key);
         const childQuery = (col, statuses) => db("scheduled_services")
           .where({ [col]: svc.id })
           .whereNotIn("status", statuses)
-          .first();
+          .select("id", "status");
+        // A linked child whose report declares 'Initial setup' is a NEW
+        // series' opener with a stale/cross-series link (codex #3243 r20
+        // P2) — it must not read as this series' structural child, or a
+        // payment-deferred final would stand down as series_completed.
+        const withoutNewSeries = async (rows) => {
+          if (!isTrappingSeries || !rows.length) return rows;
+          const kept = [];
+          for (const r of rows) {
+            if ((await this._declaredTrapVisitType({ scheduledServiceId: r.id })) === "initial") continue;
+            kept.push(r);
+          }
+          return kept;
+        };
         const liveStatuses = [...FOLLOWUP_CHILD_INACTIVE_STATUSES, "completed"];
-        const liveChild = (await childQuery("followup_source_service_id", liveStatuses))
-          || (await childQuery("parent_service_id", liveStatuses));
+        const liveChild = (await withoutNewSeries(await childQuery("followup_source_service_id", liveStatuses)))[0]
+          || (await withoutNewSeries(await childQuery("parent_service_id", liveStatuses)))[0]
+          || null;
         const anyChild = liveChild
-          || (await childQuery("followup_source_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES))
-          || (await childQuery("parent_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES));
-        const isFollowUpChild = !!(svc.parent_service_id || svc.followup_source_service_id);
+          || (await withoutNewSeries(await childQuery("followup_source_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES)))[0]
+          || (await withoutNewSeries(await childQuery("parent_service_id", FOLLOWUP_CHILD_INACTIVE_STATUSES)))[0]
+          || null;
+        // Trapping position resolves BEFORE the structural returns (codex
+        // #3243 r3 P1): a program can mix linkage styles — a linked visit 2
+        // with an unlinked booked visit 3, or an unlinked opener with a
+        // linked child — and the child queries above only see LINKED
+        // siblings. Line-scoped keys (the rodent return check has its own
+        // catalog row, rodent_trapping_followup, so same-service matching
+        // never sees the opener), premise-scoped JS-side via
+        // trappingPremiseMatcher, window floored at 30 days (catalog
+        // intervals are 1-7 days but a program's checks stretch across
+        // weeks; a far-future booking is a new series).
+        let trapPrior = null;
+        let trapLaterLive = null;
+        let trapLaterCompleted = null;
+        let visitDeclaredInitial = false;
+        let visitDeclaredType = null;
+        let trapEngaged = false;
+        let trapSeriesKeys = null;
+        let trapInPremise = null;
+        if (isTrappingSeries) {
+          const intervalDays = Number(svc.follow_up_interval_days) > 0 ? Number(svc.follow_up_interval_days) : 15;
+          const windowDays = trappingWindowDaysFor(svc.service_key, intervalDays);
+          const { anchorStr, floorStr: windowFloor } = etDayWindow(svc.scheduled_date, windowDays);
+          const ceilStr = new Date(Date.parse(`${anchorStr}T00:00:00Z`) + windowDays * 86400000)
+            .toISOString().slice(0, 10);
+          const seriesKeys = trappingSeriesKeysFor(svc.service_key);
+          const inPremise = await trappingPremiseMatcher(customerId, svc);
+          trapSeriesKeys = seriesKeys;
+          trapInPremise = inPremise;
+          const priorRows = await db("scheduled_services as ps")
+            .leftJoin("services as psv", "ps.service_id", "psv.id")
+            .where("ps.customer_id", customerId)
+            .where("ps.status", "completed")
+            .where("ps.id", "!=", svc.id)
+            .where("ps.scheduled_date", "<", anchorStr)
+            .where("ps.scheduled_date", ">=", windowFloor)
+            .whereIn("psv.service_key", seriesKeys)
+            .select("ps.id", "ps.property_id", "ps.service_address_line1", "ps.service_address_line2", "ps.service_address_city", "ps.service_address_zip");
+          trapPrior = priorRows.find((r) => inPremise(r)) || null;
+          const laterRows = await db("scheduled_services as fs")
+            .leftJoin("services as fsv", "fs.service_id", "fsv.id")
+            .where("fs.customer_id", customerId)
+            .where("fs.id", "!=", svc.id)
+            .where("fs.scheduled_date", ">", anchorStr)
+            .where("fs.scheduled_date", "<=", ceilStr)
+            .whereIn("fsv.service_key", seriesKeys)
+            .select("fs.id", "fs.status", "fs.property_id", "fs.scheduled_date", "fs.window_start", "fs.created_at", "fs.parent_service_id", "fs.followup_source_service_id", "fsv.service_key as service_key", "fs.service_address_line1", "fs.service_address_line2", "fs.service_address_city", "fs.service_address_zip");
+          // Same-day siblings (codex #3243 r5 P2: trap setup + same-day
+          // capture/removal) are invisible to the date-only comparisons —
+          // order them by appointment window (then created_at); an
+          // indeterminate order contributes nothing.
+          const sameDayRows = await db("scheduled_services as ds")
+            .leftJoin("services as dsv", "ds.service_id", "dsv.id")
+            .where("ds.customer_id", customerId)
+            .where("ds.id", "!=", svc.id)
+            .where("ds.scheduled_date", anchorStr)
+            .whereIn("dsv.service_key", seriesKeys)
+            .select("ds.id", "ds.status", "ds.property_id", "ds.scheduled_date", "ds.parent_service_id", "ds.followup_source_service_id", "dsv.service_key as service_key", "ds.service_address_line1", "ds.service_address_line2", "ds.service_address_city", "ds.service_address_zip", "ds.window_start", "ds.created_at");
+          const sameDayInPremise = sameDayRows.filter((r) => inPremise(r));
+          if (!trapPrior) {
+            trapPrior = sameDayInPremise.find(
+              (r) => r.status === "completed" && compareSameDayVisits(r, svc) < 0,
+            ) || null;
+          }
+          const laterInPremise = [
+            ...laterRows.filter((r) => inPremise(r)),
+            ...sameDayInPremise.filter((r) => compareSameDayVisits(r, svc) > 0),
+          ].filter((r) => !FOLLOWUP_CHILD_INACTIVE_STATUSES.includes(r.status));
+          // A later DECLARED initial is a series boundary, not evidence
+          // this series continues (codex #3243 r13 P2): a payment-deferred
+          // old final must not read the new program's opener as its own
+          // later visit. The boundary visit and everything at/after it are
+          // the NEW series.
+          const laterFlags = new Map();
+          for (const r of laterInPremise) {
+            const declaredType = await this._declaredTrapVisitType({ scheduledServiceId: r.id });
+            // A still-booked future opener has no report to declare itself
+            // yet (codex #3243 r18 P2) — at booking level, a fresh UNLINKED
+            // base-SKU row is a new program's opener (checks ride the
+            // generic followup SKU or linkage; wildlife stays report-based
+            // because its checks share the base key). A report declaring a
+            // follow-up outranks the heuristic.
+            const boundary = declaredType === "initial"
+              // Booking-only inference applies to LIVE rows only (codex
+              // #3243 r19 P2) and to keys where a booking conclusively
+              // means a new program (r23 P2 — a plain rodent_trapping
+              // booking may be this program's own check): combo packages
+              // and exclusion.
+              || (declaredType == null
+                && r.status !== "completed"
+                && BOOKING_OPENER_KEYS.has(r.service_key)
+                && !r.parent_service_id
+                && !r.followup_source_service_id);
+            laterFlags.set(r.id, boundary);
+          }
+          let boundedLater = laterInPremise;
+          const laterDeclared = laterInPremise.filter((r) => laterFlags.get(r.id));
+          if (laterDeclared.length) {
+            // Same-date boundary ties break by appointment order (codex
+            // #3243 r22 P2) — DB row order must not decide which opener
+            // bounds the look-ahead.
+            const earliestBoundary = laterDeclared.reduce((a, b) => {
+              const dayA = etDayWindow(a.scheduled_date, 0).anchorStr;
+              const dayB = etDayWindow(b.scheduled_date, 0).anchorStr;
+              if (dayA !== dayB) return dayA <= dayB ? a : b;
+              return compareSameDayVisits(b, a) < 0 ? b : a;
+            });
+            const bDay = etDayWindow(earliestBoundary.scheduled_date, 0).anchorStr;
+            boundedLater = laterInPremise.filter((r) => {
+              if (r.id === earliestBoundary.id) return false;
+              const day = etDayWindow(r.scheduled_date, 0).anchorStr;
+              if (day < bDay) return true;
+              return day === bDay && compareSameDayVisits(r, earliestBoundary) < 0;
+            });
+          }
+          trapLaterLive = boundedLater.find((r) => r.status !== "completed") || null;
+          trapLaterCompleted = boundedLater.find((r) => r.status === "completed") || null;
+          // A technician-declared initial setup outranks history inference
+          // AND structural linkage (codex #3243 r10 P2 + r12 P2): a new
+          // program starting inside the window of an old one — even one
+          // wrongly linked to it — must not inherit its position.
+          // trap_visit_type is REQUIRED on rodent_trapping reports and
+          // frozen into the typed report snapshot.
+          visitDeclaredType = await this._declaredTrapVisitType({ serviceRecordId, scheduledServiceId: svc.id });
+          visitDeclaredInitial = visitDeclaredType === "initial";
+          if (trapPrior && visitDeclaredInitial) {
+            trapPrior = null;
+          }
+          // Series engagement, computed ONCE for every path that can
+          // classify this visit final (codex #3243 r12 P1: linked finals
+          // returned before the unlinked branch's check ran): a customer
+          // who already responded to the series' first ask — private
+          // rating, submit, or Google click — must not get three more
+          // asks. Separate simple queries by design (no OR groups).
+          if (trapPrior || svc.parent_service_id || svc.followup_source_service_id) {
+            // strict: a swallowed walk failure here would read as "not
+            // engaged" and over-send (codex #3243 r13 P1) — propagate to
+            // the resolver's retry/plan_resolution_failed path instead.
+            const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId: svc.id, strict: true });
+            trapEngaged = await this._seriesEngagement(seriesIds);
+          }
+        }
+        // A declared initial never reads as a follow-up child — stale or
+        // cross-service linkage must not demote the opener to middle/final
+        // (codex #3243 r12 P2). Non-trapping visits are unaffected.
+        const isFollowUpChild = !visitDeclaredInitial && !!(svc.parent_service_id || svc.followup_source_service_id);
+
         if (liveChild) {
-          // Another treatment in this series is still on the books.
-          return isFollowUpChild
+          // Another treatment in this series is still on the books. An
+          // unlinked earlier line visit already carried the first ask
+          // (codex #3243 r3 P1) — a linked child alone doesn't make this
+          // the series opener.
+          return isFollowUpChild || trapPrior
             ? { skip: "multi_treatment_middle" }
             : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
         }
@@ -580,15 +924,115 @@ const ReviewService = {
           return { skip: "series_completed" };
         }
         if (isFollowUpChild) {
-          // This IS the follow-up visit and nothing further is scheduled —
-          // the series is done; run the full cadence with the series-final
+          // Structurally the follow-up visit with nothing LINKED further —
+          // but an unlinked later line visit still means the program is
+          // ongoing (booked → middle) or already finished past this visit
+          // (completed → the final carried the cadence).
+          if (trapLaterLive) return { skip: "multi_treatment_middle" };
+          if (trapLaterCompleted) return { skip: "series_completed" };
+          // Engagement on the series' earlier asks stands the final down
+          // here too (codex #3243 r12 P1 — linked finals bypassed the
+          // unlinked branch's check).
+          if (trapEngaged) return { skip: "series_engaged" };
+          // The series is done; run the full cadence with the series-final
           // cap/cooldown exemption.
           return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true };
         }
+        if (isTrappingSeries) {
+          // Unlinked trapping position from line history (owner spec: one
+          // ask after treatment 1, the 3-touch cadence after the final).
+          // With a prior behind it, ANY non-dead later visit makes this a
+          // middle check ('completed' counts: a late-paid middle enrollment
+          // must not fire the cadence the real final carries). Without a
+          // prior (payment-deferred FIRST visit), only a later COMPLETED
+          // visit stands the ask down — a merely-booked later check keeps
+          // the owner-spec first ask.
+          if (trapPrior && (trapLaterLive || trapLaterCompleted)) return { skip: "multi_treatment_middle" };
+          if (!trapPrior && trapLaterCompleted) return { skip: "series_completed" };
+          // Opener engagement stands the final cadence down (codex #3243
+          // r11 P1) — computed once in the hoisted block.
+          if (trapPrior && trapEngaged) return { skip: "series_engaged" };
+          // An explicit "Follow-up check" declaration is a position signal
+          // too (codex #3243 r14 P2): when the window missed the real prior
+          // (long gap, unrecoverable legacy history), the tech's own
+          // declaration says this is NOT an opener — a booked later check
+          // makes it a middle, otherwise it carries the final cadence
+          // (the exemption walk simply finds nothing when the opener is
+          // outside the window, so the cap counts normally).
+          // The follow-up SKU is itself a position signal (codex #3243 r21
+          // P2): a rodent_trapping_followup visit with no report yet (the
+          // admin-completion-before-record path) is still a follow-up by
+          // catalog definition — never a series opener.
+          const positionalFollowup = visitDeclaredType === "followup"
+            || (visitDeclaredType == null && svc.service_key === "rodent_trapping_followup");
+          if (!trapPrior && positionalFollowup) {
+            if (trapLaterLive) return { skip: "multi_treatment_middle" };
+            // The opener may sit beyond the position window (that is why
+            // trapPrior is null) — recover the line's premise history over
+            // the ask-cap horizon so a rated/clicked opener still stands
+            // the cadence down (codex #3243 r15 P1).
+            const w180 = etDayWindow(svc.scheduled_date, ASK_CAP_WINDOW_DAYS);
+            const lineageRows = await db("scheduled_services as lp")
+              .leftJoin("services as lpv", "lp.service_id", "lpv.id")
+              .where("lp.customer_id", customerId)
+              .where("lp.status", "completed")
+              .where("lp.id", "!=", svc.id)
+              .where("lp.scheduled_date", "<", w180.anchorStr)
+              .where("lp.scheduled_date", ">=", w180.floorStr)
+              .whereIn("lpv.service_key", trapSeriesKeys)
+              .select("lp.id", "lp.scheduled_date", "lp.window_start", "lp.created_at", "lp.property_id", "lp.parent_service_id", "lp.followup_source_service_id", "lpv.service_key as service_key", "lp.service_address_line1", "lp.service_address_line2", "lp.service_address_city", "lp.service_address_zip");
+            // Bounded at the nearest declared initial (codex #3243 r16 P2):
+            // an OLDER program's engagement must not suppress the current
+            // program's cadence — walk newest-first, stop at (and include)
+            // the first declared opener.
+            const lineageSorted = lineageRows
+              .filter((r) => trapInPremise(r))
+              .sort((a, b) => {
+                const dayA = etDayWindow(a.scheduled_date, 0).anchorStr;
+                const dayB = etDayWindow(b.scheduled_date, 0).anchorStr;
+                // Newest first; same-date ties break by appointment order
+                // (codex #3243 r23 P2) — DB row order must not let the old
+                // program's final precede the opener boundary.
+                if (dayA !== dayB) return dayB < dayA ? -1 : 1;
+                return compareSameDayVisits(b, a) < 0 ? -1 : 1;
+              });
+            const lineageIds = [];
+            for (const r of lineageSorted) {
+              lineageIds.push(r.id);
+              const t = await this._declaredTrapVisitType({ scheduledServiceId: r.id });
+              // The nearest opener bounds the lineage (codex #3243 r19 P2,
+              // narrowed by r20 P1): a declared initial, or an UNLINKED
+              // visit of a type that genuinely CANNOT declare its position
+              // (plain exclusion — its reports carry no trap_visit_type).
+              // A report-less base rodent row may be a follow-up whose
+              // report just doesn't exist yet — it never truncates the
+              // walk toward the engaged opener.
+              const boundary = t === "initial"
+                || (t == null
+                  && UNDECLARABLE_OPENER_KEYS.has(r.service_key)
+                  && !r.parent_service_id
+                  && !r.followup_source_service_id);
+              if (boundary) break;
+            }
+            if (lineageIds.length) {
+              const records = await db("service_records").whereIn("scheduled_service_id", lineageIds).select("id");
+              const byRecord = records.length
+                ? await db("review_sequences").whereIn("service_record_id", records.map((r) => r.id)).select("id")
+                : [];
+              const byVisit = await db("review_sequences").whereIn("scheduled_service_id", lineageIds).select("id");
+              const seqIds = [...new Set([...byRecord, ...byVisit].map((r) => r.id))];
+              if (await this._seriesEngagement(seqIds)) return { skip: "series_engaged" };
+            }
+            return { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true };
+          }
+          return trapPrior
+            ? { plan: OUTREACH.DEFAULT_SEQUENCE_PLAN, seriesFinal: true }
+            : { plan: OUTREACH.MULTI_TREATMENT_FIRST_PLAN };
+        }
         if (TWO_TREATMENT_PACKAGE_KEYS.has(svc.service_key)) {
-          // Named multi-treatment service with no child linkage — position in
+          // Named two-treatment package with no child linkage — position in
           // the series comes from history: a completed same-service visit in
-          // the prior 60 days makes THIS the follow-up treatment (owner spec:
+          // the window makes THIS the follow-up treatment (owner spec:
           // "the 3 after 2nd treatment"); none makes it the first.
           // Anchored to the COMPLETED VISIT's date, earlier visits only
           // (codex #3235 r10 P1): a payment-deferred enrollment runs at
@@ -2318,14 +2762,119 @@ const ReviewService = {
    * with an active sequence returns that one instead of starting a second
    * (also enforced by the partial unique index). Fires step 0 immediately.
    */
+  /**
+   * Park a series-final enrollment durably while its opener's send is in
+   * flight (codex #3243 r21 P2): a 'deferred' row (outside the one-active
+   * index) that the sequence cron redeems once the opener settles.
+   * started_at carries the intended firstTouchAt; completed_at records the
+   * parking time for the 24h age cap. Write failures propagate.
+   */
+  async _parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal }) {
+    const existingPark = await db("review_sequences")
+      .where({ customer_id: customerId })
+      .whereIn("status", ["deferred", "redeeming"])
+      .first();
+    if (existingPark) return;
+    await db("review_sequences").insert({
+      customer_id: customerId,
+      location_id: locationId || customer?.nearest_location_id || null,
+      status: "deferred",
+      stop_reason: "opener_in_flight",
+      plan: JSON.stringify(Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN),
+      current_step: 0,
+      touches_sent: 0,
+      next_run_at: new Date(Date.now() + 10 * 60 * 1000),
+      series_final: seriesFinal === true,
+      service_record_id: serviceRecordId || null,
+      scheduled_service_id: scheduledServiceId || null,
+      tech_name: techName || null,
+      service_type: serviceType || null,
+      started_by: startedBy || null,
+      started_at: firstTouchAt || null,
+      completed_at: new Date(),
+    });
+  },
+
+  // In-flight supersession re-check spacing — a knob so tests don't wait
+  // real provider-settle seconds.
+  _SUPERSEDE_RETRY_DELAY_MS: 1500,
+
   async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false }) {
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     if (customer.deleted_at) throw new Error("Customer is archived");
     if (customer.has_left_google_review) return { started: false, reason: "already_reviewed" };
 
+    let supersedeOpenerId = null;
     const active = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
-    if (active) return { started: false, reason: "already_active", sequence: active };
+    if (active) {
+      // A zero-sent series opener yields to its own series' FINAL enrollment
+      // (codex #3243 r7 P1): daily trapping checks can complete the final
+      // before the opener's smart-window ask ever sends — rejecting here
+      // left the opener to stop itself as series_completed at send time, so
+      // NEITHER ask went out and nothing re-enrolled the final. Supersede
+      // ONLY when the active sequence provably belongs to this enrollment's
+      // series (the exemption walk) and has delivered nothing; any error
+      // falls back to the reject (never risks a duplicate ask).
+      // Proof only here — the actual stop commits atomically WITH the
+      // replacement insert below (codex #3243 r9 P2): stopping up front let
+      // any later enrollment failure strand the customer with the opener
+      // dead and no final cadence.
+      // An IN-FLIGHT opener is non-supersedable (codex #3243 r18 P2): the
+      // step runner's atomic claim NULLs next_run_at while sendOutreachTouch
+      // awaits the provider, and stopping the row would not cancel that
+      // call — the opener ask could still deliver alongside the
+      // replacement's. Only a scheduled, unclaimed opener yields. But a
+      // single-trigger final must not be permanently lost either (codex
+      // #3243 r20 P2): the provider call settles in seconds, so wait
+      // briefly and re-check — supersede a still-zero-sent opener, or
+      // enroll fresh once it completed.
+      let proceedFresh = false;
+      let parkFinal = false;
+      if (seriesFinal) {
+        try {
+          const seriesIds = await this._seriesExemptSequenceIds(customerId, { serviceRecordId, scheduledServiceId });
+          if (seriesIds.includes(active.id)) {
+            if (active.next_run_at != null) {
+              const delivered = await db("review_requests")
+                .where({ sequence_id: active.id, status: "sent" })
+                .first();
+              if (!delivered) supersedeOpenerId = active.id;
+            } else {
+              for (let attempt = 0; attempt < 4 && !supersedeOpenerId && !proceedFresh; attempt += 1) {
+                await new Promise((resolve) => { setTimeout(resolve, this._SUPERSEDE_RETRY_DELAY_MS); });
+                const refreshed = await db("review_sequences").where({ id: active.id }).first();
+                if (!refreshed || refreshed.status !== "active") {
+                  // The opener settled (completed/stopped) — the one-active
+                  // constraint is gone; enroll the final fresh. Its sent
+                  // ask stays cap-exempt via the series walk (owner 1+3).
+                  proceedFresh = true;
+                } else if (refreshed.next_run_at != null) {
+                  // Send settled back into a schedule (failed/retrying) —
+                  // a still-zero-sent opener yields normally.
+                  const delivered = await db("review_requests")
+                    .where({ sequence_id: active.id, status: "sent" })
+                    .first();
+                  if (!delivered) supersedeOpenerId = active.id;
+                  break;
+                }
+              }
+              if (!supersedeOpenerId && !proceedFresh) parkFinal = true;
+            }
+          }
+        } catch (err) {
+          logger.warn(`[review] opener-supersede check failed (customerId=${customerId}): ${err.message} — keeping already_active`);
+        }
+      }
+      if (parkFinal) {
+        // Deliberately OUTSIDE the proof's catch (r26 P2): a parking-write
+        // failure must propagate to the caller, never degrade into
+        // already_active with no retry.
+        await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal });
+        return { started: false, reason: "deferred_inflight", deferred: true };
+      }
+      if (!supersedeOpenerId && !proceedFresh) return { started: false, reason: "already_active", sequence: active };
+    }
 
     // One cadence per SERVICE RECORD, ever (codex #3235 r3 P1): the legacy
     // create() deduped by service_record_id, and the cadence path used to be
@@ -2338,6 +2887,9 @@ const ReviewService = {
       const priorForRecord = await db("review_sequences")
         .where({ service_record_id: serviceRecordId })
         .whereRaw("stop_reason IS DISTINCT FROM 'start_failed'")
+        // Parked/redeeming deferred enrollments are not deliveries (codex
+        // #3243 r21 P2) — they must not dedupe-block a real enrollment.
+        .whereNotIn("status", ["deferred", "redeeming"])
         .first();
       if (priorForRecord) {
         return { started: false, reason: "service_record_enrolled", sequence: priorForRecord };
@@ -2351,6 +2903,7 @@ const ReviewService = {
       const priorForVisit = await db("review_sequences")
         .where({ scheduled_service_id: scheduledServiceId })
         .whereRaw("stop_reason IS DISTINCT FROM 'start_failed'")
+        .whereNotIn("status", ["deferred", "redeeming"])
         .first();
       if (priorForVisit) {
         return { started: false, reason: "service_record_enrolled", sequence: priorForVisit };
@@ -2403,9 +2956,28 @@ const ReviewService = {
     const locId = locationId || customer.nearest_location_id || resolveLocation(customer);
 
     let sequence;
-    try {
-      [sequence] = await db("review_sequences")
-        .insert({
+    const insertReplacement = () => db.transaction(async (trx) => {
+        // The opener stop commits WITH the replacement insert (codex #3243
+        // r9 P2) — and the one-active partial index means the stop cannot
+        // simply be deferred outside the insert's transaction. A concurrent
+        // state change on the opener aborts into the already_active
+        // recovery below, exactly like an index collision.
+        if (supersedeOpenerId) {
+          const stopped = await trx("review_sequences")
+            .where({ id: supersedeOpenerId, status: "active" })
+            // whereNotNull: a cron claim that landed between the proof and
+            // this commit means the send is in flight — abort into the
+            // already_active recovery instead of stopping mid-send.
+            .whereNotNull("next_run_at")
+            .update({ status: "stopped", stop_reason: "superseded_by_final", next_run_at: null, completed_at: new Date(), updated_at: new Date() });
+          if (!stopped) {
+            const raceErr = new Error("opener changed state mid-enrollment");
+            raceErr.code = "OPENER_SUPERSEDE_RACE";
+            throw raceErr;
+          }
+        }
+        return trx("review_sequences")
+          .insert({
           customer_id: customerId,
           location_id: locId,
           status: "active",
@@ -2434,13 +3006,42 @@ const ReviewService = {
           started_by: startedBy || null,
           started_at: new Date(),
         })
-        .returning("*");
+          .returning("*");
+      });
+    try {
+      [sequence] = await insertReplacement();
     } catch (err) {
-      if (err?.code === "23505") {
+      if (err?.code === "OPENER_SUPERSEDE_RACE") {
+        // The opener stopped ITSELF (its cron re-resolution can close it as
+        // series_completed) between the proof and this commit (codex #3243
+        // r10 P1). Another active sequence in its place is a genuine
+        // already_active; NO active sequence means the final's cadence must
+        // still be created — retry once without the stop.
+        const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
+        if (existing && existing.id === supersedeOpenerId && existing.next_run_at == null) {
+          // The cron CLAIMED the opener between the proof and the commit
+          // (codex #3243 r27 P2) — its send is now in flight, so the final
+          // parks durably instead of vanishing into already_active.
+          await this._parkDeferredFinal({ customerId, customer, plan, locationId, serviceType, techName, serviceRecordId, scheduledServiceId, startedBy, firstTouchAt, seriesFinal });
+          return { started: false, reason: "deferred_inflight", deferred: true };
+        }
+        if (existing) return { started: false, reason: "already_active", sequence: existing };
+        supersedeOpenerId = null;
+        try {
+          [sequence] = await insertReplacement();
+        } catch (retryErr) {
+          if (retryErr?.code === "23505") {
+            const raced = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
+            return { started: false, reason: "already_active", sequence: raced };
+          }
+          throw retryErr;
+        }
+      } else if (err?.code === "23505") {
         const existing = await db("review_sequences").where({ customer_id: customerId, status: "active" }).first();
         return { started: false, reason: "already_active", sequence: existing };
+      } else {
+        throw err;
       }
-      throw err;
     }
 
     // Scheduled start: the cron fires step 0 at firstTouchAt; nothing to run
@@ -2764,7 +3365,111 @@ const ReviewService = {
   },
 
   /** Cron: advance all due review sequences. Gated by GATE_REVIEW_SEQUENCES. */
+  /**
+   * Redeem enrollments parked while an opener's send was in flight (codex
+   * #3243 r21 P2). At-most-once via delete-claim; already_active re-parks
+   * with backoff (preserving the original parking time for the 24h age
+   * cap); any other non-start (dedupe, cap, engagement) is terminal.
+   */
+  async _sweepDeferredEnrollments() {
+    // Claim WITHOUT deleting (codex #3243 r23 P2): the parking row is the
+    // one-shot final's only durable retry, and an outage that fails the
+    // start would likely fail a restore-insert too. The lease is a status
+    // flip ('redeeming'); the row is removed only on a successful or
+    // terminal result, and a crash mid-redeem is reclaimed after 15
+    // minutes via the stale leg.
+    const due = await db("review_sequences")
+      .where({ status: "deferred" })
+      .whereNotNull("next_run_at")
+      .where("next_run_at", "<=", new Date())
+      .limit(10);
+    const stale = await db("review_sequences")
+      .where({ status: "redeeming" })
+      .where("updated_at", "<=", new Date(Date.now() - 15 * 60 * 1000))
+      .limit(10);
+    let redeemed = 0;
+    for (const row of [...due, ...stale]) {
+      const claimed = await db("review_sequences")
+        .where({ id: row.id, status: row.status })
+        .update({ status: "redeeming", updated_at: new Date() });
+      if (!claimed) continue;
+      const parkedAt = row.completed_at ? new Date(row.completed_at).getTime() : 0;
+      if (parkedAt && Date.now() - parkedAt > 24 * 3600000) {
+        logger.warn(`[review] deferred final expired unredeemed (customerId=${row.customer_id})`);
+        await db("review_sequences").where({ id: row.id }).del();
+        continue;
+      }
+      let result = null;
+      try {
+        result = await this.startReviewSequence({
+          customerId: row.customer_id,
+          plan: typeof row.plan === "string" ? JSON.parse(row.plan) : row.plan,
+          startedBy: row.started_by,
+          locationId: row.location_id,
+          serviceType: row.service_type,
+          techName: row.tech_name,
+          serviceRecordId: row.service_record_id,
+          scheduledServiceId: row.scheduled_service_id,
+          firstTouchAt: row.started_at ? new Date(row.started_at) : null,
+          seriesFinal: row.series_final === true,
+        });
+      } catch (err) {
+        logger.error(`[review] deferred enrollment redeem failed (customerId=${row.customer_id} errType=${err?.name || "Error"})`);
+        // Release the lease with backoff — the row survives the outage.
+        await db("review_sequences")
+          .where({ id: row.id, status: "redeeming" })
+          .update({ status: "deferred", next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+          .catch(() => {});
+        continue;
+      }
+      if (result?.started) {
+        redeemed += 1;
+        await db("review_sequences").where({ id: row.id, status: "redeeming" }).del();
+        continue;
+      }
+      if (result?.reason === "already_active") {
+        // Opener still active — release with backoff.
+        await db("review_sequences")
+          .where({ id: row.id, status: "redeeming" })
+          .update({ status: "deferred", next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() });
+        continue;
+      }
+      if (result?.reason === "deferred_inflight") {
+        // startReviewSequence may have seen THIS claimed row as the
+        // existing park and inserted nothing (codex #3243 r24 P2) — only
+        // drop it when a DISTINCT replacement actually exists; otherwise
+        // release it back with backoff, or a hung provider call would
+        // consume the sole durable retry.
+        const replacement = await db("review_sequences")
+          .where({ customer_id: row.customer_id, status: "deferred" })
+          .where("id", "!=", row.id)
+          .first();
+        if (replacement) {
+          await db("review_sequences").where({ id: row.id, status: "redeeming" }).del();
+          // Carry the original parking time so the age cap stays honest.
+          await db("review_sequences")
+            .where({ id: replacement.id, status: "deferred" })
+            .update({ completed_at: row.completed_at || new Date() });
+        } else {
+          await db("review_sequences")
+            .where({ id: row.id, status: "redeeming" })
+            .update({ status: "deferred", next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() });
+        }
+        continue;
+      }
+      // Terminal (dedupe, cap, engagement, resolver skip) — done with it.
+      await db("review_sequences").where({ id: row.id, status: "redeeming" }).del();
+    }
+    return { redeemed };
+  },
+
   async processReviewSequences() {
+    let redeemed = 0;
+    try {
+      ({ redeemed } = await this._sweepDeferredEnrollments());
+    } catch (err) {
+      logger.error(`[review] deferred-enrollment sweep failed (errType=${err?.name || "Error"})`);
+    }
     const due = await db("review_sequences")
       .where({ status: "active" })
       .whereNotNull("next_run_at")
@@ -2786,10 +3491,10 @@ const ReviewService = {
         logger.error(`[review] sequence step failed (sequenceId=${seq.id} errType=${err?.name || "Error"})`);
       }
     }
-    if (sent || stopped || completed || deferred) {
-      logger.info(`[review] Sequences: ${sent} sent, ${completed} completed, ${stopped} stopped, ${deferred} deferred`);
+    if (sent || stopped || completed || deferred || redeemed) {
+      logger.info(`[review] Sequences: ${sent} sent, ${completed} completed, ${stopped} stopped, ${deferred} deferred, ${redeemed} redeemed`);
     }
-    return { sent, stopped, completed, deferred };
+    return { sent, stopped, completed, deferred, redeemed };
   },
 
   async stopReviewSequence(sequenceId, reason = "manual") {
@@ -2840,7 +3545,96 @@ const ReviewService = {
    * completed same-service visits in the last 60 days. Fail-open to [] —
    * no exemption means FEWER sends, never more.
    */
-  async _seriesExemptSequenceIds(customerId, { serviceRecordId = null, scheduledServiceId = null } = {}) {
+  /**
+   * Technician-declared initial setup (codex #3243 r10 P2): rodent_trapping
+   * reports REQUIRE trap_visit_type, frozen into service_data's
+   * typedReportSnapshot (or a companion snapshot when trapping rides a
+   * combined visit). Absence or a parse failure falls back to inference —
+   * the declaration is an override, not a gate.
+   */
+  async _declaredTrapVisitType({ serviceRecordId = null, scheduledServiceId = null } = {}) {
+    // Returns 'initial' | 'followup' | null (codex #3243 r14 P2: the
+    // explicit "Follow-up check" declaration is a position signal too —
+    // collapsing it into "not declared" sent a duplicate opener ask when
+    // the window missed the real prior).
+    // DB failures PROPAGATE (codex #3243 r13 P1): collapsing them into
+    // "not declared" let a genuine new setup inherit the old program's
+    // position — the resolver's retry/plan_resolution_failed path must see
+    // the error. Only parse/shape problems fall back to inference.
+    let record = null;
+    if (serviceRecordId) {
+      record = await db("service_records").where({ id: serviceRecordId }).select("service_data").first();
+    }
+    if (!record && scheduledServiceId) {
+      record = await db("service_records")
+        .where({ scheduled_service_id: scheduledServiceId })
+        .orderBy("created_at", "desc")
+        .select("service_data")
+        .first();
+    }
+    if (!record?.service_data) return null;
+    try {
+      const data = typeof record.service_data === "string" ? JSON.parse(record.service_data) : record.service_data;
+      const snapshots = [
+        data?.typedReportSnapshot,
+        ...(Array.isArray(data?.companionReportSnapshots) ? data.companionReportSnapshots : []),
+      ];
+      for (const snap of snapshots) {
+        const t = String(snap?.values?.trap_visit_type || "").trim();
+        if (t === "Initial setup") return "initial";
+        if (t === "Follow-up check") return "followup";
+        // Wildlife reports carry no trap_visit_type (codex #3243 r15 P2) —
+        // derive the boundary from trap_actions: a pure install opens a
+        // series; check/capture actions without an install are follow-ups.
+        // Mixed or absent actions stay undeclared. The chips control
+        // persists the value as a COMMA-JOINED STRING (codex #3243 r16 P2)
+        // — accept both forms.
+        const rawActions = snap?.values?.trap_actions;
+        const actions = Array.isArray(rawActions)
+          ? rawActions.map(String)
+          : String(rawActions || "").split(",").map((a) => a.trim()).filter(Boolean);
+        if (actions.length) {
+          const installed = actions.includes("Trap installed") || actions.includes("One-way door installed");
+          // 'Bait/lure refreshed' is deliberately NOT a check signal — new
+          // traps get baited at setup too, and counting it made every real
+          // install read as mixed/undeclared.
+          const checked = actions.some((a) => [
+            "Trap checked", "Capture removed", "Traps reset", "Trap removed", "No activity at traps",
+          ].includes(a));
+          if (installed && !checked) return "initial";
+          if (checked && !installed) return "followup";
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  },
+
+  async _isDeclaredInitialTrapVisit(args) {
+    return (await this._declaredTrapVisitType(args)) === "initial";
+  },
+
+  /**
+   * Engagement across a set of sequence ids (codex #3243 r11+r13 P1): a
+   * customer who responded to any of the series' asks — sequence stopped
+   * responded/clicked, request submitted/reviewed/rated, tracked redirect,
+   * rated_at, legacy click stamp, or an abandoned NON-PROMOTER score tap
+   * (the step runner's own lowDraft predicate) — must not receive the
+   * final cadence. Separate simple queries by design (no OR groups).
+   */
+  async _seriesEngagement(seriesIds = []) {
+    if (!seriesIds.length) return false;
+    const engaged = (await db("review_sequences").whereIn("id", seriesIds).whereIn("stop_reason", ["responded", "clicked"]).first())
+      || (await db("review_requests").whereIn("sequence_id", seriesIds).whereIn("status", ["submitted", "reviewed", "rated"]).first())
+      || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("redirected_at").first())
+      || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("rated_at").first())
+      || (await db("review_requests").whereIn("sequence_id", seriesIds).where({ google_review_clicked: true }).first())
+      || (await db("review_requests").whereIn("sequence_id", seriesIds).whereNotNull("score").whereNot("category", "promoter").first());
+    return !!engaged;
+  },
+
+  async _seriesExemptSequenceIds(customerId, { serviceRecordId = null, scheduledServiceId = null, strict = false } = {}) {
     try {
       let visitId = scheduledServiceId || null;
       if (!visitId && serviceRecordId) {
@@ -2854,7 +3648,7 @@ const ReviewService = {
       const visit = await db("scheduled_services as s")
         .leftJoin("services as sv", "s.service_id", "sv.id")
         .where("s.id", visitId)
-        .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "sv.follow_up_interval_days")
+        .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "s.property_id", "s.service_address_line1", "s.service_address_line2", "s.service_address_city", "s.service_address_zip", "s.window_start", "s.created_at", "sv.service_key", "sv.follow_up_interval_days")
         .first();
       if (!visit) return [];
       // Walk the FULL ancestor chain (codex #3235 r7 P1): in a 3+ visit
@@ -2866,22 +3660,204 @@ const ReviewService = {
       // terminator, the depth cap is only a runaway guard.
       const seen = new Set([visit.id]);
       let sourceIds = [];
+      const ancestorRows = [];
       let cursor = visit;
       for (let depth = 0; depth < 50; depth += 1) {
         const next = cursor.parent_service_id || cursor.followup_source_service_id;
         if (!next || seen.has(next)) break;
         seen.add(next);
         sourceIds.push(next);
-        cursor = await db("scheduled_services")
-          .where({ id: next })
-          .select("id", "parent_service_id", "followup_source_service_id", "service_id")
+        cursor = await db("scheduled_services as s")
+          .leftJoin("services as sv", "s.service_id", "sv.id")
+          .where("s.id", next)
+          .select("s.id", "s.parent_service_id", "s.followup_source_service_id", "s.service_id", "s.scheduled_date", "s.property_id", "s.service_address_line1", "s.service_address_line2", "s.service_address_city", "s.service_address_zip", "s.window_start", "s.created_at", "sv.service_key", "sv.follow_up_interval_days")
           .first();
         if (!cursor) break;
+        ancestorRows.push(cursor);
       }
-      if (!sourceIds.length && visit.service_id) {
+      // Trapping merges family history INTO linked ancestry (codex #3243 r4
+      // P1) rather than falling back either/or: a final linked only to the
+      // middle visit made sourceIds nonempty, so the unlinked opener's
+      // first_treatment_ask stayed unexempted and the cooldown rejected the
+      // intended final cadence.
+      if (visit.service_id && TRAPPING_MULTI_TREATMENT_KEYS.has(visit.service_key)
+        // A declared initial IS its series' opener — nothing behind it
+        // belongs to this series, so the family walk is skipped entirely
+        // (codex #3243 r11 P1); linked ancestry (if any) stands alone.
+        && !(await this._isDeclaredInitialTrapVisit({ scheduledServiceId: visit.id }))) {
+        // Breadth-first opener trace (r3 P2 + r4 P1): every discovered
+        // visit anchors its own window — adjacent checks chain past one
+        // window's span (days 0/20/40) — and the seeds are the visit PLUS
+        // its linked ancestors: linkage bridges date gaps the walk can't
+        // cross, the walk reaches unlinked visits linkage can't. The
+        // seen-set terminates; the hop cap is a runaway guard.
+        const intervalDays = Number(visit.follow_up_interval_days) > 0 ? Number(visit.follow_up_interval_days) : 15;
+        const windowDays = trappingWindowDaysFor(visit.service_key, intervalDays);
+        const seriesKeys = trappingSeriesKeysFor(visit.service_key);
+        const inPremise = await trappingPremiseMatcher(customerId, visit);
+        const collectedRows = new Map(); // walk discoveries: id -> row
+        const walkSelect = ["ps.id", "ps.scheduled_date", "ps.property_id", "ps.service_address_line1", "ps.service_address_line2", "ps.service_address_city", "ps.service_address_zip", "ps.window_start", "ps.created_at", "psv.service_key as service_key", "psv.follow_up_interval_days as follow_up_interval_days"];
+        // The declared-opener boundary is GLOBAL across dequeues (codex
+        // #3243 r12 P1): later cursors re-open windows behind the opener,
+        // so the bound persists (and retro-prunes) rather than living one
+        // iteration.
+        let boundOpener = null;
+        const afterBound = (r) => {
+          if (!boundOpener || r.id === boundOpener.id) return true;
+          const day = etDayWindow(r.scheduled_date, 0).anchorStr;
+          const bDay = etDayWindow(boundOpener.scheduled_date, 0).anchorStr;
+          if (day > bDay) return true;
+          return day === bDay && compareSameDayVisits(r, boundOpener) >= 0;
+        };
+        // Linked ancestry is cut at the nearest declared initial too (codex
+        // #3243 r13 P1): a stale link THROUGH the opener must not exempt
+        // the previous program's ask. The cut opener seeds the walk's
+        // global bound; ancestry ids without row data (broken chain) are
+        // kept — unknown, not judged.
+        let ancestryRows = ancestorRows;
+        for (let i = 0; i < ancestorRows.length; i += 1) {
+          if (await this._isDeclaredInitialTrapVisit({ scheduledServiceId: ancestorRows[i].id })) {
+            boundOpener = ancestorRows[i];
+            ancestryRows = ancestorRows.slice(0, i + 1);
+            break;
+          }
+        }
+        const keptAncestryIds = new Set(ancestryRows.map((r) => r.id));
+        const ancestorById = new Map(ancestorRows.map((r) => [r.id, r]));
+        const seedIds = new Set(sourceIds.filter((id) => keptAncestryIds.has(id) || !ancestorById.has(id)));
+        const queue = [visit, ...ancestryRows.filter((r) => r.scheduled_date != null)];
+        // Exhaust the queue (codex #3243 r6 P2): a dequeue cap truncated
+        // long chains — each cursor can enqueue several same-window
+        // siblings, starving the path to the opener. Termination is the
+        // seen-set (nothing enqueues twice); the collected-size bound is a
+        // runaway guard sized far above any real program.
+        // Per-cursor windows follow the ORIGINATING program (codex #3243
+        // r17 P2): a cross-key final (the return rides the generic
+        // followup SKU) must not widen an exclusion program's tight
+        // boundary — each cursor hops with its OWN key's window, and the
+        // final's first hop borrows the nearest prior line row's key when
+        // its own key is the generic followup SKU.
+        let visitWindowDays = windowDays;
+        let originWindowDays = null;
+        if (visit.service_key === "rodent_trapping_followup") {
+          const peekW = etDayWindow(visit.scheduled_date, 60);
+          const nearestRows = await db("scheduled_services as ps")
+            .leftJoin("services as psv", "ps.service_id", "psv.id")
+            .where("ps.customer_id", customerId)
+            .where("ps.status", "completed")
+            .where("ps.scheduled_date", "<", peekW.anchorStr)
+            .where("ps.scheduled_date", ">=", peekW.floorStr)
+            .whereIn("psv.service_key", seriesKeys)
+            .orderBy("ps.scheduled_date", "desc")
+            .select(...walkSelect);
+          // A same-day opener (exclusion set up the morning of its first
+          // check) sits outside the strict earlier-date window (codex
+          // #3243 r26 P2) — include earlier-same-day candidates.
+          const sameDayOrigin = await db("scheduled_services as ps")
+            .leftJoin("services as psv", "ps.service_id", "psv.id")
+            .where("ps.customer_id", customerId)
+            .where("ps.status", "completed")
+            .where("ps.scheduled_date", peekW.anchorStr)
+            .whereIn("psv.service_key", seriesKeys)
+            .select(...walkSelect);
+          nearestRows.push(...sameDayOrigin.filter((r) => r.id !== visit.id && compareSameDayVisits(r, visit) < 0));
+          // The origin is the most recent BASE-key row — generic middle
+          // checks ride the followup SKU and must not reset the boundary
+          // to the 30-day check floor (codex #3243 r18 P2). Same-date ties
+          // break by appointment order (r25 P2) — DB row order must not
+          // pick the wrong origin key/window.
+          const originRow = nearestRows
+            .filter((r) => inPremise(r) && r.service_key && r.service_key !== "rodent_trapping_followup")
+            .sort((a, b) => {
+              const dayA = etDayWindow(a.scheduled_date, 0).anchorStr;
+              const dayB = etDayWindow(b.scheduled_date, 0).anchorStr;
+              if (dayA !== dayB) return dayB < dayA ? -1 : 1;
+              return compareSameDayVisits(b, a) < 0 ? -1 : 1;
+            })[0] || null;
+          if (originRow) {
+            const ni = Number(originRow.follow_up_interval_days) > 0 ? Number(originRow.follow_up_interval_days) : intervalDays;
+            originWindowDays = trappingWindowDaysFor(originRow.service_key, ni);
+            visitWindowDays = originWindowDays;
+          }
+        }
+        let firstHop = true;
+        while (queue.length && collectedRows.size < 300) {
+          const c = queue.shift();
+          const cKey = c.service_key || visit.service_key;
+          const cInterval = Number(c.follow_up_interval_days) > 0 ? Number(c.follow_up_interval_days) : intervalDays;
+          // Generic-followup cursors inherit the ORIGIN window too — every
+          // middle check of an exclusion program hops with the exclusion
+          // boundary, not the check floor.
+          const cWindow = firstHop && c.id === visit.id
+            ? visitWindowDays
+            : (cKey === "rodent_trapping_followup" && originWindowDays != null
+              ? originWindowDays
+              : trappingWindowDaysFor(cKey, cInterval));
+          firstHop = false;
+          const w = etDayWindow(c.scheduled_date, cWindow);
+          const rows = await db("scheduled_services as ps")
+            .leftJoin("services as psv", "ps.service_id", "psv.id")
+            .where("ps.customer_id", customerId)
+            .where("ps.status", "completed")
+            .where("ps.scheduled_date", "<", w.anchorStr)
+            .where("ps.scheduled_date", ">=", w.floorStr)
+            .whereIn("psv.service_key", seriesKeys)
+            .select(...walkSelect);
+          // Same-day earlier siblings (r5 P2): a same-date setup visit sits
+          // outside the strictly-earlier window — order by appointment
+          // window / created_at relative to this cursor.
+          const sameDay = await db("scheduled_services as ps")
+            .leftJoin("services as psv", "ps.service_id", "psv.id")
+            .where("ps.customer_id", customerId)
+            .where("ps.status", "completed")
+            .where("ps.scheduled_date", w.anchorStr)
+            .whereIn("psv.service_key", seriesKeys)
+            .select(...walkSelect);
+          const fresh = [...rows, ...sameDay.filter((r) => compareSameDayVisits(r, c) < 0)]
+            .filter((r) => r.id !== visit.id && !collectedRows.has(r.id) && inPremise(r));
+          // A declared initial is ITS series' opener (codex #3243 r11 P1):
+          // it stays in the exemption set, but nothing EARLIER than it —
+          // in this window or via further traversal — belongs to this
+          // series; those asks must keep counting toward cap/cooldown.
+          const declaredFlags = new Map();
+          for (const r of fresh) {
+            declaredFlags.set(r.id, await this._isDeclaredInitialTrapVisit({ scheduledServiceId: r.id }));
+          }
+          for (const r of fresh) {
+            // The NEAREST declared initial wins; raising the bound also
+            // retro-prunes anything admitted before it was known.
+            if (declaredFlags.get(r.id) && (!boundOpener || afterBound(r))) {
+              boundOpener = r;
+              for (const [id, row] of [...collectedRows]) {
+                if (!afterBound(row)) collectedRows.delete(id);
+              }
+            }
+          }
+          for (const r of fresh) {
+            if (!afterBound(r)) continue;
+            collectedRows.set(r.id, r);
+            if (!declaredFlags.get(r.id)) {
+              queue.push(r);
+            }
+          }
+        }
+        // Seeds re-filter against the FINAL bound (codex #3243 r14 P1): the
+        // walk can discover an UNLINKED declared opener after the seeds were
+        // fixed, and a linked old-program ancestor must not survive the
+        // union that pruned its walk-discovered twin. Ancestry ids without
+        // row data stay — unknown, not judged.
+        sourceIds = [...new Set([
+          ...[...seedIds].filter((id) => {
+            const row = ancestorById.get(id);
+            return !row || row.scheduled_date == null || afterBound(row);
+          }),
+          ...collectedRows.keys(),
+        ])];
+      } else if (!sourceIds.length && visit.service_id) {
         // Same anchoring as the plan resolver (codex #3235 r10 P1): the
         // series' earlier visits, relative to THIS visit's date — never a
         // now-relative window that payment-deferred enrollment would skew.
+        // Packages stay same-service, 2x-interval.
         const intervalDays = Number(visit.follow_up_interval_days) > 0 ? Number(visit.follow_up_interval_days) : 15;
         const windowDays = Math.min(60, intervalDays * 2);
         const w = etDayWindow(visit.scheduled_date, windowDays);
@@ -2910,6 +3886,12 @@ const ReviewService = {
         .select("id");
       return [...new Set([...byRecord, ...byVisit].map((r) => r.id))];
     } catch (err) {
+      // strict = the ENGAGEMENT consumer (codex #3243 r13 P1): a swallowed
+      // failure there reads as "not engaged" and sends three more asks to a
+      // customer who already responded — propagate so the resolver defers.
+      // Non-strict consumers (cap/cooldown exemption) keep the fail-open []
+      // — a missing exemption means FEWER sends, never more.
+      if (strict) throw err;
       logger.warn(`[review] series-exempt lookup failed (customerId=${customerId}): ${err.message} — no exemption`);
       return [];
     }

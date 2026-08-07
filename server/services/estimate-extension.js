@@ -169,6 +169,14 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
         .whereNull('archived_at')
         .whereNull('price_locked_at')
         .whereIn('status', ['sent', 'viewed', 'expired', 'send_failed'])
+        // A send_failed sibling with NO delivery evidence was never
+        // published — often deliberately, after its pricing snapshot
+        // refused to freeze. Reviving it would expose a live-repricing
+        // token the publication path rejected (codex #3244 r8). Evidence =
+        // sent_at OR viewed_at (codex #3248 r1) — the same pair the public
+        // extension-eligibility predicate treats as proof the link reached
+        // the customer.
+        .where((b) => b.whereNot('status', 'send_failed').orWhereNotNull('sent_at').orWhereNotNull('viewed_at'))
         .where((b) => b.whereNull('expires_at').orWhere('expires_at', '<', newExpiry))
         .update({
           expires_at: newExpiry,

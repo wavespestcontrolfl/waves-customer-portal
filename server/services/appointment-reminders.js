@@ -834,7 +834,11 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // PRE_DISPATCH_CHECK_FAILED — that's transient infra (our fence's DB
     // read failed), retryable, not a deterministic block (codex r25).
     sendOutcome.retryable = sendOutcome.retryable === true || result.retryable === true
-      || result.code === 'PRE_DISPATCH_CHECK_FAILED';
+      // Consent/suppression lookup failures are transient infra by
+      // contract (codex r47) — terminal suppression would drop the
+      // notice permanently on a blip.
+      || result.code === 'PRE_DISPATCH_CHECK_FAILED'
+      || result.code === 'CONSENT_LOOKUP_FAILED';
     sendOutcome.blockedCode = result.code || null;
   }
   if (result.blocked || result.sent === false) {
@@ -2929,6 +2933,11 @@ const AppointmentReminders = {
       // it, a sweep delayed past the old 25-minute window still recovers.
       await db('appointment_reminders')
         .whereNull('cancellation_notice_at')
+        // Current-era guard (codex r47): a draining gate-on pod must not
+        // late-claim cancels committed after a NEWER disable was stamped
+        // (on→off rolling deploy) — late-claiming is allowed only while
+        // the enable boundary postdates the newest observed disable.
+        .whereRaw("COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-enabled-at'), '-infinity'::timestamptz) > COALESCE((SELECT last_sent_at FROM ops_email_send_state WHERE email_key = 'cancel-notice-hook-disabled-at'), '-infinity'::timestamptz)")
         .whereIn('scheduled_service_id', function recentCancels() {
           this.select('h.job_id').from('job_status_history as h')
             .where('h.to_status', 'cancelled')
@@ -2941,30 +2950,89 @@ const AppointmentReminders = {
             AND ss.status = 'cancelled'
         )`)
         .update({
-          cancellation_notice_at: db.raw("(SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')"),
-          cancellation_notice_state: 'pending',
+          cancellation_notice_at: db.raw("COALESCE((SELECT ok2.last_sent_at FROM ops_email_send_state ok2 WHERE ok2.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok2.last_sent_at >= now() - interval '72 hours'), (SELECT MAX(h.transitioned_at) FROM job_status_history h WHERE h.job_id = appointment_reminders.scheduled_service_id AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled'))"),
+          // A durable caller-intent outbox row (written in the cancel's
+          // own transaction when the in-trx claim savepoint failed —
+          // codex #3238 r7/r8) upgrades the late claim to pending_notify
+          // AND restores the shared group token stored as its value, so
+          // partial series failures rejoin their siblings' group. Only
+          // FRESH rows (within the 72h horizon) are honored.
+          // Live-sibling survivor check applies here too (codex r11): a
+          // merged-slot survivor downgrades the outbox intent to the
+          // evidence-gated default rather than texting against a live
+          // visit.
+          // Survivor rows are TERMINALLY suppressed (codex r13), matching
+          // the in-trx and post-commit classifications — a plain pending
+          // could still send on prior-reminder evidence (or ride a shared
+          // group's callerNotify) despite the live sibling visit.
+          cancellation_notice_state: db.raw("CASE WHEN NOT (NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id)) THEN 'suppressed' WHEN EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours') THEN 'pending_notify' ELSE 'pending' END"),
           updated_at: new Date(),
         });
+      // Consume outbox rows only once their intent is APPLIED — marker
+      // present and no longer plain 'pending' (codex r8/r9) — and age out
+      // anything past the 72h horizon.
+      // Consume only TERMINALLY SUPPRESSED intent (codex r11/r12): even a
+      // 'pending_notify' marker can be mid-flight — an active sender that
+      // cached plain 'pending' before the upgrade would revert to that
+      // cached state on a retryable failure, and a consumed outbox could
+      // not re-upgrade it. Keys for notify/sent cycles are removed by the
+      // restoration transaction, the live-visit void, or the 72h age-out;
+      // the upgrade pass is idempotent in the meantime.
+      await db.raw(
+        "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND (ok.last_sent_at < now() - interval '72 hours' OR EXISTS (SELECT 1 FROM appointment_reminders ar WHERE 'cn-ci-' || ar.scheduled_service_id::text = ok.email_key AND ar.cancellation_notice_state = 'suppressed'))",
+      ).catch(() => {});
+      }
+
+      // Apply outstanding caller intent to plain 'pending' markers BEFORE
+      // ungated settlement (codex r9, ungated by r17): the route's own
+      // tokenless claim writes plain pending — if the route then dies, the
+      // outbox is the only record of the operator's notify intent and must
+      // upgrade the marker, not be consumed past it. This runs OUTSIDE the
+      // gate check: settlement below intentionally settles residue with the
+      // gate off, and durable intent recorded while the gate was on must be
+      // applied before that residue is judged — otherwise a gate-off sweep
+      // could terminally suppress an operator-requested notice.
+      try {
+        // Outbox-backed rows classify BOTH ways (codex r15): survivor-free
+        // upgrades to pending_notify; a live-sibling survivor stamps
+        // terminal suppressed so evidence-gated settlement cannot text
+        // against the surviving visit.
+        await db.raw(
+          "UPDATE appointment_reminders SET cancellation_notice_state = CASE WHEN NOT EXISTS (SELECT 1 FROM appointment_reminders sib3 WHERE sib3.customer_id = appointment_reminders.customer_id AND sib3.appointment_time = appointment_reminders.appointment_time AND sib3.cancelled = false AND sib3.id <> appointment_reminders.id) THEN 'pending_notify' ELSE 'suppressed' END, updated_at = now() WHERE cancellation_notice_state = 'pending' AND EXISTS (SELECT 1 FROM ops_email_send_state ok WHERE ok.email_key = 'cn-ci-' || appointment_reminders.scheduled_service_id::text AND ok.last_sent_at >= now() - interval '72 hours')",
+        );
+      } catch (upgradeErr) {
+        // Un-applied caller intent must never reach settlement (codex
+        // r14): a plain-pending row with no delivery evidence would be
+        // terminally suppressed and its outbox consumed. Abort this tick;
+        // everything retries in 15 minutes.
+        logger.warn(`[appt-remind] outbox upgrade failed — aborting sweep tick: ${upgradeErr.message}`);
+        return;
       }
 
       // Repair pass (codex r22): a restoration whose in-trx marker clear
       // failed leaves a stale terminal marker on a LIVE visit — shed it
       // here so a later real cancellation notices normally.
-      // Driven from RECENT restorations (codex r35), not a scan of every
-      // historical terminal marker: the failure this repairs is an
-      // un-cancel whose in-trx marker clear was swallowed, and that
-      // restoration is a cancelled→live history row. 7 days of ticks is
-      // hundreds of repair chances before the bound ages one out.
-      await db('appointment_reminders')
-        .whereNotNull('cancellation_notice_state')
-        .whereIn('scheduled_service_id', function recentRestorations() {
-          this.select('h.job_id').from('job_status_history as h')
-            .where('h.from_status', 'cancelled')
-            .whereNot('h.to_status', 'cancelled')
-            .whereRaw("h.transitioned_at >= now() - interval '7 days'");
-        })
-        .whereRaw("EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.status IN ('pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'))")
-        .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+      // Driven from the LIVE-visit population (codex r35 perf, r46
+      // durability): a marker on a LIVE visit is the anomaly this
+      // repairs, and that population is small and bounded — unlike the
+      // ever-growing terminal-marker history (r35) or a time-bounded
+      // restoration window that a >7-day cron outage would out-age (r46).
+      // Eligibility persists until the stale marker is actually cleared.
+      // Marker clear and outbox void commit or fail TOGETHER (codex
+      // r10/r14): clearing the marker while the void transiently fails
+      // would let a restore-and-recancel inherit the old cycle's intent.
+      await db.transaction(async (rtrx) => {
+        await rtrx('appointment_reminders')
+          .whereNotNull('cancellation_notice_state')
+          .whereIn('scheduled_service_id', function liveVisits() {
+            this.select('ss.id').from('scheduled_services as ss')
+              .whereIn('ss.status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
+          })
+          .update({ cancellation_notice_at: null, cancellation_notice_state: null, updated_at: new Date() });
+        await rtrx.raw(
+          "DELETE FROM ops_email_send_state ok WHERE ok.email_key LIKE 'cn-ci-%' AND EXISTS (SELECT 1 FROM scheduled_services ss WHERE 'cn-ci-' || ss.id::text = ok.email_key AND ss.status IN ('pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'))",
+        );
+      });
 
       // Age-out runs regardless of the gate (r12): a notice older than
       // 72h is moot — texting "your visit was cancelled" days later is

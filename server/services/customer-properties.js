@@ -370,6 +370,8 @@ module.exports = {
   OCCUPANCY_TYPES,
   normStreet,
   addressKey,
+  canonicalizeAddress,
+  stripUnitDesignators,
   unitKey,
   streetEmbeddedUnitKey,
   streetKey,

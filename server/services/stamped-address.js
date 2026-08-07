@@ -108,4 +108,52 @@ function stampedLine2Sql(sAlias, cAlias) {
     + ` ELSE COALESCE(${sAlias}.service_address_line2, ${cAlias}.address_line2) END`;
 }
 
-module.exports = { stampedAddressDiverges, stampedDivergesSql, stampedLine2Sql, sqlZip5 };
+// ---------------------------------------------------------------------------
+// Stamp-vs-stamp premise identity (both sides service_address_* shaped —
+// the customer side can be adapted by mapping address_* onto the same keys).
+// Used by the review-cadence trapping series matcher; ONE implementation so
+// cadence classification can never disagree with GPS/tracking about whether
+// two stamps identify the same premise (codex #3243 r21 P1).
+// ---------------------------------------------------------------------------
+
+// Conflict between two stamps, canonical forms throughout. Each leg requires
+// BOTH sides present — a missing value is unknown, not different — EXCEPT
+// units, where a one-sided unit diverges ("100 Main St Apt 4" vs the
+// unitless "100 Main St" is a sub-unit, not the same premise); pair with
+// inheritReferenceUnit first when an omitted unit should borrow a
+// reference's.
+function premiseStampConflicts(a, b) {
+  const { streetKey: sk, unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
+  const sa = sk(a?.service_address_line1);
+  const sb = sk(b?.service_address_line1);
+  if (!sa || !sb) return false;
+  if (sa !== sb) return true;
+  const ua = unitKey(a?.service_address_line2) || streetEmbeddedUnitKey(a?.service_address_line1);
+  const ub = unitKey(b?.service_address_line2) || streetEmbeddedUnitKey(b?.service_address_line1);
+  if ((ua || ub) && ua !== ub) return true;
+  const za = normalizeZip(a?.service_address_zip);
+  const zb = normalizeZip(b?.service_address_zip);
+  if (za && zb && za !== zb) return true;
+  const ca = cityKey(a?.service_address_city);
+  const cb = cityKey(b?.service_address_city);
+  return !!(ca && cb && ca !== cb);
+}
+
+// A stamp matching a reference's street but omitting the unit INHERITS the
+// reference's unit (the same phone-extractions-omit-line-2 reality the
+// stampedLine2Sql fallback encodes); the reference's unit may live in
+// line 2 OR embedded in its street line. A stamp that ADDS a unit the
+// reference lacks stays divergent.
+function inheritReferenceUnit(row, reference) {
+  const { streetKey: sk, unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
+  if (!row || !reference) return row;
+  const rowUnit = unitKey(row.service_address_line2) || streetEmbeddedUnitKey(row.service_address_line1);
+  if (rowUnit) return row;
+  const refUnit = unitKey(reference.service_address_line2) || streetEmbeddedUnitKey(reference.service_address_line1);
+  if (!refUnit) return row;
+  const rs = sk(row.service_address_line1);
+  if (!rs || rs !== sk(reference.service_address_line1)) return row;
+  return { ...row, service_address_line2: reference.service_address_line2 || refUnit };
+}
+
+module.exports = { stampedAddressDiverges, stampedDivergesSql, stampedLine2Sql, sqlZip5, premiseStampConflicts, inheritReferenceUnit };
