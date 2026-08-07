@@ -3206,10 +3206,15 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
 
   test('backfill covers genuinely absent post_type only — an explicit empty/whitespace value stays for validation to reject (Codex r5)', () => {
     const { backfillLegacyBlogRequiredFields } = AstroPublisher._internals;
-    // A page_type that RELIABLY maps (how-to → protocol) is backfilled.
+    // A page_type that RELIABLY maps (how-to → protocol) is backfilled; the
+    // consumed pre-v2 key is removed AND the removal is disclosed in the
+    // healed list so PR bodies reflect the full migration (Codex r12).
     const absent = { page_type: 'how-to', service_areas_tag: ['Sarasota'] };
-    expect(backfillLegacyBlogRequiredFields(absent, {})).toContain('post_type');
+    const healed = backfillLegacyBlogRequiredFields(absent, {});
+    expect(healed).toContain('post_type');
+    expect(healed).toContain('page_type (legacy key consumed & removed)');
     expect(absent.post_type).toBe('protocol');
+    expect(absent.page_type).toBeUndefined();
     const invalid = { post_type: '  ', page_type: 'how-to', service_areas_tag: ['Sarasota'] };
     expect(backfillLegacyBlogRequiredFields(invalid, {})).not.toContain('post_type');
     expect(invalid.post_type).toBe('  ');

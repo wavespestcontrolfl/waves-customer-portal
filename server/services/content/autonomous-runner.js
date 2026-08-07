@@ -3482,13 +3482,25 @@ function applyOperatorSlugRepair(brief, draft) {
 
   // Body self-links may carry the writer's slug in EITHER its literal casing
   // or the normalized form — rewrite both candidate paths (Codex r4).
-  const rawDraftPath = (typeof mismatch.draft_slug === 'string' && mismatch.draft_slug.trim())
-    ? `/${mismatch.draft_slug.trim().replace(/^\/+|\/+$/g, '')}/`
+  // A URL-shaped drifted slug (writer emitted an absolute or
+  // protocol-relative URL in frontmatter.slug) carries its route in the
+  // PATHNAME — building candidates from the raw string would produce
+  // /https:/…/ paths that never match a body link, so the post would
+  // publish at the pin while its self-links still point at the drifted
+  // route (Codex r12).
+  let draftPathSource = typeof mismatch.draft_slug === 'string' ? mismatch.draft_slug.trim() : null;
+  if (draftPathSource && /^(https?:\/\/|\/\/)/i.test(draftPathSource)) {
+    try {
+      draftPathSource = new URL(draftPathSource.startsWith('//') ? `https:${draftPathSource}` : draftPathSource).pathname;
+    } catch { /* unparseable — keep the raw string as the candidate source */ }
+  }
+  const rawDraftPath = draftPathSource
+    ? `/${draftPathSource.replace(/^\/+|\/+$/g, '')}/`
     : null;
   const oldSlugPaths = [...new Set([
-    mismatch.draft_slug ? normalizeSlugPath(mismatch.draft_slug) : null,
+    draftPathSource ? normalizeSlugPath(draftPathSource) : null,
     rawDraftPath,
-  ].filter(Boolean))].filter((p) => p !== pinned);
+  ].filter(Boolean))].filter((p) => p !== pinned && p !== '//');
   const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
   // Hub host equivalence (apex ≡ www) — mirrors the publisher's
   // isFleetCanonicalHost contract. The body self-link rewrite uses the hub
@@ -3648,7 +3660,11 @@ function applyOperatorSlugRepair(brief, draft) {
       // whitespace requirement keeps a query param literally named
       // href/src (`?src=/old-slug/`) out of scope: that is part of a
       // different destination, not an attribute.
-      const unquotedAttrRe = new RegExp(`((?:^|\\s)(?:href|src)\\s*=\\s*)((?:${hubAlternation})?)${escapeRe(oldSlugPath)}(?=[\\s>]|$)`, 'gi');
+      // End boundary includes ?/# so a legal query/fragment suffix
+      // (`<a href=/old/?utm_source=post>`) still identifies the old route —
+      // the suffix sits after the match and survives the replacement
+      // verbatim (Codex r12).
+      const unquotedAttrRe = new RegExp(`((?:^|\\s)(?:href|src)\\s*=\\s*)((?:${hubAlternation})?)${escapeRe(oldSlugPath)}(?=[\\s>?#]|$)`, 'gi');
       draft.body = draft.body.replace(unquotedAttrRe, (m, attr, origin) => {
         occurrences += 1;
         if (!origin) return `${attr}${pinned}`;

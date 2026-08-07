@@ -989,11 +989,12 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     expect(result.repair.canonical_rewritten).toBe(false);
   });
 
-  test('unquoted HTML/MDX href self-links are rewritten — legal syntax the body scanners support (Codex r11)', () => {
+  test('unquoted HTML/MDX href self-links are rewritten — legal syntax the body scanners support (Codex r11; query suffix r12)', () => {
     const draft = driftedDraft({
       body: [
         'Click <a href=/fall-lawn-mistakes-southwest-florida/>here</a> or',
-        '<a href=https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/>the absolute form</a>;',
+        '<a href=https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/>the absolute form</a> or',
+        '<a href=/fall-lawn-mistakes-southwest-florida/?utm_source=post>the tracked form</a>;',
         'a query param named src [x](https://source.example/r?src=/fall-lawn-mistakes-southwest-florida/) survives.',
       ].join(' '),
     });
@@ -1001,7 +1002,23 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     expect(result.ok).toBe(true);
     expect(draft.body).toContain(`<a href=${PINNED}>`);
     expect(draft.body).toContain(`<a href=https://www.wavespestcontrol.com${PINNED}>`);
+    // The query suffix identifies the old route and survives verbatim.
+    expect(draft.body).toContain(`<a href=${PINNED}?utm_source=post>`);
     expect(draft.body).toContain('?src=/fall-lawn-mistakes-southwest-florida/');
+    expect(result.repair.body_self_link_rewrites).toBe(3);
+  });
+
+  test('a URL-shaped drifted slug rewrites body links by its PATHNAME — raw-string candidates never match (Codex r12)', () => {
+    const draft = driftedDraft({
+      frontmatter: { slug: 'https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/' },
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+    // The default body's two relative self-links on the drifted route are
+    // found via the extracted pathname and rewritten.
+    expect(draft.body).not.toContain('/fall-lawn-mistakes-southwest-florida/');
+    expect(draft.body).toContain(`(${PINNED})`);
     expect(result.repair.body_self_link_rewrites).toBe(2);
   });
 
