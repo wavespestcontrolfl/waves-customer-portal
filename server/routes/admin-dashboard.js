@@ -316,12 +316,17 @@ router.get('/', dashboardCache, async (req, res, next) => {
               .first();
             return { total: totalFromPlaces, avg_rating: ratingCount > 0 ? (ratingSum / ratingCount).toFixed(1) : '5.0', unresponded: parseInt(unresponded?.c || 0) };
           }
-          // Fallback to actual review rows
-          return await db('google_reviews').where('reviewer_name', '!=', '_stats').select(
-            db.raw('COUNT(*) as total'),
-            db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
-            db.raw("COUNT(*) FILTER (WHERE review_text IS NOT NULL AND (review_reply IS NULL OR review_reply LIKE '[DRAFT]%') AND COALESCE(dismissed, false) = false AND missing_since IS NULL) as unresponded")
-          ).first();
+          // Fallback to actual review rows — live rows only: the Rating tile
+          // reports current Google state, and rows Google removed are
+          // retained evidence, not part of the current rating/total.
+          return await db('google_reviews')
+            .where('reviewer_name', '!=', '_stats')
+            .whereNull('missing_since')
+            .select(
+              db.raw('COUNT(*) as total'),
+              db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
+              db.raw("COUNT(*) FILTER (WHERE review_text IS NOT NULL AND (review_reply IS NULL OR review_reply LIKE '[DRAFT]%') AND COALESCE(dismissed, false) = false) as unresponded")
+            ).first();
         } catch (err) {
           logger.error(`[admin-dashboard] google_reviews query failed: ${err.message}`);
           return { total: 0, avg_rating: '0', unresponded: 0 };

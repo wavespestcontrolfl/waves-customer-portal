@@ -541,15 +541,6 @@ class GoogleBusinessService {
       review_created_at: normalized.review_created_at,
       customer_id: customerId || existing?.customer_id || null,
       synced_at: db.fn.now(),
-      // A review present in the feed is not missing — clears the stamp when
-      // a previously-removed review reappears (e.g. Google reinstated it).
-      // EXCEPT when the stamp postdates this runner's fetch start: then a
-      // newer reconciliation already decided the review is gone, and this
-      // runner's snapshot is the stale one — an overlapping older sync must
-      // not revive the review for testimonial/marketing surfaces.
-      missing_since: (existing?.missing_since && syncStart && new Date(existing.missing_since) >= new Date(syncStart))
-        ? existing.missing_since
-        : null,
       ...replyFields,
     };
     let result;
@@ -573,6 +564,19 @@ class GoogleBusinessService {
         await db('google_reviews').where({ id: winner.id }).update(row);
         result = { id: winner.id, inserted: false };
       }
+    }
+    // Reinstatement clear — a review present in the feed is not missing. The
+    // main update above deliberately never touches missing_since; the clear
+    // is its own conditional UPDATE evaluated against the CURRENT column
+    // value, so a stamp committed by a newer reconciliation between our
+    // snapshot read and this statement survives (only stamps older than this
+    // runner's fetch start may be cleared). A fresh insert carries no stamp.
+    if (!result.inserted) {
+      const clear = db('google_reviews')
+        .where({ id: result.id })
+        .whereNotNull('missing_since');
+      if (syncStart) clear.where('missing_since', '<', new Date(syncStart).toISOString());
+      await clear.update({ missing_since: null });
     }
     if (row.customer_id) {
       // A matched review means the customer left one — stop asking them.
