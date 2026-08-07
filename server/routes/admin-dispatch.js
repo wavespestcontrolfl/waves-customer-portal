@@ -11845,6 +11845,9 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       target,
       notifyCustomer: notifyCustomer !== false,
       initiatedBy: 'admin',
+      // Authenticated dispatch-board click — the moved SMS is exempt from
+      // the 8AM-8PM send window (operator-initiated, not machine-initiated).
+      operatorInitiated: true,
     });
 
     if (!result.ok) {

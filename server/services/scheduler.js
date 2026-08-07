@@ -35,7 +35,10 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   if (type.includes('referral')) return 'referral';
   if (type.includes('retention') || type.includes('renewal') || type.includes('save')) return 'retention';
   if (type.includes('marketing') || type.includes('seasonal') || type.includes('promo')) return 'marketing';
-  if (type.includes('appointment') || type.includes('reminder') || type.includes('confirmation') || type.includes('en_route')) return 'appointment';
+  // 'prep' covers prep_info — the deferred booking-time prep text requeued
+  // from a quiet-hours hold replays under the same appointment policy the
+  // immediate send enforced.
+  if (type.includes('appointment') || type.includes('reminder') || type.includes('confirmation') || type.includes('en_route') || type.includes('prep')) return 'appointment';
   // Deferred voicemail text-back (voicemail_quote_link) must re-send under its
   // own purpose, not fall through to conversational, so the policy re-check at
   // dispatch keeps a re-queued row honest.

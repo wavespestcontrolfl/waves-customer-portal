@@ -338,6 +338,48 @@ class AppointmentTagger {
       metadata: { original_message_type: 'prep_info', pest_type: pestType, prep_variant: smsVariant },
     });
     if (!prepResult.sent) {
+      // Send-window hold (night bookings are routine — the owner builds
+      // schedules overnight and customers self-book in the evening): the
+      // prep obligation must survive to 8:00 AM, and nothing re-fires this
+      // booking-time hook on its own. Requeue on the scheduled-SMS rail —
+      // the same rail the deferred voicemail text-back uses — and write the
+      // prep marker NOW so a regenerate-brief replay can't enqueue a
+      // duplicate; the queued row owns the obligation from here (bounded
+      // retries + phone refresh at send time).
+      if (prepResult.code === 'QUIET_HOURS_HOLD' && prepResult.deferred && prepResult.nextAllowedAt) {
+        try {
+          const TWILIO_NUMBERS = require('../config/twilio-numbers');
+          await dbh('sms_log').insert({
+            customer_id: service.customer_id,
+            direction: 'outbound',
+            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+            to_phone: service.phone,
+            message_body: prepSMS,
+            status: 'scheduled',
+            scheduled_for: new Date(prepResult.nextAllowedAt),
+            message_type: 'prep_info',
+            metadata: JSON.stringify({
+              entry_point: 'appointment_tagger_prep_deferred',
+              pest_type: pestType,
+              prep_variant: smsVariant,
+              scheduled_service_id: service.id,
+              original_block_code: prepResult.code,
+              refresh_customer_phone: true,
+            }),
+          });
+          await dbh('customer_interactions').insert({
+            customer_id: service.customer_id, interaction_type: 'sms_outbound',
+            subject: `${pestType} prep info sent`,
+            body: `Prep SMS held outside the 8AM-8PM ET send window — queued for ${new Date(prepResult.nextAllowedAt).toISOString()}.`,
+          });
+          logger.info(`[appointment-tagger] Prep SMS for customer ${service.customer_id} deferred to ${prepResult.nextAllowedAt} (send window)`);
+        } catch (queueErr) {
+          // Marker not written on a failed enqueue — a later replay of the
+          // booking hook retries the whole prep flow.
+          logger.error(`[appointment-tagger] Prep SMS requeue failed for customer ${service.customer_id}: ${queueErr.message}`);
+        }
+        return;
+      }
       logger.warn(`[appointment-tagger] Prep SMS blocked/failed for customer ${service.customer_id}: ${prepResult.code || prepResult.reason || 'unknown'}`);
       return;
     }

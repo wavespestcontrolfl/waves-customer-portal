@@ -306,6 +306,7 @@ async function mintStageLinks(est, purpose, { query = null, emailOnly = false } 
 // claimStage() flag is still primary; idempotency is belt-and-suspenders.
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
+  let smsHeld = false;
   if (est.customer_phone && sms) {
     try {
       const result = await sendCustomerMessage({
@@ -333,6 +334,13 @@ async function sendDualChannel(est, { sms, email }) {
         logger.warn(
           `[est-followup] SMS blocked for estimate ${est.id}: ${result.code || "unknown"} ${result.reason || ""}`,
         );
+        // Send-window hold (this cron ticks at night too): not a delivery
+        // failure — defer the WHOLE touch below rather than letting the
+        // email leg mark the stage attempted, which would finalize the
+        // claim with the SMS leg permanently unsent.
+        if (result.code === "QUIET_HOURS_HOLD" && result.deferred) {
+          smsHeld = true;
+        }
       } else {
         attempted = true;
       }
@@ -341,6 +349,18 @@ async function sendDualChannel(est, { sms, email }) {
         `[est-followup] SMS failed for estimate ${est.id}: ${e.message}`,
       );
     }
+  }
+  // A held SMS leg defers the whole dual-channel touch: return false so the
+  // caller releases its stage claim and the next cron tick re-fires the
+  // stage inside the window — both legs then go out together at 8:00 AM.
+  // Sending the email now instead would return attempted=true, the claim
+  // would finalize, and the SMS leg would never send. Safe to re-fire: the
+  // email idempotencyKey dedupes if a prior partial attempt did send it.
+  if (smsHeld) {
+    logger.info(
+      `[est-followup] SMS for estimate ${est.id} held — outside 8AM-8PM ET send window; touch deferred to the window open`,
+    );
+    return false;
   }
   if (est.customer_email && email?.templateKey) {
     // Optional lifecycle suffix (codex 2736 r10): a stage that can
