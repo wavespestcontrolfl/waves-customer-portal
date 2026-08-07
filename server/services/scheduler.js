@@ -137,6 +137,17 @@ async function recoverStaleScheduledSmsClaims(now) {
           'queued_at', s.created_at,
           'scheduled_sms_recovered_sent_at', ?::timestamptz
         )
+        -- Deferred completion/invoice rows settled here crashed BETWEEN
+        -- Twilio's accept and the normal settlement, so their delivery-time
+        -- finalization (invoice flip, review mark, receipt claim) never ran
+        -- and the normal path's finalize_pending stamp was never written.
+        -- Stamp it now so the stranded-finalization sweep converts them to
+        -- finalize_only retries.
+        || CASE
+          WHEN s.metadata->>'entry_point' IN ('dispatch_completion_deferred', 'invoice_send_deferred')
+            THEN jsonb_build_object('finalize_pending', true)
+          ELSE '{}'::jsonb
+        END
     WHERE s.status = 'sending'
       AND s.scheduled_for IS NOT NULL
       AND s.scheduled_for <= ?
@@ -2456,12 +2467,25 @@ function initScheduledJobs() {
               recheckFailed = true;
               logger.warn(`[scheduled-sms] deferred invoice recheck failed for ${msg.id}: ${invErr.message}`);
             }
-            if (recheckFailed && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
-              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                status: 'scheduled',
-                scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
-                updated_at: new Date(),
-              });
+            if (recheckFailed) {
+              // Fail closed on BOTH sides of the attempt cap: while
+              // attempts remain, hold for a re-check; on the final
+              // attempt, block rather than sending payment/dunning copy
+              // whose invoice state could not be confirmed.
+              if ((Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'scheduled',
+                  scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
+                  updated_at: new Date(),
+                });
+              } else {
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'blocked',
+                  updated_at: new Date(),
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', 'stale_invoice:recheck-exhausted')"),
+                });
+                logger.error(`[scheduled-sms] deferred invoice message ${msg.id} BLOCKED — invoice state unverifiable after ${SCHEDULED_SMS_MAX_ATTEMPTS} attempts`);
+              }
               continue;
             }
             if (staleReason) {
