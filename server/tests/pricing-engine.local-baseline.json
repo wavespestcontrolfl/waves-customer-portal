@@ -111,9 +111,9 @@
   },
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
-      "recurringAnnualAfterDiscount": 4119.97,
-      "recurringMonthlyAfterDiscount": 343.33,
-      "year1Total": 4120
+      "recurringAnnualAfterDiscount": 4081.57,
+      "recurringMonthlyAfterDiscount": 340.13,
+      "year1Total": 4082
     },
     "waveGuard": {
       "tier": "platinum",
@@ -126,8 +126,8 @@
         "monthly": 106.08
       },
       "lawn_care": {
-        "annual": 1140,
-        "monthly": 95
+        "annual": 1092,
+        "monthly": 91
       },
       "tree_shrub": {
         "annual": 1381,

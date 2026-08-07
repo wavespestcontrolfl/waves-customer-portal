@@ -455,6 +455,10 @@ function mapV1ToLegacyShape(v1Result) {
       pricingSource: t.pricingSource,
       pricingBasis: t.pricingBasis,
       costFloorApplied: !!t.costFloorApplied,
+      // Cadence-ladder lift marker (codex #3274 r4 P2): without it the
+      // calculate-estimate response and the persisted result label a lifted
+      // leg as market/floor-derived with no record the ladder raised it.
+      cadenceLadderLiftApplied: t.cadenceLadderLiftApplied || undefined,
       // Per-tier pricing provenance: the dollar detail behind pricingSource, so
       // a stored estimate can answer "which mechanism set this price and by how
       // much" without re-running the engine against drifted config.

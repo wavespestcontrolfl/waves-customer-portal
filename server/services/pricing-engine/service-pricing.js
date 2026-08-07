@@ -4,6 +4,7 @@
 const {
   GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
+  LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT,
   BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
@@ -1812,23 +1813,62 @@ function resolveLawnTier(tier, lawnFreq) {
   return LAWN_TIERS[tier] ? tier : 'enhanced';
 }
 
-// Premium (12x) ladder cap (owner directive 2026-07-28): the 12x
-// per-application price must never exceed the 9x per-application price at
-// the same size — premium_monthly ≤ floor(enhanced_monthly × freq_ratio),
-// where freq_ratio = 12/9 makes the two per-app prices equal. The bracket
-// TABLE carries capped endpoint cells, but each tier interpolates and
-// rounds independently between endpoints (and extrapolates above table
+// Cadence frequency-discount cap (owner directive 2026-08-07, superseding the
+// 2026-07-28 premium-only ladder cap). Each higher-frequency cadence must land
+// at or below a fixed per-application discount off the 6x anchor at the same
+// size: 9x ≤ -4%, 12x ≤ -8% (LAWN_CADENCE_DISCOUNT). Expressed on the monthly
+// cell, since pa(v) = monthly × 12 / v.
+//
+// The bracket TABLE carries capped endpoint cells, but each tier interpolates
+// and rounds independently between endpoints (and extrapolates above table
 // max), so the invariant must also be enforced on the looked-up result
 // (codex #3041 r1: 4,125 sqft st_augustine rounded enhanced to $47 and
 // premium to $63 → $63/app vs $62.67/app).
+//
+// The premium leg keeps the older 12x-never-above-9x cap as a second bound.
+// The -8%/-4% spread implies it, but only against an UNCAPPED enhanced cell —
+// binding it to the capped enhanced value keeps the ladder monotonic even if
+// an operator edits a single cell through the admin bracket panel.
 function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
   const result = lookupLawnBracketUncapped(lawnSqFt, tierIndex, track);
-  if (tierIndex === LAWN_TIERS.premium.index && result.monthly > 0) {
-    const enhanced = lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.enhanced.index, track);
-    if (enhanced.monthly > 0) {
-      const cap = Math.floor(enhanced.monthly * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq));
-      result.monthly = Math.min(result.monthly, cap);
+  if (!(result.monthly > 0) || tierIndex === LAWN_TIERS.standard.index) return result;
+  // Armed = the discounted schedule is live (in-code default true;
+  // migrate:down of 20260807120000 writes lawn_pricing_v2.
+  // cadenceFreqDiscountArmed=false so the DOCUMENTED rollback also reverts
+  // these runtime caps instead of re-clamping restored cells — codex #3274
+  // r3 P1). The 2026-07-29 12x-never-above-9x bound is NOT gated: it
+  // pre-dates the discount and must survive its rollback.
+  const discountArmed = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false;
+  const standard = discountArmed
+    ? lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.standard.index, track)
+    : null;
+  if (tierIndex === LAWN_TIERS.enhanced.index) {
+    if (standard && standard.monthly > 0) {
+      result.monthly = Math.min(
+        result.monthly,
+        Math.floor(standard.monthly * LAWN_ENHANCED_MONTHLY_CAP_RATIO),
+      );
     }
+    return result;
+  }
+  if (tierIndex === LAWN_TIERS.premium.index) {
+    const enhancedUncapped = lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.enhanced.index, track).monthly;
+    const bounds = [];
+    if (standard && standard.monthly > 0) {
+      bounds.push(Math.floor(standard.monthly * LAWN_PREMIUM_MONTHLY_CAP_RATIO));
+      const enhancedCapped = Math.min(
+        enhancedUncapped,
+        Math.floor(standard.monthly * LAWN_ENHANCED_MONTHLY_CAP_RATIO),
+      );
+      if (enhancedCapped > 0) {
+        bounds.push(Math.floor(enhancedCapped * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq)));
+      }
+    } else if (enhancedUncapped > 0) {
+      // Disarmed: the pre-discount premium bound measured against the
+      // as-stored enhanced cell, exactly the 2026-07-29 behavior.
+      bounds.push(Math.floor(enhancedUncapped * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq)));
+    }
+    if (bounds.length) result.monthly = Math.min(result.monthly, ...bounds);
   }
   return result;
 }
@@ -2071,7 +2111,8 @@ function priceLawnCare(property, options = {}) {
     }
     bermudaSuppressionPerApp = adder;
   }
-  const allTiers = TIER_LIST.map((t) => {
+  const cadenceDiscountArmed = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false;
+  const tierCalcs = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;
     const tierAnnualBudget = lawnMaterialBudget(normalizedTrack, tc.freq);
@@ -2088,6 +2129,43 @@ function priceLawnCare(property, options = {}) {
     let ann = costFloorApplied ? Math.ceil(costFloorAnnual / tc.freq) * tc.freq : marketAnnual;
     const programMinimumApplied = programMinimumAnnual > 0 && ann < programMinimumAnnual;
     if (programMinimumApplied) ann = Math.ceil(programMinimumAnnual / tc.freq) * tc.freq;
+    return {
+      t, tc, market, marketMonthly, marketAnnual, costFloorDetails, costFloorAnnual, costFloorApplied, programMinimumApplied, ann,
+      cadenceLadderLiftApplied: false,
+    };
+  }).filter(Boolean);
+
+  // Cadence-ladder lift under ARMED cost floors (codex #3274 r3 P2). Each
+  // cadence floors independently above, so a live useLawnCostFloor re-arm
+  // could invert the per-application ladder the frequency discount promises
+  // (e.g. a floored 9x per-app landing ABOVE the 6x per-app). Floors only
+  // ever raise, so the resolution direction is UP: lift the lower-frequency
+  // legs until the same relations lookupLawnBracket enforces on market
+  // lookups hold on the floored results — no cadence is ever lowered below
+  // its own floor. Order matters: enhanced lifts against premium first, then
+  // standard lifts against the (possibly lifted) enhanced and premium.
+  // Disarmed floors — today's prod default (owner 2026-07-17) — skip this
+  // entirely, and the lift rides the discount arm switch so migrate:down
+  // restores the pre-discount floor behavior bit-for-bit.
+  if (useLawnCostFloor && cadenceDiscountArmed && tierCalcs.some((c) => c.costFloorApplied)) {
+    const byTier = {};
+    for (const calc of tierCalcs) byTier[calc.t] = calc;
+    const lift = (leg, neededAnnual) => {
+      if (!leg || !(neededAnnual > leg.ann)) return;
+      leg.ann = Math.ceil(neededAnnual / leg.tc.freq) * leg.tc.freq;
+      leg.cadenceLadderLiftApplied = true;
+    };
+    const { standard, enhanced, premium } = byTier;
+    // pa12 <= pa9  ⇔  ann9 >= ann12 * 9/12
+    if (enhanced && premium) lift(enhanced, premium.ann * (enhanced.tc.freq / premium.tc.freq));
+    // pa9 <= 0.96*pa6  ⇔  ann6 >= ann9 / 1.44 ; pa12 <= 0.92*pa6  ⇔  ann6 >= ann12 / 1.84
+    if (standard && enhanced) lift(standard, enhanced.ann / LAWN_ENHANCED_MONTHLY_CAP_RATIO);
+    if (standard && premium) lift(standard, premium.ann / LAWN_PREMIUM_MONTHLY_CAP_RATIO);
+  }
+
+  const allTiers = tierCalcs.map((calc) => {
+    const { t, tc, market, marketMonthly, marketAnnual, costFloorDetails, costFloorAnnual, costFloorApplied, programMinimumApplied, cadenceLadderLiftApplied } = calc;
+    let { ann } = calc;
     // Bermuda suppression bakes into the per-app AFTER floor/minimum
     // resolution — the adder is add-on revenue, never a way to satisfy them.
     // INTENTIONAL plan-spread pricing (owner ruling 2026-08-07, "a number
@@ -2105,6 +2183,7 @@ function priceLawnCare(property, options = {}) {
     const perApp = Math.round(ann / tc.freq * 100) / 100;
     return {
       bermudaSuppressionPerApp: bermudaSuppressionPerApp > 0 ? bermudaSuppressionPerApp : null,
+      cadenceLadderLiftApplied: cadenceLadderLiftApplied || undefined,
       tier: t,
       index: tc.index,
       visits: tc.freq,
@@ -2114,12 +2193,21 @@ function priceLawnCare(property, options = {}) {
       monthly: Math.round(ann / 12 * 100) / 100,
       label: tc.label,
       recommended: t === selectedTier,
-      pricingBasis: programMinimumApplied
-        ? 'PROGRAM_MINIMUM_MONTHLY'
-        : (costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis),
-      pricingSource: programMinimumApplied
-        ? 'PROGRAM_MINIMUM'
-        : (costFloorApplied ? 'COST_FLOOR' : market.pricingSource),
+      // A cadence-lifted leg outranks its own mechanisms in the label: its
+      // final annual exceeds whatever floor/minimum/market set it, so
+      // stamping the leg MARKET_TABLE (or COST_FLOOR) would store a
+      // non-market price as market-derived with no record of the lift
+      // (codex #3274 r4 P2).
+      pricingBasis: cadenceLadderLiftApplied
+        ? LAWN_PRICING_V2.pricingMode
+        : (programMinimumApplied
+          ? 'PROGRAM_MINIMUM_MONTHLY'
+          : (costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis)),
+      pricingSource: cadenceLadderLiftApplied
+        ? 'CADENCE_LADDER_LIFT'
+        : (programMinimumApplied
+          ? 'PROGRAM_MINIMUM'
+          : (costFloorApplied ? 'COST_FLOOR' : market.pricingSource)),
       programMinimumApplied,
       programMinimumMonthly: programMinimumAnnual > 0 ? programMinimumMonthly : null,
       marketMonthly,
@@ -4983,15 +5071,23 @@ function priceOneTimeLawn(property, options = {}) {
     afterHours = false,
     isRecurringCustomer = false,
     track = 'st_augustine',
-    tier = 'enhanced',
-    lawnFreq,
+    // tier/lawnFreq are still accepted from callers describing the requested
+    // plan, but no longer select the one-time base — see the anchor note on
+    // the priceLawnCare call below.
   } = options;
 
   const normalizedTreatment = treatmentType === 'fertilization' ? 'fert' : treatmentType;
   const lawnResult = priceLawnCare(property, {
     track,
-    tier,
-    lawnFreq,
+    // One-time work anchors on the STANDARD (6x) per-app — the column the
+    // cadence frequency discount never moves (codex #3274 r4 P1). A
+    // standalone treatment makes no frequency commitment, so deriving from
+    // the selected cadence (default 9x) silently handed every qualifying
+    // one-time quote part of the recurring -4%/-8% discount once those
+    // columns were discounted. Matches how one-time pest derives from its
+    // undiscounted anchor. The caller's tier/lawnFreq still describe the
+    // requested plan elsewhere; they no longer pick the one-time base.
+    tier: 'standard',
     useLawnCostFloor: false,
     // One-time derives from the raw recurring per-app market rate; the
     // recurring program minimum (a floor on sold PLANS) must not inflate it.
