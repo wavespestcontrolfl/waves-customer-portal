@@ -174,25 +174,19 @@ function parkedAt(item) {
 }
 
 // When an ACTIVE item became digest-eligible — the moment the row entered
-// its CURRENT review state, not the run's original completion. The
-// named-competitor janitor converts a stuck publish back into an actionable
-// review item by rewriting the RUN's outcome/skip_reason/updated_at (both
-// janitor paths bump run.updated_at) while deliberately preserving the old
-// completed_at — dating the converted item by completion would land it
-// behind the watermark and keep the interruption silent until Sunday
-// (Codex r4). opp.updated_at is deliberately NOT consulted when a run
-// exists: the daily miner upsert re-touches pending_review rows (status
-// preserved by its CASE, updated_at = now()), so an unchanged backlog
-// would re-classify as "new" every morning and defeat the watermark.
+// its CURRENT review state. opportunity_queue.completed_at is the one
+// STABLE state-specific stamp for that: queue.pendingReview() and the
+// named-competitor janitor's opportunity path both set it at the exact
+// transition INTO pending_review, and nothing touches it while the row
+// stays there. The general-purpose updated_at columns are all mutable
+// while an item waits — opp.updated_at by the daily miner re-touch (its
+// status CASE preserves pending_review but stamps updated_at = now()),
+// run.updated_at by PR polling / remediation / note edits — and the run's
+// completed_at is deliberately PRESERVED by the janitor conversion, so any
+// of those would either re-classify the unchanged backlog as "new" or hide
+// a converted item behind the watermark (Codex r4 rounds).
 function activeParkedAt(run, opp) {
-  if (run) {
-    const value = run.updated_at || run.completed_at || run.created_at;
-    return value ? new Date(value) : null;
-  }
-  // Run-less pending_review rows: completed_at is stamped by the review
-  // transition (e.g. the janitor's opportunity path) and never touched by
-  // the miner upsert; created_at as last resort.
-  const value = opp?.completed_at || opp?.created_at;
+  const value = opp?.completed_at || run?.completed_at || run?.created_at || opp?.created_at;
   return value ? new Date(value) : null;
 }
 

@@ -446,31 +446,40 @@ describe('Codex r4: active set mirrors the portal queue; janitor conversions get
   const digest = require('../services/content/parked-run-digest');
   const { activeParkedAt } = digest._private;
 
-  test('a janitor-converted run is dated by its transition, not its original completion', () => {
-    // The janitor rewrites outcome/skip_reason/updated_at but deliberately
-    // preserves completed_at — watermark classification must use the
-    // transition time or the converted item hides behind the watermark.
+  test('a janitor-converted item is dated by the opportunity transition stamp, not the run\'s preserved completion', () => {
+    // The janitor rewrites the run's outcome/skip_reason but deliberately
+    // preserves run.completed_at; its opportunity path stamps
+    // opp.completed_at at the pending_review transition — that stamp is
+    // what keeps the converted item in front of the watermark.
     const run = {
       completed_at: '2026-08-01T10:00:00Z', // original approval-request park
       created_at: '2026-08-01T09:00:00Z',
-      updated_at: '2026-08-06T02:00:00Z', // janitor conversion
+      updated_at: '2026-08-06T02:00:00Z',
     };
-    const opp = { updated_at: '2026-08-01T10:00:00Z' };
+    const opp = { completed_at: '2026-08-06T02:00:00Z', updated_at: '2026-08-06T02:00:00Z' };
     expect(activeParkedAt(run, opp)).toEqual(new Date('2026-08-06T02:00:00Z'));
   });
 
-  test("a daily miner re-touch of a pending_review row does NOT re-date the item (opp.updated_at is never consulted when a run exists)", () => {
+  test('mutable updated_at columns are never consulted: miner re-touches and run writes cannot re-date an item', () => {
     // The miner upsert preserves pending_review via its status CASE but
-    // stamps opportunity_queue.updated_at = now() every morning — using it
-    // would classify the unchanged backlog as "new" daily.
-    const run = { completed_at: '2026-08-01T10:00:00Z', created_at: '2026-08-01T09:00:00Z', updated_at: '2026-08-01T10:00:00Z' };
-    const opp = { updated_at: '2026-08-07T08:00:00Z', completed_at: null, created_at: '2026-07-01T00:00:00Z' };
+    // stamps opp.updated_at = now() every morning; PR polling/remediation/
+    // note edits bump run.updated_at. Neither may classify the unchanged
+    // backlog as "new".
+    const run = { completed_at: '2026-08-01T10:00:00Z', created_at: '2026-08-01T09:00:00Z', updated_at: '2026-08-07T09:00:00Z' };
+    const opp = { completed_at: '2026-08-01T10:00:00Z', updated_at: '2026-08-07T08:00:00Z', created_at: '2026-07-01T00:00:00Z' };
     expect(activeParkedAt(run, opp)).toEqual(new Date('2026-08-01T10:00:00Z'));
   });
 
-  test('a pending_review opportunity with no run at all dates from its miner-untouched completed_at', () => {
+  test('a pending_review opportunity with no run at all dates from its transition-stamped completed_at', () => {
     expect(activeParkedAt(null, { updated_at: '2026-08-07T08:00:00Z', completed_at: '2026-08-05T10:00:00Z' }))
       .toEqual(new Date('2026-08-05T10:00:00Z'));
+  });
+
+  test('source pin: activeParkedAt anchors on the stable transition stamps only', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/content/parked-run-digest'), 'utf8');
+    expect(src).toMatch(/opp\?\.completed_at \|\| run\?\.completed_at/);
+    // No mutable general-purpose timestamp feeds watermark classification.
+    expect(src).not.toMatch(/activeParkedAt[\s\S]{0,400}updated_at \|\|/);
   });
 
   test('source pin: the active set derives from opportunity_queue pending_review state, not a single run outcome', () => {
