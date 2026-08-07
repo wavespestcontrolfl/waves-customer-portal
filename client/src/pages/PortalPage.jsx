@@ -5120,11 +5120,21 @@ function BillingTab({ customer }) {
             Saving {Math.round(discount * 100)}% on every service with your {tierName} bundle
           </div>
         )}
-        {activeTierName && tierName !== 'Platinum' && (TIER_DISCOUNTS.Platinum || 0) > discount && (
-          <div style={{ marginTop: 10, fontSize: 14, color: muted, fontWeight: 700 }}>
-            Platinum bumps that to {Math.round((TIER_DISCOUNTS.Platinum || 0.20) * 100)}% off every service.
-          </div>
-        )}
+        {/* Name the NEXT tier up, not always the top one — telling a Bronze
+            customer about Platinum skips the step they'd actually take
+            (owner, 2026-08-06). Nothing renders on the top tier. */}
+        {(() => {
+          if (!activeTierName) return null;
+          const idx = TIER_ORDER.indexOf(tierName);
+          const nextTier = idx >= 0 ? TIER_ORDER[idx + 1] : null;
+          const nextDiscount = nextTier ? (TIER_DISCOUNTS[nextTier] || 0) : 0;
+          if (!nextTier || nextDiscount <= discount) return null;
+          return (
+            <div style={{ marginTop: 10, fontSize: 14, color: muted, fontWeight: 700 }}>
+              {nextTier} bumps that to {Math.round(nextDiscount * 100)}% off every service.
+            </div>
+          );
+        })()}
       </div>
 
       <div id="billing-payment-methods" data-glass="card" style={{ ...card, padding: 20 }}>
@@ -5678,7 +5688,7 @@ function PropertySection({ title, icon = 'document', summary, defaultOpen, child
           <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: '#475569', transform: open ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
         </span>
       </button>
-      {open && <div style={{ padding: '0 18px 18px' }}>{children}</div>}
+      {open && <div style={{ padding: '8px 18px 18px' }}>{children}</div>}
     </section>
   );
 }
@@ -11277,7 +11287,12 @@ function DocumentsTab({ customer, onSwitchTab }) {
 
   const getExpirationBadge = (expDate) => {
     if (!expDate) return null;
-    const exp = new Date(expDate + 'T12:00:00');
+    // expirationDate arrives as either a bare YYYY-MM-DD or a full ISO
+    // timestamp; concatenating a time onto the latter yields Invalid Date and
+    // rendered literally as "Valid through Invalid Date". Normalize to the
+    // date part, then bail if it still won't parse (same guard formatDate has).
+    const exp = new Date(String(expDate).slice(0, 10) + 'T12:00:00');
+    if (Number.isNaN(exp.getTime())) return null;
     const now = new Date();
     const daysUntil = Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
 
