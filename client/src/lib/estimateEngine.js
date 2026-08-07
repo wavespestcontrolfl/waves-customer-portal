@@ -394,7 +394,9 @@ const LAWN_PRICING_V2 = {
   // retirement — fallback saves must stamp the schedule they priced on
   // (codex #3190 P2), and applyServerLawnPricingConfig below syncs the live
   // row's version so a mid-flight admin change stamps correctly too.
-  pricingVersion: 'LAWN_PRICING_V2_GRID_500',
+  // _FREQ_DISCOUNT (2026-08-07): 9x/12x carry a -4%/-8% per-application
+  // discount off the 6x anchor (server mirror).
+  pricingVersion: 'LAWN_PRICING_V2_FREQ_DISCOUNT',
   laborRateLoaded: 35,
   equipmentReservePerVisit: 0,
   adminAnnualDefault: 51,
@@ -694,11 +696,13 @@ export function collectMarginReviewNotes(E) {
 // Mirrors server LAWN_BRACKETS (2026-08-04 re-grid): [sqft, 6x, 9x, 12x] —
 // basic/4x column fully retired; 500-sqft rows 1,500-8,000, 1,000-sqft
 // rows to 12,000; leading 0-row clamps sub-1,500 to the 1,500 cells.
+// Frequency discount 2026-08-07: 9x/12x cells capped at -4%/-8% per
+// application off the 6x anchor (see server LAWN_CADENCE_DISCOUNT).
 const LAWN_PRICES = {
-  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,30,34,40],[1500,30,34,40],[2000,32,38,44],[2500,35,42,49],[3000,38,44,55],[3500,38,47,58],[4000,38,47,62],[4500,38,48,64],[5000,38,50,66],[5500,38,53,70],[6000,39,56,74],[6500,40,59,78],[7000,42,62,82],[7500,44,65,86],[8000,47,68,90],[9000,50,74,98],[10000,54,80,106],[11000,58,86,114],[12000,62,92,122],[15000,73,110,146],[20000,91,140,186]] },
-  bermuda: { name: 'Bermuda', code: 'C1', pts: [[0,31,36,42],[1500,31,36,42],[2000,34,40,46],[2500,37,44,52],[3000,39,46,56],[3500,40,49,59],[4000,42,51,63],[4500,42,51,65],[5000,42,51,68],[5500,42,54,72],[6000,42,57,76],[6500,42,60,80],[7000,43,63,84],[7500,45,66,88],[8000,47,69,92],[9000,51,75,100],[10000,55,81,108],[11000,59,87,116],[12000,63,94,125],[15000,74,112,149],[20000,94,143,190]] },
-  zoysia: { name: 'Zoysia', code: 'C2', pts: [[0,31,36,42],[1500,31,36,42],[2000,34,40,46],[2500,37,44,52],[3000,39,46,56],[3500,40,49,59],[4000,42,51,63],[4500,42,51,66],[5000,42,52,69],[5500,42,55,73],[6000,42,58,77],[6500,43,60,80],[7000,44,63,84],[7500,45,66,88],[8000,47,70,93],[9000,51,76,101],[10000,56,82,109],[11000,59,88,117],[12000,63,95,126],[15000,75,113,150],[20000,95,145,193]] },
-  bahia: { name: 'Bahia', code: 'D', pts: [[0,27,30,36],[1500,27,30,36],[2000,29,34,39],[2500,31,38,44],[3000,34,42,51],[3500,34,42,53],[4000,34,42,56],[4500,34,44,58],[5000,34,47,62],[5500,35,49,65],[6000,36,52,69],[6500,37,54,72],[7000,39,57,76],[7500,40,59,78],[8000,42,62,82],[9000,45,67,89],[10000,49,73,97],[11000,52,78,103],[12000,56,83,110],[15000,65,99,132],[20000,82,125,166]] },
+  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,30,34,40],[1500,30,34,40],[2000,32,38,44],[2500,35,42,49],[3000,38,44,55],[3500,38,47,58],[4000,38,47,62],[4500,38,48,64],[5000,38,50,66],[5500,38,53,69],[6000,39,56,71],[6500,40,57,73],[7000,42,60,77],[7500,44,63,80],[8000,47,67,86],[9000,50,72,92],[10000,54,77,99],[11000,58,83,106],[12000,62,89,114],[15000,73,105,134],[20000,91,131,167]] },
+  bermuda: { name: 'Bermuda', code: 'C1', pts: [[0,31,36,42],[1500,31,36,42],[2000,34,40,46],[2500,37,44,52],[3000,39,46,56],[3500,40,49,59],[4000,42,51,63],[4500,42,51,65],[5000,42,51,68],[5500,42,54,72],[6000,42,57,76],[6500,42,60,77],[7000,43,61,79],[7500,45,64,82],[8000,47,67,86],[9000,51,73,93],[10000,55,79,101],[11000,59,84,108],[12000,63,90,115],[15000,74,106,136],[20000,94,135,172]] },
+  zoysia: { name: 'Zoysia', code: 'C2', pts: [[0,31,36,42],[1500,31,36,42],[2000,34,40,46],[2500,37,44,52],[3000,39,46,56],[3500,40,49,59],[4000,42,51,63],[4500,42,51,66],[5000,42,52,69],[5500,42,55,73],[6000,42,58,77],[6500,43,60,79],[7000,44,63,80],[7500,45,64,82],[8000,47,67,86],[9000,51,73,93],[10000,56,80,103],[11000,59,84,108],[12000,63,90,115],[15000,75,108,138],[20000,95,136,174]] },
+  bahia: { name: 'Bahia', code: 'D', pts: [[0,27,30,36],[1500,27,30,36],[2000,29,34,39],[2500,31,38,44],[3000,34,42,51],[3500,34,42,53],[4000,34,42,56],[4500,34,44,58],[5000,34,47,62],[5500,35,49,64],[6000,36,51,66],[6500,37,53,68],[7000,39,56,71],[7500,40,57,73],[8000,42,60,77],[9000,45,64,82],[10000,49,70,90],[11000,52,74,95],[12000,56,80,103],[15000,65,93,119],[20000,82,118,150]] },
 };
 
 function toPositiveNumber(value) {
@@ -1350,19 +1354,36 @@ function resolveLawnFreq(freq) {
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
 }
 
-// Premium (12x) ladder cap — server mirror (2026-07-29): 12x per-app never
-// exceeds 9x per-app. Table endpoints are capped, but each column rounds its
-// interpolation independently, so the cap must also apply to the looked-up
-// result (matches lookupLawnBracket in server service-pricing).
+// Cadence frequency-discount cap — server mirror (2026-08-07, superseding the
+// 2026-07-29 premium-only cap): 9x per-app ≤ -4% and 12x per-app ≤ -8% off the
+// 6x anchor at the same size. Table endpoints are capped, but each column
+// rounds its interpolation independently, so the cap must also apply to the
+// looked-up result (matches lookupLawnBracket in server service-pricing).
+const LAWN_ENH_MONTHLY_CAP_RATIO = 0.96 * 9 / 6;   // 1.44
+const LAWN_PREM_MONTHLY_CAP_RATIO = 0.92 * 12 / 6; // 1.84
 function lawnLookup(lp, sf, freqIdx) {
   const result = lawnLookupUncapped(lp, sf, freqIdx);
-  // freqIdx 2 = premium(12x), 1 = enhanced(9x) after the 4x column removal.
-  if (freqIdx === 2 && result.monthly > 0) {
-    const enhanced = lawnLookupUncapped(lp, sf, 1);
-    if (enhanced.monthly > 0) {
-      result.monthly = Math.min(result.monthly, Math.floor(enhanced.monthly * 12 / 9));
-    }
+  // freqIdx 0 = standard(6x), 1 = enhanced(9x), 2 = premium(12x) after the
+  // 4x column removal.
+  if (freqIdx === 0 || !(result.monthly > 0)) return result;
+  const standard = lawnLookupUncapped(lp, sf, 0);
+  if (!(standard.monthly > 0)) return result;
+  if (freqIdx === 1) {
+    result.monthly = Math.min(
+      result.monthly,
+      Math.floor(standard.monthly * LAWN_ENH_MONTHLY_CAP_RATIO),
+    );
+    return result;
   }
+  const enhancedCapped = Math.min(
+    lawnLookupUncapped(lp, sf, 1).monthly,
+    Math.floor(standard.monthly * LAWN_ENH_MONTHLY_CAP_RATIO),
+  );
+  result.monthly = Math.min(
+    result.monthly,
+    Math.floor(standard.monthly * LAWN_PREM_MONTHLY_CAP_RATIO),
+    ...(enhancedCapped > 0 ? [Math.floor(enhancedCapped * 12 / 9)] : []),
+  );
   return result;
 }
 

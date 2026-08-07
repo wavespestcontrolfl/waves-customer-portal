@@ -486,6 +486,17 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
       {showCadenceLine ? (
         <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8 }}>
           {visitsPerYear} {perApplicationNoun}{visitsPerYear === 1 ? '' : 's'} per year
+          {/* Annual total alongside the count (owner 2026-08-07): the
+              per-application headline is close across lawn cadences by
+              design — lawn unit cost barely moves with frequency — so the
+              yearly commitment is what actually separates the programs
+              ($768 vs $1,104 vs $1,404 at 12,500 sqft). Without it three
+              cards reading $128 / $122.67 / $117 look like a broken page.
+              Suppressed while ranging: an exact annual would contradict the
+              "confirmed on site" band the headline is showing. */}
+          {!showLowConfidenceRange && Number(annual) > 0
+            ? <> · {fmtMoney(Number(annual))} per year</>
+            : null}
         </div>
       ) : null}
 

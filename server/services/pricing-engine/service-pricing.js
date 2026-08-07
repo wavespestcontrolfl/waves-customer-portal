@@ -4,6 +4,7 @@
 const {
   GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
+  LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT,
   BED_DENSITY, BED_AREA_CAP, PALM, MOSQUITO, TERMITE, RODENT, ONE_TIME, SPECIALTY, BED_BUG, URGENCY,
@@ -1812,22 +1813,45 @@ function resolveLawnTier(tier, lawnFreq) {
   return LAWN_TIERS[tier] ? tier : 'enhanced';
 }
 
-// Premium (12x) ladder cap (owner directive 2026-07-28): the 12x
-// per-application price must never exceed the 9x per-application price at
-// the same size — premium_monthly ≤ floor(enhanced_monthly × freq_ratio),
-// where freq_ratio = 12/9 makes the two per-app prices equal. The bracket
-// TABLE carries capped endpoint cells, but each tier interpolates and
-// rounds independently between endpoints (and extrapolates above table
+// Cadence frequency-discount cap (owner directive 2026-08-07, superseding the
+// 2026-07-28 premium-only ladder cap). Each higher-frequency cadence must land
+// at or below a fixed per-application discount off the 6x anchor at the same
+// size: 9x ≤ -4%, 12x ≤ -8% (LAWN_CADENCE_DISCOUNT). Expressed on the monthly
+// cell, since pa(v) = monthly × 12 / v.
+//
+// The bracket TABLE carries capped endpoint cells, but each tier interpolates
+// and rounds independently between endpoints (and extrapolates above table
 // max), so the invariant must also be enforced on the looked-up result
 // (codex #3041 r1: 4,125 sqft st_augustine rounded enhanced to $47 and
 // premium to $63 → $63/app vs $62.67/app).
+//
+// The premium leg keeps the older 12x-never-above-9x cap as a second bound.
+// The -8%/-4% spread implies it, but only against an UNCAPPED enhanced cell —
+// binding it to the capped enhanced value keeps the ladder monotonic even if
+// an operator edits a single cell through the admin bracket panel.
 function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
   const result = lookupLawnBracketUncapped(lawnSqFt, tierIndex, track);
-  if (tierIndex === LAWN_TIERS.premium.index && result.monthly > 0) {
-    const enhanced = lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.enhanced.index, track);
-    if (enhanced.monthly > 0) {
-      const cap = Math.floor(enhanced.monthly * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq));
-      result.monthly = Math.min(result.monthly, cap);
+  if (result.monthly > 0 && tierIndex !== LAWN_TIERS.standard.index) {
+    const standard = lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.standard.index, track);
+    if (standard.monthly > 0) {
+      if (tierIndex === LAWN_TIERS.enhanced.index) {
+        result.monthly = Math.min(
+          result.monthly,
+          Math.floor(standard.monthly * LAWN_ENHANCED_MONTHLY_CAP_RATIO),
+        );
+      } else if (tierIndex === LAWN_TIERS.premium.index) {
+        const enhancedCapped = Math.min(
+          lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.enhanced.index, track).monthly,
+          Math.floor(standard.monthly * LAWN_ENHANCED_MONTHLY_CAP_RATIO),
+        );
+        result.monthly = Math.min(
+          result.monthly,
+          Math.floor(standard.monthly * LAWN_PREMIUM_MONTHLY_CAP_RATIO),
+          ...(enhancedCapped > 0
+            ? [Math.floor(enhancedCapped * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq))]
+            : []),
+        );
+      }
     }
   }
   return result;

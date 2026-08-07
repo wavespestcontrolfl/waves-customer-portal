@@ -505,12 +505,37 @@ describe('PriceCard — applications-per-year line under the price (owner 2026-0
 
   it('glass single-row card shows the count under the price and drops it from the sub-label', () => {
     setGlassDefault(true);
-    render(<PriceCard frequency={lawnRowFrequency()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
+    const { container } = render(<PriceCard frequency={lawnRowFrequency()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
 
-    expect(screen.getByText('9 applications per year')).toBeInTheDocument();
+    expect(container.textContent).toMatch(/9 applications per year/);
     expect(screen.queryByText(/9 applications\/year/)).toBeNull();
     // The tier tag survives alone in the row sub-label.
     expect(screen.getByText('WaveGuard Silver')).toBeInTheDocument();
+  });
+
+  // Annual total rides the same line (owner 2026-08-07): the per-application
+  // headline is close across lawn cadences by design, so the yearly commitment
+  // is what actually distinguishes the three programs on the card.
+  it('glass single-row card shows the annual commitment alongside the count', () => {
+    setGlassDefault(true);
+    const { container } = render(<PriceCard frequency={lawnRowFrequency()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
+
+    expect(container.textContent).toMatch(/9 applications per year · \$482\.22 per year/);
+  });
+
+  it('suppresses the annual commitment while showing a low-confidence range', () => {
+    setGlassDefault(true);
+    const { container } = render(
+      <PriceCard
+        frequency={{ ...lawnRowFrequency(), lowConfidenceRangePct: 0.15 }}
+        waveGuardTier="Silver"
+        waveGuardDiscountPct={0.1}
+        showTierBadge={false}
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(container.textContent).not.toMatch(/per year · \$/);
   });
 
   it('non-glass card keeps the count in the row sub-label (no header line)', () => {

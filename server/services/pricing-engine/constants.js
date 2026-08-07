@@ -266,7 +266,11 @@ const LAWN_PRICING_V2 = {
   // _LADDER_CAP (2026-07-29): Premium 12x bracket column retuned + runtime
   // cap so 12x per-app never exceeds 9x per-app — estimates stamped
   // _SPOT_RESERVE priced 12x on the pre-cap (higher, inverting) column.
-  pricingVersion: 'LAWN_PRICING_V2_GRID_500',
+  // _FREQ_DISCOUNT (2026-08-07): the 12x-never-above-9x cap left the three
+  // cadences within ~1.5% per application at large lawns, so the cards read
+  // as identical. Cadence now carries a real frequency discount off the 6x
+  // per-application anchor — see LAWN_CADENCE_DISCOUNT below.
+  pricingVersion: 'LAWN_PRICING_V2_FREQ_DISCOUNT',
   laborRateLoaded: 35,
   equipmentIncludedInLabor: true,
   equipmentReservePerVisit: 0,
@@ -294,6 +298,29 @@ const LAWN_PRICING_V2 = {
 
 const LAWN_FREQS = [6, 9, 12];
 const LAWN_TABLE_MAX_SQFT = 20000;
+
+// Cadence frequency discount (owner directive 2026-08-07). The per-application
+// price of the higher-frequency programs is held at a fixed discount off the
+// 6x per-application anchor, so the estimate cards — which lead with the
+// per-application price — show a real difference between cadences.
+//
+// Sizing: unlike pest control (where the truck roll dominates, so route
+// density genuinely lowers unit cost and the curve can be steep — PEST v2
+// runs 1.00/0.88/0.78), lawn cost per visit is FLAT across cadences because
+// materials are applied every visit (12,500 sqft St. Augustine: $86.33/visit
+// at 6x, $91.99 at 9x, $86.48 at 12x). There is no unit-cost saving to pass
+// through, so the discount is funded purely out of the higher plans' larger
+// absolute profit. These rates are the measured maximum that keeps annual
+// profit RISING with frequency (12x > 9x > 6x) at every bracket the caps
+// bind on; steeper rates invert it — a -10%/-20% curve made the 12x plan
+// less profitable than 6x at all sizes.
+//
+// Applied to the MONTHLY bracket cell, since pa(v) = monthly * 12 / v:
+//   m9  <= m6 * (1 - 0.04) * 9/6  = m6 * 1.44
+//   m12 <= m6 * (1 - 0.08) * 12/6 = m6 * 1.84
+const LAWN_CADENCE_DISCOUNT = { enhanced: 0.04, premium: 0.08 };
+const LAWN_ENHANCED_MONTHLY_CAP_RATIO = (1 - LAWN_CADENCE_DISCOUNT.enhanced) * 9 / 6;
+const LAWN_PREMIUM_MONTHLY_CAP_RATIO = (1 - LAWN_CADENCE_DISCOUNT.premium) * 12 / 6;
 const LAWN_TRACK_DISPLAY = {
   st_augustine: { code: 'A', label: 'St. Augustine' },
   bermuda: { code: 'C1', label: 'Bermuda' },
@@ -324,6 +351,11 @@ const GRASS_TYPE_ALIASES = {
 // against calcLawnAnnualCostFloorDetails). st_augustine 3,000-row 9x also
 // softened 47 -> 44 (owner-approved shoulder fix: $62.67 -> $58.67/app puts
 // the 3,000-3,300 sqft rate under the $20/1k-sqft dead zone).
+// Frequency discount 2026-08-07 (owner directive): the 9x and 12x columns are
+// capped at LAWN_ENHANCED/PREMIUM_MONTHLY_CAP_RATIO x the 6x cell so each
+// cadence carries a real per-application discount (-4% / -8%). Binds from
+// ~5,500 sqft up, where the old columns had converged to within ~1.5% per
+// application; smaller brackets already separated naturally and are untouched.
 const LAWN_BRACKETS = {
   st_augustine: [
     [1500,  r(30),  r(34),  r(40)],
@@ -334,18 +366,18 @@ const LAWN_BRACKETS = {
     [4000,  r(38),  r(47),  r(62)],
     [4500,  r(38),  r(48),  r(64)],
     [5000,  r(38),  r(50),  r(66)],
-    [5500,  r(38),  r(53),  r(70)],
-    [6000,  r(39),  r(56),  r(74)],
-    [6500,  r(40),  r(59),  r(78)],
-    [7000,  r(42),  r(62),  r(82)],
-    [7500,  r(44),  r(65),  r(86)],
-    [8000,  r(47),  r(68),  r(90)],
-    [9000,  r(50),  r(74),  r(98)],
-    [10000,  r(54),  r(80),  r(106)],
-    [11000,  r(58),  r(86),  r(114)],
-    [12000,  r(62),  r(92),  r(122)],
-    [15000,  r(73),  r(110),  r(146)],
-    [20000,  r(91),  r(140),  r(186)],
+    [5500,  r(38),  r(53),  r(69)],
+    [6000,  r(39),  r(56),  r(71)],
+    [6500,  r(40),  r(57),  r(73)],
+    [7000,  r(42),  r(60),  r(77)],
+    [7500,  r(44),  r(63),  r(80)],
+    [8000,  r(47),  r(67),  r(86)],
+    [9000,  r(50),  r(72),  r(92)],
+    [10000,  r(54),  r(77),  r(99)],
+    [11000,  r(58),  r(83),  r(106)],
+    [12000,  r(62),  r(89),  r(114)],
+    [15000,  r(73),  r(105),  r(134)],
+    [20000,  r(91),  r(131),  r(167)],
   ],
   bermuda: [
     [1500,  r(31),  r(36),  r(42)],
@@ -358,16 +390,16 @@ const LAWN_BRACKETS = {
     [5000,  r(42),  r(51),  r(68)],
     [5500,  r(42),  r(54),  r(72)],
     [6000,  r(42),  r(57),  r(76)],
-    [6500,  r(42),  r(60),  r(80)],
-    [7000,  r(43),  r(63),  r(84)],
-    [7500,  r(45),  r(66),  r(88)],
-    [8000,  r(47),  r(69),  r(92)],
-    [9000,  r(51),  r(75),  r(100)],
-    [10000,  r(55),  r(81),  r(108)],
-    [11000,  r(59),  r(87),  r(116)],
-    [12000,  r(63),  r(94),  r(125)],
-    [15000,  r(74),  r(112),  r(149)],
-    [20000,  r(94),  r(143),  r(190)],
+    [6500,  r(42),  r(60),  r(77)],
+    [7000,  r(43),  r(61),  r(79)],
+    [7500,  r(45),  r(64),  r(82)],
+    [8000,  r(47),  r(67),  r(86)],
+    [9000,  r(51),  r(73),  r(93)],
+    [10000,  r(55),  r(79),  r(101)],
+    [11000,  r(59),  r(84),  r(108)],
+    [12000,  r(63),  r(90),  r(115)],
+    [15000,  r(74),  r(106),  r(136)],
+    [20000,  r(94),  r(135),  r(172)],
   ],
   zoysia: [
     [1500,  r(31),  r(36),  r(42)],
@@ -380,16 +412,16 @@ const LAWN_BRACKETS = {
     [5000,  r(42),  r(52),  r(69)],
     [5500,  r(42),  r(55),  r(73)],
     [6000,  r(42),  r(58),  r(77)],
-    [6500,  r(43),  r(60),  r(80)],
-    [7000,  r(44),  r(63),  r(84)],
-    [7500,  r(45),  r(66),  r(88)],
-    [8000,  r(47),  r(70),  r(93)],
-    [9000,  r(51),  r(76),  r(101)],
-    [10000,  r(56),  r(82),  r(109)],
-    [11000,  r(59),  r(88),  r(117)],
-    [12000,  r(63),  r(95),  r(126)],
-    [15000,  r(75),  r(113),  r(150)],
-    [20000,  r(95),  r(145),  r(193)],
+    [6500,  r(43),  r(60),  r(79)],
+    [7000,  r(44),  r(63),  r(80)],
+    [7500,  r(45),  r(64),  r(82)],
+    [8000,  r(47),  r(67),  r(86)],
+    [9000,  r(51),  r(73),  r(93)],
+    [10000,  r(56),  r(80),  r(103)],
+    [11000,  r(59),  r(84),  r(108)],
+    [12000,  r(63),  r(90),  r(115)],
+    [15000,  r(75),  r(108),  r(138)],
+    [20000,  r(95),  r(136),  r(174)],
   ],
   bahia: [
     [1500,  r(27),  r(30),  r(36)],
@@ -400,18 +432,18 @@ const LAWN_BRACKETS = {
     [4000,  r(34),  r(42),  r(56)],
     [4500,  r(34),  r(44),  r(58)],
     [5000,  r(34),  r(47),  r(62)],
-    [5500,  r(35),  r(49),  r(65)],
-    [6000,  r(36),  r(52),  r(69)],
-    [6500,  r(37),  r(54),  r(72)],
-    [7000,  r(39),  r(57),  r(76)],
-    [7500,  r(40),  r(59),  r(78)],
-    [8000,  r(42),  r(62),  r(82)],
-    [9000,  r(45),  r(67),  r(89)],
-    [10000,  r(49),  r(73),  r(97)],
-    [11000,  r(52),  r(78),  r(103)],
-    [12000,  r(56),  r(83),  r(110)],
-    [15000,  r(65),  r(99),  r(132)],
-    [20000,  r(82),  r(125),  r(166)],
+    [5500,  r(35),  r(49),  r(64)],
+    [6000,  r(36),  r(51),  r(66)],
+    [6500,  r(37),  r(53),  r(68)],
+    [7000,  r(39),  r(56),  r(71)],
+    [7500,  r(40),  r(57),  r(73)],
+    [8000,  r(42),  r(60),  r(77)],
+    [9000,  r(45),  r(64),  r(82)],
+    [10000,  r(49),  r(70),  r(90)],
+    [11000,  r(52),  r(74),  r(95)],
+    [12000,  r(56),  r(80),  r(103)],
+    [15000,  r(65),  r(93),  r(119)],
+    [20000,  r(82),  r(118),  r(150)],
   ],
 };
 
@@ -2085,6 +2117,7 @@ module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
   PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
+  LAWN_CADENCE_DISCOUNT, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, TERMITE, RODENT,
