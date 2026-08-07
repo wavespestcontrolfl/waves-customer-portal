@@ -4,7 +4,7 @@
  *
  *  - nonzero ledger failures (error set OR abandoned claim, NO time
  *    window — dead letters repeat until fixed or purged) → one FIX: email
- *    listing event types + ids + sanitized error snippets;
+ *    listing event types + ids;
  *  - zero ledger failures AND Stripe-side clean → no email at all
  *    (exception-based: a quiet day is silent);
  *  - Stripe-side failures alone still email (they never reach the ledger);
@@ -29,8 +29,11 @@
  *    Stripe-side probe emails AND carries stripeCheckError so the scheduler
  *    wrapper converts it into a job_health failure — the check never
  *    swallows its own breakage;
- *  - error snippets never carry emails or long digit runs (payloads are
- *    never read at all — the loader selects identifiers + error only);
+ *  - stored error TEXT never appears in the email at all — arbitrary prose
+ *    (Knex SQL prefixes, provider echoes) cannot be made PII-safe by
+ *    pattern scrubbing, so the digest carries fixed generic descriptions +
+ *    identifiers only, and a thrown check error reaches the email as a
+ *    generic line + allowlisted token, never raw err.message;
  *  - the ops_email_send_state marker dedupes a deploy-overlap double tick's
  *    SEND only — the checks still run first, so a deduped tick surfaces
  *    stripeCheckError to job_health instead of masking a broken check.
@@ -54,7 +57,7 @@ jest.mock('../models/db', () => {
 const sendgrid = require('../services/sendgrid-mail');
 const {
   runStripeWebhookHealthCheck,
-  _private: { composeWebhookHealthDigest, sanitizeErrorSnippet },
+  _private: { composeWebhookHealthDigest },
 } = require('../services/stripe-webhook-health');
 
 function ledgerRow(overrides = {}) {
@@ -97,7 +100,7 @@ describe('composeWebhookHealthDigest', () => {
     })).toBeNull();
   });
 
-  test('FIX subject carries the ledger count; body lists id, type, and error snippet', () => {
+  test('FIX subject carries the ledger count; body lists id + type but WITHHOLDS the stored error text', () => {
     const composed = composeWebhookHealthDigest({
       ledger: { total: 2, rows: [ledgerRow(), ledgerRow({ id: 'evt_dead_2', event_type: 'charge.refunded', error: null })] },
       stripeSide: null,
@@ -105,7 +108,8 @@ describe('composeWebhookHealthDigest', () => {
     });
     expect(composed.subject).toBe('FIX: 2 unresolved Stripe webhook events failed/unprocessed');
     expect(composed.text).toContain('evt_dead_1 (payment_intent.succeeded)');
-    expect(composed.text).toContain('error: update failed: relation locked');
+    expect(composed.text).toContain('error recorded (text withheld');
+    expect(composed.text).not.toContain('relation locked');
     expect(composed.text).toContain('evt_dead_2 (charge.refunded)');
     expect(composed.text).toContain('unprocessed (no error recorded');
     expect(composed.count).toBe(2);
@@ -126,33 +130,26 @@ describe('composeWebhookHealthDigest', () => {
     expect(composed.stripeFailureCount).toBe(1);
   });
 
-  test('error snippets are sanitized: no emails, no long digit runs, capped length', () => {
+  test('stored error text never reaches the email — not even in scrubber-proof forms', () => {
+    // Synthetic fixture only. Includes PII shapes a scrub regex CANNOT
+    // recognize (unquoted name, street address) alongside quoted
+    // literals/emails/phones — the contract is that NONE of the stored
+    // error text survives into the digest.
     const composed = composeWebhookHealthDigest({
       ledger: {
         total: 1,
-        rows: [ledgerRow({ error: `SMS to +19415551234 bounced for jane.doe@example.com — ${'x'.repeat(400)}` })],
+        rows: [ledgerRow({ error: "insert into \"invoices\" values ('Jane Q Fixture') - duplicate key; customer Jane Q Fixture at 123 Palmetto Fixture Ln, +19415551234, jane.doe@example.com, charged $36.33" })],
       },
       stripeSide: null,
       stripeCheckError: null,
     });
-    expect(composed.text).not.toContain('+19415551234');
+    expect(composed.text).not.toContain('Jane Q Fixture');
+    expect(composed.text).not.toContain('Palmetto Fixture');
+    expect(composed.text).not.toContain('9415551234');
     expect(composed.text).not.toContain('jane.doe@example.com');
-    expect(composed.text).toContain('[redacted-number]');
-    expect(composed.text).toContain('[redacted-email]');
-    expect(sanitizeErrorSnippet('x'.repeat(500)).length).toBe(200);
-  });
-
-  test('error snippets scrub quoted SQL literals (customer names) and currency amounts', () => {
-    // Knex prefixes the failing SQL onto err.message — names arrive as
-    // quoted literals, amounts as short currency strings the digit-run
-    // pattern is too long to catch. Synthetic fixture only.
-    const snippet = sanitizeErrorSnippet(
-      "insert into \"invoices\" (\"customer_name\") values ('Jane Q Fixture') - duplicate key; charged $36.33 to card"
-    );
-    expect(snippet).not.toContain('Jane Q Fixture');
-    expect(snippet).not.toContain('36.33');
-    expect(snippet).toContain("'[redacted]'");
-    expect(snippet).toContain('[redacted-amount]');
+    expect(composed.text).not.toContain('36.33');
+    expect(composed.text).toContain('error recorded (text withheld');
+    expect(composed.html).not.toContain('Jane Q Fixture');
   });
 
   test('beyond-cap unreconciled remainder is reported as POSSIBLE failures, never as confirmed endpoint failures', () => {
@@ -227,6 +224,10 @@ describe('runStripeWebhookHealthCheck', () => {
     const mail = sendgrid.sendOne.mock.calls[0][0];
     expect(mail.subject).toBe('FIX: Stripe webhook delivery check FAILED — Stripe-side status unknown');
     expect(mail.text).toContain('Stripe-side delivery status is UNKNOWN');
+    // The thrown error's arbitrary prose stays OUT of the email — generic
+    // line only (full text lives on the result → job_health → logs).
+    expect(mail.text).not.toContain('timed out');
+    expect(mail.text).toContain('threw an unexpected error');
   });
 
   test('failed Stripe-side probe with ledger findings still emails AND surfaces stripeCheckError', async () => {

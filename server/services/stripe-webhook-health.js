@@ -29,9 +29,11 @@
 // (or the 90d purge) erases it.
 //
 // PII: Stripe event ids (evt_…) and event types are identifiers, not PII.
-// The ledger's `payload` column is NEVER read here, and error snippets are
-// masked (emails, digit runs) before they leave the process — same
-// discipline as cron-lock's sanitizeJobError.
+// The ledger's `payload` column is NEVER read here, and stored error TEXT
+// never leaves the process at all — no scrub regex can recognize every PII
+// form (unquoted names, street addresses), so the email carries fixed
+// generic descriptions plus allowlisted identifiers only; the operator
+// reads the raw error on the ledger row or in Railway logs.
 //
 // Exception-based: a quiet day sends nothing. Live by default with a
 // kill switch (STRIPE_WEBHOOK_HEALTH_DISABLED=1). Cron: daily 7:04am ET in
@@ -49,7 +51,7 @@ const { isInternalEmailRecipient } = require('../utils/internal-email-recipients
 // error=null row younger than this is an in-flight claim, not a failure.
 const { STALE_CLAIM_WINDOW_MS } = require('../routes/stripe-webhook-helpers');
 const { isDeployedProduction } = require('../utils/railway-deployment');
-const { scrubSentryText } = require('../utils/sentry-scrub');
+const { safeErrorToken } = require('../utils/sentry-scrub');
 
 const watcherDisabled = () => ['1', 'true', 'on']
   .includes(String(process.env.STRIPE_WEBHOOK_HEALTH_DISABLED || '').toLowerCase());
@@ -70,25 +72,9 @@ const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 // send-marker dedupes double TICKS, never findings.
 const LOOKBACK_HOURS = 48;
 const MAX_ROWS = 25;
-const ERROR_SNIPPET_LENGTH = 200;
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-// Handler error messages are app-written, but provider errors can echo
-// request payloads (Twilio embeds phone numbers; Stripe messages can quote a
-// receipt email) and Knex prefixes the failing SQL, where customer names
-// arrive as quoted literals and amounts as short currency strings. Reuse the
-// shared Sentry scrubber (emails, quoted SQL literals, $amounts, digit runs)
-// so the two egress sinks can't drift, then collapse whitespace and cap for
-// email display — the email itself must never carry customer
-// emails/names/amounts.
-function sanitizeErrorSnippet(message) {
-  return scrubSentryText(message)
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, ERROR_SNIPPET_LENGTH);
 }
 
 // Ledger rows the app failed to apply: `error` recorded by the handler catch,
@@ -144,10 +130,15 @@ async function loadLedgerEventIds(ids) {
   return new Set(rows.map((row) => row.id));
 }
 
+// The stored error TEXT is deliberately withheld from the email: it is
+// arbitrary prose (Knex SQL prefixes, provider echoes) that no pattern
+// scrub can make PII-safe for a third-party mail sink (codex on #3268).
+// Identifiers only; the operator reads the raw error on the ledger row or
+// in Railway logs.
 function describeLedgerRow(row) {
   const received = new Date(row.received_at).toISOString();
   const state = row.error
-    ? `error: ${sanitizeErrorSnippet(row.error) || '(empty message)'}`
+    ? 'error recorded (text withheld — may contain customer data; read it on the stripe_webhook_events row or in Railway logs)'
     : 'unprocessed (no error recorded — claim abandoned past the stale window)';
   return `${row.id} (${row.event_type}) received ${received} — ${state}`;
 }
@@ -161,6 +152,9 @@ function describeStripeSideEvent(evt) {
 // automatic notifier, so if the check itself broke (missing prod key,
 // thrown probe, capped scan) and the ledger was quiet, this digest is the
 // only rail that tells the operator Stripe-side delivery status is UNKNOWN.
+// `stripeCheckError` here must be EMAIL-SAFE text — the caller passes its
+// own fixed messages verbatim and replaces a thrown error's arbitrary
+// prose with a generic line + allowlisted token (never raw err.message).
 function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
   const ledgerTotal = ledger?.total || 0;
   const ledgerRows = ledger?.rows || [];
@@ -223,8 +217,8 @@ function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
       textSections.push('The local ledger is quiet, but the Stripe-side delivery check could not complete — Stripe-side delivery status is UNKNOWN until verified.');
       htmlSections.push('<p>The local ledger is quiet, but the Stripe-side delivery check could not complete — <strong>Stripe-side delivery status is UNKNOWN until verified</strong>.</p>');
     }
-    textSections.push('', `NOTE: the Stripe-side delivery check itself FAILED (${sanitizeErrorSnippet(stripeCheckError)}) — verify manually via the Intelligence Bar (get_stripe_webhook_failures) or the Stripe dashboard.`);
-    htmlSections.push(`<p><strong>NOTE:</strong> the Stripe-side delivery check itself FAILED (${esc(sanitizeErrorSnippet(stripeCheckError))}) — verify manually via the Intelligence Bar (get_stripe_webhook_failures) or the Stripe dashboard.</p>`);
+    textSections.push('', `NOTE: the Stripe-side delivery check itself FAILED (${stripeCheckError}) — verify manually via the Intelligence Bar (get_stripe_webhook_failures) or the Stripe dashboard.`);
+    htmlSections.push(`<p><strong>NOTE:</strong> the Stripe-side delivery check itself FAILED (${esc(stripeCheckError)}) — verify manually via the Intelligence Bar (get_stripe_webhook_failures) or the Stripe dashboard.</p>`);
   }
 
   textSections.push('', 'Replay/retry from the Stripe dashboard: https://dashboard.stripe.com/webhooks');
@@ -290,6 +284,11 @@ async function runStripeWebhookHealthCheck(opts = {}) {
   // never a benign nothing_found.
   let stripeSide = null;
   let stripeCheckError = null;
+  // Email-safe twin of stripeCheckError: our own fixed messages pass
+  // verbatim; a thrown error's arbitrary prose is replaced with a generic
+  // line + allowlisted token before it may reach the SendGrid digest (the
+  // full message still goes to the result/logs for job_health).
+  let stripeCheckErrorEmail = null;
   const stripeConfigured = opts.stripeConfigured ?? Boolean(process.env.STRIPE_SECRET_KEY);
   if (stripeConfigured) {
     try {
@@ -331,19 +330,23 @@ async function runStripeWebhookHealthCheck(opts = {}) {
       // as a thrown probe (email still carries whatever WAS found).
       if (stripeSide?.scan_exhaustive === false) {
         stripeCheckError = "Stripe-side probe hit its scan cap before covering the full lookback — events beyond the cap were not examined; verify in the Stripe dashboard";
+        stripeCheckErrorEmail = stripeCheckError;
       }
     } catch (err) {
       stripeCheckError = err.message || String(err);
+      const codeToken = safeErrorToken(err.code) || safeErrorToken(err.name);
+      stripeCheckErrorEmail = `the check threw an unexpected error${codeToken ? ` (${codeToken})` : ''} — full text in Railway logs / job_health`;
       logger.error(`[stripe-webhook-health] Stripe-side delivery check failed: ${stripeCheckError}`);
     }
   } else if (opts.deployedProd ?? isDeployedProduction()) {
     stripeCheckError = 'STRIPE_SECRET_KEY is not set in deployed production — Stripe-side delivery check cannot run';
+    stripeCheckErrorEmail = stripeCheckError;
     logger.error(`[stripe-webhook-health] ${stripeCheckError}`);
   } else {
     logger.info('[stripe-webhook-health] STRIPE_SECRET_KEY not set (dev/test/preview) — skipping Stripe-side delivery check');
   }
 
-  const composed = composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError });
+  const composed = composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError: stripeCheckErrorEmail });
   if (!composed) {
     // Everything quiet AND the check completed (compose returns a digest
     // whenever stripeCheckError is set — job_health has no notifier, so a
@@ -404,7 +407,6 @@ module.exports = {
   runStripeWebhookHealthCheck,
   _private: {
     composeWebhookHealthDigest,
-    sanitizeErrorSnippet,
     failedEventsQuery,
     ledgerCutoffs,
     LOOKBACK_HOURS,

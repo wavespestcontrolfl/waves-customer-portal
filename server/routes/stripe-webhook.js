@@ -1,5 +1,6 @@
 const express = require('express');
 const Sentry = require('@sentry/node');
+const { safeErrorToken } = require('../utils/sentry-scrub');
 const router = express.Router();
 const Stripe = require('stripe');
 const db = require('../models/db');
@@ -807,22 +808,23 @@ router.post(
       // PII rule). Capture FIXED generic text plus safe identifiers only
       // (event id/type and error name/code are not PII; the payload is
       // never attached); an explicit fingerprint keeps grouping stable
-      // without a stack. The full message/stack stay in the ledger error
-      // column (90d) and the Railway console log above. Signature failures
-      // above are deliberately NOT captured (public endpoint —
-      // attack-surface noise, not app failure).
+      // without a stack. err.name/err.code are only forwarded when they
+      // pass the strict single-token allowlist (safeErrorToken) — length
+      // alone is not PII-safety, arbitrary prose in either field is
+      // DROPPED. The full message/stack stay in the ledger error column
+      // (90d) and the Railway console log above. Signature failures above
+      // are deliberately NOT captured (public endpoint — attack-surface
+      // noise, not app failure).
+      const safeName = safeErrorToken(err.name) || 'Error';
       const syntheticErr = new Error(`stripe-webhook handler failure (${event.type})`);
-      syntheticErr.name = err.name || 'Error';
+      syntheticErr.name = safeName;
       // A synthetic stack would point at THIS catch block for every
       // failure — misleading noise, so send none.
-      syntheticErr.stack = `${syntheticErr.name}: ${syntheticErr.message}`;
-      const safeErrorCode = (typeof err.code === 'string' && err.code.length <= 64) || typeof err.code === 'number'
-        ? err.code
-        : undefined;
+      syntheticErr.stack = `${safeName}: ${syntheticErr.message}`;
       Sentry.captureException(syntheticErr, {
         tags: { area: 'stripe-webhook' },
-        extra: { eventType: event.type, eventId: event.id, errorName: syntheticErr.name, errorCode: safeErrorCode },
-        fingerprint: ['stripe-webhook-handler', event.type, syntheticErr.name],
+        extra: { eventType: event.type, eventId: event.id, errorName: safeName, errorCode: safeErrorToken(err.code) ?? undefined },
+        fingerprint: ['stripe-webhook-handler', event.type, safeName],
       });
 
       // Record error and return 500 so Stripe retries (handlers are idempotent)

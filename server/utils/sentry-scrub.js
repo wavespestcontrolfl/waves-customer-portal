@@ -10,13 +10,11 @@
 //
 // ⚠️ This pattern allowlist is NOT sufficient as the primary rail to a
 // third-party sink: an UNQUOTED customer name or street address matches
-// none of these patterns and passes through (codex on #3268). Sentry
-// capture sites must therefore send FIXED generic text + safe identifiers
-// (see stripe-webhook.js's handler catch) — this scrubber is only (a) the
-// defense-in-depth backstop on exception values inside instrument.js's
-// beforeSend, and (b) snippet masking for the owner-internal health email
-// (stripe-webhook-health's sanitizeErrorSnippet, recipient fail-closed to
-// internal addresses).
+// none of these patterns and passes through (codex on #3268). Egress sites
+// must therefore send FIXED generic text + allowlisted identifiers (see
+// stripe-webhook.js's handler catch and stripe-webhook-health's digest) —
+// this scrubber is only the defense-in-depth backstop on exception values
+// inside instrument.js's beforeSend.
 
 const MAX_SCRUBBED_LENGTH = 2000;
 
@@ -42,4 +40,15 @@ function scrubSentryText(text) {
     .slice(0, MAX_SCRUBBED_LENGTH);
 }
 
-module.exports = { scrubSentryText, MAX_SCRUBBED_LENGTH };
+// Strict allowlist for error names/codes bound for a third-party sink: one
+// machine token ('ECONNRESET', '23505', 'KnexTimeoutError'), no whitespace,
+// no '@', bounded length — a value that fails this is arbitrary prose and
+// is DROPPED, never scrubbed-and-forwarded. Numbers (Postgres error codes
+// arrive numeric-ish, HTTP statuses numeric) stringify first.
+const ERROR_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+function safeErrorToken(value) {
+  const str = typeof value === 'number' && Number.isFinite(value) ? String(value) : value;
+  return typeof str === 'string' && ERROR_TOKEN_PATTERN.test(str) ? str : null;
+}
+
+module.exports = { scrubSentryText, safeErrorToken, MAX_SCRUBBED_LENGTH };
