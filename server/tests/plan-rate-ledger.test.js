@@ -631,6 +631,44 @@ describe('zero-priced accepted families (codex r2)', () => {
     expect(slices.lawn_care).toBe(50);
   });
 
+  test('result and engineResult containers MERGE — neither shadows the other (codex r19)', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        engineResult: {
+          lineItems: [{ service: 'pest_control', name: 'Pest Control', annual: 480 }],
+        },
+        result: {
+          recurring: {
+            services: [],
+            palmInjectionMo: 55,
+          },
+        },
+      },
+      monthlyRate: 95,
+    });
+    expect(slices.pest_control).toBe(40);
+    expect(slices.palm_injection).toBe(55);
+  });
+
+  test('operator-adjusted engine rows keep their manualFinalAnnual proportions (codex r19)', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        engineResult: {
+          lineItems: [
+            { service: 'pest_control', name: 'Pest Control', annualAfterDiscount: 480, manualFinalAnnual: 240 },
+            // Lawn's rebuild branch reads PRE-discount forms (floor
+            // machinery) — the stamp still wins for slicing.
+            { service: 'lawn_care', name: 'Lawn Care', annual: 600, manualFinalAnnual: 600 },
+          ],
+        },
+      },
+      monthlyRate: 70,
+    });
+    // Post-manual proportions (20:50), not pre-discount (40:50).
+    expect(slices.pest_control).toBe(20);
+    expect(slices.lawn_care).toBe(50);
+  });
+
   test('apps/treatmentsPerYear cadence aliases annualize per-app rows (codex r18)', () => {
     const slices = estimateFamilySlices({
       estimateData: {

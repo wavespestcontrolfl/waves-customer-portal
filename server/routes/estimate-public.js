@@ -3262,6 +3262,14 @@ function recurringServicesWithSupplements(estResult = {}) {
         mo: monthly || null,
         monthly: monthly || null,
         annual: annual || (monthly ? Math.round(monthly * 12 * 100) / 100 : null),
+        // Post-manual audit stamp survives the rebuild (codex #3245 r19):
+        // the plan-rate ledger sizes components post-discount-first, and
+        // dropping the stamp here recorded pre-discount proportions for
+        // operator-adjusted agent drafts. Additive — display consumers
+        // already prefer it where present.
+        ...(item.manualFinalAnnual != null && Number.isFinite(Number(item.manualFinalAnnual))
+          ? { manualFinalAnnual: Number(item.manualFinalAnnual) }
+          : {}),
         perTreatment: firstPositiveNumber(item.perApp, item.perVisit),
         visitsPerYear: firstPositiveNumber(item.visitsPerYear, item.visits, item.frequency, item.appsPerYear),
         // Carry cadence (foam) so pattern inference / cadence-aware shapers don't
