@@ -225,7 +225,7 @@ describe('membership.started lane comes from the acceptance, not the stale row',
     })).toBe('monthly_membership');
   });
 
-  test('source pin: the converter passes the lane AND the stamped fee into the email payload', () => {
+  test("source pin: the converter passes the lane AND this acceptance's amount into the email payload", () => {
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
@@ -233,9 +233,11 @@ describe('membership.started lane comes from the acceptance, not the stale row',
     expect(emailStart).toBeGreaterThan(-1);
     const emailBlock = src.slice(emailStart, src.indexOf('};', emailStart));
     expect(emailBlock).toContain('billingLane: acceptedBillingLaneForConversion(');
-    expect(emailBlock).toContain('perApplicationAmount: stampedPerApplicationFee');
-    // The fee the email renders must be the SAME value stamped on the
-    // customers row — one authority, no drift.
+    // Codex #3271 r2: the email quotes what was JUST accepted, which on an
+    // add-on accept deliberately differs from the preserved customer-level
+    // stamp (the stamp is the completion fallback for the ORIGINAL series).
+    expect(emailBlock).toContain('perApplicationAmount: emailPerApplicationAmountForConversion(');
+    // The customers-row stamp itself is still the one fallback authority.
     expect(src).toContain('per_application_fee: stampedPerApplicationFee');
   });
 });
