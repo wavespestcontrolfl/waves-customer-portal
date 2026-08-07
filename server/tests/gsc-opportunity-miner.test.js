@@ -1114,6 +1114,9 @@ describe('listicle_family scoring + action mapping', () => {
     expect(k(['a', 'b'])).toContain('listicle_family::page::');
     expect(k(['a', 'b'])).not.toBe(k(['a', 'b', 'c'])); // new family → new key
     expect(k(['a', 'b'])).not.toBe(listicleFamilyRefreshDedupeKey('https://wavespestcontrol.com/blog/other/', 'tree-shrub', null, ['a', 'b']));
+    // r34: ROUTE IDENTITY keys — www/apex hosts and slash variants of one
+    // route share a key.
+    expect(listicleFamilyRefreshDedupeKey('https://www.wavespestcontrol.com/blog/florida-native-plants', 'tree-shrub', null, ['a', 'b'])).toBe(k(['a', 'b']));
   });
 
   test('served families route to a page refresh, never a drop and never map-existence (query-page map)', () => {
@@ -1158,7 +1161,8 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/buildListicleFamilyRefreshOpp\(pick\.entries\)/);
     // Grouped by PAGE alone — mixed-classification families served by one
     // URL must never become multiple claimable rows editing the same page.
-    expect(mineSrc).toMatch(/refreshGroups\.get\(served\.hit\.page_url\)/);
+    expect(mineSrc).toMatch(/refreshGroups\.get\(groupId\)/);
+    expect(mineSrc).toMatch(/const groupId = routeIdentity\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/s\.hit && s\.hit\.position >= THRESHOLDS\.strikingDistancePositionMin/);
     // Window filter BEFORE the per-query page reduction — a top-3 page
     // must not shadow a refreshable in-window page (Codex r17).
@@ -1168,7 +1172,7 @@ describe('listicle_family scoring + action mapping', () => {
     // An answer_gap refresh already targeting the page fences the family
     // refresh — one claimable edit per page per cycle (Codex r18); the
     // fence set is floor-filtered where mineAll builds it.
-    expect(mineSrc).toMatch(/if \(answerGapPages\.has\(served\.hit\.page_url\)\) continue;/);
+    expect(mineSrc).toMatch(/if \(answerGapPages\.has\(routeIdentity\(served\.hit\.page_url\)\)\) continue;/);
     // Mine-time fence = LIVE in-flight rows only; same-batch candidates go
     // through frozen-aware persist arbitration instead (audit r21).
     expect(src).toMatch(/const answerGapPages = new Set\(\);/);
@@ -1206,7 +1210,7 @@ describe('listicle_family scoring + action mapping', () => {
     // loadExistingPageBody check as mineAnswerGap); unresolvable → the
     // family stays a blog candidate, and the runtime FAQ guards read
     // gsc_signal.specialty_topic.
-    expect(mineSrc).toMatch(/loadExistingPageBody\(pageUrl\)/);
+    expect(mineSrc).toMatch(/loadExistingPageBody\(pageUrl, \{ strictRegistryErrors: true \}\)/);
     expect(mineSrc).toMatch(/if \(resolved\) servedBy\.set\(q, resolved\);/);
     // Fail-closed three-way (audit r25): confirmed non-editable → blog
     // fallback; I/O error → the family skips ENTIRELY (no duplicate blog
@@ -1250,28 +1254,38 @@ describe('listicle_family scoring + action mapping', () => {
     // r32: ONE verdict cache per run shared by selection AND the boost.
     expect(src).toMatch(/_applyFactsReadinessBoost\(minedOpportunities, factsReadyCache\)/);
     expect(src).toMatch(/_applyFactsReadinessBoost\(opportunities = \[\], factsReadyCache = new Map\(\)\)/);
-    expect(mineSrc).toMatch(/nonEditableCache\.set\(pageUrl, now \+ GscOpportunityMiner\.NON_EDITABLE_TTL_MS\)/);
-    expect(mineSrc).toMatch(/if \(nonEditableCache\.has\(url\)\) pageState\.set\(url, 'not_editable'\)/);
+    expect(mineSrc).toMatch(/nonEditableCache\.set\(routeIdentity\(pageUrl\), now \+ GscOpportunityMiner\.NON_EDITABLE_TTL_MS\)/);
+    expect(mineSrc).toMatch(/if \(nonEditableCache\.has\(routeIdentity\(url\)\)\) pageState\.set\(url, 'not_editable'\)/);
     expect(src).toMatch(/static _nonEditablePages = new Map\(\)/);
     // r33: pending predecessors block transitions when the mine cannot
     // sweep (noncanonical window); non-family in-flight pages count as
     // occupied in the probe rotation; topic patterns come from the
     // guardrail vocabulary, not a hand-kept list.
     expect(src).toMatch(/\? \['claimed', 'pending_review'\]\s*\n\s*: \['claimed', 'pending_review', 'pending'\]/);
-    expect(mineSrc).toMatch(/answerGapPages\.has\(pageUrl\)/);
+    expect(mineSrc).toMatch(/answerGapPages\.has\(routeIdentity\(pageUrl\)\)/);
     expect(src).toMatch(/const \{ FAQ_BLOCKED_SERVICES \} = require\('\.\.\/content\/content-guardrails'\)/);
+    // r34: strict registry errors in probes; the shared page-edit advisory
+    // lock name; identity-keyed fences, sweep exemptions, and probe cache.
+    expect(mineSrc).toMatch(/strictRegistryErrors: true/);
+    expect(src).toMatch(/pg_advisory_xact_lock\(hashtext\('opportunity_page_edit'\)\)/);
+    expect(src).not.toMatch(/listicle_family_reconcile/);
+    expect(src).toMatch(/function routeIdentity\(url\)/);
+    expect(src).toMatch(/\$\{ROUTE_IDENTITY_SQL\} NOT IN/);
+    const auditSrc = require('fs').readFileSync(require.resolve('../services/seo/refresh-audit'), 'utf8');
+    expect(auditSrc).toMatch(/pg_advisory_xact_lock\(hashtext\('opportunity_page_edit'\)\)/);
+    expect(auditSrc).toMatch(/const inflightNow = await inflightRefreshFor\(trx\);/);
     expect(mineSrc).toMatch(/pageCityByUrl\.get\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/reconcileExemptions\.pages\.add\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/inflightKeys\.has\(g\.key\) && eligible\(g\)/);
     expect(mineSrc).toMatch(/dimEq\(r\.service, g\.entries\[0\]\.service\)/);
     const sweepSrc2 = src.slice(src.indexOf('async _sweepStaleFamilyRows'), src.indexOf('async mineNoContentYet'));
-    expect(sweepSrc2).toMatch(/orWhereNotIn\('page_url', exemptPages\)/);
+    expect(sweepSrc2).toMatch(/\$\{ROUTE_IDENTITY_SQL\} NOT IN/);
     expect(sweepSrc2).toMatch(/exemptions\.blogKeys/);
     expect(mineSrc).toMatch(/pageState\.get\(cand\.page_url\) \|\| 'error'/);
     expect(mineSrc).toMatch(/city: pageCityByUrl\.get\(served\.hit\.page_url\) \?\? inferCityFromUrl\(served\.hit\.page_url\)/);
-    expect(src).toMatch(/pg_advisory_xact_lock\(hashtext\('listicle_family_reconcile'\)\)/);
+    expect(src).toMatch(/pg_advisory_xact_lock\(hashtext\('opportunity_page_edit'\)\)/);
     // One-edit-per-page re-checked UNDER the transaction lock.
-    expect(src).toMatch(/inflightPageKeys\.get\(o\.page_url\)/);
+    expect(src).toMatch(/inflightPageKeys\.get\(routeIdentity\(o\.page_url\)\)/);
     expect(src).toMatch(/k !== o\.dedupe_key/);
     expect(src).toMatch(/lockEvenIfEmpty: sweepWillRun/);
     expect(src).toMatch(/if \(!hasFamily && !lockEvenIfEmpty\) return opportunities;/);
@@ -1319,9 +1333,9 @@ describe('listicle_family scoring + action mapping', () => {
     expect(opp.signal_metadata.source).toBe('listicle_family');
     expect(opp.signal_metadata.family_size).toBe(3);
     expect(opp.action_type).toBe('refresh_existing_page'); // refresh, not a competing post
-    // Page-STABLE dedupe (r16): service/city churn can't mint a second key.
+    // Page-STABLE dedupe (r16), keyed on route identity (r34).
     expect(opp.dedupe_key).toContain('listicle_family::page::');
-    expect(opp.dedupe_key).toContain(served.hit.page_url.slice(0, 60));
+    expect(opp.dedupe_key).toContain('wavespestcontrol.com::/blog/florida-native-plants');
     // Router anchoring contract this bucket relies on.
     const routerSrc = require('fs').readFileSync(require.resolve('../services/content/decision-router'), 'utf8');
     expect(routerSrc).toMatch(/PAGE_ANCHORED_BUCKETS = new Set\(\[.*'listicle_family'.*\]\)/);
@@ -1468,7 +1482,7 @@ describe('listicle_family scoring + action mapping', () => {
     // the pre-mine fence query alone left a producer race window.
     const revalSrc = src.slice(src.indexOf('async _revalidateFamilyBatch'), src.indexOf('async _sweepStaleFamilyRows'));
     expect(revalSrc).toMatch(/whereNot\('bucket', 'listicle_family'\)/);
-    expect(revalSrc).toMatch(/conflictPages\.has\(o\.page_url\)/);
+    expect(revalSrc).toMatch(/conflictPages\.has\(routeIdentity\(o\.page_url\)\)/);
     expect(revalSrc).toMatch(/conflictQueries\.has\(String\(q\)\.toLowerCase\(\)\)/);
     // Refresh branch checks conflict queries too (r29).
     expect(revalSrc).toMatch(/const fqs = Array\.isArray\(o\.signal_metadata\?\.family_queries\)/);

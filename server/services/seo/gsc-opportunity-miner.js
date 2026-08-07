@@ -742,6 +742,27 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
   return false;
 }
 
+// Canonical ROUTE IDENTITY of a page URL — registrable domain (www
+// stripped) + query/hash-free path with the trailing slash trimmed,
+// mirroring refresh-audit's hostRegistrableSql/canonPathSql: GSC reports
+// the same route under www/apex hosts and slash variants, and identity
+// (not the raw string) must key every group, fence, and dedupe derivation
+// or one Astro file collects concurrent conflicting edits (Codex r34).
+function routeIdentity(url) {
+  if (!url) return null;
+  const str = String(url);
+  const host = str.replace(/^[a-z]+:\/\//i, '').split('/')[0].split(':')[0].replace(/^www\./i, '').toLowerCase();
+  const path = str.split('#')[0].split('?')[0].replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/\/+$/, '');
+  return `${host}::${path}`;
+}
+
+// SQL twin of routeIdentity() for matching STORED page_url values by route
+// identity (the sweep's page exemption) — keep the two in lockstep. chr(63)
+// is '?' for the same knex bind-placeholder reason as CANON_URL_SQL; the
+// root path trims to '' in both forms.
+const ROUTE_IDENTITY_SQL = "(regexp_replace(regexp_replace(split_part(split_part(lower(page_url), '//', 2), '/', 1), '^www[.]', ''), ':.*$', '')"
+  + " || '::' || regexp_replace(regexp_replace(split_part(split_part(page_url, '#', 1), chr(63), 1), '^[a-z]+://[^/]+', ''), '/+$', ''))";
+
 // Subgroup-stable refresh key: (page, service, city, covered family set).
 // Within a subgroup a primary-family flip never changes the key — the
 // family-key set is SORTED, so order is irrelevant (the r16 duplicate-row
@@ -753,15 +774,17 @@ function listicleFamilyRepReachable(rep, ownPagesByServiceCity = new Map(), thre
 // old-generation row makes the new key WAIT; the sweep expires orphaned
 // pending generations).
 function listicleFamilyRefreshDedupeKey(pageUrl, service, city, familyKeys = []) {
-  const page = String(pageUrl || '');
+  // Keyed on ROUTE IDENTITY, not the raw URL — host/slash variants of one
+  // route must share a key (Codex r34).
+  const identity = routeIdentity(pageUrl) || '';
   const dims = [
-    page,
+    identity,
     service || '_',
     String(city || '_').toLowerCase(),
     familyKeys.slice().sort().join('|'),
   ].join('::');
   const digest = crypto.createHash('sha256').update(dims).digest('hex').slice(0, 16);
-  return ['listicle_family', 'page', page.slice(0, 100), digest].join('::');
+  return ['listicle_family', 'page', identity.slice(0, 100), digest].join('::');
 }
 
 // Family-stable dedupe key. Deliberately NOT dedupeKey(opp): that keys on
@@ -1114,7 +1137,7 @@ class GscOpportunityMiner {
             .whereNotNull('page_url')
             .select('page_url', 'query', db.raw("signal_metadata->'unanswered_queries' as unanswered_queries"));
           for (const r of inflight) {
-            answerGapPages.add(r.page_url);
+            answerGapPages.add(routeIdentity(r.page_url));
             if (r.query) inflightRefreshQueries.add(String(r.query).toLowerCase());
             for (const u of (Array.isArray(r.unanswered_queries) ? r.unanswered_queries : [])) {
               if (u && u.query) inflightRefreshQueries.add(String(u.query).toLowerCase());
@@ -1164,8 +1187,9 @@ class GscOpportunityMiner {
             .whereNotNull('page_url')
             .select('page_url', 'dedupe_key', 'status', 'service', 'city', db.raw("signal_metadata->'family_keys' as family_keys"));
           for (const r of rows) {
-            if (!familyRefreshState.has(r.page_url)) familyRefreshState.set(r.page_url, []);
-            familyRefreshState.get(r.page_url).push({ dedupe_key: r.dedupe_key, status: r.status, service: r.service, city: r.city, family_keys: r.family_keys });
+            const id = routeIdentity(r.page_url);
+            if (!familyRefreshState.has(id)) familyRefreshState.set(id, []);
+            familyRefreshState.get(id).push({ dedupe_key: r.dedupe_key, status: r.status, service: r.service, city: r.city, family_keys: r.family_keys, page_url: r.page_url });
           }
         } catch (err) {
           // FAIL CLOSED (Codex r25 audit): an empty map would disable the
@@ -2304,12 +2328,13 @@ class GscOpportunityMiner {
       // Occupied = family rows OR a non-family in-flight edit
       // (answerGapPages — those served families are fenced this run
       // anyway, so probing them first wastes the budget; Codex r33).
-      const pageHasRows = (pageUrl) => ((((refreshStateAvailable && familyRefreshState.get(pageUrl)) || []).length > 0
-        || answerGapPages.has(pageUrl)) ? 1 : 0);
+      const pageHasRows = (pageUrl) => ((((refreshStateAvailable && familyRefreshState.get(routeIdentity(pageUrl))) || []).length > 0
+        || answerGapPages.has(routeIdentity(pageUrl))) ? 1 : 0);
       // Cached non-editable pages resolve WITHOUT a probe and never enter
-      // the budget.
+      // the budget. Keyed by ROUTE IDENTITY (Codex r34) so a www/slash
+      // variant of a confirmed non-Astro page doesn't re-burn the budget.
       for (const url of demandByPage.keys()) {
-        if (nonEditableCache.has(url)) pageState.set(url, 'not_editable');
+        if (nonEditableCache.has(routeIdentity(url))) pageState.set(url, 'not_editable');
       }
       const probeOrder = Array.from(demandByPage.keys())
         .filter((url) => !pageState.has(url))
@@ -2321,10 +2346,10 @@ class GscOpportunityMiner {
           continue;
         }
         try {
-          const loaded = await astroPublisher.loadExistingPageBody(pageUrl);
+          const loaded = await astroPublisher.loadExistingPageBody(pageUrl, { strictRegistryErrors: true });
           pageState.set(pageUrl, loaded && loaded.body ? 'editable' : 'not_editable');
           if (!(loaded && loaded.body)) {
-            nonEditableCache.set(pageUrl, now + GscOpportunityMiner.NON_EDITABLE_TTL_MS);
+            nonEditableCache.set(routeIdentity(pageUrl), now + GscOpportunityMiner.NON_EDITABLE_TTL_MS);
           }
           if (loaded && loaded.body) {
             // Refresh city from the page's OWN metadata (Codex r29): local
@@ -2437,7 +2462,7 @@ class GscOpportunityMiner {
         // unanswered queries, which are exactly these variants; the family
         // re-mines next cycle if the page still serves it, and the sweep
         // expires any stale pending family refresh meanwhile (Codex r18).
-        if (answerGapPages.has(served.hit.page_url)) continue;
+        if (answerGapPages.has(routeIdentity(served.hit.page_url))) continue;
         // Accumulate — families sharing a serving page merge into ONE
         // refresh row (emitted after the loop) so no family's demand is
         // dropped. Grouped by PAGE alone: families classified under
@@ -2447,10 +2472,11 @@ class GscOpportunityMiner {
         // Sarasota page ranking for a Bradenton-phrased family must load
         // Sarasota facts, exactly like mineAnswerGap's URL-only refresh
         // cities (Codex r27); the query-resolved city still shapes BLOGS.
-        let group = refreshGroups.get(served.hit.page_url);
+        const groupId = routeIdentity(served.hit.page_url);
+        let group = refreshGroups.get(groupId);
         if (!group) {
-          group = { entries: [] };
-          refreshGroups.set(served.hit.page_url, group);
+          group = { entries: [], pageUrl: served.hit.page_url };
+          refreshGroups.set(groupId, group);
         }
         group.entries.push({ fam, served, service, city: pageCityByUrl.get(served.hit.page_url) ?? inferCityFromUrl(served.hit.page_url) });
         continue;
@@ -2504,7 +2530,8 @@ class GscOpportunityMiner {
       opp.dedupe_key = listicleFamilyDedupeKey(fam.key);
       out.push(opp);
     }
-    for (const [pageUrl, group] of (refreshStateAvailable ? refreshGroups.entries() : [])) {
+    for (const [pageIdentity, group] of (refreshStateAvailable ? refreshGroups.entries() : [])) {
+      const pageUrl = group.pageUrl;
       // One facts contract per brief → SUBGROUPS by (service, city), each
       // with its own stable key; one subgroup emitted per page at a time,
       // rotating when the prior completes. This threads three invariants
@@ -2559,7 +2586,7 @@ class GscOpportunityMiner {
           && (g.baseScore + WEIGHTS.factsReady) >= familyRefreshFloor
           && await this._factsReadyFor(g.entries[0].service, g.city, factsReadyCache));
       }
-      const rowsForPage = familyRefreshState.get(pageUrl) || [];
+      const rowsForPage = familyRefreshState.get(pageIdentity) || [];
       const frozenRows = rowsForPage.filter((r) => r.status === 'done' || r.status === 'skipped');
       const frozen = new Set(frozenRows.map((r) => r.dedupe_key));
       // A completed row whose stored family_keys is a SUPERSET of the
@@ -2660,7 +2687,7 @@ class GscOpportunityMiner {
       }
     }
     return {
-      pages: new Set(live.map((o) => o.page_url)),
+      pages: new Set(live.map((o) => routeIdentity(o.page_url))),
       // A family BLOG whose variant one of these refreshes targets is the
       // same intent under a different key — a boosted ordinary refresh and
       // a family blog must not both persist (Codex r21).
@@ -2672,7 +2699,7 @@ class GscOpportunityMiner {
   static familyOppYields(o, arbitrated) {
     if (o.bucket !== 'listicle_family') return false;
     if (o.action_type === 'refresh_existing_page') {
-      if (arbitrated.pages.has(o.page_url)) return true;
+      if (arbitrated.pages.has(routeIdentity(o.page_url))) return true;
       // Query-level too (Codex r27): an ordinary same-query edit can
       // target a DIFFERENT page (own-page heuristic vs exact mapping) —
       // same intent, two claimable edits.
@@ -2709,7 +2736,7 @@ class GscOpportunityMiner {
     // a fresh page and insert competing first refreshes. Every family
     // persist path serializes here; the second transaction's re-reads then
     // see the first's committed rows and defer.
-    await trx.raw("SELECT pg_advisory_xact_lock(hashtext('listicle_family_reconcile'))");
+    await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
     const rows = await trx('opportunity_queue')
       .where({ bucket: 'listicle_family' })
       .forUpdate()
@@ -2724,8 +2751,9 @@ class GscOpportunityMiner {
     for (const r of rows) {
       if (r.action_type !== 'refresh_existing_page' || !r.page_url) continue;
       if (!['pending', 'claimed', 'pending_review'].includes(r.status)) continue;
-      if (!inflightPageKeys.has(r.page_url)) inflightPageKeys.set(r.page_url, new Set());
-      inflightPageKeys.get(r.page_url).add(r.dedupe_key);
+      const rid = routeIdentity(r.page_url);
+      if (!inflightPageKeys.has(rid)) inflightPageKeys.set(rid, new Set());
+      inflightPageKeys.get(rid).add(r.dedupe_key);
     }
     const inflight = rows.filter((r) => r.status === 'claimed' || r.status === 'pending_review');
     const inflightBlogKeys = new Set(inflight
@@ -2746,7 +2774,7 @@ class GscOpportunityMiner {
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
       .whereNotNull('page_url')
       .select('page_url', 'query', trx.raw("signal_metadata->'unanswered_queries' as unanswered_queries"));
-    const conflictPages = new Set(nonFamily.map((r) => r.page_url));
+    const conflictPages = new Set(nonFamily.map((r) => routeIdentity(r.page_url)));
     const conflictQueries = new Set();
     for (const r of nonFamily) {
       if (r.query) conflictQueries.add(String(r.query).toLowerCase());
@@ -2757,13 +2785,13 @@ class GscOpportunityMiner {
     return opportunities.filter((o) => {
       if (o.bucket !== 'listicle_family') return true;
       if (o.action_type === 'refresh_existing_page') {
-        if (conflictPages.has(o.page_url)) return false;
+        if (conflictPages.has(routeIdentity(o.page_url))) return false;
         // Same-query conflicts too (Codex r29): a non-family edit of a
         // family query on a DIFFERENT page that committed since the fence
         // read is the same intent — defer the family refresh.
         const fqs = Array.isArray(o.signal_metadata?.family_queries) ? o.signal_metadata.family_queries : [];
         if ([o.query, ...fqs].some((q) => q && conflictQueries.has(String(q).toLowerCase()))) return false;
-        const pageKeys = inflightPageKeys.get(o.page_url);
+        const pageKeys = inflightPageKeys.get(routeIdentity(o.page_url));
         if (pageKeys && Array.from(pageKeys).some((k) => k !== o.dedupe_key)) return false;
         const keys = Array.isArray(o.signal_metadata?.family_keys) ? o.signal_metadata.family_keys : [];
         return !keys.some((k) => inflightBlogKeys.has(listicleFamilyDedupeKey(k)));
@@ -2792,14 +2820,20 @@ class GscOpportunityMiner {
           ? minScoreToActFor('new_supporting_blog')
           : minScoreToActFor(o.action_type)))
         .map((o) => o.dedupe_key);
-      const exemptPages = Array.from(exemptions.pages || []);
+      // Exemptions match by ROUTE IDENTITY, not the raw string (Codex r34):
+      // a stored row minted from a www/slash variant of the probe-failed
+      // page must keep its exemption too.
+      const exemptIdentities = Array.from(new Set(Array.from(exemptions.pages || []).map(routeIdentity).filter(Boolean)));
       let sweep = runner('opportunity_queue')
         .where({ bucket: 'listicle_family', status: 'pending' })
         .whereNotIn('dedupe_key', [...persistableKeys, ...Array.from(exemptions.blogKeys || [])]);
-      if (exemptPages.length) {
+      if (exemptIdentities.length) {
         // Probe-failed pages keep their pending rows this run.
         sweep = sweep.where(function pageExemption() {
-          this.whereNull('page_url').orWhereNotIn('page_url', exemptPages);
+          this.whereNull('page_url').orWhereRaw(
+            `${ROUTE_IDENTITY_SQL} NOT IN (${exemptIdentities.map(() => '?').join(', ')})`,
+            exemptIdentities
+          );
         });
       }
       await sweep.update({ status: 'expired', skip_reason: 'family_signal_gone', updated_at: new Date() });
