@@ -205,8 +205,10 @@ async function executeBITool(toolName, input) {
               // this branch selected on a silently partial total.
               try {
                 const p = JSON.parse(row.review_text);
+                // Finite totalReviews REQUIRED (rating-only would count the
+                // location complete while contributing zero to the total).
                 if (p && typeof p === 'object'
-                  && (Number.isFinite(p.totalReviews) || Number.isFinite(p.rating))) {
+                  && Number.isFinite(p.totalReviews)) {
                   freshStats[row.location_id] = p;
                 }
               } catch {}

@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
+const { runExclusive } = require('../utils/cron-lock');
 
 const POLICY_KEY = 'review_incentives.policy';
 const DEFAULT_POLICY = {
@@ -284,18 +285,22 @@ async function existingPayoutForSource({ reviewRequestId, googleReviewId, servic
   return null;
 }
 
-async function insertPayout(attrs, conn = db) {
+async function insertPayout(attrs, conn = db, { syncLockHeld = false } = {}) {
   // Money boundary: never create (or correct) a payout for a review Google
-  // has removed. Callers pre-check liveness, but attribution resolution runs
-  // after their snapshot read — the hourly scan even passes rows loaded
-  // before the per-location sync lock released. The liveness check and the
-  // payout INSERT are atomic: the source review row is locked FOR UPDATE for
-  // the duration, so the reconcile's stamping UPDATE serializes against the
-  // insert (same shape as the review-graphics approve gate — both writers are
-  // single fast statements, no slow external work under the lock). Fail
-  // closed on a vanished row too.
+  // has removed. Two layers, mirroring the graphic-persist gate:
+  //  1. The per-location `gbp-review-sync:<loc>` advisory lock — the row's
+  //     stamp alone can't be trusted mid-cycle: a sync may already hold an
+  //     authoritative feed proving the review absent with the reconcile's
+  //     stamp still queued. Holding the sync lock means no cycle is in
+  //     flight; a busy lock defers the payout (retryable — the hourly scan
+  //     retries next tick). Callers already inside the lock pass
+  //     syncLockHeld to compose (the advisory lock is per-connection and
+  //     would not re-enter).
+  //  2. A transaction with the source review row locked FOR UPDATE through
+  //     the INSERT, so the stamping UPDATE serializes against it. Fail
+  //     closed on a vanished row too.
   if (attrs.googleReviewId) {
-    return conn.transaction(async (trx) => {
+    const moneyBoundary = () => conn.transaction(async (trx) => {
       const liveRow = await trx('google_reviews')
         .where({ id: attrs.googleReviewId })
         .whereNull('missing_since')
@@ -306,6 +311,20 @@ async function insertPayout(attrs, conn = db) {
       }
       return _insertPayoutRow(attrs, trx);
     });
+    if (syncLockHeld) return moneyBoundary();
+    const current = await conn('google_reviews').where({ id: attrs.googleReviewId }).first();
+    if (!current || current.missing_since != null) {
+      return { created: false, skipped: true, reason: 'removed_from_google' };
+    }
+    const outcome = await runExclusive(
+      `gbp-review-sync:${current.location_id}`,
+      moneyBoundary,
+      { recordHealth: false },
+    );
+    if (outcome?.skipped && (outcome.reason === 'lease_held' || outcome.reason === 'no_connection')) {
+      return { created: false, skipped: true, reason: 'sync_in_progress' };
+    }
+    return outcome;
   }
   return _insertPayoutRow(attrs, conn);
 }
@@ -777,10 +796,18 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     };
   }
 
-  // Conditional write, not a snapshot re-check: the read-time guard above can
-  // race the reconcile stamping this row mid-attribution. Zero rows updated
-  // means liveness was lost — abort BEFORE any side effect (the
-  // has_left_google_review mark, thank-you enrollment, and the payout).
+  // Every attribution mutation runs under the per-location sync advisory
+  // lock: the row's stamp alone can't be trusted mid-cycle — a sync may
+  // already hold an authoritative feed proving this review absent with the
+  // reconcile's stamp still queued, and the customer link, review-ask
+  // suppression, thank-you enrollment, and payout would all land against a
+  // review about to be marked removed. Holding the lock means no cycle is in
+  // flight; a busy lock is a retryable 409 BEFORE any side effect.
+  const attributionOutcome = await runExclusive(`gbp-review-sync:${review.location_id}`, async () => {
+  // Conditional write, not a snapshot re-check: a stamp can still have
+  // committed before the lock was free. Zero rows updated means liveness was
+  // lost — abort BEFORE any side effect (the has_left_google_review mark,
+  // thank-you enrollment, and the payout).
   const linkedCount = await conn('google_reviews')
     .where({ id: review.id })
     .whereNull('missing_since')
@@ -853,7 +880,7 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     currency: policy.currency,
     earnedAt: review.review_created_at || review.created_at || new Date(),
     attributionSnapshot,
-  }, conn);
+  }, conn, { syncLockHeld: true });
 
   // Re-attribution: a payout already existed for this review (the partial
   // unique index on google_review_id dedups it), so insertPayout no-ops with
@@ -908,8 +935,15 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     logger.warn(`[review-incentives] manual attribution activity log failed (${err?.code || err?.name || 'Error'})`);
   }
 
+  return result;
+  }, { recordHealth: false });
+  if (attributionOutcome?.skipped
+    && (attributionOutcome.reason === 'lease_held' || attributionOutcome.reason === 'no_connection')) {
+    throw operationalError('Review sync is in progress for this location — retry the attribution in a moment', 409, 'review_sync_in_progress');
+  }
+
   return {
-    ...result,
+    ...attributionOutcome,
     reviewId: review.id,
     customer: serializeCustomer(customer),
     technician: {

@@ -4,6 +4,15 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+// Advisory-lock pass-through: the payout money boundary and manual
+// attribution run under gbp-review-sync:<loc>; lock-busy behavior is
+// asserted separately by overriding this mock per-test.
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: jest.fn(async (name, fn) => fn()),
+  isLocked: jest.fn(async () => false),
+  recordJobStart: jest.fn(async () => {}),
+  recordJobEnd: jest.fn(async () => {}),
+}));
 
 const ReviewIncentives = require('../services/review-incentives');
 
@@ -686,6 +695,55 @@ describe('review incentives', () => {
 
     expect(stampLanded).toBe(true); // the race actually ran
     expect(conn.__state.rows.google_reviews[0].customer_id).toBeNull();
+    expect(conn.__state.rows.customers[0].has_left_google_review).toBe(false);
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+    expect(conn.__state.rows.activity_log).toHaveLength(0);
+  });
+
+  test('a busy location sync defers the payout and 409s manual attribution', async () => {
+    // A sync cycle mid-flight may hold an authoritative feed proving the
+    // review absent before the stamp lands — money and attribution must wait.
+    const { runExclusive } = require('../utils/cron-lock');
+    const daysAgo = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    const conn = createDbMock({
+      customers: [{
+        id: 'customer-1',
+        first_name: 'Customer',
+        last_name: 'One',
+        active: true,
+        has_left_google_review: false,
+      }],
+      service_records: [{
+        id: 'service-1',
+        customer_id: 'customer-1',
+        technician_id: 'tech-1',
+        service_date: daysAgo(12).slice(0, 10),
+      }],
+      technicians: [{ id: 'tech-1', name: 'Tech One' }],
+      google_reviews: [{
+        id: 'google-1',
+        customer_id: 'customer-1',
+        reviewer_name: 'Customer One',
+        star_rating: 5,
+        review_created_at: daysAgo(10),
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/abc',
+        missing_since: null,
+      }],
+    });
+
+    runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
+    const payout = await ReviewIncentives.createPayoutForGoogleReview('google-1', { conn, policy });
+    expect(payout).toMatchObject({ created: false, skipped: true, reason: 'sync_in_progress' });
+    expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+
+    runExclusive.mockImplementationOnce(async () => ({ skipped: true, reason: 'lease_held' }));
+    await expect(ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-1',
+      customerId: 'customer-1',
+      serviceRecordId: 'service-1',
+      adminId: 'admin-1',
+    }, { conn, policy })).rejects.toMatchObject({ code: 'review_sync_in_progress' });
     expect(conn.__state.rows.customers[0].has_left_google_review).toBe(false);
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
     expect(conn.__state.rows.activity_log).toHaveLength(0);

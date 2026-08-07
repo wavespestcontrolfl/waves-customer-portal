@@ -316,8 +316,10 @@ router.get('/', dashboardCache, async (req, res, next) => {
               // its location as complete would select a silently partial
               // Places aggregate instead of the live-row fallback. The sync
               // writer always stores at least one numeric field.
+              // Finite totalReviews REQUIRED (rating-only would count the
+              // location complete while contributing zero to the total).
               if (!parsed || typeof parsed !== 'object'
-                || !(Number.isFinite(parsed.totalReviews) || Number.isFinite(parsed.rating))) {
+                || !Number.isFinite(parsed.totalReviews)) {
                 logger.warn(`[admin-dashboard] google_reviews _stats payload has no usable numbers (id=${row.id})`);
               } else {
                 totalFromPlaces += parsed.totalReviews || 0;
@@ -1429,7 +1431,7 @@ router.get('/review-trend', dashboardCache, async (req, res, next) => {
       try {
         const parsed = JSON.parse(row.review_text);
         if (!parsed || typeof parsed !== 'object'
-          || !(Number.isFinite(parsed.totalReviews) || Number.isFinite(parsed.rating))) {
+          || !Number.isFinite(parsed.totalReviews)) {
           logger.warn(`[admin-dashboard] review-trend _stats payload has no usable numbers (id=${row.id})`);
           continue;
         }

@@ -178,8 +178,13 @@ router.get('/', async (req, res, next) => {
         // or '{}' parses as valid JSON but contributes nothing — letting it
         // into googleStats would count its location toward
         // googleStatsComplete and expose a silently partial Google total.
+        // Finite totalReviews REQUIRED: consumers sum it, so a rating-only
+        // payload counting as "complete" would contribute zero reviews and
+        // silently under-report the Google total. Rating stays optional —
+        // a zero-review location legitimately has none, and every consumer
+        // guards it.
         if (parsed && typeof parsed === 'object'
-          && (Number.isFinite(parsed.totalReviews) || Number.isFinite(parsed.rating))) {
+          && Number.isFinite(parsed.totalReviews)) {
           googleStats[row.location_id] = { rating: parsed.rating, totalReviews: parsed.totalReviews, syncedAt: row.synced_at };
         }
       } catch { /* ignore */ }
