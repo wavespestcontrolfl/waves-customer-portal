@@ -11886,16 +11886,19 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       target,
       notifyCustomer: notifyCustomer !== false,
       // Optional dispatcher note appended to the moved-SMS; the service
-      // sanitizes (≤200 chars, no link shorteners) and rejects with the
-      // note_* reasons below.
+      // sanitizes (≤200 chars, no links, no emoji, outbound-guard-clean)
+      // and rejects with the note_* reasons below.
       customerNote,
+      // Stamps sms_log.admin_user_id on each moved-SMS so the durable
+      // record shows which operator drove the send / authored the note.
+      actorUserId: req.technicianId || null,
       initiatedBy: 'admin',
     });
 
     if (!result.ok) {
       const code = result.reason === 'not_found' ? 404
         : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later',
-          'note_too_long', 'note_link_blocked', 'note_emoji_blocked', 'note_invalid'].includes(result.reason) ? 400
+          'note_too_long', 'note_link_blocked', 'note_emoji_blocked', 'note_guard_blocked', 'note_invalid'].includes(result.reason) ? 400
           : 409;
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }

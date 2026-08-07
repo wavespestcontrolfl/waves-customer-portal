@@ -83,6 +83,14 @@ const CUSTOMER_NOTE_MAX_CHARS = 200;
 // whose match is preceded by a domain character (codex pre-push P1 ×2).
 const NOTE_SHORTENER_RE = /(?:^|[^a-z0-9-])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[^a-z0-9-])/i;
 
+// A blocklist of shortener hosts can never be complete (codex r2 P1:
+// tiny.one, v.gd, …), so the real rule is: NO URL of any kind in a note.
+// The moved SMS already carries the tokenized /reschedule link — a note
+// has no legitimate need for another one. Catches scheme'd URLs, www.
+// forms, and bare host/path tokens ("tiny.one/x"); the named-shortener
+// regex above stays as an extra layer for naked hosts without a path.
+const NOTE_URL_RE = /(?:https?:\/\/|www\.)\S+|(?:^|[^a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S/i;
+
 // The regex is textual, so hosts hidden behind encodings that a URL parser
 // (or a tapping thumb) canonicalizes back to the real hostname would slip
 // it: `bit%2ely`, fullwidth `ｂｉｔ．ｌｙ`, ideographic-dot `bit。ly`,
@@ -108,7 +116,9 @@ function sanitizeCustomerNote(raw) {
   const note = raw.replace(/\s+/g, ' ').trim();
   if (!note) return { note: null };
   if (note.length > CUSTOMER_NOTE_MAX_CHARS) return { error: 'note_too_long' };
-  if (NOTE_SHORTENER_RE.test(note) || NOTE_SHORTENER_RE.test(normalizeForLinkCheck(note))) {
+  const canonical = normalizeForLinkCheck(note);
+  if (NOTE_SHORTENER_RE.test(note) || NOTE_SHORTENER_RE.test(canonical)
+    || NOTE_URL_RE.test(note) || NOTE_URL_RE.test(canonical)) {
     return { error: 'note_link_blocked' };
   }
   // Same emoji rule sendCustomerMessage enforces (validators/voice.js) —
@@ -117,6 +127,15 @@ function sanitizeCustomerNote(raw) {
   // EMOJI_FOR_CUSTOMER (codex PR P2).
   const { _internals: { findEmoji } } = require('./messaging/validators/voice');
   if (findEmoji(note).found) return { error: 'note_emoji_blocked' };
+  // The outbound sms-guard rejects bodies containing unsubstituted {vars},
+  // "undefined"/"null"/"1970" etc. AFTER assembly — a note like "Gate code
+  // 1970 still works" would commit the move and then lose the SMS (codex
+  // r2 P2). Run the same guard on the note pre-move so it fails loudly in
+  // the sheet instead. (empty-body/too-long can't trip here: the note is
+  // non-blank and ≤200 chars.)
+  const { validateOutbound } = require('./sms-guard');
+  const guard = validateOutbound(note);
+  if (!guard.ok) return { error: 'note_guard_blocked', guardReason: guard.reason };
   return { note };
 }
 
@@ -481,7 +500,7 @@ async function getOptions(serviceId) {
 // without it — the copy is optional, the tech's response is not.
 const FORECAST_DECORATION_TIMEOUT_MS = 1500;
 
-async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, customerNote = null, forecastHealth = { degraded: false } }) {
+async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, customerNote = null, actorUserId = null, forecastHealth = { degraded: false } }) {
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
   // Moved-first means the new slot is already booked — no confirmation
@@ -643,7 +662,15 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     // as a sentinel "success". The legacy-render fallback stamps the v2 key
     // for the same reason — an absent v2 row (rolled-back migration) counts
     // as active there, so the fallback still texts.
-    metadata: { original_message_type: renderedKey, reason_code: reasonCode },
+    metadata: {
+      original_message_type: renderedKey,
+      reason_code: reasonCode,
+      // Operator attribution: twilio-sms.js writes sms_log.admin_user_id
+      // from this key. Without it every rain-out SMS — including ones
+      // carrying a dispatcher-authored note — reads as system-generated in
+      // the durable record (codex r2 P2).
+      ...(actorUserId ? { adminUserId: actorUserId } : {}),
+    },
   });
   if (result?.blocked || result?.sent === false) {
     return { sent: false, reason: result.code || result.reason || 'blocked' };
@@ -683,8 +710,12 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
  * @param {string} [args.initiatedBy='tech']  actor recorded on each reschedule
  *                                            for the audit log — 'admin' from the
  *                                            dispatch board, 'tech' from the app.
+ * @param {string} [args.actorUserId]         acting user's id, stamped as
+ *                                            metadata.adminUserId on each moved-SMS
+ *                                            so sms_log.admin_user_id records who
+ *                                            drove the send (and who authored a note).
  */
-async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, initiatedBy = 'tech' }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech' }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
@@ -1045,6 +1076,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // Anchor only — a stop-specific note (gate code, pet warning)
           // must never fan out to the rest of the route's customers.
           customerNote: job.id === serviceId ? note : null,
+          actorUserId,
           forecastHealth,
         });
       } catch (err) {

@@ -103,8 +103,9 @@ const ERROR_COPY = {
   noshow_route_scope: 'No-show moves apply to this stop only.',
   target_not_later: 'Running late needs a time after the current window — pick a later slot.',
   note_too_long: 'Note is too long — keep it under 200 characters.',
-  note_link_blocked: "Link shorteners can't go in customer texts — remove the shortened URL.",
+  note_link_blocked: "Links can't go in the note — the text already includes the reschedule link.",
   note_emoji_blocked: "Emoji can't go in customer texts — remove them.",
+  note_guard_blocked: 'That note would trip the SMS safety guard — avoid {braces} and the words null, undefined, or 1970.',
   note_invalid: 'That note could not be sent — plain text only.',
 };
 
@@ -113,10 +114,24 @@ const ERROR_COPY = {
 // the server is the enforcer.
 const NOTE_MAX_CHARS = 200;
 const NOTE_SHORTENER_RE = /(?:^|[^a-z0-9-])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[^a-z0-9-])/i;
+// No URL of ANY kind in a note (shortener blocklists can't be complete) —
+// the moved SMS already carries the tokenized reschedule link.
+const NOTE_URL_RE = /(?:https?:\/\/|www\.)\S+|(?:^|[^a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S/i;
 // Customer-facing SMS are emoji-free (messaging validator EMOJI_FOR_CUSTOMER)
 // — catching it here keeps the move from committing with a text that the
 // send layer would then block.
 const NOTE_EMOJI_RE = /\p{Extended_Pictographic}/u;
+// Mirror of the outbound sms-guard (server/services/sms-guard.js): bodies
+// containing unsubstituted {vars} or broken-render markers are rejected at
+// send time, AFTER the move would have committed.
+const NOTE_UNSUBBED_VAR_RE = /\{\s*[a-z][a-z0-9_]{0,40}\s*\}/;
+const NOTE_BROKEN_SUBSTRINGS = ['undefined', '[object object]', 'nan/nan', 'invalid date', '1970'];
+function noteGuardTrips(note) {
+  if (NOTE_UNSUBBED_VAR_RE.test(note)) return true;
+  const lower = note.toLowerCase();
+  if (NOTE_BROKEN_SUBSTRINGS.some((s) => lower.includes(s))) return true;
+  return /\bnull\b/i.test(note);
+}
 // Same canonicalization the server runs before the shortener test —
 // encoded/unicode-dot hosts (`bit%2ely`, `bit。ly`) resolve to real links.
 function normalizeForLinkCheck(raw) {
@@ -287,9 +302,15 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     }
   };
 
-  const noteShortener = NOTE_SHORTENER_RE.test(note) || NOTE_SHORTENER_RE.test(normalizeForLinkCheck(note));
+  const noteCanonical = normalizeForLinkCheck(note);
+  const noteLink = NOTE_SHORTENER_RE.test(note) || NOTE_SHORTENER_RE.test(noteCanonical)
+    || NOTE_URL_RE.test(note) || NOTE_URL_RE.test(noteCanonical);
   const noteEmoji = NOTE_EMOJI_RE.test(note);
-  const noteBlocked = notify && (noteShortener || noteEmoji);
+  const noteGuard = noteGuardTrips(note);
+  const noteBlocked = notify && (noteLink || noteEmoji || noteGuard);
+  const noteBlockedCopy = noteLink ? ERROR_COPY.note_link_blocked
+    : noteEmoji ? ERROR_COPY.note_emoji_blocked
+      : ERROR_COPY.note_guard_blocked;
 
   const handleCommit = async () => {
     if (!selected || busy || noteBlocked) return;
@@ -576,7 +597,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginTop: 4, fontSize: 12, color: '#71717A' }}>
                   <span>
                     {noteBlocked
-                      ? <span style={{ color: '#B91C1C' }}>{noteShortener ? ERROR_COPY.note_link_blocked : ERROR_COPY.note_emoji_blocked}</span>
+                      ? <span style={{ color: '#B91C1C' }}>{noteBlockedCopy}</span>
                       : (scope === 'route' && routeCount > 0 && note.trim()
                         ? "Note goes to this stop's customer only — the rest of the route gets the standard text."
                         : '')}

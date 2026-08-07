@@ -1425,6 +1425,25 @@ describe('rain-out service', () => {
       expect(sanitize()('go https://bit。ly/abc')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()('go ｂｉｔ．ｌｙ/abc')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()('go bit\u200B.ly/abc')).toEqual({ error: 'note_link_blocked' });
+      // A shortener blocklist can never be complete \u2014 ANY URL is banned in
+      // a note (codex r2 P1): unlisted shorteners, scheme'd URLs, www.
+      // forms, bare host/path tokens.
+      expect(sanitize()('go tiny.one/x now')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('go https://v.gd/x')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('see www.example.com for details')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('pay at waves.com/pay please')).toEqual({ error: 'note_link_blocked' });
+      // Plain prose with dots/times must NOT false-positive.
+      expect(sanitize()('Arriving 12:30. See you at 2 p.m. sharp')).toEqual({ note: 'Arriving 12:30. See you at 2 p.m. sharp' });
+    });
+
+    test('sanitizer: mirrors the outbound sms-guard so the note fails BEFORE the move, not the send after', () => {
+      // sms-guard.js rejects assembled bodies containing these \u2014 a note
+      // that trips it would strand a committed move with no SMS (codex r2 P2).
+      expect(sanitize()('Gate code 1970 still works')).toEqual({ error: 'note_guard_blocked', guardReason: 'broken-render:1970' });
+      expect(sanitize()('{gate_code} is 4482')).toEqual({ error: 'note_guard_blocked', guardReason: 'unsubstituted-variable:{gate_code}' });
+      expect(sanitize()('the code is null for now')).toEqual({ error: 'note_guard_blocked', guardReason: 'broken-render:null' });
+      // Words merely CONTAINING guard tokens pass, same as the guard itself.
+      expect(sanitize()('we will annull nothing, promise')).toEqual({ note: 'we will annull nothing, promise' });
     });
 
     test('sanitizer: rejects emoji BEFORE the move (send layer would block the SMS after)', () => {
@@ -1452,12 +1471,17 @@ describe('rain-out service', () => {
         target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
         notifyCustomer: true,
         customerNote: '  Sorry for the shuffle — see you Friday!  ',
+        actorUserId: 'admin-7',
       });
 
       expect(result.ok).toBe(true);
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       expect(sendCustomerMessage.mock.calls[0][0].body)
         .toBe('rendered body\n\nNote from our team: Sorry for the shuffle — see you Friday!');
+      // Operator attribution: adminUserId → sms_log.admin_user_id, so the
+      // durable record shows who authored the customer-visible note
+      // (codex r2 P2). Absent actor → key absent (system-initiated shape).
+      expect(sendCustomerMessage.mock.calls[0][0].metadata.adminUserId).toBe('admin-7');
     });
 
     test('route scope: the note rides the ANCHOR SMS only — siblings get the standard text', async () => {
