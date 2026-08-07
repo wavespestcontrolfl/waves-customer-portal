@@ -113,6 +113,14 @@ router.get('/', async (req, res, next) => {
         // no reach beyond what the customer's own texts already carry.
         // Null for legacy pre-backfill rows → the button falls back to SMS.
         rescheduleUrl: s.reschedule_token ? `/reschedule/${s.reschedule_token}` : null,
+        // Add-to-calendar deep link — the tokenized public appointment page's
+        // /calendar.ics (an ICS spanning the customer-quoted 2-hour arrival
+        // window). Same-customer token, same posture as rescheduleUrl above.
+        // Null while GATE_APPOINTMENT_PAGE is dark (that router 404s) or for
+        // legacy pre-token rows — the portal simply doesn't render the button.
+        calendarUrl: (process.env.GATE_APPOINTMENT_PAGE === 'true' && s.reschedule_token)
+          ? `/api/public/appointment/${s.reschedule_token}/calendar.ics`
+          : null,
       })),
     });
   } catch (err) {
@@ -346,6 +354,11 @@ router.get('/next', async (req, res, next) => {
         isCallback: nextService.is_callback === true,
         // Self-serve deep link — see the list route's note above.
         rescheduleUrl: nextService.reschedule_token ? `/reschedule/${nextService.reschedule_token}` : null,
+        // Same contract as the list payload above: tokenized .ics link, null
+        // while GATE_APPOINTMENT_PAGE is dark or the row predates tokens.
+        calendarUrl: (process.env.GATE_APPOINTMENT_PAGE === 'true' && nextService.reschedule_token)
+          ? `/api/public/appointment/${nextService.reschedule_token}/calendar.ics`
+          : null,
       },
     });
   } catch (err) {

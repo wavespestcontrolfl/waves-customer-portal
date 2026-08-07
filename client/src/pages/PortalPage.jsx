@@ -2032,6 +2032,17 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                 textDecoration: 'none',
                 position: 'relative',
               }}>Reschedule</a>
+              {/* Tokenized .ics from the public appointment page — downloads
+                  the visit (2-hour arrival window) straight into the phone's
+                  calendar. Server sends null while GATE_APPOINTMENT_PAGE is
+                  dark or for legacy pre-token rows, so no fallback needed. */}
+              {nextService.calendarUrl && (
+                <a href={nextService.calendarUrl} data-glass-accent="" style={{
+                  ...dashboardSecondaryButton,
+                  textDecoration: 'none',
+                  position: 'relative',
+                }}>Add to Calendar</a>
+              )}
             </div>
           ) : nextServiceReady ? (
             <div style={{ padding: 20 }}>
