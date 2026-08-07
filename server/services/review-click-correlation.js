@@ -68,17 +68,36 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT } 
     const windowStart = new Date(reviewAt.getTime() - WINDOW_BEFORE_HOURS * 3600 * 1000);
     const windowEnd = new Date(reviewAt.getTime() + WINDOW_AFTER_HOURS * 3600 * 1000);
 
-    const clicks = await conn('review_requests as rr')
+    const reviewLocationId = review?.location_id || null;
+    let query = conn('review_requests as rr')
       .join('customers as c', 'rr.customer_id', 'c.id')
       .whereNull('c.deleted_at')
       .whereNotNull('rr.redirected_at')
+      // Only server-observed clicks: the tracked redirect (review-gate)
+      // stamps google_review_clicked when the browser actually follows the
+      // link. The legacy promoter path stamps redirected_at OPTIMISTICALLY
+      // before the client ever navigates (review-request.js submitRating) —
+      // those rows are not evidence anyone reached the Google form (codex
+      // #3264 r2).
+      .where('rr.google_review_clicked', true)
       .where('rr.redirected_at', '>=', windowStart)
-      .where('rr.redirected_at', '<=', windowEnd)
+      .where('rr.redirected_at', '<=', windowEnd);
+    // A click 302s to ONE location's review form — a click for a different
+    // GBP than the review's is anti-evidence, not a weaker match; timestamp
+    // proximity must not let it outrank the real clicker (codex #3264 r2).
+    // Location-less clicks (pre-stamping legacy rows) stay in, annotated null.
+    if (reviewLocationId) {
+      query = query.where(function locationFilter() {
+        this.whereNull('rr.google_location').orWhere('rr.google_location', reviewLocationId);
+      });
+    }
+    const clicks = await query
       .orderBy('rr.redirected_at', 'desc')
       .limit(SCAN_LIMIT)
       .select(
         'rr.customer_id',
         'rr.redirected_at',
+        'rr.google_review_clicked',
         'rr.google_location',
         'c.first_name',
         'c.last_name',
@@ -106,10 +125,14 @@ async function findLikelyReviewers(review, { conn = db, limit = DEFAULT_LIMIT } 
       .select('customer_id');
     const linked = new Set(linkedRows.map((r) => r.customer_id));
 
-    // One entry per customer, nearest click wins.
+    // One entry per customer, nearest click wins. The clicked/location
+    // filters repeat JS-side so behavior holds even where the SQL layer is
+    // mocked (test harnesses ignore where-clauses — #3235 r6 lesson).
     const byCustomer = new Map();
     for (const row of clicks) {
       if (linked.has(row.customer_id)) continue;
+      if (row.google_review_clicked !== true) continue;
+      if (reviewLocationId && row.google_location && row.google_location !== reviewLocationId) continue;
       const clickedAt = new Date(row.redirected_at);
       if (Number.isNaN(clickedAt.getTime())) continue;
       const clickOffsetMs = reviewAt.getTime() - clickedAt.getTime();

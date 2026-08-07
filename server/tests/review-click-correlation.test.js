@@ -10,6 +10,7 @@ function clickRow(overrides = {}) {
   return {
     customer_id: 'cust-1',
     redirected_at: '2026-08-07T17:30:00.000Z',
+    google_review_clicked: true,
     google_location: 'bradenton',
     first_name: 'Jane',
     last_name: 'Doe',
@@ -99,22 +100,38 @@ describe('findLikelyReviewers', () => {
     expect(result.map((r) => r.customerId)).toEqual(['open']);
   });
 
-  test('annotates location match, already-flagged, and after-review clicks', async () => {
+  test('excludes clicks that targeted a different location; annotates match/null, already-flagged, after-review', async () => {
     const conn = makeConn({
       clickRows: [
-        clickRow({ customer_id: 'a', google_location: 'sarasota' }),
+        // Sarasota-link click 1 minute before a Bradenton review — anti-evidence,
+        // must not outrank anyone (codex r2)
+        clickRow({ customer_id: 'mismatch', google_location: 'sarasota', redirected_at: '2026-08-07T17:59:00.000Z' }),
+        clickRow({ customer_id: 'a', google_location: 'bradenton' }),
         clickRow({ customer_id: 'b', google_location: null, redirected_at: '2026-08-07T19:00:00.000Z', has_left_google_review: true }),
       ],
     });
     const result = await findLikelyReviewers({ review_created_at: REVIEW_AT, location_id: 'bradenton' }, { conn });
+    expect(result.map((r) => r.customerId).sort()).toEqual(['a', 'b']);
     const a = result.find((r) => r.customerId === 'a');
     const b = result.find((r) => r.customerId === 'b');
-    expect(a.locationMatch).toBe(false);
+    expect(a.locationMatch).toBe(true);
     expect(a.alreadyFlagged).toBe(false);
     expect(b.locationMatch).toBeNull();
     expect(b.alreadyFlagged).toBe(true);
     expect(b.clickedBeforeReview).toBe(false);
     expect(b.clickOffsetLabel).toBe('1h after');
+  });
+
+  test('excludes optimistic legacy redirect stamps (redirected_at without google_review_clicked)', async () => {
+    const conn = makeConn({
+      clickRows: [
+        // legacy promoter path: redirected_at stamped before any navigation
+        clickRow({ customer_id: 'optimistic', google_review_clicked: false, redirected_at: '2026-08-07T17:58:00.000Z' }),
+        clickRow({ customer_id: 'real' }),
+      ],
+    });
+    const result = await findLikelyReviewers({ review_created_at: REVIEW_AT, location_id: 'bradenton' }, { conn });
+    expect(result.map((r) => r.customerId)).toEqual(['real']);
   });
 
   test('respects the limit option', async () => {
