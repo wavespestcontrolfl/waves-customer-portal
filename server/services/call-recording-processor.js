@@ -2205,22 +2205,35 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // workableUnnamedLead path stays active-leads-only — an ineligible row
   // falls through to contact reuse or a fresh mint like any other rejected
   // candidate.
-  if (callSid || stampedLeadId) {
-    let ownQuery = database('leads')
-      .whereNull('deleted_at')
-      .where(function sameCallIdentity() {
-        if (callSid) this.orWhere('twilio_call_sid', callSid);
-        if (stampedLeadId) this.orWhere('id', stampedLeadId);
-      });
+  // The SID is AUTHORITATIVE over the stamp: a stale stamp can coexist with
+  // a newly inserted SID-linked lead when a prior attempt failed before the
+  // linkage-maintenance block — OR-ing the two and taking the newest let
+  // retries pick an arbitrary one (audit P1 r21). Resolve the SID lead
+  // first; consult the stamp only when no eligible SID lead exists. The
+  // maintenance block downstream repairs the conflict by clearing the stale
+  // stamp once the SID lead is selected.
+  const applySameCallFilters = (q) => {
+    let out = q;
     if (workableUnnamedLead) {
-      ownQuery = ownQuery.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
+      out = out.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
     }
     if (unclaimedOnly) {
-      ownQuery = ownQuery.whereNull('customer_id');
+      out = out.whereNull('customer_id');
     } else if (customerId) {
-      ownQuery = ownQuery.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+      out = out.where((qq) => qq.whereNull('customer_id').orWhere('customer_id', customerId));
     }
-    const own = await ownQuery.orderBy('created_at', 'desc').first();
+    return out;
+  };
+  if (callSid) {
+    const own = await applySameCallFilters(
+      database('leads').whereNull('deleted_at').where('twilio_call_sid', callSid),
+    ).orderBy('created_at', 'desc').first();
+    if (own) return own;
+  }
+  if (stampedLeadId) {
+    const own = await applySameCallFilters(
+      database('leads').whereNull('deleted_at').where('id', stampedLeadId),
+    ).orderBy('created_at', 'desc').first();
     if (own) return own;
   }
   // The email key must be a REAL email, validated here and not just at the
@@ -7343,6 +7356,13 @@ const CallRecordingProcessor = {
         : `existing customer (${leadCustomer?.pipeline_stage || 'unknown'})`;
       logger.info(`[call-proc] Skipping lead creation for ${skipReason}, customer ${customerId || 'none'}`);
     }
+    // Phone-less linkage completion flag: once a phone-less flow involves a
+    // reused lead or a prior stamp, it must EXIT with its linkage settled
+    // (stamped, re-pointed, or cleared by the maintenance block). A throw
+    // anywhere before that block would otherwise be swallowed by the
+    // section's non-blocking catch and finalize the call with missing or
+    // stale linkage (audit P1 r21) — the catch escalates while this is set.
+    let phoneLessLinkagePending = false;
     if (shouldCreateLead) {
       try {
         // Check if lead already exists for this phone — or by spoken email
@@ -7385,6 +7405,10 @@ const CallRecordingProcessor = {
         const sameCallLeadReuse = !!(existingLead
           && ((call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid)
             || (priorStampedLeadId && String(existingLead.id) === priorStampedLeadId)));
+        // A fresh phone-less insert with no prior stamp self-links via its
+        // own sid at insert time — only reuse or a leftover stamp puts
+        // linkage state in play.
+        if (!phone && (existingLead || priorStampedLeadId)) phoneLessLinkagePending = true;
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -7904,7 +7928,7 @@ const CallRecordingProcessor = {
           // P1 r19 ×2). Writes are fenced on the processing token; a lost
           // fence or write failure aborts into the extraction_failed retry
           // path via abortProcessing (the lead-section catch rethrows it).
-          if (!phone && leadId) {
+          if (!phone) {
             const finalLeadCarriesSid = raceRecovered || !existingLead
               || (!!call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid);
             const requireLinkWrite = async (label, updatePayload) => {
@@ -7924,7 +7948,17 @@ const CallRecordingProcessor = {
                 throw lost;
               }
             };
-            if (finalLeadCarriesSid) {
+            if (!leadId) {
+              // Mint failure dropped the lead — a leftover stamp would leave
+              // the OR-join consumers associating this call with a lead that
+              // is now foreign (it lost the claim race). Unlink.
+              if (priorStampedLeadId) {
+                await requireLinkWrite('clear', {
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'lead_id'"),
+                  updated_at: new Date(),
+                });
+              }
+            } else if (finalLeadCarriesSid) {
               // The final lead is linked by its own sid — a leftover stamp
               // pointing at a different lead must not survive.
               if (priorStampedLeadId && priorStampedLeadId !== String(leadId)) {
@@ -7944,6 +7978,7 @@ const CallRecordingProcessor = {
                 updated_at: new Date(),
               });
             }
+            phoneLessLinkagePending = false;
           }
 
           // Log AI triage activity — gated on the enrichment write landing, so
@@ -8210,8 +8245,16 @@ const CallRecordingProcessor = {
       } catch (leadErr) {
         // Required-linkage failures must reach the outer extraction_failed
         // guard — swallowing them finalized the call with its only
-        // call→lead association missing or stale (codex P1 r19).
+        // call→lead association missing or stale (codex P1 r19). The
+        // pending flag catches the same failure ARRIVING EARLIER: any throw
+        // between the reuse decision and the maintenance block would
+        // otherwise finalize with unsettled linkage (audit P1 r21).
         if (leadErr.abortProcessing) throw leadErr;
+        if (phoneLessLinkagePending) {
+          const unsettled = new Error(`phone-less call exited with unsettled lead linkage: ${leadErr.message}`);
+          unsettled.abortProcessing = true;
+          throw unsettled;
+        }
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
       }
     }
