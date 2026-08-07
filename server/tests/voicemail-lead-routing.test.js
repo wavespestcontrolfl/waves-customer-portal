@@ -163,12 +163,12 @@ describe('findReusableCallLead identity keys', () => {
     const db = makeDb({ id: 'lead-2' });
     const found = await findReusableCallLead(db, {
       phone: null,
-      email: '  JBrooks00005@Gmail.com ',
+      email: '  JBrooks00005@Example.com ',
       workableUnnamedLead: true,
     });
     expect(found).toEqual({ id: 'lead-2' });
     const raw = db.calls.find(([m]) => m === 'whereRaw');
-    expect(raw[1][1]).toEqual(['jbrooks00005@gmail.com']);
+    expect(raw[1][1]).toEqual(['jbrooks00005@example.com']);
     expect(db.calls.some(([m, a]) => m === 'where' && a[0] === 'phone')).toBe(false);
     // Weak identity: an email match must never land on a customer-owned lead.
     expect(db.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(true);
@@ -179,6 +179,48 @@ describe('findReusableCallLead identity keys', () => {
     const found = await findReusableCallLead(db, { phone: null, email: null });
     expect(found).toBeNull();
     expect(db.calls.length).toBe(0);
+  });
+
+  test('email match with a CONFLICTING stated name forces a fresh lead', async () => {
+    const db = makeDb({ id: 'lead-4', first_name: 'Maria', last_name: 'Lopez' });
+    const found = await findReusableCallLead(db, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
+      workableUnnamedLead: true,
+    });
+    expect(found).toBeNull();
+  });
+
+  test('email match with a compatible or missing name is still reusable', async () => {
+    const sameName = makeDb({ id: 'lead-5', first_name: 'Jeff', last_name: 'Brooks' });
+    expect(await findReusableCallLead(sameName, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: 'jeff',
+      lastName: 'BROOKS',
+      workableUnnamedLead: true,
+    })).toEqual({ id: 'lead-5', first_name: 'Jeff', last_name: 'Brooks' });
+
+    const namelessCandidate = makeDb({ id: 'lead-6', first_name: null, last_name: null });
+    expect(await findReusableCallLead(namelessCandidate, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
+      workableUnnamedLead: true,
+    })).toEqual({ id: 'lead-6', first_name: null, last_name: null });
+  });
+
+  test('name conflict never blocks a PHONE match — corroboration is email-path only', async () => {
+    const db = makeDb({ id: 'lead-7', first_name: 'Maria', last_name: 'Lopez' });
+    expect(await findReusableCallLead(db, {
+      phone: '+19415550101',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
+      workableUnnamedLead: true,
+    })).toEqual({ id: 'lead-7', first_name: 'Maria', last_name: 'Lopez' });
   });
 });
 

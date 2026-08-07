@@ -2189,7 +2189,7 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 //   and the booking-conversion ownership guard would then (rightly) refuse to
 //   close it — stranding this caller's booked deal with no convertible lead.
 //   A foreign-owned lead is invisible here; the caller gets a fresh row.
-async function findReusableCallLead(database, { phone, email = null, customerId, workableUnnamedLead, unclaimedOnly }) {
+async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly }) {
   const emailLc = String(email || '').trim().toLowerCase();
   if (!phone && !emailLc) return null;
   let query = database('leads').whereNull('deleted_at');
@@ -2215,7 +2215,22 @@ async function findReusableCallLead(database, { phone, email = null, customerId,
   } else if (customerId) {
     query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
-  return query.orderBy('created_at', 'desc').first();
+  const candidate = await query.orderBy('created_at', 'desc').first();
+  // Email-matched candidates need a corroborating identity check: two
+  // different anonymous callers can share one inbox (or a transcription
+  // collision can fabricate the overlap), and reusing across them would
+  // overwrite the first prospect's extraction and swallow the second's
+  // new-lead surfacing. A stated name that CONFLICTS with the candidate's
+  // stored name forces a fresh row; a missing name on either side stays
+  // reusable (the recovery path exists for name-less callers).
+  if (candidate && !phone) {
+    const norm = (v) => String(v || '').trim().toLowerCase();
+    const conflicts = (a, b) => !!(norm(a) && norm(b) && norm(a) !== norm(b));
+    if (conflicts(firstName, candidate.first_name) || conflicts(lastName, candidate.last_name)) {
+      return null;
+    }
+  }
+  return candidate;
 }
 
 // Convert the call's lead to won when the pipeline books an appointment,
@@ -7242,6 +7257,8 @@ const CallRecordingProcessor = {
         const existingLead = await findReusableCallLead(db, {
           phone,
           email: phone ? null : (extracted.email || null),
+          firstName: extracted.first_name || null,
+          lastName: extracted.last_name || null,
           customerId,
           workableUnnamedLead,
           unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
@@ -7688,7 +7705,40 @@ const CallRecordingProcessor = {
             // branch, unclaimed-only flavor (codex P1, PR #3275).
             enrichmentWrite = enrichmentWrite.whereNull('customer_id');
           }
-          const enriched = await enrichmentWrite.update(leadUpdates);
+          let enriched = await enrichmentWrite.update(leadUpdates);
+          if (!enriched && !customerId && !phone) {
+            // The email-matched lead was claimed between lookup and the
+            // guarded write (0 rows). leadId must not keep pointing at a
+            // lead someone else now owns — downstream writers (triage
+            // activity, text-back, follow-ups) would target the foreign
+            // row. Mint the fresh unclaimed lead this caller would have
+            // gotten on a lookup miss, carrying the same enrichment; on
+            // mint failure, drop leadId so downstream skips cleanly.
+            try {
+              const [raceFresh] = await db('leads').insert({
+                lead_source_id: leadSourceId,
+                customer_id: null,
+                phone: null,
+                first_name: capitalizeName(extracted.first_name) || null,
+                last_name: capitalizeName(extracted.last_name) || null,
+                email: extracted.email || null,
+                lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
+                first_contact_at: new Date(),
+                first_contact_channel: 'call',
+                twilio_call_sid: call.twilio_call_sid,
+                call_duration_seconds: call.duration_seconds,
+                call_recording_url: call.recording_url,
+                status: 'new',
+                ...leadUpdates,
+              }).returning('*');
+              logger.warn(`[call-proc] email-matched lead ${leadId} lost the claim race — minted fresh lead ${raceFresh.id}`);
+              leadId = raceFresh.id;
+              enriched = 1;
+            } catch (raceErr) {
+              logger.warn(`[call-proc] fresh-lead mint after claim race failed for ${maskSid(callSid)}: ${raceErr.message}`);
+              leadId = null;
+            }
+          }
 
           // Log AI triage activity — gated on the enrichment write landing, so
           // a lead lost to the ownership race above never gets this caller's
