@@ -12102,6 +12102,12 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
               purpose: 'appointment',
               customerId: svc.customer_id,
               identityTrustLevel: 'phone_matches_customer',
+              // Authenticated dispatcher explicitly asked to notify the
+              // customer of the series move — exempt from the 8AM-8PM send
+              // window like the neighboring rain-out and quick-move actions
+              // (nothing re-enqueues this exact message; a held night send
+              // would silently drop the notice for a next-morning move).
+              operatorInitiated: true,
               metadata: { original_message_type: 'reschedule_series_confirmation', reasonText },
             });
             notificationSent = !(msg?.blocked || msg?.sent === false);

@@ -1015,6 +1015,17 @@ const TwilioService = {
     //    the arrival is HANDLED — the caller must keep the guard stamped, else a
     //    later same-job signal could fire a stale "has arrived" if the
     //    suppression/number is fixed while the job is still on-property.
+    // Send-window hold is HANDLED, not retryable, for this one notification:
+    // "has arrived" is only true at arrival time. Releasing the guard on a
+    // night hold lets the next morning's GPS/geofence re-fire of an
+    // on_property row text "has arrived" hours after the fact (markOnProperty
+    // deliberately retries stamped-but-unsent rows on every later signal).
+    // Dropping the text is the correct outcome — same call as the completion
+    // SMS's no-retry rail documented in the PR body.
+    const heldByWindow = results.some((r) => r?.code === "QUIET_HOURS_HOLD");
+    if (heldByWindow) {
+      return { success: false, suppressed: true, reason: "send_window_hold", results };
+    }
     const anyRetryable = results.length === 0 || results.some((r) => r?.retryable);
     if (anyRetryable) return { success: false, results };
     return { success: false, suppressed: true, reason: "blocked", results };

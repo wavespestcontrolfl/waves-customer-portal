@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etParts } = require('../utils/datetime-et');
+const { SEND_WINDOW_START_HOUR_ET, SEND_WINDOW_END_HOUR_ET } = require('./messaging/send-window');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 // Map notification types to their toggle column and channel column in notification_prefs
@@ -50,6 +51,25 @@ function inCustomerQuietHours(prefs, at = new Date()) {
     : (currentTime >= start || currentTime < end);
 }
 
+// True when the customer's quiet window leaves NO deliverable minute inside
+// the global send window — the deferred-replay recheck must terminally
+// suppress rather than ping-pong between the two windows forever. Pure
+// HH:MM string comparison (both windows are ET wall-clock).
+function customerQuietHoursCoverSendWindow(prefs) {
+  const start = String(prefs?.quiet_hours_start || '').substring(0, 5);
+  const end = String(prefs?.quiet_hours_end || '').substring(0, 5);
+  if (!/^\d{2}:\d{2}$/.test(start) || !/^\d{2}:\d{2}$/.test(end) || start === end) return false;
+  const open = `${String(SEND_WINDOW_START_HOUR_ET).padStart(2, '0')}:00`;
+  const close = `${String(SEND_WINDOW_END_HOUR_ET).padStart(2, '0')}:00`;
+  // Non-wraparound quiet window [start, end): covers [open, close) iff it
+  // starts at/before the open and ends at/after the close.
+  if (start < end) return start <= open && end >= close;
+  // Wraparound (start > end): the only NON-quiet gap is [end, start); the
+  // send window is covered iff that gap lies entirely before the open or
+  // entirely at/after the close.
+  return start <= open || end >= close;
+}
+
 // The next instant the customer's OWN quiet window ends (ET wall-clock,
 // DST-safe via the iterate-and-re-read shape nextSendWindowOpenET uses).
 function nextCustomerQuietHoursEndET(prefs, at = new Date()) {
@@ -74,7 +94,7 @@ function nextCustomerQuietHoursEndET(prefs, at = new Date()) {
 // overnight. Suppression mirrors the immediate dispatcher exactly (it
 // drops on all three without retrying); a read failure fails closed as
 // retryable.
-async function deferredNotificationStillWanted(notificationType, customerId) {
+async function deferredNotificationStillWanted(notificationType, customerId, now = new Date()) {
   try {
     const typeConfig = TYPE_MAP[notificationType];
     if (!typeConfig || !customerId) return { eligible: true };
@@ -86,7 +106,18 @@ async function deferredNotificationStillWanted(notificationType, customerId) {
     if (channel !== 'sms' && channel !== 'both') {
       return { eligible: false, reason: `channel_${channel}` };
     }
-    if (inCustomerQuietHours(prefs)) {
+    if (inCustomerQuietHours(prefs, now)) {
+      // If the customer's OWN quiet window covers the entire global 8AM-8PM
+      // send window (e.g. 08:00-21:00), no deliverable minute exists: a
+      // replay at the quiet-hours end is rejected by the global cutoff and
+      // rescheduled back to 08:00, with the attempt refunded each time —
+      // an infinite ping-pong. Terminally suppress instead so the row gets
+      // its blocked settlement + terminal hooks, and alert loudly: the
+      // caller's notify() already reported this notification as queued.
+      if (customerQuietHoursCoverSendWindow(prefs)) {
+        logger.error(`[notify] customer ${customerId} quiet hours ${prefs.quiet_hours_start}-${prefs.quiet_hours_end} cover the entire ${SEND_WINDOW_START_HOUR_ET}:00-${SEND_WINDOW_END_HOUR_ET}:00 ET send window — terminally suppressing deferred ${notificationType} (no deliverable minute exists)`);
+        return { eligible: false, reason: 'quiet_hours_cover_send_window' };
+      }
       // Still wanted, just not YET — retryable with the customer's actual
       // quiet-hours END as the retry time, so the executor reschedules
       // straight to it (and refunds the attempt) instead of burning the
@@ -95,7 +126,7 @@ async function deferredNotificationStillWanted(notificationType, customerId) {
         eligible: false,
         reason: 'customer_quiet_hours',
         retryable: true,
-        retryAt: nextCustomerQuietHoursEndET(prefs),
+        retryAt: nextCustomerQuietHoursEndET(prefs, now),
       };
     }
     return { eligible: true };
