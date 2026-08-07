@@ -24,11 +24,15 @@ const NUMBER_PATTERN = /\+?\d[\d\s().-]{5,}\d/g;
 // over-redaction (two apostrophes in one line pair up) is the fail-closed
 // direction here.
 const SQL_LITERAL_PATTERN = /'[^'\n]{0,200}'/g;
+// Currency amounts ($36.33) are customer billing data; too short for the
+// digit-run pattern, so they get their own.
+const CURRENCY_PATTERN = /\$\s?\d[\d,.]*/g;
 
 function scrubSentryText(text) {
   return String(text || '')
     .replace(EMAIL_PATTERN, '[redacted-email]')
     .replace(SQL_LITERAL_PATTERN, "'[redacted]'")
+    .replace(CURRENCY_PATTERN, '[redacted-amount]')
     .replace(NUMBER_PATTERN, '[redacted-number]')
     .slice(0, MAX_SCRUBBED_LENGTH);
 }

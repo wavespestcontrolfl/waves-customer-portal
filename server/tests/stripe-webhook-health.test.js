@@ -129,6 +129,32 @@ describe('composeWebhookHealthDigest', () => {
     expect(composed.text).toContain('[redacted-email]');
     expect(sanitizeErrorSnippet('x'.repeat(500)).length).toBe(200);
   });
+
+  test('error snippets scrub quoted SQL literals (customer names) and currency amounts', () => {
+    // Knex prefixes the failing SQL onto err.message — names arrive as
+    // quoted literals, amounts as short currency strings the digit-run
+    // pattern is too long to catch. Synthetic fixture only.
+    const snippet = sanitizeErrorSnippet(
+      "insert into \"invoices\" (\"customer_name\") values ('Jane Q Fixture') - duplicate key; charged $36.33 to card"
+    );
+    expect(snippet).not.toContain('Jane Q Fixture');
+    expect(snippet).not.toContain('36.33');
+    expect(snippet).toContain("'[redacted]'");
+    expect(snippet).toContain('[redacted-amount]');
+  });
+
+  test('beyond-cap unreconciled remainder is reported as POSSIBLE failures, never as confirmed endpoint failures', () => {
+    const composed = composeWebhookHealthDigest({
+      ledger: { total: 0, rows: [] },
+      stripeSide: { undelivered_events: [], total_undelivered: 0, unreconciled_undelivered: 48 },
+      stripeCheckError: null,
+    });
+    expect(composed.subject).toBe('FIX: 48 possible Stripe webhook delivery failures (Stripe-side, unreconciled) in last 48h');
+    expect(composed.stripeFailureCount).toBe(0);
+    expect(composed.stripeUnreconciledCount).toBe(48);
+    expect(composed.text).toContain('could NOT be reconciled');
+    expect(composed.text).toContain('possible failures only');
+  });
 });
 
 describe('runStripeWebhookHealthCheck', () => {
@@ -288,6 +314,34 @@ describe('runStripeWebhookHealthCheck', () => {
     const result = await runStripeWebhookHealthCheck(opts);
     expect(result).toEqual({ skipped: 'nothing_found' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('beyond-cap remainder survives reconciliation as unreconciled instead of masquerading as confirmed failures', async () => {
+    // Probe saw 50 failures but capped the list at 2; both displayed ids
+    // reconcile to the local ledger (another endpoint's outage). The other
+    // 48 could not be checked — they must alert as UNRECONCILED possible
+    // failures, with zero confirmed ones and no foreign ids listed.
+    const opts = baseOpts({
+      loadLedgerEventIds: jest.fn(async () => new Set(['evt_foreign_1', 'evt_foreign_2'])),
+      stripeOpsTools: {
+        getStripeWebhookFailures: jest.fn(async () => ({
+          undelivered_events: [
+            { id: 'evt_foreign_1', type: 'invoice.paid', created: '2026-08-06T09:00:00.000Z', pending_webhooks: 1 },
+            { id: 'evt_foreign_2', type: 'invoice.paid', created: '2026-08-06T09:01:00.000Z', pending_webhooks: 1 },
+          ],
+          total_undelivered: 50,
+        })),
+      },
+    });
+    const result = await runStripeWebhookHealthCheck(opts);
+    expect(result.sent).toBe(true);
+    expect(result.stripeFailureCount).toBe(0);
+    expect(result.stripeUnreconciledCount).toBe(48);
+    const mail = sendgrid.sendOne.mock.calls[0][0];
+    expect(mail.subject).toContain('possible');
+    expect(mail.subject).toContain('unreconciled');
+    expect(mail.text).not.toContain('evt_foreign_1');
+    expect(mail.text).toContain('could NOT be reconciled');
   });
 
   test('a failed ledger-reconciliation query still alerts (unreconciled) AND surfaces the blocking stripeCheckError', async () => {

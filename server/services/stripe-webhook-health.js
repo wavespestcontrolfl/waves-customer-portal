@@ -44,6 +44,7 @@ const { isInternalEmailRecipient } = require('../utils/internal-email-recipients
 // error=null row younger than this is an in-flight claim, not a failure.
 const { STALE_CLAIM_WINDOW_MS } = require('../routes/stripe-webhook-helpers');
 const { isDeployedProduction } = require('../utils/railway-deployment');
+const { scrubSentryText } = require('../utils/sentry-scrub');
 
 const watcherDisabled = () => ['1', 'true', 'on']
   .includes(String(process.env.STRIPE_WEBHOOK_HEALTH_DISABLED || '').toLowerCase());
@@ -69,12 +70,14 @@ function esc(value) {
 
 // Handler error messages are app-written, but provider errors can echo
 // request payloads (Twilio embeds phone numbers; Stripe messages can quote a
-// receipt email). Mask before the text leaves the process — the email itself
-// must never carry customer emails/names/amounts.
+// receipt email) and Knex prefixes the failing SQL, where customer names
+// arrive as quoted literals and amounts as short currency strings. Reuse the
+// shared Sentry scrubber (emails, quoted SQL literals, $amounts, digit runs)
+// so the two egress sinks can't drift, then collapse whitespace and cap for
+// email display — the email itself must never carry customer
+// emails/names/amounts.
 function sanitizeErrorSnippet(message) {
-  return String(message || '')
-    .replace(/[\w.+-]+@[\w.-]+\.\w+/g, '[redacted-email]')
-    .replace(/\+?\d[\d\s().-]{5,}\d/g, '[redacted-number]')
+  return scrubSentryText(message)
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, ERROR_SNIPPET_LENGTH);
@@ -149,12 +152,18 @@ function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
   const ledgerRows = ledger?.rows || [];
   const stripeEvents = stripeSide?.undelivered_events || [];
   const stripeTotal = stripeSide?.total_undelivered || 0;
-  if (ledgerTotal === 0 && stripeTotal === 0) return null;
+  // Beyond-cap remainder the ledger reconciliation could not verify — a
+  // POSSIBLE failure needing manual verification, never a confirmed one.
+  const stripeUnreconciled = stripeSide?.unreconciled_undelivered || 0;
+  if (ledgerTotal === 0 && stripeTotal === 0 && stripeUnreconciled === 0) return null;
 
   const plural = (n) => (n === 1 ? '' : 's');
+  const stripeCombined = stripeTotal + stripeUnreconciled;
   const subject = ledgerTotal > 0
-    ? `FIX: ${ledgerTotal} Stripe webhook event${plural(ledgerTotal)} failed/unprocessed in last ${LOOKBACK_HOURS}h${stripeTotal > 0 ? ` + ${stripeTotal} undelivered Stripe-side` : ''}`
-    : `FIX: ${stripeTotal} Stripe webhook delivery failure${plural(stripeTotal)} (Stripe-side) in last ${LOOKBACK_HOURS}h`;
+    ? `FIX: ${ledgerTotal} Stripe webhook event${plural(ledgerTotal)} failed/unprocessed in last ${LOOKBACK_HOURS}h${stripeCombined > 0 ? ` + ${stripeCombined} undelivered Stripe-side` : ''}`
+    : stripeTotal > 0
+      ? `FIX: ${stripeTotal} Stripe webhook delivery failure${plural(stripeTotal)} (Stripe-side) in last ${LOOKBACK_HOURS}h${stripeUnreconciled > 0 ? ` (+${stripeUnreconciled} unreconciled)` : ''}`
+      : `FIX: ${stripeUnreconciled} possible Stripe webhook delivery failure${plural(stripeUnreconciled)} (Stripe-side, unreconciled) in last ${LOOKBACK_HOURS}h`;
 
   const textSections = [];
   const htmlSections = [];
@@ -173,17 +182,20 @@ function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
     );
   }
 
-  if (stripeTotal > 0) {
+  if (stripeTotal > 0 || stripeUnreconciled > 0) {
+    const unreconciledLine = `…plus ${stripeUnreconciled} more event${plural(stripeUnreconciled)} beyond the probe's scan cap that could NOT be reconciled against the local ledger — possible failures only (may belong to another endpoint on the account); verify in the Stripe dashboard.`;
     textSections.push(
       '',
       `Stripe-side delivery failures (events Stripe could not deliver to the endpoint — these never reached the ledger): ${stripeTotal}`,
       ...stripeEvents.map((evt) => `- ${describeStripeSideEvent(evt)}`),
       ...(stripeTotal > stripeEvents.length ? [`…and ${stripeTotal - stripeEvents.length} more not shown`] : []),
+      ...(stripeUnreconciled > 0 ? [unreconciledLine] : []),
     );
     htmlSections.push(
       `<p><strong>Stripe-side delivery failures</strong> (events Stripe could not deliver to the endpoint — these never reached the ledger): ${stripeTotal}</p>`,
       `<ul style="margin:0 0 12px 18px;padding:0;">${stripeEvents.map((evt) => `<li style="margin:0 0 6px 0;">${esc(describeStripeSideEvent(evt))}</li>`).join('')}</ul>`,
       ...(stripeTotal > stripeEvents.length ? [`<p>…and ${stripeTotal - stripeEvents.length} more not shown</p>`] : []),
+      ...(stripeUnreconciled > 0 ? [`<p>${esc(unreconciledLine)}</p>`] : []),
     );
   }
 
@@ -201,6 +213,7 @@ function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
     html: htmlSections.join('\n'),
     count: ledgerTotal,
     stripeFailureCount: stripeTotal,
+    stripeUnreconciledCount: stripeUnreconciled,
   };
 }
 
@@ -263,23 +276,26 @@ async function runStripeWebhookHealthCheck(opts = {}) {
       // delivery_success=false is account-wide, so another integration's
       // unhealthy endpoint would otherwise page us. Any returned event id
       // already present in OUR ledger was delivered here — not our failure.
-      // total_undelivered can count events beyond the shown cap, which
-      // cannot be reconciled — subtract only what was verified foreign. A
-      // reconciliation query failure is caught below as stripeCheckError
-      // (blocking), same as a failed probe.
+      // Only the DISPLAYED ids can be reconciled (the probe caps the list),
+      // so any remainder beyond the cap is carried as explicitly
+      // UNRECONCILED — reported as "verify manually", never described as a
+      // confirmed failure of this endpoint. A reconciliation query failure
+      // is caught below as stripeCheckError (blocking), same as a failed
+      // probe.
       const undelivered = stripeSide?.undelivered_events || [];
       if (undelivered.length > 0) {
         const knownIds = await (opts.loadLedgerEventIds || loadLedgerEventIds)(undelivered.map((evt) => evt.id));
-        if (knownIds.size > 0) {
-          const ours = undelivered.filter((evt) => !knownIds.has(evt.id));
-          const foreignCount = undelivered.length - ours.length;
+        const ours = undelivered.filter((evt) => !knownIds.has(evt.id));
+        const foreignCount = undelivered.length - ours.length;
+        if (foreignCount > 0) {
           logger.info(`[stripe-webhook-health] excluded ${foreignCount} Stripe-side failure(s) already present in the local ledger (other endpoint's failure)`);
-          stripeSide = {
-            ...stripeSide,
-            undelivered_events: ours,
-            total_undelivered: Math.max(0, (Number(stripeSide.total_undelivered) || 0) - foreignCount),
-          };
         }
+        stripeSide = {
+          ...stripeSide,
+          undelivered_events: ours,
+          total_undelivered: ours.length,
+          unreconciled_undelivered: Math.max(0, (Number(stripeSide.total_undelivered) || 0) - undelivered.length),
+        };
       }
     } catch (err) {
       stripeCheckError = err.message || String(err);
