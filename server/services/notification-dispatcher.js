@@ -32,6 +32,49 @@ function purposeForNotificationType(type) {
   return 'conversational';
 }
 
+// Customer-level quiet-hours check (prefs are ET wall-clock — the server
+// runs UTC). Shared by notify() and the deferred-replay recheck so both
+// enforce the same window shape.
+function inCustomerQuietHours(prefs, at = new Date()) {
+  if (!prefs?.quiet_hours_start || !prefs?.quiet_hours_end) return false;
+  const et = etParts(at);
+  const currentTime = `${String(et.hour).padStart(2, '0')}:${String(et.minute).padStart(2, '0')}`;
+  const start = prefs.quiet_hours_start.substring(0, 5);
+  const end = prefs.quiet_hours_end.substring(0, 5);
+  return start <= end
+    ? (currentTime >= start && currentTime <= end)
+    : (currentTime >= start || currentTime <= end);
+}
+
+// Replay-time preference recheck for a quiet-hours-deferred notification
+// (deferred-replay registry): the queued row replays through the generic
+// executor, which knows nothing about the dispatcher's per-type toggles,
+// channel choices, or customer quiet hours — and any of those can change
+// overnight. Suppression mirrors the immediate dispatcher exactly (it
+// drops on all three without retrying); a read failure fails closed as
+// retryable.
+async function deferredNotificationStillWanted(notificationType, customerId) {
+  try {
+    const typeConfig = TYPE_MAP[notificationType];
+    if (!typeConfig || !customerId) return { eligible: true };
+    const prefs = await db('notification_prefs').where({ customer_id: customerId }).first();
+    if (prefs && typeConfig.toggle && prefs[typeConfig.toggle] === false) {
+      return { eligible: false, reason: 'type_disabled' };
+    }
+    const channel = prefs?.[typeConfig.channel] || 'sms';
+    if (channel !== 'sms' && channel !== 'both') {
+      return { eligible: false, reason: `channel_${channel}` };
+    }
+    if (inCustomerQuietHours(prefs)) {
+      return { eligible: false, reason: 'customer_quiet_hours' };
+    }
+    return { eligible: true };
+  } catch (err) {
+    logger.warn(`[notify] deferred recheck failed for ${customerId}/${notificationType} (holding for retry): ${err.message}`);
+    return { eligible: false, reason: 'recheck-failed', retryable: true };
+  }
+}
+
 const NotificationDispatcher = {
 
   /**
@@ -64,26 +107,11 @@ const NotificationDispatcher = {
       return { sent: false, channel: null, results: { reason: 'type_disabled' } };
     }
 
-    // Check quiet hours (prefs are ET wall-clock — server runs UTC)
-    if (prefs?.quiet_hours_start && prefs?.quiet_hours_end) {
-      const et = etParts(new Date());
-      const currentTime = `${String(et.hour).padStart(2, '0')}:${String(et.minute).padStart(2, '0')}`;
-      const start = prefs.quiet_hours_start.substring(0, 5);
-      const end = prefs.quiet_hours_end.substring(0, 5);
-
-      let inQuietHours = false;
-      if (start <= end) {
-        // e.g. 21:00 to 08:00 does NOT apply here; this is e.g. 08:00 to 17:00
-        inQuietHours = currentTime >= start && currentTime <= end;
-      } else {
-        // Wraps midnight: e.g. 21:00 to 08:00
-        inQuietHours = currentTime >= start || currentTime <= end;
-      }
-
-      if (inQuietHours) {
-        logger.info(`[notify] Quiet hours active for customer ${customerId} (${start}-${end})`);
-        return { sent: false, channel: null, results: { reason: 'quiet_hours' } };
-      }
+    // Check quiet hours (shared helper — also enforced by the deferred-
+    // replay recheck so a queued notification honors the same window)
+    if (inCustomerQuietHours(prefs)) {
+      logger.info(`[notify] Quiet hours active for customer ${customerId} (${prefs.quiet_hours_start}-${prefs.quiet_hours_end})`);
+      return { sent: false, channel: null, results: { reason: 'quiet_hours' } };
     }
 
     // Determine channel
@@ -137,6 +165,7 @@ const NotificationDispatcher = {
               metadata: JSON.stringify({
                 entry_point: 'notification_dispatcher_deferred',
                 notification_type: notificationType,
+                notify_customer_id: customer.id,
                 original_block_code: smsResult.code,
                 replay_purpose: purpose,
                 refresh_customer_phone: true,
@@ -176,3 +205,5 @@ const NotificationDispatcher = {
 };
 
 module.exports = NotificationDispatcher;
+// Deferred-replay registry hook (replay-time preference recheck).
+module.exports.deferredNotificationStillWanted = deferredNotificationStillWanted;

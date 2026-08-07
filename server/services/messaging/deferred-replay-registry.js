@@ -241,6 +241,17 @@ const REGISTRY = {
     },
   },
 
+  notification_dispatcher_deferred: {
+    async recheck(meta) {
+      // The dispatcher's per-type toggle, channel choice, and CUSTOMER
+      // quiet hours can all change between enqueue and 8:00 AM — re-run
+      // them so the replay honors exactly what the immediate dispatcher
+      // would (which drops on all three without retrying).
+      const { deferredNotificationStillWanted } = require('../notification-dispatcher');
+      return deferredNotificationStillWanted(meta.notification_type, meta.notify_customer_id || null);
+    },
+  },
+
   public_quote_booking_sms_deferred: {
     async recheck(meta) {
       // The immediate EMAIL carried the same booking link, so the lead may
