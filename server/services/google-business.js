@@ -922,9 +922,11 @@ class GoogleBusinessService {
           : `the GBP Reviews API pull failed: ${cause}`;
         // Without a Maps key the caller skips the Places sample entirely —
         // the alert must not claim a partial feed remains during what is
-        // actually a complete tracking outage.
+        // actually a complete tracking outage. With a key, this alert fires
+        // BEFORE the fallback runs (deliberately — a fallback failure must
+        // not swallow it), so describe the sample as an attempt, not a fact.
         const fallbackState = process.env.GOOGLE_MAPS_API_KEY
-          ? `fell back to the ~5-review Places sample`
+          ? `is degraded — the sync will attempt the ~5-review Places sample fallback`
           : `is fully down — no Places fallback is available (GOOGLE_MAPS_API_KEY is not set)`;
         await NotificationService.notifyAdmin(
           'review',

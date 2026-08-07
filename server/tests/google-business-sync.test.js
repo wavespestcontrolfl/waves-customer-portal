@@ -972,7 +972,9 @@ describe('Google Business review sync', () => {
     // One degraded alert across both runs (24h title dedupe).
     const degraded = (db.__state.rows.notifications || []).filter(n => n.title.includes('sync degraded'));
     expect(degraded).toHaveLength(1);
-    expect(degraded[0].body).toContain('Places sample');
+    // The alert fires BEFORE the fallback runs, so it must describe the
+    // sample as an attempt — not claim a partial feed is already active.
+    expect(degraded[0].body).toContain('will attempt the ~5-review Places sample');
   });
 
   test('fails closed when the GBP pull itself errors (no stamps, degraded alert instead)', async () => {

@@ -734,6 +734,10 @@ async function loadReviewTasks() {
   if (!(await tableExists('google_reviews'))) return { missing: true, tasks: [] };
   const rows = await db('google_reviews')
     .where('reviewer_name', '!=', '_stats')
+    // A review Google removed (missing_since stamped) can't be replied to —
+    // presenting it as a task would loop forever as "Refresh draft" while
+    // the Reviews page keeps submission disabled.
+    .whereNull('missing_since')
     .where(function needsReply() {
       this.whereNull('review_reply').orWhere('review_reply', 'like', '[DRAFT]%');
     })
@@ -1299,6 +1303,11 @@ router.post('/reviews/:id/draft-response', async (req, res, next) => {
 
     const review = await db('google_reviews').where('id', req.params.id).first();
     if (!review || review.reviewer_name === '_stats') return res.status(404).json({ error: 'Review not found' });
+    // Same lockout as the reply endpoints: a stamped review has no live GBP
+    // resource, so drafting for it would park an unsubmittable draft.
+    if (review.missing_since) {
+      return res.status(409).json({ error: 'This review has been removed from Google — replies are disabled.' });
+    }
 
     const existingReply = String(review.review_reply || '').trim();
     if (existingReply && !existingReply.startsWith(DRAFT_REPLY_PREFIX)) {
@@ -1309,6 +1318,9 @@ router.post('/reviews/:id/draft-response', async (req, res, next) => {
     const updated = await db('google_reviews')
       .where('id', req.params.id)
       .where('reviewer_name', '!=', '_stats')
+      // Guards the read-then-write race: the hourly sync can stamp the row
+      // between the check above and this conditional update.
+      .whereNull('missing_since')
       .where(function needsRealReply() {
         this.whereNull('review_reply').orWhere('review_reply', 'like', `${DRAFT_REPLY_PREFIX}%`);
       })
@@ -1318,7 +1330,7 @@ router.post('/reviews/:id/draft-response', async (req, res, next) => {
       })
       .returning('id');
     if (Array.isArray(updated) ? updated.length === 0 : updated === 0) {
-      return res.status(409).json({ error: 'This review already has a posted reply' });
+      return res.status(409).json({ error: 'This review can no longer be drafted — it already has a posted reply or was removed from Google' });
     }
 
     await db('activity_log').insert({
