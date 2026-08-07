@@ -27,8 +27,8 @@
  * it made the 12x plan less profitable than 6x at every lawn size. The
  * claim's exact scope — the between-cell rounding sag and the >20k sqft
  * extrapolation region where the ordering structurally fails — is documented
- * at LAWN_CADENCE_DISCOUNT in constants.js and pinned by
- * lawn-cadence-profit-ordering.test.js (codex #3274 r1).
+ * at LAWN_CADENCE_DISCOUNT in constants.js and pinned per track by
+ * lawn-cadence-profit-ordering.test.js (codex #3274 r1+r2).
  *
  * SCOPE. The caps bind from ~5,500 sqft up (~10-12 rows per track, 44 cells
  * total). Smaller brackets already separated naturally and are untouched, so

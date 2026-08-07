@@ -315,19 +315,27 @@ const LAWN_TABLE_MAX_SQFT = 20000;
 // caps bind on; steeper rates invert it — a -10%/-20% curve made the 12x
 // plan less profitable than 6x at all sizes.
 //
-// Scope of that claim (codex #3274 r1 — measured, not assumed):
-// - Between cells, independent per-column rounding can sag the 9x leg
-//   under the exact -4% line; 9x annual profit dips up to $4.23 below 6x
-//   in 18,069–19,903 sqft only. Accepted: comparable inversions pre-date
-//   this discount at ~17.7k (track,size) points (small lawns), and lawn
-//   floors are report-only (owner 2026-07-17).
-// - ABOVE LAWN_TABLE_MAX_SQFT the ordering claim does NOT hold and cannot
-//   be made to hold at these rates: incremental visit cost grows ~$28 per
-//   1,000 sqft while capped incremental 9x revenue grows ~$18, so 9x falls
-//   behind 6x by ~$10/yr per 1,000 sqft past the crossover (-$33.66/yr at
-//   30,000 sqft). Discount policy for >20k sqft lawns is an owner ruling,
-//   tracked on PR #3274. The envelope is pinned by
-//   lawn-cadence-profit-ordering.test.js — widening it should fail loudly.
+// Scope of that claim (codex #3274 r1+r2 — measured PER TRACK by diffing
+// this branch against unmodified origin/main; r1's first pass passed the
+// track where priceLawnCare ignores it and measured St. Augustine 4x):
+// - The discount adds NO sag at any bracket cell on any track. Its only
+//   added 9x-under-6x sag is off-cell, on st_augustine and zoysia only:
+//   the 18k–20k interpolation tail (independent per-column rounding,
+//   ≤ ~$4.7/yr) and the extrapolation region below. Bermuda and bahia
+//   gain zero sag anywhere 500–30,000 sqft.
+// - The bermuda 5,500–5,745 / zoysia 5,500–5,577 inversions (≤ ~$14 and
+//   ~$4.7/yr) PRE-DATE the discount — identical profits on origin/main;
+//   the caps do not bind those cells. Accepted: same class as the
+//   long-standing small-lawn shape, and lawn floors are report-only
+//   (owner 2026-07-17).
+// - ABOVE LAWN_TABLE_MAX_SQFT the ordering claim does NOT hold on
+//   st_augustine/zoysia and cannot be made to hold at these rates:
+//   incremental visit cost grows ~$28 per 1,000 sqft while capped
+//   incremental 9x revenue grows ~$18, so 9x falls behind 6x past the
+//   crossover (≈-$33/yr at 30,000 sqft). Discount policy for >20k sqft
+//   lawns is an owner ruling, tracked on PR #3274. All envelopes are
+//   pinned per track by lawn-cadence-profit-ordering.test.js — widening
+//   one should fail loudly.
 //
 // Applied to the MONTHLY bracket cell, since pa(v) = monthly * 12 / v:
 //   m9  <= m6 * (1 - 0.04) * 9/6  = m6 * 1.44
