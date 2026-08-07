@@ -3085,7 +3085,9 @@ const APPOINTMENT_CHANNEL_KEYS = [
   'serviceReminder72hChannel',
   'serviceReminder24hChannel',
   'enRouteChannel',
-  'techArrivedChannel',
+  // techArrivedChannel intentionally absent: the arrival alert is SMS-only
+  // (the appointment.tech_arrived email twin was retired 2026-08-06), so the
+  // bulk "updates by email" shortcut must not claim to route it to email.
 ];
 
 function ScheduleTab({ customer, properties = [], onRequestVisit }) {
@@ -3793,7 +3795,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 // Arrival alert — fires when the tracker flips to on-site, the
                 // moment the tech reaches the property. Independent of the
                 // en-route text so a customer can keep one and mute the other.
-                { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Tech Arrived Alert', desc: 'A message the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
+                // SMS-only (no channelKey): the arrival email twin was
+                // retired 2026-08-06 — offering Email/Both here would show a
+                // choice the server no longer honors.
+                { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
                 // Owner ruling 2026-07-09: the list stops at the appointment
                 // alerts. Auto En Route from GPS (internal detail of the
                 // en-route alert above), Service Complete Report (locked
