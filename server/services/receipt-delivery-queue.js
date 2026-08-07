@@ -146,6 +146,29 @@ async function markJobCompleted(job, { smsResult, emailResult }) {
 }
 
 async function markJobRetry(job, err, { smsResult = null, emailResult = null } = {}) {
+  // Send-window hold: not a delivery failure. Schedule the retry exactly at
+  // the window open and REFUND the claimed attempt — an after-8PM payment's
+  // receipt must go out at 8:00 AM, not burn the whole backoff ladder
+  // overnight and land permanently 'failed' before the window ever opens.
+  const holdAt = smsResult?.code === 'QUIET_HOURS_HOLD' && smsResult?.nextAllowedAt
+    ? new Date(smsResult.nextAllowedAt)
+    : null;
+  if (holdAt && !Number.isNaN(holdAt.getTime()) && holdAt.getTime() > Date.now()) {
+    await db('receipt_delivery_jobs')
+      .where({ id: job.id })
+      .update({
+        status: 'retry_scheduled',
+        sms_result: smsResult,
+        email_result: emailResult,
+        last_error: err?.message || 'receipt SMS held for send window',
+        attempts: db.raw('GREATEST(attempts - 1, 0)'),
+        next_attempt_at: holdAt,
+        locked_at: null,
+        locked_by: null,
+        updated_at: db.fn.now(),
+      });
+    return;
+  }
   const attempts = Number(job.attempts || 0);
   const maxAttempts = Number(job.max_attempts || DEFAULT_MAX_ATTEMPTS);
   const terminal = attempts >= maxAttempts;
@@ -180,7 +203,15 @@ async function processReceiptDeliveryJob(job) {
     const { sendReceiptEmail } = require('./invoice-email');
 
     smsResult = await InvoiceService.sendReceipt(invoice.id, { hasEmailLeg: true })
-      .catch((err) => ({ sent: false, reason: err.message }));
+      .catch((err) => ({
+        sent: false,
+        reason: err.message,
+        // Send-window hold metadata (code + window-open time) rides through
+        // so markJobRetry schedules the retry at 8:00 AM instead of the
+        // generic backoff ladder.
+        ...(err.code ? { code: err.code } : {}),
+        ...(err.nextAllowedAt ? { nextAllowedAt: err.nextAllowedAt } : {}),
+      }));
     if (actionableSmsFailure(smsResult)) {
       logger.warn(`[receipt-delivery-queue] Receipt SMS not sent for invoice ${invoice.invoice_number}: ${smsResult.reason}`);
     }

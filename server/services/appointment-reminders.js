@@ -1881,12 +1881,21 @@ const AppointmentReminders = {
             continue;
           }
 
-          // Outside the send window (owner ruling 2026-08-07): a deferred
-          // 24h reminder would land on the visit's own day — an 8:00 AM
-          // text for that morning's appointment reminds nobody. Close the
-          // reminder instead. Same appointment_time-guarded close as the
-          // preference skip so a concurrent move's re-arm is never stomped.
+          // Outside the send window (owner ruling 2026-08-07): an EVENING
+          // hold's deferred send would land on the visit's own day — an
+          // 8:00 AM text for that morning's appointment reminds nobody, so
+          // close the reminder. A PRE-OPENING hold (e.g. a 7:45 AM restart
+          // draining backlog) is different: the window opens later TODAY,
+          // still a full day before tomorrow's visit — defer like the 72h
+          // leg instead of burning the reminder. Same appointment_time-
+          // guarded close as the preference skip so a concurrent move's
+          // re-arm is never stomped.
           if (reminderSendWindowHold(channel24)) {
+            const { nextSendWindowOpenET } = require('./messaging/send-window');
+            if (etDateString(nextSendWindowOpenET(now)) < apptDateET) {
+              logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} deferred — outside 8AM-8PM ET send window, window reopens before the visit day`);
+              continue;
+            }
             const closedWindow24 = await db('appointment_reminders')
               .where({ id: r.id })
               .where('appointment_time', r.appointment_time)

@@ -45,6 +45,7 @@ const OPERATOR_ENTRY_POINTS = new Set([
   'admin_estimate_send',
   'admin_estimate_send_booking_link',
   'admin_lawn_service_outline_send',
+  'admin_prep_guide_send',
   'admin_pricing_strategy_upsell',
   'admin_project_report_send',
   'admin_project_report_with_invoice',
