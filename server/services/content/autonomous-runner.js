@@ -3523,6 +3523,7 @@ function applyOperatorSlugRepair(brief, draft) {
     from_slug: mismatch.draft_slug || null,
     to_slug: pinned,
     canonical_rewritten: false,
+    url_rewritten: false,
     body_self_link_rewrites: 0,
   };
 
@@ -3558,6 +3559,17 @@ function applyOperatorSlugRepair(brief, draft) {
   if (!canonicalIsForeign && oldCanonical !== newCanonical) {
     draft.frontmatter.canonical = newCanonical;
     repair.canonical_rewritten = true;
+  }
+
+  // draft.url is the writer's own-route reference, consumed downstream by
+  // the sitemap pre-check, the AI-visibility gate, uniqueness
+  // self-exclusion, and the published/pending-url fallback — after a repair
+  // it must describe the pinned route, not the rejected writer route
+  // (Codex r8). Unlike the canonical, no publish guard reads it, so there
+  // is no unsafe input to preserve.
+  if (typeof draft.url === 'string' && draft.url.trim() && draft.url !== newCanonical) {
+    draft.url = newCanonical;
+    repair.url_rewritten = true;
   }
 
   // Self-referencing links the writer built on its own (wrong) slug. Only

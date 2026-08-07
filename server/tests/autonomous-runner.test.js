@@ -750,6 +750,9 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
   function driftedDraft(overrides = {}) {
     return {
       type: 'draft',
+      url: overrides.url !== undefined
+        ? overrides.url
+        : 'https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/',
       frontmatter: {
         slug: '/fall-lawn-mistakes-southwest-florida/',
         canonical: 'https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/',
@@ -831,6 +834,10 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     expect(result.ok).toBe(true);
     expect(draft.frontmatter.slug).toBe(PINNED);
     expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    // draft.url feeds the sitemap pre-check, visibility gate, uniqueness
+    // self-exclusion, and published/pending-url fallback — it must describe
+    // the pinned route after repair, not the rejected writer route (Codex r8).
+    expect(draft.url).toBe(`https://www.wavespestcontrol.com${PINNED}`);
     expect(draft.body).not.toContain('/fall-lawn-mistakes-southwest-florida/');
     expect(draft.body).toContain(`(${PINNED})`);
     // Fragment link keeps its fragment — only the exact path is swapped.
@@ -839,6 +846,7 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
       from_slug: '/fall-lawn-mistakes-southwest-florida/',
       to_slug: PINNED,
       canonical_rewritten: true,
+      url_rewritten: true,
       body_self_link_rewrites: 2,
     });
     // The detector reads clean afterwards — the pipeline continues past the
