@@ -91,8 +91,10 @@ if [ "$MERGEABLE" = "CONFLICTING" ]; then
     "Then: re-run this script, and post '@codex review' — the pre-conflict clean does not cover the merge commit."
 fi
 if [ "$MERGEABLE" = "UNKNOWN" ]; then
-  echo "⚠️  verify-pr-checks: mergeable still UNKNOWN after $((MERGEABLE_TRIES * 5))s — GitHub is slow; re-run in a minute." >&2
-  echo "   (Not failing: UNKNOWN is indeterminate, but do NOT treat CI state as trustworthy until this resolves.)" >&2
+  fail "PR #$PR_NUMBER mergeability is still UNKNOWN after $((MERGEABLE_TRIES * 5))s — this gate cannot prove the PR is non-conflicting." \
+    "A pass here is supposed to MEAN 'not conflicting, so CI silence would be real'. UNKNOWN proves nothing, so it fails." \
+    "GitHub is usually just slow computing the merge ref: wait a moment and re-run this script." \
+    "If it stays UNKNOWN, check the PR on GitHub directly before trusting any CI state."
 fi
 
 # 4. The tests workflow actually triggered a run for this head SHA.
