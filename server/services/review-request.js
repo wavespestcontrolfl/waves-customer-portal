@@ -3421,12 +3421,26 @@ const ReviewService = {
         continue;
       }
       if (result?.reason === "deferred_inflight") {
-        // startReviewSequence parked a FRESH row — drop this one and carry
-        // the original parking time onto it so the age cap stays honest.
-        await db("review_sequences").where({ id: row.id, status: "redeeming" }).del();
-        await db("review_sequences")
+        // startReviewSequence may have seen THIS claimed row as the
+        // existing park and inserted nothing (codex #3243 r24 P2) — only
+        // drop it when a DISTINCT replacement actually exists; otherwise
+        // release it back with backoff, or a hung provider call would
+        // consume the sole durable retry.
+        const replacement = await db("review_sequences")
           .where({ customer_id: row.customer_id, status: "deferred" })
-          .update({ completed_at: row.completed_at || new Date() });
+          .where("id", "!=", row.id)
+          .first();
+        if (replacement) {
+          await db("review_sequences").where({ id: row.id, status: "redeeming" }).del();
+          // Carry the original parking time so the age cap stays honest.
+          await db("review_sequences")
+            .where({ id: replacement.id, status: "deferred" })
+            .update({ completed_at: row.completed_at || new Date() });
+        } else {
+          await db("review_sequences")
+            .where({ id: row.id, status: "redeeming" })
+            .update({ status: "deferred", next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() });
+        }
         continue;
       }
       // Terminal (dedupe, cap, engagement, resolver skip) — done with it.

@@ -1948,6 +1948,36 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan.plan).toHaveLength(3);
   });
 
+  test('r24: a still-in-flight opener releases the claimed parking row instead of consuming it', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+    const mock = makeMock({
+      customers: [{ id: 'rp', first_name: 'Ivy', last_name: 'R', phone: '+19410000069', nearest_location_id: 'bradenton' }],
+      scheduled_services: [
+        { id: 'rp-1', customer_id: 'rp', service_id: 'svc-wt', status: 'completed', scheduled_date: d(2), service_key: 'wildlife_trapping' },
+        { id: 'rp-2', customer_id: 'rp', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+      ],
+      review_sequences: [
+        { id: 'seq-hung', customer_id: 'rp', scheduled_service_id: 'rp-1', status: 'active', current_step: 0, next_run_at: null, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]) },
+        { id: 'seq-park2', customer_id: 'rp', status: 'deferred', stop_reason: 'opener_in_flight', plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]), current_step: 0, touches_sent: 0, next_run_at: new Date(Date.now() - 1000), series_final: true, scheduled_service_id: 'rp-2', completed_at: new Date() },
+      ],
+    });
+    db.mockImplementation(mock);
+    const prev = ReviewService._SUPERSEDE_RETRY_DELAY_MS;
+    ReviewService._SUPERSEDE_RETRY_DELAY_MS = 1;
+    let out;
+    try {
+      out = await ReviewService.processReviewSequences();
+    } finally {
+      ReviewService._SUPERSEDE_RETRY_DELAY_MS = prev;
+    }
+    expect(out.redeemed).toBe(0);
+    const released = mock.__state.rows.review_sequences.find((r) => r.id === 'seq-park2');
+    expect(released).toBeTruthy();
+    expect(released.status).toBe('deferred');
+    expect(new Date(released.next_run_at).getTime()).toBeGreaterThan(Date.now());
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
