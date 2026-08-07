@@ -1054,13 +1054,20 @@ describe('Google Business review sync', () => {
       createTime: '2026-05-25T12:00:00Z',
     }]);
     service._reconcileMissingReviews = jest.fn(async () => ({ ok: false, error: 'boom' }));
+    // A pull-failure alert from earlier in the window must NOT suppress the
+    // reconcile alert — distinct failure classes carry distinct titles.
+    db.__state.rows.notifications = [{
+      recipient_type: 'admin',
+      title: 'Google review sync degraded for Lakewood Ranch',
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+    }];
 
     const result = await service.syncAllReviews();
 
     // The pull itself succeeded — no Places review-sample fallback runs.
     expect(result.sources).toEqual({ bradenton: 'gbp' });
     expect(result.errors.some(e => e.source === 'reconcile')).toBe(true);
-    const degraded = (db.__state.rows.notifications || []).filter(n => n.title.includes('sync degraded'));
+    const degraded = (db.__state.rows.notifications || []).filter(n => n.title.includes('removal reconcile failing'));
     expect(degraded).toHaveLength(1);
     expect(degraded[0].body).toContain('pulled the GBP feed');
     expect(degraded[0].body).toContain('REMOVALS will not be detected');

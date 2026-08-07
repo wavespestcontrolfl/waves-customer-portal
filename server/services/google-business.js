@@ -1062,7 +1062,14 @@ class GoogleBusinessService {
    */
   async _notifyDegradedSync(loc, cause) {
     try {
-      const title = `Google review sync degraded for ${loc.name}`;
+      // The title is the 24h dedupe key, so distinct failure classes need
+      // distinct titles: a pull-failure alert this morning must not
+      // suppress a reconcile-failure alert this afternoon — they have
+      // different remediation and both mean removals go undetected.
+      const reconcileFailure = String(cause || '').startsWith('removal reconcile failed');
+      const title = reconcileFailure
+        ? `Google review removal reconcile failing for ${loc.name}`
+        : `Google review sync degraded for ${loc.name}`;
       // The advisory lock serializes the check-then-insert across the hourly
       // job, the manual admin sync, and overlapping deploy instances — a
       // plain read-then-insert here would double-notify. A held lock means
@@ -1079,7 +1086,6 @@ class GoogleBusinessService {
         // SUCCEEDED (new reviews still sync, no Places fallback runs), but
         // removal detection is dead until the reconcile works — the body
         // must not claim the feed is down or that a fallback will run.
-        const reconcileFailure = String(cause || '').startsWith('removal reconcile failed');
         const detail = cause === 'no_client'
           ? `the GBP client could not be initialized: ${await this._describeCredentialGap(loc)}`
           : `the GBP Reviews API pull failed: ${cause}`;
