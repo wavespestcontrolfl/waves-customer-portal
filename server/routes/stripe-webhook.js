@@ -1,4 +1,5 @@
 const express = require('express');
+const Sentry = require('@sentry/node');
 const router = express.Router();
 const Stripe = require('stripe');
 const db = require('../models/db');
@@ -795,6 +796,17 @@ router.post(
 
     } catch (err) {
       logger.error(`[stripe-webhook] Handler error for ${event.type}: ${err.message}`, { stack: err.stack });
+
+      // Winston is console-only (Railway's rotating logs) and the ledger's
+      // error column is purged at 90 days — Sentry is the only durable,
+      // operator-visible record of a handler failure. Identifiers only:
+      // event id/type are not PII, and the payload is never attached.
+      // Signature failures above are deliberately NOT captured (public
+      // endpoint — attack-surface noise, not app failure).
+      Sentry.captureException(err, {
+        tags: { area: 'stripe-webhook' },
+        extra: { eventType: event.type, eventId: event.id },
+      });
 
       // Record error and return 500 so Stripe retries (handlers are idempotent)
       await db('stripe_webhook_events')

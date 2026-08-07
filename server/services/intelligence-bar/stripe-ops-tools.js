@@ -433,4 +433,9 @@ async function executeStripeOpsTool(toolName, input = {}) {
   }
 }
 
-module.exports = { STRIPE_OPS_TOOLS, executeStripeOpsTool };
+// getStripeWebhookFailures is also consumed directly by the daily
+// stripe-webhook-health check (services/stripe-webhook-health.js) — direct
+// export keeps real throw semantics (executeStripeOpsTool swallows errors
+// into { error } for the IB circuit breaker, which would hide a failed
+// check from job_health).
+module.exports = { STRIPE_OPS_TOOLS, executeStripeOpsTool, getStripeWebhookFailures };
