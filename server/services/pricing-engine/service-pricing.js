@@ -2040,6 +2040,18 @@ function priceLawnCare(property, options = {}) {
   const bermudaSuppressionEligible = normalizedTrack === 'st_augustine';
   let bermudaSuppressionPerApp = 0;
   if (bermudaSuppression === true && bermudaSuppressionEligible) {
+    // Gate enforcement lives HERE, the deepest chokepoint, so every entry
+    // point — the V2 translator, persisted estimateData.engineInputs
+    // replays, direct generateEstimate/priceLawnCare callers — hits the
+    // same wall (codex: translator-only enforcement was bypassable).
+    // failClosed rides the persistence rethrow rail, never CLIENT_FALLBACK.
+    if (process.env.GATE_BERMUDA_SUPPRESSION !== 'true') {
+      const err = new Error('Bermudagrass suppression is not enabled on this environment (GATE_BERMUDA_SUPPRESSION) — uncheck the add-on or flip the gate.');
+      err.statusCode = 400;
+      err.code = 'BERMUDA_SUPPRESSION_GATED';
+      err.failClosed = true;
+      throw err;
+    }
     // A selected add-on must price POSITIVE or fail the calculation — a
     // malformed admin edit to the DB knobs (missing key, non-numeric, zero)
     // silently zeroing the adder would return a successful unchanged lawn

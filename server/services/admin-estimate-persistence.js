@@ -641,6 +641,10 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
       : null) || null;
     return { recomputed: true, source, serverResult, serverTotals, pestPricingVersion };
   } catch (error) {
+    // failClosed policy rejections (gated/invalid add-on inside the replayed
+    // inputs) propagate — wrapping them as ENGINE_ERROR would hand them to
+    // the fail-open CLIENT_FALLBACK rail and persist the rejected price.
+    if (error && error.failClosed === true) throw error;
     return { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
 }
@@ -674,6 +678,10 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
     if (error && error.failClosed === true) throw error;
     result = { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
+  // Belt-and-suspenders for injected/legacy recompute fns that WRAP the
+  // error instead of throwing: a wrapped failClosed rejection must not
+  // reach the CLIENT_FALLBACK branch either.
+  if (result && result.error && result.error.failClosed === true) throw result.error;
 
   if (result.recomputed) {
     // Overwrite the embedded result so the stored blob and the persisted

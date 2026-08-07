@@ -939,20 +939,39 @@ const CONFIG_KEY_FEATURE_GATES = {
   termite_rental: 'GATE_TERMITE_STATION_RENTAL',
 };
 
+// Gated SUB-features that live inside a broader config row (the row itself
+// stays available). Same read-at-request-time semantics as featureAvailable,
+// so a gate flip needs no client redeploy.
+const CONFIG_KEY_SUB_FEATURE_GATES = {
+  lawn_pricing_v2: { bermudaSuppression: 'GATE_BERMUDA_SUPPRESSION' },
+};
+
+function gateEnvOn(gate) {
+  return ['1', 'true', 'on'].includes(String(process.env[gate] || '').toLowerCase());
+}
+
 function configKeyFeatureAvailable(key) {
   const gate = CONFIG_KEY_FEATURE_GATES[key];
   if (!gate) return true;
-  return ['1', 'true', 'on'].includes(String(process.env[gate] || '').toLowerCase());
+  return gateEnvOn(gate);
+}
+
+function configKeySubFeaturesAvailable(key) {
+  const subs = CONFIG_KEY_SUB_FEATURE_GATES[key];
+  if (!subs) return undefined;
+  return Object.fromEntries(Object.entries(subs).map(([name, gate]) => [name, gateEnvOn(gate)]));
 }
 
 router.get('/:key', async (req, res, next) => {
   try {
     const config = await db('pricing_config').where({ config_key: req.params.key }).first();
     if (!config) return res.status(404).json({ error: 'Config not found' });
+    const subFeaturesAvailable = configKeySubFeaturesAvailable(req.params.key);
     res.json({
       ...normalizePricingConfigRow(config),
       // Read at request time so a gate flip needs no redeploy of the client.
       featureAvailable: configKeyFeatureAvailable(req.params.key),
+      ...(subFeaturesAvailable ? { subFeaturesAvailable } : {}),
     });
   } catch (err) { next(err); }
 });

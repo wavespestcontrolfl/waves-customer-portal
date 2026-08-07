@@ -37,16 +37,25 @@ function findGrassTypeSelect(container) {
   );
 }
 
-beforeEach(() => {
-  localStorage.setItem("waves_admin_token", "test-token");
+function stubFetch({ gateOn }) {
   vi.stubGlobal(
     "fetch",
     vi.fn((url) => {
       const path = String(url);
       if (path.includes("/admin/discounts")) return jsonResponse([]);
+      if (path.includes("/admin/pricing-config/lawn_pricing_v2")) {
+        return jsonResponse(
+          gateOn ? { subFeaturesAvailable: { bermudaSuppression: true } } : {},
+        );
+      }
       return jsonResponse({});
     }),
   );
+}
+
+beforeEach(() => {
+  localStorage.setItem("waves_admin_token", "test-token");
+  stubFetch({ gateOn: true });
 });
 
 afterEach(() => {
@@ -56,6 +65,21 @@ afterEach(() => {
 });
 
 describe("bermudagrass suppression add-on checkbox", () => {
+  it("never renders while GATE_BERMUDA_SUPPRESSION is off (server reports unavailable)", async () => {
+    stubFetch({ gateOn: false });
+    const { container } = render(
+      <MemoryRouter>
+        <EstimateToolViewV2 />
+      </MemoryRouter>,
+    );
+    // Lawn block renders (svcLawn defaults on)...
+    await waitFor(() => {
+      expect(findGrassTypeSelect(container)).toBeTruthy();
+    });
+    // ...but the gated add-on control does not.
+    expect(findCheckboxByLabel(container, /Bermudagrass suppression/)).toBeNull();
+  });
+
   it("appears only for the St. Augustine track and shows the eligibility copy when checked", async () => {
     const { container } = render(
       <MemoryRouter>

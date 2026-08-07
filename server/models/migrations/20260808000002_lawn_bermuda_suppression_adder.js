@@ -29,7 +29,11 @@ const CHANGELOG_IDENTITY = {
 
 async function loadRow(knex) {
   if (!(await knex.schema.hasTable('pricing_config'))) return null;
-  const row = await knex('pricing_config').where({ config_key: 'lawn_pricing_v2' }).first();
+  // Migrations run transactionally; forUpdate locks the row for the
+  // read-modify-write so a concurrent admin pricing edit can't commit
+  // between the read and the replace and be overwritten by this stale
+  // snapshot (codex P0).
+  const row = await knex('pricing_config').where({ config_key: 'lawn_pricing_v2' }).forUpdate().first();
   if (!row) return null;
   const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
   if (!data || typeof data !== 'object') return null;

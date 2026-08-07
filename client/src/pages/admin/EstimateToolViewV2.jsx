@@ -3248,6 +3248,27 @@ export default function EstimateToolViewV2({
   // the choice, so the save-time recompute check sees no drift to warn about
   // (codex P1). Fail closed: null/false hides the control entirely.
   const [termiteRentalAvailable, setTermiteRentalAvailable] = useState(false);
+  // Bermuda-suppression add-on availability (GATE_BERMUDA_SUPPRESSION, read
+  // at request time server-side). Explicit true only — 404 / transport
+  // failure / older server all keep the option hidden rather than offering
+  // a control the engine would reject with a 400.
+  const [bermudaSuppressionAvailable, setBermudaSuppressionAvailable] = useState(false);
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const r = await adminFetch("/admin/pricing-config/lawn_pricing_v2");
+        if (!r.ok) return;
+        const row = await r.json();
+        if (active) setBermudaSuppressionAvailable(row?.subFeaturesAvailable?.bermudaSuppression === true);
+      } catch {
+        /* ignore — stays unavailable */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
   useEffect(() => {
     (async () => {
       try {
@@ -3944,7 +3965,7 @@ export default function EstimateToolViewV2({
       const options = {
         grassType: form.grassType || "st_augustine",
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
-        ...(form.svcLawn && form.grassType === "st_augustine" && form.bermudaSuppression
+        ...(bermudaSuppressionAvailable && form.svcLawn && form.grassType === "st_augustine" && form.bermudaSuppression
           ? { bermudaSuppression: true }
           : {}),
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
@@ -6027,11 +6048,12 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   </div>{" "}
                   {/* Bermuda-in-St.-Augustine suppression add-on — dark behind
-                      GATE_BERMUDA_SUPPRESSION server-side. Requesting it while
-                      the gate is off FAILS the calculation with an explicit
-                      error (never a silent unchanged price). St. Augustine
+                      GATE_BERMUDA_SUPPRESSION. The control renders only when
+                      the server reports the gate on (subFeaturesAvailable);
+                      the engine additionally fails closed, so a stale client
+                      can never produce a silent unchanged price. St. Augustine
                       track only. */}
-                  {form.grassType === "st_augustine" && (
+                  {bermudaSuppressionAvailable && form.grassType === "st_augustine" && (
                     <div className="mt-3">
                       <CheckboxV2
                         k="bermudaSuppression"

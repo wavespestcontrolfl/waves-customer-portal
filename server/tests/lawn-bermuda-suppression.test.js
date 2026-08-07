@@ -19,6 +19,33 @@ const ADDER_5K = 25;
 const ADDER_10K = 35;
 
 describe('priceLawnCare bermudaSuppression adder', () => {
+  // Gate enforcement lives in the pricer itself (deepest chokepoint), so
+  // the adder tests run gate-on; the gate-off behavior is pinned below.
+  const prevGate = process.env.GATE_BERMUDA_SUPPRESSION;
+  beforeAll(() => { process.env.GATE_BERMUDA_SUPPRESSION = 'true'; });
+  afterAll(() => {
+    if (prevGate === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION;
+    else process.env.GATE_BERMUDA_SUPPRESSION = prevGate;
+  });
+
+  test('gate off: a selected add-on fails closed even on DIRECT pricer calls', () => {
+    delete process.env.GATE_BERMUDA_SUPPRESSION;
+    try {
+      let thrown;
+      try {
+        priceLawnCare(PROPERTY_5K, { track: 'st_augustine', tier: 'enhanced', bermudaSuppression: true });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeTruthy();
+      expect(thrown.code).toBe('BERMUDA_SUPPRESSION_GATED');
+      expect(thrown.failClosed).toBe(true);
+      // Unselected quotes are untouched by the gate.
+      expect(priceLawnCare(PROPERTY_5K, { track: 'st_augustine', tier: 'enhanced' }).bermudaSuppression).toBeNull();
+    } finally {
+      process.env.GATE_BERMUDA_SUPPRESSION = 'true';
+    }
+  });
   test('bakes the adder into every tier per-app on St. Augustine', () => {
     const base = priceLawnCare(PROPERTY_5K, { track: 'st_augustine', tier: 'enhanced' });
     const withAddon = priceLawnCare(PROPERTY_5K, {
@@ -110,6 +137,33 @@ describe('save-replay failClosed propagation', () => {
       now: new Date(),
       recompute: async () => { throw gateErr; },
     })).rejects.toBe(gateErr);
+  });
+
+  test('a gated engineInputs replay rejects via the REAL recompute path (no CLIENT_FALLBACK)', async () => {
+    // The engine wraps its own errors as {reason:'ENGINE_ERROR'} inside
+    // serverRecomputeFromEstimateData — this pins that a failClosed rejection
+    // raised DEEP in priceLawnCare still blocks the save instead of riding
+    // the fail-open rail (codex #3272 pre-push P0).
+    const prev = process.env.GATE_BERMUDA_SUPPRESSION;
+    delete process.env.GATE_BERMUDA_SUPPRESSION;
+    try {
+      const estimateData = {
+        engineInputs: {
+          turfSf: 5000,
+          homeSqFt: 2000,
+          services: { lawn: { track: 'st_augustine', tier: 'enhanced', bermudaSuppression: true } },
+        },
+      };
+      await expect(resolveServerAuthoritativePricing({
+        estimateData,
+        clientPreview,
+        quoteRequired: false,
+        now: new Date(),
+      })).rejects.toMatchObject({ code: 'BERMUDA_SUPPRESSION_GATED', failClosed: true });
+    } finally {
+      if (prev === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION;
+      else process.env.GATE_BERMUDA_SUPPRESSION = prev;
+    }
   });
 
   test('an ordinary engine error still fails OPEN to CLIENT_FALLBACK', async () => {
