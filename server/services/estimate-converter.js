@@ -635,7 +635,7 @@ async function addOnPreservedMonthlyRateBase({
     // grouped estimates take this path — ungrouped accepts are byte-identical.
     async function scopePlanRowsToEstimateProperty(rows) {
       if (!(estimate?.estimate_group_id && estimate.address)) return rows;
-      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey } = require('./estimate-property-linkage');
+      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
       const estimateStreet = normalizedEstimateStreet(estimate.address);
       if (!estimateStreet) return rows;
       return database.transaction(async (sp) => {
@@ -643,7 +643,7 @@ async function addOnPreservedMonthlyRateBase({
         const kept = [];
         for (const row of rows) {
           let street = normalizedStampedStreet(row.service_address_line1, row.service_address_line2, row.service_address_city, row.service_address_zip);
-          if (!street && row.source_estimate_id) {
+          if ((!street || scopeKeyLacksLocality(street)) && row.source_estimate_id) {
             const src = await sp('estimates').where({ id: row.source_estimate_id }).first('address');
             street = normalizedEstimateStreet(src?.address);
           }

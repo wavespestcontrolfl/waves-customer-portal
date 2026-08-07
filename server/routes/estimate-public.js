@@ -906,7 +906,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     // repriced, and the accepted property ends up with NO booked visit
     // while linkage can no longer correct the already-linked row. Fail
     // CLOSED on candidates whose property can't be located.
-    const { normalizedEstimateStreet: adoptStreetOf, normalizedStampedStreet: adoptStampedStreetOf, sameScopeKey: adoptSameScope } = require('../services/estimate-property-linkage');
+    const { normalizedEstimateStreet: adoptStreetOf, normalizedStampedStreet: adoptStampedStreetOf, sameScopeKey: adoptSameScope, scopeKeyLacksLocality: adoptKeyLacksLocality } = require('../services/estimate-property-linkage');
     const adoptionEstimateStreet = estimate.estimate_group_id ? adoptStreetOf(estimate.address) : '';
     let adoptionPrimaryStreet = '';
     if (adoptionEstimateStreet) {
@@ -918,7 +918,7 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
     const candidateAtQuotedProperty = async (cand) => {
       if (!adoptionEstimateStreet) return true;
       let candStreet = adoptStampedStreetOf(cand.service_address_line1, cand.service_address_line2, cand.service_address_city, cand.service_address_zip);
-      if (!candStreet && cand.source_estimate_id) {
+      if ((!candStreet || adoptKeyLacksLocality(candStreet)) && cand.source_estimate_id) {
         try {
           const src = await conn('estimates').where({ id: cand.source_estimate_id }).first('address');
           candStreet = adoptStreetOf(src?.address);
@@ -11811,8 +11811,8 @@ async function transferGroupFollowupOwnership(estimate) {
          SELECT 1 FROM estimates s
          WHERE s.estimate_group_id = ? AND s.id <> ?
            AND s.status IN ('sent','viewed') AND s.archived_at IS NULL
-           AND (s.followup_unviewed_sent = false OR s.followup_viewed_sent = false
-             OR s.followup_final_sent = false OR s.followup_expiring_sent = false)
+           AND (s.followup_unviewed_sent IS NOT TRUE OR s.followup_viewed_sent IS NOT TRUE
+             OR s.followup_final_sent IS NOT TRUE OR s.followup_expiring_sent IS NOT TRUE)
        )
        RETURNING o.id`,
       [

@@ -588,9 +588,9 @@ async function findActiveRecurringSeries(conn, {
       && serviceKeyFor({ service_type: parent.service_type }) === targetKey;
     if (!idMatch && !keyMatch) continue;
     if (serviceAddressScope && columns.service_address_line1 && serviceAddressScope.estimateStreet) {
-      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey } = require('./estimate-property-linkage');
+      const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeyLacksLocality } = require('./estimate-property-linkage');
       let parentStreet = normalizedStampedStreet(parent.service_address_line1, parent.service_address_line2, parent.service_address_city, parent.service_address_zip);
-      if (!parentStreet && parent.source_estimate_id) {
+      if ((!parentStreet || scopeKeyLacksLocality(parentStreet)) && parent.source_estimate_id) {
         // Unstamped parent: the post-commit linkage hook may not have run yet
         // (or the gate is off), and under concurrent group accepts the other
         // property's fresh series would otherwise read as the customer's

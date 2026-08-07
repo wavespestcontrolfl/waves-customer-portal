@@ -520,6 +520,8 @@ async function processLeadEstimateAutoSendBatch({
       const sendResult = await sender(claimed, config.sendMethod, {
         idempotencyKey: `lead-estimate-auto-send:${claimed.id}`,
         now: () => now,
+        // This path claims the row before calling (codex #3248 r6 contract).
+        callerPreClaimed: true,
       });
       if (sendResult.sent) {
         const sentEstimate = await database('estimates').where({ id: claimed.id }).first();

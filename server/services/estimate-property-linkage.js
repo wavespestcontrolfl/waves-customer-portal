@@ -301,6 +301,15 @@ function normalizedStampedStreet(line1, line2, city, zip) {
   return `${street}|${cityKey}|${normalizeZip(zip)}`;
 }
 
+// True when a scope key carries a street but neither city nor zip — a
+// partially stamped legacy row whose wildcard locality would otherwise
+// match EVERY same-street property (codex #3248 r6); consumers use this to
+// try the row's source estimate for a fully qualified key first.
+function scopeKeyLacksLocality(key) {
+  const [street, city, zip] = String(key || '').split('|');
+  return !!street && !city && !zip;
+}
+
 // Strict on street, wildcard on locality segments either side lacks.
 function sameScopeKey(a, b) {
   if (!a || !b) return false;
@@ -378,6 +387,7 @@ module.exports = {
   normalizedEstimateStreet,
   normalizedStampedStreet,
   sameScopeKey,
+  scopeKeyLacksLocality,
   normalizedEstimatePropertyKey,
   samePropertyKey,
   estimateQuotesCustomerAddress,
