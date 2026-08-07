@@ -2979,3 +2979,80 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     }
   });
 });
+
+// ── W2: compliance language + banned service topics ────────────────────────
+
+describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
+  test('"safe to re-enter" blocks at P0', () => {
+    const r = guardrails.evaluate({ body: 'The lawn is safe to re-enter about an hour after treatment.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('"safe for kids and pets" blocks', () => {
+    const r = guardrails.evaluate({ body: 'Our granular application is safe for kids and pets once watered in.' }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('pet-safe / child-safe compounds block', () => {
+    const r = guardrails.evaluate({ body: 'We only use pet-safe products in the backyard.' }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('"EPA-registered" endorsement blocks in any framing', () => {
+    const r = guardrails.evaluate({ body: 'Every product we apply is EPA-registered for residential use.' }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('a violation in the meta description blocks too (publishable text covers meta)', () => {
+    const r = guardrails.evaluate({
+      body: 'Follow the label re-entry directions after any application.',
+      frontmatter: { meta_description: 'Pet-safe lawn treatments for Sarasota homes.' },
+    }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('label-directed phrasing and negated disclaimers stay legal', () => {
+    const r = guardrails.evaluate({
+      body: [
+        'Follow the label re-entry directions and keep pets off the lawn until the application is dry.',
+        'No product is completely safe for pets in the wet window, which is why the label interval matters.',
+      ].join(' '),
+    }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+});
+
+describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
+  test('"we offer fumigation" blocks at P0', () => {
+    const r = guardrails.evaluate({ body: 'For severe drywood termites, we offer whole-structure fumigation.' }, {});
+    expect(r.pass).toBe(false);
+    expect(r.findings.some((f) => f.code === 'BANNED_TOPIC' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('"our wildlife trapping service" blocks', () => {
+    const r = guardrails.evaluate({ body: 'Ask about our wildlife trapping service for raccoons in the attic.' }, {});
+    expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('"call Waves for insulation" blocks', () => {
+    const r = guardrails.evaluate({ body: 'Call Waves for attic insulation quotes while we are on site.' }, {});
+    expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('informational mention stays legal — no first-person service anchor', () => {
+    const r = guardrails.evaluate({
+      body: [
+        'Severe drywood termite infestations may call for structural fumigation, which is handled by tenting specialists.',
+        'Light infestations do not call for fumigation at all.',
+        'Wildlife trapping is regulated separately in Florida.',
+      ].join(' '),
+    }, {});
+    expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('the wanted referral disclaimer stays legal', () => {
+    const r = guardrails.evaluate({ body: 'We do not offer fumigation — for tenting we refer you to a licensed structural fumigator.' }, {});
+    expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+});

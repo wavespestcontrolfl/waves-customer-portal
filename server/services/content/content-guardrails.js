@@ -2871,6 +2871,98 @@ function preventionPromiseFinding(text) {
   return null;
 }
 
+// ── Re-entry / safety compliance language (P0 REENTRY_SAFETY_CLAIM) ────────
+// Compliance hard rule (owner, 2026-07-11 sweep): treated areas and re-entry
+// are NEVER described as "safe", and "EPA-registered/-approved" is never
+// used as a safety endorsement — the compliant phrasing is "follow the label
+// re-entry directions" / "once dry per the label". Until now this lived only
+// in the writer prompt; this is the deterministic backstop. Negated forms
+// ("no product is completely safe…") are the WANTED phrasing and stay legal
+// via the same negation guards the prevention section uses.
+const REENTRY_SAFETY_SRCS = [
+  // "safe to re-enter / return / go back inside", "re-entry is safe",
+  // "safe for kids and pets to return"
+  "\\bsafe\\s+(?:for\\s+(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies))\\s+(?:and\\s+(?:kids?|children|pets?|dogs?|cats?)\\s+)?)?to\\s+(?:re-?enter|return|go\\s+back|come\\s+back|walk\\s+on|play\\s+on|be\\s+(?:in|on|inside|around))\\b",
+  "\\bre-?entry\\s+(?:is|becomes?|will\\s+be)\\s+(?:completely\\s+|totally\\s+|perfectly\\s+)?(?:safe|harmless|risk[-\\s]?free)\\b",
+  "\\bsafe\\s+(?:for\\s+)?re-?entry\\b",
+  // "the treatment/product/spray/lawn is safe (for kids/pets/around …)"
+  "\\b(?:treatments?|products?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:completely\\s+|totally\\s+|perfectly\\s+|entirely\\s+|100\\s?%\\s+)?safe\\b",
+  // "safe for/around kids, pets, pollinators…"
+  "\\bsafe\\s+(?:for|around)\\s+(?:your\\s+)?(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies)|pollinators?|bees?|wildlife)\\b",
+  // "pet-safe" / "child-safe" / "kid-safe" / "family-safe" compounds
+  "\\b(?:pet|child|kid|family)[-\\s]safe\\b",
+  // EPA endorsement language — never used, in ANY framing (the registration
+  // is a legal status, not a safety claim, and compliance bans the phrase).
+  "\\bEPA[-\\s]?(?:registered|approved|certified)\\b",
+];
+
+function reentrySafetyClaimFinding(text) {
+  const s = String(text || '');
+  for (const src of REENTRY_SAFETY_SRCS) {
+    const re = new RegExp(src, 'gi');
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      const before = s.slice(Math.max(0, m.index - 80), m.index);
+      const sentenceBreak = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n'));
+      const sameSentence = sentenceBreak >= 0 ? before.slice(sentenceBreak + 1) : before;
+      // "no product is completely safe", "we never call a treatment safe",
+      // "isn't safe to re-enter until dry" — honest disclaimers, keep.
+      if (DIRECT_NEGATION_BEFORE_RE.test(sameSentence) || NEGATED_SUBJECT_BEFORE_RE.test(sameSentence)) {
+        if (m.index === re.lastIndex) re.lastIndex += 1;
+        continue;
+      }
+      return finding('P0', 'REENTRY_SAFETY_CLAIM', `Safety/re-entry compliance violation "${m[0].trim()}" — treated areas and products are never described as "safe" and EPA registration is never cited as endorsement. Use label-directed phrasing instead ("follow the label re-entry directions", "once dry per the label").`);
+    }
+  }
+  return null;
+}
+
+// ── Banned service topics (P0 BANNED_TOPIC) ────────────────────────────────
+// Waves does NOT offer door-to-door sales, structural fumigation/tenting,
+// insulation work, or wildlife/animal trapping. A draft presenting any of
+// these as OUR services misrepresents the company. INFORMATIONAL mentions
+// stay legal by construction (same idiom as the comparison gate's
+// require-lookahead: "severe drywood infestations may call for tent
+// fumigation" carries no first-person service anchor). The first-person
+// filler is negation-guarded, so the wanted disclaimer ("we do not offer
+// fumigation — we refer you to…") stays legal too.
+const BANNED_TOPIC_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|insulation|wildlife\\s+(?:trapping|removal|control)|animal\\s+(?:trapping|removal)|door[-\\s]?to[-\\s]?door)";
+// The object gap between the service verb and the topic must be
+// negation-guarded exactly like the pre-verb filler — otherwise "We do NOT
+// offer fumigation" matches through the bare "do" verb with "not offer"
+// absorbed by the gap. Hyphens allowed ("whole-structure fumigation").
+const BANNED_TOPIC_GAP_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b)[\\w'’-]+\\s+){0,3}?`;
+const BANNED_TOPIC_SRCS = [
+  // "we/Waves/our team offer(s)/provide(s)/perform(s)/handle(s) … <topic>"
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
+  // "our fumigation/insulation/wildlife-trapping service/program/team"
+  `\\bour\\s+${BANNED_TOPIC_SRC}\\s+(?:services?|programs?|teams?|offerings?|packages?|crews?)\\b`,
+  // "schedule/book (your) fumigation with us", "call Waves for fumigation"
+  `\\b(?:schedule|book)\\s+(?:your\\s+|a\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}\\s+(?:with|through)\\s+(?:us|waves)\\b`,
+  `\\bcall\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\s+(?:today\\s+)?for\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
+];
+
+function bannedTopicFinding(text) {
+  const s = String(text || '');
+  for (const src of BANNED_TOPIC_SRCS) {
+    const re = new RegExp(src, 'gi');
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      const before = s.slice(Math.max(0, m.index - 80), m.index);
+      const sentenceBreak = Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n'));
+      const sameSentence = sentenceBreak >= 0 ? before.slice(sentenceBreak + 1) : before;
+      // "we do not offer fumigation", "no, our team doesn't do tenting" —
+      // the wanted referral phrasing.
+      if (DIRECT_NEGATION_BEFORE_RE.test(sameSentence) || NEGATED_SUBJECT_BEFORE_RE.test(sameSentence)) {
+        if (m.index === re.lastIndex) re.lastIndex += 1;
+        continue;
+      }
+      return finding('P0', 'BANNED_TOPIC', `Draft presents a service Waves does not offer: "${m[0].trim()}" — door-to-door sales, structural fumigation/tenting, insulation, and wildlife/animal trapping are never our services. Keep any mention purely informational (what it is, when a specialist is needed) with no we/our/schedule/call framing.`);
+    }
+  }
+  return null;
+}
+
 // Owner hard rule (2026-07-16): service/location metaTitles are never edited
 // by automation. Fires only on refresh drafts AND only when the caller
 // supplied the live metaTitle to compare against — a null liveMetaTitle means
@@ -3065,6 +3157,11 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // just like in body — scan the full publishable text for both.
     productClaimFinding(publishableText),
     preventionPromiseFinding(publishableText),
+    // Compliance language + banned service topics ship in meta just like in
+    // body — full publishable text, every lane, no exemptions (W2: the
+    // rules were prompt-only until this deterministic backstop).
+    reentrySafetyClaimFinding(publishableText),
+    bannedTopicFinding(publishableText),
     // Citation residue + off-footprint service claims cover everything that
     // ships (body AND meta) on every lane — neither has a legitimate form.
     citationResidueFinding(publishableText),

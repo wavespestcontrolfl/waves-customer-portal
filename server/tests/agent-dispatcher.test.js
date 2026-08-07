@@ -211,6 +211,73 @@ describe('emit_draft tool sink', () => {
   });
 });
 
+describe('emit_draft in-loop self-lint (W1)', () => {
+  const { registerSessionLint } = tools;
+  const CLEAN_BODY = 'Ant trails around Sarasota patios usually start with moisture. Follow the label re-entry directions after any professional application.';
+  const PRICED_BODY = 'A quarterly plan runs about $250 per visit in Sarasota, which beats most competitors.';
+
+  afterEach(() => {
+    clearDraft('lint-1'); clearDraft('lint-2'); clearDraft('lint-3'); clearDraft('lint-4'); clearDraft('lint-5');
+  });
+
+  test('a violating draft is REJECTED with canonical directives and NOT captured', async () => {
+    registerSessionLint('lint-1', {});
+    const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-1' });
+    expect(r.ok).toBe(false);
+    expect(r.draft_rejected).toBe(true);
+    expect(r.redrafts_remaining).toBe(1);
+    expect(r.directives.join(' ')).toMatch(/dollar amount/i);
+    expect(getDraft('lint-1')).toBeNull();
+  });
+
+  test('the redraft cap captures the still-violating draft for the authoritative run-level gates', async () => {
+    registerSessionLint('lint-2', {});
+    const first = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-2' });
+    expect(first.draft_rejected).toBe(true);
+    const second = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-2' });
+    expect(second.draft_rejected).toBe(true);
+    expect(second.redrafts_remaining).toBe(0);
+    const third = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-2' });
+    expect(third.ok).toBe(true);
+    const captured = getDraft('lint-2');
+    expect(captured.self_lint).toEqual({ redrafts: 2, cap_reached: true });
+  });
+
+  test('a clean draft captures with the lint audit riding the payload', async () => {
+    registerSessionLint('lint-3', {});
+    const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: CLEAN_BODY }, { sessionId: 'lint-3' });
+    expect(r.ok).toBe(true);
+    expect(getDraft('lint-3').self_lint).toEqual({ redrafts: 0, pass: true });
+  });
+
+  test('W2 codes flow through the loop — a banned-topic draft is rejected with its directive', async () => {
+    registerSessionLint('lint-4', {});
+    const r = await executeBriefTool('emit_draft', {
+      frontmatter: { title: 'T' },
+      body: 'For drywood termites, we offer whole-structure fumigation across Sarasota.',
+    }, { sessionId: 'lint-4' });
+    expect(r.ok).toBe(false);
+    expect(r.directives.join(' ')).toMatch(/does NOT offer door-to-door/);
+  });
+
+  test('OFF_FOOTPRINT_CITY_CLAIM never blocks in-loop — the run-level LLM classifier owns its false positives', async () => {
+    registerSessionLint('lint-6', {});
+    const r = await executeBriefTool('emit_draft', {
+      frontmatter: { title: 'T' },
+      body: 'We proudly serve Tampa homeowners with quarterly visits.',
+    }, { sessionId: 'lint-6' });
+    expect(r.ok).toBe(true); // captured — gate 3c refines and parks if real
+    expect(getDraft('lint-6').self_lint).toEqual({ redrafts: 0, pass: true });
+    clearDraft('lint-6');
+  });
+
+  test('sessions without registered lint options capture exactly as before', async () => {
+    const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-5' });
+    expect(r.ok).toBe(true);
+    expect(getDraft('lint-5').self_lint).toBeNull();
+  });
+});
+
 describe('emit_metadata_only tool sink', () => {
   test('captures title + meta', async () => {
     const sid = 'sess-meta-1';

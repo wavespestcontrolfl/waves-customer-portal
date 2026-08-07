@@ -20,7 +20,7 @@
  */
 
 const logger = require('../../logger');
-const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft } = require('./brief-driven-tools');
+const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft, registerSessionLint } = require('./brief-driven-tools');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const API_BASE = 'https://api.anthropic.com/v1';
@@ -164,7 +164,7 @@ class AgentDispatcher {
    *   { ok: true, draft, agent_id, session_id, duration_ms }
    *   { ok: false, reason, ... }  // including reason='dry_run'
    */
-  async runWithBrief(brief, { dryRun = false, sessionTimeoutMs = 5 * 60 * 1000 } = {}) {
+  async runWithBrief(brief, { dryRun = false, sessionTimeoutMs = 5 * 60 * 1000, selfLintOptions = null } = {}) {
     const route = pickAgent(brief);
     if (!route.ok) return { ok: false, ...route };
 
@@ -202,6 +202,11 @@ class AgentDispatcher {
       return { ok: false, reason: `session_create_failed: ${err.message}` };
     }
     const sessionId = session.id;
+    // Arm the writer's in-loop self-lint (W1) with the caller's precomputed
+    // guardrail options — the runner derives them from the SAME shared
+    // module gate 3c uses, so the lint can never disagree with the gate
+    // that parks runs. Cleared with clearDraft below.
+    if (selfLintOptions) registerSessionLint(sessionId, selfLintOptions);
 
     // Post the initial input to the session. Schema mirrors the
     // live Managed Agents contract used by lead-response-agent.js:

@@ -49,6 +49,7 @@ const getSerpProfiler = lazy('serp-profiler', '../../seo/serp-profiler');
 const getGithubClient = lazy('github-client', '../../content-astro/github-client');
 const getFrontmatter = lazy('frontmatter', '../../content-astro/frontmatter');
 const getContentGuardrails = lazy('content-guardrails', '../content-guardrails');
+const getGateRetryDirectives = lazy('gate-retry-directives', '../gate-retry-directives');
 
 // ── tool executor ────────────────────────────────────────────────────
 
@@ -65,6 +66,20 @@ const sessionDrafts = new Map();
 // back so the internal-route gate can allow them (checked_existing_routes).
 const sessionCheckedRoutes = new Map();
 
+// W1 in-loop self-lint: per-session guardrail options (registered by the
+// dispatcher from the runner's SHARED sync derivation — guardrail-options.js,
+// the same object gate 3c builds on) and the per-session redraft counter.
+// A violation caught here costs an in-session redraft instead of the whole
+// run cycle it used to burn (88 skipped_gate_fail + 45 deferred_gate_retry
+// in the 90 days before this existed).
+const SELF_LINT_MAX_REDRAFTS = 2;
+const sessionLintOptions = new Map();
+const sessionLintAttempts = new Map();
+
+function registerSessionLint(sessionId, options) {
+  if (sessionId && options) sessionLintOptions.set(sessionId, options);
+}
+
 function getDraft(sessionId) {
   return sessionDrafts.get(sessionId) || null;
 }
@@ -76,6 +91,8 @@ function getCheckedRoutes(sessionId) {
 function clearDraft(sessionId) {
   sessionDrafts.delete(sessionId);
   sessionCheckedRoutes.delete(sessionId);
+  sessionLintOptions.delete(sessionId);
+  sessionLintAttempts.delete(sessionId);
 }
 
 async function executeBriefTool(toolName, input, { sessionId } = {}) {
@@ -392,6 +409,61 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
           logger.warn(`[brief-driven-tools] emit_draft(${sessionId}): stripped citation residue from the draft — the writer model is still emitting citation markup despite the prompt ban`);
         }
       }
+      // W1 in-loop self-lint: run the PURE guardrails evaluator at capture,
+      // with the SAME options gate 3c derives (registered by the dispatcher
+      // from guardrail-options.deriveSyncGuardrailOptions — one derivation,
+      // two call sites). On blocking findings the draft is NOT captured; the
+      // agent receives the canonical redraft directives as this tool's
+      // result and redrafts INSIDE the session. Deliberate limits:
+      //   - capped at SELF_LINT_MAX_REDRAFTS, then capture regardless — the
+      //     run-level gates stay AUTHORITATIVE (and fail closed there);
+      //     this lint only exists to stop violations burning full runs.
+      //   - OFF_FOOTPRINT_CITY_CLAIM never blocks in-loop: the run level
+      //     refines it through an LLM classifier that dismisses false
+      //     positives, and burning an in-loop redraft on a dismissible
+      //     finding would reintroduce the waste this removes.
+      //   - evaluator absence/failure captures normally: fail OPEN here,
+      //     because gate 3c is the fail-closed authority.
+      let selfLintAudit = null;
+      const lintOptions = sessionLintOptions.get(sessionId);
+      if (lintOptions && guardrails?.evaluate) {
+        const attempts = sessionLintAttempts.get(sessionId) || 0;
+        if (attempts >= SELF_LINT_MAX_REDRAFTS) {
+          selfLintAudit = { redrafts: attempts, cap_reached: true };
+          logger.warn(`[brief-driven-tools] emit_draft(${sessionId}): self-lint redraft cap reached (${attempts}) — capturing for the authoritative run-level gates`);
+        } else {
+          let lintResult = null;
+          try {
+            lintResult = guardrails.evaluate({ frontmatter: cleanFrontmatter, body: cleanBody }, lintOptions);
+          } catch (err) {
+            logger.warn(`[brief-driven-tools] emit_draft(${sessionId}): self-lint evaluator threw (${err.message}) — capturing without in-loop lint (run-level gates stay authoritative)`);
+          }
+          const blocking = (lintResult?.findings || [])
+            .filter((f) => (f.severity === 'P0' || f.severity === 'P1') && f.code !== 'OFF_FOOTPRINT_CITY_CLAIM');
+          if (blocking.length) {
+            sessionLintAttempts.set(sessionId, attempts + 1);
+            // P2 nudges ride the same feedback so the redraft hears them
+            // too — blocking stays P0/P1-only (mirrors gate 3c).
+            const advisory = (lintResult.findings || []).filter((f) => f.severity === 'P2').slice(0, 2);
+            const retryModule = getGateRetryDirectives();
+            const directives = retryModule?.buildRetryDirectives
+              ? retryModule.buildRetryDirectives(
+                { findings: [...blocking, ...advisory] },
+                { header: `DRAFT REJECTED by the hard content gates (in-session attempt ${attempts + 1} of ${SELF_LINT_MAX_REDRAFTS + 1}). Revise per the directives below and call emit_draft again with the corrected draft:` },
+              )
+              : blocking.map((f) => `${f.severity} ${f.code}${f.message ? `: ${f.message}` : ''}`);
+            logger.warn(`[brief-driven-tools] emit_draft(${sessionId}): self-lint rejected the draft (redraft ${attempts + 1}/${SELF_LINT_MAX_REDRAFTS}): ${blocking.map((f) => f.code).join(', ')}`);
+            return {
+              ok: false,
+              draft_rejected: true,
+              redrafts_remaining: SELF_LINT_MAX_REDRAFTS - attempts - 1,
+              error: 'Draft failed hard content gates — NOT captured. Revise the draft per `directives` and call emit_draft again.',
+              directives,
+            };
+          }
+          if (lintResult) selfLintAudit = { redrafts: attempts, pass: true };
+        }
+      }
       sessionDrafts.set(sessionId, {
         type: 'draft',
         frontmatter: cleanFrontmatter,
@@ -400,6 +472,10 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         claims_ledger: Array.isArray(claims_ledger) ? claims_ledger : [],
         notes_for_reviewer: notes_for_reviewer || null,
         citation_residue_stripped: residueStripped,
+        // Audit trail: how many in-loop redrafts this draft took (null when
+        // the lint wasn't armed for the session). Rides the persisted
+        // draft_payload like citation_residue_stripped above.
+        self_lint: selfLintAudit,
         captured_at: new Date(),
       });
       return { ok: true, captured: true, body_chars: cleanBody.length, claims: Array.isArray(claims_ledger) ? claims_ledger.length : 0 };
@@ -632,6 +708,7 @@ module.exports = {
   getDraft,
   getCheckedRoutes,
   clearDraft,
+  registerSessionLint,
   // exposed for tests:
-  _internals: { sessionDrafts, sessionCheckedRoutes, urlToAstroPath, parseJsonbColumns },
+  _internals: { sessionDrafts, sessionCheckedRoutes, sessionLintOptions, sessionLintAttempts, urlToAstroPath, parseJsonbColumns },
 };
