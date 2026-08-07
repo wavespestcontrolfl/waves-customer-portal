@@ -666,7 +666,13 @@ function mapV1ToLegacyShape(v1Result) {
       ...measurementMetadataFields(li), ...extra,
     });
   };
-  svcAdd(lawnLI && lawnLI.bermudaSuppression ? 'Lawn Care + Bermudagrass Suppression' : 'Lawn Care', lawnLI, {
+  // Name stays the canonical 'Lawn Care' even with the bermuda-suppression
+  // adder: this string becomes scheduled_services.service_type on acceptance
+  // and the lawn completion-profile fallback resolves by EXACT catalog name
+  // (pre-push codex P1 — a synthetic name would drop completed visits into
+  // the generic flow). The add-on travels as structured metadata:
+  // R.lawnMeta.bermudaSuppression + per-tier prov.bermudaSuppressionPerApp.
+  svcAdd('Lawn Care', lawnLI, {
     service: 'lawn_care',
     discountable: true,
     discountEligible: true,
