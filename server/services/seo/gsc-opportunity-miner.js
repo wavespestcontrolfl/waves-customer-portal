@@ -571,6 +571,10 @@ function buildListicleFamilyRefreshOpp(entries) {
       family_count: sorted.length,
       family_key: primary.fam.key,
       family_keys: sorted.map((e) => e.fam.key),
+      // COMPLETE normalized query set — arbitration must see every
+      // variant; family_variants below stays capped for brief metadata
+      // (pre-push audit r21).
+      family_queries: allVariants.map((v) => String(v.query || '').toLowerCase()),
       // At least one variant from EVERY merged family, then fill by
       // impressions — a five-big-variant family A must not erase family B
       // from the only row that can carry it (Codex r12).
@@ -2169,6 +2173,7 @@ class GscOpportunityMiner {
           // check needs it — same lesson as seasonal_rising's key mismatch).
           impressions: fam.impressions,
           family_size: fam.variants.length,
+          family_queries: fam.variants.map((v) => String(v.query || '').toLowerCase()),
           family_avg_position: Math.round(fam.position * 10) / 10,
           family_variants: fam.variants.slice(0, 5).map(({ query, impressions }) => ({ query, impressions })),
         },
@@ -2261,8 +2266,12 @@ class GscOpportunityMiner {
     if (o.bucket !== 'listicle_family') return false;
     if (o.action_type === 'refresh_existing_page') return arbitrated.pages.has(o.page_url);
     if (o.action_type === 'new_supporting_blog') {
-      const variants = Array.isArray(o.signal_metadata?.family_variants) ? o.signal_metadata.family_variants : [];
-      return [o.query, ...variants.map((v) => v.query)]
+      // family_queries is the COMPLETE set; family_variants is capped at 5
+      // for brief metadata and only serves as a legacy fallback.
+      const queries = Array.isArray(o.signal_metadata?.family_queries)
+        ? o.signal_metadata.family_queries
+        : (Array.isArray(o.signal_metadata?.family_variants) ? o.signal_metadata.family_variants.map((v) => v.query) : []);
+      return [o.query, ...queries]
         .some((q) => q && arbitrated.queries.has(String(q).toLowerCase()));
     }
     return false;

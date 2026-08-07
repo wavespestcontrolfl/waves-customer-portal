@@ -565,7 +565,12 @@ describe('persistAll upsert binding integrity (07-31 regression)', () => {
       bucket: 'listicle_family', action_type: 'new_supporting_blog',
       query: 'signs of termites florida', page_url: null, service: 'termite', city: null,
       score: 60, score_breakdown: {},
-      signal_metadata: { family_variants: [{ query: 'termite signs', impressions: 30 }] },
+      // family_queries is the COMPLETE set arbitration reads — the deep
+      // variant beyond the capped family_variants must still match.
+      signal_metadata: {
+        family_variants: [{ query: 'other phrasing', impressions: 30 }],
+        family_queries: ['other phrasing', 'termite signs'],
+      },
       dedupe_key: 'listicle_family::fam::y',
     };
     const blogPersisted = await miner.persistAll([famBlog, boosted]);
@@ -1227,6 +1232,8 @@ describe('listicle_family scoring + action mapping', () => {
     expect(opp.signal_metadata.family_size).toBe(5);
     expect(opp.signal_metadata.family_keys).toEqual([famA.key, famB.key]); // impression-desc
     expect(opp.signal_metadata.family_key).toBe(famA.key); // primary = highest-impression family
+    // Complete query set for arbitration (family_variants stays capped).
+    expect(opp.signal_metadata.family_queries).toHaveLength(5);
     // Query, classification, and position anchor to the SAME entry — the
     // PRIMARY family — never a mix of the best-ranked family's query with
     // another family's service/city (Codex r13).
