@@ -548,7 +548,14 @@ class GoogleBusinessService {
       review_text: normalized.review_text,
       review_created_at: normalized.review_created_at,
       customer_id: customerId || existing?.customer_id || null,
-      synced_at: db.fn.now(),
+      // One clock authority for the reconcile ordering tokens: synced_at is
+      // compared against runner fetch-start timestamps (Node clock), so it
+      // must come from the same clock — db.fn.now() (Postgres) behind the
+      // app clock would make rows refreshed THIS run satisfy
+      // `synced_at < syncStart` and let the reconcile stamp every returned
+      // review. "Live as of this runner's fetch start" is also the honest
+      // assertion — the feed was fetched then, not at write time.
+      synced_at: syncStart ? new Date(syncStart).toISOString() : db.fn.now(),
       ...replyFields,
     };
     let result;
@@ -696,6 +703,21 @@ class GoogleBusinessService {
           const sameContent = (candidate.review_text || null) === (review.text || null)
             && Number(candidate.star_rating) === Number(review.rating || 0);
           if (sameContent) {
+            // A stamped candidate is retained evidence. Same-name+content
+            // alone must not select it: the merge below would overwrite its
+            // photo/customer fields and run attribution side effects for
+            // what may be a copycat account. Only the exact-second identity
+            // proof (Places `time` == stored creation instant — the same
+            // corroboration that gates the stamp clear) may touch a stamped
+            // row; otherwise defer to the authoritative GBP feed.
+            const placesSec = review.time ? Math.floor(review.time) : null;
+            const candidateSec = candidate.review_created_at
+              ? Math.floor(new Date(candidate.review_created_at).getTime() / 1000)
+              : null;
+            if (candidate.missing_since && !(placesSec != null && candidateSec != null && placesSec === candidateSec)) {
+              logger.info(`[gbp] Places sample: same-name match on stamped evidence row ${candidate.id} at ${loc.id} lacks identity corroboration — deferring to GBP feed`);
+              continue;
+            }
             existing = candidate;
           } else {
             logger.info(`[gbp] Places sample: ambiguous same-name review at ${loc.id} (row ${candidate.id}) — deferring to GBP feed`);
@@ -736,7 +758,10 @@ class GoogleBusinessService {
         // copycat's Places appearance suppress a concurrent GBP removal
         // stamp — so liveness freshness requires the same identity proof
         // as the stamp clear.
-        if (identityCorroborated) upd.synced_at = db.fn.now();
+        // Fetch-start timestamp, not db.fn.now() — synced_at is an ordering
+        // token compared against runner fetch starts (Node clock); see
+        // _upsertGbpReview for the skew rationale.
+        if (identityCorroborated) upd.synced_at = sampleSyncStart.toISOString();
         if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
           upd.review_reply = ownerReply;
           upd.reply_updated_at = db.fn.now();
@@ -766,7 +791,7 @@ class GoogleBusinessService {
           reply_updated_at: ownerReply ? new Date() : null,
           review_created_at: new Date(review.time * 1000).toISOString(),
           customer_id: customerId,
-          synced_at: db.fn.now(),
+          synced_at: sampleSyncStart.toISOString(),
         }).returning('id');
         newCount++;
       }
@@ -940,7 +965,12 @@ class GoogleBusinessService {
             // candidate select and this update — a stale snapshot must not
             // stamp a review another sync just proved is on Google.
             .where('synced_at', '<', syncStart)
-            .update({ missing_since: db.fn.now() }, ['id']);
+            // Stamp with the runner's own fetch start, not db.fn.now() —
+            // the reinstatement clears compare missing_since against other
+            // runners' fetch starts (Node clock), and a Postgres-clock stamp
+            // behind the app clock could be "older" than a fetch that
+            // predates the removal, letting a stale runner clear it.
+            .update({ missing_since: new Date(syncStart).toISOString() }, ['id']);
           const claimedIds = new Set((claimedRows || []).map(r => r.id));
           gone = candidates.filter(r => claimedIds.has(r.id));
           if (gone.length === 0) return;

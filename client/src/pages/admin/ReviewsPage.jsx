@@ -449,7 +449,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
               </span>{" "}
               {review.missingSince && (
                 <span
-                  title={`No longer returned by Google as of ${new Date(review.missingSince).toLocaleDateString()}. The full text is retained here as evidence for a missing-reviews support case.`}
+                  title={`No longer returned by Google as of ${new Date(review.missingSince).toLocaleDateString("en-US", { timeZone: "America/New_York" })}. The full text is retained here as evidence for a missing-reviews support case.`}
                   style={{
                     fontSize: 11,
                     fontFamily: "Roboto, Arial, sans-serif",

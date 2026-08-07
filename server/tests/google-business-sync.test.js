@@ -1033,6 +1033,44 @@ describe('Google Business review sync', () => {
     expect(copycat).toBeTruthy();
   });
 
+  test('Places fallback: uncorroborated same-name+content match cannot mutate a stamped evidence row', async () => {
+    const stamp = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const oldSynced = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    seedSyncedReview({
+      id: 'evidence-2',
+      missing_since: stamp,
+      synced_at: oldSynced,
+      reviewer_photo_url: null,
+    });
+    service._getClient = jest.fn(async () => null); // GBP down → Places fallback
+    // Same display name AND identical content, but the Places `time` is an
+    // hour off the stored creation instant — a copycat account, not the
+    // original review. Pre-fix this merged: photo/customer overwritten and
+    // synced_at refreshed on retained evidence.
+    const copycatTime = Math.floor(new Date('2026-05-25T13:00:00Z').getTime() / 1000);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'John Doe',
+          rating: 5,
+          text: 'Great work',
+          time: copycatTime,
+          profile_photo_url: 'https://copycat.example/photo.jpg',
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const evidence = db.__state.rows.google_reviews.find(r => r.id === 'evidence-2');
+    expect(evidence.missing_since).toBe(stamp);
+    expect(evidence.reviewer_photo_url).toBeNull();
+    expect(evidence.synced_at).toBe(oldSynced);
+    // Ambiguous identity defers entirely — no synthetic Places row either.
+    expect(db.__state.rows.google_reviews.some(r => String(r.google_review_id).startsWith('places_place-1'))).toBe(false);
+  });
+
   test('fails closed: no missing stamps on the Places fallback, and the degraded-sync alert fires once per 24h', async () => {
     seedSyncedReview({ id: 'stale-1' });
     service._getClient = jest.fn(async () => null); // token missing → Places fallback
