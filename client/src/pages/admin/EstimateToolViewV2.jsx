@@ -2818,6 +2818,12 @@ export default function EstimateToolViewV2({
           customerName: d.customerName || "",
           hasInputs: !!d.inputs,
         });
+        // The Customer Lookup panel's only linked-customer visual is this
+        // chip — without seeding it here, an opened estimate always shows
+        // the empty search state even though the row IS linked (and
+        // form.customerId was seeded above). Display-only: pricing inputs
+        // like isRecurringCustomer stay exactly as the estimate saved them.
+        setExistingCustomerMatch(d.customer || null);
       } catch (e) {
         if (!cancelled) {
           setEditMode(null);
@@ -2841,6 +2847,9 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
     setPriceRecomputeNotice(null);
     setGroupAnchorId(null);
+    // Hydration now seeds the linked-customer chip — clear it with the rest
+    // of the edit state or it lingers over the next blank form.
+    setExistingCustomerMatch(null);
   }
 
   const set = useCallback((key, val) => {
@@ -5627,7 +5636,8 @@ export default function EstimateToolViewV2({
                     : " · No active plan"}
                   {existingCustomerMatch.tier &&
                   existingCustomerMatch.tier !== "null" &&
-                  existingCustomerMatch.monthlyRate > 0
+                  existingCustomerMatch.monthlyRate > 0 &&
+                  form.isRecurringCustomer === "YES"
                     ? " · 15% loyalty discount applied"
                     : ""}
                 </div>

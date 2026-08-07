@@ -568,6 +568,27 @@ router.get('/:id/edit-source', async (req, res, next) => {
     const engineProfile = estData.engineRequest?.profile && typeof estData.engineRequest.profile === 'object'
       ? estData.engineRequest.profile
       : null;
+    // The builder's Customer Lookup panel has exactly one linked-customer
+    // visual (the existingCustomerMatch chip), and it renders from a live
+    // customer object — without this block every opened estimate shows the
+    // empty search state even when customer_id is set. Shape mirrors the
+    // fields the chip and its setters read from the customer search results.
+    // Best-effort: a lookup failure must not block opening the estimate.
+    let customer = null;
+    if (estimate.customer_id) {
+      const c = await db('customers').where({ id: estimate.customer_id }).first().catch(() => null);
+      if (c) {
+        customer = {
+          id: c.id,
+          firstName: c.first_name || '',
+          lastName: c.last_name || '',
+          phone: c.phone || null,
+          email: c.email || null,
+          tier: c.waveguard_tier,
+          monthlyRate: parseFloat(c.monthly_rate || 0),
+        };
+      }
+    }
     res.json({
       id: estimate.id,
       status: estimate.status,
@@ -587,6 +608,7 @@ router.get('/:id/edit-source', async (req, res, next) => {
       estimateGroupId: estimate.estimate_group_id || null,
       inputs,
       engineProfile,
+      customer,
     });
   } catch (err) { next(err); }
 });

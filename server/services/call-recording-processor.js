@@ -6652,6 +6652,12 @@ const CallRecordingProcessor = {
               phone,
               email: extracted.email || null,
               address_line1: addrLine || null,
+              // The extraction carries the unit separately — dropping it made
+              // condo/apartment customers unfindable by any unit-bearing
+              // address search and defeated the estimate builder's address
+              // auto-match. Same 100-char clamp as the booking
+              // property-linkage path.
+              address_line2: String(extracted.address_line2 || '').trim().slice(0, 100) || null,
               city: addrCity || null,
               state: addrState,
               zip: addrZip || null,
