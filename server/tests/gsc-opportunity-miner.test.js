@@ -847,9 +847,12 @@ describe('listicle_family scoring + action mapping', () => {
       ...over,
     });
     expect(listicleFamilyEligible(fam())).toBe(true);
-    // Representative alone clears the floor → the query-level buckets can
-    // already emit it; mining here too would queue two rows for one intent.
-    expect(listicleFamilyEligible(fam({ variants: [{ impressions: 60 }, { impressions: 42 }], impressions: 102 }))).toBe(false);
+    // A rep the query buckets will ACTUALLY emit excludes the family —
+    // proven reachability only (r16: the hub-only rep-impressions
+    // precondition undercounted cross-domain sums, so raw impressions no
+    // longer auto-exclude).
+    expect(listicleFamilyEligible(fam({ variants: [{ impressions: 60 }, { impressions: 42 }], impressions: 102 }), undefined, { repQualifiesQueryBucket: true })).toBe(false);
+    expect(listicleFamilyEligible(fam({ variants: [{ impressions: 60 }, { impressions: 42 }], impressions: 102 }))).toBe(true);
     // Single-variant family → existing buckets' territory.
     expect(listicleFamilyEligible(fam({ variants: [{ impressions: 48 }] }))).toBe(false);
     // Family sum under the floor.
@@ -873,10 +876,11 @@ describe('listicle_family scoring + action mapping', () => {
       impressions: 100,
       position: 18,
     };
-    // Default (rep reachable): excluded — query buckets reach it.
-    expect(listicleFamilyEligible(fam)).toBe(false);
-    // Rep unreachable: the family stays eligible or its demand reaches NO
-    // bucket at all.
+    // Proven reachable: excluded — a query bucket will emit the rep.
+    expect(listicleFamilyEligible(fam, undefined, { repQualifiesQueryBucket: true })).toBe(false);
+    // Default (reachability unproven): eligible — the safe direction is
+    // keeping the demand (Codex r11/r16).
+    expect(listicleFamilyEligible(fam)).toBe(true);
     expect(listicleFamilyEligible(fam, undefined, { repQualifiesQueryBucket: false })).toBe(true);
   });
 
@@ -1013,6 +1017,12 @@ describe('listicle_family scoring + action mapping', () => {
     // included, or an intent split under their per-group floor reads as
     // reachable when neither miner will emit (Codex r15).
     expect(mineSrc).toMatch(/groupBy\('query', 'service_category', 'city_target', 'intent_type'\)/);
+    // Reachability reads CROSS-DOMAIN tuples (the query miners don't
+    // filter domain; the family rows deliberately do — Codex r16) and the
+    // seasonal admission for every rep.
+    expect(mineSrc).toMatch(/_crossDomainRepTuples\(repQueries, since\)/);
+    expect(mineSrc).toMatch(/_seasonalEmittableQueries\(repQueries, periodDays\)/);
+    expect(src).toMatch(/async _crossDomainRepTuples\(queries, since\)/);
     expect(mineSrc).toMatch(/groupByRaw\(CANON_URL_SQL\)/); // per owned PAGE, not per query
     expect(mineSrc).toMatch(/sum\(position \* impressions\) \/ NULLIF\(sum\(impressions\), 0\) <= \?/);
     expect(mineSrc).toMatch(/THRESHOLDS\.strikingDistancePositionMax/);

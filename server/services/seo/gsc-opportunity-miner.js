@@ -422,14 +422,17 @@ function clusterListicleFamilies(rows) {
 //  - the family SUM clears the floor — the whole point;
 //  - weighted position is outside the top-3 — that intent is already won by
 //    an own page (same "-3" anchor as striking_distance).
-function listicleFamilyEligible(fam, thresholds = THRESHOLDS, { repQualifiesQueryBucket = true } = {}) {
+function listicleFamilyEligible(fam, thresholds = THRESHOLDS, { repQualifiesQueryBucket = false } = {}) {
   if (!fam || fam.variants.length < 2) return false;
-  // Rep-over-floor exclusion assumes the query-level buckets can actually
-  // reach the representative — the caller says whether it resolves a
-  // service (mineNoContentYet skips !service rows). A 51-imp unresolvable
-  // rep with a resolvable 49-imp sibling is still family demand: excluding
-  // it here would lose the aggregate to NO bucket at all (Codex r11).
-  if ((fam.variants[0]?.impressions || 0) >= thresholds.minImpressionsToScore && repQualifiesQueryBucket) return false;
+  // A representative some query-level bucket will ACTUALLY emit excludes
+  // the family — two independently claimable rows for one intent
+  // otherwise. Reachability is proven by the caller via
+  // listicleFamilyRepReachable (window + per-tuple floor + persistence
+  // floor + the miners' CROSS-DOMAIN aggregation — the old hub-only
+  // rep-impressions precondition undercounted a 30-hub/30-spoke rep the
+  // miners see as 60); the default assumes none, which only ever errs
+  // toward keeping the demand.
+  if (repQualifiesQueryBucket) return false;
   if (fam.impressions < thresholds.minImpressionsToScore) return false;
   if (fam.position > 0 && fam.position < 4) return false;
   // The emitted target_keyword IS the representative — if IT already ranks
@@ -1082,6 +1085,35 @@ class GscOpportunityMiner {
       if (!service && !city) continue; // can't classify — skip rather than pollute generic bucket
       const key = ownPageKey(service, city);
       if (!map.has(key)) map.set(key, r.page_url); // first wins (orderBy impressions desc)
+    }
+    return map;
+  }
+
+  // Cross-domain tuple aggregation for representative reachability. The
+  // family rows are deliberately HUB-ONLY (blog publishes are hub-only),
+  // but mineStrikingDistance / mineNoContentYet / mineSeasonalRising
+  // aggregate gsc_queries across every hub/spoke domain — reachability
+  // must see what THEY see or a 30-hub/30-spoke rep reads as below-floor
+  // here while the miner emits it, minting parallel rows for one intent.
+  async _crossDomainRepTuples(queries, since) {
+    const rows = await db('gsc_queries')
+      .where('date', '>=', since)
+      .where('is_branded', false)
+      .whereIn('query', queries)
+      .select('query', 'service_category', 'city_target', 'intent_type')
+      .sum('impressions as impressions')
+      .avg('position as plain_avg_position')
+      .groupBy('query', 'service_category', 'city_target', 'intent_type');
+    const map = new Map();
+    for (const r of rows) {
+      const list = map.get(r.query) || [];
+      list.push({
+        impressions: parseInt(r.impressions, 10) || 0,
+        plainPosition: Number(r.plain_avg_position) || 0,
+        service_category: r.service_category || null,
+        city_target: r.city_target || null,
+      });
+      map.set(r.query, list);
     }
     return map;
   }
@@ -1875,21 +1907,28 @@ class GscOpportunityMiner {
     // No early return on empty fams: the end-of-mine sweep must still run
     // so stale queue rows expire when every family went ineligible.
     const allFams = clusterListicleFamilies(rows);
-    // Over-floor reps blocked from the position-window buckets can STILL be
-    // emitted by mineSeasonalRising — check its admission for exactly those
-    // queries so the two buckets never queue competing posts (Codex r13).
-    const overFloorRepQueries = Array.from(new Set(allFams
-      .map((f) => f.variants[0])
-      .filter((r) => r && (r.impressions || 0) >= THRESHOLDS.minImpressionsToScore)
-      .map((r) => r.query)));
-    const seasonalEmittable = overFloorRepQueries.length
-      ? await this._seasonalEmittableQueries(overFloorRepQueries, periodDays)
-      : new Set();
-    const fams = allFams.filter((f) => listicleFamilyEligible(f, THRESHOLDS, {
-      repQualifiesQueryBucket: listicleFamilyRepReachable(f.variants[0], ownPagesByServiceCity, THRESHOLDS, {
-        seasonalEmittable: seasonalEmittable.has(f.variants[0]?.query),
-      }),
-    }));
+    // Reachability data must match the QUERY MINERS' scope: cross-domain
+    // tuples (they don't filter domain) and the seasonal admission for
+    // EVERY rep (a rep under the hub floor can still be over-floor
+    // cross-domain, or seasonal-emittable). Checked once per rep query.
+    const repQueries = Array.from(new Set(allFams
+      .map((f) => f.variants[0]?.query)
+      .filter(Boolean)));
+    const [crossTuples, seasonalEmittable] = repQueries.length
+      ? await Promise.all([
+        this._crossDomainRepTuples(repQueries, since),
+        this._seasonalEmittableQueries(repQueries, periodDays),
+      ])
+      : [new Map(), new Set()];
+    const fams = allFams.filter((f) => {
+      const rep = f.variants[0];
+      const repForReach = rep ? { ...rep, tuples: crossTuples.get(rep.query) || rep.tuples } : rep;
+      return listicleFamilyEligible(f, THRESHOLDS, {
+        repQualifiesQueryBucket: listicleFamilyRepReachable(repForReach, ownPagesByServiceCity, THRESHOLDS, {
+          seasonalEmittable: seasonalEmittable.has(rep?.query),
+        }),
+      });
+    });
 
     // A variant is SERVED when some owned page ranks within striking
     // distance for it (best page-level weighted position ≤
