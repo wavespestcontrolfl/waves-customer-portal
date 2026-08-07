@@ -257,6 +257,18 @@ const LAWN_PRICING_V2 = {
   // per-input useLawnCostFloor, or set this key true on the pricing_config
   // lawn_pricing_v2 row (db-bridge resets it false when absent).
   useLawnCostFloor: false,
+  // Cadence frequency-discount arm switch (codex #3274 r3 P1). Default ON —
+  // the in-code grid ships discounted, so the runtime caps that keep
+  // interpolated lookups on the -4%/-8% ladder are part of the same
+  // schedule. migrate:down of 20260807120000 writes an explicit false to
+  // the pricing_config lawn_pricing_v2 row so the DOCUMENTED revert path
+  // actually reverts runtime prices: without this gate the engine cap
+  // re-clamped every enhanced/premium lookup to the discount even after
+  // the rollback restored the pre-discount cells. db-bridge rebases this
+  // to true when the key is absent (kill-value pattern); the always-on
+  // 12x-never-above-9x bound (2026-07-29, pre-dates the discount) is NOT
+  // governed by this switch.
+  cadenceFreqDiscountArmed: true,
   targetListMargin: null,
   useTargetListMargin: false,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',

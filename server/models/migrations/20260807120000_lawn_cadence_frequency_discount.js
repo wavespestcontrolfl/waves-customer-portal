@@ -47,7 +47,12 @@
  * ROLLBACK CONTRACT — down() restores from the audit snapshot up() wrote
  * (live before-values, including pre-deploy drift), and only for cells that
  * STILL hold the value up() applied; a cell an operator edited afterward is
- * left alone. The captured prior pricingVersion is restored the same way.
+ * left alone. The captured prior pricingVersion is restored the same way,
+ * and down() writes lawn_pricing_v2.cadenceFreqDiscountArmed=false so the
+ * engine's -4%/-8% runtime caps disarm with it — without that, the caps
+ * would re-clamp the restored cells on every lookup and the revert would be
+ * a silent no-op at runtime (codex #3274 r3 P1). up() clears the flag again
+ * (absent = armed default) so reapply cycles land fully armed.
  * down()'s audit rows are tagged `${MIGRATION_TAG}:down` so re-runs never
  * mistake them for the up capture.
  */
@@ -128,6 +133,25 @@ async function loadLatestUpAudit(knex) {
 // only-if-nothing-re-advanced-it check into the UPDATE's WHERE so the
 // check-and-set is atomic; stamped: false then means the token was not ours
 // to touch.
+// Atomic single-key write on the lawn_pricing_v2 row (same never-RMW rule as
+// mergeConfigVersion). value === null deletes the key. Used for the cadence
+// discount arm switch (codex #3274 r3 P1): the engine's -4%/-8% runtime caps
+// read lawn_pricing_v2.cadenceFreqDiscountArmed via db-bridge (absent = armed
+// in-code default), so down() writing false makes the DOCUMENTED migrate:down
+// revert actually revert runtime prices, and up() deleting the key re-arms
+// after a rollback→reapply cycle.
+async function mergeConfigFlag(knex, key, value) {
+  if (!(await knex.schema.hasTable('pricing_config'))) return;
+  await knex('pricing_config')
+    .where({ config_key: 'lawn_pricing_v2' })
+    .update({
+      data: value == null
+        ? knex.raw(`data - ?`, [key])
+        : knex.raw(`jsonb_set(data, ?, to_jsonb(?::boolean), true)`, [`{${key}}`, value]),
+      updated_at: knex.fn.now(),
+    });
+}
+
 async function mergeConfigVersion(knex, version, expectCurrent) {
   if (!(await knex.schema.hasTable('pricing_config'))) return null;
   const existing = await knex('pricing_config')
@@ -155,11 +179,26 @@ async function mergeConfigVersion(knex, version, expectCurrent) {
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('lawn_pricing_brackets'))) return;
 
+  // Every cap below is DERIVED from anchor rows (standard, and enhanced for
+  // the premium bound) while the conditional UPDATE only guards the TARGET
+  // row — a concurrent admin anchor edit landing between the read and the
+  // dependent write would bake a cap off the stale anchor into the
+  // DB-authoritative dollar source (pre-push audit P0 on r3). One
+  // whole-table lock serializes every bracket writer for the seconds this
+  // runs instead of incremental row locks, whose acquisition order
+  // (targets, then anchors) inverts the admin panel's standard-first write
+  // order and could deadlock the deploy (pre-push audit P1). SHARE ROW
+  // EXCLUSIVE blocks writes but not reads, and knex runs migrations
+  // transactionally so it releases at commit.
+  await knex.raw('LOCK TABLE lawn_pricing_brackets IN SHARE ROW EXCLUSIVE MODE');
+
   const applied = [];
   // Enhanced first, then premium: the premium cap is also bounded by the
   // (already capped) enhanced cell, so ordering keeps the ladder monotonic.
   for (const tier of ['enhanced', 'premium']) {
-    const rows = await knex('lawn_pricing_brackets').where({ tier });
+    const rows = await knex('lawn_pricing_brackets')
+      .where({ tier })
+      .orderBy(['grass_track', 'sqft_bracket']);
     for (const row of rows) {
       const standard = await knex('lawn_pricing_brackets')
         .where({ grass_track: row.grass_track, sqft_bracket: row.sqft_bracket, tier: 'standard' })
@@ -189,6 +228,11 @@ exports.up = async function up(knex) {
   const stamp = await mergeConfigVersion(knex, VERSION_TO);
   const priorVersion = stamp ? stamp.prior : null;
   const versionAdvanced = Boolean(stamp && stamp.stamped) && stamp.prior !== VERSION_TO;
+
+  // Re-arm the runtime caps: clear any cadenceFreqDiscountArmed:false a prior
+  // down() left (absent = armed in-code default), so rollback→reapply cycles
+  // land fully armed (codex #3274 r3 P1).
+  await mergeConfigFlag(knex, 'cadenceFreqDiscountArmed', null);
 
   // Write a capture whenever this run changed anything — cells, the version
   // token, or both. A version-only run (every cell already under its cap, e.g.
@@ -265,7 +309,16 @@ exports.down = async function down(knex) {
   // migration's to touch. A captured prior of null restores the pre-up
   // "no version key" state verbatim.
   if (snapshot) {
-    await mergeConfigVersion(knex, snapshot.before.pricingVersion ?? null, VERSION_TO);
+    const unwound = await mergeConfigVersion(knex, snapshot.before.pricingVersion ?? null, VERSION_TO);
+    // Disarm the engine's -4%/-8% runtime caps ONLY when this down() actually
+    // unwound the version (codex #3274 r3 P1): restored bracket cells would
+    // otherwise be re-clamped to the discount on every lookup, making the
+    // documented migrate:down revert a silent no-op at runtime. If something
+    // re-advanced the version since (expectCurrent no-op above), the current
+    // schedule is not this migration's to disarm.
+    if (unwound && unwound.stamped) {
+      await mergeConfigFlag(knex, 'cadenceFreqDiscountArmed', false);
+    }
   }
 
   await auditInsert(

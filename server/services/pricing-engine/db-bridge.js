@@ -875,6 +875,12 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // post-discount and public-ladder margin-floor caps.
     constants.LAWN_PRICING_V2.programMinimumMonthly = 0;
     constants.LAWN_PRICING_V2.useLawnCostFloor = false;
+    // Cadence frequency-discount arm switch rebases to its in-code default
+    // (ON) — only an explicit false on the row (written by migrate:down of
+    // 20260807120000) disarms the -4%/-8% runtime caps, and deleting the
+    // key re-arms on the next sync rather than leaving a stale disarm
+    // resident until restart (codex #3274 r3 P1).
+    constants.LAWN_PRICING_V2.cadenceFreqDiscountArmed = true;
     // Same rebase rule for the bermuda-suppression knobs: the singleton is
     // mutated in place across syncs, so deleting the DB key (or the row)
     // after an admin edit must restore the in-code defaults on the next

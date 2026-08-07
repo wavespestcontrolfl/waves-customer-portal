@@ -384,6 +384,13 @@ const LAWN_PRICING_V2 = {
   // floor SELECTION matches the server-recomputed save (codex P2 on the
   // #2827 main-merge).
   useLawnCostFloor: false,
+  // Mirrors server constants.LAWN_PRICING_V2.cadenceFreqDiscountArmed
+  // (codex #3274 r3 P1): default ON — the baked grid ships discounted.
+  // migrate:down of 20260807120000 writes false on the lawn_pricing_v2 row
+  // so a rollback disarms the -4%/-8% runtime caps here too via
+  // applyServerLawnPricingConfig; the 2026-07-29 12x-never-above-9x bound
+  // is not governed by this switch.
+  cadenceFreqDiscountArmed: true,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
   // _SPOT_RESERVE (2026-07-17): material budgets now fund the protocol
   // spot-treatment reserves (owner-approved) — estimates stamped with the
@@ -425,6 +432,10 @@ export function applyServerLawnPricingConfig(config) {
   // Cost-floor enforcement arm switch rides the same row — absent/non-true
   // resolves to the disarmed default, exactly like db-bridge on the server.
   LAWN_PRICING_V2.useLawnCostFloor = config?.useLawnCostFloor === true;
+  // Cadence discount arm switch: ONLY an explicit false disarms (written by
+  // migrate:down of 20260807120000); absent/invalid restores the in-code
+  // armed default — same kill-value shape as the version stamp below.
+  LAWN_PRICING_V2.cadenceFreqDiscountArmed = config?.cadenceFreqDiscountArmed !== false;
   // Version stamp rides the same row too (codex #3190 P2): fallback saves
   // stamp the pricing schedule they were priced under, so the live DB value
   // wins over the baked default; absent/invalid resets the in-code default —
@@ -710,6 +721,33 @@ const LAWN_PRICES = {
   zoysia: { name: 'Zoysia', code: 'C2', pts: [[0,31,36,42],[1500,31,36,42],[2000,34,40,46],[2500,37,44,52],[3000,39,46,56],[3500,40,49,59],[4000,42,51,63],[4500,42,51,66],[5000,42,52,69],[5500,42,55,73],[6000,42,58,77],[6500,43,60,79],[7000,44,63,80],[7500,45,64,82],[8000,47,67,86],[9000,51,73,93],[10000,56,80,103],[11000,59,84,108],[12000,63,90,115],[15000,75,108,138],[20000,95,136,174]] },
   bahia: { name: 'Bahia', code: 'D', pts: [[0,27,30,36],[1500,27,30,36],[2000,29,34,39],[2500,31,38,44],[3000,34,42,51],[3500,34,42,53],[4000,34,42,56],[4500,34,44,58],[5000,34,47,62],[5500,35,49,64],[6000,36,51,66],[6500,37,53,68],[7000,39,56,71],[7500,40,57,73],[8000,42,60,77],[9000,45,64,82],[10000,49,70,90],[11000,52,74,95],[12000,56,80,103],[15000,65,93,119],[20000,82,118,150]] },
 };
+
+// The exact pre-FREQ_DISCOUNT columns (2026-08-04 re-grid values), selected
+// by lawnPricesFor when the discount is DISARMED (pre-push audit P0 on
+// #3274 r3): a migrate:down restores these cells on the server's
+// DB-authoritative brackets, and merely releasing the runtime caps left
+// this fallback quoting the baked discounted grid — under the restored
+// server prices (12,000 sqft st_augustine fallback 89/114 vs restored
+// 92/122), violating the estimator dollar-authority rule. Only the
+// 9x/12x columns differ from LAWN_PRICES (the 6x anchor never moved).
+const LAWN_PRICES_PRE_FREQ_DISCOUNT = {
+  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,30,34,40],[1500,30,34,40],[2000,32,38,44],[2500,35,42,49],[3000,38,44,55],[3500,38,47,58],[4000,38,47,62],[4500,38,48,64],[5000,38,50,66],[5500,38,53,70],[6000,39,56,74],[6500,40,59,78],[7000,42,62,82],[7500,44,65,86],[8000,47,68,90],[9000,50,74,98],[10000,54,80,106],[11000,58,86,114],[12000,62,92,122],[15000,73,110,146],[20000,91,140,186]] },
+  bermuda: { name: 'Bermuda', code: 'C1', pts: [[0,31,36,42],[1500,31,36,42],[2000,34,40,46],[2500,37,44,52],[3000,39,46,56],[3500,40,49,59],[4000,42,51,63],[4500,42,51,65],[5000,42,51,68],[5500,42,54,72],[6000,42,57,76],[6500,42,60,80],[7000,43,63,84],[7500,45,66,88],[8000,47,69,92],[9000,51,75,100],[10000,55,81,108],[11000,59,87,116],[12000,63,94,125],[15000,74,112,149],[20000,94,143,190]] },
+  zoysia: { name: 'Zoysia', code: 'C2', pts: [[0,31,36,42],[1500,31,36,42],[2000,34,40,46],[2500,37,44,52],[3000,39,46,56],[3500,40,49,59],[4000,42,51,63],[4500,42,51,66],[5000,42,52,69],[5500,42,55,73],[6000,42,58,77],[6500,43,60,80],[7000,44,63,84],[7500,45,66,88],[8000,47,70,93],[9000,51,76,101],[10000,56,82,109],[11000,59,88,117],[12000,63,95,126],[15000,75,113,150],[20000,95,145,193]] },
+  bahia: { name: 'Bahia', code: 'D', pts: [[0,27,30,36],[1500,27,30,36],[2000,29,34,39],[2500,31,38,44],[3000,34,42,51],[3500,34,42,53],[4000,34,42,56],[4500,34,44,58],[5000,34,47,62],[5500,35,49,65],[6000,36,52,69],[6500,37,54,72],[7000,39,57,76],[7500,40,59,78],[8000,42,62,82],[9000,45,67,89],[10000,49,73,97],[11000,52,78,103],[12000,56,83,110],[15000,65,99,132],[20000,82,125,166]] },
+};
+
+// Grid selector for every lawn lookup: the armed default reads the
+// discounted LAWN_PRICES; an explicit cadenceFreqDiscountArmed:false from
+// the lawn_pricing_v2 row (written by migrate:down of 20260807120000)
+// selects the pre-discount columns so fallback quotes match the restored
+// server brackets.
+function lawnPricesFor(grassType) {
+  const grid = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false
+    ? LAWN_PRICES
+    : LAWN_PRICES_PRE_FREQ_DISCOUNT;
+  return grid[grassType] || grid.st_augustine;
+}
 
 function toPositiveNumber(value) {
   const n = Number(value);
@@ -1372,24 +1410,36 @@ function lawnLookup(lp, sf, freqIdx) {
   // freqIdx 0 = standard(6x), 1 = enhanced(9x), 2 = premium(12x) after the
   // 4x column removal.
   if (freqIdx === 0 || !(result.monthly > 0)) return result;
-  const standard = lawnLookupUncapped(lp, sf, 0);
-  if (!(standard.monthly > 0)) return result;
+  // Armed = the discounted schedule is live; a rollback of 20260807120000
+  // disarms via applyServerLawnPricingConfig so the caps stop re-clamping
+  // restored bracket values (codex #3274 r3 P1, server mirror). The
+  // 2026-07-29 12x-never-above-9x bound below stays unconditional.
+  const discountArmed = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false;
+  const standard = discountArmed ? lawnLookupUncapped(lp, sf, 0) : null;
   if (freqIdx === 1) {
-    result.monthly = Math.min(
-      result.monthly,
-      Math.floor(standard.monthly * LAWN_ENH_MONTHLY_CAP_RATIO),
-    );
+    if (standard && standard.monthly > 0) {
+      result.monthly = Math.min(
+        result.monthly,
+        Math.floor(standard.monthly * LAWN_ENH_MONTHLY_CAP_RATIO),
+      );
+    }
     return result;
   }
-  const enhancedCapped = Math.min(
-    lawnLookupUncapped(lp, sf, 1).monthly,
-    Math.floor(standard.monthly * LAWN_ENH_MONTHLY_CAP_RATIO),
-  );
-  result.monthly = Math.min(
-    result.monthly,
-    Math.floor(standard.monthly * LAWN_PREM_MONTHLY_CAP_RATIO),
-    ...(enhancedCapped > 0 ? [Math.floor(enhancedCapped * 12 / 9)] : []),
-  );
+  const enhancedUncapped = lawnLookupUncapped(lp, sf, 1).monthly;
+  const bounds = [];
+  if (standard && standard.monthly > 0) {
+    bounds.push(Math.floor(standard.monthly * LAWN_PREM_MONTHLY_CAP_RATIO));
+    const enhancedCapped = Math.min(
+      enhancedUncapped,
+      Math.floor(standard.monthly * LAWN_ENH_MONTHLY_CAP_RATIO),
+    );
+    if (enhancedCapped > 0) bounds.push(Math.floor(enhancedCapped * 12 / 9));
+  } else if (enhancedUncapped > 0) {
+    // Disarmed: the pre-discount premium bound against the as-stored
+    // enhanced column, exactly the 2026-07-29 behavior.
+    bounds.push(Math.floor(enhancedUncapped * 12 / 9));
+  }
+  if (bounds.length) result.monthly = Math.min(result.monthly, ...bounds);
   return result;
 }
 
@@ -2005,7 +2055,7 @@ export function calculateEstimate(inputs) {
     // ── Smoothed turf factor (~5% per point) ──
     const tfTable = [0.78, 0.73, 0.68, 0.63, 0.58, 0.53, 0.48, 0.43, 0.38, 0.33];
     const tf = tfTable[Math.min(sc, 9)];
-    const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
+    const lp = lawnPricesFor(grassType);
     const lsf = turfArea.turfSf;
     const selectedFreq = resolveLawnFreq(lawnFreq);
 
@@ -2025,7 +2075,7 @@ export function calculateEstimate(inputs) {
       ? Math.round(lawnProgramMinMonthly * 12 * 100) / 100
       : 0;
     R.lawn = [];
-    freqs.forEach((f) => {
+    const lawnCalcs = freqs.map((f) => {
       const freqIdx = LAWN_FREQS.indexOf(f.v);
       const marketPrice = lawnLookup(lp, lsf, freqIdx);
       const floorPrice = calcLawnFloorPrice(lsf, grassType, f.v, { complexityMinutes: lawnComplexityMin });
@@ -2042,10 +2092,38 @@ export function calculateEstimate(inputs) {
       let ann = floorApplied ? floorPrice.ann : marketAnnual;
       const programMinimumApplied = lawnProgramMinAnnual > 0 && ann < lawnProgramMinAnnual;
       if (programMinimumApplied) ann = Math.ceil(lawnProgramMinAnnual / f.v) * f.v;
+      return { f, marketPrice, floorPrice, marketAnnual, floorApplied, programMinimumApplied, ann };
+    });
+    // Cadence-ladder lift under ARMED cost floors — server mirror (codex
+    // #3274 r3 P2): floors resolve per cadence, so a re-arm could invert
+    // the per-application ladder the frequency discount promises. Lift the
+    // lower-frequency legs (never lowering any leg below its floor) until
+    // the lawnLookup relations hold on the floored results: enhanced
+    // against premium first, then standard against both. Rides both the
+    // floor arm and the discount arm, so disarmed floors and a rolled-back
+    // discount each keep the pre-existing behavior bit-for-bit.
+    if (LAWN_PRICING_V2.useLawnCostFloor === true
+      && LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false
+      && lawnCalcs.some((c) => c.floorApplied)) {
+      const byFreq = {};
+      lawnCalcs.forEach((c) => { byFreq[c.f.v] = c; });
+      const liftLeg = (leg, neededAnnual) => {
+        if (!leg || !(neededAnnual > leg.ann)) return;
+        leg.ann = Math.ceil(neededAnnual / leg.f.v) * leg.f.v;
+        leg.cadenceLadderLiftApplied = true;
+      };
+      // pa12 <= pa9 ⇔ ann9 >= ann12 * 9/12
+      if (byFreq[9] && byFreq[12]) liftLeg(byFreq[9], byFreq[12].ann * 9 / 12);
+      // pa9 <= 0.96*pa6 ⇔ ann6 >= ann9/1.44 ; pa12 <= 0.92*pa6 ⇔ ann6 >= ann12/1.84
+      if (byFreq[6] && byFreq[9]) liftLeg(byFreq[6], byFreq[9].ann / LAWN_ENH_MONTHLY_CAP_RATIO);
+      if (byFreq[6] && byFreq[12]) liftLeg(byFreq[6], byFreq[12].ann / LAWN_PREM_MONTHLY_CAP_RATIO);
+    }
+    lawnCalcs.forEach(({ f, marketPrice, floorPrice, marketAnnual, floorApplied, programMinimumApplied, ann, cadenceLadderLiftApplied }) => {
       const mo = Math.round(ann / 12 * 100) / 100;
       const pa = Math.round(ann / f.v * 100) / 100;
       const rec = f.v === selectedFreq, dim = !rec;
       R.lawn.push({
+        cadenceLadderLiftApplied: cadenceLadderLiftApplied || undefined,
         pa,
         v: f.v,
         ann,
@@ -2497,7 +2575,7 @@ export function calculateEstimate(inputs) {
   /* ── One-Time Lawn ───────────────────────────────────────── */
   if (svcOnetimeLawn && !isCommercial && lotSqFt > 0) {
     hasOT = true;
-    const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
+    const lp = lawnPricesFor(grassType);
     const selectedFreq = resolveLawnFreq(lawnFreq);
     const selectedFreqIdx = LAWN_FREQS.indexOf(selectedFreq);
     const baselinePrice = lawnLookup(lp, turfArea.turfSf, selectedFreqIdx >= 0 ? selectedFreqIdx : 1);
