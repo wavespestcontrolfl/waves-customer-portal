@@ -14,6 +14,8 @@ const { _internals } = require('../services/content/autonomous-runner');
 const {
   isShadow,
   autoPublishEnabled,
+  operatorSlugMismatch,
+  applyOperatorSlugRepair,
   FACTS_GATED_ACTIONS,
   TRUST_BUILD_THRESHOLD,
   DEFAULT_MIN_SCORE,
@@ -733,6 +735,102 @@ describe('isDeterministicPublishError', () => {
     const heroErr = new Error('autonomous blog hero image generation failed for x: image API down');
     heroErr.code = 'BLOG_HERO_IMAGE_FAILED';
     expect(isDeterministicPublishError(heroErr)).toBe(true);
+  });
+
+  test('an off-site canonical rejection is deterministic (park, never retry or repair into a publish)', () => {
+    expect(isDeterministicPublishError(new Error('autonomous draft canonical points off-site (evil.example.com) — refusing to repair a cross-site canonical'))).toBe(true);
+  });
+});
+
+describe('applyOperatorSlugRepair (operator pin is authoritative — drift repaired, not parked)', () => {
+  const PINNED = '/lawn-care/fall-lawn-mistakes-swfl/';
+  function operatorBrief(slug = PINNED) {
+    return { voice_constraints: { operator_brief: { slug } } };
+  }
+  function driftedDraft(overrides = {}) {
+    return {
+      type: 'draft',
+      frontmatter: {
+        slug: '/fall-lawn-mistakes-southwest-florida/',
+        canonical: 'https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/',
+        title: 'Fall Lawn Mistakes',
+        ...overrides.frontmatter,
+      },
+      body: overrides.body !== undefined
+        ? overrides.body
+        : 'Intro. See [our checklist](/fall-lawn-mistakes-southwest-florida/) and the [same post again](/fall-lawn-mistakes-southwest-florida/#faq-adjacent).',
+    };
+  }
+
+  test('returns null (no-op) when the draft already matches the pin', () => {
+    const draft = driftedDraft({ frontmatter: { slug: PINNED, canonical: `https://www.wavespestcontrol.com${PINNED}` } });
+    const before = JSON.stringify(draft);
+    expect(applyOperatorSlugRepair(operatorBrief(), draft)).toBeNull();
+    expect(JSON.stringify(draft)).toBe(before);
+  });
+
+  test('repairs drift in place: slug forced to the pin, canonical repointed, body self-links rewritten, repair recorded', () => {
+    const draft = driftedDraft();
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+    expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(draft.body).not.toContain('/fall-lawn-mistakes-southwest-florida/');
+    expect(draft.body).toContain(`(${PINNED})`);
+    // Fragment link keeps its fragment — only the exact path is swapped.
+    expect(draft.body).toContain(`${PINNED}#faq-adjacent`);
+    expect(result.repair).toMatchObject({
+      from_slug: '/fall-lawn-mistakes-southwest-florida/',
+      to_slug: PINNED,
+      canonical_rewritten: true,
+      body_self_link_rewrites: 2,
+    });
+    // The detector reads clean afterwards — the pipeline continues past the
+    // machine check instead of parking.
+    expect(operatorSlugMismatch(operatorBrief(), draft)).toBeNull();
+  });
+
+  test('repairs a draft that emitted NO slug at all (slug set, body untouched)', () => {
+    const draft = driftedDraft({ frontmatter: { slug: undefined }, body: 'No self links here.' });
+    delete draft.frontmatter.slug;
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+    expect(result.repair.body_self_link_rewrites).toBe(0);
+    expect(draft.body).toBe('No self links here.');
+  });
+
+  test('does NOT rewrite unrelated content — only the exact old slug path', () => {
+    const draft = driftedDraft({
+      body: 'Talks about fall-lawn-mistakes-southwest-florida as a phrase (no slashes) and links [here](/fall-lawn-mistakes-southwest-florida/).',
+    });
+    applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(draft.body).toContain('fall-lawn-mistakes-southwest-florida as a phrase');
+    expect(draft.body).toContain(`(${PINNED})`);
+  });
+
+  test('an invalid pinned slug is NOT repairable — draft untouched, caller keeps the park', () => {
+    for (const badPin of ['/Fall Lawn Mistakes!!/', '/bad_underscore/', '//', '   ']) {
+      const draft = driftedDraft();
+      const before = JSON.stringify(draft);
+      const result = applyOperatorSlugRepair(operatorBrief(badPin), draft);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/not a valid blog slug path/);
+      expect(result.mismatch.expected_slug).toBe(badPin);
+      expect(JSON.stringify(draft)).toBe(before);
+    }
+  });
+
+  test('a draft without a frontmatter object is NOT repairable (cannot publish anyway)', () => {
+    const draft = { type: 'draft', body: 'body only' };
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/no frontmatter/);
+  });
+
+  test('no operator pin on the brief → null (non-intercept briefs unaffected)', () => {
+    expect(applyOperatorSlugRepair({}, driftedDraft())).toBeNull();
   });
 });
 
@@ -2238,6 +2336,154 @@ describe('runNext post-publish bookkeeping', () => {
       expect(result.failure_message).toBe(err.message);
       expect(publisher.publishOrUpdatePage).toHaveBeenCalled();
       expect(queue.pendingReview).toHaveBeenCalledWith('opp_invalid_1', 'publish_validation_failed', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+      expect(queue.complete).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
+  // Operator slug pin: drift is repaired and the pipeline CONTINUES to the
+  // publisher (the pinned slug is authoritative); only an unrepairable pin
+  // (invalid slug) keeps the old operator_slug_mismatch park.
+  function operatorPinScenario({ pinnedSlug, draftSlug, publisher }) {
+    const claimedAt = new Date('2026-08-06T05:30:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({
+        id: 'opp_pin_1',
+        action_type: 'new_supporting_blog',
+        bucket: 'operator_intercept',
+        claimed_at: claimedAt,
+      }),
+      complete: jest.fn().mockResolvedValue(true),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({
+        id: 'brief_pin_1',
+        action_type: 'new_supporting_blog',
+        page_type: 'supporting-blog',
+        human_review_required: false,
+        voice_constraints: { operator_brief: { slug: pinnedSlug } },
+      }),
+    };
+    const dispatcher = {
+      runWithBrief: jest.fn().mockResolvedValue({
+        ok: true,
+        draft: {
+          type: 'draft',
+          url: `${draftSlug}`,
+          title: 'Fall Lawn Mistakes in Southwest Florida',
+          frontmatter: {
+            slug: draftSlug,
+            canonical: `https://www.wavespestcontrol.com${draftSlug}`,
+            title: 'Fall Lawn Mistakes in Southwest Florida',
+          },
+          body: `Guidance for SWFL lawns. See [this post](${draftSlug}) for the checklist.`,
+        },
+      }),
+    };
+    const qualityGate = {
+      evaluate: jest.fn().mockReturnValue({
+        ok: true, hard_failures: [], soft_failures: [], total_score: 100, min_total_score: 80,
+      }),
+    };
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder,
+      dispatcher,
+      qualityGate,
+      publisher,
+      indexNow: { submit: jest.fn() },
+      linkPlanner: {},
+      // Gate mocks pass so the test isolates the slug-repair step: the repair
+      // runs BEFORE these gates, so they see the repaired draft.
+      contentGuardrails: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
+      comparisonTableGate: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [], requiresHumanReview: false }) },
+    });
+    return { runner, queue, claimedAt };
+  }
+
+  test('operator slug drift is repaired and the run continues to publish with the pinned slug (repair recorded)', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const publisher = {
+        publishOrUpdatePage: jest.fn().mockResolvedValue({
+          url: 'https://www.wavespestcontrol.com/lawn-care/fall-lawn-mistakes-swfl/',
+          status: 'pr_open',
+          live: false,
+          pr_url: 'https://github.com/wavespestcontrolfl/astro/pull/900',
+        }),
+      };
+      const { runner, queue, claimedAt } = operatorPinScenario({
+        pinnedSlug: '/lawn-care/fall-lawn-mistakes-swfl/',
+        draftSlug: '/fall-lawn-mistakes-southwest-florida/',
+        publisher,
+      });
+
+      const result = await runner.runNext();
+
+      // NOT parked on the old operator_slug_mismatch remedy — the pipeline
+      // ran through to the publisher.
+      expect(result.skip_reason).not.toBe('operator_slug_mismatch');
+      expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+      const publishedDraft = publisher.publishOrUpdatePage.mock.calls[0][0];
+      expect(publishedDraft.frontmatter.slug).toBe('/lawn-care/fall-lawn-mistakes-swfl/');
+      expect(publishedDraft.frontmatter.canonical).toBe('https://www.wavespestcontrol.com/lawn-care/fall-lawn-mistakes-swfl/');
+      expect(publishedDraft.body).toContain('(/lawn-care/fall-lawn-mistakes-swfl/)');
+      expect(publishedDraft.body).not.toContain('/fall-lawn-mistakes-southwest-florida/');
+      // Repair recorded on the persisted draft payload.
+      expect(publishedDraft.operator_slug_repair).toMatchObject({
+        from_slug: '/fall-lawn-mistakes-southwest-florida/',
+        to_slug: '/lawn-care/fall-lawn-mistakes-swfl/',
+        canonical_rewritten: true,
+        body_self_link_rewrites: 1,
+      });
+      expect(result.draft_payload.operator_slug_repair).toMatchObject({
+        to_slug: '/lawn-care/fall-lawn-mistakes-swfl/',
+      });
+      // PR-open publish → the usual pending-merge park, claim NOT released.
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_pin_1', 'astro_pr_pending_merge', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
+  test('an INVALID pinned slug still parks as operator_slug_mismatch (repair cannot be made safe)', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const publisher = { publishOrUpdatePage: jest.fn() };
+      const { runner, queue, claimedAt } = operatorPinScenario({
+        pinnedSlug: '/Fall Lawn Mistakes!!/',
+        draftSlug: '/fall-lawn-mistakes-southwest-florida/',
+        publisher,
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('operator_slug_mismatch');
+      expect(result.reviewer_notes).toMatch(/not auto-repairable/);
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_pin_1', 'operator_slug_mismatch', { claimToken: claimedAt });
       expect(queue.release).not.toHaveBeenCalled();
       expect(queue.complete).not.toHaveBeenCalled();
     } finally {

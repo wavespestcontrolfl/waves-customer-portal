@@ -508,21 +508,33 @@ class AutonomousRunner {
     this._clampDraftLengths(draft);
 
     // 3a. Operator slug pin (machine-checked, not just prompt-binding). The
-    // intercept manifest declares the slug exact/binding; if the writer
-    // drifts, the fully-autonomous lane would otherwise publish a
-    // competitor-intercept post at the wrong URL (publishOrUpdatePage only
-    // validates canonical against the draft's OWN slug). Park for review —
-    // never auto-publish a mismatched URL.
+    // intercept manifest declares the slug exact/binding; the writer drifts
+    // onto its own slug often enough that parking every drift burned
+    // finished drafts on a field the operator had already decided. The pin
+    // is authoritative truth, so drift is REPAIRED — slug forced back to the
+    // pin, canonical + body self-links repointed — BEFORE any gate runs
+    // (every gate then evaluates exactly what will publish; no finding
+    // evidence is destroyed). operatorSlugMismatch stays the detector; only
+    // a repair that cannot be made safe (the pinned slug itself invalid)
+    // keeps the old park remedy.
     if (opp.bucket === OPERATOR_INTERCEPT_BUCKET) {
-      const slugCheck = operatorSlugMismatch(brief, draft);
-      if (slugCheck) {
+      const slugRepair = applyOperatorSlugRepair(brief, draft);
+      if (slugRepair && !slugRepair.ok) {
         const finalized = await finalize(run, t0, {
           outcome: 'completed_pending_review',
           skip_reason: 'operator_slug_mismatch',
-          reviewer_notes: `Writer slug "${slugCheck.draft_slug || '(none)'}" does not match the operator-pinned slug "${slugCheck.expected_slug}" — review/fix before publishing.`,
+          reviewer_notes: `Writer slug "${slugRepair.mismatch.draft_slug || '(none)'}" does not match the operator-pinned slug "${slugRepair.mismatch.expected_slug}" and the drift is not auto-repairable (${slugRepair.reason}) — review/fix before publishing.`,
         });
         await this._pendingReviewClaimOrThrow(queue, opp.id, 'operator_slug_mismatch', { claimToken });
         return finalized;
+      }
+      if (slugRepair && slugRepair.ok) {
+        // Audit trail rides the persisted draft payload (same pattern as
+        // citation_residue_stripped / checked_existing_routes) — the run
+        // record shows exactly what the repair rewrote.
+        draft.operator_slug_repair = slugRepair.repair;
+        run.draft_payload = draft;
+        logger.warn(`[autonomous-runner] operator slug drift repaired for opportunity ${opp.id}: "${slugRepair.repair.from_slug || '(none)'}" → "${slugRepair.repair.to_slug}" (canonical ${slugRepair.repair.canonical_rewritten ? 'rewritten' : 'unchanged'}, ${slugRepair.repair.body_self_link_rewrites} body self-link rewrite(s))`);
       }
     }
 
@@ -3379,6 +3391,79 @@ function normalizeSlugPath(slug) {
   return `/${trimmed}/`;
 }
 
+// The binding blog-schema slug shape (packages/blog-schema/schema.json):
+// /segment/segment/…/ with lowercase [a-z0-9-] segments only.
+const PINNED_SLUG_PATTERN = /^\/[a-z0-9-]+(\/[a-z0-9-]+)*\/$/;
+
+/**
+ * applyOperatorSlugRepair(brief, draft) — the operator-pinned slug is
+ * authoritative truth, so writer slug drift is REPAIRED (slug forced back to
+ * the pin before any gate or publish runs), not parked. The old remedy
+ * parked every drift as operator_slug_mismatch, burning a finished draft on
+ * a field the operator had already decided.
+ *
+ * Mutates the draft in place:
+ *   - frontmatter.slug     → the pinned slug;
+ *   - frontmatter.canonical → hub origin + pinned slug (the canonical embeds
+ *     the slug; a stale-leaf canonical would otherwise park downstream at the
+ *     publisher's canonical↔slug check — the publisher still derives the
+ *     binding canonical from the slug either way);
+ *   - body self-links on the writer's own wrong slug path → pinned path.
+ * Nothing else is touched, so every gate still sees the writer's content
+ * verbatim (repairs run BEFORE the gates — no finding evidence is destroyed).
+ *
+ * Returns:
+ *   null                       — no drift (nothing to do);
+ *   { ok: true, repair }       — drift repaired; `repair` is the audit record
+ *                                the caller persists on the run's draft payload;
+ *   { ok: false, reason, mismatch } — the repair cannot be made safe (pinned
+ *                                slug itself invalid / draft shape unusable);
+ *                                the caller keeps the old park remedy.
+ * Pure aside from the draft mutation — exported via _internals for tests.
+ */
+function applyOperatorSlugRepair(brief, draft) {
+  const mismatch = operatorSlugMismatch(brief, draft);
+  if (!mismatch) return null;
+  const pinned = normalizeSlugPath(mismatch.expected_slug);
+  if (!PINNED_SLUG_PATTERN.test(pinned)) {
+    return { ok: false, reason: `pinned slug "${mismatch.expected_slug}" is not a valid blog slug path`, mismatch };
+  }
+  if (!draft || typeof draft !== 'object' || !draft.frontmatter || typeof draft.frontmatter !== 'object' || Array.isArray(draft.frontmatter)) {
+    return { ok: false, reason: 'draft has no frontmatter object to repair', mismatch };
+  }
+
+  const oldSlugPath = mismatch.draft_slug ? normalizeSlugPath(mismatch.draft_slug) : null;
+  const hub = (process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').replace(/\/$/, '');
+  const repair = {
+    repaired_at: new Date().toISOString(),
+    from_slug: mismatch.draft_slug || null,
+    to_slug: pinned,
+    canonical_rewritten: false,
+    body_self_link_rewrites: 0,
+  };
+
+  draft.frontmatter.slug = pinned;
+
+  const newCanonical = `${hub}${pinned}`;
+  const oldCanonical = typeof draft.frontmatter.canonical === 'string' ? draft.frontmatter.canonical.trim() : '';
+  if (oldCanonical !== newCanonical) {
+    draft.frontmatter.canonical = newCanonical;
+    repair.canonical_rewritten = true;
+  }
+
+  // Self-referencing links the writer built on its own (wrong) slug. The
+  // normalized path includes both slashes, so a match in prose is a link
+  // target, not a word; replacement is an exact-path swap, never a rewrite
+  // of surrounding content.
+  if (oldSlugPath && oldSlugPath !== pinned && typeof draft.body === 'string' && draft.body.includes(oldSlugPath)) {
+    const occurrences = draft.body.split(oldSlugPath).length - 1;
+    draft.body = draft.body.split(oldSlugPath).join(pinned);
+    repair.body_self_link_rewrites = occurrences;
+  }
+
+  return { ok: true, repair };
+}
+
 function countsTowardTrustBuild(row) {
   if (row?.outcome === 'completed_published') return true;
   return row?.outcome === 'completed_pending_review'
@@ -3412,6 +3497,7 @@ function isDeterministicPublishError(err) {
     /^Astro file not found for refresh:/,
     /^autonomous draft missing safe frontmatter slug$/,
     /^autonomous draft canonical is not a valid URL$/,
+    /^autonomous draft canonical points off-site /,
     /^autonomous draft canonical must match slug /,
   ].some((pattern) => pattern.test(message));
 }
@@ -3671,6 +3757,7 @@ module.exports._internals = {
   autoPublishEnabled,
   OPERATOR_INTERCEPT_BUCKET,
   operatorSlugMismatch,
+  applyOperatorSlugRepair,
   FACTS_GATED_ACTIONS,
   TRUST_BUILD_THRESHOLD,
   DEFAULT_MIN_SCORE,

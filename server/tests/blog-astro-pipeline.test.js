@@ -734,6 +734,31 @@ describe('autonomous frontmatter normalization (Bucket A generator fixes)', () =
       const fm = { slug: '/ant-trails/', canonical: 'https://www.wavespestcontrol.com/roach-trails/' };
       expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical must match slug/);
     });
+
+    test('repairs a RELATIVE canonical (derives from slug, keeps the generation)', () => {
+      const fm = { slug: '/ant-trails/', canonical: '/pest-control/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'pest-control/ant-trails')).not.toThrow();
+      expect(fm.canonical).toBe(canonicalUrlForSlug('pest-control/ant-trails'));
+    });
+
+    test('repairs a same-leaf canonical on a FLEET (spoke) host — on-fleet drift is publisher-owned', () => {
+      const fm = { slug: '/ant-trails/', canonical: 'https://sarasotaflpestcontrol.com/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).not.toThrow();
+      expect(fm.canonical).toBe(canonicalUrlForSlug('ant-trails'));
+    });
+
+    test('REJECTS an off-site canonical even with a matching leaf — never repaired into a publish', () => {
+      const fm = { slug: '/ant-trails/', canonical: 'https://evil.example.com/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical points off-site/);
+      // The rejection message is in the runner's deterministic-park list, so
+      // the run parks for review instead of retry-looping.
+      expect(fm.canonical).toBe('https://evil.example.com/ant-trails/'); // untouched — no silent repair
+    });
+
+    test('REJECTS a protocol-relative off-site canonical (//host/… carries a host of its own)', () => {
+      const fm = { slug: '/ant-trails/', canonical: '//evil.example.com/ant-trails/' };
+      expect(() => assertCanonicalMatchesSlug(fm, 'ant-trails')).toThrow(/canonical points off-site/);
+    });
   });
 
   describe('clampMetaDescription — over-160 is normalized, not rejected', () => {
@@ -2195,6 +2220,102 @@ describe('generateHeroBuffer (publish-time AI hero)', () => {
       AstroPublisher._internals.generateHeroBuffer({ title: 'T' })
     ).rejects.toThrow(/no usable image/);
   });
+
+  test('decodes a provider-scale (multi-MB, whitespace-wrapped) data URL without regexing the payload', async () => {
+    // The old /^data:...;base64,(.+)$/ ran V8's regex engine across the whole
+    // multi-megabyte payload (the huge-input suspect behind the prod
+    // "Maximum call stack size exceeded" hero failure) and outright FAILED on
+    // wrapped base64 (newlines), falling through to a network fetch() of a
+    // data: URL. The bounded header parse must decode both shapes locally.
+    const wrapped = `data:image/png;base64,${(PNG_B64.match(/.{1,20}/g) || []).join('\n')}`;
+    imageGenerator.generate.mockResolvedValue({ dataUrl: wrapped, model: 'test-model' });
+    const img = await AstroPublisher._internals.generateHeroBuffer({ title: 'Wrapped' });
+    expect(Buffer.isBuffer(img.buffer)).toBe(true);
+    expect(img.buffer.length).toBeGreaterThan(0);
+    expect(img.ext).toBe('png');
+  });
+});
+
+describe('parseImageDataUrl (bounded data-URL header parse)', () => {
+  const { parseImageDataUrl } = AstroPublisher._internals;
+
+  test('parses mime + payload without touching the payload with a regex', () => {
+    const big = 'A'.repeat(6 * 1024 * 1024);
+    const parsed = parseImageDataUrl(`data:image/webp;base64,${big}`);
+    expect(parsed.mime).toBe('image/webp');
+    expect(parsed.base64).toBe(big);
+  });
+
+  test('rejects non-data and non-base64-image URLs', () => {
+    expect(parseImageDataUrl('https://example.com/x.png')).toBeNull();
+    expect(parseImageDataUrl('data:text/html;base64,PGI+')).toBeNull();
+    expect(parseImageDataUrl('data:image/png,rawdata')).toBeNull();
+    expect(parseImageDataUrl('')).toBeNull();
+  });
+});
+
+describe('resolveAutonomousHero fallback (hero is schema-required — default asset or full-cause park)', () => {
+  const imageGenerator = require('../services/content/image-generator');
+  const frontmatter = {
+    title: 'Fall Lawn Mistakes',
+    meta_description: 'm',
+    primary_keyword: 'fall lawn mistakes',
+    category: 'lawn-care',
+  };
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('on generation failure, reuses a COMMITTED category-default hero when one exists in the repo', async () => {
+    const boom = new RangeError('Maximum call stack size exceeded');
+    imageGenerator.generate.mockRejectedValue(boom);
+    gh.getFile.mockImplementation(async (path) => (
+      path === 'public/images/blog/defaults/lawn-care/hero.webp' ? { content: 'x', sha: 's' } : null
+    ));
+
+    const hero = await AstroPublisher._internals.resolveAutonomousHero({
+      frontmatter, slug: 'lawn-care/fall-lawn-mistakes-swfl', existingFile: null,
+    });
+
+    expect(hero).toEqual({ src: '/images/blog/defaults/lawn-care/hero.webp', buffer: null });
+  });
+
+  test('falls back to the site-wide default when no category default exists', async () => {
+    imageGenerator.generate.mockRejectedValue(new Error('all providers failed'));
+    gh.getFile.mockImplementation(async (path) => (
+      path === 'public/images/blog/defaults/hero.webp' ? { content: 'x', sha: 's' } : null
+    ));
+
+    const hero = await AstroPublisher._internals.resolveAutonomousHero({
+      frontmatter, slug: 'lawn-care/fall-lawn-mistakes-swfl', existingFile: null,
+    });
+
+    expect(hero).toEqual({ src: '/images/blog/defaults/hero.webp', buffer: null });
+  });
+
+  test('with NO committed default, still parks — and the failure message carries the FULL root cause (error class + provider attempts)', async () => {
+    const boom = new RangeError('Maximum call stack size exceeded');
+    boom.attempts = [
+      { provider: 'gpt-image-2', result: { retryable: true, status: 503 } },
+      { provider: 'gemini', result: { fatal: true, status: 'no_image_in_response' } },
+    ];
+    imageGenerator.generate.mockRejectedValue(boom);
+    gh.getFile.mockResolvedValue(null);
+
+    let thrown;
+    try {
+      await AstroPublisher._internals.resolveAutonomousHero({
+        frontmatter, slug: 'lawn-care/fall-lawn-mistakes-swfl', existingFile: null,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeDefined();
+    expect(thrown.code).toBe('BLOG_HERO_IMAGE_FAILED');
+    expect(thrown.message).toContain('autonomous blog hero image generation failed for lawn-care/fall-lawn-mistakes-swfl');
+    expect(thrown.message).toContain('RangeError: Maximum call stack size exceeded');
+    expect(thrown.message).toContain('gpt-image-2=503');
+    expect(thrown.message).toContain('gemini=no_image_in_response');
+  });
 });
 
 describe('compressToWebp (hero LCP optimization)', () => {
@@ -2247,6 +2368,43 @@ describe('blog posts target the hub only', () => {
       ...base, source: 'ai_generated', target_sites: ['wavespestcontrol.com', 'veniceflpestcontrol.com'],
     });
     expect(data.domains).toEqual(['wavespestcontrol.com']);
+  });
+});
+
+describe('buildFrontmatter self-heals schema-required service_areas_tag (never undefined)', () => {
+  const base = {
+    title: 'Dollar Spot in Venice', slug: 'dollar-spot-venice',
+    meta_description: 'A short guide to dollar spot on Venice lawns and how to actually treat it.',
+    keyword: 'dollar spot Venice', tag: 'Lawn Disease',
+    featured_image_url: '/images/blog/dollar-spot-venice/hero.webp',
+    content: 'Dollar spot shows up as small bleached patches on warm-season turf.',
+  };
+
+  test('keeps stored valid service areas unchanged', async () => {
+    const data = await AstroPublisher.buildFrontmatter({ ...base, service_areas_tag: ['Sarasota', 'Parrish'] });
+    expect(data.service_areas_tag).toEqual(['Sarasota', 'Parrish']);
+  });
+
+  test('with no stored areas and no valid city, infers from the title/keyword haystack instead of emitting undefined', async () => {
+    // The old `serviceAreas.length > 0 ? serviceAreas : undefined` dropped the
+    // key entirely and hard-failed assertValidBlogFrontmatter
+    // ("service_areas_tag is required") after the generation was spent.
+    const data = await AstroPublisher.buildFrontmatter({ ...base, city: null });
+    expect(data.service_areas_tag).toEqual(['Venice']);
+  });
+
+  test('a fully generic post falls back to the default service-area set (still schema-valid)', async () => {
+    const data = await AstroPublisher.buildFrontmatter({
+      ...base,
+      title: 'How soil pH changes turf color',
+      keyword: 'soil ph turf',
+      city: null,
+    });
+    expect(Array.isArray(data.service_areas_tag)).toBe(true);
+    expect(data.service_areas_tag.length).toBeGreaterThan(0);
+    // post_type already defaults deterministically — both schema-required
+    // fields are guaranteed present on this path now.
+    expect(data.post_type).toBe('location');
   });
 });
 
