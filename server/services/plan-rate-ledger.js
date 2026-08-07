@@ -116,7 +116,7 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
       if (annual != null) return annual / 12;
     }
     for (const value of [line?.monthlyAfterDiscount, line?.monthlyAfterCredits, line?.monthly, line?.mo,
-      line?.monthlyTotal, line?.monthly_total]) {
+      line?.monthlyTotal, line?.monthly_total, line?.monthlyBase]) {
       const monthly = priceValue(value);
       if (monthly != null) return monthly;
     }

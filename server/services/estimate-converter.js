@@ -521,11 +521,6 @@ function hasWaveGuardSetupService(services = []) {
 // 0 in every other case (fail-safe: any classification doubt → replace,
 // the pre-existing behavior). Live pipeline stages only — a churned/dormant
 // re-signup's stale rate must never be summed back in.
-async function addOnPreservedMonthlyRateBase(args = {}) {
-  const context = await classifyAddOnAcceptContext(args);
-  return context.addOnBase;
-}
-
 // Full classification context for an accept against the customer's existing
 // billed plans. addOnBase carries the #3241 sum semantics (existing rate for
 // a proven-disjoint add-on, else 0); hadOtherLiveFamilies feeds the
@@ -2349,6 +2344,20 @@ const EstimateConverter = {
         logger.warn(`[estimate-converter] gate-off ledger divergence reset failed for customer ${customerId}: ${divergenceErr.message}`);
       }
     }
+    // UNSLICED authoritative accepts (codex #3245 r16): a recurring accept
+    // whose estimate carries a positive total but NO priced recurring rows
+    // yields empty slices — applyAcceptToLedger returned null and the
+    // legacy scalar committed above. Under the gate that scalar must not
+    // disagree with surviving components: reset the ledger to match
+    // (single unattributed component; the helper THROWS on failure under
+    // authority, failing the accept).
+    if (!suppressRecurringConversion && !groupedEstimateAccept
+      && ledgerScalar == null && ledgerAdvisoryScalar == null) {
+      const PlanRateLedger = require('./plan-rate-ledger');
+      if (PlanRateLedger.planRateLedgerEnabled()) {
+        await PlanRateLedger.syncScalarWriteToLedger(database, customerId, convertedMonthlyRate, { source: 'unsliced_accept' });
+      }
+    }
     // Grouped accepts (bypassed above): the committed scalar is #3244's
     // legacy math; the ledger resets to a single unattributed component
     // matching it, and the owner reviews once when finer attribution
@@ -3968,5 +3977,4 @@ module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceFo
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
 module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
-module.exports.addOnPreservedMonthlyRateBase = addOnPreservedMonthlyRateBase;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;
