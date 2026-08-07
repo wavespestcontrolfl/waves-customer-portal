@@ -2221,7 +2221,8 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   } else if (customerId) {
     query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
-  const candidate = await query.orderBy('created_at', 'desc').first();
+  // Phone identity is strong — the newest match wins outright.
+  if (phone) return query.orderBy('created_at', 'desc').first();
   // Email-matched candidates need POSITIVE identity corroboration, not just
   // absence of conflict: two different anonymous callers can share one inbox
   // (or a transcription collision can fabricate the overlap), and reusing
@@ -2231,16 +2232,21 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // and match, with last names non-conflicting; missing name data on either
   // side forces a fresh row instead (pre-push audit P1 r7 — the cost is a
   // recoverable duplicate, fail-closed beats a cross-prospect merge).
-  if (candidate && !phone) {
-    const norm = (v) => String(v || '').trim().toLowerCase();
-    const conflicts = (a, b) => !!(norm(a) && norm(b) && norm(a) !== norm(b));
+  // Scan the newest matches rather than only the newest ONE: a shared inbox
+  // can hold several active unclaimed leads, and the caller's own row may
+  // sit behind a housemate's newer one — corroborate-then-pick, or every
+  // repeat call from this caller mints another duplicate (codex P2 r6).
+  const candidates = await query.orderBy('created_at', 'desc').limit(5);
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const conflicts = (a, b) => !!(norm(a) && norm(b) && norm(a) !== norm(b));
+  for (const candidate of candidates) {
     const firstCorroborated = !!(norm(firstName) && norm(candidate.first_name)
       && norm(firstName) === norm(candidate.first_name));
-    if (!firstCorroborated || conflicts(lastName, candidate.last_name)) {
-      return null;
+    if (firstCorroborated && !conflicts(lastName, candidate.last_name)) {
+      return candidate;
     }
   }
-  return candidate;
+  return null;
 }
 
 // New-lead admin surfacing for a lead minted by call processing — the fresh
@@ -7738,11 +7744,25 @@ const CallRecordingProcessor = {
             if (customerId) {
               enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
             } else if (!phone) {
-              // Email-matched reuse (anonymous caller): weak identity, so a
-              // lead claimed by ANY customer between the lookup and this write
-              // stays untouched — same race backstop as the customer-attached
-              // branch, unclaimed-only flavor (codex P1, PR #3275).
-              enrichmentWrite = enrichmentWrite.whereNull('customer_id');
+              // Email-matched reuse (anonymous caller): weak identity, so the
+              // write repeats the FULL lookup eligibility, not just
+              // unclaimed-ness (that alone was codex P1 r2) — an admin
+              // correcting the lead's email or marking it lost/deleted
+              // between the lookup and this write must 0-row into the
+              // recovery mint below, never apply this caller's rolling
+              // extraction to a row that no longer matches (codex P2 r6).
+              // Predicates mirror findReusableCallLead exactly, including the
+              // workableUnnamedLead conditionality; a pass-2 recovery row
+              // (email from THIS extraction, status 'new') passes them all.
+              enrichmentWrite = enrichmentWrite
+                .whereNull('customer_id')
+                .whereNull('deleted_at')
+                .whereRaw('LOWER(TRIM(email)) = ?', [String(extracted.email || '').trim().toLowerCase()]);
+              if (workableUnnamedLead) {
+                enrichmentWrite = enrichmentWrite
+                  .whereNotIn('status', TERMINAL_LEAD_STATUSES)
+                  .whereNull('converted_at');
+              }
             }
             enriched = await enrichmentWrite.update(leadUpdates);
             if (!enriched && existingLead && !customerId && !phone && !raceRecovered) {
