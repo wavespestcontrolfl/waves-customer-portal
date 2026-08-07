@@ -44,7 +44,7 @@ router.get('/', async (req, res, next) => {
     const payerInvRows = await db('invoices')
       .where({ customer_id: req.customerId })
       .whereNotNull('payer_id')
-      .select('id', 'stripe_payment_intent_id', 'invoice_number')
+      .select('id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
       .catch(() => { payerLookupFailed = true; return []; });
     const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
     // Payer ownership must be recognized through EVERY linkage the receipt
@@ -52,6 +52,7 @@ router.get('/', async (req, res, next) => {
     // / invoice-number-linked payer rows through, and their hosted Stripe
     // receipt exposes the AP payer's identity to the homeowner (pre-push P0).
     const payerIntentIds = new Set(payerInvRows.map((r) => r.stripe_payment_intent_id).filter(Boolean));
+    const payerChargeIds = new Set(payerInvRows.map((r) => r.stripe_charge_id).filter(Boolean));
     const payerInvoiceNumbers = new Set(payerInvRows.map((r) => r.invoice_number).filter(Boolean));
     const invoiceIdOf = (p) => {
       try {
@@ -76,6 +77,7 @@ router.get('/', async (req, res, next) => {
       const invId = invoiceIdOf(p) || aliasInvoiceIdOf(p);
       if (invId && payerInvoiceIds.has(invId)) return true;
       if (p.stripe_payment_intent_id && payerIntentIds.has(p.stripe_payment_intent_id)) return true;
+      if (p.stripe_charge_id && payerChargeIds.has(p.stripe_charge_id)) return true;
       const num = descriptionInvoiceNumberOf(p);
       return !!(num && payerInvoiceNumbers.has(num));
     };
@@ -93,7 +95,7 @@ router.get('/', async (req, res, next) => {
         // exclusion for rows payer-linked only through their PaymentIntent or
         // invoice-number description, leaving `total` above the number of
         // rows pagination will ever serve (pre-push P1).
-        .select('metadata', 'stripe_payment_intent_id', 'description');
+        .select('metadata', 'stripe_payment_intent_id', 'stripe_charge_id', 'description');
       total = rows.reduce((count, payment) => count + (isPayerLinked(payment) ? 0 : 1), 0);
     }
 
@@ -185,11 +187,18 @@ router.get('/', async (req, res, next) => {
     const invoiceIds = [...new Set(visiblePayments.map(anyInvoiceIdOf).filter(Boolean))]
       .filter((id) => RECEIPT_UUID_SHAPE.test(id));
     const intentIds = [...new Set(visiblePayments.map(p => p.stripe_payment_intent_id).filter(Boolean))];
+    // Historical reconciled rows can be bound to their invoice ONLY through
+    // payments.stripe_charge_id ↔ invoices.stripe_charge_id — the canonical
+    // webhook resolver and receipt-v2's payment lookup both honor it, so the
+    // billing history must too or those rows show a Stripe link (or nothing)
+    // instead of the permanent Waves receipt (codex r7 P1).
+    const chargeIds = [...new Set(visiblePayments.map(p => p.stripe_charge_id).filter(Boolean))];
     const invoiceNumbers = [...new Set(visiblePayments.map(invoiceNumberOf).filter(Boolean))];
     const receiptTokenByInvoiceId = new Map();
     const receiptTokenByIntentId = new Map();
+    const receiptTokenByChargeId = new Map();
     const receiptTokenByNumber = new Map();
-    if (invoiceIds.length || intentIds.length || invoiceNumbers.length) {
+    if (invoiceIds.length || intentIds.length || chargeIds.length || invoiceNumbers.length) {
       try {
         const invoiceRows = await db('invoices')
           .where({ customer_id: req.customerId })
@@ -204,14 +213,16 @@ router.get('/', async (req, res, next) => {
           .where((qb) => {
             if (invoiceIds.length) qb.orWhereIn('id', invoiceIds);
             if (intentIds.length) qb.orWhereIn('stripe_payment_intent_id', intentIds);
+            if (chargeIds.length) qb.orWhereIn('stripe_charge_id', chargeIds);
             if (invoiceNumbers.length) qb.orWhereIn('invoice_number', invoiceNumbers);
           })
-          .select('id', 'token', 'invoice_number', 'stripe_payment_intent_id');
+          .select('id', 'token', 'invoice_number', 'stripe_payment_intent_id', 'stripe_charge_id');
         invoiceRows.forEach((row) => {
           if (!row.token) return;
           const entry = { token: row.token, invoiceNumber: row.invoice_number };
           receiptTokenByInvoiceId.set(row.id, entry);
           if (row.stripe_payment_intent_id) receiptTokenByIntentId.set(row.stripe_payment_intent_id, entry);
+          if (row.stripe_charge_id) receiptTokenByChargeId.set(row.stripe_charge_id, entry);
           if (row.invoice_number) receiptTokenByNumber.set(row.invoice_number, entry);
         });
       } catch (err) {
@@ -255,6 +266,7 @@ router.get('/', async (req, res, next) => {
           const inv = !settled ? null : (
             receiptTokenByInvoiceId.get(anyInvoiceIdOf(p))
             || (p.stripe_payment_intent_id ? receiptTokenByIntentId.get(p.stripe_payment_intent_id) : null)
+            || (p.stripe_charge_id ? receiptTokenByChargeId.get(p.stripe_charge_id) : null)
             || receiptTokenByNumber.get(invoiceNumberOf(p))
           );
           const stripeReceiptUrl = stripeReceiptOf(p);
