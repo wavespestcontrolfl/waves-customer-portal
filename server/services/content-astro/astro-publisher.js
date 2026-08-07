@@ -1258,14 +1258,14 @@ async function firstExistingRouteFile(basePaths, routeSlug) {
   return null;
 }
 
-async function resolveExistingAstroFileForTarget(targetUrlOrPath) {
+async function resolveExistingAstroFileForTarget(targetUrlOrPath, opts = {}) {
   const target = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
   if (target) {
     const resolved = await resolveExistingAstroFile(target);
     if (resolved) return resolved;
   }
 
-  const registryPath = await registryAstroPathForTarget(targetUrlOrPath);
+  const registryPath = await registryAstroPathForTarget(targetUrlOrPath, opts);
   if (registryPath && registryPath !== target) {
     const resolved = await resolveExistingAstroFile(registryPath);
     if (resolved) return resolved;
@@ -1274,21 +1274,21 @@ async function resolveExistingAstroFileForTarget(targetUrlOrPath) {
   return null;
 }
 
-async function registryAstroPathForTarget(targetUrlOrPath) {
+async function registryAstroPathForTarget(targetUrlOrPath, { rethrowLookupErrors = false } = {}) {
   if (!targetUrlOrPath || /^src\/content\//.test(String(targetUrlOrPath))) return null;
   const lookup = registryLookupValuesForUrl(targetUrlOrPath);
   if (!lookup.exact.length) return null;
 
-  const exact = await registryAstroPathForLiveUrl(lookup.exact);
+  const exact = await registryAstroPathForLiveUrl(lookup.exact, { rethrowLookupErrors });
   if (exact) return exact;
   if (lookup.host && lookup.pathOnly) {
-    const hostedPath = await registryAstroPathForLiveUrl([lookup.pathOnly], { requiredHost: lookup.host });
+    const hostedPath = await registryAstroPathForLiveUrl([lookup.pathOnly], { requiredHost: lookup.host, rethrowLookupErrors });
     if (hostedPath) return hostedPath;
   }
-  return registryAstroPathForCanonicalUrl(lookup.exact, { requiredHost: lookup.host });
+  return registryAstroPathForCanonicalUrl(lookup.exact, { requiredHost: lookup.host, rethrowLookupErrors });
 }
 
-async function registryAstroPathForLiveUrl(liveUrlValues, { requiredHost = null } = {}) {
+async function registryAstroPathForLiveUrl(liveUrlValues, { requiredHost = null, rethrowLookupErrors = false } = {}) {
   try {
     const query = db('content_registry');
     if (!query || typeof query.select !== 'function') return null;
@@ -1311,12 +1311,16 @@ async function registryAstroPathForLiveUrl(liveUrlValues, { requiredHost = null 
     const sourcePath = row?.astro_source_path;
     return isSafeAstroContentPath(sourcePath) ? sourcePath : null;
   } catch (err) {
+    if (rethrowLookupErrors) {
+      err.code = err.code || 'REGISTRY_LOOKUP_FAILED';
+      throw err;
+    }
     logger.warn(`[astro-publisher] content registry path lookup failed for ${liveUrlValues[0]}: ${err.message}`);
     return null;
   }
 }
 
-async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null } = {}) {
+async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null, rethrowLookupErrors = false } = {}) {
   try {
     const query = db('content_registry');
     if (!query || typeof query.select !== 'function') return null;
@@ -1342,6 +1346,10 @@ async function registryAstroPathForCanonicalUrl(urlValues, { requiredHost = null
     const sourcePath = rows[0]?.astro_source_path;
     return isSafeAstroContentPath(sourcePath) ? sourcePath : null;
   } catch (err) {
+    if (rethrowLookupErrors) {
+      err.code = err.code || 'REGISTRY_LOOKUP_FAILED';
+      throw err;
+    }
     logger.warn(`[astro-publisher] content registry canonical lookup failed for ${urlValues[0]}: ${err.message}`);
     return null;
   }
@@ -2077,12 +2085,21 @@ async function getLiveFrontmatter(targetUrlOrPath) {
  * closed (the content-quality gate's improvement_over_prior check refuses to
  * publish a refresh without a prior version to compare against).
  */
-async function loadExistingPageBody(targetUrlOrPath) {
-  const resolved = await resolveExistingAstroFileForTarget(targetUrlOrPath);
+async function loadExistingPageBody(targetUrlOrPath, { strictRegistryErrors = false } = {}) {
+  // strictRegistryErrors: a registry DB failure THROWS (code
+  // REGISTRY_LOOKUP_FAILED) instead of reading as null — callers that
+  // treat null as 'confirmed non-Astro' (the family miner's probe cache)
+  // must be able to tell a transient failure apart (Codex #3255 r34).
+  const resolved = await resolveExistingAstroFileForTarget(targetUrlOrPath, { rethrowLookupErrors: strictRegistryErrors });
   if (!resolved) return null;
-  const body = fm.parse(resolved.file.content).content || '';
+  const parsed = fm.parse(resolved.file.content);
+  const body = parsed.content || '';
   const word_count = body.split(/\s+/).filter(Boolean).length;
-  return { body, word_count };
+  // frontmatter rides along (additive): local blog slugs embed their city
+  // without the -fl marker URL inference needs, but service_areas_tag
+  // carries it authoritatively — the family miner derives refresh cities
+  // from it (Codex #3255 r29).
+  return { body, word_count, frontmatter: parsed.data || {} };
 }
 
 function canPublishRefresh(draft, brief = {}) {
