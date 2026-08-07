@@ -768,16 +768,30 @@ async function fallbackZoneCenter(city) {
 async function resolveEstimateCoords(estimate) {
   let customerAddress = '';
   let customerCity = '';
+  let estimateAddressIsCustomerAddress = true;
 
-  // Prefer linked-customer coords (zero cost, zero external call).
+  // Prefer linked-customer coords (zero cost, zero external call) — but ONLY
+  // when the estimate actually quotes the customer's on-file address. A
+  // multi-property estimate keeps the customer_id while quoting a DIFFERENT
+  // address (codex #3244 r1): trusting the cached coords there stamps the
+  // second property's hold with the first property's location and poisons
+  // route ranking. When the addresses differ, fall through to geocoding the
+  // quoted address, and don't offer the customer address as a geocode
+  // fallback either — a wrong route anchor is worse than none.
   if (estimate.customer_id) {
     try {
       const cust = await db('customers')
         .where({ id: estimate.customer_id })
         .first('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip');
+      const normalize = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const estimateAddress = normalize(estimate.address);
+      const customerStreet = normalize(cust?.address_line1);
+      estimateAddressIsCustomerAddress = !estimateAddress
+        || (!!customerStreet && estimateAddress.startsWith(customerStreet));
       const lat = cust?.latitude != null ? Number(cust.latitude) : null;
       const lng = cust?.longitude != null ? Number(cust.longitude) : null;
-      if (Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0) {
+      if (estimateAddressIsCustomerAddress
+        && Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0) {
         return { lat, lng, source: 'customer_record' };
       }
       customerAddress = [cust?.address_line1, cust?.city, cust?.state, cust?.zip].filter(Boolean).join(', ');
@@ -787,8 +801,12 @@ async function resolveEstimateCoords(estimate) {
     }
   }
 
-  // Fallback: geocode the exact estimate/customer address.
-  const addressCandidates = [estimate.address, customerAddress].filter(Boolean);
+  // Fallback: geocode the exact estimate address (plus the customer address
+  // only when the estimate quotes that same address).
+  const addressCandidates = [
+    estimate.address,
+    estimateAddressIsCustomerAddress ? customerAddress : null,
+  ].filter(Boolean);
   for (const address of addressCandidates) {
     const coords = await geocodeAddress(address);
     if (coords) {
@@ -1843,6 +1861,8 @@ module.exports = {
   invalidateEstimate,
   invalidateAllEstimates,
   resolveEstimateSlotProfile,
+  // Shared with slot-reservation so holds can be geo-stamped as route anchors.
+  resolveEstimateCoords,
   seasonalSelectionProfile,
   inMosquitoSeason,
   nextSeasonStartFrom,

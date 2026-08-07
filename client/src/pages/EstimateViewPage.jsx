@@ -2888,6 +2888,76 @@ export function DraftPreviewBanner() {
   );
 }
 
+// Multi-property group switcher — rendered when /data carries propertyGroup
+// (sibling estimates published together under one link, one per service
+// address). Each property keeps its own estimate and accept flow; this strip
+// lets the customer hop between them, and shows which are already accepted.
+// Plain anchors (not router navigation): /estimate/:token remounts per token
+// and the server-side handoff covers a full load.
+function PropertyGroupSwitcher({ group }) {
+  if (!Array.isArray(group) || group.length < 2) return null;
+  // Pricing-copy contract: estimate surfaces show per-application pricing,
+  // never combined monthly/annual plan totals (codex #3244 r1). The switcher
+  // therefore names one-time totals (a real single charge) but shows no
+  // aggregate for recurring plans — the per-application breakdown is on each
+  // property's own page, one tap away.
+  const priceLabel = (p) => {
+    if (p.onetimeTotal > 0 && !(p.monthlyTotal > 0)) return `$${Number(p.onetimeTotal).toFixed(2)} one-time`;
+    return null;
+  };
+  const statusLabel = (p) => {
+    if (p.status === 'accepted') return 'Accepted';
+    if (p.status === 'declined') return 'Declined';
+    return null;
+  };
+  const rowBase = {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+    borderRadius: 10, padding: '12px 14px', textDecoration: 'none',
+  };
+  return (
+    <div style={estimateCard()}>
+      <div style={{ fontSize: 16, fontWeight: 600, color: ESTIMATE_TEXT, marginBottom: 4 }}>
+        This estimate covers {group.length} properties
+      </div>
+      <div style={{ fontSize: 14, color: ESTIMATE_BODY, marginBottom: 10 }}>
+        Each property has its own plan and is approved separately — switch
+        between them here.
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {group.map((p) => {
+          const inner = (
+            <>
+              <span style={{ minWidth: 0 }}>
+                <span style={{ display: 'block', fontSize: 15, fontWeight: 600, color: ESTIMATE_TEXT, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {p.address || 'Property'}
+                </span>
+                <span style={{ display: 'block', fontSize: 14, color: ESTIMATE_BODY, marginTop: 2 }}>
+                  {[priceLabel(p), statusLabel(p), p.isCurrent ? 'Viewing now' : null]
+                    .filter(Boolean).join(' · ') || (p.isCurrent ? 'Viewing now' : 'View estimate')}
+                </span>
+              </span>
+              {!p.isCurrent && (
+                <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy, flexShrink: 0 }}>
+                  View
+                </span>
+              )}
+            </>
+          );
+          return p.isCurrent ? (
+            <div key={p.token} style={{ ...rowBase, border: `2px solid ${COLORS.navy}`, background: 'rgba(4, 57, 94, 0.06)' }}>
+              {inner}
+            </div>
+          ) : (
+            <a key={p.token} href={`/estimate/${p.token}`} style={{ ...rowBase, border: '1px solid rgba(4, 57, 94, 0.25)', background: COLORS.white }}>
+              {inner}
+            </a>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // Shared failure banner for the reserve/accept/deposit/card-hold flow.
 // Accept-path failures land the customer back in the REVIEW phase, not just
 // configure, so both branches must render it — a review-phase 500 used to
@@ -5285,6 +5355,7 @@ function EstimateViewPageInner() {
             headline={stateHero?.h1 || headline}
             eyebrowOverride={stateHero ? stateHero.eyebrow : null}
           />
+          {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
           <TerminalStateCard
             state="accepted"
             customerFirstName={estimate.customerFirstName}
@@ -5312,6 +5383,7 @@ function EstimateViewPageInner() {
           headline={stateHero?.h1 || headline}
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
+        {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar ? (
           <EstimateAskBar
@@ -5348,6 +5420,7 @@ function EstimateViewPageInner() {
           headline={TERMINAL_HERO.accepted.h1}
           eyebrowOverride={TERMINAL_HERO.accepted.eyebrow}
         />
+        {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
         <SuccessCard
           acceptResult={acceptResult}
           // First-visit line (owner ask 2026-07-12, re-confirmed): the slot
@@ -5404,6 +5477,7 @@ function EstimateViewPageInner() {
           eyebrowOverride={glassPack?.eyebrow || null}
           subline={fillGlassTokens(glassPack?.heroSub) || null}
         />
+        {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
         {renderQuoteDetailCards(true)}
         {aiPanelBlock}
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
@@ -5427,6 +5501,8 @@ function EstimateViewPageInner() {
         // the table — terminal and success states keep the plain hero.
         subline={fillGlassTokens(glassPack?.heroSub) || null}
       />
+
+      {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
 
       {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
         <SlotIssueBanner

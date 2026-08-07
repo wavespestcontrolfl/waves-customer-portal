@@ -571,8 +571,43 @@ router.get('/:id/edit-source', async (req, res, next) => {
       showOneTimeOption: !!estimate.show_one_time_option,
       billByInvoice: !!estimate.bill_by_invoice,
       satelliteUrl: estimate.satellite_url,
+      propertyId: estimate.property_id || null,
+      estimateGroupId: estimate.estimate_group_id || null,
       inputs,
       engineProfile,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/estimates/:id/group — the multi-property group this estimate
+// belongs to: every sibling (including the requested one) with the summary the
+// builder's group strip renders. Ungrouped estimates return just themselves so
+// the client needs no special case.
+router.get('/:id/group', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const siblings = estimate.estimate_group_id
+      ? await db('estimates')
+        .where({ estimate_group_id: estimate.estimate_group_id })
+        .whereNull('archived_at')
+        .orderBy('created_at', 'asc')
+      : [estimate];
+    res.json({
+      estimateGroupId: estimate.estimate_group_id || null,
+      estimates: siblings.map((e) => ({
+        id: e.id,
+        status: e.status,
+        address: e.address,
+        propertyId: e.property_id || null,
+        customerId: e.customer_id || null,
+        customerName: e.customer_name,
+        monthlyTotal: e.monthly_total != null ? Number(e.monthly_total) : null,
+        annualTotal: e.annual_total != null ? Number(e.annual_total) : null,
+        onetimeTotal: e.onetime_total != null ? Number(e.onetime_total) : null,
+        waveguardTier: e.waveguard_tier || null,
+        isCurrent: e.id === estimate.id,
+      })),
     });
   } catch (err) { next(err); }
 });
@@ -678,6 +713,91 @@ router.post('/:id/send', async (req, res, next) => {
 });
 
 // Shared send logic — used by both immediate send and scheduled cron
+// Multi-property group pre-flight (codex #3244 r1). Publishing the group makes
+// every sibling token publicly acceptable, so BEFORE any channel delivery:
+// (a) every publishable sibling must clear the same send gate as the anchor —
+// a quote-required / unapproved / zero-amount sibling aborts the WHOLE send
+// rather than partially publishing the group; (b) siblings are claimed to
+// 'sending' one row at a time (claim = update WHERE id+current status, so a
+// row a concurrent send already claimed is never stolen or released by this
+// one) — two concurrent sends of different group members serialize, the loser
+// aborts pre-delivery. Returns the claimed rows for later publish/release.
+async function claimGroupSiblingsForPublish(estimate) {
+  // A sibling already mid-send is a concurrent publisher (another pod's
+  // scheduled batch, or a parallel operator click): its send will publish
+  // this group with its own message, so this send must abort rather than
+  // deliver a second one. The scheduler claims one member per group per
+  // batch, so this only trips on true cross-process races.
+  const midSendSibling = await db('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id, status: 'sending' })
+    .whereNot({ id: estimate.id })
+    .first('id');
+  if (midSendSibling) {
+    const err = new Error('Another send is publishing this multi-property group — wait a moment and retry.');
+    err.statusCode = 409;
+    throw err;
+  }
+  const siblings = await db('estimates')
+    .where({ estimate_group_id: estimate.estimate_group_id })
+    .whereNot({ id: estimate.id })
+    .whereNull('archived_at')
+    .whereNull('price_locked_at')
+    .whereIn('status', ['draft', 'scheduled', 'send_failed']);
+  if (!siblings.length) return [];
+  for (const sibling of siblings) {
+    try {
+      // Acknowledgment is PER ESTIMATE (codex #3244 r4): the anchor's
+      // acknowledged warning (or its scheduled-status implicit ack) says
+      // nothing about a yellow-lane DRAFT sibling the operator never
+      // reviewed. A sibling only carries its own implicit ack when it was
+      // itself scheduled (it cleared its own request-time gate then); an
+      // unacknowledged yellow draft aborts the whole group send.
+      assertEstimateSendable(sibling, {
+        engineReviewAcknowledged: ['scheduled', 'sending'].includes(String(sibling.status || '')),
+      });
+    } catch (e) {
+      const err = new Error(`Grouped property "${sibling.address || sibling.id}" is not sendable: ${e.message}`);
+      err.statusCode = e.statusCode || 422;
+      err.code = e.code || err.code;
+      throw err;
+    }
+  }
+  const claimed = [];
+  for (const sibling of siblings) {
+    // updated_at joins the claim predicate (codex #3244 r5): a revision
+    // between this function's read and the claim bumps updated_at, so the
+    // claim misses and the group send aborts instead of publishing (and
+    // snapshotting) a stale validation of a newly quote-required revision.
+    const won = await db('estimates')
+      .where({ id: sibling.id, status: sibling.status, updated_at: sibling.updated_at })
+      .whereNull('price_locked_at')
+      .update({ status: 'sending', updated_at: db.fn.now() });
+    if (won) claimed.push(sibling);
+  }
+  if (claimed.length !== siblings.length) {
+    await releaseGroupSiblingClaims(claimed);
+    const err = new Error('Another send is publishing this multi-property group — wait a moment and retry.');
+    err.statusCode = 409;
+    throw err;
+  }
+  return claimed;
+}
+
+// Hand claimed siblings back to their pre-claim status. Scoped to rows still
+// 'sending' so a sibling a concurrent accept moved off the claim keeps its
+// terminal state.
+async function releaseGroupSiblingClaims(claimedSiblings = []) {
+  for (const sibling of claimedSiblings) {
+    try {
+      await db('estimates')
+        .where({ id: sibling.id, status: 'sending' })
+        .update({ status: sibling.status, updated_at: db.fn.now() });
+    } catch (e) {
+      logger.warn(`[admin-estimates] failed to release group sibling claim ${sibling.id}: ${e.message}`);
+    }
+  }
+}
+
 async function sendEstimateNow(estimate, sendMethod, options = {}) {
   if (!['sms', 'email', 'both'].includes(sendMethod)) {
     const err = new Error('Invalid sendMethod');
@@ -687,10 +807,17 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   // A row in 'scheduled'/'sending' already cleared the request-time gate
   // (the operator acknowledged the engine review when scheduling/clicking) —
   // the cron leg must not bounce it at execution time.
+  const engineReviewAcknowledgedResolved = options.engineReviewAcknowledged === true
+    || ['scheduled', 'sending'].includes(String(estimate.status || ''));
   assertEstimateSendable(estimate, {
-    engineReviewAcknowledged: options.engineReviewAcknowledged === true
-      || ['scheduled', 'sending'].includes(String(estimate.status || '')),
+    engineReviewAcknowledged: engineReviewAcknowledgedResolved,
   });
+
+  // Group pre-flight runs before ANY channel delivery (see helper above).
+  let claimedGroupSiblings = [];
+  if (estimate.estimate_group_id) {
+    claimedGroupSiblings = await claimGroupSiblingsForPublish(estimate);
+  }
 
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   const nextExpiresAt = estimateExpiresAt(now);
@@ -889,6 +1016,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   const sent = sentChannels.length > 0;
 
   if (!sent) {
+    await releaseGroupSiblingClaims(claimedGroupSiblings);
     return {
       sent: false,
       channels,
@@ -995,6 +1123,11 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
         logger.warn(`[admin-estimates] superseded-send first-response stamp failed: ${e.message}`);
       }
     }
+    // Superseded anchor: a concurrent accept/decline won the anchor row while
+    // channels were in flight. Hand claimed siblings back rather than publish
+    // a group whose anchor is no longer in a sent state — the operator can
+    // re-send from a sibling if the group should still go out.
+    await releaseGroupSiblingClaims(claimedGroupSiblings);
     return {
       sent: true,
       superseded: true,
@@ -1003,6 +1136,116 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
       sentChannels,
       failedChannels,
     };
+  }
+
+  // Multi-property group publication: sending the anchor publishes its sibling
+  // estimates too — the customer's ONE link renders every property, and each
+  // sibling's own token must be acceptable, which requires sent status. Expiry
+  // aligns to this send. Follow-up state is PRE-BURNED (booleans true, and the
+  // engagement sweeps key on the same flags): the customer got one message for
+  // the whole group, so only the anchor may ever drive follow-up comms —
+  // sibling rows must never re-message the same person about the same link.
+  // Publishes ONLY the rows this send claimed pre-delivery (validated
+  // sendable + moved to 'sending' by claimGroupSiblingsForPublish) — a row
+  // that lost the claim, or was accepted mid-flight, keeps its own state.
+  // Per-sibling, each publication freezes the sibling's own send snapshot
+  // (codex #3244 r2: without it the sibling link reprices live, so a pricing
+  // change after the group message could alter what the customer accepts).
+  // A failed publication retries; a sibling that still can't publish is
+  // RELEASED back to its prior state (visible as unsent, operator re-sends)
+  // rather than left dangling in 'sending' for the stale-claim sweep to
+  // mislabel — and the failure is surfaced on the send result instead of
+  // silently reporting a fully-published group.
+  let groupPublicationFailures = 0;
+  if (estimate.estimate_group_id && claimedGroupSiblings.length) {
+    for (const sibling of claimedGroupSiblings) {
+      let published = false;
+      for (let attempt = 1; attempt <= 3 && !published; attempt += 1) {
+        try {
+          let siblingSnapshotPatch = { groupPublishedByEstimateId: estimate.id };
+          // A snapshot whose pricing bundle failed is NOT a freeze — the
+          // public page would fall back to live repricing, exactly what the
+          // snapshot exists to prevent (codex #3244 r7). Treat it like any
+          // other publication failure: throw into the retry loop; after the
+          // final attempt the sibling is released for an operator re-send.
+          const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: nextExpiresAt }, now);
+          if (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError) {
+            throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
+          }
+          siblingSnapshotPatch = { ...siblingSnapshotPatch, sendSnapshot: snapshot.sendSnapshot };
+          const updated = await db('estimates')
+            .where({ id: sibling.id, status: 'sending' })
+            .whereNull('price_locked_at')
+            .update({
+              // A customer can open the anchor link instantly and view this
+              // sibling while it's still under the pre-delivery claim — the
+              // view stamps viewed_at without touching 'sending'. Same
+              // viewed-aware finalization as the anchor (codex #3244 r3).
+              status: db.raw("CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END"),
+              sent_at: db.fn.now(),
+              expires_at: nextExpiresAt,
+              scheduled_at: null,
+              send_method: null,
+              followup_unviewed_sent: true,
+              followup_viewed_sent: true,
+              followup_final_sent: true,
+              followup_expiring_sent: true,
+              estimate_data: db.raw(
+                "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
+                [JSON.stringify(siblingSnapshotPatch)],
+              ),
+              updated_at: db.fn.now(),
+            });
+          published = true;
+          if (!updated) {
+            logger.warn(`[admin-estimates] sibling ${sibling.id} left 'sending' before publication (likely accepted) — state preserved.`);
+          }
+        } catch (e) {
+          logger.error(`[admin-estimates] sibling ${sibling.id} publication attempt ${attempt} failed: ${e.message}`);
+          if (attempt === 3) {
+            groupPublicationFailures += 1;
+            await releaseGroupSiblingClaims([sibling]);
+          }
+        }
+      }
+    }
+    const publishedCount = claimedGroupSiblings.length - groupPublicationFailures;
+    logger.info(`[admin-estimates] group ${estimate.estimate_group_id}: published ${publishedCount}/${claimedGroupSiblings.length} sibling estimate(s) with anchor ${estimate.id}${groupPublicationFailures ? ` (${groupPublicationFailures} released for re-send)` : ''}`);
+  }
+  // A sibling that was ALREADY sent/viewed before joining the group (operator
+  // added a property to a live estimate) is public with its OWN expiry and
+  // follow-up state (codex #3244 r4): left alone it keeps sending its own
+  // reminders alongside the group's anchor and drops off the combined link
+  // when its earlier expiry hits. Reconcile without any channel delivery:
+  // align expiry forward-only and pre-burn the follow-up flags — the group's
+  // anchor owns all further comms. Status/snapshot untouched (their original
+  // send froze them).
+  if (estimate.estimate_group_id) {
+    try {
+      await db('estimates')
+        .where({ estimate_group_id: estimate.estimate_group_id })
+        .whereNot({ id: estimate.id })
+        .whereIn('status', ['sent', 'viewed'])
+        .whereNull('archived_at')
+        .whereNull('price_locked_at')
+        .update({
+          // Forward-only expiry inside the SET (not the WHERE): a sibling
+          // already extended past this send still needs its reminder flags
+          // burned — the anchor owns all group comms (codex #3244 r5).
+          expires_at: db.raw('GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz)', [nextExpiresAt, nextExpiresAt]),
+          followup_unviewed_sent: true,
+          followup_viewed_sent: true,
+          followup_final_sent: true,
+          followup_expiring_sent: true,
+          estimate_data: db.raw(
+            "COALESCE(estimate_data, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({ groupPublishedByEstimateId: estimate.id })],
+          ),
+          updated_at: db.fn.now(),
+        });
+    } catch (e) {
+      logger.warn(`[admin-estimates] live-sibling group reconciliation failed for estimate ${estimate.id}: ${e.message}`);
+    }
   }
 
   try {
@@ -1061,6 +1304,7 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   return {
     sent: true,
     partialFailure: failedChannels.length > 0,
+    ...(groupPublicationFailures > 0 ? { groupPublicationFailures } : {}),
     channels,
     sentChannels,
     failedChannels,

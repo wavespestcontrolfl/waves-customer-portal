@@ -9281,6 +9281,49 @@ router.put('/:token/accept', async (req, res, next) => {
       }
 
       let customerId = estimate.customer_id;
+      // Grouped multi-property accept: a sibling estimate in the same group
+      // that already resolved its customer is the DETERMINISTIC owner of this
+      // acceptance — reuse it instead of re-guessing by phone. A second
+      // property's address naturally fails the phone-match disambiguation
+      // (different service address), which would mint a duplicate
+      // "Additional property" sibling profile — exactly the frozen pattern
+      // the customer_properties model replaces. Same comms-lock fencing as
+      // the phone-match path below.
+      if (!customerId && estimate.estimate_group_id) {
+        // Serialize customer-unlinked grouped accepts (codex #3244 r6): two
+        // concurrent accepts (two tabs, two household members) could both
+        // run the sibling lookup below before either commits a customer_id,
+        // then both fall through to phone matching — which a second
+        // property's address fails — and mint TWO customer accounts for one
+        // group. The xact lock holds until commit, so the second accept
+        // re-reads only after the first's customer_id is visible. Key
+        // namespace is group-accept-specific; both accepts then take the
+        // comms lock in the same order (no inversion).
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['estimate-group-accept', String(estimate.estimate_group_id)],
+        );
+        const resolvedSibling = await trx('estimates')
+          .where({ estimate_group_id: estimate.estimate_group_id })
+          .whereNot({ id: estimate.id })
+          .whereNotNull('customer_id')
+          .orderBy('accepted_at', 'asc')
+          .first();
+        const siblingCustomer = resolvedSibling
+          ? await trx('customers').where({ id: resolvedSibling.customer_id }).whereNull('deleted_at').first('id')
+          : null;
+        if (siblingCustomer) {
+          customerId = siblingCustomer.id;
+          if (customerId !== acceptPreLockedCommsId && !(await tryLockCustomerComms(trx, customerId))) {
+            const err = new Error('This account is being updated right now — please retry your acceptance in a moment.');
+            err.status = 409;
+            err.isOperational = true;
+            err.code = 'CUSTOMER_BUSY_RETRY';
+            throw err;
+          }
+          await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
+        }
+      }
       if (!customerId && estimate.customer_phone) {
         // Match on last-10 digits (format-insensitive), skip soft-deleted
         // rows, and order deterministically: exact raw match first, then the
@@ -9327,6 +9370,12 @@ router.put('/:token/accept', async (req, res, next) => {
             phone: estimate.customer_phone,
             email: estimate.customer_email || null,
           });
+          // Structured address when the free-text snapshot parses ("street,
+          // city, ST zip" — the Places shape the builder stores); the legacy
+          // whole-string-into-line1 fallback only for unparseable text. A
+          // structured line1/city/zip is what lets the customer_properties
+          // primary backfill + address_key dedup identify this property later.
+          const parsedAcceptAddress = require('../services/estimate-property-linkage').parseEstimateAddress(estimate.address);
           const [newCust] = await trx('customers').insert(applyContactNormalization({
             account_id: account.accountId,
             is_primary_profile: !account.existingCustomer,
@@ -9335,8 +9384,14 @@ router.put('/:token/accept', async (req, res, next) => {
             last_name: nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
             email: estimate.customer_email || null,
-            address_line1: estimate.address || '',
-            city: '', state: 'FL', zip: '',
+            address_line1: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.address_line1 : estimate.address) || '',
+            // Canonicalized unit segment (codex #3244 r7): without it the
+            // primary-property backfill and every addressKey compare see a
+            // unitless address and can mint a duplicate property later.
+            address_line2: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.address_line2 : null) || null,
+            city: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.city : '') || '',
+            state: (parsedAcceptAddress && parsedAcceptAddress.state) || 'FL',
+            zip: (parsedAcceptAddress && !parsedAcceptAddress.partial ? parsedAcceptAddress.zip : '') || '',
             // One-time accepts must not look like WaveGuard members: a
             // monthly_rate > 0 with active+autopay defaults would put them
             // in billing-cron's monthly charge sweep. 'One-Time' is an
@@ -10034,6 +10089,22 @@ router.put('/:token/accept', async (req, res, next) => {
     });
 
     const { customerId, reservationCommitted } = txResult;
+    // Multi-property linkage (post-commit, best-effort, gated on
+    // GATE_CUSTOMER_PROPERTIES): resolve/create the customer_properties row
+    // for the accepted address, link estimates.property_id, stamp the booked
+    // visits' service address, refresh has_multi_home. AWAITED so a deploy
+    // right after the response can't strand the accept unlinked, but the
+    // helper never throws — the committed acceptance stands regardless.
+    // Ownership transfer is NOT customer-gated (codex #3244 r7): a lead-only
+    // group whose accept fails customer resolution still burned every
+    // sibling's follow-up stages at publication.
+    await transferGroupFollowupOwnership(estimate);
+    if (customerId) {
+      await require('../services/estimate-property-linkage').linkAcceptedEstimateProperty({
+        estimateId: estimate.id,
+        customerId,
+      });
+    }
     // Attach the held card to the customer (post-commit, best-effort). The hold
     // row already carries the pm id for charging, so a transient attach failure
     // never breaks the booking — it self-heals on retry / first charge.
@@ -11647,6 +11718,43 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
   } catch (err) { next(err); }
 });
 
+
+// When a group's comms-owning estimate goes TERMINAL (accepted/declined)
+// with other properties still undecided, the follow-up sweeps can no longer
+// select it (they scan sent/viewed only) and every sibling's stages were
+// pre-burned at publication — the remaining properties would never get a
+// follow-up (codex #3244 r6). Transfer ownership to exactly ONE live
+// sibling: un-burn its stage flags so the sweep runs its normal ladder off
+// that sibling's own sent/viewed timestamps. Deterministic pick (earliest
+// created) + guarded update keep concurrent terminal events from arming two
+// owners. Best-effort post-commit — never throws.
+async function transferGroupFollowupOwnership(estimate) {
+  try {
+    if (!estimate?.estimate_group_id) return;
+    const owner = await db('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id })
+      .whereNot({ id: estimate.id })
+      .whereIn('status', ['sent', 'viewed'])
+      .whereNull('archived_at')
+      .orderBy('created_at', 'asc')
+      .first('id');
+    if (!owner) return;
+    await db('estimates')
+      .where({ id: owner.id })
+      .whereIn('status', ['sent', 'viewed'])
+      .update({
+        followup_unviewed_sent: false,
+        followup_viewed_sent: false,
+        followup_final_sent: false,
+        followup_expiring_sent: false,
+        updated_at: db.fn.now(),
+      });
+    logger.info(`[estimate-public] group ${estimate.estimate_group_id}: follow-up ownership transferred to sibling ${owner.id} after ${estimate.id} went terminal`);
+  } catch (e) {
+    logger.warn(`[estimate-public] follow-up ownership transfer failed for estimate ${estimate?.id}: ${e.message}`);
+  }
+}
+
 // PUT /api/estimates/:token/decline
 router.put('/:token/decline', async (req, res, next) => {
   try {
@@ -11664,6 +11772,7 @@ router.put('/:token/decline', async (req, res, next) => {
       .whereNull('archived_at')
       .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', db.raw('NOW()')))
       .update({ status: 'declined', declined_at: db.fn.now(), updated_at: db.fn.now() });
+    if (declinedCount) await transferGroupFollowupOwnership(estimate);
     if (!declinedCount) {
       const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at', 'archived_at');
       const freshGuard = resolveEstimateDeclineGuard(fresh);
@@ -19823,7 +19932,38 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // hero always lists email/phone/address when Waves has them on file.
     const contact = await resolveEstimateContactFields(estimate);
 
+    // Multi-property group: the customer's ONE link renders every property in
+    // the group, each independently acceptable via its own token. Siblings are
+    // filtered through the same customer-viewability gate as the requested
+    // token, so an unpublished draft/archived sibling never leaks. Key is only
+    // present for grouped estimates — ungrouped responses stay byte-identical.
+    let propertyGroup = null;
+    if (estimate.estimate_group_id) {
+      try {
+        const siblingRows = await db('estimates')
+          .where({ estimate_group_id: estimate.estimate_group_id })
+          .whereNull('archived_at')
+          .orderBy('created_at', 'asc');
+        const viewable = siblingRows.filter((s) => s.id === estimate.id || isEstimateCustomerViewable(s));
+        if (viewable.length > 1) {
+          propertyGroup = viewable.map((s) => ({
+            token: s.token,
+            address: s.address || null,
+            status: s.status,
+            monthlyTotal: s.monthly_total != null ? Number(s.monthly_total) : null,
+            annualTotal: s.annual_total != null ? Number(s.annual_total) : null,
+            onetimeTotal: s.onetime_total != null ? Number(s.onetime_total) : null,
+            waveguardTier: s.waveguard_tier || null,
+            isCurrent: s.id === estimate.id,
+          }));
+        }
+      } catch (e) {
+        logger.warn(`[estimate-data] property group lookup failed for estimate ${estimate.id}: ${e.message}`);
+      }
+    }
+
     res.json({
+      ...(propertyGroup ? { propertyGroup } : {}),
       // Only present on a verified staff draft preview — the React page keys
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
@@ -20176,6 +20316,7 @@ module.exports.pricingBundleLacksManualDiscountNetting = pricingBundleLacksManua
 module.exports.estimateTotalsReflectManualDiscount = estimateTotalsReflectManualDiscount;
 module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
+module.exports.transferGroupFollowupOwnership = transferGroupFollowupOwnership;
 module.exports.buildPricingServices = buildPricingServices;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
