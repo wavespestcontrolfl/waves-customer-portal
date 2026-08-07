@@ -227,6 +227,20 @@ async function main() {
           'SELECT id, billing_mode, monthly_rate, per_application_fee, pipeline_stage, deleted_at FROM customers WHERE id = $1 FOR UPDATE',
           [id],
         )).rows[0];
+        if (locked) {
+          // Freeze the child rows the prerequisite predicates read (pre-push
+          // codex P1). The customer FOR UPDATE above already blocks NEW child
+          // inserts — an FK insert takes FOR KEY SHARE on the parent, which
+          // conflicts with FOR UPDATE — but not updates to EXISTING rows (a
+          // re-price to NULL, a date move into the window, a status flip back
+          // to pending). Locking every existing child row closes that window
+          // without needing app writers to cooperate; SERIALIZABLE would not
+          // (SSI only detects conflicts among serializable transactions, and
+          // the app writes at READ COMMITTED). A deadlock aborts THIS
+          // transaction and the catch below SKIPs the row — fail closed.
+          await client.query('SELECT id FROM scheduled_services WHERE customer_id = $1 ORDER BY id FOR UPDATE', [id]);
+          await client.query('SELECT id FROM annual_prepay_terms WHERE customer_id = $1 ORDER BY id FOR UPDATE', [id]);
+        }
         const lockedProblems = [];
         if (!locked) lockedProblems.push('row vanished');
         else {

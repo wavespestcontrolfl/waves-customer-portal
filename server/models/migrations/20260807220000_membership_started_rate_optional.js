@@ -37,7 +37,11 @@ function asArray(value) {
 async function moveVariable(knex, { toOptional }) {
   const hasTable = await knex.schema.hasTable('email_templates');
   if (!hasTable) return;
-  const template = await knex('email_templates').where({ template_key: TEMPLATE_KEY }).first();
+  // forUpdate: this is a read-modify-write of the live variable arrays, and
+  // knex runs migrations transactionally — the row lock holds to commit, so
+  // an admin contract edit landing mid-migration blocks instead of being
+  // overwritten with these stale arrays (pre-push codex P1).
+  const template = await knex('email_templates').where({ template_key: TEMPLATE_KEY }).forUpdate().first();
   if (!template) return;
   const required = asArray(template.required_variables).filter((key) => key !== VARIABLE);
   const optional = asArray(template.optional_variables).filter((key) => key !== VARIABLE);
