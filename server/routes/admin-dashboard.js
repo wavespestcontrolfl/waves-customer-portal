@@ -287,7 +287,15 @@ router.get('/', dashboardCache, async (req, res, next) => {
       // Google reviews — use Places API totals from _stats rows, fallback to actual review count
       (async () => {
         try {
-          const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
+          // Only trust FRESH _stats rows (same 24h convention as the
+          // /admin/reviews googleStatsComplete check): when the Maps key is
+          // removed or Places keeps failing, the stale rows would otherwise
+          // keep this branch selected forever, and the Rating tile would
+          // ignore removals the GBP reconciliation has since stamped.
+          const statsFreshCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          const statsRows = await db('google_reviews')
+            .where({ reviewer_name: '_stats' })
+            .where('synced_at', '>', statsFreshCutoff);
           let totalFromPlaces = 0, ratingSum = 0, ratingCount = 0;
           for (const row of statsRows) {
             try {

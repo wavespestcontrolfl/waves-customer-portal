@@ -632,6 +632,9 @@ class GoogleBusinessService {
 
   async _syncPlacesReviewSampleForLocation(loc, googleKey) {
     if (!loc.googlePlaceId || !googleKey) return { synced: 0, new: 0 };
+    // Ordering token for the reinstatement clear below — a removal stamp
+    // written after this fetch began is newer information than this sample.
+    const sampleSyncStart = new Date();
     const url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${loc.googlePlaceId}&fields=reviews,rating,user_ratings_total,name&reviews_sort=newest&key=${googleKey}`;
     const res = await fetch(url);
     const data = await res.json();
@@ -695,21 +698,31 @@ class GoogleBusinessService {
         const createdSec = existing.review_created_at
           ? Math.floor(new Date(existing.review_created_at).getTime() / 1000)
           : null;
-        const identityCorroborated = !existing.missing_since
-          || (placesSec != null && createdSec != null && placesSec === createdSec);
+        const identityCorroborated = placesSec != null && createdSec != null && placesSec === createdSec;
         const upd = {
           star_rating: review.rating || 0,
           review_text: review.text || null,
           reviewer_photo_url: review.profile_photo_url || null,
           customer_id: customerId || existing.customer_id,
           synced_at: db.fn.now(),
-          missing_since: identityCorroborated ? null : existing.missing_since,
         };
         if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
           upd.review_reply = ownerReply;
           upd.reply_updated_at = db.fn.now();
         }
         await db('google_reviews').where({ id: existing.id }).update(upd);
+        // Reinstatement clear, mirroring _upsertGbpReview: the main update
+        // never touches missing_since; the clear is a separate conditional
+        // UPDATE against the CURRENT column value with the ordering token,
+        // so an authoritative stamp committed after this sample's fetch
+        // began survives a concurrent degraded runner.
+        if (identityCorroborated) {
+          await db('google_reviews')
+            .where({ id: existing.id })
+            .whereNotNull('missing_since')
+            .where('missing_since', '<', sampleSyncStart.toISOString())
+            .update({ missing_since: null });
+        }
       } else {
         await db('google_reviews').insert({
           google_review_id: googleId,
