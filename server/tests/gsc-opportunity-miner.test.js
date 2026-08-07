@@ -736,7 +736,10 @@ describe('listicle_family scoring + action mapping', () => {
   test('classifier categories canonicalize before enqueueing (tree_shrub → tree-shrub)', () => {
     expect(canonicalizeServiceCategory('tree_shrub')).toBe('tree-shrub');
     expect(canonicalizeServiceCategory('LAWN')).toBe('lawn');
-    expect(canonicalizeServiceCategory('specialty')).toBe('specialty');
+    // 'specialty' (flea/tick/wasp…) has no facts-bank identity — it maps to
+    // the general-pest service so city-qualified families draft instead of
+    // parking facts_unmappable (Codex r6).
+    expect(canonicalizeServiceCategory('specialty')).toBe('pest');
     expect(canonicalizeServiceCategory('unknown_bucket')).toBeNull();
     expect(canonicalizeServiceCategory(null)).toBeNull();
   });

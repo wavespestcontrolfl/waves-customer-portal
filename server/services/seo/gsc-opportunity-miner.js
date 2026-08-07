@@ -92,10 +92,16 @@ function inferServiceFromQuery(query) {
 // (facts-sufficiency's SERVICE_CATEGORY_TO_FACTS_ID, category slugs) keys on
 // the hyphenated coarse ids. An un-canonicalized 'tree_shrub' opportunity
 // reaches the runner as facts_unmappable and parks instead of drafting.
-const SERVICE_CATEGORY_CANON = new Set(['pest', 'termite', 'rodent', 'mosquito', 'lawn', 'tree-shrub', 'specialty']);
+const SERVICE_CATEGORY_CANON = new Set(['pest', 'termite', 'rodent', 'mosquito', 'lawn', 'tree-shrub']);
 function canonicalizeServiceCategory(raw) {
   if (!raw) return null;
   const s = String(raw).toLowerCase().trim().replace(/_/g, '-');
+  // The sync's 'specialty' bucket (bed bug / flea / tick / wasp / hornet /
+  // fire ant) has no facts-bank identity of its own — those are general-pest
+  // topics for Waves (the pest-ID posts publish under pest-control), and
+  // facts-sufficiency maps 'pest' → 'pest-control'. Persisting 'specialty'
+  // verbatim parked every such family as facts_unmappable.
+  if (s === 'specialty') return 'pest';
   return SERVICE_CATEGORY_CANON.has(s) ? s : null;
 }
 
