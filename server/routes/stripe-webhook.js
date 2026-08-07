@@ -1,5 +1,6 @@
 const express = require('express');
 const Sentry = require('@sentry/node');
+const { scrubSentryText } = require('../utils/sentry-scrub');
 const router = express.Router();
 const Stripe = require('stripe');
 const db = require('../models/db');
@@ -801,9 +802,21 @@ router.post(
       // error column is purged at 90 days — Sentry is the only durable,
       // operator-visible record of a handler failure. Identifiers only:
       // event id/type are not PII, and the payload is never attached.
-      // Signature failures above are deliberately NOT captured (public
-      // endpoint — attack-surface noise, not app failure).
-      Sentry.captureException(err, {
+      // The exception TEXT is scrubbed first — Knex prefixes the failing
+      // SQL onto err.message (customer names/emails as quoted literals)
+      // and provider errors echo phones/emails (AGENTS.md PII rule);
+      // instrument.js's beforeSend strips request data only, so the
+      // exception value must be scrubbed at the capture site. Capture a
+      // scrubbed synthetic error (original name + scrubbed stack keeps
+      // Sentry grouping intact). Signature failures above are deliberately
+      // NOT captured (public endpoint — attack-surface noise, not app
+      // failure).
+      const scrubbedErr = new Error(
+        scrubSentryText(err.message) || `stripe-webhook handler failure (${event.type})`
+      );
+      scrubbedErr.name = err.name || 'Error';
+      scrubbedErr.stack = scrubSentryText(err.stack);
+      Sentry.captureException(scrubbedErr, {
         tags: { area: 'stripe-webhook' },
         extra: { eventType: event.type, eventId: event.id },
       });

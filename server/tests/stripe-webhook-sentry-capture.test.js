@@ -11,6 +11,10 @@
  *    area:stripe-webhook tag and eventType/eventId extras (identifiers
  *    only — the payload never leaves the process), and still records the
  *    ledger error + returns 500 so Stripe retries;
+ *  - the exception TEXT is scrubbed BEFORE capture: Knex/provider messages
+ *    can embed customer emails/phones/SQL literals, and instrument.js's
+ *    beforeSend only strips request data — so no PII may appear anywhere in
+ *    the capture payload (message or stack);
  *  - a signature-verification failure does NOT capture (public endpoint —
  *    attack traffic would be Sentry-quota noise, not app failure) and
  *    returns 400 as before.
@@ -142,6 +146,51 @@ test('handler-path exception captures to Sentry with area tag and event identifi
 
   // The existing ledger error-record contract survives the capture.
   expect(update).toHaveBeenCalledWith({ error: 'handler exploded' });
+});
+
+test('PII-bearing handler error is scrubbed before it reaches the Sentry capture payload', async () => {
+  // Synthetic fixture only — the shapes Knex/providers actually produce:
+  // failing SQL with quoted literals, a receipt email, a phone number.
+  const boom = new Error(
+    "update \"customers\" set \"name\" = 'Jane Q Fixture', \"email\" = 'jane.fixture@example.com' where \"phone\" = '+19415550100' - relation locked; notify jane.fixture@example.com or +1 (941) 555-0100"
+  );
+  boom.stack = 'Error: SMS to +19415550100 for jane.fixture@example.com bounced\n    at handler (/app/server/routes/stripe-webhook.js:800:11)';
+  const update = jest.fn()
+    .mockRejectedValueOnce(boom) // mark-processed → throws into the catch
+    .mockResolvedValue(1); // catch's error-record write succeeds
+  const builder = ledgerBuilder({ update });
+  db.mockImplementation((table) => {
+    if (table === 'stripe_webhook_events') return builder;
+    throw new Error(`Unexpected db table: ${table}`);
+  });
+  mockConstructEvent.mockReturnValue({
+    id: 'evt_test_pii',
+    type: 'waves.test_event',
+    created: 1754500000,
+    data: { object: { id: 'obj_pii' } },
+  });
+
+  const res = await postWebhook();
+  expect(res.status).toBe(500);
+
+  expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+  const [capturedErr, context] = Sentry.captureException.mock.calls[0];
+  const payload = JSON.stringify({ message: capturedErr.message, stack: capturedErr.stack, context });
+  expect(payload).not.toContain('jane.fixture@example.com');
+  expect(payload).not.toContain('Jane Q Fixture');
+  expect(payload).not.toContain('9415550100');
+  expect(payload).not.toContain('555-0100');
+  expect(capturedErr.message).toContain('[redacted');
+  expect(capturedErr.stack).toContain('[redacted');
+  // Grouping-relevant fields survive: same name, stack still points at the
+  // real frame.
+  expect(capturedErr.name).toBe('Error');
+  expect(capturedErr.stack).toContain('stripe-webhook.js:800');
+  expect(context.extra).toEqual({ eventType: 'waves.test_event', eventId: 'evt_test_pii' });
+
+  // The ledger error record (DB-internal, 90d purge) keeps the original
+  // message — only the third-party Sentry sink is scrubbed.
+  expect(update).toHaveBeenCalledWith({ error: boom.message });
 });
 
 test('signature-verification failure returns 400 and does NOT capture to Sentry', async () => {

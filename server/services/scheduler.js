@@ -986,7 +986,9 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // Stripe webhook events the app failed to apply (ledger rows with error /
-  // still unprocessed in the last 24h) plus Stripe-side delivery failures
+  // abandoned claims in the last 48h — the lookback deliberately exceeds
+  // the daily interval + in-flight grace windows) plus Stripe-side delivery
+  // failures reconciled against the local ledger
   // (kill: STRIPE_WEBHOOK_HEALTH_DISABLED=1) — daily 7:04am ET. Without
   // this, dead events sit silently until the 3:30am 90-day purge erases
   // them (2026-08-07 infra audit). A check that cannot complete must land

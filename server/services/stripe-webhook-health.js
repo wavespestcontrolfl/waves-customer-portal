@@ -9,10 +9,16 @@
 // than 90 days, so a dead event eventually vanishes with zero operator
 // signal (2026-08-07 infra audit). Winston is console-only, so Railway's
 // rotating logs are the only other trace. This watcher closes the loop: any
-// ledger row from the last 24h with `error` set or still unprocessed lands
-// in one morning FIX email, alongside Stripe-side delivery failures from the
-// existing get_stripe_webhook_failures probe (events Stripe could not
-// deliver never reach the ledger at all — the two views are complementary).
+// ledger row from the lookback window with `error` set — or unprocessed with
+// an ABANDONED claim (older than the webhook route's stale-claim window; a
+// fresh claim is a live worker mid-handler, not a failure) — lands in one
+// morning FIX email, alongside Stripe-side delivery failures from the
+// existing get_stripe_webhook_failures probe. Stripe's delivery_success
+// filter is ACCOUNT-wide, so the probe's results are reconciled against the
+// local ledger: an event present in our ledger WAS delivered to this
+// endpoint — its failure belongs to some other integration's endpoint and
+// is excluded (events genuinely undelivered to us never reach the ledger at
+// all — the two views are complementary).
 //
 // Subject grammar follows the ops-email convention (first word = the owner's
 // action): FIX because a stuck webhook event means payment state diverged
@@ -34,6 +40,10 @@ const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
+// Same constant the webhook route's claim logic uses — a processed=false /
+// error=null row younger than this is an in-flight claim, not a failure.
+const { STALE_CLAIM_WINDOW_MS } = require('../routes/stripe-webhook-helpers');
+const { isDeployedProduction } = require('../utils/railway-deployment');
 
 const watcherDisabled = () => ['1', 'true', 'on']
   .includes(String(process.env.STRIPE_WEBHOOK_HEALTH_DISABLED || '').toLowerCase());
@@ -41,7 +51,15 @@ const watcherEmail = () => process.env.STRIPE_WEBHOOK_HEALTH_EMAIL || 'contact@w
 const fromEmail = () => process.env.SENDGRID_FROM_EMAIL || 'contact@wavespestcontrol.com';
 const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 
-const WINDOW_HOURS = 24;
+// Lookback must exceed the daily schedule interval PLUS every "too fresh to
+// judge" grace (the probe's ~10min recent-pending split, the ledger's
+// stale-claim window). At 24h an event created minutes before one 7:04am
+// tick was classified pending (ignored) and by the next tick had aged OUT of
+// the window — it never alerted. 48h closes that gap; the cost is that an
+// unresolved item repeats in consecutive digests, which is deliberate for a
+// FIX email (the send-marker dedupes double TICKS, never findings — deduping
+// findings could silently drop a still-dead event).
+const LOOKBACK_HOURS = 48;
 const MAX_ROWS = 25;
 const ERROR_SNIPPET_LENGTH = 200;
 
@@ -63,23 +81,37 @@ function sanitizeErrorSnippet(message) {
 }
 
 // Ledger rows the app failed to apply: `error` recorded by the handler catch,
-// OR still unprocessed (a claim whose worker died, or an event Stripe stopped
-// retrying before it ever succeeded). Rolling 24h window — a real Date object
-// against the timestamptz column (waves-db §2: never a naive ISO string).
-function failedEventsQuery(cutoff) {
+// OR unprocessed with an ABANDONED claim. An error-free processed=false row
+// younger than STALE_CLAIM_WINDOW_MS is a live worker mid-handler (the route
+// uses received_at as the claim lease and bumps it on re-claim) — reporting
+// it would flag routine in-flight deliveries as failures. Rolling window —
+// real Date objects against the timestamptz column (waves-db §2: never a
+// naive ISO string).
+function ledgerCutoffs(now = Date.now()) {
+  return {
+    cutoff: new Date(now - LOOKBACK_HOURS * 60 * 60 * 1000),
+    staleCutoff: new Date(now - STALE_CLAIM_WINDOW_MS),
+  };
+}
+
+function failedEventsQuery(cutoff, staleCutoff) {
   return db('stripe_webhook_events')
     .where('received_at', '>', cutoff)
-    .where(function whereFailedOrUnprocessed() {
-      this.whereNotNull('error').orWhere('processed', false);
+    .where(function whereFailedOrAbandoned() {
+      this.whereNotNull('error').orWhere(function whereAbandonedClaim() {
+        this.where('processed', false)
+          .whereNull('error')
+          .where('received_at', '<', staleCutoff);
+      });
     });
 }
 
 async function loadLedgerFailures() {
-  const cutoff = new Date(Date.now() - WINDOW_HOURS * 60 * 60 * 1000);
-  const [{ count }] = await failedEventsQuery(cutoff).count('id as count');
+  const { cutoff, staleCutoff } = ledgerCutoffs();
+  const [{ count }] = await failedEventsQuery(cutoff, staleCutoff).count('id as count');
   const total = Number(count) || 0;
   if (total === 0) return { total: 0, rows: [] };
-  const rows = await failedEventsQuery(cutoff)
+  const rows = await failedEventsQuery(cutoff, staleCutoff)
     // `payload` is deliberately never selected — it carries customer data.
     .select('id', 'event_type', 'error', 'processed', 'received_at')
     .orderBy('received_at', 'desc')
@@ -87,11 +119,23 @@ async function loadLedgerFailures() {
   return { total, rows };
 }
 
+// Which of these Stripe event ids does OUR ledger already know? A ledger row
+// is written on receipt, so presence means the event WAS delivered to this
+// endpoint — a delivery_success=false flag on it comes from some OTHER
+// webhook endpoint on the account (the /v1/events filter is account-wide and
+// this Stripe API version offers no per-endpoint scoping). Local application
+// failures on those events are already the ledger section's job.
+async function loadLedgerEventIds(ids) {
+  if (!ids.length) return new Set();
+  const rows = await db('stripe_webhook_events').whereIn('id', ids).select('id');
+  return new Set(rows.map((row) => row.id));
+}
+
 function describeLedgerRow(row) {
   const received = new Date(row.received_at).toISOString();
   const state = row.error
     ? `error: ${sanitizeErrorSnippet(row.error) || '(empty message)'}`
-    : 'unprocessed (no error recorded — claim likely abandoned)';
+    : 'unprocessed (no error recorded — claim abandoned past the stale window)';
   return `${row.id} (${row.event_type}) received ${received} — ${state}`;
 }
 
@@ -109,21 +153,21 @@ function composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError }) {
 
   const plural = (n) => (n === 1 ? '' : 's');
   const subject = ledgerTotal > 0
-    ? `FIX: ${ledgerTotal} Stripe webhook event${plural(ledgerTotal)} failed/unprocessed in last 24h${stripeTotal > 0 ? ` + ${stripeTotal} undelivered Stripe-side` : ''}`
-    : `FIX: ${stripeTotal} Stripe webhook delivery failure${plural(stripeTotal)} (Stripe-side) in last 24h`;
+    ? `FIX: ${ledgerTotal} Stripe webhook event${plural(ledgerTotal)} failed/unprocessed in last ${LOOKBACK_HOURS}h${stripeTotal > 0 ? ` + ${stripeTotal} undelivered Stripe-side` : ''}`
+    : `FIX: ${stripeTotal} Stripe webhook delivery failure${plural(stripeTotal)} (Stripe-side) in last ${LOOKBACK_HOURS}h`;
 
   const textSections = [];
   const htmlSections = [];
 
   if (ledgerTotal > 0) {
     textSections.push(
-      `${ledgerTotal} event${plural(ledgerTotal)} in stripe_webhook_events from the last 24h with an error or still unprocessed. Stripe retries for ~72h; after that the row is a dead letter and the 90-day purge will erase it silently.`,
+      `${ledgerTotal} event${plural(ledgerTotal)} in stripe_webhook_events from the last ${LOOKBACK_HOURS}h with an error or an abandoned claim. Stripe retries for ~72h; after that the row is a dead letter and the 90-day purge will erase it silently. (Unresolved events repeat in consecutive digests until fixed.)`,
       '',
       ...ledgerRows.map((row) => `- ${describeLedgerRow(row)}`),
       ...(ledgerTotal > ledgerRows.length ? [`…and ${ledgerTotal - ledgerRows.length} more not shown`] : []),
     );
     htmlSections.push(
-      `<p><strong>${ledgerTotal} event${plural(ledgerTotal)}</strong> in <code>stripe_webhook_events</code> from the last 24h with an error or still unprocessed. Stripe retries for ~72h; after that the row is a dead letter and the 90-day purge will erase it silently.</p>`,
+      `<p><strong>${ledgerTotal} event${plural(ledgerTotal)}</strong> in <code>stripe_webhook_events</code> from the last ${LOOKBACK_HOURS}h with an error or an abandoned claim. Stripe retries for ~72h; after that the row is a dead letter and the 90-day purge will erase it silently. (Unresolved events repeat in consecutive digests until fixed.)</p>`,
       `<ul style="margin:0 0 12px 18px;padding:0;">${ledgerRows.map((row) => `<li style="margin:0 0 6px 0;">${esc(describeLedgerRow(row))}</li>`).join('')}</ul>`,
       ...(ledgerTotal > ledgerRows.length ? [`<p>…and ${ledgerTotal - ledgerRows.length} more not shown</p>`] : []),
     );
@@ -199,23 +243,53 @@ async function runStripeWebhookHealthCheck(opts = {}) {
     return { skipped: 'query_failed' };
   }
 
-  // Stripe-side delivery check via the existing IB probe. No key = the
-  // expected dark state (dev/preview), not a failure; a thrown check with a
-  // key present IS a failure and must reach job_health (never swallowed —
-  // stripeCheckError makes the scheduler wrapper throw after any send).
+  // Stripe-side delivery check via the existing IB probe. A thrown check
+  // with a key present IS a failure and must reach job_health (never
+  // swallowed — stripeCheckError makes the scheduler wrapper throw after
+  // any send). No key in dev/test/preview = the expected dark state; no key
+  // in DEPLOYED PRODUCTION is a broken payment-pipeline baseline and the
+  // Stripe-side half of this check silently couldn't run — FAIL CLOSED:
+  // treat it exactly like a failed probe so it lands in job_health as a FIX,
+  // never a benign nothing_found.
   let stripeSide = null;
   let stripeCheckError = null;
   const stripeConfigured = opts.stripeConfigured ?? Boolean(process.env.STRIPE_SECRET_KEY);
   if (stripeConfigured) {
     try {
       const { getStripeWebhookFailures } = opts.stripeOpsTools || require('./intelligence-bar/stripe-ops-tools');
-      stripeSide = await getStripeWebhookFailures({ hours: WINDOW_HOURS });
+      stripeSide = await getStripeWebhookFailures({ hours: LOOKBACK_HOURS });
+
+      // Reconcile against the local ledger before composing the alert:
+      // delivery_success=false is account-wide, so another integration's
+      // unhealthy endpoint would otherwise page us. Any returned event id
+      // already present in OUR ledger was delivered here — not our failure.
+      // total_undelivered can count events beyond the shown cap, which
+      // cannot be reconciled — subtract only what was verified foreign. A
+      // reconciliation query failure is caught below as stripeCheckError
+      // (blocking), same as a failed probe.
+      const undelivered = stripeSide?.undelivered_events || [];
+      if (undelivered.length > 0) {
+        const knownIds = await (opts.loadLedgerEventIds || loadLedgerEventIds)(undelivered.map((evt) => evt.id));
+        if (knownIds.size > 0) {
+          const ours = undelivered.filter((evt) => !knownIds.has(evt.id));
+          const foreignCount = undelivered.length - ours.length;
+          logger.info(`[stripe-webhook-health] excluded ${foreignCount} Stripe-side failure(s) already present in the local ledger (other endpoint's failure)`);
+          stripeSide = {
+            ...stripeSide,
+            undelivered_events: ours,
+            total_undelivered: Math.max(0, (Number(stripeSide.total_undelivered) || 0) - foreignCount),
+          };
+        }
+      }
     } catch (err) {
       stripeCheckError = err.message || String(err);
       logger.error(`[stripe-webhook-health] Stripe-side delivery check failed: ${stripeCheckError}`);
     }
+  } else if (opts.deployedProd ?? isDeployedProduction()) {
+    stripeCheckError = 'STRIPE_SECRET_KEY is not set in deployed production — Stripe-side delivery check cannot run';
+    logger.error(`[stripe-webhook-health] ${stripeCheckError}`);
   } else {
-    logger.info('[stripe-webhook-health] STRIPE_SECRET_KEY not set — skipping Stripe-side delivery check');
+    logger.info('[stripe-webhook-health] STRIPE_SECRET_KEY not set (dev/test/preview) — skipping Stripe-side delivery check');
   }
 
   const composed = composeWebhookHealthDigest({ ledger, stripeSide, stripeCheckError });
@@ -268,5 +342,11 @@ async function runStripeWebhookHealthCheck(opts = {}) {
 
 module.exports = {
   runStripeWebhookHealthCheck,
-  _private: { composeWebhookHealthDigest, sanitizeErrorSnippet },
+  _private: {
+    composeWebhookHealthDigest,
+    sanitizeErrorSnippet,
+    failedEventsQuery,
+    ledgerCutoffs,
+    LOOKBACK_HOURS,
+  },
 };

@@ -437,5 +437,8 @@ async function executeStripeOpsTool(toolName, input = {}) {
 // stripe-webhook-health check (services/stripe-webhook-health.js) — direct
 // export keeps real throw semantics (executeStripeOpsTool swallows errors
 // into { error } for the IB circuit breaker, which would hide a failed
-// check from job_health).
-module.exports = { STRIPE_OPS_TOOLS, executeStripeOpsTool, getStripeWebhookFailures };
+// check from job_health). RECENT_PENDING_MINUTES is exported so the health
+// check's lookback can be pinned LONGER than schedule interval + pending
+// grace — otherwise an event that is recent_pending at one daily tick ages
+// out of the window before the next and never alerts.
+module.exports = { STRIPE_OPS_TOOLS, executeStripeOpsTool, getStripeWebhookFailures, RECENT_PENDING_MINUTES };
