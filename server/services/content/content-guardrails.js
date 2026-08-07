@@ -2886,12 +2886,15 @@ const SANCTIONED_META_TOKEN_RE = /\{\{\s*cityPhone\s*\}\}/g;
 // the same sentence stays legal, as do negated disclaimers ("no product is
 // completely safe…"), via the prevention section's negation guards.
 // A "figure" is a digit, a range (hyphen/en-dash or worded: "30 to 60",
-// "between 30 and 60", "one to two"), a common spelled number with its
-// unit, or a fractional/article form ("half an hour", "an hour").
+// "between 30 and 60", "one to two"), ANY spelled number with its unit, or
+// a fractional/article form ("half an hour", "an hour").
 const REENTRY_RANGE_CONNECTOR_SRC = "(?:\\s*[-–—]\\s*|\\s+(?:to|or|and)\\s+)";
+// Full spelled-number grammar 1–99 (Codex PR r2: "six hours" and "twelve
+// minutes" are figures too, not just the round values).
+const REENTRY_SPELLED_NUM_SRC = "(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|one|two|three|four|five|six|seven|eight|nine)";
 // Digits include decimals ("1.5 hours"); spelled numbers include the
 // "two and a half" compound form.
-const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|(?:one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\w+)?)\\s*(?:minutes?|mins?|hours?|hrs?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour)`;
+const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\d+(?:\\.\\d+)?)?|${REENTRY_SPELLED_NUM_SRC}(?:\\s+and\\s+a\\s+half)?(?:${REENTRY_RANGE_CONNECTOR_SRC}\\w+)?)\\s*(?:minutes?|mins?|hours?|hrs?)|half\\s+an?\\s+hour|an?\\s+hour(?:\\s+and\\s+a\\s+half)?|a\\s+half[-\\s]hour)`;
 const REENTRY_SAFETY_SRCS = [
   // "safe to re-enter / return / go back inside", "re-entry is safe",
   // "safe for kids and pets to return"
@@ -2907,8 +2910,13 @@ const REENTRY_SAFETY_SRCS = [
   // the qualifier gap is negation-guarded so "is not safe" stays a
   // disclaimer handled by the polarity guards.
   `\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?safe\\b`,
-  // "safe for/around kids, pets, pollinators…"
-  "\\bsafe\\s+(?:for|around)\\s+(?:your\\s+)?(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies)|pollinators?|bees?|wildlife)\\b",
+  // "safe for/around kids, pets, pollinators…" — PESTICIDE context
+  // required (Codex PR r2): "the repaired screen is safe for pets" and
+  // "plants that are safe for pollinators" are legal educational copy; the
+  // rule bans safety claims about TREATMENTS. Context may precede the
+  // claim, or follow it as an application/drying clause.
+  "\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|solutions?|formulas?|treated)\\b[^.!?\\n]{0,60}?\\bsafe\\s+(?:for|around)\\s+(?:your\\s+)?(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies)|pollinators?|bees?|wildlife)\\b",
+  "\\bsafe\\s+(?:for|around)\\s+(?:your\\s+)?(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies)|pollinators?|bees?|wildlife)\\b[^.!?\\n]{0,60}?\\b(?:once|after|when|while)\\b[^.!?\\n]{0,30}?\\b(?:treat\\w+|appl\\w+|spray\\w+|water\\w+\\s+in|dr(?:y|ies|ied))",
   // "pet-safe" / "child-safe" / "kid-safe" / "family-safe" compounds
   "\\b(?:pet|child|kid|family)[-\\s]safe\\b",
   // Adjective-before-product forms: "safe pesticides", "our safe treatment
@@ -2994,9 +3002,12 @@ function reentrySafetyClaimFinding(text) {
       if (isSafeClaim) {
         const afterMatch = s.slice(m.index + m[0].length, m.index + m[0].length + 60);
         const afterSameSentence = afterMatch.split(/[.!?\n]/)[0];
+        // The dry condition may sit before, inside, or after the matched
+        // span (context-anchored patterns can swallow "once the application
+        // dries" into the match) — test the FULL sentence.
+        const fullSentence = `${sameSentence}${m[0]}${afterSameSentence}`;
         const neighborhood = s.slice(Math.max(0, m.index - 240), m.index + m[0].length + 240);
-        if ((DRY_CONDITION_RE.test(sameSentence) || DRY_CONDITION_RE.test(afterSameSentence))
-          && TECH_CONFIRMS_RE.test(neighborhood)) {
+        if (DRY_CONDITION_RE.test(fullSentence) && TECH_CONFIRMS_RE.test(neighborhood)) {
           if (m.index === re.lastIndex) re.lastIndex += 1;
           continue;
         }
@@ -3038,8 +3049,10 @@ const BANNED_TOPIC_SRCS = [
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|sells?|installs?|replaces?)\\s+${BANNED_TOPIC_GAP_SRC}insulation\\b`,
   // Bare POSSESSIVE ownership — "our fumigation treatment", "our wildlife
   // removal keeps your attic quiet", with or without a service noun (Codex
-  // PR r1); referral/partner attributions stay legal.
-  `\\bour\\s+${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referral|partners?|specialists?))`,
+  // PR r1) and with bounded, negation-guarded modifiers ("our professional
+  // wildlife removal", "our humane raccoon removal" — Codex PR r2);
+  // referral/partner attributions stay legal.
+  `\\bour\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referral|partners?|specialists?))`,
   // Topic-specific ownership verbs: "we install attic insulation", "our
   // technicians trap wildlife", "we remove raccoons", "we sell
   // door-to-door" — ownership expressed through the ACTION verb rather

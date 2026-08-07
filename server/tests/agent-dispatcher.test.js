@@ -303,7 +303,11 @@ describe('emit_draft in-loop self-lint (W1)', () => {
       meta_description: 'What a Sarasota lawn treatment visit covers, how the label re-entry directions work, and when to expect results on St. Augustine turf.',
     }, { sessionId: 'lint-8' });
     expect(clean.ok).toBe(true);
-    expect(getDraft('lint-8').type).toBe('metadata');
+    const capturedMeta = getDraft('lint-8');
+    expect(capturedMeta.type).toBe('metadata');
+    // The audit trail records the retried session (Codex PR r2): one
+    // rejection above, then this pass.
+    expect(capturedMeta.self_lint).toEqual({ redrafts: 1, pass: true });
     clearDraft('lint-8');
     // The contract-REQUIRED {{cityPhone}} token must not trip the .mdx-body
     // expression P0 — page metas carry it by rule.

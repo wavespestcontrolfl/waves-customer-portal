@@ -499,11 +499,16 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       // exactly like emit_draft's — same registered options, same cap,
       // same fail-open posture. The runner's metadata handler applies the
       // authoritative fail-closed pass.
+      let metaSelfLintAudit = null;
       {
         const metaLintOptions = sessionLintOptions.get(sessionId);
         const metaGuardrails = getContentGuardrails();
         if (metaLintOptions && metaGuardrails?.evaluate) {
           const attempts = sessionLintAttempts.get(sessionId) || 0;
+          if (attempts >= SELF_LINT_MAX_REDRAFTS) {
+            metaSelfLintAudit = { redrafts: attempts, cap_reached: true };
+            logger.warn(`[brief-driven-tools] emit_metadata_only(${sessionId}): self-lint redraft cap reached (${attempts}) — capturing for the authoritative metadata gate`);
+          }
           if (attempts < SELF_LINT_MAX_REDRAFTS) {
             let lintResult = null;
             try {
@@ -539,6 +544,10 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
                 directives,
               };
             }
+            // Passed (or evaluator failed open) — record the audit so a
+            // retried session is distinguishable from a first-pass one in
+            // the persisted draft_payload (Codex PR r2).
+            if (lintResult) metaSelfLintAudit = { redrafts: attempts, pass: true };
           }
         }
       }
@@ -555,6 +564,8 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         title,
         meta_description,
         notes_for_reviewer: notes_for_reviewer || null,
+        // Same audit trail full drafts carry (null when lint not armed).
+        self_lint: metaSelfLintAudit,
         captured_at: new Date(),
       });
       return { ok: true, captured: true, title_chars: title.length, meta_chars: meta_description.length };

@@ -3024,6 +3024,26 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(keepOut.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('ANY spelled duration is a figure — "six hours", "twelve minutes" (Codex PR r2)', () => {
+    const six = guardrails.evaluate({ body: 'You can re-enter after six hours.' }, {});
+    expect(six.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const twelve = guardrails.evaluate({ body: 'Keep children inside for twelve minutes after treatment.' }, {});
+    expect(twelve.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('safe-for claims about NON-pesticide objects stay legal (Codex PR r2 false positive)', () => {
+    for (const body of [
+      'The repaired screen is safe for pets.',
+      'Choose plants that are safe for pollinators.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    }
+    // Treatment-context claims still block.
+    const treatment = guardrails.evaluate({ body: 'This spray is safe for pets and pollinators.' }, {});
+    expect(treatment.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('wait/return timing advice WITHOUT re-entry context stays legal (Codex PR r1 false positive)', () => {
     const r = guardrails.evaluate({ body: 'Wait 30 minutes before returning to check whether ants took the bait.' }, {});
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
@@ -3245,6 +3265,17 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     }
     const referral = guardrails.evaluate({ body: 'Our fumigation referral partner handles the tenting itself.' }, {});
     expect(referral.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('modified possessives block too — "our professional wildlife removal", "our humane raccoon removal" (Codex PR r2)', () => {
+    for (const body of [
+      'Ask about our professional wildlife removal for attic pests.',
+      'Our humane raccoon removal service starts with an inspection.',
+      'Our attic insulation service seals rodent entry points.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    }
   });
 
   test('handling EXISTING insulation during inspection stays legal (Codex PR r1 false positive)', () => {
