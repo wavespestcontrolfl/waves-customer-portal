@@ -3,6 +3,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const { noStore } = require('../middleware/no-store');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 
 // Every response here is keyed by a bearer token in the URL and carries
 // financial/personal data — never cacheable, never indexable.
@@ -23,6 +24,29 @@ const { shouldSkipClientPaymentErrorAlert } = require('./pay-v2-helpers');
  * Public pay routes — no auth required.
  * Customers access these via invoice token links (e.g. /pay/abc123def456).
  */
+
+// Unauthenticated by-token money surface: rate-limit the whole router
+// (defense in depth over the global /api/ limiter) and reject malformed
+// tokens before any DB lookup. Mirrors the pay-statement.js pattern.
+const payLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  message: { error: 'Too many requests — please slow down.' },
+});
+router.use(payLimiter);
+
+// Current invoice tokens are randomBytes(32).hex (64 chars); legacy rows
+// carry 25-32 char url-safe tokens (prod-verified 2026-08-07: all 339 live
+// tokens match this range/charset). Format gate → generic 404, same body as
+// an unknown token so the two are indistinguishable.
+const TOKEN_RE = /^[A-Za-z0-9_-]{20,64}$/;
+router.param('token', (req, res, next, token) => {
+  if (!TOKEN_RE.test(String(token))) return res.status(404).json({ error: 'Invoice not found' });
+  next();
+});
 
 const clientPaymentErrorLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
