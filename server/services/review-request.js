@@ -854,8 +854,15 @@ const ReviewService = {
           let boundedLater = laterInPremise;
           const laterDeclared = laterInPremise.filter((r) => laterFlags.get(r.id));
           if (laterDeclared.length) {
-            const earliestBoundary = laterDeclared.reduce((a, b) => (
-              etDayWindow(a.scheduled_date, 0).anchorStr <= etDayWindow(b.scheduled_date, 0).anchorStr ? a : b));
+            // Same-date boundary ties break by appointment order (codex
+            // #3243 r22 P2) — DB row order must not decide which opener
+            // bounds the look-ahead.
+            const earliestBoundary = laterDeclared.reduce((a, b) => {
+              const dayA = etDayWindow(a.scheduled_date, 0).anchorStr;
+              const dayB = etDayWindow(b.scheduled_date, 0).anchorStr;
+              if (dayA !== dayB) return dayA <= dayB ? a : b;
+              return compareSameDayVisits(b, a) < 0 ? b : a;
+            });
             const bDay = etDayWindow(earliestBoundary.scheduled_date, 0).anchorStr;
             boundedLater = laterInPremise.filter((r) => {
               if (r.id === earliestBoundary.id) return false;
@@ -3367,6 +3374,32 @@ const ReviewService = {
         });
       } catch (err) {
         logger.error(`[review] deferred enrollment redeem failed (customerId=${row.customer_id} errType=${err?.name || "Error"})`);
+        // The parking row IS the one-shot final's durable retry (codex
+        // #3243 r22 P2) — a transient throw must not consume it. Restore
+        // it with backoff, preserving the original parking time.
+        try {
+          await db("review_sequences").insert({
+            customer_id: row.customer_id,
+            location_id: row.location_id,
+            status: "deferred",
+            stop_reason: "opener_in_flight",
+            plan: row.plan,
+            current_step: 0,
+            touches_sent: 0,
+            next_run_at: new Date(Date.now() + 30 * 60 * 1000),
+            series_final: row.series_final === true,
+            service_record_id: row.service_record_id,
+            scheduled_service_id: row.scheduled_service_id,
+            tech_name: row.tech_name,
+            service_type: row.service_type,
+            started_by: row.started_by,
+            started_at: row.started_at,
+            completed_at: row.completed_at || new Date(),
+          });
+        } catch (restoreErr) {
+          logger.error(`[review] deferred enrollment restore failed (customerId=${row.customer_id}): ${restoreErr.message}`);
+        }
+        continue;
       }
       if (result?.started) {
         redeemed += 1;

@@ -1865,6 +1865,47 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(plan.plan).toHaveLength(3);
   });
 
+  test('r22: a throwing redemption restores the parking row, and same-day boundary ties break by appointment order', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // ① startReviewSequence throws mid-redeem (customers lookup) → the
+    // parking row is restored with backoff, not consumed.
+    const base = makeMock({
+      review_sequences: [{ id: 'seq-park', customer_id: 'rx', status: 'deferred', stop_reason: 'opener_in_flight', plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]), current_step: 0, touches_sent: 0, next_run_at: new Date(Date.now() - 1000), series_final: true, scheduled_service_id: 'rx-2', completed_at: new Date() }],
+    });
+    const throwCust = jest.fn((tbl) => {
+      if (String(tbl).startsWith('customers')) throw new Error('pg blip');
+      return base(tbl);
+    });
+    throwCust.__state = base.__state;
+    db.mockImplementation(throwCust);
+    const out = await ReviewService.processReviewSequences();
+    expect(out.redeemed).toBe(0);
+    const restored = base.__state.rows.review_sequences.find((r) => r.status === 'deferred');
+    expect(restored).toBeTruthy();
+    expect(restored.stop_reason).toBe('opener_in_flight');
+
+    // ② Two same-day later openers: the EARLIER appointment bounds the
+    // look-ahead, so the deferred final keeps its cadence.
+    const mock = makeMock({
+      service_records: [
+        { id: 'sr-t1', customer_id: 'tb', scheduled_service_id: 'tb-n1', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Initial setup' } } }) },
+        { id: 'sr-t2', customer_id: 'tb', scheduled_service_id: 'tb-n2', service_data: JSON.stringify({ typedReportSnapshot: { type: 'rodent_trapping', values: { trap_visit_type: 'Initial setup' } } }) },
+      ],
+      scheduled_services: [
+        { id: 'tb-open', customer_id: 'tb', service_id: 'svc-trap', status: 'completed', scheduled_date: d(20), service_key: 'rodent_trapping' },
+        { id: 'tb-fin', customer_id: 'tb', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+        { id: 'tb-n1', customer_id: 'tb', service_id: 'svc-trap', status: 'completed', scheduled_date: d(5), service_key: 'rodent_trapping', window_start: '09:00' },
+        { id: 'tb-n2', customer_id: 'tb', service_id: 'svc-trap', status: 'completed', scheduled_date: d(5), service_key: 'rodent_trapping', window_start: '13:00' },
+      ],
+    });
+    db.mockImplementation(mock);
+    const plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'tb', scheduledServiceId: 'tb-fin' });
+    expect(plan.seriesFinal).toBe(true);
+    expect(plan.plan).toHaveLength(3);
+  });
+
   test('the first-treatment exemption is scoped to the series-final enrollment (resolver seriesFinal flag)', async () => {
     mockGates.reviewSequences = true;
     const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
