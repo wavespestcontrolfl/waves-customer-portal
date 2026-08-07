@@ -24,7 +24,7 @@ const LISTICLE_NOUN_RE = /\b(signs?|symptoms|ways|tips|ideas|mistakes|myths|type
 // the existing buyer-guide/comparison handling. Conservative by design:
 // excluding e.g. "best plants for shade" only costs the list formatting,
 // never the post.
-const LISTICLE_VENDOR_RE = /\b(best|top|cheapest|company|companies|providers?|services?|exterminators?|reviews?|vs)\b/i;
+const LISTICLE_VENDOR_RE = /\b(best|top|cheapest|company|companies|providers?|services?|exterminators?|contractors?|businesses?|firms?|brands?|reviews?|vs)\b/i;
 
 function isListicleQuery(query) {
   const q = String(query || '').trim();

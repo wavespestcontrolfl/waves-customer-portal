@@ -327,6 +327,10 @@ function clusterListicleFamilies(rows) {
     fam.variants.push({
       query: r.query,
       impressions: imp,
+      // Per-variant position kept so admission can judge the REPRESENTATIVE
+      // on its own ranking — the family-wide weighted average can be dragged
+      // past the top-3 cutoff by one low-volume deep variant.
+      position: pos,
       service_category: r.service_category || null,
       city_target: r.city_target || null,
     });
@@ -359,6 +363,11 @@ function listicleFamilyEligible(fam, thresholds = THRESHOLDS) {
   if ((fam.variants[0]?.impressions || 0) >= thresholds.minImpressionsToScore) return false;
   if (fam.impressions < thresholds.minImpressionsToScore) return false;
   if (fam.position > 0 && fam.position < 4) return false;
+  // The emitted target_keyword IS the representative — if IT already ranks
+  // top-3, a new post competes with a won query even when deep low-volume
+  // variants drag the family average past the cutoff.
+  const repPos = fam.variants[0]?.position || 0;
+  if (repPos > 0 && repPos < 4) return false;
   return true;
 }
 

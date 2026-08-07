@@ -777,6 +777,13 @@ describe('listicle_family scoring + action mapping', () => {
     expect(listicleFamilyEligible(fam({ impressions: 40, variants: [{ impressions: 25 }, { impressions: 15 }] }))).toBe(false);
     // Top-3 weighted position = won intent.
     expect(listicleFamilyEligible(fam({ position: 2.4 }))).toBe(false);
+    // Representative itself ranks top-3 while a deep low-volume variant
+    // drags the family average past the cutoff (Codex r7): still excluded.
+    expect(listicleFamilyEligible(fam({
+      position: 4.96,
+      variants: [{ impressions: 48, position: 1 }, { impressions: 2, position: 100 }],
+      impressions: 50,
+    }))).toBe(false);
     // Position 0 (no data) does not trip the top-3 exclusion.
     expect(listicleFamilyEligible(fam({ position: 0 }))).toBe(true);
   });
@@ -789,5 +796,17 @@ describe('listicle_family scoring + action mapping', () => {
     expect(a).toContain('listicle_family::fam::');
     // Distinct local intent keys apart because the city token is IN the family key.
     expect(listicleFamilyDedupeKey(listicleFamilyKey('drought tolerant plants sarasota'))).not.toBe(a);
+  });
+});
+
+describe('vendor synonyms excluded from listicle families (Codex r7 on #3255)', () => {
+  const { isListicleQuery } = require('../services/content/listicle-query');
+  test('provider-noun synonyms are vendor intent, never a family', () => {
+    expect(isListicleQuery('10 pest control contractors in sarasota')).toBe(false);
+    expect(isListicleQuery('5 lawn care businesses near bradenton')).toBe(false);
+    expect(isListicleQuery('7 pest control firms compared')).toBe(false);
+    expect(isListicleQuery('top mosquito repellent brands')).toBe(false);
+    // Informational lists unaffected
+    expect(isListicleQuery('7 signs of termite damage')).toBe(true);
   });
 });
