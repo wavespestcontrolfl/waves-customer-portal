@@ -79,6 +79,23 @@ describe('customer pricing AI helpers', () => {
     expect(result.options).toEqual([]);
   });
 
+  test('upgrade wording does not re-price a service the customer already has', async () => {
+    // Owner ruling 2026-08-06: an existing service is never re-quoted from the
+    // property profile — their live rate may predate a price change. Upgrade
+    // wording used to bypass the already-included filter.
+    const customer = propertyCustomer({ id: 'cust-upgrade', waveguard_tier: 'Silver' });
+    const result = await buildCustomerPricingResponse({
+      db: activePlanDb(customer.id, ['Quarterly Pest Control', 'Lawn Care'], 'Silver'),
+      propertyLookup: null,
+      prompt: 'I want to upgrade my lawn care to something better',
+      customer,
+    });
+
+    expect(result.alreadyIncluded).toContain('Lawn Care');
+    expect(result.options.every(o => o.serviceKey !== 'lawn_care')).toBe(true);
+    expect(result.message).toMatch(/not re-pricing/i);
+  });
+
   test('prices a requested service from the customer property profile', async () => {
     const result = await buildCustomerPricingResponse({
       db: null,

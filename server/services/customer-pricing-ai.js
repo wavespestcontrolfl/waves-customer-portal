@@ -107,9 +107,6 @@ function inferRequestedServices(prompt, currentServiceKeys = new Set()) {
     .slice(0, 4);
 }
 
-function hasUpgradeIntent(prompt) {
-  return /\b(upgrade|premium|enhanced|more frequent|monthly|higher|better plan|bigger plan)\b/i.test(String(prompt || ''));
-}
 
 function currentServiceObjectsFor(keys, context) {
   const services = {};
@@ -535,12 +532,17 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
 
   const propertyContext = await resolvePropertyContext({ customer, turfProfile, propertyLookup: lookupFn });
   const missing = missingPropertyFor(requestedServices, propertyContext);
-  const upgradeIntent = hasUpgradeIntent(text);
 
+  // A service the customer ALREADY has is never re-priced from the property
+  // profile — owner ruling 2026-08-06. Their live rate may predate a price
+  // change, or have been set by hand at estimate time; quoting a fresh number
+  // beside it invites a "why is this different?" dispute. Upgrade wording no
+  // longer opens that door (it previously did): an upgrade is a conversation,
+  // routed to Waves, not a self-serve re-quote. The one-time keys stay
+  // exempt — those are repeatable purchases, not an existing obligation.
+  const REPEATABLE_ONE_TIME_KEYS = ['palm', 'one_time_lawn', 'one_time_mosquito'];
   const alreadyIncluded = requestedServices.filter(key =>
-    currentSet.has(key) &&
-    !upgradeIntent &&
-    !['palm', 'one_time_lawn', 'one_time_mosquito'].includes(key)
+    currentSet.has(key) && !REPEATABLE_ONE_TIME_KEYS.includes(key)
   );
   const servicesToPrice = requestedServices.filter(key => !alreadyIncluded.includes(key));
 
@@ -599,12 +601,15 @@ async function buildCustomerPricingResponse({ customer, prompt, targetTier, db, 
         showEstimatedPlanMonthly: !billingModelMismatch,
         baselineMismatch: billingModelMismatch,
       });
+      // Second gate on the same rule: even if a future path routes an owned
+      // service into servicesToPrice, no price for it reaches the customer.
+      if (quoted.alreadyHasRelatedService && !REPEATABLE_ONE_TIME_KEYS.includes(option.serviceKey)) continue;
       if (quoted.monthly || quoted.oneTime || quoted.dueAtStart) options.push(quoted);
     }
   }
 
   const message = alreadyIncluded.length && !options.length
-    ? `You already have ${alreadyIncluded.map(toKeyLabel).join(', ')} on this property.`
+    ? `You already have ${alreadyIncluded.map(toKeyLabel).join(', ')} on this property, so I am not re-pricing it here — your current rate stands. Send Waves a request and we will review your plan with you.`
     : options.length
       ? `I priced ${[...new Set(servicesToPrice.map(toKeyLabel))].join(', ')} using the property tied to your portal.`
       : 'I could not price that request automatically. Waves can review it manually.';
