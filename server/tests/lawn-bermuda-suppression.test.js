@@ -208,6 +208,60 @@ describe('save-replay failClosed propagation', () => {
   });
 });
 
+describe('send-boundary gate for persisted suppression estimates', () => {
+  const { estimateDataCarriesBermudaSuppression } = require('../services/admin-estimate-persistence');
+  const { assertEstimateSendable } = require('../routes/admin-estimates')._internals;
+  const prevGate = process.env.GATE_BERMUDA_SUPPRESSION;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION;
+    else process.env.GATE_BERMUDA_SUPPRESSION = prevGate;
+  });
+
+  test('detector recognizes all three persisted carriers (and nothing else)', () => {
+    expect(estimateDataCarriesBermudaSuppression({ engineRequest: { options: { bermudaSuppression: true } } })).toBe(true);
+    expect(estimateDataCarriesBermudaSuppression({ engineInputs: { services: { lawn: { bermudaSuppression: true } } } })).toBe(true);
+    expect(estimateDataCarriesBermudaSuppression({ result: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } })).toBe(true);
+    expect(estimateDataCarriesBermudaSuppression(JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }))).toBe(true);
+    expect(estimateDataCarriesBermudaSuppression({ engineRequest: { options: {} }, result: { lawnMeta: { bermudaSuppression: null } } })).toBe(false);
+    expect(estimateDataCarriesBermudaSuppression('not json')).toBe(false);
+    expect(estimateDataCarriesBermudaSuppression(null)).toBe(false);
+  });
+
+  test('a persisted suppression estimate is NOT sendable while the gate is off', () => {
+    delete process.env.GATE_BERMUDA_SUPPRESSION;
+    const estimate = {
+      archived_at: null,
+      estimate_data: JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }),
+    };
+    let thrown;
+    try {
+      assertEstimateSendable(estimate);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeTruthy();
+    expect(thrown.code).toBe('BERMUDA_SUPPRESSION_GATED');
+  });
+
+  test('gate on: the suppression send-gate does not fire (later checks throw instead)', () => {
+    process.env.GATE_BERMUDA_SUPPRESSION = 'true';
+    const estimate = {
+      archived_at: null,
+      estimate_data: JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }),
+    };
+    let thrown;
+    try {
+      assertEstimateSendable(estimate);
+    } catch (err) {
+      thrown = err;
+    }
+    // It still fails (no token/status on this minimal row) — but NOT on the
+    // suppression gate.
+    expect(thrown).toBeTruthy();
+    expect(thrown.code).not.toBe('BERMUDA_SUPPRESSION_GATED');
+  });
+});
+
 describe('translateV2CallToV1Input GATE_BERMUDA_SUPPRESSION', () => {
   const PROFILE = { homeSqFt: 2000, stories: 1, lotSqFt: 8000, turfSf: 5000 };
   const prevGate = process.env.GATE_BERMUDA_SUPPRESSION;

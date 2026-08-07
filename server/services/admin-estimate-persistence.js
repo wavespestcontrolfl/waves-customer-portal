@@ -649,6 +649,23 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   }
 }
 
+// Does a persisted estimate carry the bermuda-suppression add-on? Checked at
+// the SEND and ACCEPT boundaries: a gate-on quote saved before the gate went
+// off would otherwise serve its stored v1-shaped rows without ever re-entering
+// priceLawnCare, letting a disabled add-on be published/accepted/billed
+// (codex #3272 r2). All three persisted carriers are checked — the replayable
+// request, the raw engine inputs, and the mapped result metadata.
+function estimateDataCarriesBermudaSuppression(estimateDataRaw) {
+  let d = estimateDataRaw;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch (_) { return false; }
+  }
+  if (!d || typeof d !== 'object') return false;
+  return d.engineRequest?.options?.bermudaSuppression === true
+    || d.engineInputs?.services?.lawn?.bermudaSuppression === true
+    || !!d.result?.lawnMeta?.bermudaSuppression;
+}
+
 // Decide the authoritative totals + audit columns for a save. Fails OPEN to the
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
@@ -1805,6 +1822,7 @@ module.exports = {
   reviseAdminEstimate,
   serverRecomputeFromEstimateData,
   resolveServerAuthoritativePricing,
+  estimateDataCarriesBermudaSuppression,
   compareClientToServer,
   sanitizeClientIdentityFields,
 };

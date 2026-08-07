@@ -35,6 +35,7 @@ const { smtpFallbackAllowed } = require('../services/email-fallback-gate');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
 const {
   createOrReuseAdminEstimate,
+  estimateDataCarriesBermudaSuppression,
   estimateExpiresAt,
   estimateReviseBlock,
   estimateViewUrl,
@@ -272,6 +273,17 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
   if (estimate.archived_at) {
     const err = new Error('Estimate is archived. Unarchive first.');
     err.statusCode = 400;
+    throw err;
+  }
+  // A persisted bermuda-suppression estimate is only sendable while the gate
+  // is LIVE: the send path serves stored rows without re-entering
+  // priceLawnCare, so a save-then-gate-off sequence would otherwise publish
+  // a disabled add-on (codex #3272 r2). Same fail-closed rail as pricing.
+  if (estimateDataCarriesBermudaSuppression(estimate.estimate_data || estimate.estimateData)
+    && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+    const err = new Error('This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before sending.');
+    err.statusCode = 409;
+    err.code = 'BERMUDA_SUPPRESSION_GATED';
     throw err;
   }
   // Estimator-engine YELLOW drafts carry review reasons (fallback sqft

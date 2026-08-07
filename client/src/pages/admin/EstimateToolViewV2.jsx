@@ -3965,7 +3965,13 @@ export default function EstimateToolViewV2({
       const options = {
         grassType: form.grassType || "st_augustine",
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
-        ...(bermudaSuppressionAvailable && form.svcLawn && form.grassType === "st_augustine" && form.bermudaSuppression
+        // Availability gates only the CHECKBOX (new selections); a selection
+        // already in the form — e.g. seeded from a saved estimate's inputs
+        // while the availability probe is still in flight — is ALWAYS
+        // forwarded, and the server's live gate rejects it loudly if off.
+        // Silently dropping it here priced an ordinary lawn ladder under a
+        // checked box (codex #3272 r2).
+        ...(form.svcLawn && form.grassType === "st_augustine" && form.bermudaSuppression
           ? { bermudaSuppression: true }
           : {}),
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
