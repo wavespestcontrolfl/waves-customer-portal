@@ -3016,6 +3016,12 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
   test('the dry condition ALONE is not the full idiom — without technician-confirms it blocks (both parts required)', () => {
     const r = guardrails.evaluate({ body: 'The lawn is safe once dry.' }, {});
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // The confirmation must concern TIMING — an unrelated technician
+    // confirmation (appointment address) is not the idiom's second part.
+    const unrelated = guardrails.evaluate({
+      body: 'The treatment is safe for pets once dry. Your technician confirms the appointment address.',
+    }, {});
+    expect(unrelated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
   test('attributive "safe pesticides" / "safe treatment options" blocks', () => {

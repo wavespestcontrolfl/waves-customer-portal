@@ -2940,7 +2940,9 @@ const REENTRY_SAFETY_SRCS = [
 // (a claim of safety in EVERY state) is not a condition at all — the window
 // rejects "wet" and the alternation suffix ("dry or wet") likewise.
 const DRY_CONDITION_RE = /\b(?:once|when|after|until)\b(?:(?!\bwet\b)[^.!?\n]){0,40}?\b(?:fully\s+|completely\s+)?dr(?:y|ies|ied)\b(?!\s*(?:or|and)\s+wet\b)/i;
-const TECH_CONFIRMS_RE = /\b(?:technicians?|techs?|applicators?|pros?)\b[^.!?\n]{0,60}?\b(?:confirms?|will\s+confirm|advises?|verif(?:y|ies)|lets?\s+you\s+know|gives?\s+you\s+the\s+all[-\s]clear)\b|\bconfirms?\s+(?:the\s+)?(?:timing|re-?entry|when\b)/i;
+// The confirmation must CONCERN re-entry timing — "your technician
+// confirms the appointment address" is not the idiom's second part.
+const TECH_CONFIRMS_RE = /\b(?:technicians?|techs?|applicators?|pros?)\b[^.!?\n]{0,60}?\b(?:confirms?|will\s+confirm|advises?(?:\s+on)?|verif(?:y|ies)|lets?\s+you\s+know)\b[^.!?\n]{0,30}?\b(?:timing|time|when\b|re-?entry|dry\w*|safe\b|all[-\s]clear)|\b(?:technicians?|techs?|applicators?|pros?)\b[^.!?\n]{0,60}?\bgives?\s+you\s+the\s+all[-\s]clear\b|\bconfirms?\s+(?:the\s+)?(?:timing|re-?entry|when\b)/i;
 
 function reentrySafetyClaimFinding(text) {
   const s = String(text || '');

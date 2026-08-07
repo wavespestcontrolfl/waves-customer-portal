@@ -1845,11 +1845,17 @@ class AutonomousRunner {
     // merely defaulted to the blog contract and continued.
     let targetPageType = null;
     let protectedTitle = false;
+    let liveDomains = null;
     try {
       const publisher = getAstroPublisher();
       const liveFm = publisher?.getLiveFrontmatter
         ? await publisher.getLiveFrontmatter(brief.target_url || brief.page_url || draft.page_url)
         : null;
+      // The live page's domains arm the brand-token guard below — metadata
+      // briefs may lack target_sites, and a spoke page with domains:null
+      // would let a literal hub brand in the title/description bypass the
+      // BRAND_TOKEN_LEAK P0.
+      liveDomains = Array.isArray(liveFm?.domains) ? liveFm.domains : null;
       const srcPath = typeof liveFm?._astro_source_path === 'string' ? liveFm._astro_source_path : null;
       if (srcPath) {
         if (srcPath.startsWith('src/content/blog/')) {
@@ -1925,7 +1931,14 @@ class AutonomousRunner {
         meta_description: draft.meta_description,
       },
       body: '',
-    }, deriveSyncGuardrailOptions(opp, brief));
+    }, {
+      ...deriveSyncGuardrailOptions(opp, brief),
+      // Live-page hydration, mirroring gate 3c's refresh posture: the
+      // resolved target's domains and page type override the brief-derived
+      // defaults.
+      ...(liveDomains != null ? { domains: liveDomains } : {}),
+      targetIsBlog: targetPageType === 'supporting-blog',
+    });
     // Same footprint refinement gate 3c applies: an LLM-dismissible
     // OFF_FOOTPRINT_CITY_CLAIM false positive must not park the rewrite;
     // classifier/module failure keeps the deterministic findings (fail
