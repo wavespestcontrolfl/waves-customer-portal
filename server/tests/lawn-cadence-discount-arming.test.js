@@ -54,6 +54,34 @@ describe('cadence discount arm switch (rollback semantics)', () => {
     }
   });
 
+  it('the discount ends at the table edge — >20k gets a per-app parity floor, no discount (owner ruling 2026-08-07)', () => {
+    // >LAWN_TABLE_MAX_SQFT is custom-quote territory. Skipping the caps
+    // alone is not enough (the extrapolation slope derives from the
+    // discounted 15k/20k anchor cells), so above the table 9x/12x per-app
+    // is FLOORED at the extrapolated 6x anchor per-app — literally "no
+    // frequency discount" — while the 2026-07-29 12x≤9x bound still holds.
+    for (const sqft of [20001, 25000, 30000]) {
+      const by = tiersByVisits(priceLawnCare({ lawnSqFt: sqft }, { tier: 'standard' }));
+      expect(by[9].perApp).toBeGreaterThanOrEqual(by[6].perApp - 0.01);
+      expect(by[12].perApp).toBeGreaterThanOrEqual(by[6].perApp - 0.01);
+      expect(by[12].perApp).toBeLessThanOrEqual(by[9].perApp + 0.01);
+    }
+    // The cap still binds AT the table edge itself.
+    const atEdge = tiersByVisits(priceLawnCare({ lawnSqFt: 20000 }, { tier: 'standard' }));
+    expect(atEdge[9].perApp).toBeLessThanOrEqual(atEdge[6].perApp * 0.96 + 0.01);
+    // A rolled-back discount removes the parity floor too: disarmed >20k
+    // keeps the raw extrapolation of whatever grid is live (in a real
+    // rollback that grid is the RESTORED pre-discount one — see the
+    // db-bridge e2e verification on #3274), with only the 12x≤9x bound.
+    // Grid-independent invariants: the 6x anchor never moves, and the
+    // premium bound survives.
+    const armed25k = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard' }));
+    LAWN_PRICING_V2.cadenceFreqDiscountArmed = false;
+    const disarmed25k = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard' }));
+    expect(disarmed25k[6].perApp).toBe(armed25k[6].perApp);
+    expect(disarmed25k[12].perApp).toBeLessThanOrEqual(disarmed25k[9].perApp + 0.01);
+  });
+
   it('an explicit true (or absent key) keeps the caps armed', () => {
     const armed = tiersByVisits(priceLawnCare({ lawnSqFt: 12500 }, { tier: 'standard' }));
     // matches the migration-applied grid: -4%/-8% off the 6x anchor

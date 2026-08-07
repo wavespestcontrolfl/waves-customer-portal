@@ -1414,32 +1414,48 @@ function lawnLookup(lp, sf, freqIdx) {
   // disarms via applyServerLawnPricingConfig so the caps stop re-clamping
   // restored bracket values (codex #3274 r3 P1, server mirror). The
   // 2026-07-29 12x-never-above-9x bound below stays unconditional.
-  const discountArmed = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false;
-  const standard = discountArmed ? lawnLookupUncapped(lp, sf, 0) : null;
+  // The discount also ends at the table edge (owner ruling 2026-08-07 on
+  // #3274, server mirror): >LAWN_TABLE_MAX_SQFT is custom-quote territory.
+  // Skipping the caps alone is not enough — the extrapolation slope derives
+  // from the DISCOUNTED 15k/20k anchor cells, so the discount would leak
+  // past the table edge through the slope. Above the table a per-app
+  // PARITY FLOOR against the extrapolated 6x anchor removes it
+  // (m9 ≥ ceil(m6·1.5), m12 ≥ ceil(m6·2)) and restores profit ordering.
+  const discountLive = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false;
+  const inTable = sf <= LAWN_TABLE_MAX_SQFT;
+  const standard = discountLive ? lawnLookupUncapped(lp, sf, 0) : null;
   if (freqIdx === 1) {
     if (standard && standard.monthly > 0) {
-      result.monthly = Math.min(
-        result.monthly,
-        Math.floor(standard.monthly * LAWN_ENH_MONTHLY_CAP_RATIO),
-      );
+      result.monthly = inTable
+        ? Math.min(result.monthly, Math.floor(standard.monthly * LAWN_ENH_MONTHLY_CAP_RATIO))
+        : Math.max(result.monthly, Math.ceil(standard.monthly * 1.5));
     }
     return result;
   }
   const enhancedUncapped = lawnLookupUncapped(lp, sf, 1).monthly;
-  const bounds = [];
   if (standard && standard.monthly > 0) {
-    bounds.push(Math.floor(standard.monthly * LAWN_PREM_MONTHLY_CAP_RATIO));
-    const enhancedCapped = Math.min(
-      enhancedUncapped,
-      Math.floor(standard.monthly * LAWN_ENH_MONTHLY_CAP_RATIO),
-    );
-    if (enhancedCapped > 0) bounds.push(Math.floor(enhancedCapped * 12 / 9));
+    if (inTable) {
+      const bounds = [Math.floor(standard.monthly * LAWN_PREM_MONTHLY_CAP_RATIO)];
+      const enhancedCapped = Math.min(
+        enhancedUncapped,
+        Math.floor(standard.monthly * LAWN_ENH_MONTHLY_CAP_RATIO),
+      );
+      if (enhancedCapped > 0) bounds.push(Math.floor(enhancedCapped * 12 / 9));
+      result.monthly = Math.min(result.monthly, ...bounds);
+    } else {
+      // Parity floor first, then the 2026-07-29 12x≤9x bound against the
+      // parity-floored enhanced (≥ std·1.5, so it can't undo the floor).
+      const enhancedFloored = Math.max(enhancedUncapped, Math.ceil(standard.monthly * 1.5));
+      result.monthly = Math.max(result.monthly, Math.ceil(standard.monthly * 2));
+      if (enhancedFloored > 0) {
+        result.monthly = Math.min(result.monthly, Math.floor(enhancedFloored * 12 / 9));
+      }
+    }
   } else if (enhancedUncapped > 0) {
     // Disarmed: the pre-discount premium bound against the as-stored
     // enhanced column, exactly the 2026-07-29 behavior.
-    bounds.push(Math.floor(enhancedUncapped * 12 / 9));
+    result.monthly = Math.min(result.monthly, Math.floor(enhancedUncapped * 12 / 9));
   }
-  if (bounds.length) result.monthly = Math.min(result.monthly, ...bounds);
   return result;
 }
 
@@ -2104,6 +2120,7 @@ export function calculateEstimate(inputs) {
     // discount each keep the pre-existing behavior bit-for-bit.
     if (LAWN_PRICING_V2.useLawnCostFloor === true
       && LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false
+      && lsf <= LAWN_TABLE_MAX_SQFT
       && lawnCalcs.some((c) => c.floorApplied)) {
       const byFreq = {};
       lawnCalcs.forEach((c) => { byFreq[c.f.v] = c; });

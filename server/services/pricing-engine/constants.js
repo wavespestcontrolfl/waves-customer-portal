@@ -340,14 +340,20 @@ const LAWN_TABLE_MAX_SQFT = 20000;
 //   the caps do not bind those cells. Accepted: same class as the
 //   long-standing small-lawn shape, and lawn floors are report-only
 //   (owner 2026-07-17).
-// - ABOVE LAWN_TABLE_MAX_SQFT the ordering claim does NOT hold on
-//   st_augustine/zoysia and cannot be made to hold at these rates:
-//   incremental visit cost grows ~$28 per 1,000 sqft while capped
-//   incremental 9x revenue grows ~$18, so 9x falls behind 6x past the
-//   crossover (≈-$33/yr at 30,000 sqft). Discount policy for >20k sqft
-//   lawns is an owner ruling, tracked on PR #3274. All envelopes are
-//   pinned per track by lawn-cadence-profit-ordering.test.js — widening
-//   one should fail loudly.
+// - ABOVE LAWN_TABLE_MAX_SQFT the discount does NOT apply (owner ruling
+//   2026-08-07 on #3274). A flat -4% there made 9x LESS profitable than 6x
+//   on st_augustine/zoysia (incremental visit cost grows ~$28 per 1,000
+//   sqft against ~$18 of capped incremental revenue, ≈-$33/yr at 30k), and
+//   the industry (TruGreen/Lawn Doctor) publishes no pricing at all past
+//   ~a half acre — every >20k quote is already custom-quote-flagged and
+//   priced on site. Because the extrapolation slope derives from the
+//   DISCOUNTED 15k/20k anchor cells, skipping the caps alone would leak
+//   the discount past the table edge — so extrapolated 9x/12x lookups
+//   carry a per-application PARITY FLOOR against the extrapolated 6x
+//   anchor instead (no discount, profit ordering restored everywhere;
+//   extrapolated sag pinned at ZERO). All envelopes are pinned per track
+//   by lawn-cadence-profit-ordering.test.js — widening one should fail
+//   loudly.
 //
 // Applied to the MONTHLY bracket cell, since pa(v) = monthly * 12 / v:
 //   m9  <= m6 * (1 - 0.04) * 9/6  = m6 * 1.44

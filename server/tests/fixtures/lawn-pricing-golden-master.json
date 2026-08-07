@@ -1742,9 +1742,9 @@
       }
     },
     "out": {
-      "perApp": 188,
-      "annual": 1692,
-      "monthly": 141,
+      "perApp": 196,
+      "annual": 1764,
+      "monthly": 147,
       "freq": 9,
       "tier": "enhanced",
       "track": "st_augustine",
@@ -1753,8 +1753,8 @@
       "pricingVersion": "LAWN_PRICING_V2_FREQ_DISCOUNT",
       "customQuoteFlag": true,
       "marginFloorOk": false,
-      "marketMonthly": 141,
-      "marketAnnual": 1692
+      "marketMonthly": 147,
+      "marketAnnual": 1764
     }
   }
 ]

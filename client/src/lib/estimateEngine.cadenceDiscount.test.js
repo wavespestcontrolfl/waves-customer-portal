@@ -79,6 +79,27 @@ describe("cadence discount arm switch — client fallback mirror", () => {
     expect(disarmed[12].mo).toBe(122);
   });
 
+  it("the discount ends at the table edge — >20k gets a per-app parity floor (owner ruling 2026-08-07)", () => {
+    // Above the table 9x/12x per-app is floored at the extrapolated 6x
+    // anchor per-app (no frequency discount; server mirror), and the
+    // 12x≤9x bound still holds. Disarming removes the floor along with
+    // the caps (pre-discount extrapolation).
+    const armed = lawnByVisits(calculateEstimate(lawnInput({ measuredTurfSf: 25000 })));
+    expect(armed[9].pa).toBeGreaterThanOrEqual(armed[6].pa - 0.01);
+    expect(armed[12].pa).toBeGreaterThanOrEqual(armed[6].pa - 0.01);
+    expect(armed[12].pa).toBeLessThanOrEqual(armed[9].pa + 0.01);
+
+    applyServerLawnPricingConfig({ cadenceFreqDiscountArmed: false });
+    const disarmed = lawnByVisits(calculateEstimate(lawnInput({ measuredTurfSf: 25000 })));
+    // Disarmed switches to the pre-discount grid: the 6x anchor is
+    // identical in both grids, the 12x≤9x bound holds, and the raw
+    // pre-discount 9x extrapolation sits at-or-above the anchor per-app
+    // on its own (which is why the parity floor is the armed equivalent).
+    expect(disarmed[6].pa).toBe(armed[6].pa);
+    expect(disarmed[12].pa).toBeLessThanOrEqual(disarmed[9].pa + 0.01);
+    expect(disarmed[9].pa).toBeGreaterThanOrEqual(disarmed[6].pa - 0.01);
+  });
+
   it("absent/invalid config keeps the armed default (kill-value pattern)", () => {
     applyServerLawnPricingConfig({});
     const by = lawnByVisits(calculateEstimate(lawnInput({ measuredTurfSf: 12500 })));
