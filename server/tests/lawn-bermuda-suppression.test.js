@@ -209,7 +209,7 @@ describe('save-replay failClosed propagation', () => {
 });
 
 describe('send-boundary gate for persisted suppression estimates', () => {
-  const { estimateDataCarriesBermudaSuppression } = require('../services/admin-estimate-persistence');
+  const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
   const { assertEstimateSendable } = require('../routes/admin-estimates')._internals;
   const prevGate = process.env.GATE_BERMUDA_SUPPRESSION;
   afterEach(() => {

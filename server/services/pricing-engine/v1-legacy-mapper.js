@@ -1169,4 +1169,24 @@ function mapV1ToLegacyShape(v1Result) {
   };
 }
 
-module.exports = { mapV1ToLegacyShape };
+// Does a persisted estimate carry the bermuda-suppression add-on? Checked at
+// the SEND and ACCEPT boundaries: a gate-on quote saved before the gate went
+// off would otherwise serve its stored v1-shaped rows without ever re-entering
+// priceLawnCare, letting a disabled add-on be published/accepted/billed
+// (codex #3272 r2). All three persisted carriers are checked — the replayable
+// request, the raw engine inputs, and the mapped result metadata (this module
+// defines that shape, which is why the detector lives here — several route
+// tests jest.mock admin-estimate-persistence with partial factories, so the
+// detector must not ride that module).
+function estimateDataCarriesBermudaSuppression(estimateDataRaw) {
+  let d = estimateDataRaw;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch (_) { return false; }
+  }
+  if (!d || typeof d !== 'object') return false;
+  return d.engineRequest?.options?.bermudaSuppression === true
+    || d.engineInputs?.services?.lawn?.bermudaSuppression === true
+    || !!d.result?.lawnMeta?.bermudaSuppression;
+}
+
+module.exports = { mapV1ToLegacyShape, estimateDataCarriesBermudaSuppression };

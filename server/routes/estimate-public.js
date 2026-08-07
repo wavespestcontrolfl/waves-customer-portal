@@ -8185,7 +8185,7 @@ router.put('/:token/accept', async (req, res, next) => {
     // would otherwise charge a disabled add-on (codex #3272 r2). Retries of
     // an ALREADY-accepted estimate stay untouched (that acceptance happened).
     if (estimate.status !== 'accepted') {
-      const { estimateDataCarriesBermudaSuppression } = require('../services/admin-estimate-persistence');
+      const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
       if (estimateDataCarriesBermudaSuppression(estimate.estimate_data)
         && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
         return res.status(409).json({

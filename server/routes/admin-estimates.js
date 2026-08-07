@@ -35,12 +35,12 @@ const { smtpFallbackAllowed } = require('../services/email-fallback-gate');
 const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
 const {
   createOrReuseAdminEstimate,
-  estimateDataCarriesBermudaSuppression,
   estimateExpiresAt,
   estimateReviseBlock,
   estimateViewUrl,
   reviseAdminEstimate,
 } = require('../services/admin-estimate-persistence');
+const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
