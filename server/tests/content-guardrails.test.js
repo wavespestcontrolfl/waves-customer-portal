@@ -3043,6 +3043,14 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(keepOff.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const allow = guardrails.evaluate({ body: 'Allow 30 minutes of drying time before returning.' }, {});
     expect(allow.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const stayOff = guardrails.evaluate({ body: 'Stay off the lawn for 30 minutes.' }, {});
+    expect(stayOff.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const doNot = guardrails.evaluate({ body: 'Do not re-enter for 30 minutes.' }, {});
+    expect(doNot.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const needsToDry = guardrails.evaluate({ body: 'The treatment needs 30 minutes to dry.' }, {});
+    expect(needsToDry.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const directClaim = guardrails.evaluate({ body: 'Our pesticides are completely safe.' }, {});
+    expect(directClaim.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     // No figure, label-directed — legal.
     const legal = guardrails.evaluate({ body: 'Keep pets off the lawn until it is dry per the label, and your technician confirms timing.' }, {});
     expect(legal.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
@@ -3091,6 +3099,18 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
     const r2 = guardrails.evaluate({ body: 'We can help with wildlife removal when raccoons move into the attic.' }, {});
     expect(r2.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('topic-specific ownership verbs block — install/trap/remove', () => {
+    const install = guardrails.evaluate({ body: 'We install attic insulation as part of rodent-proofing.' }, {});
+    expect(install.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const trap = guardrails.evaluate({ body: 'Our technicians trap wildlife humanely.' }, {});
+    expect(trap.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const remove = guardrails.evaluate({ body: 'We remove raccoons from attics across Sarasota.' }, {});
+    expect(remove.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    // Informational: a wildlife specialist doing these stays legal.
+    const info = guardrails.evaluate({ body: 'A licensed wildlife specialist traps raccoons and relocates them per FWC rules.' }, {});
+    expect(info.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
   });
 
   test('"call Waves for insulation" blocks', () => {

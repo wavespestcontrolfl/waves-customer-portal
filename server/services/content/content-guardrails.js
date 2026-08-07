@@ -2888,15 +2888,15 @@ const REENTRY_SAFETY_SRCS = [
   "\\bsafe\\s+(?:for\\s+(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies))\\s+(?:and\\s+(?:kids?|children|pets?|dogs?|cats?)\\s+)?)?to\\s+(?:re-?enter|return|go\\s+back|come\\s+back|walk\\s+on|play\\s+on|be\\s+(?:in|on|inside|around))\\b",
   "\\bre-?entry\\s+(?:is|becomes?|will\\s+be)\\s+(?:completely\\s+|totally\\s+|perfectly\\s+)?(?:safe|harmless|risk[-\\s]?free)\\b",
   "\\bsafe\\s+(?:for\\s+)?re-?entry\\b",
-  // "the treatment/product/spray/lawn is safe (for kids/pets/around …)"
-  "\\b(?:treatments?|products?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:completely\\s+|totally\\s+|perfectly\\s+|entirely\\s+|100\\s?%\\s+)?safe\\b",
+  // "the treatment/product/pesticide/lawn is safe (for kids/pets/around …)"
+  "\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:completely\\s+|totally\\s+|perfectly\\s+|entirely\\s+|100\\s?%\\s+)?safe\\b",
   // "safe for/around kids, pets, pollinators…"
   "\\bsafe\\s+(?:for|around)\\s+(?:your\\s+)?(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies)|pollinators?|bees?|wildlife)\\b",
   // "pet-safe" / "child-safe" / "kid-safe" / "family-safe" compounds
   "\\b(?:pet|child|kid|family)[-\\s]safe\\b",
   // Adjective-before-product forms: "safe pesticides", "our safe treatment
   // options" — the unconditional claim in attributive position.
-  "\\bsafe\\s+(?:pesticides?|products?|treatments?|sprays?|applications?|chemicals?|materials?|solutions?|options?|granules?|baits?|formulas?)\\b",
+  "\\bsafe\\s+(?:pesticides?|insecticides?|herbicides?|products?|treatments?|sprays?|applications?|chemicals?|materials?|solutions?|options?|granules?|baits?|formulas?)\\b",
   // ONLY "EPA-approved" is banned — "EPA-registered"/"EPA-exempt" is the
   // wording AGENTS.md requires.
   "\\bEPA[-\\s]?approved\\b",
@@ -2910,6 +2910,11 @@ const REENTRY_SAFETY_SRCS = [
   `\\bdr(?:y|ies|ied)\\s+(?:in|within|after)\\s+${REENTRY_DURATION_SRC}\\b`,
   `\\b(?:wait|allow|give\\s+it)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry|return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*|dry\\w*|drying)`,
   `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\bfor\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
+  `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\bfor\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*)\\b[^.!?\\n]{0,30}?\\bfor\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+)?${REENTRY_DURATION_SRC}\\b`,
+  // "needs 30 minutes to dry", "30 minutes of drying"
+  `\\b${REENTRY_DURATION_SRC}\\s+(?:to\\s+dry|of\\s+drying)\\b`,
 ];
 
 // The APPROVED conditional idiom has TWO required parts (AGENTS.md): the
@@ -2979,6 +2984,13 @@ const BANNED_TOPIC_SRCS = [
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
   // "our fumigation/insulation/wildlife-trapping service/program/team"
   `\\bour\\s+${BANNED_TOPIC_SRC}\\s+(?:services?|programs?|teams?|offerings?|packages?|crews?)\\b`,
+  // Topic-specific ownership verbs: "we install attic insulation", "our
+  // technicians trap wildlife", "we remove raccoons", "we sell
+  // door-to-door" — ownership expressed through the ACTION verb rather
+  // than offer/provide.
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}installs?\\s+${BANNED_TOPIC_GAP_SRC}insulation\\b`,
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:sell|market|canvass)\\w*\\s+${BANNED_TOPIC_GAP_SRC}door[-\\s]?to[-\\s]?door\\b`,
   // "schedule/book (your) fumigation …" — on OUR pages a bare CTA presents
   // the topic as our service even without "with us" (Codex audit). A
   // THIRD-PARTY referral stays legal via the negative lookahead: "schedule
