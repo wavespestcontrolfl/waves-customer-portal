@@ -2909,7 +2909,7 @@ const REENTRY_SAFETY_SRCS = [
   // "environmentally safe", "perfectly pet safe") count as the same claim;
   // the qualifier gap is negation-guarded so "is not safe" stays a
   // disclaimer handled by the polarity guards.
-  `\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?safe\\b`,
+  `\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|remains?|stays?)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b`,
   // "safe for/around kids, pets, pollinators…" — PESTICIDE context
   // required (Codex PR r2): "the repaired screen is safe for pets" and
   // "plants that are safe for pollinators" are legal educational copy; the
@@ -2945,8 +2945,11 @@ const REENTRY_SAFETY_SRCS = [
   // play) require treated/application context in the same sentence — "wait
   // 30 minutes before returning to check whether ants took the bait" is
   // timing advice, not a re-entry figure (Codex PR r1).
-  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry|dry\\w*|drying)`,
-  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*)\\b[^.!?\\n]{0,50}?\\b(?:treated|treatment|application|sprayed|lawn|yard|turf|grass|inside|indoors|home|house)\\b`,
+  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:for\\s+)?(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:re-?enter\\w*|re-?entry|dry\\w*|drying)`,
+  `\\b(?:wait|allow|give\\s+it|requires?|needs?|takes?)\\s+(?:for\\s+)?(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,50}?\\b(?:enter\\w*|return\\w*|going\\s+back|go\\s+back|walk\\w*|play\\w*)\\b[^.!?\\n]{0,50}?\\b(?:treated|treatment|application|sprayed|lawn|yard|turf|grass|inside|indoors|home|house)\\b`,
+  // Object-first drying: "allow the spray to dry for 30 minutes", "needs to
+  // dry for 30 minutes" (Codex PR r3).
+  `\\b(?:to\\s+dry|dry(?:ing)?)\\s+for\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
   `\\bkeep\\s+(?:pets?|kids?|children|dogs?|cats?|everyone|people|family)\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
   // "stay off the lawn for 30 minutes", "do not re-enter for 30 minutes"
   `\\b(?:stay|remain)\\s+(?:off|out\\s+of|away\\s+from|inside)\\b[^.!?\\n]{0,40}?\\b(?:for|until)\\s+(?:about\\s+|at\\s+least\\s+|up\\s+to\\s+|between\\s+)?${REENTRY_DURATION_SRC}\\b`,
@@ -3052,13 +3055,19 @@ const BANNED_TOPIC_SRCS = [
   // PR r1) and with bounded, negation-guarded modifiers ("our professional
   // wildlife removal", "our humane raccoon removal" — Codex PR r2);
   // referral/partner attributions stay legal.
-  `\\bour\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referral|partners?|specialists?))`,
+  // Referral framing is exempt on EITHER side of the topic (Codex PR r3):
+  // "our referral for wildlife removal goes to licensed partners" is the
+  // wanted language — the modifier gap must not absorb referral nouns.
+  `\\bour\\s+(?:(?!${NEGATION_WORD_SRC}\\b|referrals?\\b|partners?\\b|specialists?\\b)[\\w-]+\\s+){0,2}?${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referral|partners?|specialists?))`,
   // Topic-specific ownership verbs: "we install attic insulation", "our
   // technicians trap wildlife", "we remove raccoons", "we sell
   // door-to-door" — ownership expressed through the ACTION verb rather
   // than offer/provide.
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}installs?\\s+${BANNED_TOPIC_GAP_SRC}insulation\\b`,
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
+  // Get-out paraphrase of wildlife removal: "we get raccoons out of your
+  // attic", "our team gets squirrels out" (Codex PR r3).
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}get(?:s|ting)?\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b[^.!?\\n]{0,20}?\\bout\\b`,
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?))\\s+${NON_NEGATED_FILLER_SRC}(?:sell|market|canvass)\\w*\\s+${BANNED_TOPIC_GAP_SRC}door[-\\s]?to[-\\s]?door\\b`,
   // Direct banned-service verbs: "we fumigate homes", "our technicians
   // tent homes across Sarasota" — ownership expressed as the action itself.

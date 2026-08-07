@@ -3031,6 +3031,20 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(twelve.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('harmless / risk-free are the same unconditional claim (Codex PR r3)', () => {
+    const harmless = guardrails.evaluate({ body: 'This pesticide is harmless to pets.' }, {});
+    expect(harmless.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const riskFree = guardrails.evaluate({ body: 'The treatment is risk-free around children.' }, {});
+    expect(riskFree.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('object-first and for-led drying durations block (Codex PR r3)', () => {
+    const allowDry = guardrails.evaluate({ body: 'Allow the spray to dry for 30 minutes before re-entry.' }, {});
+    expect(allowDry.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const waitFor = guardrails.evaluate({ body: 'Wait for thirty minutes before entering the treated room.' }, {});
+    expect(waitFor.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('safe-for claims about NON-pesticide objects stay legal (Codex PR r2 false positive)', () => {
     for (const body of [
       'The repaired screen is safe for pets.',
@@ -3265,6 +3279,15 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     }
     const referral = guardrails.evaluate({ body: 'Our fumigation referral partner handles the tenting itself.' }, {});
     expect(referral.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('get-out phrasing is wildlife removal; referral framing BEFORE the topic stays legal (Codex PR r3)', () => {
+    const getOut = guardrails.evaluate({ body: 'Our team gets raccoons out of attics across Sarasota.' }, {});
+    expect(getOut.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const weGet = guardrails.evaluate({ body: 'We get squirrels out of your attic humanely.' }, {});
+    expect(weGet.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const referralBefore = guardrails.evaluate({ body: 'Our referral for wildlife removal goes to licensed partners.' }, {});
+    expect(referralBefore.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
   });
 
   test('modified possessives block too — "our professional wildlife removal", "our humane raccoon removal" (Codex PR r2)', () => {
