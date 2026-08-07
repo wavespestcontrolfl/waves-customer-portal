@@ -105,6 +105,7 @@ function makeMock(initial = {}, opts = {}) {
         return { returning: async () => [inserted] };
       },
       async update(patch) { if (throwUpdateFor.has(this.table)) throw new Error('pg blip on update'); const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
+      async del() { const rows = filtered(this); const arr = state.rows[this.table] || []; rows.forEach((r) => { const i = arr.indexOf(r); if (i >= 0) arr.splice(i, 1); }); return rows.length; },
       then(res, rej) { return Promise.resolve(filtered(this)).then(res, rej); },
     };
     return q;
@@ -1171,7 +1172,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       customer_properties: [{ id: 'prop-oak2', customer_id: 'rl2', is_primary: false, address_line1: '99 Oak St', zip: '34293' }],
       scheduled_services: [
         { id: 'rl2-1', customer_id: 'rl2', service_id: 'svc-trap', status: 'completed', scheduled_date: d(10), service_key: 'rodent_trapping', property_id: null },
-        { id: 'rl2-2', customer_id: 'rl2', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3, property_id: 'prop-oak2' },
+        { id: 'rl2-2', customer_id: 'rl2', service_id: 'svc-trap', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping', follow_up_interval_days: 3, property_id: 'prop-oak2' },
       ],
     });
     db.mockImplementation(mock);
@@ -1804,6 +1805,62 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     });
     db.mockImplementation(mock);
     plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'nb2', scheduledServiceId: 'nb2-fin' });
+    expect(plan.seriesFinal).toBe(true);
+    expect(plan.plan).toHaveLength(3);
+  });
+
+  test('r21: a stuck in-flight opener parks the final durably and the cron redeems it; report-less followup-SKU visits are never openers', async () => {
+    mockGates.reviewSequences = true;
+    const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+
+    // ② Retry window exhausts against a stuck in-flight opener → a
+    // 'deferred' parking row persists the final; once the opener settles,
+    // processReviewSequences redeems it into a real cadence.
+    const mock = makeMock({
+      customers: [{ id: 'pk', first_name: 'Ann', last_name: 'Q', phone: '+19410000068', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-pk', customer_id: 'pk', scheduled_service_id: 'pk-2' }],
+      scheduled_services: [
+        { id: 'pk-1', customer_id: 'pk', service_id: 'svc-wt', status: 'completed', scheduled_date: d(2), service_key: 'wildlife_trapping' },
+        { id: 'pk-2', customer_id: 'pk', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+      ],
+      review_sequences: [{ id: 'seq-stuck', customer_id: 'pk', scheduled_service_id: 'pk-1', status: 'active', current_step: 0, next_run_at: null, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]) }],
+    });
+    db.mockImplementation(mock);
+    const prev = ReviewService._SUPERSEDE_RETRY_DELAY_MS;
+    ReviewService._SUPERSEDE_RETRY_DELAY_MS = 1;
+    let res;
+    try {
+      res = await ReviewService.enrollPostService({ customerId: 'pk', serviceRecordId: 'sr-pk', completedAt: new Date() });
+    } finally {
+      ReviewService._SUPERSEDE_RETRY_DELAY_MS = prev;
+    }
+    expect(res.started).toBe(false);
+    expect(res.reason).toBe('deferred_inflight');
+    const parked = mock.__state.rows.review_sequences.find((r) => r.status === 'deferred');
+    expect(parked).toBeTruthy();
+    expect(parked.stop_reason).toBe('opener_in_flight');
+
+    // The opener settles; make the parking row due and run the cron sweep.
+    const stuck = mock.__state.rows.review_sequences.find((r) => r.id === 'seq-stuck');
+    stuck.status = 'completed';
+    parked.next_run_at = new Date(Date.now() - 1000);
+    const out = await ReviewService.processReviewSequences();
+    expect(out.redeemed).toBe(1);
+    const replacement = mock.__state.rows.review_sequences.find((r) => r.status === 'active');
+    expect(replacement).toBeTruthy();
+    expect(JSON.parse(replacement.plan)).toHaveLength(3);
+
+    // ③ A followup-SKU visit with NO report and an out-of-window opener is
+    // still a follow-up by catalog definition — final cadence, not an
+    // opener ask.
+    const mock2 = makeMock({
+      scheduled_services: [
+        { id: 'fk-1', customer_id: 'fk', service_id: 'svc-trap', status: 'completed', scheduled_date: d(45), service_key: 'rodent_trapping' },
+        { id: 'fk-2', customer_id: 'fk', service_id: 'svc-trap-fu', status: 'completed', scheduled_date: d(0), service_key: 'rodent_trapping_followup', follow_up_interval_days: 3 },
+      ],
+    });
+    db.mockImplementation(mock2);
+    const plan = await ReviewService.resolveSequencePlanForEnrollment({ customerId: 'fk', scheduledServiceId: 'fk-2' });
     expect(plan.seriesFinal).toBe(true);
     expect(plan.plan).toHaveLength(3);
   });

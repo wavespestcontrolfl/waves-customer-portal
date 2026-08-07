@@ -59,53 +59,9 @@ function trappingWindowDaysFor(serviceKey, intervalDays) {
   if (serviceKey === "rodent_exclusion") return Math.min(60, intervalDays * 2);
   return Math.min(60, Math.max(30, intervalDays * 2));
 }
-// Stamped-address conflict for premise comparison — CANONICAL forms via the
-// property-dedup streetKey ("123 Main St." == "123 Main Street", suffixes
-// never stripped) and normalizeZip, the same identity stampedAddressDiverges
-// uses (codex #3243 r6 P1: a parallel whitespace-only rule split equivalent
-// formats into different premises). Each leg requires BOTH sides present —
-// a missing value is unknown, not different.
-function premiseStampConflicts(a, b) {
-  const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require("./customer-properties");
-  const sa = streetKey(a?.service_address_line1);
-  const sb = streetKey(b?.service_address_line1);
-  if (!sa || !sb) return false;
-  if (sa !== sb) return true;
-  // Unit leg (codex #3243 r7 P2): streetKey is deliberately unit-stripped,
-  // so two units at one street key identically — compare the unit identity
-  // (explicit line2, else embedded in line1) when both sides carry one.
-  const ua = unitKey(a?.service_address_line2) || streetEmbeddedUnitKey(a?.service_address_line1);
-  const ub = unitKey(b?.service_address_line2) || streetEmbeddedUnitKey(b?.service_address_line1);
-  // One-sided units diverge too (codex #3243 r10 P2): "100 Main St Apt 4"
-  // vs the unitless "100 Main St" is a sub-unit, not the same premise.
-  // Errs toward fewer merges — the safe direction for cadence position.
-  if ((ua || ub) && ua !== ub) return true;
-  const za = normalizeZip(a?.service_address_zip);
-  const zb = normalizeZip(b?.service_address_zip);
-  if (za && zb && za !== zb) return true;
-  const cityNorm = (v) => String(v == null ? "" : v).trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-  const ca = cityNorm(a?.service_address_city);
-  const cb = cityNorm(b?.service_address_city);
-  return !!(ca && cb && ca !== cb);
-}
-// A stamp matching a reference's street but omitting the unit INHERITS the
-// reference's unit (codex #3243 r12 P2 — the canonical stamped-address rule:
-// phone extractions often omit line 2, so a missing stamped unit is unknown,
-// not different). A stamp that ADDS a unit the reference lacks stays
-// divergent (r10: a sub-unit is not the whole-street premise).
-function inheritReferenceUnit(row, reference) {
-  const { streetKey, unitKey, streetEmbeddedUnitKey } = require("./customer-properties");
-  if (!row || !reference) return row;
-  const rowUnit = unitKey(row.service_address_line2) || streetEmbeddedUnitKey(row.service_address_line1);
-  if (rowUnit) return row;
-  // The reference's unit may live in line 2 OR embedded in its street line
-  // ("100 Main St Apt 7" — codex #3243 r13 P2); either form inherits.
-  const refUnit = unitKey(reference.service_address_line2) || streetEmbeddedUnitKey(reference.service_address_line1);
-  if (!refUnit) return row;
-  const rs = streetKey(row.service_address_line1);
-  if (!rs || rs !== streetKey(reference.service_address_line1)) return row;
-  return { ...row, service_address_line2: reference.service_address_line2 || refUnit };
-}
+// Premise identity helpers live in the canonical stamped-address module
+// (codex #3243 r21 P1 — one implementation shared with GPS/tracking).
+const { premiseStampConflicts, inheritReferenceUnit } = require("./stamped-address");
 // Premise predicate for trapping history (codex #3243 r2+r3+r5 P2): a linked
 // NON-primary property (rental, second home) is strict; the primary premise
 // spans BOTH legacy NULL rows and rows carrying the backfilled primary
@@ -991,7 +947,13 @@ const ReviewService = {
           // makes it a middle, otherwise it carries the final cadence
           // (the exemption walk simply finds nothing when the opener is
           // outside the window, so the cap counts normally).
-          if (!trapPrior && visitDeclaredType === "followup") {
+          // The follow-up SKU is itself a position signal (codex #3243 r21
+          // P2): a rodent_trapping_followup visit with no report yet (the
+          // admin-completion-before-record path) is still a follow-up by
+          // catalog definition — never a series opener.
+          const positionalFollowup = visitDeclaredType === "followup"
+            || (visitDeclaredType == null && svc.service_key === "rodent_trapping_followup");
+          if (!trapPrior && positionalFollowup) {
             if (trapLaterLive) return { skip: "multi_treatment_middle" };
             // The opener may sit beyond the position window (that is why
             // trapPrior is null) — recover the line's premise history over
@@ -2843,6 +2805,40 @@ const ReviewService = {
                   break;
                 }
               }
+              if (!supersedeOpenerId && !proceedFresh) {
+                // A provider call can outlive the bounded wait (codex #3243
+                // r21 P2 — dispatchToProvider has no matching timeout), and
+                // a single-trigger final has no natural retry. PARK the
+                // enrollment durably: a 'deferred' row (outside the
+                // one-active index) that the sequence cron redeems once the
+                // opener settles. started_at carries the intended
+                // firstTouchAt; completed_at records the parking time for
+                // the 24h age cap.
+                const existingPark = await db("review_sequences")
+                  .where({ customer_id: customerId, status: "deferred" })
+                  .first();
+                if (!existingPark) {
+                  await db("review_sequences").insert({
+                    customer_id: customerId,
+                    location_id: locationId || customer.nearest_location_id || null,
+                    status: "deferred",
+                    stop_reason: "opener_in_flight",
+                    plan: JSON.stringify(Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN),
+                    current_step: 0,
+                    touches_sent: 0,
+                    next_run_at: new Date(Date.now() + 10 * 60 * 1000),
+                    series_final: seriesFinal === true,
+                    service_record_id: serviceRecordId || null,
+                    scheduled_service_id: scheduledServiceId || null,
+                    tech_name: techName || null,
+                    service_type: serviceType || null,
+                    started_by: startedBy || null,
+                    started_at: firstTouchAt || null,
+                    completed_at: new Date(),
+                  });
+                }
+                return { started: false, reason: "deferred_inflight", deferred: true };
+              }
             }
           }
         } catch (err) {
@@ -2863,6 +2859,9 @@ const ReviewService = {
       const priorForRecord = await db("review_sequences")
         .where({ service_record_id: serviceRecordId })
         .whereRaw("stop_reason IS DISTINCT FROM 'start_failed'")
+        // Parked deferred enrollments are not deliveries (codex #3243 r21
+        // P2) — they must not dedupe-block a real enrollment.
+        .whereNot("status", "deferred")
         .first();
       if (priorForRecord) {
         return { started: false, reason: "service_record_enrolled", sequence: priorForRecord };
@@ -2876,6 +2875,7 @@ const ReviewService = {
       const priorForVisit = await db("review_sequences")
         .where({ scheduled_service_id: scheduledServiceId })
         .whereRaw("stop_reason IS DISTINCT FROM 'start_failed'")
+        .whereNot("status", "deferred")
         .first();
       if (priorForVisit) {
         return { started: false, reason: "service_record_enrolled", sequence: priorForVisit };
@@ -3330,7 +3330,85 @@ const ReviewService = {
   },
 
   /** Cron: advance all due review sequences. Gated by GATE_REVIEW_SEQUENCES. */
+  /**
+   * Redeem enrollments parked while an opener's send was in flight (codex
+   * #3243 r21 P2). At-most-once via delete-claim; already_active re-parks
+   * with backoff (preserving the original parking time for the 24h age
+   * cap); any other non-start (dedupe, cap, engagement) is terminal.
+   */
+  async _sweepDeferredEnrollments() {
+    const due = await db("review_sequences")
+      .where({ status: "deferred" })
+      .whereNotNull("next_run_at")
+      .where("next_run_at", "<=", new Date())
+      .limit(10);
+    let redeemed = 0;
+    for (const row of due) {
+      const claimed = await db("review_sequences").where({ id: row.id, status: "deferred" }).del();
+      if (!claimed) continue;
+      const parkedAt = row.completed_at ? new Date(row.completed_at).getTime() : 0;
+      if (parkedAt && Date.now() - parkedAt > 24 * 3600000) {
+        logger.warn(`[review] deferred final expired unredeemed (customerId=${row.customer_id})`);
+        continue;
+      }
+      let result = null;
+      try {
+        result = await this.startReviewSequence({
+          customerId: row.customer_id,
+          plan: typeof row.plan === "string" ? JSON.parse(row.plan) : row.plan,
+          startedBy: row.started_by,
+          locationId: row.location_id,
+          serviceType: row.service_type,
+          techName: row.tech_name,
+          serviceRecordId: row.service_record_id,
+          scheduledServiceId: row.scheduled_service_id,
+          firstTouchAt: row.started_at ? new Date(row.started_at) : null,
+          seriesFinal: row.series_final === true,
+        });
+      } catch (err) {
+        logger.error(`[review] deferred enrollment redeem failed (customerId=${row.customer_id} errType=${err?.name || "Error"})`);
+      }
+      if (result?.started) {
+        redeemed += 1;
+        continue;
+      }
+      if (result?.reason === "already_active") {
+        await db("review_sequences").insert({
+          customer_id: row.customer_id,
+          location_id: row.location_id,
+          status: "deferred",
+          stop_reason: "opener_in_flight",
+          plan: row.plan,
+          current_step: 0,
+          touches_sent: 0,
+          next_run_at: new Date(Date.now() + 30 * 60 * 1000),
+          series_final: row.series_final === true,
+          service_record_id: row.service_record_id,
+          scheduled_service_id: row.scheduled_service_id,
+          tech_name: row.tech_name,
+          service_type: row.service_type,
+          started_by: row.started_by,
+          started_at: row.started_at,
+          completed_at: row.completed_at || new Date(),
+        });
+      } else if (result?.reason === "deferred_inflight") {
+        // startReviewSequence re-parked with a fresh birth — restore the
+        // original so the age cap stays honest.
+        await db("review_sequences")
+          .where({ customer_id: row.customer_id, status: "deferred" })
+          .update({ completed_at: row.completed_at || new Date() });
+      }
+    }
+    return { redeemed };
+  },
+
   async processReviewSequences() {
+    let redeemed = 0;
+    try {
+      ({ redeemed } = await this._sweepDeferredEnrollments());
+    } catch (err) {
+      logger.error(`[review] deferred-enrollment sweep failed (errType=${err?.name || "Error"})`);
+    }
     const due = await db("review_sequences")
       .where({ status: "active" })
       .whereNotNull("next_run_at")
@@ -3352,10 +3430,10 @@ const ReviewService = {
         logger.error(`[review] sequence step failed (sequenceId=${seq.id} errType=${err?.name || "Error"})`);
       }
     }
-    if (sent || stopped || completed || deferred) {
-      logger.info(`[review] Sequences: ${sent} sent, ${completed} completed, ${stopped} stopped, ${deferred} deferred`);
+    if (sent || stopped || completed || deferred || redeemed) {
+      logger.info(`[review] Sequences: ${sent} sent, ${completed} completed, ${stopped} stopped, ${deferred} deferred, ${redeemed} redeemed`);
     }
-    return { sent, stopped, completed, deferred };
+    return { sent, stopped, completed, deferred, redeemed };
   },
 
   async stopReviewSequence(sequenceId, reason = "manual") {
