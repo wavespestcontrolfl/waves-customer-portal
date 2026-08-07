@@ -191,6 +191,12 @@ const gates = {
   // unset — the endpoint 403s.
   mcpReadTools: process.env.GATE_MCP_READ_TOOLS === 'true',
 
+  // Public MCP server: the /api/public/mcp anonymous read-only tool surface
+  // for third-party AI agents (catalog, pricing ranges, service areas, quote
+  // contract). No auth BY DESIGN; rate-limited; opt-in in EVERY environment.
+  // Kill switch: unset — the endpoint 404s (dark).
+  mcpPublic: process.env.GATE_MCP_PUBLIC === 'true',
+
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
 
