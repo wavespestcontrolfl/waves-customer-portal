@@ -414,3 +414,52 @@ describe('termite monitoring ownership', () => {
     expect(result.options.every(o => o.serviceKey !== 'termite')).toBe(true);
   });
 });
+
+// Codex #3253 r3: commercial recurring rows are owned families; termite
+// bonds are NOT bait monitoring.
+describe('commercial ownership and termite bond distinction', () => {
+  const { ownershipKeysForRow } = require('../services/waveguard-existing-services');
+
+  test('commercial recurring rows map to owned residential families', () => {
+    expect(ownershipKeysForRow({ service_type: 'Commercial Pest Control' })).toEqual(['pest_control']);
+    expect(ownershipKeysForRow({ service_type: 'Commercial Turf Treatment Program' })).toEqual(['lawn_care']);
+    expect(ownershipKeysForRow({ service_type: 'Commercial Tree & Shrub Care' })).toEqual(['tree_shrub']);
+    expect(ownershipKeysForRow({ service_type: 'Commercial Mosquito Control' })).toEqual(['mosquito']);
+    expect(ownershipKeysForRow({
+      service_type: 'Commercial Termite Bait Monitoring',
+    })).toEqual(['termite_bait']);
+  });
+
+  test('a recurring termite bond does not own bait monitoring', () => {
+    expect(ownershipKeysForRow({
+      service_type: 'Termite Bond',
+      service_key: 'termite_bond_1yr',
+      service_name: 'Termite Bond (1 Year)',
+    })).toEqual([]);
+  });
+
+  test('a commercial pest plan blocks a fresh residential pest quote', async () => {
+    const customer = propertyCustomer({ id: 'cust-commercial', waveguard_tier: null, monthly_rate: 189 });
+    const result = await buildCustomerPricingResponse({
+      db: activePlanDb(customer.id, ['Commercial Pest Control'], null),
+      propertyLookup: null,
+      prompt: 'How much is pest control?',
+      customer,
+    });
+
+    expect(result.options.every(o => o.serviceKey !== 'pest_control')).toBe(true);
+  });
+
+  test('a termite bond customer can still price bait monitoring', async () => {
+    const customer = propertyCustomer({ id: 'cust-bond', waveguard_tier: 'Bronze' });
+    const result = await buildCustomerPricingResponse({
+      db: activePlanDb(customer.id, ['Termite Bond'], 'Bronze'),
+      propertyLookup: null,
+      prompt: 'How much is termite bait monitoring?',
+      customer,
+    });
+
+    expect(result.alreadyIncluded).toEqual([]);
+    expect(result.options.some(o => o.serviceKey === 'termite')).toBe(true);
+  });
+});

@@ -319,16 +319,36 @@ async function filterRowsToStreet(database, rows, streetScope) {
 // rodent family that toQualifyingKeys deliberately excludes; qualification
 // itself stays untouched.
 // Ownership families in one text: the qualifying families PLUS the recurring
-// families qualification deliberately excludes — the rodent COMPONENT (led or
-// pest-primary combined) and termite rows without the 'bait' token
-// ("Termite Monitoring Service" — the qualifier requires termite AND bait).
-// Over-recognition is the safe direction here: an owned service routes to a
-// Waves conversation instead of a self-serve re-quote.
+// families qualification deliberately excludes. Over-recognition of an OWNED
+// family is the safe direction (routes to a Waves conversation instead of a
+// self-serve re-quote) — but only for products that ARE the same obligation:
+//  - commercial recurring rows never qualify (flat pricing, no tier) yet the
+//    customer owns the family — Commercial Pest Control must block a fresh
+//    residential pest quote (codex #3253 r3). Tokens mirror
+//    recurringServiceKey's commercial block (estimate-converter.js), mapped
+//    to residential families. Direct reuse is not possible: that classifier
+//    returns ONE primary key (cannot express combined pest+rodent
+//    ownership), requires the literal 'bait' token for residential termite
+//    (would drop "Termite Monitoring Service"), and estimate-converter
+//    already requires this module at load.
+//  - the rodent COMPONENT counts whether the row is rodent-led or a
+//    pest-primary combined plan.
+//  - termite counts ONLY for bait/station/monitoring products — a recurring
+//    termite BOND (termite_bond_1yr) is a distinct warranty product and must
+//    not block a bait-monitoring quote (codex #3253 r3).
 function ownershipFamiliesFromText(raw) {
   const s = String(raw || '').toLowerCase();
   const keys = toQualifyingKeys(s);
-  if (RODENT_TOKEN_RE.test(s) && !keys.includes('rodent_bait')) keys.push('rodent_bait');
-  if (/\btermite\b/.test(s) && !keys.includes('termite_bait')) keys.push('termite_bait');
+  const add = (key) => { if (!keys.includes(key)) keys.push(key); };
+  if (s.includes('commercial')) {
+    const rodentLed = isRodentLedText(s);
+    if (s.includes('pest') && !rodentLed) add('pest_control');
+    if (s.includes('lawn') || s.includes('turf')) add('lawn_care');
+    if (!/\bpalms?\b/.test(s) && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) add('tree_shrub');
+    if (s.includes('mosquito')) add('mosquito');
+  }
+  if (RODENT_TOKEN_RE.test(s)) add('rodent_bait');
+  if (/\btermite\b/.test(s) && /\b(bait|station|monitor)/.test(s)) add('termite_bait');
   return keys;
 }
 
