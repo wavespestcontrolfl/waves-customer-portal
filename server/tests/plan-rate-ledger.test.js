@@ -804,7 +804,10 @@ describe('zero-priced accepted families (codex r2)', () => {
     expect(slices.lawn_care).toBe(50);
   });
 
-  test('a line with NO price provenance is untouched, not zeroed', () => {
+  test('an unpriced line beside ANOTHER priced family quarantines the whole total (codex r21)', () => {
+    // The billed total still covers the unpriced Pest row — handing it all
+    // to Lawn would embed Pest money inside the lawn_care component (next
+    // Pest re-quote double-bills; next Lawn re-quote wipes Pest).
     const slices = estimateFamilySlices({
       estimateData: {
         result: {
@@ -816,10 +819,68 @@ describe('zero-priced accepted families (codex r2)', () => {
           },
         },
       },
-      monthlyRate: 50,
+      monthlyRate: 90,
     });
     expect(slices.pest_control).toBeUndefined();
-    expect(slices.lawn_care).toBe(50);
+    expect(slices.lawn_care).toBeUndefined();
+    expect(slices[UNATTRIBUTED]).toBe(90);
+  });
+
+  test('an unpriced line whose family is the ONLY family stays attributed (codex r21)', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control' },
+              { name: 'Quarterly Pest Control Service — detached garage', service: 'pest_control', mo: 50 },
+            ],
+          },
+        },
+      },
+      monthlyRate: 90,
+    });
+    expect(slices.pest_control).toBe(90);
+    expect(slices[UNATTRIBUTED]).toBeUndefined();
+  });
+
+  test('unpriced-family quarantine still emits comped-family deletions (codex r21)', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control' },
+              { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', mo: 50 },
+              { name: 'Bi-Monthly Tree & Shrub Care Service', service: 'tree_shrub', manualFinalAnnual: 0 },
+            ],
+          },
+        },
+      },
+      monthlyRate: 90,
+    });
+    expect(slices[UNATTRIBUTED]).toBe(90);
+    expect(slices.tree_shrub).toBe(0);
+    expect(slices.lawn_care).toBeUndefined();
+  });
+
+  test('root-level supplement scalars slice even when engine/result roots exist (codex r21)', () => {
+    // The supported rootOnly shape (booking-pay-at-visit fixture): engine
+    // lineItems populated AND recurring.rodentBaitMo stamped at the
+    // estimate_data root — the root container must be scanned as a root,
+    // not only as an empty-roots fallback.
+    const slices = estimateFamilySlices({
+      estimateData: {
+        engineResult: {
+          lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 50 }],
+        },
+        recurring: { rodentBaitMo: 24 },
+      },
+      monthlyRate: 74,
+    });
+    expect(slices.pest_control).toBe(50);
+    expect(slices.rodent_bait).toBe(24);
+    expect(slices[UNATTRIBUTED]).toBeUndefined();
   });
 });
 

@@ -102,7 +102,12 @@ function acceptedRecurringBillingLines(estimateData = {}) {
   const roots = [];
   if (estimateData?.result && typeof estimateData.result === 'object') roots.push(estimateData.result);
   if (estimateData?.engineResult && typeof estimateData.engineResult === 'object') roots.push(estimateData.engineResult);
-  if (!roots.length) roots.push(estimateData);
+  // The top-level container is ALWAYS a root, not a fallback (codex #3245
+  // r21): the supported rootOnly shape stamps recurring.rodentBaitMo /
+  // palmInjectionMo beside a populated engineResult, and skipping it there
+  // dropped the supplement while the billed total still carried it.
+  // First-add-wins dedupe keeps result/engineResult reconstruction wins.
+  roots.push(estimateData);
   for (const root of roots) {
     for (const line of recurringServicesWithSupplements(root)) add(line);
   }
@@ -168,10 +173,20 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
     }
     return null;
   };
+  // Lines with NO price provenance at all (every ladder rung null) make the
+  // split AMBIGUOUS, not smaller (codex #3245 r21): the billed total still
+  // covers them, so scaling only the priced families would embed the
+  // unpriced family's money inside another component. Track their families;
+  // the assembly below quarantines the whole total as unattributed whenever
+  // an unpriced line leaves more than one candidate family in play.
+  const unpricedFamilies = new Set();
   const addLine = (line) => {
     const family = boundedFamilyKey(serviceFamilyKeyForAdoption(line) || UNATTRIBUTED);
     const monthly = lineMonthly(line);
-    if (monthly == null || monthly < 0) return null;
+    if (monthly == null || monthly < 0) {
+      unpricedFamilies.add(family);
+      return null;
+    }
     if (monthly === 0) {
       if (family !== UNATTRIBUTED) zeroFamilies.add(family);
       return null;
@@ -207,6 +222,20 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
       if (family !== UNATTRIBUTED) zeroed[family] = 0;
     }
     return zeroed;
+  }
+  // Partial pricing quarantine (codex #3245 r21): an unpriced line whose
+  // family isn't the ONLY family in play means the priced slices can't
+  // legitimately absorb the whole billed total — e.g. unpriced Pest beside
+  // Lawn $50 on a $90 accept would mint a $90 lawn_care component and hand
+  // the next Pest re-quote a double-bill (or a Lawn re-quote a Pest wipe).
+  // The whole total parks unattributed (comped zero-families still emit
+  // their deletions). A single-family mix stays attributable: the unpriced
+  // row's money belongs to the same family the priced rows already claim.
+  if (unpricedFamilies.size) {
+    const candidateFamilies = new Set([...families, ...unpricedFamilies]);
+    if (candidateFamilies.size > 1) {
+      return withZeroFamilies({ [UNATTRIBUTED]: billedMonthly });
+    }
   }
   if (!families.length) return withZeroFamilies({ [UNATTRIBUTED]: billedMonthly });
   const rawTotal = families.reduce((sum, f) => sum + raw[f], 0);
@@ -448,12 +477,6 @@ async function resetLedgerToScalar(database, customerId, rate, { source = 'scala
   }
 }
 
-async function clearLedger(database, customerId, { source = 'offboarding' } = {}) {
-  if (!(await ledgerTableExists(database))) return;
-  await database('customer_plan_rates').where({ customer_id: customerId }).del();
-  logger.info(`[plan-rate-ledger] cleared components for customer ${customerId} (${source})`);
-}
-
 // Seed the ledger with KNOWN per-family components in one shot (the
 // self-booking plan-sync rate backfill knows each detected plan's rate —
 // codex #3245 r7: a rate minted AFTER the one-time backfill without
@@ -518,7 +541,6 @@ module.exports = {
   loadComponents,
   applyAcceptToLedger,
   resetLedgerToScalar,
-  clearLedger,
   syncScalarWriteToLedger,
   seedLedgerComponents,
 };
