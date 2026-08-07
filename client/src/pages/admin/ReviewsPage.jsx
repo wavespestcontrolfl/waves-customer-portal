@@ -447,6 +447,22 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
               >
                 {LOCATION_LABELS[review.locationId] || review.locationId}
               </span>{" "}
+              {review.missingSince && (
+                <span
+                  title={`No longer returned by Google as of ${new Date(review.missingSince).toLocaleDateString()}. The full text is retained here as evidence for a missing-reviews support case.`}
+                  style={{
+                    fontSize: 11,
+                    fontFamily: "Roboto, Arial, sans-serif",
+                    fontWeight: 600,
+                    color: D.white,
+                    background: D.amber,
+                    padding: "2px 8px",
+                    borderRadius: 99,
+                  }}
+                >
+                  Removed from Google
+                </span>
+              )}{" "}
             </div>{" "}
           </div>{" "}
         </div>{" "}
