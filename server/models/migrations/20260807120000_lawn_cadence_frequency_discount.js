@@ -268,6 +268,36 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('lawn_pricing_brackets'))) return;
 
+  // Schedule-ownership check BEFORE touching any cell (pre-push audit P1 on
+  // r4): if an admin or a later migration advanced pricingVersion past
+  // VERSION_TO, the live schedule is not this migration's to unwind —
+  // restoring cells under it would leave a hybrid grid stamped with the
+  // newer version. The FOR UPDATE read holds ownership stable for the rest
+  // of this transaction (the version unwind below re-checks atomically via
+  // expectCurrent as a second guard). Envs without the config table/row
+  // have no ownership to verify and restore cells as before.
+  if (await knex.schema.hasTable('pricing_config')) {
+    const owner = await knex('pricing_config')
+      .where({ config_key: 'lawn_pricing_v2' })
+      .forUpdate()
+      .first();
+    if (owner) {
+      let ownerData = {};
+      try { ownerData = typeof owner.data === 'string' ? JSON.parse(owner.data) : (owner.data || {}); }
+      catch { ownerData = {}; }
+      if (ownerData.pricingVersion !== VERSION_TO) {
+        await auditInsert(
+          knex,
+          { restoredFrom: VERSION_TO },
+          { skippedEntireRestore: true, currentVersion: ownerData.pricingVersion ?? null },
+          `${MIGRATION_TAG}:down`,
+          'Rollback skipped entirely: lawn_pricing_v2.pricingVersion is no longer LAWN_PRICING_V2_FREQ_DISCOUNT, so the live schedule belongs to a later change and none of its cells are this migration\'s to restore.',
+        );
+        return;
+      }
+    }
+  }
+
   const snapshot = await loadLatestUpAudit(knex);
   const beforeMap = new Map();
   const afterMap = new Map();

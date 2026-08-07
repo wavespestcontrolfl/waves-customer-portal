@@ -124,6 +124,42 @@ describe('cadence ladder under ARMED cost floors (lift resolution)', () => {
   });
 });
 
+describe('cadence discount × bermuda suppression adder (codex r4 — deliberate interaction)', () => {
+  // The suppression adder is owner-ruled FLAT per application ("a number
+  // baked into the per application", 2026-08-07): +adder × visits/yr IS the
+  // program's annual price. Re-enforcing the -4%/-8% ratios on the COMBINED
+  // price would silently discount the suppression program's revenue on
+  // higher cadences, contradicting that ruling — so the ladder resolves on
+  // the base lawn price and the adder rides on top, compressing the visible
+  // percentage (~3.3%/6.1% at 12,000 sqft) while the strict per-app
+  // ordering survives by construction (equal adders preserve ordering).
+  // This test PINS that choice; changing it is an owner ruling, tracked on
+  // PR #3274.
+  const prevGate = process.env.GATE_BERMUDA_SUPPRESSION;
+  beforeAll(() => { process.env.GATE_BERMUDA_SUPPRESSION = 'true'; });
+  afterAll(() => {
+    if (prevGate === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION;
+    else process.env.GATE_BERMUDA_SUPPRESSION = prevGate;
+  });
+
+  it('adder is identical per application on every cadence and the ladder stays strictly ordered', () => {
+    const plain = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard' }));
+    const withAdder = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', bermudaSuppression: true }));
+    const adders = [6, 9, 12].map((v) => Math.round((withAdder[v].perApp - plain[v].perApp) * 100) / 100);
+    // Flat: same per-app adder on every cadence (owner ruling), never scaled
+    // by the cadence discount.
+    expect(adders[1]).toBe(adders[0]);
+    expect(adders[2]).toBe(adders[0]);
+    expect(adders[0]).toBeGreaterThan(0);
+    // The customer-facing ordering can never invert under the flat adder.
+    expect(withAdder[9].perApp).toBeLessThan(withAdder[6].perApp);
+    expect(withAdder[12].perApp).toBeLessThan(withAdder[9].perApp);
+    // The BASE lawn price still satisfies the exact -4%/-8% relations.
+    expect(plain[9].perApp).toBeLessThanOrEqual(plain[6].perApp * 0.96 + 0.01);
+    expect(plain[12].perApp).toBeLessThanOrEqual(plain[6].perApp * 0.92 + 0.01);
+  });
+});
+
 describe('one-time lawn anchors on the undiscounted 6x column (codex r4 P1)', () => {
   it('derives its base from the standard per-app, not the discounted selected cadence', () => {
     // 20,000 sqft st_augustine: 9x per-app fell 186.67 -> 174.67 under the
