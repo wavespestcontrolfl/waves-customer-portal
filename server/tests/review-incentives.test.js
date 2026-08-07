@@ -488,22 +488,25 @@ describe('review incentives', () => {
   });
 
   test('never pays out a review Google has removed', async () => {
+    // Rolling-window fixtures derive from the clock so the suite never rots
+    // past a hardcoded date (r16 lesson).
+    const daysAgo = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const conn = createDbMock({
       service_records: [{
         id: 'service-1',
         customer_id: 'customer-1',
         technician_id: 'tech-1',
-        service_date: '2026-05-27',
+        service_date: daysAgo(12).slice(0, 10),
       }],
       google_reviews: [{
         id: 'google-1',
         customer_id: 'customer-1',
         reviewer_name: 'Customer One',
         star_rating: 5,
-        review_created_at: '2026-05-29T16:00:00.000Z',
+        review_created_at: daysAgo(10),
         location_id: 'sarasota',
         google_review_id: 'accounts/1/locations/2/reviews/abc',
-        missing_since: '2026-05-31T09:00:00.000Z',
+        missing_since: daysAgo(8),
       }],
     });
 
@@ -516,22 +519,23 @@ describe('review incentives', () => {
   });
 
   test('attribution queue and dashboard counts exclude removed reviews', async () => {
+    const daysAgo = (days) => new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const stamped = {
       id: 'removed-google',
       customer_id: null,
       reviewer_name: 'Removed Customer',
       star_rating: 5,
-      review_created_at: '2026-05-30T16:00:00.000Z',
+      review_created_at: daysAgo(9),
       location_id: 'sarasota',
       google_review_id: 'accounts/1/locations/2/reviews/removed',
-      missing_since: '2026-05-31T09:00:00.000Z',
+      missing_since: daysAgo(8),
     };
     const live = {
       id: 'live-google',
       customer_id: null,
       reviewer_name: 'Live Customer',
       star_rating: 5,
-      review_created_at: '2026-05-29T16:00:00.000Z',
+      review_created_at: daysAgo(10),
       location_id: 'sarasota',
       google_review_id: 'accounts/1/locations/2/reviews/live',
     };
@@ -544,8 +548,8 @@ describe('review incentives', () => {
     const dashboard = await ReviewIncentives.getDashboard({
       conn,
       policy,
-      periodStart: '2026-05-01T00:00:00.000Z',
-      periodEnd: '2026-06-02T00:00:00.000Z',
+      periodStart: daysAgo(30),
+      periodEnd: new Date().toISOString(),
     });
     expect(dashboard.summary.confirmedGoogleReviews).toBe(1);
   });
