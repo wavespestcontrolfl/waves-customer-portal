@@ -26,7 +26,7 @@ import {
 } from '../lib/stripeSetupActions';
 import useIsMobile from '../hooks/useIsMobile';
 import { isNativeApp, nativePlatform } from '../native/platform';
-import { canSaveNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
+import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { useGlassSurface } from '../glass/glass-engine';
 
@@ -57,6 +57,36 @@ async function downloadAuthedPdf(url, fileName = 'Waves_Service_Report.pdf') {
   const blob = await r.blob();
   // In the Capacitor shell the programmatic <a download> click below is a
   // silent no-op — hand the bytes to the OS share sheet instead (F-017).
+  if (await saveBlobNative(blob, fileName)) return;
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
+// Public (token-authenticated) PDF download — receipts. No Bearer needed, but
+// the same two traps as downloadAuthedPdf apply: a root-relative path misses a
+// configured VITE_API_URL origin, and in the Capacitor shell a programmatic
+// <a download> click is a silent no-op, so hand the bytes to the OS instead.
+// Absolute URL for a public receipt endpoint — the native share/save plugin
+// fetches the URL itself, so it needs a real origin (and must honor a
+// configured cross-origin VITE_API_URL, same splice as downloadPublicPdf).
+function receiptApiUrl(path) {
+  const spliced = path.startsWith('/api/') ? `${API_BASE}${path.slice(4)}` : path;
+  try { return new URL(spliced, window.location.origin).toString(); } catch { return spliced; }
+}
+
+async function downloadPublicPdf(path, fileName = 'Waves_Receipt.pdf') {
+  // Server sends an app-absolute '/api/...' path; API_BASE already ends in
+  // '/api' (default '/api', or a full cross-origin API URL), so splice.
+  const abs = path.startsWith('/api/') ? `${API_BASE}${path.slice(4)}` : path;
+  const r = await fetch(abs);
+  if (!r.ok) throw new Error(`Download failed (${r.status})`);
+  const blob = await r.blob();
   if (await saveBlobNative(blob, fileName)) return;
   const blobUrl = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -5533,6 +5563,85 @@ function BillingTab({ customer }) {
                     bank payment never reads "Card ending in …". */}
                 {p.lastFour && ` - ${isBankMethod(p.methodType) ? (p.bankName || 'Bank account') : (p.cardBrand || 'Card')} ending in ${p.lastFour}`}
               </div>
+              {/* Receipt actions. Waves receipts (invoice-backed) get a View
+                  page + a PDF download; recurring autopay rows carry only
+                  Stripe's hosted receipt, so they get View alone. The server
+                  nulls every field when no receipt is retrievable. */}
+              {(() => {
+                // Native shells can't use target=_blank (F-017: strands the
+                // SPA with no back path) and can't use a blob <a download>
+                // (silent no-op in both webviews). Binaries WITHOUT the
+                // Filesystem+Share plugins have no safe path at all
+                // (canSaveNative() === false), so render nothing there rather
+                // than controls that dead-end or do nothing. Web is unchanged.
+                const native = isNativeApp();
+                // Save (Filesystem+Share) opens the PDF; Share alone can still
+                // hand over a link. Binaries with NEITHER have no safe path —
+                // only those render nothing (codex r3 P2).
+                const nativeCapable = native && canSaveNative();
+                const nativeShareOnly = native && !nativeCapable && canShareNative();
+                if (native && !nativeCapable && !nativeShareOnly) return null;
+                if (!p.receiptUrl && !p.stripeReceiptUrl) return null;
+                const receiptName = `Waves_Receipt_${p.receiptNumber || String(p.id).slice(0, 8)}.pdf`;
+                const btn = {
+                  minHeight: 36, padding: '7px 10px', borderRadius: 8,
+                  border: `1px solid ${PORTAL_SHELL.border}`, background: '#fff',
+                  color: B.glassNavy, fontSize: 12, fontWeight: 800,
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                };
+                return (
+                  <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {(nativeCapable || nativeShareOnly) ? (
+                      // In-app: hand the receipt to the OS. PDF via
+                      // saveUrlNative (preview + save/share sheet); a
+                      // Stripe-only row shares its hosted link instead.
+                      <button
+                        type="button"
+                        onClick={() => {
+                          // Share-only binaries can't save the file, but can
+                          // share a link — send the receipt page (or Stripe's).
+                          const task = (nativeCapable && p.receiptPdfUrl)
+                            ? saveUrlNative(receiptApiUrl(p.receiptPdfUrl), receiptName)
+                            : shareUrlNative(p.receiptUrl ? receiptApiUrl(p.receiptUrl) : p.stripeReceiptUrl, 'Waves receipt');
+                          Promise.resolve(task).catch(() => {
+                            showCustomerAlert('Could not open this receipt. Please try again.');
+                          });
+                        }}
+                        aria-label={`Open receipt for ${p.description || 'this payment'}`}
+                        style={{ ...btn, cursor: 'pointer' }}
+                      >
+                        <Icon name="document" size={14} strokeWidth={1.75} /> Receipt
+                      </button>
+                    ) : (
+                      <>
+                        <a
+                          href={p.receiptUrl || p.stripeReceiptUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          aria-label={`View receipt for ${p.description || 'this payment'}`}
+                          style={{ ...btn, textDecoration: 'none' }}
+                        >
+                          <Icon name="document" size={14} strokeWidth={1.75} /> View receipt
+                        </a>
+                        {p.receiptPdfUrl && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              downloadPublicPdf(p.receiptPdfUrl, receiptName).catch(() => {
+                                showCustomerAlert('Could not download this receipt. Please try again.');
+                              });
+                            }}
+                            aria-label={`Download receipt PDF for ${p.description || 'this payment'}`}
+                            style={{ ...btn, cursor: 'pointer' }}
+                          >
+                            <Icon name="download" size={14} strokeWidth={1.75} /> Download
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
               {p.status === 'failed' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                   {primaryOpenInvoice && (
@@ -5649,8 +5758,42 @@ function BillingTab({ customer }) {
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
           <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Payment confirmation texts</div>
-            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get a text when your payment processes.</div>
+            {/* Channel-aware copy: the dropdown beside this row offers
+                Text / Email / Text & Email, so hardcoded "texts" copy read as
+                false the moment a customer picked Email. */}
+            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>
+              {(() => {
+                // The toggle beside this row turns the TEXT leg off on its own,
+                // for any channel — copy must never promise a text the customer
+                // just disabled (codex r4 P2 extends the Both-only fix).
+                // Effective channel, not stored: the select and the save path
+                // both coerce to SMS when no deliverable billing email exists,
+                // so a stale persisted email/both must not drive an email
+                // promise here either (codex r5 P2).
+                const channel = hasBillingEmail ? paymentConfirmationChannel : 'sms';
+                const emailLeg = channel === 'email' || channel === 'both';
+                const textLeg = channel !== 'email' && paymentSmsEnabled;
+                if (textLeg && emailLeg) return 'Payment confirmations';
+                if (emailLeg) return 'Payment confirmation emails';
+                if (textLeg) return 'Payment confirmation texts';
+                return 'Payment confirmations';
+              })()}
+            </div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
+              {/* The toggle beside this row can switch the text leg off while
+                  the channel stays Text & Email — the copy must not keep
+                  promising a text the customer just disabled (codex r1 P2). */}
+              {(() => {
+                // Same effective-channel rule as the title above (codex r5 P2).
+                const channel = hasBillingEmail ? paymentConfirmationChannel : 'sms';
+                const emailLeg = channel === 'email' || channel === 'both';
+                const textLeg = channel !== 'email' && paymentSmsEnabled;
+                if (textLeg && emailLeg) return 'Get a text and an email when your payment processes.';
+                if (emailLeg) return 'Get an email when your payment processes.';
+                if (textLeg) return 'Get a text when your payment processes.';
+                return 'Payment confirmations are off.';
+              })()}
+            </div>
           </div>
           {(() => {
             const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
