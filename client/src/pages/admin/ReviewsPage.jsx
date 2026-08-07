@@ -1727,6 +1727,10 @@ export default function ReviewsPage() {
     setError(null);
     pageRef.current = 1;
     setHasMore(false);
+    // A base load supersedes any in-flight append (its response is discarded
+    // by the sequence check without ever clearing this flag) — reset it so
+    // the new result's Load More button isn't permanently disabled.
+    setLoadingMore(false);
     adminFetch(`/admin/reviews?${buildParams(1).toString()}`)
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;

@@ -1023,7 +1023,12 @@ describe('Google Business review sync', () => {
 
     expect(result.sources).toEqual({ bradenton: 'none' });
     expect(db.__state.rows.google_reviews.find(r => r.id === 'stale-1').missing_since).toBeNull();
-    expect((db.__state.rows.notifications || []).some(n => n.title.includes('sync degraded'))).toBe(true);
+    const degraded = (db.__state.rows.notifications || []).find(n => n.title.includes('sync degraded'));
+    expect(degraded).toBeTruthy();
+    // The alert must not claim a Places sample remains when the caller
+    // skipped the fallback — this is a complete outage.
+    expect(degraded.body).toContain('no Places fallback is available');
+    expect(degraded.body).not.toContain('Places sample');
     const urls = global.fetch.mock.calls.map(c => String(c[0]));
     expect(urls.some(u => u.includes('maps.googleapis.com'))).toBe(false);
   });

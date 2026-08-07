@@ -920,10 +920,16 @@ class GoogleBusinessService {
         const detail = cause === 'no_client'
           ? `the GBP client could not be initialized: ${await this._describeCredentialGap(loc)}`
           : `the GBP Reviews API pull failed: ${cause}`;
+        // Without a Maps key the caller skips the Places sample entirely —
+        // the alert must not claim a partial feed remains during what is
+        // actually a complete tracking outage.
+        const fallbackState = process.env.GOOGLE_MAPS_API_KEY
+          ? `fell back to the ~5-review Places sample`
+          : `is fully down — no Places fallback is available (GOOGLE_MAPS_API_KEY is not set)`;
         await NotificationService.notifyAdmin(
           'review',
           title,
-          `Review tracking for ${loc.name} fell back to the ~5-review Places sample because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`,
+          `Review tracking for ${loc.name} ${fallbackState} because ${detail}. Removed reviews and most new reviews will NOT be detected until the GBP connection works.`,
           { bell: true, link: '/admin/reviews', metadata: { locationId: loc.id, reason: 'gbp_sync_degraded', cause } },
         );
         logger.warn(`[gbp] Review sync degraded for ${loc.name} (${cause === 'no_client' ? 'no client' : 'pull failed'}) — admin notified`);

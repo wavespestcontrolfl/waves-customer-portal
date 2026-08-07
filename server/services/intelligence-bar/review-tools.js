@@ -211,6 +211,9 @@ async function getUnrespondedReviews(input) {
   let query = db('google_reviews')
     .where('reviewer_name', '!=', '_stats')
     .modify(whereNeedsRealReply)
+    // A review Google has removed (missing_since stamped) has no live GBP
+    // resource — it is evidence, not an actionable reply target.
+    .whereNull('google_reviews.missing_since')
     .whereNotNull('review_text')
     .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
     .select('google_reviews.*', 'customers.first_name as cust_first', 'customers.last_name as cust_last', 'customers.waveguard_tier')
@@ -242,6 +245,9 @@ async function getUnrespondedReviews(input) {
 async function draftReviewReply(reviewId) {
   const review = await db('google_reviews').where('id', reviewId).first();
   if (!review) return { error: 'Review not found' };
+  if (review.missing_since) {
+    return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
+  }
 
   // Get location name
   let locationName = 'Southwest Florida';
@@ -302,6 +308,12 @@ Rules:
 async function submitReviewReply(reviewId, replyText) {
   const review = await db('google_reviews').where('id', reviewId).first();
   if (!review) return { error: 'Review not found' };
+  // Same lockout as POST /api/admin/reviews/:id/reply: a stamped review has
+  // no live GBP resource, so recording a local reply here would falsely
+  // report it as "visible on Google once synced".
+  if (review.missing_since) {
+    return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
+  }
 
   await db('google_reviews').where('id', reviewId).update({
     review_reply: replyText,
