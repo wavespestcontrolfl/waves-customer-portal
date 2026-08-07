@@ -97,27 +97,73 @@ if [ "$MERGEABLE" = "UNKNOWN" ]; then
     "If it stays UNKNOWN, check the PR on GitHub directly before trusting any CI state."
 fi
 
-# 4. The tests workflow actually triggered a run for this head SHA.
+# 4. The tests workflow actually triggered a run for this head SHA — and one
+#    created BY THIS PUSH. Re-pushing the same SHA (the documented hijack
+#    recovery) leaves the previous run visible, so "a run exists for this SHA"
+#    would pass instantly even when the new push triggered nothing.
+#    Baseline: the run IDs already present before we start polling. A run that
+#    appears afterwards is provably new. Set VERIFY_PR_PUSH_AFTER to an ISO8601
+#    timestamp taken immediately BEFORE the push to use createdAt instead —
+#    needed when GitHub creates the run before this script starts.
+PUSH_AFTER="${VERIFY_PR_PUSH_AFTER:-}"
+RUN_FIELDS="status,conclusion,event,url,databaseId,createdAt,headSha"
+
+list_runs() {
+  gh run list --repo "$REPO_SLUG" --workflow "$WORKFLOW_FILE" \
+    --commit "$LOCAL_SHA" --json "$RUN_FIELDS" 2>/dev/null
+}
+
+BASE_JSON="$(list_runs)" || fail "gh run list failed — check gh auth."
+BASE_IDS="$(printf '%s' "$BASE_JSON" | jq -r '[.[].databaseId] | sort | @json')"
+
 RUNS_JSON="[]"
+NEW_JSON="[]"
 try=0
 while [ "$try" -lt "$WORKFLOW_TRIES" ]; do
-  RUNS_JSON="$(gh run list --repo "$REPO_SLUG" --workflow "$WORKFLOW_FILE" \
-    --commit "$LOCAL_SHA" --json status,conclusion,event,url 2>/dev/null)" \
-    || fail "gh run list failed — check gh auth."
-  RUN_COUNT="$(printf '%s' "$RUNS_JSON" | jq -r 'length')"
-  [ "${RUN_COUNT:-0}" -gt 0 ] && break
+  RUNS_JSON="$(list_runs)" || fail "gh run list failed — check gh auth."
+  if [ -n "$PUSH_AFTER" ]; then
+    NEW_JSON="$(printf '%s' "$RUNS_JSON" \
+      | jq -r --arg after "$PUSH_AFTER" '[.[] | select(.createdAt >= $after)]')"
+  else
+    NEW_JSON="$(printf '%s' "$RUNS_JSON" \
+      | jq -r --argjson base "$BASE_IDS" '[.[] | select(.databaseId as $i | $base | index($i) | not)]')"
+  fi
+  [ "$(printf '%s' "$NEW_JSON" | jq -r 'length')" -gt 0 ] && break
   try=$((try + 1))
   [ "$try" -lt "$WORKFLOW_TRIES" ] && sleep 15
 done
-RUN_COUNT="$(printf '%s' "$RUNS_JSON" | jq -r 'length')"
-if [ "${RUN_COUNT:-0}" -eq 0 ]; then
+
+NEW_COUNT="$(printf '%s' "$NEW_JSON" | jq -r 'length')"
+STALE_COUNT="$(printf '%s' "$BASE_JSON" | jq -r 'length')"
+if [ "${NEW_COUNT:-0}" -eq 0 ]; then
+  if [ "${STALE_COUNT:-0}" -gt 0 ] && [ -z "$PUSH_AFTER" ]; then
+    fail "no NEW '$WORKFLOW_FILE' run appeared for head $LOCAL_SHA (waited ~$((WORKFLOW_TRIES * 15))s) — only $STALE_COUNT run(s) that already existed before this check." \
+      "A pre-existing run does NOT prove this push triggered CI (same-SHA re-push, e.g. hijack recovery)." \
+      "If GitHub created the run before this script started, re-run with the push timestamp:" \
+      "  VERIFY_PR_PUSH_AFTER=\$(date -u +%Y-%m-%dT%H:%M:%SZ)   # taken BEFORE the push" \
+      "Otherwise CI really is silent — check mergeable ($MERGEABLE/$MERGE_STATE) and the Actions tab."
+  fi
   fail "the '$WORKFLOW_FILE' workflow NEVER TRIGGERED for head $LOCAL_SHA (waited ~$((WORKFLOW_TRIES * 15))s) — CI is silent." \
     "Most likely cause: the PR was CONFLICTING when the push landed (mergeable above: $MERGEABLE/$MERGE_STATE)." \
     "If it conflicts: merge origin/main, push, re-run. If it's a GitHub Actions outage: substitute the full local" \
     "test evidence in the PR (precedent #441/#3240) and say so explicitly — never report a stale green as CI."
 fi
 
-echo "✅ verify-pr-checks: PR #$PR_NUMBER head $LOCAL_SHA — mergeable=$MERGEABLE ($MERGE_STATE), $RUN_COUNT tests-workflow run(s) for this head:"
-printf '%s' "$RUNS_JSON" | jq -r '.[] | "   \(.status) \(.conclusion // "-") (\(.event)) \(.url)"'
+# 5. Re-verify the head AFTER polling — the branch can move during the wait,
+#    which is precisely the hijack race this script exists to catch.
+FINAL_REMOTE="$(git ls-remote origin "refs/heads/$BRANCH" | cut -f1)"
+if [ "$FINAL_REMOTE" != "$LOCAL_SHA" ]; then
+  fail "remote tip moved to $FINAL_REMOTE during the wait (was $LOCAL_SHA) — the CI evidence above is for a SHA that is no longer the branch tip." \
+    "See waves-ship REFERENCE.md 'external push-hijack hazard', then re-push and re-run this script."
+fi
+FINAL_HEAD="$(gh pr view "$PR_NUMBER" --repo "$REPO_SLUG" --json headRefOid 2>/dev/null \
+  | jq -r '.headRefOid // empty')"
+if [ "$FINAL_HEAD" != "$LOCAL_SHA" ]; then
+  fail "PR #$PR_NUMBER head moved to $FINAL_HEAD during the wait (was $LOCAL_SHA) — CI evidence is stale." \
+    "Re-run this script against the current head before trusting any check state."
+fi
+
+echo "✅ verify-pr-checks: PR #$PR_NUMBER head $LOCAL_SHA — mergeable=$MERGEABLE ($MERGE_STATE), $NEW_COUNT new tests-workflow run(s) for this head:"
+printf '%s' "$NEW_JSON" | jq -r '.[] | "   \(.status) \(.conclusion // "-") (\(.event)) \(.url)"'
 echo "   (A run existing ≠ a run passing — wait for green before the merge gate.)"
 exit 0
