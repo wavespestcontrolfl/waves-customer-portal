@@ -964,6 +964,12 @@ describe('listicle_family scoring + action mapping', () => {
     expect(mineSrc).toMatch(/signal_metadata->>'family_key' = \?/);
     // Both cleanups touch ONLY pending rows — frozen states stay records.
     expect(mineSrc).toMatch(/status: 'pending',\s*\n\s*action_type: 'new_supporting_blog'/);
+    // And both are mutateQueue-guarded: mineAll({ persist: false }) is a
+    // READ-ONLY preview (--no-persist, facts-population analysis) and must
+    // never retire live queue work just for being inspected.
+    expect(src).toMatch(/async mineListicleFamily\(since, \{ mutateQueue = true \} = \{\}\)/);
+    expect(src).toMatch(/this\.mineListicleFamily\(since, \{ mutateQueue: persist \}\)/);
+    expect((mineSrc.match(/if \(mutateQueue\) \{/g) || []).length).toBe(2);
   });
 
   test('service resolves across EVERY variant, not just the representative (Codex r9)', () => {

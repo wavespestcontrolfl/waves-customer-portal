@@ -94,10 +94,11 @@ class OpportunityQueue {
       // can claim" — see listicleFamilyLaneOpen).
       if (!listicleFamilyLaneOpen()) q = q.whereNot('bucket', 'listicle_family');
       if (minScore != null) {
-        // Same action-aware floor as claimNext, so previews show exactly
-        // what the runner would claim.
+        // Same action-aware floor as claimNext (including the
+        // listicle_family blog-floor ride), so previews show exactly what
+        // the runner would claim.
         q = q.whereRaw(
-          `score >= CASE WHEN action_type = 'new_supporting_blog' THEN ?::numeric ELSE ?::numeric END`,
+          `score >= CASE WHEN action_type = 'new_supporting_blog' OR bucket = 'listicle_family' THEN ?::numeric ELSE ?::numeric END`,
           [blogMinScoreFor(minScore), minScore],
         );
       }
@@ -161,7 +162,11 @@ class OpportunityQueue {
            -- bare parameters as text (no comparison context), and
            -- integer >= text has no operator — this exact line failed in
            -- prod on 2026-06-11. Mocked-db tests cannot catch this class.
-           AND score >= CASE WHEN action_type = 'new_supporting_blog' THEN ?::numeric ELSE ?::numeric END
+           -- listicle_family rides the blog floor for EVERY action: the
+           -- miner admits family refreshes at the blog floor (persistAll's
+           -- family exception), so claiming at the global floor would leave
+           -- 45-74-point refreshes persisted-but-unclaimable until expiry.
+           AND score >= CASE WHEN action_type = 'new_supporting_blog' OR bucket = 'listicle_family' THEN ?::numeric ELSE ?::numeric END
            ${whereActionType}
            ${whereExclude}
            ${whereFamilyGate}

@@ -759,7 +759,7 @@ class GscOpportunityMiner {
       ['no_content_yet', () => this.mineNoContentYet(since, ownPagesByServiceCity)],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
       ['answer_gap', () => this.mineAnswerGap(since)],
-      ['listicle_family', () => this.mineListicleFamily(since)],
+      ['listicle_family', () => this.mineListicleFamily(since, { mutateQueue: persist })],
     ];
 
     for (const [name, fn] of runs) {
@@ -1605,7 +1605,7 @@ class GscOpportunityMiner {
     return out;
   }
 
-  async mineListicleFamily(since) {
+  async mineListicleFamily(since, { mutateQueue = true } = {}) {
     // BOTH gates required: mining with the brief overlay off would persist
     // listicle_family rows whose briefs come out as ORDINARY supporting
     // blogs — the lane would look enabled while producing none of the
@@ -1710,16 +1710,21 @@ class GscOpportunityMiner {
         // refresh keys differently, so without this the old blog stays
         // claimable until expiry and drafts the competing post this routing
         // exists to prevent. Fail-soft, same posture as the near-me cleanup.
-        try {
-          await db('opportunity_queue')
-            .where({
-              dedupe_key: listicleFamilyDedupeKey(fam.key),
-              status: 'pending',
-              action_type: 'new_supporting_blog',
-            })
-            .update({ status: 'skipped', skip_reason: 'family_intent_now_served', updated_at: new Date() });
-        } catch (err) {
-          logger.warn(`[gsc-opp-miner] listicle_family: stale blog retirement failed (${fam.key}): ${err.message}`);
+        // mutateQueue-guarded: mineAll({ persist: false }) is a READ-ONLY
+        // preview (--no-persist, facts-population analysis) and must never
+        // retire live queue work.
+        if (mutateQueue) {
+          try {
+            await db('opportunity_queue')
+              .where({
+                dedupe_key: listicleFamilyDedupeKey(fam.key),
+                status: 'pending',
+                action_type: 'new_supporting_blog',
+              })
+              .update({ status: 'skipped', skip_reason: 'family_intent_now_served', updated_at: new Date() });
+          } catch (err) {
+            logger.warn(`[gsc-opp-miner] listicle_family: stale blog retirement failed (${fam.key}): ${err.message}`);
+          }
         }
         if (served.hit.position >= THRESHOLDS.strikingDistancePositionMin) {
           out.push(buildListicleFamilyRefreshOpp(fam, served, service, city));
@@ -1731,13 +1736,15 @@ class GscOpportunityMiner {
       // distance, so it re-becomes a blog candidate — retire any stale
       // pending refresh row (matched via its family_key provenance) before
       // minting the blog, or both would sit claimable at once.
-      try {
-        await db('opportunity_queue')
-          .where({ bucket: 'listicle_family', status: 'pending', action_type: 'refresh_existing_page' })
-          .whereRaw("signal_metadata->>'family_key' = ?", [fam.key])
-          .update({ status: 'skipped', skip_reason: 'family_no_longer_served', updated_at: new Date() });
-      } catch (err) {
-        logger.warn(`[gsc-opp-miner] listicle_family: stale refresh retirement failed (${fam.key}): ${err.message}`);
+      if (mutateQueue) {
+        try {
+          await db('opportunity_queue')
+            .where({ bucket: 'listicle_family', status: 'pending', action_type: 'refresh_existing_page' })
+            .whereRaw("signal_metadata->>'family_key' = ?", [fam.key])
+            .update({ status: 'skipped', skip_reason: 'family_no_longer_served', updated_at: new Date() });
+        } catch (err) {
+          logger.warn(`[gsc-opp-miner] listicle_family: stale refresh retirement failed (${fam.key}): ${err.message}`);
+        }
       }
 
       // Cityless family on a hubless service can never publish (see above).
