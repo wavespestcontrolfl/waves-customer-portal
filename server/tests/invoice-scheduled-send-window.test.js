@@ -61,6 +61,8 @@ const dueRow = {
   scheduled_send_attempts: 2,
   scheduled_request_review: false,
   scheduled_review_delay_minutes: null,
+  payer_id: null,
+  customer_id: 'cust-1',
 };
 
 describe('processScheduledSends send-window handling', () => {
@@ -81,10 +83,12 @@ describe('processScheduledSends send-window handling', () => {
     isWithinSendWindowET.mockReturnValue(false);
     const staleRecovery = chain();
     const dueQuery = chain({ rows: [dueRow] });
+    const phoneLookup = chain({ first: { phone: '+19415550123' } });
     const deferUpdate = chain();
     db
       .mockReturnValueOnce(staleRecovery)
       .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(phoneLookup)
       .mockReturnValueOnce(deferUpdate);
 
     const result = await InvoiceService.processScheduledSends();
@@ -105,16 +109,54 @@ describe('processScheduledSends send-window handling', () => {
     isWithinSendWindowET.mockReturnValue(false);
     const staleRecovery = chain();
     const dueQuery = chain({ rows: [dueRow] });
+    const phoneLookup = chain({ first: { phone: '+19415550123' } });
     const deferUpdate = chain({ updateCount: 0 });
     db
       .mockReturnValueOnce(staleRecovery)
       .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(phoneLookup)
       .mockReturnValueOnce(deferUpdate);
 
     const result = await InvoiceService.processScheduledSends();
 
     expect(sendSpy).not.toHaveBeenCalled();
     expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+  });
+
+  test('outside the window: an email-only invoice (third-party payer) sends at its requested time', async () => {
+    isWithinSendWindowET.mockReturnValue(false);
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [{ ...dueRow, payer_id: 'payer-9' }] });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claim);
+    sendSpy.mockResolvedValue({ ok: true, sms: { ok: false, code: 'payer_billed' }, email: { ok: true }, creditApplied: 0 });
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
+    expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
+  });
+
+  test('outside the window: a customer with no phone is emailed at the requested time, not deferred', async () => {
+    isWithinSendWindowET.mockReturnValue(false);
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const phoneLookup = chain({ first: { phone: null } });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(phoneLookup)
+      .mockReturnValueOnce(claim);
+    sendSpy.mockResolvedValue({ ok: true, sms: { ok: false, code: 'no_phone' }, email: { ok: true }, creditApplied: 0 });
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
+    expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
   });
 
   test('inside the window: the send proceeds', async () => {

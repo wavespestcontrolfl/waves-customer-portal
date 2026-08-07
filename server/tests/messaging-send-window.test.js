@@ -131,7 +131,17 @@ describe('checkSendWindow validator', () => {
 
   test('operator-clicked entry points pass at night even with customer-level trust', () => {
     expect(checkSendWindow({ ...SMS, entryPoint: 'admin_estimate_send' }, null, null, EVENING_ET)).toEqual({ ok: true });
-    expect(checkSendWindow({ ...SMS, entryPoint: 'scheduled_sms_cron' }, null, null, EVENING_ET)).toEqual({ ok: true });
+  });
+
+  test('scheduled_sms_cron is NOT blanket-exempt — only rows with operator provenance pass', () => {
+    // The queue carries automated requeues (deferred voicemail text-backs,
+    // held prep texts) alongside operator-composed rows; a late-recovering
+    // queue must not text automated rows at night. The executor passes
+    // operatorInitiated only for persisted operator provenance.
+    const res = checkSendWindow({ ...SMS, entryPoint: 'scheduled_sms_cron' }, null, null, EVENING_ET);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('QUIET_HOURS_HOLD');
+    expect(checkSendWindow({ ...SMS, entryPoint: 'scheduled_sms_cron', operatorInitiated: true }, null, null, EVENING_ET)).toEqual({ ok: true });
   });
 
   test('explicit operatorInitiated marker passes shared entry points at night', () => {

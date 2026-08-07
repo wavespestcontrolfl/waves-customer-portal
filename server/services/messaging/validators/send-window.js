@@ -39,8 +39,16 @@ const { isWithinSendWindowET, nextSendWindowOpenET } = require('../send-window')
 //     incident this window exists to stop.
 //   - every cron/webhook/automation entry point — those are the fence's
 //     subjects. New operator surfaces must opt in here (fail closed).
-// scheduled_sms_cron IS exempt: it dispatches at the exact minute an
-// operator explicitly picked on the schedule-SMS composer.
+//   - scheduled_sms_cron — the queue carries BOTH operator-composed rows
+//     (dispatched at the exact minute the operator picked) and automated
+//     requeues (deferred voicemail text-backs, quiet-hours-held prep
+//     texts, deposit receipts). A blanket exemption would let an automated
+//     row that recovers late — e.g. a stalled queue draining after
+//     8:00 PM — text at night. The executor instead passes
+//     operatorInitiated for rows with persisted operator provenance
+//     (admin attribution / human-authored flag stamped at enqueue);
+//     automated rows stay fenced and re-defer via their retryable
+//     QUIET_HOURS_HOLD branch.
 const OPERATOR_ENTRY_POINTS = new Set([
   'admin_communications_manual_sms',
   'admin_customer_intel_retention_approve',
@@ -61,7 +69,6 @@ const OPERATOR_ENTRY_POINTS = new Set([
   'ai_assistant_send_sms_tool',
   'intelligence_bar_comms_send_sms',
   'intelligence_bar_email_sms_reply',
-  'scheduled_sms_cron',
 ]);
 
 const ET_LABEL = new Intl.DateTimeFormat('en-US', {

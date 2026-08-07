@@ -2532,6 +2532,17 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
+            // Send-window operator provenance: only rows an operator
+            // actually composed/scheduled keep the operator exemption — the
+            // composer dispatches at the exact minute the operator picked,
+            // and that intent is persisted at enqueue as admin attribution
+            // or the human-authored flag. Automated requeues (deferred
+            // voicemail text-back, quiet-hours-held prep texts, deposit
+            // receipts) carry neither and stay behind the window, so a
+            // queue that recovers late at night re-defers to 8:00 AM via
+            // the retryable QUIET_HOURS_HOLD branch below instead of
+            // texting after the cutoff.
+            ...((msg.admin_user_id || claimMeta.human_authored === true) ? { operatorInitiated: true } : {}),
             // Forward the consent basis the ORIGINAL enqueue ran under (e.g. a
             // deferred voicemail text-back persists transactional_allowed)
             // — without it an anonymous-lead transactional replay blocks as

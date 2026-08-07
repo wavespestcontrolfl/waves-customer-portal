@@ -2481,6 +2481,10 @@ const InvoiceService = {
         "scheduled_send_attempts",
         "scheduled_request_review",
         "scheduled_review_delay_minutes",
+        // For the send-window pre-claim guard's SMS-leg check: a
+        // payer-billed invoice is delivered email-only by design.
+        "payer_id",
+        "customer_id",
       );
 
     let sent = 0;
@@ -2501,35 +2505,58 @@ const InvoiceService = {
     } = require("./messaging/send-window");
     for (const inv of due) {
       if (isEnabled("smsSendWindow") && !isWithinSendWindowET()) {
-        const nextOpen = nextSendWindowOpenET();
-        // Mirror the claim predicates (still due, still attempt-eligible),
-        // not just id+status: an admin can reschedule the invoice between
-        // the due-list read and this update, and a bare id+status match
-        // would overwrite their newly chosen scheduled_send_at with the
-        // window open. 0 rows affected = the row changed underneath — the
-        // newer schedule owns it, count nothing.
-        const deferredRows = await db("invoices")
-          .where({ id: inv.id, status: "scheduled" })
-          .whereNotNull("scheduled_send_at")
-          .where("scheduled_send_at", "<=", new Date())
-          .where((q) =>
-            q
-              .whereNull("scheduled_send_attempts")
-              .orWhere("scheduled_send_attempts", "<", 5),
-          )
-          .update({
-            scheduled_send_at: nextOpen,
-            scheduled_send_error:
-              "QUIET_HOURS_HOLD — outside 8AM-8PM ET send window, deferred to window open",
-            updated_at: new Date(),
-          });
-        if (deferredRows) {
-          deferred += 1;
-          logger.info(
-            `[invoice] Scheduled send for ${inv.invoice_number} outside 8AM-8PM ET send window — deferred to ${nextOpen.toISOString()}`,
-          );
+        // SMS-leg check: the window is an SMS fence, so an invoice with no
+        // SMS leg must not have its EMAIL delayed by it — a third-party
+        // payer invoice is delivered email-only by design, and a customer
+        // with no phone can only be emailed. Those fall through and send
+        // at their requested time. Fail toward deferral on a lookup error:
+        // worst case an email waits for 8:00 AM, never a night text.
+        let hasSmsLeg = !inv.payer_id;
+        if (hasSmsLeg) {
+          try {
+            const cust = await db("customers")
+              .where({ id: inv.customer_id })
+              .first("phone");
+            hasSmsLeg = Boolean(String(cust?.phone || "").trim());
+          } catch {
+            hasSmsLeg = true;
+          }
         }
-        continue;
+        if (!hasSmsLeg) {
+          logger.info(
+            `[invoice] Scheduled send for ${inv.invoice_number} has no SMS leg — sending at its requested time despite the send window`,
+          );
+        } else {
+          const nextOpen = nextSendWindowOpenET();
+          // Mirror the claim predicates (still due, still attempt-eligible),
+          // not just id+status: an admin can reschedule the invoice between
+          // the due-list read and this update, and a bare id+status match
+          // would overwrite their newly chosen scheduled_send_at with the
+          // window open. 0 rows affected = the row changed underneath — the
+          // newer schedule owns it, count nothing.
+          const deferredRows = await db("invoices")
+            .where({ id: inv.id, status: "scheduled" })
+            .whereNotNull("scheduled_send_at")
+            .where("scheduled_send_at", "<=", new Date())
+            .where((q) =>
+              q
+                .whereNull("scheduled_send_attempts")
+                .orWhere("scheduled_send_attempts", "<", 5),
+            )
+            .update({
+              scheduled_send_at: nextOpen,
+              scheduled_send_error:
+                "QUIET_HOURS_HOLD — outside 8AM-8PM ET send window, deferred to window open",
+              updated_at: new Date(),
+            });
+          if (deferredRows) {
+            deferred += 1;
+            logger.info(
+              `[invoice] Scheduled send for ${inv.invoice_number} outside 8AM-8PM ET send window — deferred to ${nextOpen.toISOString()}`,
+            );
+          }
+          continue;
+        }
       }
       const [claimed] = await db("invoices")
         .where({ id: inv.id, status: "scheduled" })
