@@ -2132,12 +2132,20 @@ export function calculateEstimate(inputs) {
         recommended: rec,
         dimmed: dim,
         programMinimumApplied,
-        pricingBasis: programMinimumApplied
-          ? 'PROGRAM_MINIMUM_MONTHLY'
-          : (floorApplied ? LAWN_PRICING_V2.pricingMode : marketPrice.pricingBasis),
-        pricingSource: programMinimumApplied
-          ? 'PROGRAM_MINIMUM'
-          : (floorApplied ? 'COST_FLOOR' : marketPrice.pricingSource),
+        // Lift outranks the leg's own mechanisms in the label — a lifted
+        // leg's price exceeds what floor/minimum/market set, so stamping it
+        // market/floor-derived hides the raise (codex #3274 r4 P2, server
+        // mirror).
+        pricingBasis: cadenceLadderLiftApplied
+          ? LAWN_PRICING_V2.pricingMode
+          : (programMinimumApplied
+            ? 'PROGRAM_MINIMUM_MONTHLY'
+            : (floorApplied ? LAWN_PRICING_V2.pricingMode : marketPrice.pricingBasis)),
+        pricingSource: cadenceLadderLiftApplied
+          ? 'CADENCE_LADDER_LIFT'
+          : (programMinimumApplied
+            ? 'PROGRAM_MINIMUM'
+            : (floorApplied ? 'COST_FLOOR' : marketPrice.pricingSource)),
         marketMonthly: marketPrice.monthly,
         marketAnnual,
         costFloorAnnual: floorPrice.costFloorAnnual,
@@ -2576,12 +2584,15 @@ export function calculateEstimate(inputs) {
   if (svcOnetimeLawn && !isCommercial && lotSqFt > 0) {
     hasOT = true;
     const lp = lawnPricesFor(grassType);
-    const selectedFreq = resolveLawnFreq(lawnFreq);
-    const selectedFreqIdx = LAWN_FREQS.indexOf(selectedFreq);
-    const baselinePrice = lawnLookup(lp, turfArea.turfSf, selectedFreqIdx >= 0 ? selectedFreqIdx : 1);
+    // One-time anchors on the STANDARD (6x) column — the one the cadence
+    // frequency discount never moves (codex #3274 r4 P1, server mirror): a
+    // standalone treatment makes no frequency commitment, so deriving from
+    // the selected cadence handed one-time quotes part of the recurring
+    // -4%/-8% discount.
+    const baselinePrice = lawnLookup(lp, turfArea.turfSf, 0);
     const baselineMonthly = baselinePrice.monthly;
     if (baselinePrice.pricingBasis === 'EXTRAPOLATED_ABOVE_TABLE_MAX') addLawnCustomQuoteNote();
-    const baselinePerApp = Math.round((baselineMonthly * 12) / selectedFreq * 100) / 100;
+    const baselinePerApp = Math.round((baselineMonthly * 12) / 6 * 100) / 100;
     let bl = Math.max(115, Math.round(baselinePerApp * 1.50));
     let tm = 1.0, tl = 'Fertilization';
     if (otLawnType === 'WEED') { tm = 1.12; tl = 'Weed Control'; }

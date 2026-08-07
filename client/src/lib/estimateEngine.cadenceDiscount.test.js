@@ -107,4 +107,37 @@ describe("cadence ladder under ARMED cost floors — client fallback mirror", ()
       expect(by[v].cadenceLadderLiftApplied).toBeUndefined();
     });
   });
+
+  it("lifted legs carry lift provenance, not a market label (codex r4 P2)", () => {
+    applyServerLawnPricingConfig({ useLawnCostFloor: true });
+    const by = lawnByVisits(calculateEstimate(lawnInput({ measuredTurfSf: 12000 })));
+    const lifted = [6, 9, 12].map((v) => by[v]).find((t) => t.cadenceLadderLiftApplied);
+    expect(lifted).toBeTruthy();
+    expect(lifted.ann).toBeGreaterThan(lifted.marketAnnual);
+    expect(lifted.pricingSource).toBe("CADENCE_LADDER_LIFT");
+  });
+});
+
+describe("one-time lawn anchors on the undiscounted 6x column — client mirror (codex r4 P1)", () => {
+  function otLawnInput(overrides = {}) {
+    return lawnInput({
+      svcLawn: false,
+      svcOnetimeLawn: true,
+      otLawnType: "WEED",
+      measuredTurfSf: 20000,
+      ...overrides,
+    });
+  }
+  const otLawnItem = (est) => est.oneTime.items.find((i) => i.name.startsWith("OT Lawn"));
+
+  it("the requested plan cadence no longer changes the one-time price", () => {
+    // 20,000 sqft: the 9x column fell under the discount; the 6x anchor
+    // never moved. The one-time base must be cadence-independent.
+    const at6 = otLawnItem(calculateEstimate(otLawnInput({ lawnFreq: "6" })));
+    const at9 = otLawnItem(calculateEstimate(otLawnInput({ lawnFreq: "9" })));
+    const at12 = otLawnItem(calculateEstimate(otLawnInput({ lawnFreq: "12" })));
+    expect(at6).toBeTruthy();
+    expect(at9.price).toBe(at6.price);
+    expect(at12.price).toBe(at6.price);
+  });
 });

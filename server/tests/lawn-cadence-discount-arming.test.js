@@ -1,5 +1,6 @@
-const { priceLawnCare } = require('../services/pricing-engine');
+const { priceLawnCare, priceOneTimeLawn } = require('../services/pricing-engine');
 const { LAWN_PRICING_V2 } = require('../services/pricing-engine/constants');
+const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 
 // The cadence frequency discount's two runtime guards (codex #3274 r3):
 //
@@ -83,9 +84,27 @@ describe('cadence ladder under ARMED cost floors (lift resolution)', () => {
     }
   });
 
-  it('lifted legs are flagged for audit/display', () => {
+  it('lifted legs are flagged and carry lift provenance, not a market label (codex r4 P2)', () => {
     const by = tiersByVisits(priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', useLawnCostFloor: true }));
     expect(by[6].cadenceLadderLiftApplied).toBe(true);
+    // The lifted 6x annual exceeds its market annual, so labeling it
+    // MARKET_TABLE would store a non-market price as market-derived.
+    expect(by[6].annual).toBeGreaterThan(by[6].marketAnnual);
+    expect(by[6].pricingSource).toBe('CADENCE_LADDER_LIFT');
+    expect(by[6].pricingBasis).toBe(LAWN_PRICING_V2.pricingMode);
+  });
+
+  it('the legacy mapper carries the lift marker through to R.lawn (codex r4 P2)', () => {
+    const result = priceLawnCare({ lawnSqFt: 12000 }, { tier: 'standard', useLawnCostFloor: true, includeHiddenTiers: false });
+    const legacy = mapV1ToLegacyShape({
+      lineItems: [result],
+      totals: {},
+      pricingVersion: 'test',
+    });
+    const lifted = (legacy.results?.lawn || legacy.lawn || []).find((t) => t.v === 6);
+    expect(lifted).toBeTruthy();
+    expect(lifted.cadenceLadderLiftApplied).toBe(true);
+    expect(lifted.pricingSource).toBe('CADENCE_LADDER_LIFT');
   });
 
   it('disarmed floors change nothing (prod default path stays bit-identical)', () => {
@@ -102,5 +121,24 @@ describe('cadence ladder under ARMED cost floors (lift resolution)', () => {
     for (const v of [6, 9, 12]) {
       expect(by[v].cadenceLadderLiftApplied).toBeUndefined();
     }
+  });
+});
+
+describe('one-time lawn anchors on the undiscounted 6x column (codex r4 P1)', () => {
+  it('derives its base from the standard per-app, not the discounted selected cadence', () => {
+    // 20,000 sqft st_augustine: 9x per-app fell 186.67 -> 174.67 under the
+    // discount; the 6x anchor per-app (182) never moved. A standalone
+    // treatment makes no frequency commitment and must not inherit the
+    // recurring discount.
+    const standardPerApp = tiersByVisits(priceLawnCare({ lawnSqFt: 20000 }, { tier: 'standard' }))[6].perApp;
+    const ot = priceOneTimeLawn({ lawnSqFt: 20000 }, { treatmentType: 'weed' });
+    expect(ot.baselinePerApp).toBe(standardPerApp);
+  });
+
+  it('the requested plan cadence no longer changes the one-time base', () => {
+    const otDefault = priceOneTimeLawn({ lawnSqFt: 20000 }, { treatmentType: 'weed' });
+    const otPremium = priceOneTimeLawn({ lawnSqFt: 20000 }, { treatmentType: 'weed', tier: 'premium', lawnFreq: 12 });
+    expect(otPremium.price).toBe(otDefault.price);
+    expect(otPremium.baselinePerApp).toBe(otDefault.baselinePerApp);
   });
 });

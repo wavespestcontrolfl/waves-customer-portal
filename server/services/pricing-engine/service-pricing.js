@@ -2193,12 +2193,21 @@ function priceLawnCare(property, options = {}) {
       monthly: Math.round(ann / 12 * 100) / 100,
       label: tc.label,
       recommended: t === selectedTier,
-      pricingBasis: programMinimumApplied
-        ? 'PROGRAM_MINIMUM_MONTHLY'
-        : (costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis),
-      pricingSource: programMinimumApplied
-        ? 'PROGRAM_MINIMUM'
-        : (costFloorApplied ? 'COST_FLOOR' : market.pricingSource),
+      // A cadence-lifted leg outranks its own mechanisms in the label: its
+      // final annual exceeds whatever floor/minimum/market set it, so
+      // stamping the leg MARKET_TABLE (or COST_FLOOR) would store a
+      // non-market price as market-derived with no record of the lift
+      // (codex #3274 r4 P2).
+      pricingBasis: cadenceLadderLiftApplied
+        ? LAWN_PRICING_V2.pricingMode
+        : (programMinimumApplied
+          ? 'PROGRAM_MINIMUM_MONTHLY'
+          : (costFloorApplied ? LAWN_PRICING_V2.pricingMode : market.pricingBasis)),
+      pricingSource: cadenceLadderLiftApplied
+        ? 'CADENCE_LADDER_LIFT'
+        : (programMinimumApplied
+          ? 'PROGRAM_MINIMUM'
+          : (costFloorApplied ? 'COST_FLOOR' : market.pricingSource)),
       programMinimumApplied,
       programMinimumMonthly: programMinimumAnnual > 0 ? programMinimumMonthly : null,
       marketMonthly,
@@ -5062,15 +5071,23 @@ function priceOneTimeLawn(property, options = {}) {
     afterHours = false,
     isRecurringCustomer = false,
     track = 'st_augustine',
-    tier = 'enhanced',
-    lawnFreq,
+    // tier/lawnFreq are still accepted from callers describing the requested
+    // plan, but no longer select the one-time base — see the anchor note on
+    // the priceLawnCare call below.
   } = options;
 
   const normalizedTreatment = treatmentType === 'fertilization' ? 'fert' : treatmentType;
   const lawnResult = priceLawnCare(property, {
     track,
-    tier,
-    lawnFreq,
+    // One-time work anchors on the STANDARD (6x) per-app — the column the
+    // cadence frequency discount never moves (codex #3274 r4 P1). A
+    // standalone treatment makes no frequency commitment, so deriving from
+    // the selected cadence (default 9x) silently handed every qualifying
+    // one-time quote part of the recurring -4%/-8% discount once those
+    // columns were discounted. Matches how one-time pest derives from its
+    // undiscounted anchor. The caller's tier/lawnFreq still describe the
+    // requested plan elsewhere; they no longer pick the one-time base.
+    tier: 'standard',
     useLawnCostFloor: false,
     // One-time derives from the raw recurring per-app market rate; the
     // recurring program minimum (a floor on sold PLANS) must not inflate it.
