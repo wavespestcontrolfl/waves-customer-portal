@@ -7744,23 +7744,25 @@ const CallRecordingProcessor = {
             if (customerId) {
               enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
             }
-            if (!phone) {
-              // Email-matched reuse (phone-less caller): weak identity, so
-              // the write repeats the FULL lookup eligibility, not just
-              // unclaimed-ness/ownership (that alone was codex P1 r2) — an
-              // admin correcting the lead's email or marking it lost/deleted
-              // between the lookup and this write must 0-row into the
+            if (!phone && existingLead) {
+              // Email-matched REUSE revalidation (phone-less caller): weak
+              // identity, so the write repeats the FULL lookup eligibility —
+              // email + not-deleted + status/conversion + name corroboration
+              // — not just unclaimed-ness/ownership (codex P1 r2 / P2 r6 /
+              // P1 r8). An admin correcting the candidate's email or name or
+              // closing it between lookup and write must 0-row into the
               // recovery mint below, never apply this caller's rolling
-              // extraction to a row that no longer matches (codex P2 r6).
-              // Applied for customer-attached phone-less reuse too, NOT just
-              // anonymous — the ownership guard alone would let that write
-              // overwrite AND claim an admin-corrected lead (audit P1 r9);
-              // the strict unclaimed predicate stays anonymous-only, since a
-              // customer-attached write may land on a row this same customer
-              // just claimed. Predicates mirror findReusableCallLead,
-              // including the workableUnnamedLead conditionality; a pass-2
-              // recovery row (email from THIS extraction, status 'new')
-              // passes them all.
+              // extraction to a row that no longer matches. Applied for
+              // customer-attached phone-less reuse too (audit P1 r9), but
+              // ONLY when a candidate was actually reused: fresh phone-less
+              // inserts — which on the customer-attached path bypass
+              // hasWorkableLeadSignal and can carry an absent or malformed
+              // email — must not fail their own enrichment against these
+              // predicates (audit P1 r10). The strict unclaimed predicate
+              // stays anonymous-only, since a customer-attached write may
+              // land on a row this same customer just claimed. A pass-2
+              // recovery row (email/names from THIS extraction, status
+              // 'new') passes everything here.
               if (!customerId) enrichmentWrite = enrichmentWrite.whereNull('customer_id');
               enrichmentWrite = enrichmentWrite
                 .whereNull('deleted_at')
@@ -7770,27 +7772,18 @@ const CallRecordingProcessor = {
                   .whereNotIn('status', TERMINAL_LEAD_STATUSES)
                   .whereNull('converted_at');
               }
-              if (existingLead) {
-                // The lookup's POSITIVE name corroboration must hold at
-                // write time too — an admin correcting the candidate's name
-                // between lookup and write means the row may no longer be
-                // this caller's (audit P1 r8). Reuse only ever happened with
-                // both first names present and matching, so the equality
-                // predicate is well-defined here; a pass-2 recovery row
-                // passes it (its names ARE this extraction's). Fresh inserts
-                // skip this block — a name-less caller's own new row must
-                // not fail its own enrichment.
+              // Reuse only ever happened with both first names present and
+              // matching, so the equality predicate is well-defined here.
+              enrichmentWrite = enrichmentWrite.whereRaw(
+                'LOWER(TRIM(first_name)) = ?',
+                [String(extracted.first_name || '').trim().toLowerCase()],
+              );
+              const statedLastLc = String(extracted.last_name || '').trim().toLowerCase();
+              if (statedLastLc) {
                 enrichmentWrite = enrichmentWrite.whereRaw(
-                  'LOWER(TRIM(first_name)) = ?',
-                  [String(extracted.first_name || '').trim().toLowerCase()],
+                  "(last_name IS NULL OR TRIM(last_name) = '' OR LOWER(TRIM(last_name)) = ?)",
+                  [statedLastLc],
                 );
-                const statedLastLc = String(extracted.last_name || '').trim().toLowerCase();
-                if (statedLastLc) {
-                  enrichmentWrite = enrichmentWrite.whereRaw(
-                    "(last_name IS NULL OR TRIM(last_name) = '' OR LOWER(TRIM(last_name)) = ?)",
-                    [statedLastLc],
-                  );
-                }
               }
             }
             enriched = await enrichmentWrite.update(leadUpdates);
