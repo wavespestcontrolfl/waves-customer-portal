@@ -20327,6 +20327,7 @@ module.exports.extractEngineInputs = extractEngineInputs;
 module.exports.estimateFamilyKeysForAdoption = estimateFamilyKeysForAdoption;
 module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFamily;
 module.exports.serviceFamilyKeyForAdoption = serviceFamilyKeyForAdoption;
+module.exports.recurringServicesWithSupplements = recurringServicesWithSupplements;
 module.exports.adoptionServiceModesForContract = adoptionServiceModesForContract;
 module.exports.netManualDiscountIntoFrequencyRow = netManualDiscountIntoFrequencyRow;
 module.exports.pricingBundleLacksManualDiscountNetting = pricingBundleLacksManualDiscountNetting;

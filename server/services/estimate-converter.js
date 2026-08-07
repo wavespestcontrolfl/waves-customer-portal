@@ -551,15 +551,15 @@ async function classifyAddOnAcceptContext({
       serviceFamilyKeyForAdoption,
       appointmentMatchesEstimateFamily,
     } = require('../routes/estimate-public');
-    // Supplemental companion lines ride OUTSIDE recurring.services on some
-    // server-priced shapes (rodent bait as recurring.rodentBaitMo — codex
-    // #3241 r4 P1): they are accepted recurring services all the same, so
-    // the overlap union must see their families too.
+    // ONE canonical line source shared with the ledger slicer (codex #3245
+    // r18, superseding the #3241 r4 rodent-only supplement union): the
+    // acceptance path's recurringServicesWithSupplements — recurring rows,
+    // engine lineItems, rodent AND palm supplement reconstruction across
+    // every container shape — so classification and slicing can never
+    // disagree about which services an accept carries.
+    const { acceptedRecurringBillingLines } = require('./plan-rate-ledger');
     const familyKeys = new Set(
-      [
-        ...recurringServicesFromEstimateData(estimateData),
-        ...supplementalCompanionLines(estimateData),
-      ]
+      acceptedRecurringBillingLines(estimateData)
         .map((svc) => serviceFamilyKeyForAdoption(svc))
         .filter(Boolean),
     );
@@ -3977,4 +3977,5 @@ module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceFo
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
 module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;
+module.exports.visitsPerYearForRecurringService = visitsPerYearForRecurringService;
 module.exports.classifyAddOnAcceptContext = classifyAddOnAcceptContext;

@@ -631,6 +631,41 @@ describe('zero-priced accepted families (codex r2)', () => {
     expect(slices.lawn_care).toBe(50);
   });
 
+  test('apps/treatmentsPerYear cadence aliases annualize per-app rows (codex r18)', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        result: {
+          recurring: {
+            services: [
+              { name: 'Quarterly Pest Control Service', service: 'pest_control', pa: 90, apps: 4 },
+              { name: 'Bi-Monthly Lawn Care Service', service: 'lawn_care', perTreatment: 60, treatmentsPerYear: 6 },
+            ],
+          },
+        },
+      },
+      monthlyRate: 60,
+    });
+    expect(slices.pest_control).toBe(30);
+    expect(slices.lawn_care).toBe(30);
+  });
+
+  test('an empty root recurring container never shadows nested rodent scalars (codex r18)', () => {
+    const slices = estimateFamilySlices({
+      estimateData: {
+        recurring: {},
+        result: {
+          recurring: {
+            services: [{ name: 'Quarterly Pest Control Service', service: 'pest_control', mo: 40 }],
+            rodentBaitMo: 24,
+          },
+        },
+      },
+      monthlyRate: 64,
+    });
+    expect(slices.pest_control).toBe(40);
+    expect(slices.rodent_bait).toBe(24);
+  });
+
   test('an empty root recurring container never shadows nested palm scalars (codex r17)', () => {
     const slices = estimateFamilySlices({
       estimateData: {

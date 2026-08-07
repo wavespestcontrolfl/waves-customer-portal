@@ -76,15 +76,27 @@ async function ledgerTableExists(database) {
 // discounts, floors, rounding — land pro-rata; the remainder cent goes to
 // the largest slice). Unclassifiable lines pool under 'unattributed' so the
 // sum never silently drops a line.
+// The canonical recurring billing lines of an accepted estimate — the SAME
+// list the acceptance path prices from (recurringServicesWithSupplements:
+// rows + engine lineItems + rodent/palm supplement reconstruction across
+// every container shape, deduped by recurringServiceKey). Shared by the
+// slicer AND the add-on classifier so they can never disagree.
+function acceptedRecurringBillingLines(estimateData = {}) {
+  const { recurringServicesWithSupplements } = require('../routes/estimate-public');
+  const root = estimateData?.result && typeof estimateData.result === 'object'
+    ? estimateData.result
+    : (estimateData?.engineResult && typeof estimateData.engineResult === 'object'
+      ? estimateData.engineResult
+      : estimateData);
+  return recurringServicesWithSupplements(root);
+}
+
 function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
   const billedMonthly = roundMoney(monthlyRate);
   // Lazy requires — estimate-public/estimate-converter require this module
   // (or each other) inline only; function-scope requires cannot cycle.
   const { serviceFamilyKeyForAdoption } = require('../routes/estimate-public');
-  const {
-    recurringServicesFromEstimateData,
-    supplementalCompanionLines,
-  } = require('./estimate-converter');
+  const { visitsPerYearForRecurringService } = require('./estimate-converter');
   const raw = {};
   // A family whose accepted price is EXPLICITLY zero (a comped line —
   // manualFinalAnnual/annualAfterDiscount stamped 0) must still appear in
@@ -124,12 +136,12 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
       const annual = priceValue(value);
       if (annual != null) return annual / 12;
     }
-    // Per-application-only rows (codex #3245 r17 — RECURRING_DOLLAR_FIELDS
-    // admits them): annualize through the row's own visit cadence. No
-    // classifiable visit count means no derivable monthly — the row stays
-    // unpriced rather than inventing one.
-    const visits = priceValue(line?.visitsPerYear) ?? priceValue(line?.visits)
-      ?? priceValue(line?.appsPerYear) ?? priceValue(line?.frequency);
+    // Per-application-only rows (codex #3245 r17/r18 — RECURRING_DOLLAR_
+    // FIELDS admits them): annualize through the SHARED cadence resolver
+    // (visitsPerYearForRecurringService — visitsPerYear/appsPerYear/visits/
+    // apps/treatmentsPerYear). No classifiable visit count means no
+    // derivable monthly — the row stays unpriced rather than inventing one.
+    const visits = visitsPerYearForRecurringService(line || {});
     if (visits != null && visits > 0) {
       for (const value of [line?.perTreatment, line?.perVisit, line?.perApp, line?.pa, line?.price]) {
         const perApplication = priceValue(value);
@@ -149,55 +161,15 @@ function estimateFamilySlices({ estimateData = {}, monthlyRate = 0 } = {}) {
     raw[family] = (raw[family] || 0) + monthly;
     return family;
   };
-  const recurringFamilies = new Set();
-  for (const line of recurringServicesFromEstimateData(estimateData)) {
-    // Record EVERY classifiable recurring family before price filtering
-    // (codex #3245 r7): a zero-comped line must still block its
-    // supplemental-scalar twin, or the supplement re-adds the family
-    // positive instead of the comp deleting it.
-    const family = boundedFamilyKey(serviceFamilyKeyForAdoption(line) || UNATTRIBUTED);
-    if (family !== UNATTRIBUTED) recurringFamilies.add(family);
+  // ONE line source (codex #3245 r18, ending the parallel-parser drift the
+  // reviews kept finding one shape at a time): the acceptance path's own
+  // recurringServicesWithSupplements — recurring rows, engine lineItems,
+  // rodent AND palm supplement reconstruction, all container shapes,
+  // deduped by recurringServiceKey. The same list feeds the add-on
+  // classifier, so slicing and classification can never disagree about
+  // which services an accept carries.
+  for (const line of acceptedRecurringBillingLines(estimateData)) {
     addLine(line);
-  }
-  // Supplemental companions dedupe by FAMILY against the recurring rows
-  // (codex #3245 r1, mirroring combineRecurringServicesForScheduling's
-  // companion resolution): legacy payloads can carry rodent bait BOTH as a
-  // recurring line and as the rodentBaitMo scalar — counting it twice
-  // distorts every proportionally-normalized sibling slice even though the
-  // total still reconciles.
-  for (const line of supplementalCompanionLines(estimateData)) {
-    const family = boundedFamilyKey(serviceFamilyKeyForAdoption(line) || UNATTRIBUTED);
-    if (recurringFamilies.has(family)) continue;
-    addLine(line);
-  }
-  // Palm injection rides OUTSIDE recurring.services as mapper scalars
-  // (recurring.palmInjectionMo/Ann — codex #3245 r16), exactly like the
-  // rodent supplement; without its own slice a Pest+Palm accept normalizes
-  // the palm dollars onto pest_control and the next pest re-quote drops
-  // them. Same family dedupe as the supplements above.
-  {
-    // Scan EVERY recurring container for the first positive palm value
-    // (codex #3245 r17): an empty root `recurring` object must not shadow
-    // the populated `result.recurring` — container truthiness is not
-    // evidence.
-    const root = estimateData?.result && typeof estimateData.result === 'object'
-      ? estimateData.result
-      : estimateData;
-    const palmContainers = [estimateData?.recurring, root?.recurring, root?.results?.recurring]
-      .filter((container) => container && typeof container === 'object');
-    let palmMonthly = null;
-    for (const container of palmContainers) {
-      palmMonthly = priceValue(container.palmInjectionMo)
-        ?? (priceValue(container.palmInjectionAnn) != null
-          ? priceValue(container.palmInjectionAnn) / 12
-          : null);
-      if (palmMonthly != null && palmMonthly > 0) break;
-      palmMonthly = null;
-    }
-    if (palmMonthly != null && palmMonthly > 0
-      && !recurringFamilies.has(boundedFamilyKey('palm_injection'))) {
-      addLine({ service: 'palm_injection', name: 'Palm Injection', monthly: palmMonthly });
-    }
   }
   const families = Object.keys(raw);
   const withZeroFamilies = (slices) => {
@@ -523,6 +495,7 @@ module.exports = {
   UNATTRIBUTED,
   planRateLedgerEnabled,
   boundedFamilyKey,
+  acceptedRecurringBillingLines,
   estimateFamilySlices,
   loadComponents,
   applyAcceptToLedger,
