@@ -2217,9 +2217,15 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
     if (workableUnnamedLead) {
       out = out.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
     }
-    if (unclaimedOnly) {
+    if (unclaimedOnly || !customerId) {
+      // Anonymous retries require an UNCLAIMED row too, not just the
+      // shared-phone-ambiguity case: a stamped/sid lead assigned to a
+      // customer between attempts must be ineligible here — reusing it
+      // would let an anonymous caller's extraction overwrite a
+      // customer-owned lead (audit P1 r15). The rejected row falls through
+      // to contact reuse or a fresh mint like any other candidate.
       out = out.whereNull('customer_id');
-    } else if (customerId) {
+    } else {
       out = out.where((qq) => qq.whereNull('customer_id').orWhere('customer_id', customerId));
     }
     return out;
@@ -5668,6 +5674,12 @@ const CallRecordingProcessor = {
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
         processing_token: null,
         processing_started_at: null,
+        // A retry newly classified spam/non-workable exits BEFORE Step 4b's
+        // stamp reconciliation — an earlier attempt's lead stamp must not
+        // keep the metadata-join consumers treating this rejected call as
+        // the lead's own evidence (codex P1 r15). Atomic with the terminal
+        // status write.
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'lead_id'"),
         updated_at: new Date(),
       };
       if (extracted.is_voicemail) {
@@ -6542,6 +6554,11 @@ const CallRecordingProcessor = {
         review_status: 'open',
         processing_token: null,
         processing_started_at: null,
+        // Hard-veto exit precedes Step 4b's stamp reconciliation — clear any
+        // earlier attempt's lead stamp or the metadata-join consumers keep
+        // treating this vetoed call as the lead's own evidence (codex P1
+        // r15). Atomic with the terminal status write.
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'lead_id'"),
         updated_at: new Date(),
       });
       await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
@@ -7379,6 +7396,10 @@ const CallRecordingProcessor = {
     // would otherwise finalize with the old stamp unrevalidated (codex P1
     // r14).
     let phoneLessLinkagePending = !!priorStampedLeadId;
+    // Assigned inside the try once the lead source resolves; declared out
+    // here so the section catch can run it on a benign failure (codex P2
+    // r15). The default no-op keeps pre-lead-source failures safe.
+    let runCallPpcAttribution = () => {};
     if (shouldCreateLead) {
       try {
         // Check if lead already exists for this phone — or by spoken email
@@ -7452,6 +7473,45 @@ const CallRecordingProcessor = {
         } catch (e) {
           logger.warn(`[call-proc] lead_source lookup failed: ${e.message}`);
         }
+
+        // Assigned HERE (before anything downstream can throw) and invoked
+        // after the enrichment/claim-race block — and also from the section
+        // catch on a benign failure, so a transient enrichment error cannot
+        // permanently drop the call from paid/organic funnel reporting
+        // (codex P2 r15). Reads leadId/customerId at CALL time (final
+        // values); fully self-guarded, never throws.
+        runCallPpcAttribution = () => {
+          try {
+            const callAttr = leadSourceRow
+              ? require('./ads/call-attribution').attributionForSourceType(leadSourceRow.source_type)
+              : null;
+            const isBridgeTarget = leadSourceRow
+              && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
+            if (leadId && customerId && callAttr && !isBridgeTarget) {
+              require('./ads/call-attribution').recordCallPpcAttribution({
+                customerId,
+                leadId,
+                leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
+                isPaid: callAttr.isPaid,
+                leadSourceDetail: leadSourceRow.name || 'inbound call',
+                // Pass the PRIMARY matched service, NOT the composed
+                // multi-service label (and not the lead row's
+                // service_interest, which enrichment may have just written
+                // as the composite): attribution derives a single
+                // service_line via inferServiceLine, whose keyword order
+                // (lawn before pest) would bucket a pest-primary "… + Lawn
+                // Care Service" composite as lawn and skew paid/organic ROI
+                // (codex r3). The secondary families live on the lead's
+                // service_interest; the single-line funnel field carries
+                // the primary by design.
+                serviceInterest: extracted.matched_service || extracted.requested_service || null,
+                leadDate: call.created_at || null, // date by the actual call
+              }).catch(() => {});
+            }
+          } catch (attrErr) {
+            logger.warn(`[call-proc] ppc attribution setup failed: ${attrErr.code || attrErr.name || 'error'}`);
+          }
+        };
 
         if (existingLead) {
           leadId = existingLead.id;
@@ -7792,6 +7852,14 @@ const CallRecordingProcessor = {
             if (customerId) {
               enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
             }
+            if (!phone && sameCallLeadReuse && !customerId) {
+              // Same-call reuse skips the weak-identity revalidation, but an
+              // ANONYMOUS write still needs the unclaimed backstop — the
+              // lookup now rejects customer-claimed rows (audit P1 r15) and
+              // this repeats that predicate against the claim race between
+              // lookup and write; a 0-row lands in the recovery mint below.
+              enrichmentWrite = enrichmentWrite.whereNull('customer_id');
+            }
             if (!phone && existingLead && !sameCallLeadReuse) {
               // Email-matched REUSE revalidation (phone-less caller): weak
               // identity, so the write repeats the FULL lookup eligibility —
@@ -8093,34 +8161,13 @@ const CallRecordingProcessor = {
         // Runs AFTER the enrichment/claim-race block above so the funnel row
         // targets the FINAL leadId — attribution kicked off before recovery
         // could land on a lead the race rejected, leaving the replacement
-        // lead unattributed and reporting pointing at the wrong row
-        // (codex P1 r11). Fire-and-forget stays fine here: nothing after
-        // this consumes its result.
-        const callAttr = leadSourceRow
-          ? require('./ads/call-attribution').attributionForSourceType(leadSourceRow.source_type)
-          : null;
-        const isBridgeTarget = leadSourceRow
-          && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
-        if (leadId && customerId && callAttr && !isBridgeTarget) {
-          require('./ads/call-attribution').recordCallPpcAttribution({
-            customerId,
-            leadId,
-            leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
-            isPaid: callAttr.isPaid,
-            leadSourceDetail: leadSourceRow.name || 'inbound call',
-            // Pass the PRIMARY matched service, NOT the composed
-            // multi-service label (and not the lead row's service_interest,
-            // which enrichment may have just written as the composite):
-            // attribution derives a single service_line via inferServiceLine,
-            // whose keyword order (lawn before pest) would bucket a
-            // pest-primary "… + Lawn Care Service" composite as lawn and
-            // skew paid/organic ROI (codex r3). The secondary families live
-            // on the lead's service_interest; the single-line funnel field
-            // carries the primary by design.
-            serviceInterest: extracted.matched_service || extracted.requested_service || null,
-            leadDate: call.created_at || null, // date by the actual call
-          }).catch(() => {});
-        }
+        // lead unattributed and reporting pointing at the wrong row (codex
+        // P1 r11). The body lives in runCallPpcAttribution (assigned near
+        // the lead-source resolution) so the section catch can also fire it
+        // on a benign enrichment failure — see that assignment for the full
+        // channel-mapping rationale. Fire-and-forget: nothing after this
+        // consumes its result.
+        runCallPpcAttribution();
 
         // Voicemail lead text-back (Layer 3): text the prospect a prefilled
         // quote-wizard link. Only on the voicemail lead path — new prospect,
@@ -8284,6 +8331,14 @@ const CallRecordingProcessor = {
           unsettled.abortProcessing = true;
           throw unsettled;
         }
+        // Benign (non-retrying) failure finalizes the call — fire the funnel
+        // attribution before doing so, or a transient enrichment error
+        // permanently drops a tracked customer-attached call from
+        // paid/organic reporting (codex P2 r15). leadId holds the final
+        // selection made before the throw; the escalating paths above skip
+        // this because their RETRY re-runs the whole section, attribution
+        // included (recordCallPpcAttribution dedupes by lead + first-touch).
+        runCallPpcAttribution();
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
       }
     } else if (priorStampedLeadId) {
