@@ -29,6 +29,8 @@ const {
   dedupeKey,
   scoreOpportunity,
   deriveLinkBoost,
+  listicleFamilyKey,
+  clusterListicleFamilies,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
 
 const { WEIGHTS } = require('../services/content/scoring-config');
@@ -642,5 +644,81 @@ describe('answer_gap scoring + action mapping', () => {
       .toBe('refresh_existing_page');
     expect(actionForOpportunity({ bucket: 'answer_gap', page_url: null, query: 'q' }))
       .toBe('do_not_publish');
+  });
+});
+
+// ── listicle_family clustering + scoring + action mapping ────────────
+
+describe('listicleFamilyKey', () => {
+  test('word order and glue words do not split a family', () => {
+    const a = listicleFamilyKey('drought tolerant plants florida');
+    expect(listicleFamilyKey('florida drought tolerant plants')).toBe(a);
+    expect(listicleFamilyKey('drought tolerant plants for florida')).toBe(a);
+    expect(listicleFamilyKey('drought tolerant plants in florida')).toBe(a);
+  });
+  test('different content tokens are different families', () => {
+    expect(listicleFamilyKey('drought resistant plants florida'))
+      .not.toBe(listicleFamilyKey('drought tolerant plants florida'));
+    expect(listicleFamilyKey('drought tolerant plants sarasota'))
+      .not.toBe(listicleFamilyKey('drought tolerant plants florida'));
+  });
+  test('punctuation and repeated tokens normalize away; empty input → null', () => {
+    expect(listicleFamilyKey('drought-tolerant plants, florida'))
+      .toBe(listicleFamilyKey('drought tolerant plants florida'));
+    expect(listicleFamilyKey('')).toBeNull();
+    expect(listicleFamilyKey(null)).toBeNull();
+  });
+});
+
+describe('clusterListicleFamilies', () => {
+  const rows = [
+    { query: 'drought tolerant plants florida', impressions: '48', avg_position: '17.2', service_category: 'lawn', city_target: null },
+    { query: 'florida drought tolerant plants', impressions: '24', avg_position: '17.3', service_category: null, city_target: null },
+    { query: 'drought tolerant plants for florida', impressions: '30', avg_position: '20.8', service_category: 'lawn', city_target: null },
+    { query: 'kinds of ants in florida', impressions: '11', avg_position: '48.4', service_category: 'pest', city_target: null },
+    { query: 'how to get rid of ants', impressions: '900', avg_position: '4.0', service_category: 'pest', city_target: null }, // not list-shaped
+    { query: 'best plants for shade', impressions: '60', avg_position: '9.0', service_category: 'lawn', city_target: null }, // vendor-RE excluded
+  ];
+
+  test('merges variants, sums impressions, weights position, sorts variants by impressions', () => {
+    const fams = clusterListicleFamilies(rows);
+    const drought = fams.find((f) => f.variants.length === 3);
+    expect(drought).toBeDefined();
+    expect(drought.impressions).toBe(102);
+    expect(drought.variants[0].query).toBe('drought tolerant plants florida');
+    // Impressions-weighted: (48*17.2 + 24*17.3 + 30*20.8) / 102 ≈ 18.28
+    expect(drought.position).toBeCloseTo(18.28, 1);
+  });
+
+  test('non-list-shaped and vendor-intent queries never enter a family', () => {
+    const fams = clusterListicleFamilies(rows);
+    const all = fams.flatMap((f) => f.variants.map((v) => v.query));
+    expect(all).not.toContain('how to get rid of ants');
+    expect(all).not.toContain('best plants for shade');
+    expect(all).toContain('kinds of ants in florida'); // single-variant family still clustered (floor applied by the miner)
+  });
+
+  test('empty/undefined input → no families', () => {
+    expect(clusterListicleFamilies([])).toEqual([]);
+    expect(clusterListicleFamilies(undefined)).toEqual([]);
+  });
+});
+
+describe('listicle_family scoring + action mapping', () => {
+  test('gscOpportunityScore treats listicle_family like seasonal_rising (0.7×)', () => {
+    expect(gscOpportunityScore('listicle_family', 18, 1.0)).toBe(Math.round(WEIGHTS.gscOpportunity * 0.7));
+  });
+
+  test('maps to new_supporting_blog; transactional representative still demoted', () => {
+    expect(actionForOpportunity({ bucket: 'listicle_family', page_url: null, query: 'kinds of ants in florida' }))
+      .toBe('new_supporting_blog');
+    // The wrapper's transactional demotion applies to this bucket like any other.
+    expect(actionForOpportunity({ bucket: 'listicle_family', page_url: null, query: 'signs you need pest control near me' }))
+      .toBe('do_not_publish');
+  });
+
+  test('family-summed impressions clear the boost floor that individual variants miss', () => {
+    expect(impressionsBoost(48)).toBe(0); // best single variant: below minImpressionsToScore
+    expect(impressionsBoost(102)).toBeGreaterThan(0); // family sum: scores
   });
 });

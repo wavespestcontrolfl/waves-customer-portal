@@ -21,6 +21,10 @@ const { buildSeoRequirements } = require('./blog-seo-contract');
 const {
   isFaqBlockedService, PAGE_CITY_SLUGS, ALLOWED_INTERNAL_LINKS, isKnownGoodInternalRoute,
 } = require('./content-guardrails');
+// "List-shaped" detection is shared with the miner's listicle_family bucket
+// (single grammar — a mined listicle opportunity must actually receive the
+// overlay). Never fork a private copy of the regexes here.
+const { isListicleQuery } = require('./listicle-query');
 const { isEnabled } = require('../../config/feature-gates');
 
 const queue = require('./opportunity-queue');
@@ -217,37 +221,12 @@ function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, 
 // overlay, and the voice notes forbid ranking companies outright.
 const LISTICLE_ELIGIBLE_PAGE_TYPES = new Set(['supporting-blog']);
 
-// Query shapes that map naturally to an enumerable list: a leading count
-// ("10 natural mosquito repellents") or an enumerable-noun keyword. Kept
-// narrow on purpose — a miss just produces a normal supporting-blog, and a
-// borderline match still yields a valid post, just list-formatted. A leading
-// digit followed by a time/cadence unit ("24 hour pest control", "7 day
-// treatment plan") is service phrasing, not an item count — excluded.
-const LISTICLE_TIME_UNIT_RE = /^(hour|hr|day|week|month|year|minute|min|am|pm)s?\b/i;
-const LISTICLE_LEADING_COUNT_RE = /^\s*\d{1,2}\s+(\S+)/;
-const LISTICLE_NOUN_RE = /\b(signs?|symptoms|ways|tips|ideas|mistakes|myths|types|kinds|reasons|steps|plants|checklist)\b/i;
-// Vendor/roundup intent ("10 best pest control companies", "top exterminators")
-// must never receive the overlay: the voice notes forbid ranking companies, so
-// the brief would be self-contradictory — leave those SERPs to the existing
-// buyer-guide/comparison handling. Conservative by design: excluding e.g.
-// "best plants for shade" only costs the list formatting, never the post.
-const LISTICLE_VENDOR_RE = /\b(best|top|cheapest|company|companies|providers?|services?|exterminators?|reviews?|vs)\b/i;
-
 // Question-shaped list queries ("what are the signs of termites") get a
 // question-header variant: each numbered H2 is phrased as the exact
 // sub-question that item answers, so the heading itself matches how the
 // query was asked. Interrogative-lead only — a bare noun query ("signs of
 // termites") keeps declarative headings.
 const LISTICLE_QUESTION_RE = /^\s*(what|why|which|how|when|where|is|are|can|do|does|should)\b/i;
-
-function isListicleQuery(query) {
-  const q = String(query || '').trim();
-  if (!q) return false;
-  if (LISTICLE_VENDOR_RE.test(q)) return false;
-  const count = q.match(LISTICLE_LEADING_COUNT_RE);
-  if (count && !LISTICLE_TIME_UNIT_RE.test(count[1])) return true;
-  return LISTICLE_NOUN_RE.test(q);
-}
 
 function applyListicleTreatment({ enabled, actionType, pageType, query, operatorPinned = false, requiredSections, schemaTypes, voiceConstraints }) {
   // New MINED drafts only:

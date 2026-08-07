@@ -45,6 +45,9 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
 const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, minScoreToActFor, isTransactionalQuery } =
   require('../content/scoring-config');
+// The SAME list-shape grammar the brief-builder's listicle overlay uses —
+// guarantees a listicle_family opportunity actually receives the overlay.
+const { isListicleQuery } = require('../content/listicle-query');
 
 // ── normalization helpers (pure, test-friendly) ─────────────────────
 
@@ -170,6 +173,7 @@ function gscOpportunityScore(bucket, position, impressionsBoost) {
   if (bucket === 'no_content_yet') return Math.round(W * 0.65 * impressionsBoost);
   if (bucket === 'aeo_gap') return Math.round(W * 0.8 * impressionsBoost);
   if (bucket === 'answer_gap') return Math.round(W * 0.8 * impressionsBoost);
+  if (bucket === 'listicle_family') return Math.round(W * 0.7 * impressionsBoost);
   return 0;
 }
 
@@ -253,7 +257,71 @@ function baseActionForOpportunity({ bucket, query, page_url, city, service }) {
   if (bucket === 'answer_gap') {
     return page_url ? 'refresh_existing_page' : 'do_not_publish';
   }
+  // listicle_family demand is enumerable-informational by construction
+  // (isListicleQuery excludes vendor/roundup intent) — always a new blog
+  // post; the actionForOpportunity wrapper still demotes a transactional
+  // representative query like any other bucket.
+  if (bucket === 'listicle_family') return 'new_supporting_blog';
   return 'do_not_publish';
+}
+
+// ── listicle-family clustering (pure, test-friendly) ─────────────────
+//
+// List-shaped demand arrives FRAGMENTED: "drought tolerant plants florida",
+// "florida drought tolerant plants", "drought tolerant plants for florida"…
+// each variant sits below minImpressionsToScore (impressionsBoost 0 → score
+// 0), so per-query buckets can never surface the topic even when the family
+// as a whole has hundreds of impressions. Cluster variants by
+// order-insensitive token identity (glue words dropped), sum impressions
+// across the family, and let the SUM clear the floor. The representative
+// query (highest-impression variant) stays a REAL GSC query — the brief's
+// target_keyword is never an invented string.
+const LISTICLE_FAMILY_GLUE_WORDS = new Set([
+  'for', 'in', 'the', 'a', 'an', 'of', 'to', 'and', 'with', 'on', 'at',
+  'my', 'your',
+]);
+
+function listicleFamilyKey(query) {
+  const tokens = String(query || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w && !LISTICLE_FAMILY_GLUE_WORDS.has(w));
+  if (!tokens.length) return null;
+  return Array.from(new Set(tokens)).sort().join('+');
+}
+
+function clusterListicleFamilies(rows) {
+  const families = new Map();
+  for (const r of rows || []) {
+    if (!isListicleQuery(r.query)) continue;
+    const key = listicleFamilyKey(r.query);
+    if (!key) continue;
+    const imp = parseInt(r.impressions, 10) || 0;
+    const pos = Number(r.avg_position) || 0;
+    let fam = families.get(key);
+    if (!fam) {
+      fam = { key, variants: [], impressions: 0, posWeightedSum: 0 };
+      families.set(key, fam);
+    }
+    fam.variants.push({
+      query: r.query,
+      impressions: imp,
+      service_category: r.service_category || null,
+      city_target: r.city_target || null,
+    });
+    fam.impressions += imp;
+    fam.posWeightedSum += pos * imp;
+  }
+  return Array.from(families.values()).map((f) => {
+    f.variants.sort((a, b) => b.impressions - a.impressions);
+    return {
+      key: f.key,
+      variants: f.variants,
+      impressions: f.impressions,
+      position: f.impressions ? f.posWeightedSum / f.impressions : 0,
+    };
+  });
 }
 
 // Used to look up the best-impression own page sharing a query's
@@ -535,6 +603,7 @@ class GscOpportunityMiner {
       ['no_content_yet', () => this.mineNoContentYet(since, ownPagesByServiceCity)],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
       ['answer_gap', () => this.mineAnswerGap(since)],
+      ['listicle_family', () => this.mineListicleFamily(since)],
     ];
 
     for (const [name, fn] of runs) {
@@ -1380,6 +1449,59 @@ class GscOpportunityMiner {
     return out;
   }
 
+  async mineListicleFamily(since) {
+    if (!isEnabled('listicleFamilyMining')) return []; // dormant until explicitly enabled
+    // Grouping by (query, service, city) mirrors the other query buckets;
+    // clusterListicleFamilies re-merges split classifications by token
+    // identity anyway, so a variant classified under two cities still
+    // contributes all its impressions to one family.
+    const rows = await db('gsc_queries')
+      .where('date', '>=', since)
+      .where('is_branded', false)
+      .select('query', 'service_category', 'city_target')
+      .sum('impressions as impressions')
+      .avg('position as avg_position')
+      .groupBy('query', 'service_category', 'city_target');
+
+    const out = [];
+    for (const fam of clusterListicleFamilies(rows)) {
+      // Fragmentation is this bucket's reason to exist: a single-variant
+      // list query strong enough to clear the floor alone is already
+      // reachable through striking_distance / no_content_yet / seasonal.
+      if (fam.variants.length < 2) continue;
+      if (fam.impressions < THRESHOLDS.minImpressionsToScore) continue;
+      const rep = fam.variants[0];
+      const city = normalizeCity(rep.city_target) || inferCityFromQuery(rep.query);
+      const service = rep.service_category || inferServiceFromQuery(rep.query);
+      const opp = {
+        bucket: 'listicle_family',
+        query: rep.query,
+        page_url: null,
+        service,
+        city,
+        signal_metadata: {
+          // `impressions` is the canonical key content-brief-builder reads
+          // into gsc_signal (the quality gate's gsc_signal_attached hard
+          // check needs it — same lesson as seasonal_rising's key mismatch).
+          impressions: fam.impressions,
+          family_size: fam.variants.length,
+          family_avg_position: Math.round(fam.position * 10) / 10,
+          family_variants: fam.variants.slice(0, 5).map(({ query, impressions }) => ({ query, impressions })),
+        },
+      };
+      const { total, breakdown } = scoreOpportunity(opp, {
+        position: fam.position,
+        impressions: fam.impressions,
+      });
+      opp.score = total;
+      opp.score_breakdown = breakdown;
+      opp.action_type = actionForOpportunity(opp);
+      opp.dedupe_key = dedupeKey(opp);
+      out.push(opp);
+    }
+    return out;
+  }
+
   async mineNoContentYet(since, ownPagesByServiceCity = new Map()) {
     // Queries with impressions on the property but no own page even
     // appearing in gsc_pages for the matching service+city.
@@ -1587,6 +1709,8 @@ module.exports._internals = {
   scoreOpportunity,
   deriveLinkBoost,
   linkBoostCap,
+  listicleFamilyKey,
+  clusterListicleFamilies,
   answerGapStem,
   stemmedTokenSet,
   queryContentTerms,
