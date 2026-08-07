@@ -3422,16 +3422,25 @@ const PINNED_SLUG_PATTERN = /^\/[a-z0-9-]+(\/[a-z0-9-]+)*\/$/;
  * Pure aside from the draft mutation — exported via _internals for tests.
  */
 function applyOperatorSlugRepair(brief, draft) {
+  // The pin is validated RAW (trim only) BEFORE the mismatch short-circuit —
+  // normalizing first would let a malformed pin ("Fall-Lawn", missing
+  // boundary slashes) silently become a schema-valid URL the operator never
+  // wrote, and operatorSlugMismatch compares NORMALIZED slugs, so a pin
+  // like /Fall-Lawn/ against draft /fall-lawn/ reads as "no drift" and
+  // would wave the invalid pin straight through to publish (Codex r1+r3).
+  // A shape error in the pin is an operator input error: park via the old
+  // remedy, never guess.
+  const rawPin = brief?.voice_constraints?.operator_brief?.slug;
+  const pinned = rawPin == null ? null : String(rawPin).trim();
+  if (pinned != null && !PINNED_SLUG_PATTERN.test(pinned)) {
+    return {
+      ok: false,
+      reason: `pinned slug "${rawPin}" is not a valid blog slug path (pin must be exact: /segment/…/ lowercase)`,
+      mismatch: { expected_slug: rawPin, draft_slug: draft?.frontmatter?.slug || null },
+    };
+  }
   const mismatch = operatorSlugMismatch(brief, draft);
   if (!mismatch) return null;
-  // The pin is validated RAW (trim only) — normalizing first would let a
-  // malformed pin ("Fall-Lawn", missing boundary slashes) silently become a
-  // schema-valid URL the operator never wrote. A shape error in the pin is
-  // an operator input error: park via the old remedy, never guess (Codex r1).
-  const pinned = String(mismatch.expected_slug || '').trim();
-  if (!PINNED_SLUG_PATTERN.test(pinned)) {
-    return { ok: false, reason: `pinned slug "${mismatch.expected_slug}" is not a valid blog slug path (pin must be exact: /segment/…/ lowercase)`, mismatch };
-  }
   if (!draft || typeof draft !== 'object' || !draft.frontmatter || typeof draft.frontmatter !== 'object' || Array.isArray(draft.frontmatter)) {
     return { ok: false, reason: 'draft has no frontmatter object to repair', mismatch };
   }

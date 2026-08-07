@@ -247,7 +247,13 @@ async function buildFrontmatter(post) {
     || (post.technically_reviewed_at ? todayEt : null);
   const factCheckedDate = clampDateToToday(calendarDateOnly(post.fact_checked_at), todayEt)
     || (post.fact_checked_at ? todayEt : null);
-  const serviceAreas = normalizeServiceAreas(post.service_areas_tag, post.city);
+  // City substitution applies to ABSENT stored areas only: with an invalid
+  // stored value (['Tampa']) plus a valid city, letting city stand in would
+  // silently replace the corrupt field and publish it — present-but-invalid
+  // must normalize to empty so schema validation rejects the row (Codex r3).
+  const storedAreasAbsent = post.service_areas_tag == null
+    || (Array.isArray(post.service_areas_tag) && post.service_areas_tag.length === 0);
+  const serviceAreas = normalizeServiceAreas(post.service_areas_tag, storedAreasAbsent ? post.city : undefined);
   const relatedServices = normalizeArray(post.related_services);
   // Blog posts from this publisher are hub-only. Spoke/service pages can still
   // carry spoke domains, but blog content should not fan out to city spokes.
@@ -274,8 +280,7 @@ async function buildFrontmatter(post) {
     // guessing over it would publish geographically inaccurate metadata —
     // keep the empty result so assertValidBlogFrontmatter rejects the row
     // (the pre-hardening behavior for invalid data; Codex r2).
-    service_areas_tag: (serviceAreas.length > 0 || !(post.service_areas_tag == null
-        || (Array.isArray(post.service_areas_tag) && post.service_areas_tag.length === 0)))
+    service_areas_tag: (serviceAreas.length > 0 || !storedAreasAbsent)
       ? serviceAreas
       : inferServiceAreas({ title: post.title, primary_keyword: post.keyword, tags: post.tag, city: post.city }, {}),
     related_services: relatedServices,

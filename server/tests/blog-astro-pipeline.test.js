@@ -253,6 +253,12 @@ describe('blog Astro frontmatter validation', () => {
     // empty result must reach assertValidBlogFrontmatter and reject the row.
     const invalid = await AstroPublisher.buildFrontmatter({ ...base, service_areas_tag: ['Tampa'] });
     expect(invalid.service_areas_tag).toEqual([]);
+    // A valid city must NOT stand in for present-but-invalid stored areas
+    // (Codex r3) — city substitution is for absent data only.
+    const invalidWithCity = await AstroPublisher.buildFrontmatter({ ...base, service_areas_tag: ['Tampa'], city: 'Sarasota' });
+    expect(invalidWithCity.service_areas_tag).toEqual([]);
+    const absentWithCity = await AstroPublisher.buildFrontmatter({ ...base, city: 'Sarasota' });
+    expect(absentWithCity.service_areas_tag).toEqual(['Sarasota']);
   });
 
   test('maps pest-family legacy tags to the required pest-control category', async () => {

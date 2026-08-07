@@ -833,6 +833,19 @@ describe('applyOperatorSlugRepair (operator pin is authoritative — drift repai
     }
   });
 
+  test('an invalid pin that NORMALIZES equal to the draft slug still parks — normalized equality must not bypass raw validation (Codex r3)', () => {
+    // Pin /Lawn-Care/…-Swfl/ lowercases to the draft slug, so
+    // operatorSlugMismatch alone reads "no drift" — the malformed pin must
+    // still park instead of publishing.
+    const draft = driftedDraft({ frontmatter: { slug: '/lawn-care/fall-lawn-mistakes-swfl/' } });
+    const before = JSON.stringify(draft);
+    const result = applyOperatorSlugRepair(operatorBrief('/Lawn-Care/Fall-Lawn-Mistakes-Swfl/'), draft);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/not a valid blog slug path/);
+    expect(result.mismatch.expected_slug).toBe('/Lawn-Care/Fall-Lawn-Mistakes-Swfl/');
+    expect(JSON.stringify(draft)).toBe(before);
+  });
+
   test('slug repair rewrites ONLY exact self-link destinations — foreign-host citations and longer internal routes survive verbatim (Codex r1)', () => {
     const draft = driftedDraft({
       body: [
