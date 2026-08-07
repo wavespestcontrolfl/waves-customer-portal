@@ -7,6 +7,13 @@ const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { normalizeServiceType } = require('../utils/service-normalizer');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const { calendarIcsAvailable, arrivalWindowEndsAt } = require('../services/appointment-ics-eligibility');
+
+// Add-to-calendar link for a visit row, or null. The eligibility verdict is
+// NOT re-derived here — services/appointment-ics-eligibility.js owns it and
+// routes/appointment-public.js's .ics route applies the same predicate, so the
+// portal can never advertise a link that 404s or hide one the route serves
+// (codex r3 P1).
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
 
@@ -15,6 +22,23 @@ router.use(authenticate);
 const listQuerySchema = Joi.object({
   days: Joi.number().integer().min(1).max(365).default(90),
 });
+
+function calendarUrlFor(row, now = new Date()) {
+  if (process.env.GATE_APPOINTMENT_PAGE !== 'true') return null;
+  if (!row?.reschedule_token) return null;
+  if (!calendarIcsAvailable(row, now)) return null;
+  return `/api/public/appointment/${row.reschedule_token}/calendar.ics`;
+}
+
+// The instant the link stops being servable, straight from the same owner, so
+// the client never reconstructs the deadline (no second date parser, no
+// duplicated window constant — codex r6 P1).
+function calendarExpiresAtFor(row, now = new Date()) {
+  if (!calendarUrlFor(row, now)) return null;
+  const endsAt = arrivalWindowEndsAt(row);
+  return endsAt ? endsAt.toISOString() : null;
+}
+
 
 // =========================================================================
 // GET /api/schedule — Upcoming scheduled services
@@ -113,6 +137,12 @@ router.get('/', async (req, res, next) => {
         // no reach beyond what the customer's own texts already carry.
         // Null for legacy pre-backfill rows → the button falls back to SMS.
         rescheduleUrl: s.reschedule_token ? `/reschedule/${s.reschedule_token}` : null,
+        // Add-to-calendar deep link — the tokenized public appointment page's
+        // /calendar.ics (an ICS spanning the customer-quoted 2-hour arrival
+        // window). Same-customer token, same posture as rescheduleUrl above;
+        // calendarUrlFor nulls every case that route would 404.
+        calendarUrl: calendarUrlFor(s),
+        calendarExpiresAt: calendarExpiresAtFor(s),
       })),
     });
   } catch (err) {
@@ -346,6 +376,9 @@ router.get('/next', async (req, res, next) => {
         isCallback: nextService.is_callback === true,
         // Self-serve deep link — see the list route's note above.
         rescheduleUrl: nextService.reschedule_token ? `/reschedule/${nextService.reschedule_token}` : null,
+        // Same contract as the list payload above.
+        calendarUrl: calendarUrlFor(nextService),
+        calendarExpiresAt: calendarExpiresAtFor(nextService),
       },
     });
   } catch (err) {

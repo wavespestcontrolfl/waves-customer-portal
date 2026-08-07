@@ -98,6 +98,30 @@ async function downloadPublicPdf(path, fileName = 'Waves_Receipt.pdf') {
   URL.revokeObjectURL(blobUrl);
 }
 
+// The visit .ics is a PUBLIC token endpoint (no Bearer needed), but it shares
+// two traps with downloadAuthedPdf: a root-relative href misses a configured
+// VITE_API_URL origin, and in the Capacitor shell a programmatic <a download>
+// click is a silent no-op. Resolve against API_BASE and hand the bytes to the
+// OS — share sheet on native, <a download> on web — so the .ics opens in the
+// calendar app (codex #3249 r1).
+async function downloadCalendarIcs(path, fileName = 'Waves_Visit.ics') {
+  // Server sends the app-absolute '/api/...' path; API_BASE already ends in
+  // '/api' (default '/api', or a full cross-origin API URL), so splice.
+  const abs = path.startsWith('/api/') ? `${API_BASE}${path.slice(4)}` : path;
+  const r = await fetch(abs);
+  if (!r.ok) throw new Error(`Calendar download failed (${r.status})`);
+  const blob = await r.blob();
+  if (await saveBlobNative(blob, fileName)) return;
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(blobUrl);
+}
+
 // Authenticated fetch → PDF blob, with the JSON "not ready yet" body turned
 // into a readable error. Shared by the Documents + Visits report flows.
 async function fetchAuthedPdfBlob(url) {
@@ -168,6 +192,25 @@ const arrivalWindowEnd = (windowStart) => {
   if (Number.isNaN(d.getTime())) return null;
   return new Date(d.getTime() + 120 * 60000).toISOString();
 };
+
+// True while the visit's quoted arrival window has not closed — mirrors
+// services/appointment-ics-eligibility on the server, so a long-open tab
+// stops offering a calendar file the route will refuse.
+// The deadline is SERVER-OWNED (schedule payload's calendarExpiresAt, from
+// services/appointment-ics-eligibility). The client parses no dates and holds
+// no copy of the arrival-window constant, so it can't drift from the endpoint
+// that serves the file (codex #3249 r6 P1).
+const calendarLinkEndsAt = (svc) => {
+  if (!svc?.calendarExpiresAt) return null;
+  const endsAt = new Date(svc.calendarExpiresAt);
+  return Number.isNaN(endsAt.getTime()) ? null : endsAt;
+};
+
+const calendarLinkStillLive = (svc) => {
+  const endsAt = calendarLinkEndsAt(svc);
+  return !!endsAt && endsAt.getTime() >= Date.now();
+};
+
 
 // ---------------------------------------------------------------------------
 // Waves AI bar — the wavespestcontrol.com "Ask Waves" intake, embedded on
@@ -1515,6 +1558,23 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
 function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   const compact = useIsMobile(720);
   const [nextService, setNextService] = useState(null);
+  // The Add-to-Calendar button hides itself once the arrival window closes,
+  // but an idle dashboard never rerenders to notice. Fire a one-shot timer at
+  // the deadline so the button disappears on its own (codex #3249 r4 P2).
+  const [calendarWindowTick, setCalendarWindowTick] = useState(0);
+  useEffect(() => {
+    const endsAt = calendarLinkEndsAt(nextService);
+    if (!nextService?.calendarUrl || !endsAt) return undefined;
+    const ms = endsAt.getTime() - Date.now();
+    if (ms <= 0) return undefined;
+    // setTimeout saturates past ~24.8 days; the window is hours away, but
+    // clamp so a far-future visit can't wrap to an immediate fire.
+    const timer = setTimeout(() => setCalendarWindowTick(t => t + 1), Math.min(ms, 2147483647));
+    return () => clearTimeout(timer);
+    // calendarWindowTick is a dependency ON PURPOSE: when the delay saturates
+    // the setTimeout ceiling the timer fires early, and without re-running
+    // here it would never be rescheduled toward the real deadline (codex r5).
+  }, [nextService, calendarWindowTick]);
   const [nextServiceStatus, setNextServiceStatus] = useState('loading');
   const [confirmingVisit, setConfirmingVisit] = useState(false);
   const [stats, setStats] = useState(null);
@@ -2062,6 +2122,25 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                 textDecoration: 'none',
                 position: 'relative',
               }}>Reschedule</a>
+              {/* Tokenized .ics from the public appointment page — drops the
+                  visit (2-hour arrival window) into the phone's calendar.
+                  Server nulls calendarUrl for every case the route would 404
+                  (gate dark, pre-token row, no window, window elapsed), so no
+                  fallback needed here. */}
+              {/* The dashboard fetches the next visit once, so a page left
+                  open past the arrival window would keep a calendarUrl the
+                  .ics route now 404s. Re-check the window client-side on each
+                  render against the same 2-hour promise (codex r3 P2). */}
+              {nextService.calendarUrl && calendarLinkStillLive(nextService) && (
+                <button type="button" onClick={() => {
+                  downloadCalendarIcs(nextService.calendarUrl).catch(() => {
+                    showCustomerAlert('Could not download the calendar file. Please try again.');
+                  });
+                }} data-glass-accent="" style={{
+                  ...dashboardSecondaryButton,
+                  position: 'relative',
+                }}>Add to Calendar</button>
+              )}
             </div>
           ) : nextServiceReady ? (
             <div style={{ padding: 20 }}>
@@ -5150,11 +5229,21 @@ function BillingTab({ customer }) {
             Saving {Math.round(discount * 100)}% on every service with your {tierName} bundle
           </div>
         )}
-        {activeTierName && tierName !== 'Platinum' && (TIER_DISCOUNTS.Platinum || 0) > discount && (
-          <div style={{ marginTop: 10, fontSize: 14, color: muted, fontWeight: 700 }}>
-            Platinum bumps that to {Math.round((TIER_DISCOUNTS.Platinum || 0.20) * 100)}% off every service.
-          </div>
-        )}
+        {/* Name the NEXT tier up, not always the top one — telling a Bronze
+            customer about Platinum skips the step they'd actually take
+            (owner, 2026-08-06). Nothing renders on the top tier. */}
+        {(() => {
+          if (!activeTierName) return null;
+          const idx = TIER_ORDER.indexOf(tierName);
+          const nextTier = idx >= 0 ? TIER_ORDER[idx + 1] : null;
+          const nextDiscount = nextTier ? (TIER_DISCOUNTS[nextTier] || 0) : 0;
+          if (!nextTier || nextDiscount <= discount) return null;
+          return (
+            <div style={{ marginTop: 10, fontSize: 14, color: muted, fontWeight: 700 }}>
+              {nextTier} bumps that to {Math.round(nextDiscount * 100)}% off every service.
+            </div>
+          );
+        })()}
       </div>
 
       <div id="billing-payment-methods" data-glass="card" style={{ ...card, padding: 20 }}>
@@ -5821,7 +5910,7 @@ function PropertySection({ title, icon = 'document', summary, defaultOpen, child
           <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: '#475569', transform: open ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
         </span>
       </button>
-      {open && <div style={{ padding: '0 18px 18px' }}>{children}</div>}
+      {open && <div style={{ padding: '8px 18px 18px' }}>{children}</div>}
     </section>
   );
 }
@@ -7473,13 +7562,21 @@ function LearnTab({ customer }) {
           marginTop: 22,
         }}>
           {[
-            { label: 'Blog Posts', value: sortedBlogPosts.length, sub: 'wavespestcontrol.com' },
-            { label: 'Expert Sources', value: expertPosts.length, sub: 'UF/IFAS and references' },
+            // "Recent Posts", not "Blog Posts": the value is the feed's
+            // most-recent slice (capped at 6 by /feed/blog), NOT the size of
+            // the blog library — the old label undersold a 150+ post archive.
+            { label: 'Recent Posts', value: sortedBlogPosts.length, sub: 'wavespestcontrol.com' },
+            { label: 'Expert Articles', value: expertPosts.length, sub: 'UF/IFAS and references' },
             { label: 'FAQ Answers', value: totalFaqQuestions, sub: 'Service and lawn topics' },
             {
               label: 'Latest',
               value: latestDate && !isNaN(latestDate) ? latestDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'None',
-              sub: latestContent?.title || 'No articles loaded yet',
+              // Latest pools Waves posts + UF/IFAS + LOCAL NEWS — name the
+              // source so a Tampa Bay Times headline sitting beside the
+              // wavespestcontrol.com tile can't read as a Waves post.
+              sub: latestContent
+                ? [latestContent.sourceName, latestContent.title].filter(Boolean).join(' · ')
+                : 'No articles loaded yet',
             },
           ].map(item => (
             <div key={item.label} style={{
@@ -11412,7 +11509,12 @@ function DocumentsTab({ customer, onSwitchTab }) {
 
   const getExpirationBadge = (expDate) => {
     if (!expDate) return null;
-    const exp = new Date(expDate + 'T12:00:00');
+    // expirationDate arrives as either a bare YYYY-MM-DD or a full ISO
+    // timestamp; concatenating a time onto the latter yields Invalid Date and
+    // rendered literally as "Valid through Invalid Date". Normalize to the
+    // date part, then bail if it still won't parse (same guard formatDate has).
+    const exp = new Date(String(expDate).slice(0, 10) + 'T12:00:00');
+    if (Number.isNaN(exp.getTime())) return null;
     const now = new Date();
     const daysUntil = Math.ceil((exp - now) / (1000 * 60 * 60 * 24));
 
