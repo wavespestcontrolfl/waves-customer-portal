@@ -1652,19 +1652,22 @@ function cityFromLocationId(locationId) {
  * The liveness DECISION runs under the per-location advisory lock the sync
  * holds across its whole fetch→reconcile cycle (gbp-review-sync:<loc>):
  * while the lock is held no cycle is in flight and no stamp is pending
- * (the reconcile is the only stamp writer and runs inside the same lock),
- * so the re-read is authoritative and no already-observed absence can
- * predate the decision. The lock — and its pooled connection — is released
- * BEFORE the slow multi-provider publish: holding it across provider
- * stalls pinned a pool connection per in-flight publish (two, counting the
- * callers' own outer locks) and could starve unrelated queries. A sync
- * cycle that starts after the decision and stamps the review mid-publish
- * is the same genuinely-concurrent-removal class as a stamp landing right
- * after a held-lock publish committed: the watchdog alert still fires and
- * stamped rows drop off every surface. Non-review publishes (no
- * sourceReviewId) pass straight through. FAIL CLOSED: no hasTable
- * pre-check — a DB error rejects and the publish fails loudly.
+ * (the reconcile is the only stamp writer and runs inside the same lock).
+ * The decision is a CONDITIONAL CLAIM — one statement that verifies the
+ * row is unstamped and stamps publish_claimed_until — and then the lock
+ * (and its pooled connection) is released BEFORE the slow multi-provider
+ * publish: holding it across provider stalls pinned a pool connection per
+ * in-flight publish and could starve unrelated queries. The durable claim
+ * covers the publish interval instead: the reconcile skips rows with an
+ * unexpired claim, so no removal stamp can land mid-publication either.
+ * The claim self-expires (PUBLISH_CLAIM_MS) and is cleared best-effort
+ * afterwards, so a crashed publisher only defers that row's stamping to
+ * the next hourly cycle. Non-review publishes (no sourceReviewId) pass
+ * straight through. FAIL CLOSED: no hasTable pre-check — a DB error
+ * rejects and the publish fails loudly.
  */
+const PUBLISH_CLAIM_MS = 10 * 60 * 1000;
+
 async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
   if (!sourceReviewId) {
     return { blocked: false, result: await publishFn() };
@@ -1674,16 +1677,26 @@ async function publishWithReviewLivenessLock(sourceReviewId, publishFn) {
     return { blocked: true, missing: !source };
   }
   const decision = await runExclusive(`gbp-review-sync:${source.location_id}`, async () => {
-    const fresh = await db('google_reviews').where({ id: sourceReviewId }).first();
-    return { blocked: !fresh || !!fresh.missing_since, missing: !fresh };
+    const claimed = await db('google_reviews')
+      .where({ id: sourceReviewId })
+      .whereNull('missing_since')
+      .update({ publish_claimed_until: new Date(Date.now() + PUBLISH_CLAIM_MS).toISOString() });
+    return { blocked: (Array.isArray(claimed) ? claimed.length : claimed) === 0 };
   }, { recordHealth: false });
   if (decision?.skipped) {
     return { blocked: true, lockBusy: true };
   }
   if (decision.blocked) {
-    return decision;
+    return { blocked: true, missing: false };
   }
-  return { blocked: false, result: await publishFn() };
+  try {
+    return { blocked: false, result: await publishFn() };
+  } finally {
+    await db('google_reviews')
+      .where({ id: sourceReviewId })
+      .update({ publish_claimed_until: null })
+      .catch(() => null);
+  }
 }
 
 function runVariants(preview = {}) {

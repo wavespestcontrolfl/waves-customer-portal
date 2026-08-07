@@ -980,6 +980,11 @@ class GoogleBusinessService {
         .whereNotNull('gbp_review_name')
         .whereNull('missing_since')
         .where('synced_at', '<', syncStart)
+        // A testimonial publisher stamps a short-lived publish claim (under
+        // this location's advisory lock) before its slow external posting —
+        // skip claimed rows so a removal stamp cannot land mid-publication;
+        // an expired claim (crashed publisher) is stampable again.
+        .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
         .select('id', 'reviewer_name', 'star_rating', 'review_created_at');
       if (candidates.length === 0) return { ok: true };
 
@@ -1006,6 +1011,10 @@ class GoogleBusinessService {
             // candidate select and this update — a stale snapshot must not
             // stamp a review another sync just proved is on Google.
             .where('synced_at', '<', syncStart)
+            // Publish-claim re-check at claim time, mirroring the candidate
+            // select — a claim stamped between the select and this update
+            // must also defer the stamp.
+            .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
             // Stamp with the runner's own fetch start, not db.fn.now() —
             // the reinstatement clears compare missing_since against other
             // runners' fetch starts (Node clock), and a Postgres-clock stamp

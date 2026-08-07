@@ -54,6 +54,10 @@ function createDbMock(initialRows = {}) {
       const last = String(bindings[0] || '').trim().toLowerCase();
       return row => String(row.last_name || '').trim().toLowerCase() === last;
     }
+    if (sql.includes('publish_claimed_until IS NULL OR publish_claimed_until <')) {
+      const cutoff = new Date(bindings[0]);
+      return row => row.publish_claimed_until == null || new Date(row.publish_claimed_until) < cutoff;
+    }
     return null;
   }
 
@@ -1042,6 +1046,38 @@ describe('Google Business review sync', () => {
       r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-copycat',
     );
     expect(copycat).toBeTruthy();
+  });
+
+  test('an unexpired publish claim defers the removal stamp; an expired claim does not', async () => {
+    seedSyncedReview({ id: 'keep-1' });
+    // Mid-publication: claimed 10 minutes into the future.
+    seedSyncedReview({
+      id: 'claimed-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-claimed',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-claimed',
+      reviewer_name: 'Publishing Pat',
+      publish_claimed_until: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    });
+    // Crashed publisher: claim expired an hour ago — stampable again.
+    seedSyncedReview({
+      id: 'expired-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-expired',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-expired',
+      reviewer_name: 'Expired Edna',
+      publish_claimed_until: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'claimed-1').missing_since).toBeNull();
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'expired-1').missing_since).toBeTruthy();
   });
 
   test('a failed reconcile surfaces in errors and rings the degraded alert (no Places fallback)', async () => {

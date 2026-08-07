@@ -1363,6 +1363,10 @@ router.get('/review-trend', dashboardCache, async (req, res, next) => {
 
     const rows = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
+      // Live rows only — the chart sits next to the live total/rating, and a
+      // removed review counted in its posting month would make the trend
+      // disagree with the adjacent current metrics.
+      .whereNull('missing_since')
       .select(db.raw("to_char(review_created_at AT TIME ZONE 'America/New_York','YYYY-MM') as ym"))
       .count('* as n')
       .avg('star_rating as avg')
