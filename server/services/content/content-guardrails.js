@@ -3066,7 +3066,9 @@ const REENTRY_SAFETY_SRCS = [
   // Noun-first re-entry figures (Codex PR r11): "the recommended
   // re-entry interval is 30 minutes", "the re-entry period lasts 30
   // minutes".
-  `\\bre-?(?:entry|occupation)\\s+(?:intervals?|periods?|windows?|times?|waits?)\\s+(?:\\w+\\s+){0,2}?(?:is|are|lasts?|runs?|takes?|equals?)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
+  // Label/list separators count as the predicate too (Codex PR r16:
+  // "Re-entry interval: 30 minutes", "Re-entry time — 30 minutes").
+  `\\bre-?(?:entry|occupation)\\s+(?:intervals?|periods?|windows?|times?|waits?)\\s*(?:(?:\\w+\\s+){0,2}?(?:is|are|lasts?|runs?|takes?|equals?)\\s+|[:\\-–—]\\s*)${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // go-inside/go-into count as the entry action too (Codex PR r7: "Do not
   // go inside the treated home for 30 minutes").
   `\\b(?:do\\s+not|don['’]?t|avoid)\\s+(?:re-?enter\\w*|enter\\w*|return\\w*|walk\\w*|play\\w*|go\\s+(?:back|inside|into|in)\\b)[^.!?\\n]{0,30}?\\b(?:for|until|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
@@ -3114,7 +3116,7 @@ const DRY_CONDITION_RE = /\b(?:once|when|after|until)\b(?:(?!\bwet\b)[^.!?\n]){0
 // PR r15: "refuses to confirm", "failed to confirm", "unable to confirm").
 const TECH_CONFIRMS_NEG_SRC = "(?:not|never|no|doesn['’]?t|don['’]?t|won['’]?t|cannot|can['’]?t|isn['’]?t|wasn['’]?t|refus\\w+|fail\\w+|unable|declin\\w+|neglect\\w+|without)";
 const TECH_CONFIRMS_RE = new RegExp(
-  `\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\b(?:confirms?|will\\s+confirm|advises?(?:\\s+on)?|verif(?:y|ies)|lets?\\s+you\\s+know)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,30}?\\b(?:timing|re-?entry|dry\\w*|safe\\b|all[-\\s]clear|when\\s+[^.!?\\n]{0,25}?\\b(?:safe|re-?ent\\w+|dry\\w*|return\\w*|go\\s+back)\\b)`
+  `\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\b(?:confirms?|confirmed|(?:has|have|had)\\s+confirmed|will\\s+confirm|advises?(?:\\s+on)?|advised|verif(?:y|ies|ied)|lets?\\s+you\\s+know)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,30}?\\b(?:timing|re-?entry|dry\\w*|safe\\b|all[-\\s]clear|when\\s+[^.!?\\n]{0,25}?\\b(?:safe|re-?ent\\w+|dry\\w*|return\\w*|go\\s+back)\\b)`
   + `|\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\bgives?\\s+you\\s+the\\s+all[-\\s]clear\\b`,
   'i',
 );
@@ -3125,6 +3127,10 @@ const TECH_CONFIRMS_RE = new RegExp(
 function normalizeHardCopyText(text) {
   return String(text || '')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    // Reference-style and collapsed/shortcut links render as their
+    // anchor text too (Codex PR r16: "[safe][policy]").
+    .replace(/\[([^\]]*)\]\[[^\]]*\]/g, '$1')
+    .replace(/\[([^\]]*)\]/g, '$1')
     // inline HTML/MDX tags render away too (<em>, <strong>, <b>, <i>…) —
     // but their quoted STRING PROPS are customer-visible copy (Codex PR
     // r13 audit: `<BottomLineBox verdict="…is safe for pets." />`), so
@@ -3149,11 +3155,14 @@ function normalizeHardCopyText(text) {
     // r15: `pet&#45;safe` renders as pet-safe). Decoded AFTER the tag
     // scan — an ENCODED `&lt;em&gt;` renders as literal text in the
     // browser, never as a tag.
-    .replace(/&#(\d+);/g, (m, n) => {
+    // The terminating semicolon is optional in browsers (Codex PR r16:
+    // `pet&#45safe` renders as pet-safe) — like HTML parsing, the
+    // maximal digit run is consumed.
+    .replace(/&#(\d+);?/g, (m, n) => {
       const cp = parseInt(n, 10);
       return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : m;
     })
-    .replace(/&#x([0-9a-fA-F]+);/g, (m, n) => {
+    .replace(/&#x([0-9a-fA-F]+);?/gi, (m, n) => {
       const cp = parseInt(n, 16);
       return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : m;
     })
@@ -3341,7 +3350,7 @@ const BANNED_TOPIC_SRCS = [
   // "schedule a wildlife removal consultation WITH A LICENSED
   // SPECIALIST" must reach the third-party check with the suffix
   // consumed), and referral nouns after the topic stay legal.
-  `\\b(?:schedule|book)\\s+(?:your\\s+|a\\s+|an\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?))?\\b(?!\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?|referrals?|partners?|specialists?)\\b)(?!\\s+(?:with|through)\\s+(?!us\\b|waves\\b))`,
+  `\\b(?:schedule|book)\\s+(?:your\\s+|a\\s+|an\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?))?\\b(?!\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?|referrals?|partners?|specialists?)\\b)(?!\\s+(?:(?:today|now|directly|online|easily|conveniently)\\s+)?(?:with|through)\\s+(?!us\\b|waves\\b))`,
   // REVERSE brand attribution (Codex PR r13 audit): "Wildlife removal by
   // Waves Pest Control", "Raccoon Removal | Waves Pest Control", "attic
   // insulation services from Waves" present the service as ours without a
@@ -3351,6 +3360,12 @@ const BANNED_TOPIC_SRCS = [
   // legal (Codex PR r14: "Wildlife removal by Waves Pest Control is not
   // available").
   `(?<!\\b(?:tips?|advice|guides?|information|articles?|posts?|reports?|research|questions?)\\s+(?:on|about|regarding|for)\\s+)\\b${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))(?:\\s+(?:services?|solutions?|programs?|options?|work))?\\s*(?:\\||[-–—:]|\\bby\\b|\\bfrom\\b|\\bwith\\b)\\s*(?:waves(?:\\s+pest\\s+control)?|us)\\b(?!(?:[^.!?\\n]){0,40}?\\b(?:not|never|isn['’]?t|aren['’]?t|unavailable|no\\s+longer)\\b)`,
+  // Standalone transactional service LISTINGS on our surfaces present
+  // the banned topic as ours even without we/Waves (Codex PR r16:
+  // "Professional raccoon removal services in Sarasota. Schedule
+  // today."). The marketing adjective + service noun keeps informational
+  // titles ("when to call a wildlife removal specialist") out.
+  `\\b(?:professional|expert|local|trusted|affordable|licensed|reliable|top[-\\s]?rated|fast|same[-\\s]?day)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}\\s+(?:services?|solutions?)\\b(?!\\s+(?:referrals?|partners?|specialists?))`,
   // Referral framing is exempt on either side of the topic here too
   // (Codex PR r12 audit: "call Waves for a wildlife removal referral" is
   // the wanted copy). The \b before the lookahead stops \w+ backtracking.

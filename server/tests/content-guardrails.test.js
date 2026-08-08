@@ -3132,6 +3132,22 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(petSafe.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const epa = guardrails.evaluate({ body: 'The pesticide is EPA&#45;approved.' }, {});
     expect(epa.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // Semicolon-less numeric references decode like browsers do —
+    // maximal digit run (Codex PR r16).
+    const noSemi = guardrails.evaluate({ body: 'The treatment is pet&#45safe.' }, {});
+    expect(noSemi.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('reference-style links and label-style durations block; completed confirmations pass (Codex PR r16)', () => {
+    const refLink = guardrails.evaluate({ body: 'The treatment is [safe][policy] for pets.' }, {});
+    expect(refLink.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const colon = guardrails.evaluate({ body: 'Re-entry interval: 30 minutes.' }, {});
+    expect(colon.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const dash = guardrails.evaluate({ body: 'Re-entry time — 30 minutes.' }, {});
+    expect(dash.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // The affirmative COMPLETED confirmation is the approved idiom.
+    const confirmed = guardrails.evaluate({ body: 'The treatment is safe once dry. Your technician has confirmed the timing.' }, {});
+    expect(confirmed.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
   test('escaped quotes inside MDX expression props survive extraction (Codex PR r15)', () => {
@@ -3792,6 +3808,13 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(rid.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
+  test('standalone transactional service listings block; informational titles stay legal (Codex PR r16)', () => {
+    const listing = guardrails.evaluate({ body: 'Professional raccoon removal services in Sarasota. Schedule today.' }, {});
+    expect(listing.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const info = guardrails.evaluate({ body: 'When to call a wildlife removal specialist for attic noises.' }, {});
+    expect(info.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
   test('removal-of-animal forms block; third-party schedule referrals stay legal (Codex PR r15)', () => {
     for (const body of [
       'We offer removal of raccoons from attics.',
@@ -3804,6 +3827,9 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     for (const body of [
       'Schedule a wildlife removal consultation with a licensed specialist.',
       'Schedule a wildlife removal consultation through a licensed specialist.',
+      // Bounded CTA modifiers before the attribution (Codex PR r16).
+      'Schedule a wildlife removal consultation today with a licensed specialist.',
+      'Schedule a wildlife removal consultation directly through a licensed specialist.',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
