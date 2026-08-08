@@ -2911,7 +2911,10 @@ const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR
 const REENTRY_LINKING_VERB_SRC = `(?:is|are|was|were|remains?|remained|stays?|stayed|becomes?|became|appears?|appeared|seems?|seemed|looks?|looked|(?:will|can|could|should|would|may|might|must)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)\\w+\\s+){0,2}?(?:be|remain|stay|become|appear|seem|look))`;
 // Bounded qualifiers accepted wherever a duration is parsed (Codex PR
 // r9): "in just 30 minutes", "wait only 30 minutes".
-const REENTRY_QUALIFIER_SRC = "(?:(?:about|around|roughly|approximately|between|just|only|at\\s+least|up\\s+to|under|over|less\\s+than|more\\s+than|no\\s+more\\s+than|fewer\\s+than|as\\s+little\\s+as)\\s+){0,2}?";
+// EXACTNESS qualifiers count too (Codex PR r21): "dries in exactly 30
+// minutes" is a fixed figure by definition — arguably the most fixed form
+// of one — so they belong in the same shared grammar as the hedges.
+const REENTRY_QUALIFIER_SRC = "(?:(?:about|around|roughly|approximately|between|just|only|exactly|precisely|a\\s+full|at\\s+least|up\\s+to|under|over|less\\s+than|more\\s+than|no\\s+more\\s+than|fewer\\s+than|as\\s+little\\s+as)\\s+){0,2}?";
 // A duration may be closed by a bare relative adverb instead of a
 // preposition that takes an object (Codex PR r17: "you may re-enter the
 // treated area 30 minutes later"). Same fixed figure, nothing after it.
@@ -2977,6 +2980,12 @@ const REENTRY_SAFETY_SRCS = [
   // claim, or follow it as an application/drying clause.
   "\\b(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|solutions?|formulas?|treated)\\b[^.!?\\n]{0,60}?\\bsafe\\s+(?:for|around)\\s+(?:your\\s+)?(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies)|pollinators?|bees?|wildlife)\\b",
   "\\bsafe\\s+(?:for|around)\\s+(?:your\\s+)?(?:kids?|children|pets?|dogs?|cats?|famil(?:y|ies)|pollinators?|bees?|wildlife)\\b[^.!?\\n]{0,60}?\\b(?:once|after|when|while)\\b[^.!?\\n]{0,30}?\\b(?:treat\\w+|appl\\w+|spray\\w+|water\\w+\\s+in|dr(?:y|ies|ied))",
+  // PERFECT/PASSIVE evidentiary predicates (Codex PR r21): "has been proven
+  // safe", "has been shown to be safe", "has proven safe" are unconditional
+  // claims dressed as findings — and worse than the plain copula, since they
+  // assert external validation. Treatment subject required, same as the
+  // copular branch; negation stays outside via the polarity guards.
+  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)\\b[^.!?\\n]{0,30}?\\b(?:has|have|had|is|are|was|were|been)\\b[^.!?\\n]{0,20}?\\b(?:proven|proved|shown|demonstrated|found|tested|verified|confirmed)\\b(?:\\s+to\\s+be)?\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`,
   // "pet-safe" / "child-safe" / "kid-safe" / "family-safe" compounds
   "\\b(?:pet|child|kid|family)[-\\s]safe\\b",
   // Adjective-before-product forms: "safe pesticides", "our safe treatment
@@ -3032,7 +3041,10 @@ const REENTRY_SAFETY_SRCS = [
   // finishing rather than as a dries-predicate — "will finish drying in 30
   // minutes", "drying will be complete in 30 minutes". Same fixed figure,
   // same treatment-context gate.
-  { src: `\\bfinish\\w*\\s+dry\\w*\\b[^.!?\\n]{0,20}?\\b(?:in|within|after|by)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  // Completion verbs sit on EITHER side of "drying" (Codex PR r21): r20
+  // covered "finish drying"; "will be done drying" / "will complete drying"
+  // are the same claim with the verb leading.
+  { src: `\\b(?:finish\\w*|complet\\w*|done|through)\\s+dry\\w*\\b[^.!?\\n]{0,20}?\\b(?:in|within|after|by)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   { src: `\\bdry(?:ing)?\\b[^.!?\\n]{0,30}?\\b(?:complete|completed|finished|done)\\b[^.!?\\n]{0,20}?\\b(?:in|within|after|by)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   // A bounded qualifier may sit between the drying verb and the
   // preposition (Codex PR r8: "dries completely within 45 minutes").
@@ -3123,7 +3135,13 @@ const REENTRY_SAFETY_SRCS = [
 // The condition must be an actual DRY-STATE condition: "when wet or dry"
 // (a claim of safety in EVERY state) is not a condition at all — the window
 // rejects "wet" and the alternation suffix ("dry or wet") likewise.
-const DRY_CONDITION_RE = /\b(?:once|when|after|until)\b(?:(?!\bwet\b)[^.!?\n]){0,40}?\b(?:fully\s+|completely\s+)?dr(?:y|ies|ied)\b(?!\s*(?:or|and)\s+wet\b)/i;
+// `until` is deliberately ABSENT (Codex PR r21): "safe UNTIL dry" claims
+// safety during the WET period — the exact inverse of the approved idiom —
+// so accepting it handed the exemption to the opposite of the rule. Only
+// once/when/after mark safety that BEGINS at the dry state. Negated copy
+// ("will not be safe until it dries") is unaffected; it never reaches this
+// exemption, the polarity guards handle it.
+const DRY_CONDITION_RE = /\b(?:once|when|after)\b(?:(?!\bwet\b)[^.!?\n]){0,40}?\b(?:fully\s+|completely\s+)?dr(?:y|ies|ied)\b(?!\s*(?:or|and)\s+wet\b)/i;
 // The confirmation must CONCERN re-entry timing — "your technician
 // confirms the appointment address" is not the idiom's second part, and
 // neither is "confirms the appointment TIME" (Codex PR r6): bare
@@ -3181,6 +3199,14 @@ function stripExpressionComments(s) {
       i += 2;
       while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i += 1;
       i += 2;
+      out += ' ';
+      continue;
+    }
+    // Line comments run to the newline and are equally unrendered (Codex
+    // PR r21) — r20 handled only the block form.
+    if (ch === '/' && s[i + 1] === '/') {
+      i += 2;
+      while (i < s.length && s[i] !== '\n') i += 1;
       out += ' ';
       continue;
     }
@@ -3452,7 +3478,7 @@ const BANNED_TOPIC_SRCS = [
   // door-to-door" — ownership expressed through the ACTION verb rather
   // than offer/provide.
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}installs?\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_AUX_FRAMING_SRC}${BANNED_TOPIC_ACTION_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?|extracts?|extracting|clears?|clearing|rids?|ridding|eliminat\\w+|eradicat\\w+)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_AUX_FRAMING_SRC}${BANNED_TOPIC_ACTION_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|captur\\w+|evicts?|extracts?|extracting|clears?|clearing|rids?|ridding|eliminat\\w+|eradicat\\w+)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
   // EXCLUDE also means "omit" (Codex PR r6): only a physical
   // location/entry-point tail makes it the wildlife-exclusion service —
   // "we exclude wildlife examples from this comparison" stays legal.
@@ -3461,6 +3487,12 @@ const BANNED_TOPIC_SRCS = [
   // attic", "our team gets squirrels out" (Codex PR r3).
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}(?:get(?:s|ting)?|took|take(?:s|n|ing)?)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b[^.!?\\n]{0,20}?\\bout\\b`,
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:sell|market|canvass)\\w*\\s+${BANNED_TOPIC_GAP_SRC}door[-\\s]?to[-\\s]?door\\b`,
+  // The insulation VERB is the same offering as the noun (Codex PR r21):
+  // "we insulate attics", "our technicians can insulate your attic". The
+  // aux-framing group rides along so the can/are-trained-to forms are
+  // covered; an OBJECT is required so informational verb use ("insulating
+  // an attic reduces…") has no first-person service anchor.
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_AUX_FRAMING_SRC}${BANNED_TOPIC_ACTION_FILLER_SRC}insulates?\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w'’-]+\\s+){0,2}?(?:attics?|homes?|houses?|crawl\\s?spaces?|walls?|ceilings?|garages?|properties|property)\\b`,
   // NOUN-FIRST and dispatch forms (Codex PR r17): "we make door-to-door
   // sales", "Waves sends salespeople door to door", "our team goes door to
   // door". The sales noun follows the topic here, so the sell/market/canvass

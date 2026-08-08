@@ -3282,6 +3282,58 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(paint.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
+  test('exactness qualifiers, leading completion verbs, perfect-tense predicates and safe-UNTIL-dry all block (Codex PR r21)', () => {
+    for (const body of [
+      // An exactness qualifier is the MOST fixed form of a fixed figure.
+      'The treatment dries in exactly 30 minutes.',
+      'You may re-enter the treated room after exactly 30 minutes.',
+      // Completion verb leading rather than trailing.
+      'The treatment will be done drying in 30 minutes.',
+      'The treatment will complete drying in 30 minutes.',
+      // Perfect/passive evidentiary predicates assert external validation.
+      'The pesticide has been proven safe.',
+      'The treatment has been shown to be safe.',
+      'The spray has proven safe.',
+      // "safe UNTIL dry" is the INVERSE of the approved idiom — safety
+      // during the wet period — so it must never earn the exemption, even
+      // with the technician-confirms clause present.
+      'The treatment is safe until dry. Your technician confirms the timing.',
+      'The pesticide is safe until it dries. Your technician confirms re-entry timing.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    // The APPROVED idiom must still be exempt — once/after, not until.
+    for (const body of [
+      'The treatment is safe once dry. Your technician confirms the timing.',
+      'The treatment is safe after it dries. Your technician confirms the timing.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    }
+    // JS LINE comments are unrendered too — r20 covered only the block form.
+    const lineComment = guardrails.evaluate({ body: '<PestEvidenceGrid items={[ // Don\'t say "pet-safe treatment"\n { label: "Ordinary copy" }]} />' }, {});
+    expect(lineComment.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    // Ownership through capture/insulate verbs.
+    for (const body of [
+      'Our technicians capture raccoons in your attic.',
+      'We can capture wildlife on your property.',
+      'We insulate attics throughout Sarasota.',
+      'Our technicians can insulate your attic.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    }
+    // Informational verb use and third-party attribution stay legal.
+    for (const body of [
+      'Insulating an attic reduces energy loss in Florida homes.',
+      'We refer you to specialists who capture wildlife.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    }
+  });
+
   test('escaped quotes inside MDX expression props survive extraction (Codex PR r15)', () => {
     const r = guardrails.evaluate({ body: "<BottomLineBox verdict={'Waves\\' treatment is safe for pets > ordinary products.'} />" }, {});
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
