@@ -311,13 +311,27 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         {options && (
           <>
             <div style={sectionLabel}>REASON</div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 18 }}>
+            {/* Native select (owner request 2026-08-08): one tap opens the
+                platform picker instead of a 2-3 row chip wrap. Same codes,
+                same pickReason side effects, same gate on the extra
+                reasons — presentation only. */}
+            <select
+              value={reason}
+              onChange={(e) => pickReason(e.target.value)}
+              aria-label="Reason"
+              style={{
+                width: '100%', padding: '11px 40px 11px 13px', borderRadius: 10, fontSize: 14,
+                fontWeight: 500, border: '1px solid #D4D4D8', background: '#FFFFFF',
+                color: '#18181B', fontFamily: 'inherit', cursor: 'pointer', marginBottom: 18,
+                appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none',
+                backgroundImage: `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2371717A' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>")`,
+                backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center', backgroundSize: '16px',
+              }}
+            >
               {(options.extraReasonsEnabled ? [...RAIN_REASONS, ...EXTRA_REASONS] : RAIN_REASONS).map((r) => (
-                <button key={r.code} type="button" onClick={() => pickReason(r.code)} style={chipStyle(reason === r.code)}>
-                  {r.label}
-                </button>
+                <option key={r.code} value={r.code}>{r.label}</option>
               ))}
-            </div>
+            </select>
 
             <div style={sectionLabel}>MOVE TO</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 }}>
