@@ -159,7 +159,11 @@ const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No p
 // setup, "unlimited callbacks 100% guaranteed") are deliberately absent —
 // they are not established commercial terms, so this pack must not inherit
 // them (which is why commercial needed its own pack at all).
-const GLASS_COMMERCIAL_CTA_MICRO = 'No long-term contract · Auto Pay billing · Cancel your plan in the app';
+// No billing-method claims here (codex #3281 r2): commercial accepts run
+// the MANUAL invoicing lane (commercialAcceptDepositExempt —
+// 'commercial_manual_billing'), so "Auto Pay" / "cancel in the app" would
+// describe a flow commercial accounts don't get. Structural terms only.
+const GLASS_COMMERCIAL_CTA_MICRO = 'No long-term contract · Licensed & insured · Satisfaction guaranteed';
 const GLASS_COMMERCIAL = {
   heroH1: 'Hello {first}, your commercial service plan is ready!',
   heroSub: 'Priced from your property’s actual specs — recurring exterior protection with interior service included on request, tenant-reported pests handled between visits, and no long-term contract.',
@@ -505,7 +509,7 @@ const GLASS_SERVICE_INCLUSIONS = {
     'Tenant-reported pests handled between visits — re-service requests are included in the plan',
     'Tenants can be added to the Waves app for arrival alerts and service reports',
     'Every visit documented — time on site, areas treated, and products applied',
-    'No long-term contract — Auto Pay billing, cancel your plan right in the app',
+    'No long-term contract — stay because it works, not because you\u2019re locked in',
   ],
 };
 

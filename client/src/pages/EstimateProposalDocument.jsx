@@ -176,8 +176,11 @@ export default function EstimateProposalDocument({ data, token }) {
   const termsLine = authoredTermsPresent
     ? NEUTRAL_TERMS
     : isCommercial
+      // Structural terms only — commercial accepts run the MANUAL invoicing
+      // lane (commercial_manual_billing), so no billing-method claims here
+      // (codex #3281 r2).
       ? (pestRecurringOnly
-        ? 'No long-term contract · Auto Pay billing · Cancel your plan in the app'
+        ? 'No long-term contract · Licensed & insured · Satisfaction guaranteed'
         : NEUTRAL_TERMS)
       : recurringLineDescriptions.length === 0
         ? NEUTRAL_TERMS

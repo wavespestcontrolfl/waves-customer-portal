@@ -5382,7 +5382,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <li>Tenant-reported pests handled between visits &mdash; re-service requests are included in the plan</li>
         <li>Tenants can be added to the Waves app for arrival alerts and service reports</li>
         <li>Every visit documented &mdash; time on site, areas treated, and products applied</li>
-        <li>No long-term contract &mdash; Auto Pay billing, cancel your plan right in the app</li>
+        <li>No long-term contract &mdash; stay because it works, not because you&rsquo;re locked in</li>
       </ul>
     </div>` : ''}
   </section>`;

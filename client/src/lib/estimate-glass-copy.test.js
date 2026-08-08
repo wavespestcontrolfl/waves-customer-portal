@@ -283,6 +283,7 @@ describe('commercial glass release', () => {
     const joined = stack.join(' ');
     expect(joined).toContain('Interior treatment included on request');
     expect(joined).toContain('No long-term contract');
+    expect(joined).not.toMatch(/auto pay|in the app/i);
     expect(joined).not.toMatch(/90-day/i);
     expect(joined).not.toMatch(/money-back/i);
     expect(joined).not.toMatch(/\$99/);
@@ -291,7 +292,9 @@ describe('commercial glass release', () => {
   it('folds the commercial row slug to the commercial CTA micro line', () => {
     const micro = glassCtaMicroFor('commercial_pest');
     expect(micro).toContain('No long-term contract');
-    expect(micro).toContain('Auto Pay');
+    // Billing-method claims stay out — commercial bills by manual invoice,
+    // not Auto Pay (codex #3281 r2).
+    expect(micro).not.toMatch(/auto pay/i);
     expect(micro).not.toBe(GLASS_COPY.ctaMicro);
     expect(micro).not.toMatch(/90-day/i);
   });

@@ -99,7 +99,13 @@ function estimateDocumentUrl(token, { validThrough = null } = {}) {
 // in-process semaphore is the real backstop: past the cap, renders throw
 // `estimate_doc_render_busy` and every caller serves its pdfkit fallback
 // instead of stacking browsers until Railway runs out of memory.
-const MAX_CONCURRENT_DOC_RENDERS = Math.max(1, Number(process.env.ESTIMATE_DOC_PDF_MAX_CONCURRENT || 2));
+// Parsed as a finite positive integer — a nonnumeric/Infinity value would
+// make the >= cap check never fire and silently disarm the memory-safety
+// backstop (codex #3281 r2). Bad values fall back to the default.
+const MAX_CONCURRENT_DOC_RENDERS = (() => {
+  const parsed = Number.parseInt(String(process.env.ESTIMATE_DOC_PDF_MAX_CONCURRENT || ''), 10);
+  return Number.isFinite(parsed) && parsed >= 1 ? parsed : 2;
+})();
 let activeDocRenders = 0;
 
 // Renders the document → Buffer. Throws on any failure; callers fall back

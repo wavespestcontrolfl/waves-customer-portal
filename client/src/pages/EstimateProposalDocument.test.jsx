@@ -76,7 +76,8 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('What your commercial pest service includes');
     expect(text).toContain('Valid through');
     // Commercial terms only — no residential guarantee claims anywhere.
-    expect(text).toContain('No long-term contract · Auto Pay billing · Cancel your plan in the app');
+    expect(text).toContain('No long-term contract · Licensed & insured · Satisfaction guaranteed');
+    expect(text).not.toMatch(/Auto Pay|cancel your plan in the app/i);
     expect(text).not.toMatch(/90-day/i);
     expect(text).not.toMatch(/money-back/i);
     // Account-manager next step, not self-checkout.
@@ -220,7 +221,7 @@ describe('EstimateProposalDocument', () => {
     const text = container.textContent;
     expect(text).toContain('12-month service commitment');
     expect(text).not.toContain('What your commercial pest service includes');
-    expect(text).not.toContain('Cancel your plan in the app');
+    expect(text).not.toContain('No long-term contract');
   });
 
   it('keeps non-pest commercial proposals terms-neutral with no pest inclusions', () => {
@@ -248,7 +249,7 @@ describe('EstimateProposalDocument', () => {
     const text = container.textContent;
     expect(text).toContain('Termite bait station monitoring');
     expect(text).not.toContain('What your commercial pest service includes');
-    expect(text).not.toContain('Cancel your plan in the app');
+    expect(text).not.toContain('No long-term contract');
     expect(text).toContain('Licensed & insured · Satisfaction guaranteed');
   });
 
