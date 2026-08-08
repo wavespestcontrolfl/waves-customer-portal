@@ -1077,7 +1077,12 @@ class GoogleBusinessService {
 
     const rows = await db('google_reviews')
       .select('location_id')
-      .select(db.raw(`COUNT(*) FILTER (WHERE reviewer_name != '_stats') AS row_count`))
+      // LIVE rows only — retained missing_since removal evidence must not
+      // count as coverage: 60 historical rows incl. 20 removals would make a
+      // Places total of 47 read fully ingested while the live feed holds 40
+      // (codex #3298 r2). newest_ingest_at stays all-rows: ingestion recency
+      // is about the pipeline moving, not the row's later removal.
+      .select(db.raw(`COUNT(*) FILTER (WHERE reviewer_name != '_stats' AND missing_since IS NULL) AS row_count`))
       .select(db.raw(`MAX(created_at) FILTER (WHERE reviewer_name != '_stats') AS newest_ingest_at`))
       // _syncPlacesStatsForLocation stamps synced_at (updated_at has no
       // auto-touch trigger) — reading updated_at would mark every
