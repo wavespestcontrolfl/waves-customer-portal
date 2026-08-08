@@ -211,16 +211,23 @@ router.post('/', async (req, res, next) => {
         if (!reviewLink) {
           let bareOk = asked.outcome !== 'in_cadence';
           if (asked.outcome === 'concurrent') {
-            // Lock contention alone doesn't prove a review ask will exist —
-            // the same review-send lock wraps private no-link check-ins, and
-            // an in-flight ask can finish blocked without persisting a retry
-            // (codex #3285 r9). Suppress the CTA only when a durably queued
-            // ask is confirmed on the books; otherwise show the bare link
-            // rather than promising a text that may never come.
-            const gate = await ReviewService.checkUnscheduledAskGates(customer.id).catch(() => null);
-            bareOk = !(gate && gate.outcome === 'already_queued');
+            // Lock contention proves neither direction (codex #3285 r9 ×2):
+            // the competing holder may be a no-link check-in or fail without
+            // a retry (suppressing would promise a text that never comes),
+            // OR it may deliver an ask moments after we respond (a bare URL
+            // now = untracked review + another ask later). Settle the race:
+            // wait briefly for the in-flight send to land, then prefer its
+            // tokenized URL; a durably queued ask suppresses; only a window
+            // with NEITHER falls back to the bare link.
+            for (let attempt = 0; attempt < 3 && bareOk && !reviewLink; attempt++) {
+              await new Promise((r) => setTimeout(r, 700));
+              reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
+              if (reviewLink) break;
+              const gate = await ReviewService.checkUnscheduledAskGates(customer.id).catch(() => null);
+              if (gate && gate.outcome === 'already_queued') bareOk = false;
+            }
           }
-          if (bareOk) reviewLink = office.googleReviewUrl;
+          if (bareOk && !reviewLink) reviewLink = office.googleReviewUrl;
         }
       }
 
