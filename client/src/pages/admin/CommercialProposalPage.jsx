@@ -4,7 +4,7 @@ import { Button, Input, Select, Switch, Textarea, Badge, Card, CardHeader, CardT
 import {
   ArrowLeft, Plus, Trash2, Download, Building2, Loader2,
   Send as SendIcon, Link as LinkIcon, CheckCircle2, Copy,
-  ClipboardList, ChevronDown, ChevronUp,
+  ClipboardList, ChevronDown, ChevronUp, Wand2,
 } from 'lucide-react';
 
 // Commercial proposal builder — the full-page surface for authoring the
@@ -74,8 +74,18 @@ function buildingSubtotals(b) {
   return { annual, oneTime };
 }
 
+const PROGRAM_FAMILY_OPTIONS = [
+  ['pest', 'Pest'], ['lawn', 'Lawn'], ['tree_shrub', 'Tree & shrub'], ['mosquito', 'Mosquito'],
+  ['termite', 'Termite'], ['rodent', 'Rodent'], ['other', 'Other'],
+];
+
+// A builder program row counts (totals, payload) once it is actually
+// priced — same predicate everywhere so the sidebar shows what will save.
+const programRowIsPriced = (p) => String(p.label || '').trim()
+  && Number(p.frequencyPerYear) >= 1 && Number(p.pricePerApplication) > 0;
+
 // Mirrors server computeProposalTotals so totals update live as you type.
-function computeTotals(buildings, taxRate, correctiveWork = []) {
+function computeTotals(buildings, taxRate, correctiveWork = [], programs = []) {
   let annualRecurring = 0, oneTime = 0, taxableAnnual = 0, taxableOneTime = 0;
   for (const b of buildings) {
     for (const li of b.lineItems) {
@@ -100,6 +110,13 @@ function computeTotals(buildings, taxRate, correctiveWork = []) {
     const amount = roundMoney(w.amount);
     oneTime += amount;
     if (w.taxable) taxableOneTime += amount;
+  }
+  // Service programs (slice 1A-ii): annual = per-application × frequency,
+  // derived exactly like normalizeProgram.
+  for (const p of programs.filter(programRowIsPriced)) {
+    const annual = roundMoney(roundMoney(p.pricePerApplication) * Math.round(Number(p.frequencyPerYear)));
+    annualRecurring += annual;
+    if (p.taxable) taxableAnnual += annual;
   }
   // Per-bucket cent rounding, mirroring computeProposalTotals — a merged
   // bucket can drift a cent from the saved proposal/PDF (codex 1A-i r3).
@@ -185,6 +202,11 @@ export default function CommercialProposalPage() {
   // card empty omits its section from the saved proposal, and the customer
   // surfaces render exactly as before.
   const [scopeItems, setScopeItems] = useState([]);
+  // Service programs (slice 1A-ii) — when any priced program exists it IS
+  // the recurring itemization: the buildings editor collapses and the
+  // payload omits buildings (the server rejects both together).
+  const [programsState, setProgramsState] = useState([]);
+  const [generating, setGenerating] = useState(false);
   const [correctiveWork, setCorrectiveWork] = useState([]);
   const [responsibilitiesText, setResponsibilitiesText] = useState('');
   const [commercialTerms, setCommercialTerms] = useState({
@@ -233,6 +255,17 @@ export default function CommercialProposalPage() {
     setScopeItems((p.propertyScope?.items || []).map((item) => ({
       label: item.label || '', value: item.value || '',
     })));
+    setProgramsState((p.programs || []).map((program) => ({
+      service: program.service || 'other',
+      label: program.label || '',
+      frequencyPerYear: program.frequencyPerYear ?? 4,
+      pricePerApplication: program.pricePerApplication ?? 0,
+      taxable: program.taxable === true,
+      note: program.note || '',
+      inclusionsText: (program.inclusions || []).join('\n'),
+      exclusionsText: (program.exclusions || []).join('\n'),
+      coversText: (program.buildings || []).map((b) => b.name).join(', '),
+    })));
     setCorrectiveWork((p.correctiveWork || []).map((w) => ({
       label: w.label || '',
       amount: w.amount ?? 0,
@@ -274,10 +307,71 @@ export default function CommercialProposalPage() {
   }, [estimateId, applyLoaded]);
 
   const taxRate = (Number(taxRatePct) || 0) / 100;
+  const programsMode = programsState.some(programRowIsPriced);
+  // Sidebar mirrors what SAVES: in programs mode the payload omits the
+  // buildings entirely, so their (hidden) line items must not count.
   const totals = useMemo(
-    () => computeTotals(buildings, taxRate, correctiveWork),
-    [buildings, taxRate, correctiveWork],
+    () => computeTotals(programsMode ? [] : buildings, taxRate, correctiveWork, programsState),
+    [programsMode, buildings, taxRate, correctiveWork, programsState],
   );
+
+  // "Generate from estimate" (slice 1A-ii): pulls DRAFT sections derived
+  // from what the estimator priced/knows. Fills only sections that are
+  // currently EMPTY — never overwrites operator-authored content — and
+  // everything stays editable until Save publishes it.
+  const generateFromEstimate = async () => {
+    setGenerating(true);
+    setError(null);
+    try {
+      const { draft } = await adminFetch(`/admin/estimates/${estimateId}/proposal/generated`);
+      // Emptiness checks read the LIVE render-assigned formRef, not the
+      // state captured when the request began — the form stays editable
+      // during the fetch and fill-only must mean "empty NOW", never
+      // "empty when I clicked" (codex 1A-ii r1b).
+      const live = formRef.current;
+      let filled = 0;
+      if (draft?.propertyScope?.items?.length && !live.scopeItems.some((i) => i.label.trim())) {
+        setScopeItems(draft.propertyScope.items.map((item) => ({ label: item.label, value: item.value })));
+        filled += 1;
+      }
+      // NEVER install programs over an authored building itemization —
+      // programs mode omits buildings from the save, so generating here
+      // would silently erase the prior lines and rewrite the totals
+      // (pre-push codex P0). The operator clears the building lines first
+      // to switch modes.
+      const hasAuthoredBuildingLines = live.buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim()));
+      if (draft?.programs?.length && !live.programsState.some((p) => p.label.trim()) && !hasAuthoredBuildingLines) {
+        setProgramsState(draft.programs.map((program) => ({
+          service: program.service,
+          label: program.label,
+          frequencyPerYear: program.frequencyPerYear,
+          pricePerApplication: program.pricePerApplication,
+          taxable: program.taxable === true,
+          note: '',
+          inclusionsText: (program.inclusions || []).join('\n'),
+          exclusionsText: (program.exclusions || []).join('\n'),
+          coversText: '',
+        })));
+        filled += 1;
+      }
+      if (draft?.customerResponsibilities?.length && !live.responsibilitiesText.trim()) {
+        setResponsibilitiesText(draft.customerResponsibilities.join('\n'));
+        filled += 1;
+      }
+      if (filled > 0) {
+        markEdit();
+        // Partial generation still surfaces the programs warning.
+        if (draft?.warnings?.length) setError(draft.warnings.join(' '));
+      } else if (draft?.warnings?.length) setError(draft.warnings.join(' '));
+      else if (draft?.programs?.length && hasAuthoredBuildingLines) {
+        setError('Programs were not generated: this proposal already has building line items. Clear them first to switch to generated programs.');
+      } else setError('Nothing to generate — the estimate has no derivable sections this proposal is missing.');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   const touch = () => markEdit();
 
@@ -319,7 +413,7 @@ export default function CommercialProposalPage() {
   const formRef = React.useRef(null);
   formRef.current = {
     title, preparedFor, propertyAddress, taxRate, terms,
-    buildings, scopeItems, correctiveWork, responsibilitiesText, commercialTerms,
+    buildings, scopeItems, programsState, correctiveWork, responsibilitiesText, commercialTerms,
   };
 
   // Structured sections serialize only when actually authored — an empty
@@ -329,6 +423,19 @@ export default function CommercialProposalPage() {
     const items = f.scopeItems
       .map((item) => ({ label: item.label.trim(), value: item.value.trim() }))
       .filter((item) => item.label && item.value);
+    const programsPayload = f.programsState
+      .filter(programRowIsPriced)
+      .map((p) => ({
+        service: p.service,
+        label: p.label.trim(),
+        frequencyPerYear: Math.round(Number(p.frequencyPerYear)),
+        pricePerApplication: Number(p.pricePerApplication) || 0,
+        taxable: p.taxable === true,
+        note: p.note.trim() || null,
+        inclusions: p.inclusionsText.split('\n').map((s) => s.trim()).filter(Boolean),
+        exclusions: p.exclusionsText.split('\n').map((s) => s.trim()).filter(Boolean),
+        buildings: p.coversText.split(/[\n,]/).map((s) => s.trim()).filter(Boolean).map((name) => ({ name })),
+      }));
     const work = f.correctiveWork
       .map((w) => ({
         label: w.label.trim(),
@@ -349,6 +456,7 @@ export default function CommercialProposalPage() {
     const hasTerms = Object.values(ct).some((v) => v !== null);
     return {
       ...(items.length ? { propertyScope: { items } } : {}),
+      ...(programsPayload.length ? { programs: programsPayload } : {}),
       ...(work.length ? { correctiveWork: work } : {}),
       ...(responsibilities.length ? { customerResponsibilities: responsibilities } : {}),
       ...(hasTerms ? { commercialTerms: ct } : {}),
@@ -363,7 +471,10 @@ export default function CommercialProposalPage() {
       taxRate: f.taxRate,
       terms: f.terms.trim() || null,
       ...structuredSectionsPayload(f),
-      buildings: f.buildings.map((b) => ({
+      // Priced programs ARE the recurring itemization — the server rejects
+      // building line items beside them, so the payload omits buildings
+      // entirely in programs mode (the UI collapses that editor too).
+      buildings: f.programsState.some(programRowIsPriced) ? [] : f.buildings.map((b) => ({
         name: b.name.trim() || 'Building',
         note: b.note.trim() || null,
         lineItems: b.lineItems
@@ -398,8 +509,8 @@ export default function CommercialProposalPage() {
         // runs.)
         const genAtSave = editGenRef.current;
         const payload = buildPayload();
-        if (payload.proposal.buildings.length === 0) {
-          setError('Add at least one building with a described line item.');
+        if (payload.proposal.buildings.length === 0 && !(payload.proposal.programs || []).length) {
+          setError('Add a service program, or a building with a described line item.');
           return false;
         }
         await adminFetch(`/admin/estimates/${estimateId}/proposal`, {
@@ -733,6 +844,13 @@ export default function CommercialProposalPage() {
             </Card>
           )}
 
+          {!locked && (
+            <Button variant="secondary" size="sm" onClick={generateFromEstimate} disabled={generating}>
+              {generating ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
+              Generate from estimate
+            </Button>
+          )}
+
           <Card>
             <CardHeader>
               <CardTitle>Property scope</CardTitle>
@@ -771,7 +889,91 @@ export default function CommercialProposalPage() {
             </CardBody>
           </Card>
 
-          {buildings.map((b, bi) => {
+          <Card>
+            <CardHeader>
+              <CardTitle>Service programs</CardTitle>
+            </CardHeader>
+            <CardBody className="space-y-3">
+              <div className="text-12 text-zinc-500">
+                Per-service programs with per-application pricing — when any program is priced, programs
+                replace the building line items as the recurring itemization (use &ldquo;Covers&rdquo; for
+                building labels). Annual totals derive from price × frequency.
+              </div>
+              {programsState.map((p, idx) => (
+                <div key={idx} className="space-y-2 border-b border-hairline border-zinc-100 pb-3 last:border-0 last:pb-0">
+                  <div className="flex flex-wrap gap-2 items-center">
+                    <Select
+                      size="sm" className="w-32 shrink-0" value={p.service} disabled={!!locked} title="Service family"
+                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, service: e.target.value } : it))); }}
+                    >
+                      {PROGRAM_FAMILY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                    </Select>
+                    <Input
+                      size="sm" className="flex-1 min-w-[180px]" placeholder="Program name (e.g. Quarterly pest program)" maxLength={120}
+                      value={p.label} disabled={!!locked}
+                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
+                    />
+                    <Input
+                      size="sm" className="w-20 shrink-0" type="number" min="1" max="52" step="1" title="Visits per year"
+                      value={p.frequencyPerYear} disabled={!!locked}
+                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, frequencyPerYear: e.target.value } : it))); }}
+                    />
+                    <Input
+                      size="sm" className="w-28 shrink-0" type="number" min="0" step="0.01" title="Price per application"
+                      value={p.pricePerApplication} disabled={!!locked}
+                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, pricePerApplication: e.target.value } : it))); }}
+                    />
+                    <div className="flex items-center gap-1 shrink-0" title="Taxable program">
+                      <Switch checked={p.taxable} disabled={!!locked}
+                        onChange={(v) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, taxable: v } : it))); }} />
+                      <span className="text-12 text-zinc-500">Tax</span>
+                    </div>
+                    <span className="text-12 text-zinc-500 tabular-nums shrink-0">
+                      {money(roundMoney((Number(p.pricePerApplication) || 0) * (Math.round(Number(p.frequencyPerYear)) || 0)))}/yr
+                    </span>
+                    {!locked && (
+                      <Button variant="ghost" size="sm" title="Remove program"
+                        onClick={() => { markEdit(); setProgramsState((prev) => prev.filter((_, i) => i !== idx)); }}>
+                        <Trash2 size={14} />
+                      </Button>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <Textarea
+                      rows={3} value={p.inclusionsText} disabled={!!locked}
+                      placeholder={'What this program includes — one per line'}
+                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, inclusionsText: e.target.value } : it))); }}
+                    />
+                    <Textarea
+                      rows={3} value={p.exclusionsText} disabled={!!locked}
+                      placeholder={'Not included / quoted separately — one per line'}
+                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, exclusionsText: e.target.value } : it))); }}
+                    />
+                  </div>
+                  <Input
+                    size="sm" placeholder="Covers (optional) — building or area names, comma-separated (e.g. Tower A, Clubhouse)" maxLength={400}
+                    value={p.coversText} disabled={!!locked}
+                    onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, coversText: e.target.value } : it))); }}
+                  />
+                </div>
+              ))}
+              {!locked && (
+                <Button variant="ghost" size="sm"
+                  onClick={() => { markEdit(); setProgramsState((prev) => [...prev, { service: 'pest', label: '', frequencyPerYear: 4, pricePerApplication: 0, taxable: false, note: '', inclusionsText: '', exclusionsText: '', coversText: '' }]); }}>
+                  <Plus size={14} /> Add program
+                </Button>
+              )}
+            </CardBody>
+          </Card>
+
+          {programsMode && (
+            <div className="text-13 text-zinc-600 bg-zinc-50 border border-hairline border-zinc-200 rounded px-3 py-2">
+              Service programs are the recurring itemization — the building line-item editor is hidden and
+              won&rsquo;t be saved while a priced program exists. Use each program&rsquo;s &ldquo;Covers&rdquo; field for building labels.
+            </div>
+          )}
+
+          {!programsMode && buildings.map((b, bi) => {
             const sub = buildingSubtotals(b);
             return (
               <Card key={bi}>
@@ -881,7 +1083,7 @@ export default function CommercialProposalPage() {
             );
           })}
 
-          {!locked && (
+          {!locked && !programsMode && (
             <Button variant="secondary" size="sm" onClick={addBuilding}>
               <Plus size={15} /> Add building
             </Button>

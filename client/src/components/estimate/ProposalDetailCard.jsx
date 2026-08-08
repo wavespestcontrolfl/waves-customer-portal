@@ -43,9 +43,13 @@ const amtStyle = {
 };
 
 export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
-  if (!proposal || !Array.isArray(proposal.buildings) || !proposal.buildings.length) return null;
+  // Programs-mode proposals (slice 1A-ii) have no top-level buildings —
+  // either itemization renders the card.
+  const programs = Array.isArray(proposal?.programs) ? proposal.programs : [];
+  if (!proposal || ((!Array.isArray(proposal.buildings) || !proposal.buildings.length) && !programs.length)) return null;
   const totals = proposal.totals || {};
-  const multiBuilding = proposal.buildings.length > 1;
+  const buildingsList = Array.isArray(proposal.buildings) ? proposal.buildings : [];
+  const multiBuilding = buildingsList.length > 1;
   // The commercial PEST inclusions stack — only when the server classified
   // this proposal's recurring lines as pest work (proposal.pestRecurringOnly,
   // truth-scope rule): a termite/rodent/mixed proposal must not promise
@@ -57,8 +61,11 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
   // server-side: /data only ships a `proposal` block under
   // GATE_ESTIMATE_COMMERCIAL_GLASS.
   // Structured commercialTerms are authored terms in the same sense as the
-  // free-text block, so they suppress the canned stack the same way.
-  const inclusions = proposal.pestRecurringOnly === true && !proposalHasAuthoredTerms(proposal)
+  // free-text block, so they suppress the canned stack the same way — and
+  // programs carry their OWN authored inclusions (slice 1A-ii), so the
+  // canned stack would double them.
+  const hasPrograms = programs.length > 0;
+  const inclusions = proposal.pestRecurringOnly === true && !proposalHasAuthoredTerms(proposal) && !hasPrograms
     ? (glassRowInclusions('commercial_pest') || null)
     : null;
   // Structured agreement sections (slice 1A-i) — every one optional; a legacy
@@ -75,8 +82,9 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
   // the pdfkit document it replaced: mark each taxed amount, show the rate,
   // explain the marker. A mixed taxable/exempt proposal must let the
   // customer verify the calculation line by line.
-  const anyTaxableLine = proposal.buildings.some((b) => (b.lineItems || []).some((li) => li.taxable === true))
-    || correctiveWork.some((work) => work.taxable === true);
+  const anyTaxableLine = buildingsList.some((b) => (b.lineItems || []).some((li) => li.taxable === true))
+    || correctiveWork.some((work) => work.taxable === true)
+    || programs.some((program) => program.taxable === true);
   const taxRateSource = Number(totals.taxRate) > 0 ? Number(totals.taxRate) : Number(proposal.taxRate);
   const taxRatePct = taxRateSource > 0 ? (taxRateSource * 100).toFixed(2) : null;
   // One-time-only proposals have no plan year — "First-year total" would
@@ -109,7 +117,56 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
         </div>
       ) : null}
 
-      {proposal.buildings.map((building, bIdx) => (
+      {programs.length ? (
+        <div>
+          {/* Overview line (derived, never typed): the agreement at a glance. */}
+          <div style={{ ...lineRow, padding: '6px 0', fontWeight: 600 }}>
+            <span>{programs.reduce((acc, p) => acc + (Number(p.frequencyPerYear) || 0), 0)} service visits per year across {programs.length} program{programs.length === 1 ? '' : 's'}</span>
+            {Number(totals.firstYearTotal) > 0 ? (
+              <span style={amtStyle}>{fmtMoney(totals.firstYearTotal)} first year</span>
+            ) : null}
+          </div>
+          {programs.map((program, pIdx) => (
+            <div key={`${program.label}-${pIdx}`} style={{ marginTop: pIdx === 0 ? 8 : 14 }}>
+              <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, marginBottom: 2 }}>{program.label}</div>
+              {program.note ? (
+                <div style={{ fontSize: 14, color: W.textCaption, marginBottom: 4, lineHeight: 1.5 }}>{program.note}</div>
+              ) : null}
+              <div style={lineRow}>
+                <span>{program.frequencyPerYear} visit{program.frequencyPerYear === 1 ? '' : 's'} per year</span>
+                <span style={amtStyle}>
+                  {fmtMoney(program.pricePerApplication)}
+                  {program.taxable === true ? ' *' : ''}
+                  <span style={{ fontWeight: 500, color: W.textCaption }}> per application</span>
+                </span>
+              </div>
+              <div style={lineRow}>
+                <span>Annual program total</span>
+                <span style={amtStyle}>{fmtMoney(program.annual)}</span>
+              </div>
+              {(program.buildings || []).length ? (
+                <div style={{ fontSize: 14, color: W.textCaption, marginTop: 4, lineHeight: 1.5 }}>
+                  Covers: {program.buildings.map((b) => b.name).join(' · ')}
+                </div>
+              ) : null}
+              {(program.inclusions || []).length ? (
+                <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>
+                  {program.inclusions.map((line) => (
+                    <li key={line} style={{ fontSize: 14, color: W.textBody, lineHeight: 1.6 }}>{line}</li>
+                  ))}
+                </ul>
+              ) : null}
+              {(program.exclusions || []).length ? (
+                <div style={{ fontSize: 14, color: W.textCaption, marginTop: 4, lineHeight: 1.55 }}>
+                  Not included (quoted separately): {program.exclusions.join(' · ')}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {buildingsList.map((building, bIdx) => (
         <div key={`${building.name || 'building'}-${bIdx}`} style={{ marginTop: bIdx === 0 ? 0 : 14 }}>
           {multiBuilding ? (
             <div style={{ fontSize: 15, fontWeight: 800, color: W.blueDeeper, marginBottom: 4 }}>

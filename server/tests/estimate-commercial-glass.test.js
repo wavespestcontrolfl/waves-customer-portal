@@ -166,6 +166,37 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
     expect(html).toContain('* Taxable line.');
   });
 
+  test('programs-mode proposal renders program cards with inclusions, and suppresses the canned stack (slice 1A-ii)', () => {
+    const programsProposal = {
+      enabled: true,
+      title: 'Commercial Service Proposal',
+      taxRate: 0.07,
+      buildings: [],
+      programs: [{
+        service: 'pest',
+        label: 'Quarterly pest program',
+        frequencyPerYear: 4,
+        pricePerApplication: 120,
+        taxable: false,
+        inclusions: ['4 scheduled service visits per year', 'Interior treatment included on request — no extra charge, no surprise fees'],
+        exclusions: ['Termite treatment or monitoring — separate program, quoted on inspection'],
+        buildings: [{ name: 'Tower A' }, { name: 'Clubhouse' }],
+      }],
+    };
+    const html = renderPage('proposal-programs-token', BASE_ESTIMATE, { proposal: programsProposal });
+    expect(html).toContain('Quarterly pest program');
+    expect(html).toContain('4 visits per year');
+    expect(html).toContain('per application');
+    expect(html).toContain('Annual program total');
+    expect(html).toContain('480.00');
+    expect(html).toContain('Interior treatment included on request');
+    expect(html).toContain('Covers: Tower A · Clubhouse');
+    expect(html).toContain('Not included (quoted separately)');
+    // Programs carry authored inclusions — the canned commercial stack
+    // must not double them.
+    expect(html).not.toContain('What your commercial pest service includes');
+  });
+
   test('a legacy proposal renders no structured section headings (byte-stable subset)', () => {
     const html = renderPage('proposal-legacy-token', BASE_ESTIMATE, { proposal: AUTHORED_PROPOSAL });
     expect(html).not.toContain('Corrective work (one-time)');

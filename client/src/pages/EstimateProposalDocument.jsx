@@ -163,15 +163,18 @@ export default function EstimateProposalDocument({ data, token }) {
   // commercialTerms block (slice 1A-i) is authored terms in exactly that
   // sense, so it suppresses the stacks the same way.
   const authoredTermsPresent = proposalHasAuthoredTerms(proposal);
-  // Structured agreement sections (slice 1A-i) — all optional; a legacy
-  // proposal renders this document exactly as before.
+  // Structured agreement sections (slice 1A-i/ii) — all optional; a legacy
+  // proposal renders this document exactly as before. Programs carry their
+  // OWN authored inclusions, so they suppress the canned stacks like
+  // authored terms do.
+  const programList = Array.isArray(proposal?.programs) ? proposal.programs : [];
   const propertyScopeItems = proposal?.propertyScope?.items || [];
   const correctiveWork = Array.isArray(proposal?.correctiveWork) ? proposal.correctiveWork : [];
   const responsibilities = Array.isArray(proposal?.customerResponsibilities)
     ? proposal.customerResponsibilities : [];
   const termRows = commercialTermRows(proposal?.commercialTerms);
   const inclusionStacks = useMemo(() => {
-    if (authoredTermsPresent) return [];
+    if (authoredTermsPresent || programList.length) return [];
     if (isCommercial) {
       const stack = pestRecurringOnly ? glassRowInclusions('commercial_pest') : null;
       return stack ? [{ key: 'commercial_pest', title: 'What your commercial pest service includes', items: stack }] : [];
@@ -190,7 +193,7 @@ export default function EstimateProposalDocument({ data, token }) {
       }
     }
     return [...seen.values()];
-  }, [isCommercial, pestRecurringOnly, authoredTermsPresent, buildings]);
+  }, [isCommercial, pestRecurringOnly, authoredTermsPresent, buildings, programList]);
 
   // Terms line — only claims the estimate page itself already makes for the
   // same services. Authored terms govern (neutral line beside them, never a
@@ -233,7 +236,8 @@ export default function EstimateProposalDocument({ data, token }) {
   // amount with '*', prints the rate beside the tax total, and explains the
   // marker, so the customer can verify the calculation line by line.
   const anyTaxableLine = buildings.some((b) => (b.lineItems || []).some((li) => li.taxable === true))
-    || correctiveWork.some((work) => work.taxable === true);
+    || correctiveWork.some((work) => work.taxable === true)
+    || programList.some((program) => program.taxable === true);
   const taxRatePct = Number(totals.taxRate) > 0 ? (Number(totals.taxRate) * 100).toFixed(2) : null;
   const showRecurringTotals = !suppressPlanTotals && Number(totals.annualRecurring) > 0;
   const showGrandTotal = !suppressPlanTotals || Number(totals.annualRecurring) <= 0;
@@ -322,10 +326,64 @@ export default function EstimateProposalDocument({ data, token }) {
           </div>
         )}
 
+        {/* Service programs (slice 1A-ii) — the recurring itemization when
+            authored; the PUT guard keeps building line items out beside
+            them, so this and the buildings table never render together. */}
+        {programList.length > 0 && (
+          <div>
+            <SectionHeader>Service programs</SectionHeader>
+            <div style={{ fontSize: 11.5, color: MUTED, margin: '2px 0 4px' }}>
+              {programList.reduce((acc, p) => acc + (Number(p.frequencyPerYear) || 0), 0)} service visits
+              per year across {programList.length} program{programList.length === 1 ? '' : 's'}.
+            </div>
+            {programList.map((program, pIdx) => (
+              <div className="doc-keep" key={`${program.label}-${pIdx}`} style={{ marginTop: pIdx === 0 ? 0 : 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: NAVY, padding: '4px 0 2px' }}>{program.label}</div>
+                {program.note ? (
+                  <div style={{ fontSize: 11, color: MUTED, lineHeight: 1.5 }}>{program.note}</div>
+                ) : null}
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between', gap: 14,
+                  padding: '4px 0', borderBottom: `1px solid ${LINE}`, fontSize: 11.5,
+                }}>
+                  <span style={{ color: INK }}>{program.frequencyPerYear} visit{program.frequencyPerYear === 1 ? '' : 's'} per year</span>
+                  <span style={{ whiteSpace: 'nowrap', fontWeight: 700, color: NAVY, fontVariantNumeric: 'tabular-nums' }}>
+                    {fmtMoney(program.pricePerApplication)}
+                    {program.taxable === true ? ' *' : ''}
+                    <span style={{ fontWeight: 400, color: MUTED }}> per application</span>
+                  </span>
+                </div>
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between', gap: 14,
+                  padding: '4px 0', borderBottom: `1px solid ${LINE}`, fontSize: 11.5,
+                }}>
+                  <span style={{ color: MUTED }}>Annual program total</span>
+                  <span style={{ fontWeight: 700, color: INK, fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(program.annual)}</span>
+                </div>
+                {(program.buildings || []).length > 0 && (
+                  <div style={{ fontSize: 10.5, color: MUTED, marginTop: 2, lineHeight: 1.5 }}>
+                    Covers: {program.buildings.map((b) => b.name).join(' · ')}
+                  </div>
+                )}
+                {(program.inclusions || []).map((line) => <Bullet key={line}>{line}</Bullet>)}
+                {(program.exclusions || []).length > 0 && (
+                  <div style={{ fontSize: 10.5, color: MUTED, marginTop: 2, lineHeight: 1.5 }}>
+                    Not included (quoted separately): {program.exclusions.join(' · ')}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Pricing */}
-        {buildings.length > 0 && (
+        {(buildings.length > 0 || programList.length > 0) && (
           <div className="doc-keep">
-            <SectionHeader>{authoredProposal ? 'Your proposal' : 'Your services & pricing'}</SectionHeader>
+            <SectionHeader>
+              {buildings.length > 0
+                ? (authoredProposal ? 'Your proposal' : 'Your services & pricing')
+                : 'Investment'}
+            </SectionHeader>
             {buildings.map((building, bIdx) => (
               <div key={`${building.name || 'b'}-${bIdx}`} style={{ marginTop: bIdx === 0 ? 0 : 8 }}>
                 {multiBuilding ? (

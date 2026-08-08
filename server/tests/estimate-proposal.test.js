@@ -241,6 +241,53 @@ describe('structured proposal sections (slice 1A-i)', () => {
     expect(p.commercialTerms).toBeNull();        // every field invalid → whole block null
   });
 
+  it('normalizes service programs: derived annual, family enum, caps, unpriced rows dropped (slice 1A-ii)', () => {
+    const p = normalizeProposal(authored({
+      buildings: [],
+      programs: [
+        {
+          service: 'pest', label: 'Quarterly pest program', frequencyPerYear: 4, pricePerApplication: 120.005,
+          taxable: true, annual: 999999, // caller-supplied annual is IGNORED — derived from factors
+          inclusions: ['4 visits', ''], exclusions: ['Termite — separate'],
+          buildings: [{ name: 'Tower A' }, { name: '' }],
+        },
+        { service: 'not_a_family', label: 'Mystery', frequencyPerYear: 2, pricePerApplication: 50 },
+        { service: 'lawn', label: 'Unpriced row', frequencyPerYear: 0, pricePerApplication: 100 },
+      ],
+    }));
+    expect(p.programs).toHaveLength(2); // unpriced row dropped
+    expect(p.programs[0]).toMatchObject({
+      service: 'pest',
+      label: 'Quarterly pest program',
+      frequencyPerYear: 4,
+      pricePerApplication: 120.01,
+      annual: 480.04,               // 120.01 × 4, never the caller's number
+      taxable: true,
+      inclusions: ['4 visits'],
+      buildings: [{ name: 'Tower A', note: null }],
+    });
+    expect(p.programs[1].service).toBe('other'); // unknown family demotes
+    // A programs-only stored proposal is authoritative — it must NOT fall
+    // through to the synthesized fallback.
+    expect(p.synthesized).toBe(false);
+    expect(p.enabled).toBe(true);
+  });
+
+  it('folds program annuals into recurring totals with per-program tax', () => {
+    const t = computeProposalTotals(normalizeProposal(authored({
+      buildings: [],
+      taxRate: 0.07,
+      programs: [
+        { service: 'pest', label: 'Pest', frequencyPerYear: 4, pricePerApplication: 100, taxable: true },   // 400 taxable
+        { service: 'lawn', label: 'Lawn', frequencyPerYear: 9, pricePerApplication: 50 },                    // 450 exempt
+      ],
+    })));
+    expect(t.annualRecurring).toBe(850);
+    expect(t.taxableAnnualRecurring).toBe(400);
+    expect(t.totalTax).toBe(28);
+    expect(t.firstYearTotal).toBe(878);
+  });
+
   it('never authors structured sections onto a synthesized fallback', () => {
     const p = normalizeProposal({ customer_name: 'Y', monthly_total: 120, estimate_data: {} });
     expect(p.synthesized).toBe(true);

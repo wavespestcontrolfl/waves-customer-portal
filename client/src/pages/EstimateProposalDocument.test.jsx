@@ -320,6 +320,36 @@ describe('EstimateProposalDocument', () => {
     expect(text).not.toContain('Service terms');
   });
 
+  it('renders programs-mode documents: program section, Investment header, stack suppression (slice 1A-ii)', () => {
+    const { container } = render(<EstimateProposalDocument data={{
+      ...BASE_DATA,
+      proposal: {
+        ...BASE_DATA.proposal,
+        buildings: [],
+        programs: [{
+          service: 'pest',
+          label: 'Quarterly pest program',
+          frequencyPerYear: 4,
+          pricePerApplication: 120,
+          annual: 480,
+          taxable: false,
+          inclusions: ['4 scheduled service visits per year'],
+          exclusions: ['Termite treatment — separate program'],
+          buildings: [{ name: 'Tower A' }],
+        }],
+      },
+    }} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('Service programs');
+    expect(text).toContain('Quarterly pest program');
+    expect(text).toContain('4 visits per year');
+    expect(text).toContain('per application');
+    expect(text).toContain('Covers: Tower A');
+    expect(text).toContain('Investment');
+    // Programs carry authored inclusions — canned stacks stay out.
+    expect(text).not.toContain('What your commercial pest service includes');
+  });
+
   it('keeps a plain Total for one-time-only documents', () => {
     const oneTime = {
       ...BASE_DATA,

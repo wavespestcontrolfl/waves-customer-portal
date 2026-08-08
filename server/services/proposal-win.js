@@ -129,6 +129,23 @@ function buildProposalFirstInvoice(proposal) {
     }
   }
 
+  // Service programs (slice 1A-ii) are the recurring itemization when
+  // authored — the acceptance invoice bills each program's FIRST
+  // APPLICATION, exactly like the first period of a recurring line item
+  // (pre-push codex P0: a programs-only invoice-mode win either failed as
+  // unbillable or omitted every program).
+  for (const program of (Array.isArray(proposal?.programs) ? proposal.programs : [])) {
+    const amount = roundMoney(program?.pricePerApplication);
+    if (!(amount > 0)) continue;
+    lineItems.push({
+      description: cleanStr(`${program.label || 'Service program'} (first application)`, 300),
+      quantity: 1,
+      unit_price: amount,
+    });
+    subtotal = roundMoney(subtotal + amount);
+    if (program.taxable === true) taxableRecurringSubtotal = roundMoney(taxableRecurringSubtotal + amount);
+  }
+
   // Structured corrective-work lines (slice 1A-i) are one-time charges inside
   // computeProposalTotals' one-time totals — the acceptance invoice must bill
   // them too, or a marked-won bill-by-invoice proposal underbills exactly the

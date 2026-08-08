@@ -172,6 +172,52 @@ function normalizePaymentTerms(value) {
   return PROPOSAL_PAYMENT_TERMS.includes(candidate) ? candidate : null;
 }
 
+// §2/§9 Service programs (slice 1A-ii) — the per-service cards a generated
+// commercial agreement is built from. When programs are authored they ARE
+// the recurring itemization: computeProposalTotals sums recurring from them
+// and the PUT route rejects top-level building line items beside them (one
+// source of recurring truth — never two lists that can disagree). Buildings
+// demote to DISPLAY-ONLY subdivisions inside a program (name/note, no
+// pricing) for multi-building properties.
+const PROGRAM_FAMILIES = ['pest', 'lawn', 'tree_shrub', 'mosquito', 'termite', 'rodent', 'other'];
+
+function normalizeProgram(raw = {}) {
+  const family = PROGRAM_FAMILIES.includes(String(raw.service || '').trim()) ? String(raw.service).trim() : 'other';
+  const frequencyPerYear = (() => {
+    const n = Number(raw.frequencyPerYear ?? raw.visitsPerYear);
+    return Number.isFinite(n) && n >= 1 && n <= 52 ? Math.round(n) : 0;
+  })();
+  const pricePerApplication = Math.max(0, roundMoney(num(raw.pricePerApplication ?? raw.perApplication, 0)));
+  // annual is DERIVED (per-application × frequency), never trusted from the
+  // payload — a caller-supplied annual that disagrees with its own factors
+  // would let the rendered per-visit math contradict the billed total.
+  const annual = roundMoney(pricePerApplication * frequencyPerYear);
+  return {
+    service: family,
+    label: cleanString(raw.label ?? raw.name, 120) || 'Recurring service program',
+    frequencyPerYear,
+    pricePerApplication,
+    annual,
+    taxable: raw.taxable === true,
+    note: cleanString(raw.note, 300),
+    inclusions: cleanStringList(raw.inclusions, { maxItems: 12, maxLen: 200 }),
+    exclusions: cleanStringList(raw.exclusions, { maxItems: 8, maxLen: 160 }),
+    buildings: (Array.isArray(raw.buildings) ? raw.buildings : [])
+      .map((b) => ({ name: cleanString(b?.name, 120), note: cleanString(b?.note, 300) }))
+      .filter((b) => b.name)
+      .slice(0, 12),
+  };
+}
+
+function normalizePrograms(raw) {
+  if (!Array.isArray(raw)) return null;
+  const cleaned = raw
+    .map(normalizeProgram)
+    .filter((program) => program.frequencyPerYear > 0 && program.pricePerApplication > 0)
+    .slice(0, 10);
+  return cleaned.length ? cleaned : null;
+}
+
 function cleanBoundedInt(value, { min, max }) {
   // Number(null) and Number('') are 0 — a blank editor field must stay
   // "unset", never coerce to the 0-means-month-to-month claim the operator
@@ -542,7 +588,13 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
   const stored = estimateData.proposal;
 
-  const base = stored && Array.isArray(stored.buildings) && stored.buildings.length
+  // A stored proposal is authoritative when it carries EITHER itemization:
+  // legacy building line items or (slice 1A-ii) service programs. A
+  // programs-mode proposal has no top-level buildings by design and must
+  // not fall through to the synthesized fallback.
+  const storedHasBuildings = stored && Array.isArray(stored.buildings) && stored.buildings.length;
+  const storedHasPrograms = stored && Array.isArray(stored.programs) && stored.programs.length;
+  const base = storedHasBuildings || storedHasPrograms
     ? stored
     : synthesizeFallbackProposal(estimate, estimateData, { recurringMode, livePricing });
 
@@ -566,6 +618,7 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
     // saves to preserve dead state; it lands with its authoring + rendering
     // slice (codex #3297 r3, same rule as validDays).
     propertyScope: normalizePropertyScope(base.propertyScope),
+    programs: normalizePrograms(base.programs),
     correctiveWork: normalizeCorrectiveWork(base.correctiveWork),
     customerResponsibilities: normalizeCustomerResponsibilities(base.customerResponsibilities),
     commercialTerms: normalizeCommercialTerms(base.commercialTerms),
@@ -613,6 +666,14 @@ function computeProposalTotals(proposal) {
     if (work.taxable) taxableOneTime += work.amount;
   }
 
+  // Service programs (slice 1A-ii) are the recurring itemization when
+  // authored — the PUT route rejects top-level building line items beside
+  // them, so this never double-counts a legacy buildings list.
+  for (const program of proposal.programs || []) {
+    annualRecurring += program.annual;
+    if (program.taxable) taxableAnnualRecurring += program.annual;
+  }
+
   annualRecurring = roundMoney(annualRecurring);
   oneTime = roundMoney(oneTime);
   const monthlyEquivalent = roundMoney(annualRecurring / 12);
@@ -648,6 +709,8 @@ module.exports = {
   normalizeCorrectiveWork,
   normalizeCustomerResponsibilities,
   normalizeCommercialTerms,
+  normalizePrograms,
+  PROGRAM_FAMILIES,
   normalizePaymentTerms,
   PROPOSAL_PAYMENT_TERMS,
   normalizeProposal,
