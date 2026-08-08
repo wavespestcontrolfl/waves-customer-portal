@@ -249,6 +249,17 @@ async function loadCalls(lead, phoneKey) {
     // calls on the same number since), and it is the whole point of the
     // pack. Owned = sid- or stamp-linked (for_this_lead).
     const capped = calls.slice(0, 3);
+    // The ORIGINAL sid-linked call is THE anchor — stamped rows and the
+    // synthetic summary row are owned evidence too, but they must not
+    // SUBSTITUTE for its transcript (pre-push P1 r1: two newer stamped
+    // calls plus a non-provenance-matched summary row silently dropped
+    // the original transcript and its service/identity evidence).
+    // Restored first, so the general owned-evidence guarantee below is
+    // then already satisfied by it and cannot overwrite the restore.
+    const sidRow = lead.twilio_call_sid
+      ? calls.find((call) => call.call_sid === lead.twilio_call_sid && !String(call.id).startsWith('lead-summary:'))
+      : null;
+    if (sidRow && !capped.includes(sidRow)) capped[capped.length - 1] = sidRow;
     if (!capped.some((call) => call.for_this_lead)) {
       const anchor = calls.find((call) => call.for_this_lead);
       if (anchor) capped[capped.length - 1] = anchor;
