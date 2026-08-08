@@ -161,6 +161,26 @@ this skill.
 - SEO changes: no protected-family URLs touched without sign-off; sitemap
   lastmod updated where content changed.
 
+## Fixing a compliance-guard finding (content-guardrails.js)
+The guard is a paraphrase classifier, so a finding names ONE spelling of a
+class. Close the class, not the sentence in the evidence — patching the named
+form is what makes the next review round find the same defect again.
+- Widen to the verb/noun family, not the cited word (`finish\w*` →
+  `finish|complet|done|through`).
+- Check SIBLING branches for symmetry before you call it done: a term added to
+  the action-verb list usually needs its noun in `BANNED_TOPIC_CORE_SRC` too,
+  and a separator or qualifier added to one duration branch usually belongs in
+  the adjacent ones. If neighbours already have the form and yours doesn't,
+  that asymmetry is the bug.
+- Ask what PROPERTY the rule encodes, not what string it matches — the
+  approved-idiom exemption needs "the dry state is the sole condition
+  governing the claim", which `until` broke in one direction and a wet-state
+  conjunct broke in another.
+- Assert both directions every time: the positive AND the negative it must not
+  swallow. A widened matcher that gains a false positive is not a fix.
+- Run the FULL server suite (`npm test`), not just the guardrail file — these
+  patterns are source-grepped by tests in unrelated suites.
+
 ## Failure Modes
 - "Fixing" intentional SEO (city-page titles, empty spoke blogs, meta
   proximity terms).

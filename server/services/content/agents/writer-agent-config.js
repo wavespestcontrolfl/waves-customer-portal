@@ -489,7 +489,9 @@ facts with stable fact ids). When it does:
   - Emit a claims_ledger entry for every local claim, citing the backing
     fact id(s). A claim with no backing fact id is not allowed.
 
-OUTPUT — call emit_draft() once with the final shape:
+OUTPUT — call emit_draft() with the final shape (if the result carries
+draft_rejected, the draft was NOT captured — revise per its directives and
+call emit_draft() again; otherwise call it only once):
   {
     frontmatter: { title, meta_description, slug, schema, schema_types, primary_keyword, secondary_keywords[], … },
     body: "...MDX body — markdown plus any of the visual components above...",
@@ -589,7 +591,7 @@ handles all of those after the gates pass.`,
     {
       type: 'custom',
       name: 'emit_draft',
-      description: 'Submit the final draft. Call exactly ONCE at the end. The runner (not this agent) handles publishing.',
+      description: 'Submit the final draft. Call ONCE at the end — UNLESS the result comes back with draft_rejected: the draft was NOT captured; revise it per the returned `directives` and call emit_draft again with the corrected draft. The runner (not this agent) handles publishing.',
       input_schema: {
         type: 'object',
         required: ['frontmatter', 'body'],

@@ -20,7 +20,7 @@
  */
 
 const logger = require('../../logger');
-const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft } = require('./brief-driven-tools');
+const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft, registerSessionLint } = require('./brief-driven-tools');
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const API_BASE = 'https://api.anthropic.com/v1';
@@ -110,7 +110,12 @@ function buildInputPayload(brief) {
   // representation of the brief plus an explicit instruction to start
   // with get_content_brief() for the full row.
   return {
-    instruction: `You have been dispatched to produce a draft for opportunity ${brief.opportunity_id}. Start by calling get_content_brief(opportunity_id="${brief.opportunity_id}") to load the full brief. The shape summary below is what was composed; the get_content_brief call returns the canonical JSON to work from.${brief.facts_pack ? ' This brief includes a facts_pack: every local claim in your body must be grounded in one of its fact ids, and you must emit a claims_ledger.' : ''}${operatorBrief ? ' IMPORTANT: this is an OPERATOR-AUTHORED intercept brief. The operator_brief block below (also at voice_constraints.operator_brief in the canonical brief) is BINDING: follow its binding_instructions exactly — the working title/thesis/outline are the content plan, required_sources must be linked in-post with explicit attribution, verify_notes are mandatory verification steps, and the internal links and author block are required as given. Do not re-derive the topic, angle, slug, or sources.' : ''}`,
+    // The self-lint retry permission rides the SESSION input, not only the
+    // registered agent prompt (Codex PR r9): a deployment that keeps the
+    // previously-registered agent IDs would otherwise still run the old
+    // call-emit-exactly-once prompt, turning the first in-session lint
+    // rejection into agent_did_not_emit_draft instead of a redraft.
+    instruction: `You have been dispatched to produce a draft for opportunity ${brief.opportunity_id}. Start by calling get_content_brief(opportunity_id="${brief.opportunity_id}") to load the full brief. The shape summary below is what was composed; the get_content_brief call returns the canonical JSON to work from.${brief.facts_pack ? ' This brief includes a facts_pack: every local claim in your body must be grounded in one of its fact ids, and you must emit a claims_ledger.' : ''}${operatorBrief ? ' IMPORTANT: this is an OPERATOR-AUTHORED intercept brief. The operator_brief block below (also at voice_constraints.operator_brief in the canonical brief) is BINDING: follow its binding_instructions exactly — the working title/thesis/outline are the content plan, required_sources must be linked in-post with explicit attribution, verify_notes are mandatory verification steps, and the internal links and author block are required as given. Do not re-derive the topic, angle, slug, or sources.' : ''} NOTE ON EMIT RETRIES: if an emit tool result comes back with draft_rejected or metadata_rejected, your submission was NOT captured — revise it per the returned directives and call the SAME emit tool again in this session. Any call-once rule applies only to ACCEPTED submissions, never to rejected ones.`,
     brief_summary: {
       operator_brief: operatorBrief,
       opportunity_id: brief.opportunity_id,
@@ -164,7 +169,7 @@ class AgentDispatcher {
    *   { ok: true, draft, agent_id, session_id, duration_ms }
    *   { ok: false, reason, ... }  // including reason='dry_run'
    */
-  async runWithBrief(brief, { dryRun = false, sessionTimeoutMs = 5 * 60 * 1000 } = {}) {
+  async runWithBrief(brief, { dryRun = false, sessionTimeoutMs = 5 * 60 * 1000, selfLintOptions = null } = {}) {
     const route = pickAgent(brief);
     if (!route.ok) return { ok: false, ...route };
 
@@ -202,6 +207,11 @@ class AgentDispatcher {
       return { ok: false, reason: `session_create_failed: ${err.message}` };
     }
     const sessionId = session.id;
+    // Arm the writer's in-loop self-lint (W1) with the caller's precomputed
+    // guardrail options — the runner derives them from the SAME shared
+    // module gate 3c uses, so the lint can never disagree with the gate
+    // that parks runs. Cleared with clearDraft below.
+    if (selfLintOptions) registerSessionLint(sessionId, selfLintOptions);
 
     // Post the initial input to the session. Schema mirrors the
     // live Managed Agents contract used by lead-response-agent.js:
@@ -215,6 +225,10 @@ class AgentDispatcher {
         }],
       });
     } catch (err) {
+      // Session state (lint options, attempts) was registered above — a
+      // transient initial-message failure must not leak it into the
+      // process-global maps.
+      clearDraft(sessionId);
       return { ok: false, reason: `initial_message_failed: ${err.message}`, session_id: sessionId };
     }
 

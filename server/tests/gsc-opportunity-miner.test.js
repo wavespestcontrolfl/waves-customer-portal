@@ -1306,8 +1306,15 @@ describe('listicle_family scoring + action mapping', () => {
     expect(auditSrc).toMatch(/\.whereIn\('action_type', miner\.PAGE_EDITING_ACTIONS\)/);
     const gateSrc = require('fs').readFileSync(require.resolve('../services/content/content-quality-gate'), 'utf8');
     expect(gateSrc).toMatch(/brief\?\.gsc_signal\?\.specialty_topic/);
+    // The runner's SYNC guardrail-option derivation moved into the shared
+    // guardrail-options module (#3273), so the specialty_topic fold lives
+    // there now and the runner reaches it via deriveSyncGuardrailOptions.
+    // Pin BOTH halves — the fold itself and the runner's delegation to it —
+    // so neither can drift back out of the FAQ_BLOCKED_SERVICE guard.
+    const guardOptionsSrc = require('fs').readFileSync(require.resolve('../services/content/guardrail-options'), 'utf8');
+    expect(guardOptionsSrc).toMatch(/brief\?\.gsc_signal\?\.specialty_topic/);
     const runnerSrc = require('fs').readFileSync(require.resolve('../services/content/autonomous-runner'), 'utf8');
-    expect(runnerSrc).toMatch(/brief\?\.gsc_signal\?\.specialty_topic/);
+    expect(runnerSrc).toMatch(/deriveSyncGuardrailOptions/);
     // Blog↔refresh transitions defer while the family's prior work is
     // claimed or in review (Codex r20).
     expect(mineSrc).toMatch(/inflightFamily\.blogKeys\.has\(listicleFamilyDedupeKey\(fam\.key\)\)/);
