@@ -25,6 +25,7 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
   const classify = (over = {}) => gbp._classifyLocationSyncHealth({
     hasResource: true,
     source: 'gbp',
+    pulledCount: 100,
     rowCount: 100,
     newestIngestAt: daysAgo(1),
     statsUpdatedAt: daysAgo(1),
@@ -51,10 +52,14 @@ describe('_classifyLocationSyncHealth (pure classifier)', () => {
   });
 
   test('GBP pull succeeds on an EMPTY feed → silent_empty ACT (the Venice class)', () => {
-    // Mechanically "healthy": source is gbp, no error — but zero reviews
-    // ever ingested means the profile was wiped/suspended and reviewers
-    // there can never auto-mark.
-    expect(classify({ rowCount: 0, statsTotal: undefined, statsUpdatedAt: null, newestIngestAt: null }))
+    // Mechanically "healthy": source is gbp, no error — but the CURRENT pull
+    // returned zero reviews. Judged on the pull, not retained rows: a wiped
+    // profile keeps its historical rows (missing_since-stamped), so a
+    // stored-row count would read healthy forever after the wipe.
+    expect(classify({ pulledCount: 0, rowCount: 0, statsTotal: undefined, statsUpdatedAt: null, newestIngestAt: null }))
+      .toMatchObject({ cls: 'silent_empty', severity: 'ACT' });
+    // The post-wipe shape: 47 retained stamped rows, empty feed → still caught.
+    expect(classify({ pulledCount: 0, rowCount: 47 }))
       .toMatchObject({ cls: 'silent_empty', severity: 'ACT' });
   });
 
@@ -96,9 +101,17 @@ describe('_assessReviewSyncHealth (escalation)', () => {
   }
 
   beforeEach(() => {
+    // The assessment compares fixtures against the REAL clock — freeze it to
+    // the fixture anchor or the suite starts failing by itself once the
+    // calendar passes the fixtures' window (codex #3298 r1).
+    jest.useFakeTimers().setSystemTime(NOW);
     mockEmailSend.mockClear();
     mockNotifyAdmin.mockClear();
     delete process.env.REVIEW_SYNC_HEALTH_EMAIL;
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   test('healthy fleet sends NOTHING (exception-based)', async () => {
@@ -111,8 +124,10 @@ describe('_assessReviewSyncHealth (escalation)', () => {
       ],
       stats: [],
     });
-    const out = await gbp._assessReviewSyncHealth({ bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' });
-    // NOTE: date-dependent classifier uses real now here; fresh timestamps keep it healthy.
+    const out = await gbp._assessReviewSyncHealth(
+      { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' },
+      { bradenton: 109, parrish: 33, sarasota: 47, venice: 12 },
+    );
     expect(out).toEqual({ healthy: true });
     expect(mockEmailSend).not.toHaveBeenCalled();
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
@@ -120,18 +135,21 @@ describe('_assessReviewSyncHealth (escalation)', () => {
 
   test('problems email contact@ FIRST with the ACT:/FIX: subject and bell as dedupe marker', async () => {
     installDb({ aggregates: [], stats: [] }); // venice-class everywhere: zero rows
-    const out = await gbp._assessReviewSyncHealth({ bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' });
+    const out = await gbp._assessReviewSyncHealth({ bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {});
     expect(out.emailed).toBe(true);
     const sent = mockEmailSend.mock.calls[0][0];
     expect(sent.to).toBe('contact@wavespestcontrol.com');
     expect(sent.subject).toMatch(/^ACT: Google review sync/);
     expect(sent.body).toContain('silent_empty');
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    // The dedupe/backup bell must survive GATE_ADMIN_BELL_POLICY — without
+    // the explicit tag the marker vanishes and the email resends hourly.
+    expect(mockNotifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true });
   });
 
   test('feed_down escalates the subject to FIX:', async () => {
     installDb({ aggregates: [], stats: [] });
-    await gbp._assessReviewSyncHealth({ bradenton: 'none', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' });
+    await gbp._assessReviewSyncHealth({ bradenton: 'none', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {});
     expect(mockEmailSend.mock.calls[0][0].subject).toMatch(/^FIX: Google review sync/);
   });
 

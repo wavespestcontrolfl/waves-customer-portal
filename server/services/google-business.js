@@ -890,6 +890,11 @@ class GoogleBusinessService {
     let totalSynced = 0, totalNew = 0;
     const errors = [];
     const sources = {};
+    // Current-run pull sizes per location — the health check must judge the
+    // FEED, not retained rows (a wiped profile keeps its old rows with
+    // missing_since stamps, so a stored-row count reads healthy forever —
+    // codex #3298 r1).
+    const pulledCounts = {};
     // Unlinked-review notifications collected across the WHOLE run and fired
     // after every location's reviews are inserted/linked — the likely-reviewer
     // exclusion must see the full batch (codex #3264 r2).
@@ -924,6 +929,7 @@ class GoogleBusinessService {
             // fallback and stall reconciliation. Pagination fetches all
             // pages regardless.
             const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id);
+            pulledCounts[loc.id] = reviews.length;
             for (const review of reviews) {
               const normalized = this._normalizeGbpReview(review, loc);
               const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked);
@@ -964,6 +970,7 @@ class GoogleBusinessService {
           }
           if (GOOGLE_KEY) {
             const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked);
+            pulledCounts[loc.id] = sample.synced;
             totalSynced += sample.synced;
             totalNew += sample.new;
             sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
@@ -1009,7 +1016,7 @@ class GoogleBusinessService {
     // auto-mark as having reviewed, so they keep getting asked — the exact
     // class the Nicole backfill had to fix by hand. Best-effort: health
     // reporting must never break the sync itself.
-    await this._assessReviewSyncHealth(sources).catch((err) => {
+    await this._assessReviewSyncHealth(sources, pulledCounts).catch((err) => {
       logger.warn(`[gbp] review sync health assessment failed: ${err.message}`);
     });
 
@@ -1031,7 +1038,7 @@ class GoogleBusinessService {
    *   stats_stale   ACT  no _stats row, or Places stats older than 7d — the
    *                      totals cross-check above is running blind
    */
-  _classifyLocationSyncHealth({ hasResource, source, rowCount, newestIngestAt, statsUpdatedAt, statsTotal, now = Date.now() }) {
+  _classifyLocationSyncHealth({ hasResource, source, pulledCount, rowCount, newestIngestAt, statsUpdatedAt, statsTotal, now = Date.now() }) {
     if (!hasResource) return null;               // not a GBP-tracked location
     if (source === 'concurrent_skip') return null; // another runner owns this cycle
     const days = (ts) => (ts ? (now - new Date(ts).getTime()) / 86400000 : Infinity);
@@ -1042,7 +1049,10 @@ class GoogleBusinessService {
     if (source === 'places_fallback') {
       return { cls: 'feed_degraded', severity: 'ACT', detail: 'GBP credentials are broken — running on the ~5-review Places sample; removals and most new reviews are invisible' };
     }
-    if (rowCount === 0) {
+    // Judged on the CURRENT pull, not retained rows: a wiped profile keeps
+    // its historical rows (missing_since-stamped, never deleted), so a
+    // stored-row count would read healthy forever after the wipe.
+    if (source === 'gbp' && Number(pulledCount) === 0) {
       return { cls: 'silent_empty', severity: 'ACT', detail: 'the GBP pull succeeds but the feed returns ZERO reviews — profile wiped, suspended, or re-created (the Venice class)' };
     }
     if (Number.isFinite(statsTotal) && statsTotal > rowCount && days(newestIngestAt) > 14) {
@@ -1061,14 +1071,17 @@ class GoogleBusinessService {
    * backup channel, 24h-deduped via the notifications table. Kill switch:
    * REVIEW_SYNC_HEALTH_EMAIL=off (same convention as EMAIL_BOUNCE_RECOVERY).
    */
-  async _assessReviewSyncHealth(sources = {}) {
+  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}) {
     if (String(process.env.REVIEW_SYNC_HEALTH_EMAIL || '').toLowerCase() === 'off') return { skipped: 'disabled' };
 
     const rows = await db('google_reviews')
       .select('location_id')
       .select(db.raw(`COUNT(*) FILTER (WHERE reviewer_name != '_stats') AS row_count`))
       .select(db.raw(`MAX(created_at) FILTER (WHERE reviewer_name != '_stats') AS newest_ingest_at`))
-      .select(db.raw(`MAX(updated_at) FILTER (WHERE reviewer_name = '_stats') AS stats_updated_at`))
+      // _syncPlacesStatsForLocation stamps synced_at (updated_at has no
+      // auto-touch trigger) — reading updated_at would mark every
+      // established location stats_stale forever (codex #3298 r1).
+      .select(db.raw(`MAX(COALESCE(synced_at, updated_at)) FILTER (WHERE reviewer_name = '_stats') AS stats_updated_at`))
       .groupBy('location_id');
     const byLoc = Object.fromEntries(rows.map((r) => [r.location_id, r]));
 
@@ -1087,6 +1100,7 @@ class GoogleBusinessService {
       const verdict = this._classifyLocationSyncHealth({
         hasResource: !!loc.googleLocationResourceName,
         source: sources[loc.id],
+        pulledCount: pulledCounts[loc.id],
         rowCount: Number(agg.row_count) || 0,
         newestIngestAt: agg.newest_ingest_at || null,
         statsUpdatedAt: agg.stats_updated_at || null,
@@ -1132,7 +1146,11 @@ class GoogleBusinessService {
         'review',
         title,
         emailed ? `Emailed ${subject} to contact@.` : `EMAIL FAILED — acting surface is this bell. ${subject}\n\n${body}`,
-        { link: '/admin/reviews' },
+        // bell: true — this row is BOTH the 24h dedupe marker and the
+        // email-failure backup surface; GATE_ADMIN_BELL_POLICY suppressing
+        // it would erase the marker and let an ongoing fault resend the
+        // email every hourly sync (codex #3298 r1).
+        { link: '/admin/reviews', bell: true },
       );
       return { emailed, findings: findings.length };
     }, { recordHealth: false });
