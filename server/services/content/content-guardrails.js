@@ -2928,8 +2928,11 @@ const REENTRY_SAFETY_SRCS = [
   // same conditional-idiom exemption path (contains "safe").
   "\\bsafely\\s+(?:re-?enter\\w*|return\\w*|go\\s+back|walk\\w*|play\\w*|be\\s+(?:in|on|inside|around))\\b",
   // Verb-then-adverb order (Codex PR r12 audit): "the pesticide can be
-  // used safely around pets" is the same unconditional claim.
+  // used safely around pets" is the same unconditional claim — and the
+  // inverse adverb order too (Codex PR r13 audit: "can safely be
+  // applied around pets").
   "\\b(?:used?|apply(?:ing)?|applied|applies|spray(?:ed|ing|s)?)\\s+safely\\b",
+  "\\bsafely\\s+be\\s+(?:used|applied|sprayed)\\b",
   "\\bre-?entry\\s+(?:is|becomes?|will\\s+be)\\s+(?:completely\\s+|totally\\s+|perfectly\\s+)?(?:safe|harmless|risk[-\\s]?free)\\b",
   "\\bsafe\\s+(?:for\\s+)?re-?entry\\b",
   // "the treatment/product/pesticide/lawn is safe (for kids/pets/around …)"
@@ -3205,7 +3208,7 @@ const BANNED_TOPIC_GAP_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b)[\\w'’-]+\\s+){0,3
 // Content nouns that make a possessive INFORMATIONAL rather than a
 // service claim (Codex PR r5, extended r6): "our guide to wildlife
 // removal explains…", "our report on wildlife removal…".
-const BANNED_TOPIC_INFO_NOUN_SRC = "(?:guides?|articles?|posts?|pages?|blogs?|overviews?|explainers?|resources?|advice|primers?|faqs?|breakdowns?|comparisons?|information|reports?|research|glossar(?:y|ies)|summar(?:y|ies)|explanations?|reviews?|coverage|discussions?|checklists?|handbooks?|manuals?|playbooks?|worksheets?|walkthroughs?|tutorials?)";
+const BANNED_TOPIC_INFO_NOUN_SRC = "(?:guides?|articles?|posts?|pages?|blogs?|overviews?|explainers?|resources?|advice|primers?|faqs?|breakdowns?|comparisons?|information|reports?|research|glossar(?:y|ies)|summar(?:y|ies)|explanations?|reviews?|coverage|discussions?|checklists?|handbooks?|manuals?|playbooks?|worksheets?|walkthroughs?|tutorials?|tips?|pointers?)";
 // Action-verb patterns must not absorb a THIRD-PARTY subject in their
 // filler (Codex PR r6): "we help specialists remove wildlife" and "we
 // have partners trap wildlife" attribute the work to someone else — the
@@ -3279,13 +3282,21 @@ const BANNED_TOPIC_SRCS = [
   // THIRD-PARTY referral stays legal via the negative lookahead: "schedule
   // tenting with a licensed structural fumigator" directs elsewhere.
   `\\b(?:schedule|book)\\s+(?:your\\s+|a\\s+|an\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?))?\\b(?!\\s+(?:with|through)\\s+(?!us\\b|waves\\b))`,
+  // REVERSE brand attribution (Codex PR r13 audit): "Wildlife removal by
+  // Waves Pest Control", "Raccoon Removal | Waves Pest Control", "attic
+  // insulation services from Waves" present the service as ours without a
+  // leading we/our. Referral objects and informational framing ("tips on
+  // wildlife removal from Waves…") stay legal via the lookarounds.
+  `(?<!\\b(?:tips?|advice|guides?|information|articles?|posts?|reports?|research|questions?)\\s+(?:on|about|regarding|for)\\s+)\\b${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))(?:\\s+(?:services?|solutions?|programs?|options?|work))?\\s*(?:\\||[-–—:]|\\bby\\b|\\bfrom\\b|\\bwith\\b)\\s*(?:waves(?:\\s+pest\\s+control)?|us)\\b`,
   // Referral framing is exempt on either side of the topic here too
   // (Codex PR r12 audit: "call Waves for a wildlife removal referral" is
   // the wanted copy). The \b before the lookahead stops \w+ backtracking.
   `\\b(?:call|contact|text|email|ask)\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\s+(?:today\\s+)?(?:for|about)\\s+(?:(?!${NEGATION_WORD_SRC}\\b|referrals?\\b|partners?\\b|specialists?\\b)[\\w'’-]+\\s+){0,3}?${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))`,
   // Sales framings: "request a fumigation quote from Waves", "get attic
   // insulation from Waves", "choose Waves for wildlife trapping".
-  `\\b(?:request|order|get|book)\\s+(?:a\\s+|an\\s+|your\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:quotes?|estimates?|services?|appointments?))?\\s+(?:from|with|through)\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\b`,
+  // The object gap refuses informational nouns (Codex PR r13 audit:
+  // "get TIPS ON wildlife removal from Waves" is content, not a sale).
+  `\\b(?:request|order|get|book)\\s+(?:a\\s+|an\\s+|your\\s+)?(?:(?!${NEGATION_WORD_SRC}\\b|${BANNED_TOPIC_INFO_NOUN_SRC}\\b|referrals?\\b|partners?\\b|specialists?\\b)[\\w'’-]+\\s+){0,3}?${BANNED_TOPIC_SRC}(?:\\s+(?:quotes?|estimates?|services?|appointments?))?\\s+(?:from|with|through)\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\b`,
   `\\b(?:choose|pick|hire|trust)\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\s+for\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
 ];
 

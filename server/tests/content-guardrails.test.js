@@ -3324,6 +3324,11 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(usedSafely.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const oncePassed = guardrails.evaluate({ body: 'You may return once 30 minutes have passed after treatment.' }, {});
     expect(oncePassed.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // Inverse adverb order too (Codex PR r13 audit).
+    const safelyApplied = guardrails.evaluate({ body: 'This pesticide can safely be applied around pets.' }, {});
+    expect(safelyApplied.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const safelyUsed = guardrails.evaluate({ body: 'Our spray can safely be used around children.' }, {});
+    expect(safelyUsed.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
   test('comparative duration qualifiers and reoccupy forms block (Codex PR r12)', () => {
@@ -3673,6 +3678,24 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     // Direct service CTAs still block.
     const direct = guardrails.evaluate({ body: 'Contact Waves for wildlife trapping in Manatee County.' }, {});
     expect(direct.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('reverse brand attribution blocks; informational/referral forms stay legal (Codex PR r13 audit)', () => {
+    for (const body of [
+      'Wildlife removal by Waves Pest Control.',
+      'Raccoon Removal | Waves Pest Control',
+      'Attic insulation services from Waves Pest Control.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    }
+    for (const body of [
+      'Wildlife removal referrals from Waves Pest Control.',
+      'Get tips on wildlife removal from Waves Pest Control.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    }
   });
 
   test('clear/rid wildlife forms and Let-Waves anchors block (Codex PR r13)', () => {
