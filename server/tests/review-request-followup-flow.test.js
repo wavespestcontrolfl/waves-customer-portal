@@ -475,29 +475,30 @@ describe('review request follow-up flow', () => {
       }),
     });
     const reviewRequestQueries = [
-      // Gate stack runs BEFORE the dedupe now (pre-push audit r2):
-      // 1. getDeliveredAskStats — no delivered asks.
-      chain({
-        whereRaw: jest.fn(function () { return this; }),
-        orderByRaw: jest.fn(function () { return this; }),
-        limit: jest.fn().mockResolvedValue([]),
-      }),
-      // 2. queued-ask check — returns THIS pending row, so the resend is the
-      //    one already_queued outcome allowed through (queuedId match).
-      chain({
-        whereRaw: jest.fn(function () { return this; }),
-        first: jest.fn().mockResolvedValue({
-          id: 'rr-existing',
-          scheduled_for: new Date('2026-06-03T16:00:00.000Z'),
-        }),
-      }),
-      // 3. per-service-record dedupe lookup.
+      // Same-service idempotency lookup runs FIRST (codex #3285 r8); the
+      // pending-unsent row makes this a RESEND, so the gate stack then runs.
+      // 1. per-service-record dedupe lookup.
       chain({
         first: jest.fn().mockResolvedValue({
           id: 'rr-existing',
           service_record_id: 'sr-1',
           status: 'pending',
           sms_sent_at: null,
+          scheduled_for: new Date('2026-06-03T16:00:00.000Z'),
+        }),
+      }),
+      // 2. getDeliveredAskStats — no delivered asks.
+      chain({
+        whereRaw: jest.fn(function () { return this; }),
+        orderByRaw: jest.fn(function () { return this; }),
+        limit: jest.fn().mockResolvedValue([]),
+      }),
+      // 3. queued-ask check — returns THIS pending row, so the resend is the
+      //    one already_queued outcome allowed through (queuedId match).
+      chain({
+        whereRaw: jest.fn(function () { return this; }),
+        first: jest.fn().mockResolvedValue({
+          id: 'rr-existing',
           scheduled_for: new Date('2026-06-03T16:00:00.000Z'),
         }),
       }),

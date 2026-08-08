@@ -507,6 +507,22 @@ const ReviewService = {
         { statusCode: 409, code: gate.outcome, nextAllowedAt: gate.nextAllowedAt || null },
       );
     };
+    // Same-service IDEMPOTENCY comes before every gate (codex #3285 r8): a
+    // retried /trigger or /tech-trigger whose first request already delivered
+    // must get the EXISTING row back (with its review URL) — nothing sends,
+    // so no gate applies. Only the resend of a pending unsent row is a real
+    // send and goes through the gate stack below.
+    let existing = null;
+    if (serviceRecordId) {
+      existing = await db("review_requests")
+        .where({ service_record_id: serviceRecordId })
+        .first();
+      const manualTrigger = triggeredBy !== "auto";
+      const pendingResend = existing && manualTrigger
+        && String(existing.status || "").toLowerCase() === "pending" && !existing.sms_sent_at;
+      if (existing && !pendingResend) return existing;
+    }
+
     let gate = { allowed: true };
     if (triggeredBy !== "auto") {
       if (customer.has_left_google_review) {
@@ -518,30 +534,19 @@ const ReviewService = {
       gate = await this.checkUnscheduledAskGates(customerId);
     }
 
-    // Don't create duplicate for same service
-    if (serviceRecordId) {
-      const existing = await db("review_requests")
-        .where({ service_record_id: serviceRecordId })
-        .first();
-      if (existing) {
-        const manualTrigger = triggeredBy !== "auto";
-        const pending = String(existing.status || "").toLowerCase() === "pending";
-        if (manualTrigger && pending && !existing.sms_sent_at) {
-          // The one gate outcome a resend may pass through: the queued ask IS
-          // this row — dispatching it now is what the operator asked for.
-          // Any other blocker (cap, cooldown, cadence, a DIFFERENT queued
-          // ask) blocks the resend too.
-          if (!gate.allowed && !(gate.outcome === "already_queued" && gate.queuedId === existing.id)) {
-            throw gateError(gate);
-          }
-          await this.sendSMS(existing.id);
-          return (
-            (await db("review_requests").where({ id: existing.id }).first()) ||
-            existing
-          );
-        }
-        return existing;
+    if (existing) {
+      // Pending-unsent resend: the one gate outcome it may pass through is
+      // already_queued when the queued ask IS this row — dispatching it now
+      // is what the operator asked for. Any other blocker (cap, cooldown,
+      // cadence, a DIFFERENT queued ask) blocks the resend too.
+      if (!gate.allowed && !(gate.outcome === "already_queued" && gate.queuedId === existing.id)) {
+        throw gateError(gate);
       }
+      await this.sendSMS(existing.id);
+      return (
+        (await db("review_requests").where({ id: existing.id }).first()) ||
+        existing
+      );
     }
 
     if (!gate.allowed) throw gateError(gate);

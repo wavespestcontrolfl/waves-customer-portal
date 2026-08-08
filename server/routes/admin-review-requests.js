@@ -36,7 +36,9 @@ router.post('/trigger', async (req, res, next) => {
     // request body claiming 'auto' would bypass the manual-trigger gate stack
     // in ReviewService.create and leave a scheduled ask processScheduled()
     // sends without rechecking (pre-push audit r1).
-    const triggeredBy = ['admin', 'csr'].includes(req.body.triggeredBy) ? req.body.triggeredBy : 'admin';
+    // 'tech' stays allowed — DispatchPageV2 posts it and the techTriggered
+    // metric + audit provenance count triggered_by='tech' (codex #3285 r8).
+    const triggeredBy = ['admin', 'csr', 'tech'].includes(req.body.triggeredBy) ? req.body.triggeredBy : 'admin';
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     let resolvedServiceRecordId = serviceRecordId || null;
     let serviceContext = {};

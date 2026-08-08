@@ -49,10 +49,20 @@ const PRIOR_BODY_AUGMENTED = PRIOR_BODY.replace('\n\nReply STOP', `\n\n${RESERVI
 const NEW_BODY_AUGMENTED = NEW_BODY.replace('\n\nReply STOP', `\n\n${RESERVICE}Reply STOP`);
 
 async function swap(knex, from, to) {
-  if (!(await knex.schema.hasTable('sms_templates'))) return;
-  await knex('sms_templates')
-    .where({ template_key: TEMPLATE_KEY, body: from })
-    .update({ body: to, updated_at: new Date() });
+  if (await knex.schema.hasTable('sms_templates')) {
+    await knex('sms_templates')
+      .where({ template_key: TEMPLATE_KEY, body: from })
+      .update({ body: to, updated_at: new Date() });
+  }
+  // Experiment variants outrank the base body at render (admin-sms-templates
+  // selects variant.body first), so a control variant carrying the exact old
+  // copy would keep sending it after the base swap (codex #3285 r8). Same
+  // exact-match guard — independently edited variant bodies are untouched.
+  if (await knex.schema.hasTable('sms_template_variants')) {
+    await knex('sms_template_variants')
+      .where({ template_key: TEMPLATE_KEY, body: from })
+      .update({ body: to, updated_at: new Date() });
+  }
 }
 
 exports.up = async function up(knex) {

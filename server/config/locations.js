@@ -263,8 +263,26 @@ const REVIEW_CITY_TO_LOCATION = { ...CITY_TO_LOCATION, ...REVIEW_CITY_EXTRAS };
  * @param {object} [opts]    { storedLocationId } — review_requests.location_id
  * @returns {object} a WAVES_LOCATIONS entry (never null)
  */
+// ZIPs whose USPS/Places city label CONTRADICTS the canonical routing —
+// zip-to-city.js documents 34243: USPS says "Sarasota" but it is Manatee /
+// University Park and routes to Bradenton. For these ZIPs the ZIP wins over
+// the (known-mislabeled) city, or a Places-autocompleted "Sarasota, 34243"
+// record would hit the wrong profile through the city-first order
+// (codex #3285 r8). Keep this set to DOCUMENTED conflicts only — the general
+// order stays city-first.
+const ZIP_CITY_CONFLICTS = new Set(['34243']);
+
 function resolveReviewLocation(customer = {}, { storedLocationId = null } = {}) {
   const byId = (id) => WAVES_LOCATIONS.find((l) => l.id === id) || null;
+
+  const zipRaw = String(customer.zip || '').trim().slice(0, 5);
+  if (zipRaw && ZIP_CITY_CONFLICTS.has(zipRaw)) {
+    const { zipToCity } = require('../utils/zip-to-city');
+    const conflictCity = String(zipToCity(zipRaw) || '').toLowerCase().trim();
+    const hit = conflictCity && REVIEW_CITY_TO_LOCATION[conflictCity]
+      ? byId(REVIEW_CITY_TO_LOCATION[conflictCity]) : null;
+    if (hit) return hit;
+  }
 
   const city = String(customer.city || '').toLowerCase().trim();
   if (city && REVIEW_CITY_TO_LOCATION[city]) {
@@ -272,7 +290,7 @@ function resolveReviewLocation(customer = {}, { storedLocationId = null } = {}) 
     if (hit) return hit;
   }
 
-  const zip = String(customer.zip || '').trim().slice(0, 5);
+  const zip = zipRaw;
   if (zip) {
     // Canonical ZIP → city (utils/zip-to-city.js), then the same review city
     // map as step 1 — so ZIP-only rows inherit the review overrides too
