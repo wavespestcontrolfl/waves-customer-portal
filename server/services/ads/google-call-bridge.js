@@ -575,7 +575,7 @@ async function joinedLeadLiveRow(callLog, { dbc = db, lock = false } = {}) {
 // plan; only a match whose live-lead update actually landed is returned.
 // Returns { match } on success; { match: null, reason } for skip
 // bookkeeping.
-async function attributeResolvedLead(callLog, bridgeSource, now, trx) {
+async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFallback = false } = {}) {
   let joinedWentStale = false;
   if (callLog?.leadId) {
     const lockedLead = await trx('leads')
@@ -587,13 +587,28 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx) {
       const joined = {
         strategy: 'joined_lead',
         leadId: callLog.leadId,
-        customerId: lockedLead.customer_id || callLog.customerId || null,
+        // The joined lead's CURRENT owner ONLY — an UNCLAIMED lead stays
+        // customer-less (codex P1, PR #3303 r2): borrowing the call's own
+        // customer link would pair the lead with a customer it does not
+        // own; the funnel write declines on a null customer and the
+        // unclaimed→organic sweep / claim-time backfill attribute it once
+        // the lead is actually claimed.
+        customerId: lockedLead.customer_id || null,
       };
       if (await updateLeadAttribution(joined, bridgeSource, now, { linkageCallId: callLog.id, dbc: trx })) {
         return { match: joined };
       }
     }
     joinedWentStale = true;
+  }
+  // `noPlanFallback`: the retry lane reconciling a CLEARED joined stamp
+  // must not re-resolve a lead by plan (codex P1, PR #3303 r2) — the
+  // deliberate clear would be silently rewritten as a plan match and the
+  // cleared-link branch (which retires this call's funnel row and clears
+  // the recorded match) would never run. Once cleared, a LATER scan may
+  // legitimately plan-attribute the call through the normal flow.
+  if (noPlanFallback) {
+    return { match: null, reason: joinedWentStale ? 'lead_not_live' : 'lead_not_found' };
   }
   const planned = await findLeadForCall(callLog, { dbc: trx });
   if (!planned?.leadId) {
@@ -661,21 +676,30 @@ async function findLeadForCall(callLog, { dbc = db } = {}) {
 // transfer carries the new lead's CURRENT customer (read under the lead
 // lock by the caller) so the row never pairs the new lead with the former
 // lead's customer.
+// Returns the outcome so the caller can gate the funnel write:
+// 'transferred' (this call's row now sits on the new lead — safe to
+// backfill), 'retired_conflict' (the new lead already owns a DIFFERENT
+// row — this call must NOT write, or it would backfill campaign/detail
+// onto another call's attribution), 'retired_cleared' (link cleared),
+// 'none' (no provenanced row — nothing owned by this call).
 async function reconcileMovedCallAttribution(trx, callLogId, recordedLeadId, newLeadId, newCustomerId, now) {
   const oldRow = await trx('ad_service_attribution')
     .where({ lead_id: recordedLeadId, source_call_id: callLogId })
     .first('id');
-  if (!oldRow) return;
+  if (!oldRow) return 'none';
   if (newLeadId) {
     const conflict = await trx('ad_service_attribution').where({ lead_id: newLeadId }).first('id');
     if (!conflict) {
       await trx('ad_service_attribution')
         .where({ id: oldRow.id })
         .update({ lead_id: newLeadId, customer_id: newCustomerId || null, updated_at: now });
-      return;
+      return 'transferred';
     }
+    await trx('ad_service_attribution').where({ id: oldRow.id }).del();
+    return 'retired_conflict';
   }
   await trx('ad_service_attribution').where({ id: oldRow.id }).del();
+  return 'retired_cleared';
 }
 
 async function updateLeadAttribution(leadMatch, bridgeSource, now, { linkageCallId = null, dbc = db } = {}) {
@@ -840,11 +864,15 @@ async function applyBridge(options = {}) {
           try {
             await db.transaction(async (trx) => {
               let backfillLeadId = match.callLog?.leadId || null;
-              let backfillCustomerId = match.callLog?.customerId || null;
+              let backfillCustomerId = null;
               if (backfillLeadId) {
                 const liveJoined = await joinedLeadLiveRow(match.callLog, { dbc: trx, lock: true });
                 if (liveJoined) {
-                  backfillCustomerId = liveJoined.customer_id || backfillCustomerId;
+                  // The joined lead's CURRENT owner ONLY — an unclaimed
+                  // lead stays customer-less and the funnel write
+                  // declines (codex P1, PR #3303 r2); never the call's
+                  // own customer link.
+                  backfillCustomerId = liveJoined.customer_id || null;
                 } else {
                   backfillLeadId = null;
                 }
@@ -874,7 +902,7 @@ async function applyBridge(options = {}) {
                   ).first('id');
                   if (stillMatches) {
                     backfillLeadId = lm.leadId;
-                    backfillCustomerId = lockedFallback.customer_id || lm.customerId || backfillCustomerId;
+                    backfillCustomerId = lockedFallback.customer_id || lm.customerId || null;
                   }
                 }
               }
@@ -896,8 +924,16 @@ async function applyBridge(options = {}) {
         // interleave between the lead write and the call record. Not a
         // write_failed on skip: the retry lane re-evaluates next pass.
         const recordedLeadId = match.callLog.googleAdsLeadMatchedLeadId || null;
+        // A retry triggered by a CLEARED joined stamp must not re-resolve
+        // by plan — the deliberate clear would be rewritten as a plan
+        // match and the cleared-link reconciliation below would never run
+        // (codex P1, PR #3303 r2). Repoints (joined lead present) and
+        // plain unmatched retries keep the plan fallback.
+        const clearedJoinedTrigger = !!recordedLeadId
+          && !match.callLog.leadId
+          && match.callLog.googleAdsLeadMatchedStrategy === 'joined_lead';
         const attribution = await db.transaction(async (trx) => {
-          const res = await attributeResolvedLead(match.callLog, bridgeSource, now, trx);
+          const res = await attributeResolvedLead(match.callLog, bridgeSource, now, trx, { noPlanFallback: clearedJoinedTrigger });
           if (!res.match) {
             // Recorded match with NO resolvable lead — the CLEARED-link
             // case (codex P1, PR #3303): retire this call's own funnel row
@@ -923,8 +959,9 @@ async function applyBridge(options = {}) {
           // heuristic. The old lead's lead_source_id is left as-is: the
           // prior value was never recorded, and guessing would corrupt
           // real attribution.
+          let reconcileOutcome = 'none';
           if (recordedLeadId && String(recordedLeadId) !== String(res.match.leadId)) {
-            await reconcileMovedCallAttribution(trx, match.callLog.id, recordedLeadId, res.match.leadId, res.match.customerId, now);
+            reconcileOutcome = await reconcileMovedCallAttribution(trx, match.callLog.id, recordedLeadId, res.match.leadId, res.match.customerId, now);
           }
           await trx('call_log')
             .where({ id: match.callLog.id })
@@ -940,10 +977,14 @@ async function applyBridge(options = {}) {
           // lock, so the verified linkage cannot be cleared before the
           // funnel row lands — and the FK check's FOR KEY SHARE on the
           // locked lead must not come from a second connection. A funnel
-          // SQL failure rolls the round back to the retry lane,
-          // attribution and funnel staying consistent.
-          if (bridgedToThisCall) {
-            await writeCallPpcAttribution(match, res.match.customerId || match.callLog?.customerId || null, res.match.leadId, trx);
+          // SQL failure rolls the round back to the retry lane. SKIPPED
+          // after a conflict-retire (codex P1, PR #3303 r2): the target
+          // lead's existing row belongs to a DIFFERENT call, and this
+          // write would backfill campaign/detail/service onto it. The
+          // customer is the match's own resolved owner — never the call's
+          // customer link, which a lead does not necessarily own.
+          if (bridgedToThisCall && reconcileOutcome !== 'retired_conflict') {
+            await writeCallPpcAttribution(match, res.match.customerId || null, res.match.leadId, trx);
           }
           return res;
         });
@@ -1020,9 +1061,14 @@ async function applyBridge(options = {}) {
         // locked lead must not come from a second connection. A funnel
         // SQL failure rolls this bridge write back to write_failed and
         // the next run re-applies it.
+        // The customer is the match's own resolved owner — never the
+        // call's customer link (codex P1, PR #3303 r2): an UNCLAIMED
+        // joined lead stays customer-less and the write declines; the
+        // unclaimed sweep / claim-time backfill attribute it once the
+        // lead is actually claimed.
         await writeCallPpcAttribution(
           match,
-          attributed?.customerId || match.callLog?.customerId || null,
+          attributed?.customerId || null,
           attributed?.leadId || null,
           trx,
         );
