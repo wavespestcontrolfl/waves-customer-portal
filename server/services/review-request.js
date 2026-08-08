@@ -488,6 +488,36 @@ const ReviewService = {
     technicianId: overrideTechnicianId,
     expiresAt,
   }, customer) {
+    // Manual triggers (/trigger, /tech-trigger, the intelligence-bar tool —
+    // anything not the auto enrollment machinery, which carries its own
+    // cadence/cap guards) go through the SAME gate stack as sendGatedAsk, so
+    // no unscheduled path can out-ask the caps (codex #3285 r1 P1). Evaluated
+    // BEFORE the per-service-record dedupe: an at-cap / in-cadence /
+    // already-reviewed customer must not receive a resend either (pre-push
+    // audit r2). Throws a 409-shaped error the routes surface verbatim.
+    const gateError = (gate) => {
+      const messages = {
+        in_cadence: "Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.",
+        at_cap: "Customer has already received 3 review requests in the last 6 months",
+        cooldown: "Customer received a review request in the last 30 days",
+        already_queued: "A review request to this customer is already queued and will send automatically.",
+      };
+      return Object.assign(
+        new Error(messages[gate.outcome] || "Review request blocked"),
+        { statusCode: 409, code: gate.outcome, nextAllowedAt: gate.nextAllowedAt || null },
+      );
+    };
+    let gate = { allowed: true };
+    if (triggeredBy !== "auto") {
+      if (customer.has_left_google_review) {
+        throw Object.assign(
+          new Error("Customer is marked as already having left a Google review"),
+          { statusCode: 409, code: "already_reviewed" },
+        );
+      }
+      gate = await this.checkUnscheduledAskGates(customerId);
+    }
+
     // Don't create duplicate for same service
     if (serviceRecordId) {
       const existing = await db("review_requests")
@@ -497,6 +527,13 @@ const ReviewService = {
         const manualTrigger = triggeredBy !== "auto";
         const pending = String(existing.status || "").toLowerCase() === "pending";
         if (manualTrigger && pending && !existing.sms_sent_at) {
+          // The one gate outcome a resend may pass through: the queued ask IS
+          // this row — dispatching it now is what the operator asked for.
+          // Any other blocker (cap, cooldown, cadence, a DIFFERENT queued
+          // ask) blocks the resend too.
+          if (!gate.allowed && !(gate.outcome === "already_queued" && gate.queuedId === existing.id)) {
+            throw gateError(gate);
+          }
           await this.sendSMS(existing.id);
           return (
             (await db("review_requests").where({ id: existing.id }).first()) ||
@@ -507,34 +544,7 @@ const ReviewService = {
       }
     }
 
-    // Manual triggers (/trigger, /tech-trigger, the intelligence-bar tool —
-    // anything not the auto enrollment machinery, which carries its own
-    // cadence/cap guards) go through the SAME gate stack as sendGatedAsk, so
-    // no unscheduled path can out-ask the caps (codex #3285 r1 P1). Runs
-    // AFTER the per-service-record dedupe above: dispatching an
-    // already-queued row is a resend, not a new ask. Throws a 409-shaped
-    // error the routes surface verbatim.
-    if (triggeredBy !== "auto") {
-      if (customer.has_left_google_review) {
-        throw Object.assign(
-          new Error("Customer is marked as already having left a Google review"),
-          { statusCode: 409, code: "already_reviewed" },
-        );
-      }
-      const gate = await this.checkUnscheduledAskGates(customerId);
-      if (!gate.allowed) {
-        const messages = {
-          in_cadence: "Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.",
-          at_cap: "Customer has already received 3 review requests in the last 6 months",
-          cooldown: "Customer received a review request in the last 30 days",
-          already_queued: "A review request to this customer is already queued and will send automatically.",
-        };
-        throw Object.assign(
-          new Error(messages[gate.outcome] || "Review request blocked"),
-          { statusCode: 409, code: gate.outcome, nextAllowedAt: gate.nextAllowedAt || null },
-        );
-      }
-    }
+    if (!gate.allowed) throw gateError(gate);
 
     // Pull service + tech context
     let techName = overrideTechName || null,
@@ -2893,7 +2903,9 @@ const ReviewService = {
       .orderBy("scheduled_for", "asc")
       .first();
     if (queued) {
-      return { allowed: false, outcome: "already_queued", nextAllowedAt: queued.scheduled_for };
+      // queuedId lets create()'s resend path distinguish "THIS row is the
+      // queued one — dispatch it now" from "a different ask is queued".
+      return { allowed: false, outcome: "already_queued", nextAllowedAt: queued.scheduled_for, queuedId: queued.id };
     }
     return { allowed: true };
   },
@@ -3063,6 +3075,10 @@ const ReviewService = {
     const row = await db("review_requests")
       .where({ customer_id: customerId })
       .whereNotNull("token")
+      // DELIVERED asks only: a pending scheduled row's token would hand the
+      // portal a link whose ask processScheduled still sends afterward — the
+      // customer clicks, then gets the SMS anyway (pre-push audit r2).
+      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
       .where((b) => b.whereNull("expires_at").orWhere("expires_at", ">", new Date()))
       .whereNull("redirected_at")
       .whereNull("submitted_at")

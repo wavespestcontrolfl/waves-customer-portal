@@ -475,6 +475,23 @@ describe('review request follow-up flow', () => {
       }),
     });
     const reviewRequestQueries = [
+      // Gate stack runs BEFORE the dedupe now (pre-push audit r2):
+      // 1. getDeliveredAskStats — no delivered asks.
+      chain({
+        whereRaw: jest.fn(function () { return this; }),
+        orderByRaw: jest.fn(function () { return this; }),
+        limit: jest.fn().mockResolvedValue([]),
+      }),
+      // 2. queued-ask check — returns THIS pending row, so the resend is the
+      //    one already_queued outcome allowed through (queuedId match).
+      chain({
+        whereRaw: jest.fn(function () { return this; }),
+        first: jest.fn().mockResolvedValue({
+          id: 'rr-existing',
+          scheduled_for: new Date('2026-06-03T16:00:00.000Z'),
+        }),
+      }),
+      // 3. per-service-record dedupe lookup.
       chain({
         first: jest.fn().mockResolvedValue({
           id: 'rr-existing',

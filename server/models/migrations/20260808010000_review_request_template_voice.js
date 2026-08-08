@@ -12,9 +12,9 @@
  * behind GATE_REVIEW_DIRECT_LINK, so "how was your service?" sets up an
  * interaction the destination cannot deliver. And it is generic third-person
  * ("helps us") next to the personalized drafter's copy, which is specific,
- * first-person, and converts:
+ * first-person, and converts (synthetic example, drafter-style):
  *
- *   "Thanks for having us out on the Sarasota roaches, Stacey! Review: ..."
+ *   "Thanks for having us out on the ants, Sam! Review: ..."
  *
  * New body matches that voice while staying a template. Constraints held:
  *   - ONE GSM-7 segment with a 12-character first name and the ~43-char
