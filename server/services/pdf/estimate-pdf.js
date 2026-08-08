@@ -313,11 +313,12 @@ function correctiveWorkBlock(ctx, correctiveWork, y) {
 }
 
 // Structured commercial terms (slice 1A-i) → the flat lines this document's
-// terms block prints. Labels mirror client/src/lib/proposal-sections.js.
+// terms block prints. Labels mirror client/src/lib/proposal-sections.js —
+// including its validDays omission (the enforced expires_at is the only
+// validity date any renderer may print; codex 1A-i r1).
 function commercialTermLines(commercialTerms) {
   if (!commercialTerms || typeof commercialTerms !== 'object') return [];
   return [
-    ['Proposal valid', commercialTerms.validDays != null ? `${commercialTerms.validDays} days from issue` : null],
     ['Payment', commercialTerms.paymentTerms],
     ['Initial term', commercialTerms.initialTermMonths != null
       ? (commercialTerms.initialTermMonths > 0 ? `${commercialTerms.initialTermMonths} months` : 'None — month-to-month')

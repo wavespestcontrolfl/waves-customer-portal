@@ -276,7 +276,9 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('Both kitchens');
     expect(text).toContain('Customer responsibilities');
     expect(text).toContain('Service terms');
-    expect(text).toContain('30 days from issue');
+    // validDays never renders — expires_at ("Valid through") is the only
+    // validity date any surface may print (codex 1A-i r1).
+    expect(text).not.toContain('30 days from issue');
     expect(text).toContain('12 months');
     // Structured terms are authored terms: the canned commercial inclusions
     // stack (with its no-long-term-contract claim beside a 12-month initial
@@ -294,8 +296,8 @@ describe('EstimateProposalDocument', () => {
         ...BASE_DATA.proposal,
         terms: 'Interior visits billed per visit.',
         commercialTerms: {
-          validDays: 30, paymentTerms: null, initialTermMonths: null,
-          renewal: null, priceAdjustment: null, cancellation: null, accessRequirements: null,
+          validDays: null, paymentTerms: null, initialTermMonths: null,
+          renewal: null, priceAdjustment: null, cancellation: '30-day written notice', accessRequirements: null,
         },
       },
     }} token="tok-123" />);

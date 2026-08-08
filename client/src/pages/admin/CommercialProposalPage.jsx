@@ -177,7 +177,7 @@ export default function CommercialProposalPage() {
   const [correctiveWork, setCorrectiveWork] = useState([]);
   const [responsibilitiesText, setResponsibilitiesText] = useState('');
   const [commercialTerms, setCommercialTerms] = useState({
-    validDays: '', paymentTerms: '', initialTermMonths: '', renewal: '',
+    paymentTerms: '', initialTermMonths: '', renewal: '',
     priceAdjustment: '', cancellation: '', accessRequirements: '',
   });
   const [sendMethod, setSendMethod] = useState('email');
@@ -223,7 +223,6 @@ export default function CommercialProposalPage() {
     })));
     setResponsibilitiesText((p.customerResponsibilities || []).join('\n'));
     setCommercialTerms({
-      validDays: p.commercialTerms?.validDays != null ? String(p.commercialTerms.validDays) : '',
       paymentTerms: p.commercialTerms?.paymentTerms || '',
       initialTermMonths: p.commercialTerms?.initialTermMonths != null ? String(p.commercialTerms.initialTermMonths) : '',
       renewal: p.commercialTerms?.renewal || '',
@@ -310,7 +309,9 @@ export default function CommercialProposalPage() {
       .filter((w) => w.label);
     const responsibilities = responsibilitiesText.split('\n').map((s) => s.trim()).filter(Boolean);
     const ct = {
-      validDays: commercialTerms.validDays.trim() === '' ? null : Number(commercialTerms.validDays),
+      // validDays is reserved for the adjustable-expiry lane: rendering an
+      // authored validity period would contradict the enforced expires_at
+      // the send flow stamps (codex 1A-i r1), so the builder doesn't offer it.
       paymentTerms: commercialTerms.paymentTerms.trim() || null,
       initialTermMonths: commercialTerms.initialTermMonths.trim() === '' ? null : Number(commercialTerms.initialTermMonths),
       renewal: commercialTerms.renewal.trim() || null,
@@ -906,7 +907,6 @@ export default function CommercialProposalPage() {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {[
-                  ['validDays', 'Proposal valid (days)', 'number', 'e.g. 30'],
                   ['paymentTerms', 'Payment terms', 'text', 'e.g. Net-30 to the management company'],
                   ['initialTermMonths', 'Initial term (months, 0 = month-to-month)', 'number', 'e.g. 12'],
                   ['renewal', 'Renewal', 'text', 'e.g. Renews month-to-month after the initial term'],

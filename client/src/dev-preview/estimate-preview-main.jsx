@@ -556,7 +556,6 @@ function proposalStructuredScenario() {
         'Report pest activity through the Waves app or office line',
       ],
       commercialTerms: {
-        validDays: 30,
         paymentTerms: 'Net-30 to the management company',
         initialTermMonths: 0,
         renewal: null,

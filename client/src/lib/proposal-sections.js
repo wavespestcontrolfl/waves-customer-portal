@@ -5,10 +5,15 @@
 // pattern as the commercial inclusions bullets) — change them together.
 
 // commercialTerms → ordered [label, value] rows, omitting absent fields.
+// validDays deliberately does NOT render: the send flow stamps the enforced
+// expiry (estimates.expires_at, printed as "Valid through") from the fixed
+// ESTIMATE_SEND_EXPIRY_DAYS, so an authored validity period would contradict
+// the date acceptance actually enforces (codex 1A-i r1). The field stays in
+// the normalizer, reserved for the adjustable-expiry lane that will wire
+// enforcement and rendering together.
 export function commercialTermRows(commercialTerms) {
   if (!commercialTerms || typeof commercialTerms !== 'object') return [];
   return [
-    ['Proposal valid', commercialTerms.validDays != null ? `${commercialTerms.validDays} days from issue` : null],
     ['Payment', commercialTerms.paymentTerms],
     ['Initial term', commercialTerms.initialTermMonths != null
       ? (commercialTerms.initialTermMonths > 0 ? `${commercialTerms.initialTermMonths} months` : 'None — month-to-month')

@@ -5367,15 +5367,27 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       // Taxable-line identification + one-time total label (codex #3281 r4)
       // — SSR parity with ProposalDetailCard / EstimateProposalDocument.
       const proposalAnyTaxable = (proposalForCard.buildings || [])
-        .some((b) => (b.lineItems || []).some((li) => li.taxable === true));
+        .some((b) => (b.lineItems || []).some((li) => li.taxable === true))
+        // Corrective-work rows carry the same '*' marker, so they must arm
+        // the legend too — parity with the React card and both PDFs.
+        || (proposalForCard.correctiveWork || []).some((work) => work.taxable === true);
       const proposalTaxRatePct = proposalCardTotals.taxRate > 0
         ? (proposalCardTotals.taxRate * 100).toFixed(2)
         : null;
       const proposalGrandTotalLabel = proposalCardTotals.annualRecurring > 0 ? 'First-year total' : 'Total';
-      // Structured agreement sections (slice 1A-i) — SSR keeps the parity
-      // subset: corrective work (its amounts are inside the totals above, so
-      // the rows must be visible here too) and the structured terms block.
-      // Property scope / responsibilities stay React-card-only by design.
+      // Structured agreement sections (slice 1A-i) — FULL parity with the
+      // React card and document: this SSR card introduces itself as
+      // "everything in your formal proposal", so it must not omit material
+      // scope or obligations (codex 1A-i r1).
+      const proposalScopeHtml = (proposalForCard.propertyScope?.items || []).length ? `
+    <div class="proposal-section-title">Property scope</div>
+    ${proposalForCard.propertyScope.items.map((item) => `
+    <div class="proposal-term-row"><span class="proposal-term-label">${escapeHtml(item.label)}</span><span class="proposal-term-value">${escapeHtml(item.value)}</span></div>`).join('')}` : '';
+      const proposalResponsibilitiesHtml = (proposalForCard.customerResponsibilities || []).length ? `
+    <div class="proposal-section-title">Customer responsibilities</div>
+    <ul class="proposal-work-includes">
+      ${proposalForCard.customerResponsibilities.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}
+    </ul>` : '';
       const proposalCorrectiveHtml = (proposalForCard.correctiveWork || []).length ? `
     <div class="proposal-section-title">Corrective work (one-time)</div>
     ${proposalForCard.correctiveWork.map((work) => `
@@ -5386,8 +5398,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       // Same labels/formatting as the React card + document (COMMERCIAL_TERM_ROWS
       // in client/src/lib/proposal-sections.js) — SSR duplicates them verbatim,
       // like the inclusions bullets above.
+      // validDays never renders — the enforced expires_at is the only
+      // validity date any renderer may print (see proposal-sections.js).
       const proposalTermRows = proposalForCard.commercialTerms ? [
-        ['Proposal valid', proposalForCard.commercialTerms.validDays != null ? `${proposalForCard.commercialTerms.validDays} days from issue` : null],
         ['Payment', proposalForCard.commercialTerms.paymentTerms],
         ['Initial term', proposalForCard.commercialTerms.initialTermMonths != null
           ? (proposalForCard.commercialTerms.initialTermMonths > 0 ? `${proposalForCard.commercialTerms.initialTermMonths} months` : 'None — month-to-month')
@@ -5413,7 +5426,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     <p class="card-sub">${proposalPdfEmailed
       ? 'Everything in your formal proposal, itemized &mdash; the emailed PDF carries this same detail.'
       : 'Everything in your formal proposal, itemized.'}</p>
+    ${proposalScopeHtml}
     ${proposalBuildingsHtml}${proposalCorrectiveHtml}
+    ${proposalResponsibilitiesHtml}
     <div class="proposal-totals">
       ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">Recurring service (per year)</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.annualRecurring)}</span></div>` : ''}
       ${proposalCardTotals.oneTime > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">One-time services</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.oneTime)}</span></div>` : ''}

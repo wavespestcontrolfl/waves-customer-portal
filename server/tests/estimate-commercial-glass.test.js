@@ -114,23 +114,30 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
     expect(html).not.toContain('Tenant-reported pests handled between visits');
   });
 
-  test('structured sections render in the SSR parity subset: corrective work + service terms (slice 1A-i)', () => {
+  test('structured sections render with FULL parity: scope, corrective work, responsibilities, service terms (slice 1A-i)', () => {
     const structured = {
       ...AUTHORED_PROPOSAL,
       correctiveWork: [{ label: 'German roach cleanout', amount: 450, taxable: true, includes: ['Both kitchens'] }],
       commercialTerms: { validDays: 30, paymentTerms: 'Net-30', initialTermMonths: 12, cancellation: '30-day written notice' },
-      // React-card-only sections — the SSR subset deliberately omits them.
       propertyScope: { items: [{ label: 'Units', value: '4 residential units' }] },
       customerResponsibilities: ['Provide unit access with 24-hour tenant notice'],
       terms: 'Interior visits billed per visit.',
     };
     const html = renderPage('proposal-structured-token', BASE_ESTIMATE, { proposal: structured });
+    // This card claims "everything in your formal proposal" — scope and
+    // responsibilities must render here too (codex 1A-i r1).
+    expect(html).toContain('Property scope');
+    expect(html).toContain('4 residential units');
+    expect(html).toContain('Customer responsibilities');
+    expect(html).toContain('Provide unit access with 24-hour tenant notice');
     expect(html).toContain('Corrective work (one-time)');
     expect(html).toContain('German roach cleanout');
     expect(html).toContain('Both kitchens');
     expect(html).toContain('450.00');
     expect(html).toContain('Service terms');
-    expect(html).toContain('30 days from issue');
+    // validDays never renders — expires_at is the only validity date any
+    // surface may print (codex 1A-i r1).
+    expect(html).not.toContain('30 days from issue');
     expect(html).toContain('12 months');
     // Free-text terms demote to Additional terms beside structured terms.
     expect(html).toContain('Additional terms');
@@ -140,9 +147,23 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
     expect(html).toContain('One-time services');
     // Structured terms are authored terms — canned inclusions stay out.
     expect(html).not.toContain('What your commercial pest service includes');
-    // SSR keeps the parity subset light.
-    expect(html).not.toContain('4 residential units');
-    expect(html).not.toContain('Provide unit access');
+  });
+
+  test('a taxable corrective-work line arms the * legend even with a zero tax rate (codex 1A-i r1)', () => {
+    const structured = {
+      ...AUTHORED_PROPOSAL,
+      taxRate: 0,
+      buildings: [{
+        name: '600 Sample Plaza Dr',
+        note: null,
+        lineItems: [{ description: 'Quarterly pest control', quantity: 1, unitPrice: 120, frequency: 'quarterly', taxable: false }],
+      }],
+      correctiveWork: [{ label: 'Cleanout', amount: 450, taxable: true, includes: [] }],
+    };
+    const html = renderPage('proposal-corrective-legend-token', BASE_ESTIMATE, { proposal: structured });
+    // hasTax is false (rate 0), but the marker prints on the row — the
+    // legend explaining it must print too.
+    expect(html).toContain('* Taxable line.');
   });
 
   test('a legacy proposal renders no structured section headings (byte-stable subset)', () => {

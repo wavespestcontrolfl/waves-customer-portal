@@ -140,7 +140,9 @@ describe('ProposalDetailCard', () => {
     expect(text).toContain('Follow-up at 2 weeks');
     expect(text).toContain('Customer responsibilities');
     expect(text).toContain('Service terms');
-    expect(text).toContain('30 days from issue');
+    // validDays never renders — the enforced expires_at is the only validity
+    // date any surface may print (codex 1A-i r1).
+    expect(text).not.toContain('30 days from issue');
     expect(text).toContain('None — month-to-month');
     // Structured terms are authored terms — the canned inclusions stack
     // must not sit beside them (same rule as free-text terms).
@@ -152,8 +154,8 @@ describe('ProposalDetailCard', () => {
       ...PROPOSAL,
       terms: 'Interior visits billed per visit.',
       commercialTerms: {
-        validDays: 30, paymentTerms: null, initialTermMonths: null,
-        renewal: null, priceAdjustment: null, cancellation: null, accessRequirements: null,
+        validDays: null, paymentTerms: null, initialTermMonths: null,
+        renewal: null, priceAdjustment: null, cancellation: '30-day written notice', accessRequirements: null,
       },
     }} />);
     expect(structured.container.textContent).toContain('Additional terms');
