@@ -309,9 +309,15 @@ async function buildSummary(service) {
         const rr = await db('review_requests')
           .where({ customer_id: service.customer_id })
           .orderBy('created_at', 'desc')
-          .first('token', 'expires_at');
+          .first('token', 'expires_at', 'rated_at', 'status');
         const expired = rr?.expires_at && new Date(rr.expires_at) < new Date();
-        if (rr?.token && !expired) reviewUrl = `/api/rate/${rr.token}/go`;
+        // A finalized request (feedback submitted — including a detractor's)
+        // must not resurface as a Google ask: the old /rate page showed the
+        // alreadySubmitted state, and the /go CTA must not bypass that
+        // finality (pre-push audit P1; same set review-gate.js enforces).
+        const finalized = Boolean(rr?.rated_at)
+          || ['submitted', 'reviewed', 'rated'].includes(rr?.status);
+        if (rr?.token && !expired && !finalized) reviewUrl = `/api/rate/${rr.token}/go`;
       }
     }
   } catch (err) {

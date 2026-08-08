@@ -218,6 +218,25 @@ describe('public track token expiry', () => {
     expect(mockDb.mock.calls.map(([table]) => table)).not.toContain('review_requests');
   });
 
+  test('suppresses the review CTA for a finalized review request (audit P1)', async () => {
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      reviewRequest: { token: 'review-token', status: 'submitted' },
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.reviewUrl).toBeNull();
+  });
+
   test('suppresses the review CTA for an expired review request', async () => {
     installSummaryDb({
       record: {

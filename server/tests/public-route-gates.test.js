@@ -196,6 +196,51 @@ describe('review-gate /go expired-link handling (review audit 2026-08-07)', () =
     // cadence stop, no owner bell.
     expect(updateSpy).not.toHaveBeenCalled();
   });
+
+  const installGoDb = ({ request, customer = null }) => {
+    const updateSpy = jest.fn();
+    db.mockImplementation((table) => {
+      const q = {};
+      for (const m of ['where', 'whereNull', 'orderBy', 'limit', 'select']) q[m] = jest.fn(() => q);
+      q.update = updateSpy;
+      q.first = jest.fn(async () => (table === 'review_requests' ? request : customer));
+      return q;
+    });
+    return updateSpy;
+  };
+
+  test('finalized requests never redirect to Google — expired or live (audit P1)', async () => {
+    isEnabled.mockImplementation((key) => key === 'reviewDirectLink');
+    const token = 'ab'.repeat(32);
+    // Expired AND already rated → rate-page fallback, not a revived ask.
+    let updateSpy = installGoDb({
+      request: { id: 'rr-1', customer_id: 'c1', rated_at: '2026-05-01T00:00:00Z', expires_at: '2020-01-01T00:00:00.000Z' },
+    });
+    let res = await get(`/api/rate/${token}/go`);
+    expect(res.headers.get('location')).toBe(`/rate/${token}`);
+    expect(updateSpy).not.toHaveBeenCalled();
+    // Live but submitted (a detractor's feedback) → rate page's
+    // alreadySubmitted state, never Google.
+    updateSpy = installGoDb({
+      request: { id: 'rr-2', customer_id: 'c1', status: 'submitted' },
+    });
+    res = await get(`/api/rate/${token}/go`);
+    expect(res.headers.get('location')).toBe(`/rate/${token}`);
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  test('customers marked has_left_google_review are not re-solicited via /go', async () => {
+    isEnabled.mockImplementation((key) => key === 'reviewDirectLink');
+    const token = 'ab'.repeat(32);
+    const { WAVES_LOCATIONS: locs } = require('../config/locations');
+    const updateSpy = installGoDb({
+      request: { id: 'rr-3', customer_id: 'c1', location_id: locs[0].id },
+      customer: { id: 'c1', has_left_google_review: true },
+    });
+    const res = await get(`/api/rate/${token}/go`);
+    expect(res.headers.get('location')).toBe(`/rate/${token}`);
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe('/l shortlink limiter + code entropy', () => {
