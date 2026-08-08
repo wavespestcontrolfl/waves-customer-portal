@@ -4956,10 +4956,20 @@ function EstimateViewPageInner() {
   // glass release, commercial estimates read the commercial pack instead of
   // inheriting residential guarantee claims; gate off → exactly today's
   // category resolution.
+  // Authored proposal present in the payload — /data ships `proposal` only
+  // for authored (enabled) proposals under the commercial glass gate. Part
+  // of the commercial identity below because a HIGHER-priority quote reason
+  // (manager approval, quote-required line) outranks commercial_proposal in
+  // resolveEstimateQuoteRequirement, zeroing all three cta predicates while
+  // the authored proposal still renders — the surrounding hero/Ask copy
+  // must not fall back to residential guarantee claims beside it (codex
+  // #3281 r5; same payload-flag rule as the ProposalDetailCard render).
+  const authoredProposalOnPage = data?.proposal?.enabled === true;
   const copyCommercial = commercialGlassActive()
     && (cta?.commercialProposal === true
       || cta?.commercialAutoPriced === true
-      || cta?.quoteRequiredReason === 'commercial_proposal');
+      || cta?.quoteRequiredReason === 'commercial_proposal'
+      || authoredProposalOnPage);
   // Truth scope WITHIN the commercial identity (codex #3281 r3): the
   // commercial pack's hero/chips promise interior treatment, tenant
   // re-service, and no-contract terms — claims that only hold for a
@@ -4971,7 +4981,6 @@ function EstimateViewPageInner() {
   // already established, so plain pest rows qualify; any lawn/tree/
   // mosquito/termite/rodent row demotes). Everything else reads the
   // terms-neutral commercial pack, which makes no claims at all.
-  const authoredProposalOnPage = data?.proposal?.enabled === true;
   const commercialRowSlugs = services.map((s) => glassServiceSlug(s?.key || s?.name));
   const copyCommercialPest = copyCommercial && (
     authoredProposalOnPage
