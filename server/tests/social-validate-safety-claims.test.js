@@ -41,6 +41,9 @@ const FLAGGED_PRODUCT_SAFETY = [
   // confirmation — it must not exempt the dry idiom.
   'Our treatment is safe once dry. Your technician confirms arrival timing.',
   'Treatments are safe once dry — your tech will confirm the appointment time',
+  // #3278 r9: nor is a confirmation about anything else — the exemption
+  // requires the confirmation's OBJECT to be drying/re-entry timing.
+  'Treatment is safe once dry. Your technician confirms the gate code.',
   // r6: "safe UNTIL dry" claims wet-safety — the opposite of the idiom.
   'Our treatments are safe until dry; your technician confirms timing',
   'safe pesticide treatments',

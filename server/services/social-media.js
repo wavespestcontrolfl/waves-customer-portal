@@ -485,7 +485,12 @@ const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|when)\s+(?:completely\
 // and a mere technician MENTION ("our technician applied…") doesn't count:
 // the sentence needs an actual confirmation ("technician confirms/will let
 // you know", "confirms timing").
-const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
+// The exemption needs a confirmation ABOUT drying/re-entry timing — a
+// POSITIVE object (dry/drying/re-entry/timing/time/when/ready) after the
+// confirmation verb, not an enumeration of unrelated subjects ("confirms
+// the gate code" must not exempt; codex #3278 r9). "will let you know"
+// carries the when by itself.
+const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know\b|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)[^.!?\n]{0,30}\b(?:dr(?:y|ies|ying)|re-?ent\w*|tim(?:e|es|ing)|when|ready)\b)|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
 // A confirmation ABOUT something other than drying/re-entry ("technician
 // confirms ARRIVAL timing", "confirms the appointment") defers appointment
 // logistics, not the drying claim — it must not exempt "safe once dry"

@@ -1487,6 +1487,9 @@ describe('rain-out service', () => {
       // A confirmation about APPOINTMENT logistics is not a drying
       // confirmation and must not exempt the idiom (codex r7).
       blocked('Treatment is safe once dry. Your technician confirms arrival timing.');
+      // A confirmation about any NON-drying subject doesn't exempt either —
+      // the exemption requires a drying/timing object (r9).
+      blocked('Treatment is safe once dry. Your technician confirms the gate code.');
       // ...but a DRYING confirmation located at the appointment IS one (r8).
       expect(sanitize()('Treatment is safe once dry. Your technician confirms drying time at the appointment.'))
         .toEqual({ note: 'Treatment is safe once dry. Your technician confirms drying time at the appointment.' });

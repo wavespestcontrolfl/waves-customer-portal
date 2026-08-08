@@ -14,6 +14,7 @@
 
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import psl from 'psl';
 import { TIMEZONE } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -57,15 +58,32 @@ const NOTE_MAX_CHARS = 200;
 const NOTE_SHORTENER_RE = /(?:^|[^a-z0-9-])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[^a-z0-9-])/i;
 // No URL of ANY kind in a note (shortener blocklists can't be complete) —
 // the moved SMS already carries the tokenized reschedule link. Mirrors the
-// server: scheme://, www., host.tld+path, bare host on a common/link TLD,
-// IPv4.
+// server: scheme://, www., host.tld+path, IPv4; bare hosts are validated
+// against the SAME public-suffix list the server uses (psl) below.
 const NOTE_URL_RE = new RegExp([
   '\\b[a-z][a-z0-9+.-]*://\\S+',
   '(?:^|[^a-z0-9.-])www\\.\\S+',
   '(?:^|[^a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\\.[a-z0-9-]+)*\\.[a-z]{2,}[/?#]\\S',
-  '(?:^|[^a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\\.[a-z0-9-]+)*\\.(?:com|net|org|io|co|ly|gl|gd|cc|one|info|biz|app|dev|link)(?=$|[^a-z0-9-])',
   '(?:^|[^0-9.])(?:\\d{1,3}\\.){3}\\d{1,3}(?:[:/?#]\\S*)?(?=$|[^0-9])',
 ].join('|'), 'i');
+// Same bare-host detection as the server's containsBareHost (rain-out.js):
+// dot-joined candidates confirmed against the public-suffix list; unicode
+// hosts punycoded via the browser's URL parser first.
+const NOTE_HOST_TOKEN_RE = /(?:^|[^a-z0-9.-])([a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+)(?=$|[^a-z0-9-])/gi;
+const NOTE_UNICODE_HOST_TOKEN_RE = /([\p{L}\p{N}][\p{L}\p{N}-]*(?:\.[\p{L}\p{N}-]+)+)/gu;
+function noteContainsBareHost(text) {
+  for (const m of String(text).matchAll(NOTE_HOST_TOKEN_RE)) {
+    if (psl.isValid(m[1].toLowerCase())) return true;
+  }
+  for (const m of String(text).matchAll(NOTE_UNICODE_HOST_TOKEN_RE)) {
+    if (/^[\x20-\x7F]+$/.test(m[1])) continue;
+    try {
+      const ascii = new URL(`http://${m[1]}`).hostname;
+      if (ascii && psl.isValid(ascii)) return true;
+    } catch { /* not a parseable host — prose */ }
+  }
+  return false;
+}
 // Customer-facing SMS are emoji-free (messaging validator EMOJI_FOR_CUSTOMER)
 // — catching it here keeps the move from committing with a text that the
 // send layer would then block. Same three families the server detects:
@@ -89,7 +107,9 @@ function noteGuardTrips(note) {
 // the technician confirms timing — same rule the canonical server checker
 // (social-media.js complianceLanguageIssues) enforces, so the mirror never
 // green-lights wording the server then rejects.
-const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
+// Mirror of the canonical exemption: the confirmation's OBJECT must be
+// drying/re-entry timing ("confirms the gate code" does not exempt).
+const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know\b|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)[^.!?\n]{0,30}\b(?:dr(?:y|ies|ying)|re-?ent\w*|tim(?:e|es|ing)|when|ready)\b)|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
 // A confirmation about appointment logistics ("confirms arrival timing")
 // is not a drying confirmation — stripped before the confirm test. Gap is
 // tempered so "confirms DRYING time at the appointment" survives.
@@ -300,7 +320,8 @@ export default function RainOutSheet({ service, onClose, onDone }) {
 
   const noteCanonical = normalizeForLinkCheck(note);
   const noteLink = NOTE_SHORTENER_RE.test(note) || NOTE_SHORTENER_RE.test(noteCanonical)
-    || NOTE_URL_RE.test(note) || NOTE_URL_RE.test(noteCanonical);
+    || NOTE_URL_RE.test(note) || NOTE_URL_RE.test(noteCanonical)
+    || noteContainsBareHost(note) || noteContainsBareHost(noteCanonical);
   const noteEmoji = NOTE_EMOJI_RE.test(note);
   const noteGuard = noteGuardTrips(note);
   const noteCompliance = noteComplianceTrips(note);
