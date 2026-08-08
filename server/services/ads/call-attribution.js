@@ -410,11 +410,50 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
     .del();
 }
 
+// Move the funnel row a specific call created when its linkage moves to a
+// different lead — the ONE transfer/retire primitive shared by the google
+// bridge's repoint reconciliation and the call processor's stamp settles
+// (codex P0, PR #3303: rows accumulate booked/completed stages and revenue
+// via lead-funnel-bridge, so delete-and-recreate loses history — a moved
+// linkage TRANSFERS the row, stages and metrics intact). Exact provenance
+// only. Outcomes: 'transferred' (row now on toLeadId, owner set to the
+// target lead's CURRENT customer — read here on the same connection unless
+// the caller already holds it), 'retired_conflict' (the target already
+// owns a DIFFERENT row — this call's row retires; callers must NOT then
+// backfill the target's row), 'retired_cleared' (no target — definitive
+// unlink), 'none' (no provenanced row).
+async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLeadId, now, { toCustomerId } = {}) {
+  if (!callLogId || !fromLeadId) return 'none';
+  const oldRow = await dbc('ad_service_attribution')
+    .where({ lead_id: fromLeadId, source_call_id: callLogId })
+    .first('id');
+  if (!oldRow) return 'none';
+  if (toLeadId) {
+    const conflict = await dbc('ad_service_attribution').where({ lead_id: toLeadId }).first('id');
+    if (!conflict) {
+      let owner = toCustomerId;
+      if (owner === undefined) {
+        const lead = await dbc('leads').where({ id: toLeadId }).first('customer_id');
+        owner = lead?.customer_id || null;
+      }
+      await dbc('ad_service_attribution')
+        .where({ id: oldRow.id })
+        .update({ lead_id: toLeadId, customer_id: owner || null, updated_at: now });
+      return 'transferred';
+    }
+    await retireCallAttributionRow(dbc, callLogId, fromLeadId);
+    return 'retired_conflict';
+  }
+  await retireCallAttributionRow(dbc, callLogId, fromLeadId);
+  return 'retired_cleared';
+}
+
 module.exports = {
   recordCallPpcAttribution,
   attributionForSourceType,
   backfillCallLeadAttribution,
   attributeUnclaimedBridgeLeads,
   retireCallAttributionRow,
+  reconcileMovedCallAttributionRow,
   _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION },
 };

@@ -2541,7 +2541,7 @@ const STAMPED_LEAD_FIELD_CASTS = {
 // restamp's old epoch inside ITSELF (it already holds the lead lock this
 // body takes — same-transaction re-locks are no-ops); every other caller
 // omits it and gets the standalone transaction.
-async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = null) {
+async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = null, attribution = { mode: 'keep' }) {
   const run = async (trx) => {
     const readOwnMd = async () => {
       const fresh = await trx('call_log').where({ id: call.id }).first('metadata');
@@ -2589,16 +2589,30 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
         updated_at: new Date(),
       });
     if (!cleared) return false;
-    // The funnel row THIS call created for the stamped lead is retired with
-    // the stamp (codex P1, PR #3303): the processor path writes provenanced
-    // ad_service_attribution rows for organic/dedicated-number calls the
-    // google bridge never scans, and without this a cleared stamp left the
-    // old lead's row while a retry could insert another for the new lead —
-    // one call counted twice. Exact provenance (lead_id + source_call_id):
-    // NULL-provenance and other calls' rows never match. A retry that
-    // re-attributes (same or different lead) re-creates the row via
-    // runCallPpcAttribution; rides this transaction under the lead lock.
-    await require('./ads/call-attribution').retireCallAttributionRow(trx, call.id, stampedLeadId);
+    // Attribution disposition rides the clear (codex P0/P1, PR #3303): the
+    // funnel row THIS call created (exact provenance — lead_id +
+    // source_call_id; NULL-provenance and other calls' rows never match)
+    // accumulates booked/completed stages and revenue via
+    // lead-funnel-bridge, so a blanket delete-and-recreate LOSES history.
+    // The CALL SITE states intent:
+    //   'retire'   — definitive unlink (rejection terminals, the non-lead
+    //                verdict, a mint failure): the call supports no lead.
+    //   'transfer' — the call's linkage MOVED to a known lead (pre-stamp
+    //                settle, stale-stamp maintenance): the row follows via
+    //                the shared primitive, stages intact; a target-slot
+    //                conflict retires (the target's row is another call's
+    //                evidence).
+    //   'keep'     — the row already sits on the right lead (same-lead
+    //                chronological restamp) or the caller cannot rule a
+    //                surviving linkage out: never destroy history.
+    if (attribution.mode === 'retire') {
+      await require('./ads/call-attribution').retireCallAttributionRow(trx, call.id, stampedLeadId);
+    } else if (attribution.mode === 'transfer' && attribution.transferToLeadId
+      && String(attribution.transferToLeadId) !== String(stampedLeadId)) {
+      await require('./ads/call-attribution').reconcileMovedCallAttributionRow(
+        trx, call.id, stampedLeadId, attribution.transferToLeadId, new Date(),
+      );
+    }
     if (priorState && writtenState) {
       // Successors are read BEFORE the restore because they gate it (codex
       // P2 r19). Two calls can write the SAME value to a field — both
@@ -5765,7 +5779,7 @@ const CallRecordingProcessor = {
       // presenting the rejected call — and its hallucinated summary — as
       // lead evidence). Fence-lost bails exactly like the rejection write's
       // own 0-row path below.
-      const rejectionStampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
+      const rejectionStampSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'retire' });
       if (!rejectionStampSettled) {
         logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
         return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
@@ -6108,7 +6122,7 @@ const CallRecordingProcessor = {
       // — atomically, fenced (codex P1 r15 / audit P1 r17/r19). A transient
       // failure here throws to the outer extraction_failed guard rather
       // than finalizing with the rejected linkage in place.
-      const stampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
+      const stampSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'retire' });
       if (!stampSettled) {
         logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
@@ -7006,7 +7020,7 @@ const CallRecordingProcessor = {
       // earlier attempt's lead stamp and restore that lead's prior summary,
       // atomically and fenced (codex P1 r15 / audit P1 r17/r19); a
       // transient failure throws to the outer extraction_failed guard.
-      const vetoStampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
+      const vetoStampSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'retire' });
       if (!vetoStampSettled) {
         logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
@@ -8437,7 +8451,7 @@ const CallRecordingProcessor = {
               if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
                 let priorSettled;
                 try {
-                  priorSettled = await clearStampAndRestoreLead(call, procToken, callSid);
+                  priorSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'transfer', transferToLeadId: leadId });
                 } catch (settleErr) {
                   if (settleErr.abortProcessing) throw settleErr;
                   const wrapped = new Error(`call→lead link pre-stamp settle failed: ${settleErr.code || settleErr.name || 'db_error'}`);
@@ -8495,7 +8509,7 @@ const CallRecordingProcessor = {
                     .whereRaw("COALESCE((metadata->>'lead_stamp_seq')::bigint, 0) > ?", [ownSeq])
                     .first('id');
                   if (interveningStamp) {
-                    const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx);
+                    const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'keep' });
                     if (!settled) {
                       const lost = new Error('processing claim lost during call→lead restamp settle');
                       lost.abortProcessing = true;
@@ -8819,10 +8833,10 @@ const CallRecordingProcessor = {
             // direct writes use. The STAMP itself is written in-loop,
             // atomically with the enrichment write — maintenance only ever
             // clears.
-            const settleClear = async () => {
+            const settleClear = async (attribution) => {
               let ok;
               try {
-                ok = await clearStampAndRestoreLead(call, procToken, callSid);
+                ok = await clearStampAndRestoreLead(call, procToken, callSid, null, attribution);
               } catch (clearErr) {
                 if (clearErr.abortProcessing) throw clearErr;
                 const wrapped = new Error(`call→lead link clear failed: ${clearErr.code || clearErr.name || 'db_error'}`);
@@ -8838,18 +8852,22 @@ const CallRecordingProcessor = {
             if (!leadId) {
               // Mint failure dropped the lead — a leftover stamp would leave
               // the OR-join consumers associating this call with a lead that
-              // is now foreign (it lost the claim race). Unlink.
-              if (currentStampedLeadId) await settleClear();
+              // is now foreign (it lost the claim race). Unlink; the call
+              // supports no lead, so its funnel row retires with the stamp.
+              if (currentStampedLeadId) await settleClear({ mode: 'retire' });
             } else if (finalLeadCarriesSid) {
               // The final lead is linked by its own sid — a leftover stamp
-              // pointing at a different lead must not survive.
-              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear();
+              // pointing at a different lead must not survive. The call's
+              // linkage MOVED: its funnel row transfers to the final lead,
+              // stages intact (codex P0, PR #3303).
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear({ mode: 'transfer', transferToLeadId: leadId });
             } else if (phone) {
               // Retry GAINED a phone and selected a phone-linked lead: its
               // linkage is the phone, not the stamp — a stale stamp pointing
               // at a different lead must not survive (audit P1 r22); a stamp
-              // already pointing at this lead stays accurate.
-              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear();
+              // already pointing at this lead stays accurate. The funnel row
+              // follows the moved linkage.
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear({ mode: 'transfer', transferToLeadId: leadId });
             }
             phoneLessLinkagePending = false;
           }
@@ -9135,7 +9153,7 @@ const CallRecordingProcessor = {
       // P1 r22/r18/r19). abortProcessing reaches the outer
       // extraction_failed guard directly.
       try {
-        const settled = await clearStampAndRestoreLead(call, procToken, callSid);
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'retire' });
         if (!settled) {
           const lost = new Error('processing claim lost during call→lead link clear (non-lead path)');
           lost.abortProcessing = true;

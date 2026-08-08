@@ -679,30 +679,14 @@ async function findLeadForCall(callLog, { dbc = db } = {}) {
 // transfer carries the new lead's CURRENT customer (read under the lead
 // lock by the caller) so the row never pairs the new lead with the former
 // lead's customer.
-// Returns the outcome so the caller can gate the funnel write:
-// 'transferred' (this call's row now sits on the new lead — safe to
-// backfill), 'retired_conflict' (the new lead already owns a DIFFERENT
-// row — this call must NOT write, or it would backfill campaign/detail
-// onto another call's attribution), 'retired_cleared' (link cleared),
-// 'none' (no provenanced row — nothing owned by this call).
+// The shared transfer/retire primitive lives in call-attribution
+// (reconcileMovedCallAttributionRow) — the processor's stamp settles use
+// the SAME definition. This wrapper only fixes the argument shape the
+// bridge call sites use.
 async function reconcileMovedCallAttribution(trx, callLogId, recordedLeadId, newLeadId, newCustomerId, now) {
-  const oldRow = await trx('ad_service_attribution')
-    .where({ lead_id: recordedLeadId, source_call_id: callLogId })
-    .first('id');
-  if (!oldRow) return 'none';
-  if (newLeadId) {
-    const conflict = await trx('ad_service_attribution').where({ lead_id: newLeadId }).first('id');
-    if (!conflict) {
-      await trx('ad_service_attribution')
-        .where({ id: oldRow.id })
-        .update({ lead_id: newLeadId, customer_id: newCustomerId || null, updated_at: now });
-      return 'transferred';
-    }
-    await require('./call-attribution').retireCallAttributionRow(trx, callLogId, recordedLeadId);
-    return 'retired_conflict';
-  }
-  await require('./call-attribution').retireCallAttributionRow(trx, callLogId, recordedLeadId);
-  return 'retired_cleared';
+  return require('./call-attribution').reconcileMovedCallAttributionRow(
+    trx, callLogId, recordedLeadId, newLeadId, now, { toCustomerId: newCustomerId },
+  );
 }
 
 async function updateLeadAttribution(leadMatch, bridgeSource, now, { linkageCallId = null, dbc = db } = {}) {
