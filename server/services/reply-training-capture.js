@@ -58,7 +58,14 @@ function shouldCaptureReply({ channel, direction, authorType, adminUserId, messa
   if (direction !== 'outbound') return false;
   if (!normalizeText(body)) return false;
   if (authorType !== 'admin' && !adminUserId) return false;
-  if (['internal_alert', 'system_note'].includes(String(messageType || '').toLowerCase())) return false;
+  // Attribution ≠ authorship: rain-out Quick Moves stamp adminUserId for
+  // the sms_log audit trail, but the body is a rendered TEMPLATE — a
+  // proactive notice, not a human reply to the customer's last inbound.
+  // Capturing it would pair templated copy with whatever the customer
+  // texted in the past 21 days and pollute the training corpus (route
+  // siblings included). Same exclusion mechanism as internal_alert.
+  if (['internal_alert', 'system_note',
+    'rain_out_moved', 'rain_out_moved_v2', 'rain_out_moved_v3'].includes(String(messageType || '').toLowerCase())) return false;
   return true;
 }
 

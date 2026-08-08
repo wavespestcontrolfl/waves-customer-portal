@@ -1438,10 +1438,16 @@ describe('rain-out service', () => {
       expect(sanitize()('example.com?x=1 has it')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()('grab ftp://files.example.io/x')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()('open 192.168.4.20/pay')).toEqual({ error: 'note_link_blocked' });
+      // Bare hosts are validated against the REAL public-suffix list (psl),
+      // not a hand-kept TLD subset (codex r3 P1) — new gTLDs included, and
+      // real ccTLD prose-typos ("late.Be" = late.be, Belgium) block too.
+      expect(sanitize()('try example.xyz today')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('ask example.ai about it')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('Running late.Be there at 3')).toEqual({ error: 'note_link_blocked' });
       // Plain prose with dots/times must NOT false-positive.
       expect(sanitize()('Arriving 12:30. See you at 2 p.m. sharp')).toEqual({ note: 'Arriving 12:30. See you at 2 p.m. sharp' });
       expect(sanitize()('Back gate. Code 4482 works. Thanks')).toEqual({ note: 'Back gate. Code 4482 works. Thanks' });
-      expect(sanitize()('Running late.Be there at 3')).toEqual({ note: 'Running late.Be there at 3' });
+      expect(sanitize()('Ask for Mr.Smith at the door')).toEqual({ note: 'Ask for Mr.Smith at the door' });
     });
 
     test('sanitizer: mirrors the outbound sms-guard so the note fails BEFORE the move, not the send after', () => {
