@@ -81,6 +81,15 @@ A safety statement is acceptable ONLY when BOTH hold:
 Judge (a) by what the clause modifies, not by whether the words co-occur:
   ACCEPTABLE  "The treatment is safe once dry. Your technician confirms the timing."
               -> "once dry" governs "is safe".
+  ACCEPTABLE  "The treatment is safe after it dries. Your technician confirms the timing."
+              -> "after it dries" governs "is safe" — the same structure as
+                 "safe once dry". The WORDING of the dry clause is irrelevant;
+                 only its attachment is. Do not treat "after it dries" as a
+                 violation marker: the next example violates because of what
+                 the clause ATTACHES to, not because of these words.
+  ACCEPTABLE  "The area is safe after it dries. Your technician confirms re-entry timing."
+              -> the SUBJECT may be the treatment, the treated area/surface,
+                 or the lawn; the idiom's two conditions are what matter.
   VIOLATION   "The treatment is safe for pets and works after it dries. Your technician confirms the timing."
               -> "after it dries" governs "works". "safe for pets" is left
                  UNCONDITIONAL, so this is a bare safety claim.
@@ -107,6 +116,59 @@ than a claim about it:
 Flag these even though they are phrased as prohibitions. The negation
 exemption above covers only safety/service CLAIMS that contain no fixed
 duration.
+
+SCOPE — what the two rules reach, and what they do not:
+- Judge only text a customer will see rendered. Text inside HTML comments
+  (<!-- ... -->) or JSX/MDX comments ({/* ... */}) never renders — do not
+  flag it no matter what it says.
+- A re-entry, drying, or keep-off FIGURE is a violation ONLY when the copy
+  ties it to a pesticide, treatment, application, or treated surface/area.
+  Figures about anything else are compliant, even inside a pest-control
+  article:
+    COMPLIANT  "Allow the caulk to dry for 30 minutes before inspecting the gap."
+    COMPLIANT  "The paint will finish drying in 30 minutes."
+    COMPLIANT  "Keep pets off the couch for 30 minutes."  (no treatment named)
+    COMPLIANT  "You may enter the room after 30 minutes."  (nothing links the
+               figure to a treatment)
+    COMPLIANT  "Wait 30 minutes before returning to check whether ants took
+               the bait."  (bait-activity check, not a re-entry instruction)
+    VIOLATION  "You may re-enter the treated room after 30 minutes."
+  The linkage may come from surrounding sentences — "We sprayed the lanai.
+  You can go back out in 20 minutes." still violates.
+- A safety claim about something that is not the treatment, compound, or
+  treated area is compliant: "The repaired screen is safe for pets" claims
+  nothing about a pesticide.
+- BANNED_TOPIC bans door-to-door SALES/solicitation as our practice.
+  Describing door-to-door service DELIVERY for a commercial or multi-unit
+  client is compliant operations copy: "We provide door-to-door inspections
+  for condo associations" is fine; "We sell pest control door to door"
+  violates.
+- REFERRAL AND THIRD-PARTY copy is compliant, including imperative CTAs —
+  the rule bans presenting a banned topic as OUR OWN service, not pointing
+  the reader to someone licensed for it:
+    COMPLIANT  "Schedule a wildlife removal consultation with a licensed
+               specialist."
+    COMPLIANT  "For severe drywood cases, schedule tenting with a licensed
+               structural fumigator."
+    COMPLIANT  "Call Waves for a wildlife removal referral."
+    COMPLIANT  "We help specialists remove wildlife." / "We have partners
+               trap wildlife."  (the specialist/partner performs it, not us)
+    VIOLATION  "Schedule a wildlife removal consultation with our team."
+  Informational artifacts about a banned topic are compliant for the same
+  reason: "Our handbook on structural fumigation covers when tenting is
+  needed", "Get tips on wildlife removal from Waves Pest Control".
+- INSULATION AS A LOCATION is compliant: naming insulation as material or a
+  place encountered during pest work ("install traps above attic
+  insulation", "we handle homes with attic insulation without disturbing
+  the material") does not offer insulation work. OFFERING insulation
+  installation, replacement, removal, or repair as a service violates.
+- A negated or informational statement ABOUT EPA approval is a claim about
+  regulation, not a safety endorsement: "EPA approval is not required for
+  minimum-risk products" is compliant. "The pesticide is EPA-approved"
+  violates.
+- These scope limits never rescue copy that itself names the treatment,
+  pesticide, application, or treated area. When you are unsure whether the
+  linkage exists, use P1, not P0.
 
 Flag ONLY actual violations of the two rules above. Do NOT flag writing style,
 tone, marketing phrasing, calls to action, or copy that is merely incomplete or
