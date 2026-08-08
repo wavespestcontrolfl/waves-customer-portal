@@ -2403,6 +2403,42 @@ async function clearStampAndRestoreLead(call, procToken, callSid) {
         );
         logger.info(`[call-proc] Reconciled the stamped lead's state after rejection for ${maskSid(callSid)}`);
       }
+      // Re-parent SUCCESSOR snapshots (audit P1 r21): a call that reused
+      // this lead AFTER this one snapshotted THIS call's written values as
+      // its rollback baseline — if this call rejects first and the
+      // successor rejects later, the successor's restore would resurrect
+      // data belonging to an already-rejected call. Point those baseline
+      // entries at this call's own prior values instead. (The reverse order
+      // needs nothing: the successor's restore re-materializes this call's
+      // written values first, and this call's CAS then matches and restores
+      // its own prior.) Successor lookup rides the metadata lead_id index.
+      const eq = (a, b) => (a ?? null) === (b ?? null);
+      const successors = await trx('call_log')
+        .whereRaw("metadata->>'lead_id' = ?", [stampedLeadId])
+        .whereNot('id', call.id)
+        .select('id', 'metadata');
+      for (const s of successors) {
+        let sm = null;
+        try { sm = typeof s.metadata === 'string' ? JSON.parse(s.metadata) : (s.metadata || {}); } catch { sm = null; }
+        const sPrior = sm?.lead_prior_state;
+        if (!sPrior || typeof sPrior !== 'object') continue;
+        let changed = false;
+        for (const f of Object.keys(writtenState)) {
+          if (Object.prototype.hasOwnProperty.call(sPrior, f) && eq(sPrior[f], writtenState[f])) {
+            sPrior[f] = Object.prototype.hasOwnProperty.call(priorState, f) ? (priorState[f] ?? null) : null;
+            changed = true;
+          }
+        }
+        if (changed) {
+          await trx('call_log').where({ id: s.id }).update({
+            metadata: db.raw(
+              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_prior_state}', ?::jsonb, true)",
+              [JSON.stringify(sPrior)],
+            ),
+            updated_at: new Date(),
+          });
+        }
+      }
     }
     return true;
   });
@@ -8069,9 +8105,16 @@ const CallRecordingProcessor = {
                   .where({ id: call.id })
                   .where('processing_token', procToken)
                   .update({
+                    // Same-lead re-stamp MERGES both ledgers (audit P1 r21):
+                    // prior keeps the ORIGINAL baseline for shared keys and
+                    // only ADDS keys first written this pass; written keeps
+                    // fill-once fields from earlier passes (absent from later
+                    // payloads — replacing wholesale made rejection unable to
+                    // restore them) with this pass's values winning shared
+                    // keys. A different-lead stamp starts both fresh.
                     metadata: db.raw(
-                      "jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true), '{lead_prior_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN COALESCE(metadata->'lead_prior_state', ?::jsonb) ELSE ?::jsonb END, true), '{lead_written_state}', ?::jsonb, true)",
-                      [JSON.stringify(String(leadId)), String(leadId), JSON.stringify(prior), JSON.stringify(prior), JSON.stringify(written)],
+                      "jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true), '{lead_prior_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN ?::jsonb || COALESCE(metadata->'lead_prior_state', '{}'::jsonb) ELSE ?::jsonb END, true), '{lead_written_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN COALESCE(metadata->'lead_written_state', '{}'::jsonb) || ?::jsonb ELSE ?::jsonb END, true)",
+                      [JSON.stringify(String(leadId)), String(leadId), JSON.stringify(prior), JSON.stringify(prior), String(leadId), JSON.stringify(written), JSON.stringify(written)],
                     ),
                     updated_at: new Date(),
                   });
