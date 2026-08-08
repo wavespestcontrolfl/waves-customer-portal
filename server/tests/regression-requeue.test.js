@@ -168,6 +168,31 @@ describe('requeueRegressedPages', () => {
     expect(out.unsupported).toBe(1);
   });
 
+  test('after a failed stamp, the retry RECOVERS its own queue row as success', async () => {
+    // The retry re-enqueues under the same cycleKey and gets queued=false back
+    // (the row it created is now pending/claimed/done). `own` marks it as this
+    // cycle's row, so it must read as 'queued' — not as a foreign in-flight
+    // edit that eventually retires the regression with the fix still queued.
+    const db = makeDb({ pending: [row({ requeue_attempts: 1 })] });
+    const refreshAudit = audit({
+      enqueueRefresh: jest.fn(async () => ({ queued: false, own: true, status: 'claimed' })),
+    });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
+
+    expect(out.queued).toBe(1);
+    expect(db.state.updates[0]).toMatchObject({ requeue_status: 'queued' });
+  });
+
+  test('a foreign in-flight edit is still NOT treated as our corrective work', async () => {
+    const db = makeDb({ pending: [row()] });
+    const refreshAudit = audit({
+      enqueueRefresh: jest.fn(async () => ({ queued: false, own: false, status: 'claimed' })),
+    });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
+    expect(out.results[0].status).toBe('inflight:claimed');
+    expect(out.queued).toBe(0);
+  });
+
   test('a failed marker write is NOT reported as success', async () => {
     // The marker is the exactly-once contract; swallowing its failure would
     // have the next sweep reprocess and eventually retire the regression as an
@@ -185,7 +210,7 @@ describe('requeueRegressedPages', () => {
     // that edit is not a fix for this regression.
     for (const status of ['claimed', 'pending_review']) {
       const db = makeDb({ pending: [row({ requeue_attempts: 0 })] });
-      const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => ({ queued: false, status })) });
+      const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => ({ queued: false, own: false, status })) });
       const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
       expect(out.results[0].status).toBe(`inflight:${status}`);
@@ -197,7 +222,7 @@ describe('requeueRegressedPages', () => {
 
   test('a page stuck behind other edits is retired at the cap, not retried forever', async () => {
     const db = makeDb({ pending: [row({ requeue_attempts: requeue.THRESHOLDS.MAX_TRANSIENT_ATTEMPTS - 1 })] });
-    const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => ({ queued: false, status: 'claimed' })) });
+    const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => ({ queued: false, own: false, status: 'claimed' })) });
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(out.results[0].status).toBe('inflight:claimed_exhausted');

@@ -88,6 +88,13 @@ function requeueStatusFor({ resolved, enqueue, errorCode }) {
   if (!resolved) return 'unsupported_target';
   if (!enqueue) return 'unknown';
   if (enqueue.queued) return 'queued';
+  // `own` means the row enqueueRefresh found carries OUR cycle's dedupe key —
+  // i.e. an earlier attempt for THIS regression already created it and only
+  // the marker write failed. Recovering that as success is what makes the
+  // enqueue/stamp pair safe to retry: without it the retry would read its own
+  // work as a foreign in-flight edit and eventually retire the regression as
+  // an exhausted no-op while the corrective refresh sat in the queue.
+  if (enqueue.own) return 'queued';
   return `inflight:${enqueue.status || 'unknown'}`.slice(0, 40);
 }
 

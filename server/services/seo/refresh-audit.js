@@ -436,7 +436,7 @@ class RefreshAudit {
       .first();
     const inflight = await inflightRefreshFor(db);
     if (inflight) {
-      return { queued: false, status: inflight.status, url: inflight.page_url, dedupeKey: inflight.dedupe_key };
+      return { queued: false, own: false, status: inflight.status, url: inflight.page_url, dedupeKey: inflight.dedupe_key };
     }
 
     const qa = await db('seo_content_qa_scores')
@@ -503,8 +503,14 @@ class RefreshAudit {
     const score = Math.max(ENQUEUE_FLOOR, priority);
     // Domain in the key: hub + spoke pages can share a slug/path, and a
     // domain-less key would conflate them under ON CONFLICT.
+    // The cycle suffix must SURVIVE truncation: slicing after appending would,
+    // on a long domain/slug, cut the suffix off and collide distinct cycles
+    // with each other (or with the stable key), silently restoring the
+    // "refreshed once, ever" behaviour the suffix exists to fix. Reserve its
+    // length from the base instead.
     const cycleSuffix = cycleKey ? `:${String(cycleKey).replace(/[^a-zA-Z0-9._-]/g, '')}` : '';
-    const dedupeKey = `refresh-audit:${targetDomain}:${post.slug || post.id}${cycleSuffix}`.slice(0, 200);
+    const dedupeBase = `refresh-audit:${targetDomain}:${post.slug || post.id}`;
+    const dedupeKey = `${dedupeBase.slice(0, 200 - cycleSuffix.length)}${cycleSuffix}`;
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
     // Mirror intercept-brief-seeder's upsert: never reset a claimed/done/in-review
@@ -587,7 +593,7 @@ class RefreshAudit {
       );
     });
     if (result.__inflight) {
-      return { queued: false, status: result.__inflight.status, url: result.__inflight.page_url, dedupeKey: result.__inflight.dedupe_key };
+      return { queued: false, own: false, status: result.__inflight.status, url: result.__inflight.page_url, dedupeKey: result.__inflight.dedupe_key };
     }
 
     const row = result.rows && result.rows[0];
@@ -598,7 +604,7 @@ class RefreshAudit {
     // the UI doesn't show "Queued" for a no-op on an already-handled page.
     const queued = status === 'pending';
     logger.info(`[refresh-audit] enqueue refresh ${pageUrl} (score ${score}) → status ${status}, queued=${queued}`);
-    return { queued, status, url: pageUrl, score, dedupeKey };
+    return { queued, own: true, status, url: pageUrl, score, dedupeKey };
   }
 }
 
