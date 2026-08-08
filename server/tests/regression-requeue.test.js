@@ -14,12 +14,20 @@ const { requeueRegressedPages, requeueStatusFor } = requeue;
 // is recorded with the id it was keyed on, and every whereRaw bind is captured
 // so the cooldown's page-identity predicate can be asserted.
 function makeDb({ pending = [], cooldownHit = false } = {}) {
-  const state = { updates: [], rawBinds: [] };
+  const state = { updates: [], rawBinds: [], excluded: [] };
   const fakeDb = () => {
     const q = {
       _id: null,
       _limit: null,
-      where: (col, val) => { if (col === 'id') q._id = val; return q; },
+      where: (col, val) => {
+        // The paused-bucket exclusion is a callback predicate.
+        if (typeof col === 'function') {
+          col({ whereRaw: () => {}, whereNull: () => ({ orWhereNotIn: (_c, vals) => state.excluded.push(...vals) }) });
+          return q;
+        }
+        if (col === 'id') q._id = val;
+        return q;
+      },
       whereRaw: (sql, binds) => { state.rawBinds.push(...(binds || [])); return q; },
       whereNotNull: () => q,
       whereNull: () => q,
@@ -60,6 +68,8 @@ const audit = (over = {}) => ({
   ...over,
 });
 
+const tracker = (paused = []) => ({ pausedBuckets: jest.fn(async () => paused) });
+
 beforeEach(() => { process.env.GATE_REGRESSION_REQUEUE = 'true'; runExclusive.mockClear(); });
 afterAll(() => { delete process.env.GATE_REGRESSION_REQUEUE; });
 
@@ -91,7 +101,7 @@ describe('requeueRegressedPages', () => {
   test('queues a resolved page through the EXISTING refresh lane and stamps it', async () => {
     const db = makeDb({ pending: [row()] });
     const refreshAudit = audit();
-    const out = await requeueRegressedPages({ db, refreshAudit });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(refreshAudit.enqueueRefresh).toHaveBeenCalledWith({ blogPostId: 42 });
     expect(out).toMatchObject({ scanned: 1, queued: 1, skipped: 0 });
@@ -104,7 +114,7 @@ describe('requeueRegressedPages', () => {
     process.env.GATE_REGRESSION_REQUEUE = 'false';
     const db = makeDb({ pending: [row()] });
     const refreshAudit = audit();
-    const out = await requeueRegressedPages({ db, refreshAudit });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
     expect(db.state.updates).toHaveLength(0);
@@ -115,7 +125,7 @@ describe('requeueRegressedPages', () => {
   test('gate OFF also withholds the stamp on a REFUSAL, so the flip sees the real backlog', async () => {
     process.env.GATE_REGRESSION_REQUEUE = 'false';
     const db = makeDb({ pending: [row()], cooldownHit: true });
-    const out = await requeueRegressedPages({ db, refreshAudit: audit() });
+    const out = await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() });
     expect(db.state.updates).toHaveLength(0);
     expect(out.results[0].status).toBe('gated');
   });
@@ -123,7 +133,7 @@ describe('requeueRegressedPages', () => {
   test('cooldown: a page re-queued recently is left alone (no second enqueue)', async () => {
     const db = makeDb({ pending: [row()], cooldownHit: true });
     const refreshAudit = audit();
-    const out = await requeueRegressedPages({ db, refreshAudit });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(refreshAudit.resolvePublishedPostByUrl).not.toHaveBeenCalled();
     expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
@@ -134,7 +144,7 @@ describe('requeueRegressedPages', () => {
   test('an unresolvable URL is recorded, not silently retried forever', async () => {
     const db = makeDb({ pending: [row()] });
     const refreshAudit = audit({ resolvePublishedPostByUrl: jest.fn(async () => null) });
-    await requeueRegressedPages({ db, refreshAudit });
+    await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
     expect(db.state.updates[0]).toMatchObject({ requeue_status: 'unresolved_page' });
@@ -144,7 +154,7 @@ describe('requeueRegressedPages', () => {
     const err = new Error('no Search Console impressions'); err.code = 'NO_GSC_SIGNAL';
     const db = makeDb({ pending: [row()] });
     const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => { throw err; }) });
-    const out = await requeueRegressedPages({ db, refreshAudit });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(db.state.updates[0]).toMatchObject({ requeue_status: 'no_gsc_signal' });
     expect(out).toMatchObject({ queued: 0, skipped: 1 });
@@ -153,7 +163,7 @@ describe('requeueRegressedPages', () => {
   test('a TRANSIENT failure counts an attempt but does NOT stamp a terminal status', async () => {
     const db = makeDb({ pending: [row({ requeue_attempts: 0 })] });
     const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => { throw new Error('connection reset'); }) });
-    const out = await requeueRegressedPages({ db, refreshAudit });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(out.results[0].status).toBe('error');
     expect(db.state.updates).toHaveLength(1);
@@ -167,7 +177,7 @@ describe('requeueRegressedPages', () => {
     const attempts = requeue.THRESHOLDS.MAX_TRANSIENT_ATTEMPTS - 1;
     const db = makeDb({ pending: [row({ requeue_attempts: attempts })] });
     const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => { throw new Error('still broken'); }) });
-    const out = await requeueRegressedPages({ db, refreshAudit });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(out.results[0].status).toBe('error_exhausted');
     expect(db.state.updates[0]).toMatchObject({
@@ -181,14 +191,34 @@ describe('requeueRegressedPages', () => {
     process.env.GATE_REGRESSION_REQUEUE = 'false';
     const db = makeDb({ pending: [row()] });
     const refreshAudit = audit({ resolvePublishedPostByUrl: jest.fn(async () => { throw new Error('boom'); }) });
-    const out = await requeueRegressedPages({ db, refreshAudit });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(db.state.updates).toHaveLength(0);
     expect(out.results[0].status).toBe('gated');
   });
 
+  test('a PAUSED bucket is excluded from the scan — enqueueRefresh would launder it into an unpaused one', async () => {
+    const db = makeDb({ pending: [row()] });
+    await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker([{ bucket: 'thin_content', regressions: 3 }]) });
+    // enqueueRefresh writes bucket='content_refresh_audit', so the runner's own
+    // pause guard would NOT catch a regression from a paused lane. It has to be
+    // excluded here, and left unstamped so it returns when the bucket clears.
+    expect(db.state.excluded).toContain('thin_content');
+  });
+
+  test('FAILS CLOSED when the paused-bucket list is unavailable', async () => {
+    const db = makeDb({ pending: [row()] });
+    const refreshAudit = audit();
+    const broken = { pausedBuckets: jest.fn(async () => { throw new Error('db down'); }) };
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: broken });
+
+    expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
+    expect(db.state.updates).toHaveLength(0);
+    expect(out).toMatchObject({ scanned: 0, queued: 0 });
+  });
+
   test('the sweep runs inside the distributed cron lock', async () => {
-    await requeueRegressedPages({ db: makeDb({ pending: [] }), refreshAudit: audit() });
+    await requeueRegressedPages({ db: makeDb({ pending: [] }), refreshAudit: audit(), tracker: tracker() });
     expect(runExclusive).toHaveBeenCalledWith('regression-requeue', expect.any(Function));
   });
 
@@ -197,7 +227,7 @@ describe('requeueRegressedPages', () => {
       pending: [row({ page_url: 'https://www.wavespestcontrol.com/bed-bugs-bradenton/?utm_source=gbp' })],
       cooldownHit: true,
     });
-    await requeueRegressedPages({ db, refreshAudit: audit() });
+    await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() });
 
     // The ?utm variant and the trailing slash must be normalized away, and the
     // domain must be bound — otherwise a www/non-www twin slips the loop breaker.
@@ -212,7 +242,7 @@ describe('requeueRegressedPages', () => {
         .mockImplementationOnce(async () => { throw new Error('boom'); })
         .mockImplementationOnce(async () => ({ id: 43 })),
     });
-    const out = await requeueRegressedPages({ db, refreshAudit });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(out.scanned).toBe(2);
     expect(out.queued).toBe(1);
@@ -225,14 +255,14 @@ describe('requeueRegressedPages', () => {
   test('the nightly fan-out is bounded', async () => {
     const many = Array.from({ length: 20 }, (_, i) => row({ id: `imp-${i}`, page_url: `https://www.wavespestcontrol.com/p${i}/` }));
     const db = makeDb({ pending: many });
-    const out = await requeueRegressedPages({ db, refreshAudit: audit() });
+    const out = await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() });
     expect(out.scanned).toBe(requeue.THRESHOLDS.MAX_PER_RUN);
   });
 
   test('an empty backlog is a no-op', async () => {
     const db = makeDb({ pending: [] });
     const refreshAudit = audit();
-    const out = await requeueRegressedPages({ db, refreshAudit });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
     expect(out).toMatchObject({ scanned: 0, queued: 0, skipped: 0 });
     expect(refreshAudit.resolvePublishedPostByUrl).not.toHaveBeenCalled();
   });

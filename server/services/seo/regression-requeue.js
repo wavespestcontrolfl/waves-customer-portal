@@ -33,8 +33,13 @@
  *     refresh→regress→refresh oscillation dies after one cycle. The second
  *     regression still shows up as a regressed verdict for a human to read.
  *
- * A paused bucket needs no check here: autonomous-runner consults pausedBuckets
- * at claim time, so a seeded row for a paused bucket simply never runs.
+ * Paused buckets are honoured HERE, explicitly. It is tempting to assume the
+ * runner's own pause guard covers it, but it does not: enqueueRefresh seeds
+ * bucket='content_refresh_audit', so a regression originating in a paused
+ * bucket would be laundered into an unpaused one and run anyway — defeating
+ * the very guard that stopped that lane. Rows from a paused bucket are instead
+ * excluded from the scan, so they are neither acted on nor stamped, and they
+ * become eligible again by themselves once the bucket is reviewed and clears.
  */
 
 const db = require('../../models/db');
@@ -84,12 +89,22 @@ function requeueStatusFor({ resolved, enqueue, errorCode }) {
 // Confirmed regressions nobody has acted on yet, oldest first. checked_21d_at
 // (not 14d) is the bar on purpose — the same confirmation pausedBuckets counts,
 // so the two halves of the reversal story never disagree.
-function pendingRegressions(database, { limit = MAX_PER_RUN } = {}) {
+function pendingRegressions(database, { limit = MAX_PER_RUN, excludeBuckets = [] } = {}) {
   return database('content_optimization_impact')
     .where('verdict', 'regressed')
     .whereNotNull('checked_21d_at')
     .whereNull('requeued_at')
     .whereNotNull('page_url')
+    // A regression from a PAUSED bucket is left in place, not skipped-and-
+    // stamped: stamping would burn its one attempt while the lane is under
+    // review, and leaving it visible-but-unstamped would clog the bounded
+    // batch. Excluding it does both jobs — and it becomes eligible again on
+    // its own once the bucket clears. NULL bucket is never excluded (SQL
+    // NOT IN is NULL for a NULL column, which would silently drop the row).
+    .where((b) => {
+      if (!excludeBuckets.length) return b.whereRaw('true');
+      return b.whereNull('bucket').orWhereNotIn('bucket', excludeBuckets);
+    })
     .orderBy('checked_21d_at', 'asc')
     .limit(limit)
     .select('id', 'page_url', 'bucket', 'estimated_lift_position', 'checked_21d_at', 'requeue_attempts');
@@ -166,11 +181,26 @@ async function requeueRegressedPages(opts = {}) {
 async function requeueRegressedPagesLocked(opts = {}) {
   const database = opts.db || db;
   const refreshAudit = opts.refreshAudit || require('./refresh-audit');
+  const tracker = opts.tracker || require('./impact-tracker');
   const limit = opts.limit || MAX_PER_RUN;
+
+  // Fetch once per sweep, not per row. Fail CLOSED on error: if we cannot tell
+  // which buckets are paused, re-queueing could launder work out of a lane
+  // that was stopped for repeated losses — the whole point of the pause.
+  let excludeBuckets;
+  try {
+    excludeBuckets = ((await tracker.pausedBuckets({ db: database })) || []).map((p) => p.bucket).filter(Boolean);
+  } catch (err) {
+    logger.error(`[regression-requeue] pausedBuckets unavailable, standing down this tick: ${err.message}`);
+    return { scanned: 0, queued: 0, skipped: 0, results: [] };
+  }
+  if (excludeBuckets.length) {
+    logger.info(`[regression-requeue] excluding paused bucket(s): ${excludeBuckets.join(', ')}`);
+  }
 
   let rows;
   try {
-    rows = await pendingRegressions(database, { limit });
+    rows = await pendingRegressions(database, { limit, excludeBuckets });
   } catch (err) {
     logger.error(`[regression-requeue] scan failed: ${err.message}`);
     return { scanned: 0, queued: 0, skipped: 0, results: [] };
