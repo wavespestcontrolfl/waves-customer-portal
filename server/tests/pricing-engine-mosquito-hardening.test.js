@@ -27,9 +27,9 @@ describe('mosquito pricing hardening', () => {
     expect(result.recommendedProgram).toBe('seasonal9');
     expect(result.recommendedTier).toBe('seasonal9');
     expect(result.tierWasForced).toBe(true);
-    expect(result.perVisit).toBe(84);
-    expect(result.annual).toBe(1008);
-    expect(result.monthly).toBe(84);
+    expect(result.perVisit).toBe(87);
+    expect(result.annual).toBe(1044);
+    expect(result.monthly).toBe(87);
     expect(result.tiers.find(t => t.tier === 'monthly12')).toEqual(expect.objectContaining({
       selected: true,
       recommended: false,
@@ -62,9 +62,9 @@ describe('mosquito pricing hardening', () => {
     expect(result.pressureMultiplier).toBeCloseTo(1.7054117647, 6);
     expect(result.recommendedProgram).toBe('monthly12');
     expect(result.selectedProgram).toBe('monthly12');
-    expect(result.perVisit).toBe(128);
-    expect(result.annual).toBe(1700);
-    expect(result.monthly).toBe(141.67);
+    expect(result.perVisit).toBe(135);
+    expect(result.annual).toBe(1784);
+    expect(result.monthly).toBe(148.67);
     expect(result.addOns.annualAddOns).toBe(164);
   });
 
@@ -79,11 +79,11 @@ describe('mosquito pricing hardening', () => {
       dunkCount: 1,
     });
 
-    expect(result.perVisit).toBe(73);
+    expect(result.perVisit).toBe(77);
     expect(result.visits).toBe(9);
     expect(result.addOns.stationAddOn).toBe(39);
     expect(result.addOns.dunkAddOn).toBe(4);
-    expect(result.annual).toBe(73 * 9 + 39 + 4);
+    expect(result.annual).toBe(77 * 9 + 39 + 4);
   });
 
   test('normalizes mosquito program aliases, whitespace, and unknown program behavior', () => {
@@ -235,12 +235,12 @@ describe('mosquito pricing hardening', () => {
     });
     expect(exampleC).toEqual(expect.objectContaining({
       areaBucket: 'LARGE',
-      basePrice: 181,
+      basePrice: 190,
       stationAddOnTotal: 150,
-      subtotalBeforeRecurringCustomerDiscount: 331,
+      subtotalBeforeRecurringCustomerDiscount: 340,
       recurringCustomerDiscountRate: 0.15,
-      price: 281,
-      recurringCustomerDiscountAmount: 50,
+      price: 289,
+      recurringCustomerDiscountAmount: 51,
     }));
 
     const exampleD = priceOneTimeMosquito({ mosquitoTreatableSqFt: 65000 });
@@ -248,9 +248,9 @@ describe('mosquito pricing hardening', () => {
       areaBucket: 'OVER_ACRE',
       overageSqFt: 21440,
       incrementCount: 3,
-      basePrice: 389,
+      basePrice: 408,
       requiresManualReview: true,
-      price: 389,
+      price: 408,
       manualReviewReasons: expect.arrayContaining(['over_acre_mosquito_treatment']),
     }));
 
@@ -266,7 +266,7 @@ describe('mosquito pricing hardening', () => {
       mosquitoLotCategory: 'ACRE',
     });
     expect(derivedAcreFromMissingLot.areaBucket).toBe('SMALL');
-    expect(derivedAcreFromMissingLot.price).toBe(149);
+    expect(derivedAcreFromMissingLot.price).toBe(156);
     expect(derivedAcreFromMissingLot.requiresManualReview).toBe(true);
     expect(derivedAcreFromMissingLot.manualReviewReasons).toContain('missing_mosquito_treatable_area');
   });

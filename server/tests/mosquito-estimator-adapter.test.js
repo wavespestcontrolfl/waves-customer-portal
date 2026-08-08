@@ -93,12 +93,12 @@ describe('mosquito estimator adapter', () => {
     );
 
     expect(result.hasOneTime).toBe(true);
-    expect(result.oneTime.total).toBe(359);
+    expect(result.oneTime.total).toBe(366);
     expect(result.oneTime.items).toEqual([
       expect.objectContaining({
         service: 'one_time_mosquito',
         name: 'One-Time Mosquito',
-        price: 359,
+        price: 366,
         addOns: expect.objectContaining({
           stationCount: 2,
           dunkCount: 4,
