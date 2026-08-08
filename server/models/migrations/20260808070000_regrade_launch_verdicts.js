@@ -61,13 +61,29 @@ exports.up = async function up(knex) {
 };
 
 /**
- * Down restores insufficient_data for launch rows only. That IS the prior
- * state — every launch row was insufficient_data before this migration, since
- * the diff regime could not grade a page with no baseline.
+ * Down restores insufficient_data — but ONLY for the exact cohort up touched.
+ *
+ * up regrades launch rows that were ALREADY MEASURED when it ran. Once the
+ * launch regime is live, checkPending grades new launches itself, and those
+ * verdicts are real data this migration never created. A blanket
+ * "reset every improved/neutral launch row" down would destroy them.
+ *
+ * The cohort is therefore pinned by time: rows whose measurement landed BEFORE
+ * this migration ran, read from knex_migrations. Anything measured after is
+ * runtime output and is left alone. If the migration row cannot be read the
+ * cohort is unidentifiable, so we touch nothing rather than guess.
  */
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('content_optimization_impact'))) return;
   if (!(await knex.schema.hasTable('autonomous_runs'))) return;
+
+  const marker = await knex.raw(
+    'SELECT migration_time FROM knex_migrations WHERE name = ? ORDER BY id DESC LIMIT 1',
+    ['20260808070000_regrade_launch_verdicts.js'],
+  );
+  const ranAt = marker.rows && marker.rows[0] && marker.rows[0].migration_time;
+  if (!ranAt) return;
+
   await knex.raw(`
     UPDATE content_optimization_impact t
        SET verdict = 'insufficient_data', verdict_confidence = NULL, updated_at = now()
@@ -75,5 +91,6 @@ exports.down = async function down(knex) {
      WHERE r.id = t.run_id
        AND r.action_type = 'new_supporting_blog'
        AND t.verdict IN ('improved', 'neutral')
-  `);
+       AND COALESCE(t.checked_21d_at, t.checked_14d_at) < ?
+  `, [ranAt]);
 };
