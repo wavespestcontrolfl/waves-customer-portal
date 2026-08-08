@@ -157,6 +157,23 @@ function normalizeCustomerResponsibilities(raw) {
   return cleaned.length ? cleaned : null;
 }
 
+// Canonical payment-terms vocabulary — the SAME tokens the payer system
+// stores and the payer statements render (payer.js PAYMENT_TERMS). Proposals
+// speak this vocabulary so acceptance invoicing and any later payer wiring
+// read one term language, never a parsed display string (codex #3297 r2:
+// free text driving billing = a parallel mechanism). Common human spellings
+// canonicalize; anything else is null (and the PUT route 400s it).
+const PROPOSAL_PAYMENT_TERMS = ['due_on_receipt', 'net15', 'net30'];
+
+function normalizePaymentTerms(value) {
+  const t = String(value ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (!t) return null;
+  if (t === 'dueonreceipt') return 'due_on_receipt';
+  if (t === 'net15') return 'net15';
+  if (t === 'net30') return 'net30';
+  return null;
+}
+
 function cleanBoundedInt(value, { min, max }) {
   // Number(null) and Number('') are 0 — a blank editor field must stay
   // "unset", never coerce to the 0-means-month-to-month claim the operator
@@ -180,7 +197,7 @@ function normalizeCommercialTerms(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const terms = {
     validDays: cleanBoundedInt(raw.validDays, { min: 1, max: 365 }),
-    paymentTerms: cleanString(raw.paymentTerms, 120),
+    paymentTerms: normalizePaymentTerms(raw.paymentTerms),
     initialTermMonths: cleanBoundedInt(raw.initialTermMonths, { min: 0, max: 60 }),
     renewal: cleanString(raw.renewal, 120),
     priceAdjustment: cleanString(raw.priceAdjustment, 160),
@@ -632,6 +649,8 @@ module.exports = {
   normalizeCorrectiveWork,
   normalizeCustomerResponsibilities,
   normalizeCommercialTerms,
+  normalizePaymentTerms,
+  PROPOSAL_PAYMENT_TERMS,
   normalizeProposal,
   perApplicationRecurringLines,
   annualizedAmount,

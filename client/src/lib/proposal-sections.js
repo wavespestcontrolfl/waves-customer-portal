@@ -11,10 +11,19 @@
 // the date acceptance actually enforces (codex 1A-i r1). The field stays in
 // the normalizer, reserved for the adjustable-expiry lane that will wire
 // enforcement and rendering together.
+// Canonical payment-terms tokens → customer-facing labels. The tokens are
+// the payer system's vocabulary (server payer.js PAYMENT_TERMS), normalized
+// by the server; anything unrecognized renders nothing rather than raw data.
+export const PAYMENT_TERM_LABELS = {
+  due_on_receipt: 'Due on receipt',
+  net15: 'Net-15',
+  net30: 'Net-30',
+};
+
 export function commercialTermRows(commercialTerms) {
   if (!commercialTerms || typeof commercialTerms !== 'object') return [];
   return [
-    ['Payment', commercialTerms.paymentTerms],
+    ['Payment', PAYMENT_TERM_LABELS[commercialTerms.paymentTerms] || null],
     ['Initial term', commercialTerms.initialTermMonths != null
       ? (commercialTerms.initialTermMonths > 0 ? `${commercialTerms.initialTermMonths} months` : 'None — month-to-month')
       : null],

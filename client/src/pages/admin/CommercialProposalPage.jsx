@@ -930,8 +930,21 @@ export default function CommercialProposalPage() {
                 Free-text terms below become &ldquo;Additional terms&rdquo; once any of these are set.
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="block">
+                  <span className={LABEL}>Payment terms</span>
+                  {/* Canonical payer vocabulary only (server rejects free
+                      text) — billing derives due dates from these tokens. */}
+                  <Select
+                    size="sm" className="mt-1" value={commercialTerms.paymentTerms} disabled={!!locked}
+                    onChange={(e) => { setDirty(true); setCommercialTerms((prev) => ({ ...prev, paymentTerms: e.target.value })); }}
+                  >
+                    <option value="">Not set</option>
+                    <option value="due_on_receipt">Due on receipt</option>
+                    <option value="net15">Net-15</option>
+                    <option value="net30">Net-30</option>
+                  </Select>
+                </label>
                 {[
-                  ['paymentTerms', 'Payment terms', 'text', 'e.g. Net-30 to the management company'],
                   ['initialTermMonths', 'Initial term (months, 0 = month-to-month)', 'number', 'e.g. 12'],
                   ['renewal', 'Renewal', 'text', 'e.g. Renews month-to-month after the initial term'],
                   ['priceAdjustment', 'Price adjustment', 'text', 'e.g. Rates reviewed annually with 30-day notice'],

@@ -45,16 +45,14 @@ const SIESTA_PROPOSAL = {
 };
 
 describe('proposalNetTermDays', () => {
-  test('recognizes only the strict Net-N form — anything else states no due period (codex 1A-i r4 P0)', () => {
+  test('maps only the canonical payer tokens — lookup, never a parse (codex #3297 r2)', () => {
     const withTerms = (paymentTerms) => ({ commercialTerms: { paymentTerms } });
-    expect(proposalNetTermDays(withTerms('Net-30'))).toBe(30);
-    expect(proposalNetTermDays(withTerms('net 30'))).toBe(30);
-    expect(proposalNetTermDays(withTerms('Net-30 to the management company'))).toBe(30);
-    expect(proposalNetTermDays(withTerms('NET15'))).toBe(15);
-    // Unrecognized or unreasonable forms fall back to due-on-receipt.
-    expect(proposalNetTermDays(withTerms('Due on receipt'))).toBe(0);
-    expect(proposalNetTermDays(withTerms('Invoiced monthly'))).toBe(0);
-    expect(proposalNetTermDays(withTerms('Net-500'))).toBe(0);
+    expect(proposalNetTermDays(withTerms('net30'))).toBe(30);
+    expect(proposalNetTermDays(withTerms('net15'))).toBe(15);
+    expect(proposalNetTermDays(withTerms('due_on_receipt'))).toBe(0);
+    // Non-canonical strings never reach here (the normalizer nulls them and
+    // the PUT route 400s them) — and this lookup ignores them regardless.
+    expect(proposalNetTermDays(withTerms('Net-30 to the management company'))).toBe(0);
     expect(proposalNetTermDays(withTerms(''))).toBe(0);
     expect(proposalNetTermDays({})).toBe(0);
     expect(proposalNetTermDays(null)).toBe(0);
@@ -214,7 +212,7 @@ describe('createProposalAcceptanceInvoice', () => {
     await createProposalAcceptanceInvoice({
       trx,
       estimate: { id: 42 },
-      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'Net-15 to the management company' } },
+      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net15' } },
       customerId: 'cust-1',
     });
     expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-07-05');

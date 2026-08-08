@@ -183,6 +183,7 @@ describe('structured proposal sections (slice 1A-i)', () => {
       commercialTerms: { validDays: 30, paymentTerms: 'Net-30', initialTermMonths: 0, renewal: null, priceAdjustment: '', cancellation: '30-day written notice', accessRequirements: null },
       accountManager: 'Adam',
     }));
+    // paymentTerms canonicalizes to the payer vocabulary ('Net-30' → net30).
     expect(p.propertyScope).toEqual({ items: [{ label: 'Units', value: '4 residential units' }] });
     expect(p.correctiveWork).toEqual([{
       label: 'Cleanout', amount: 450.01, taxable: true, includes: ['Kitchens', 'Follow-up at 2 weeks'],
@@ -190,7 +191,7 @@ describe('structured proposal sections (slice 1A-i)', () => {
     expect(p.customerResponsibilities).toEqual(['Provide unit access with 24-hour tenant notice']);
     expect(p.commercialTerms).toEqual({
       validDays: 30,
-      paymentTerms: 'Net-30',
+      paymentTerms: 'net30',
       initialTermMonths: 0,
       renewal: null,
       priceAdjustment: null,

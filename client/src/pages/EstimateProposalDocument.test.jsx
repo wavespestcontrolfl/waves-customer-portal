@@ -262,7 +262,7 @@ describe('EstimateProposalDocument', () => {
         correctiveWork: [{ label: 'German roach cleanout', amount: 450, taxable: true, includes: ['Both kitchens'] }],
         customerResponsibilities: ['Provide unit access with 24-hour tenant notice'],
         commercialTerms: {
-          validDays: 30, paymentTerms: 'Net-30', initialTermMonths: 12,
+          validDays: 30, paymentTerms: 'net30', initialTermMonths: 12,
           renewal: null, priceAdjustment: null, cancellation: '30-day written notice', accessRequirements: null,
         },
         accountManager: 'Adam',
@@ -279,6 +279,7 @@ describe('EstimateProposalDocument', () => {
     // validDays never renders — expires_at ("Valid through") is the only
     // validity date any surface may print (codex 1A-i r1).
     expect(text).not.toContain('30 days from issue');
+    expect(text).toContain('Net-30');
     expect(text).toContain('12 months');
     // Structured terms are authored terms: the canned commercial inclusions
     // stack (with its no-long-term-contract claim beside a 12-month initial

@@ -325,8 +325,10 @@ function correctiveWorkBlock(ctx, correctiveWork, y) {
 // validity date any renderer may print; codex 1A-i r1).
 function commercialTermLines(commercialTerms) {
   if (!commercialTerms || typeof commercialTerms !== 'object') return [];
+  // Canonical payment tokens → labels (same map as proposal-sections.js).
+  const paymentLabel = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
   return [
-    ['Payment', commercialTerms.paymentTerms],
+    ['Payment', paymentLabel[commercialTerms.paymentTerms] || null],
     ['Initial term', commercialTerms.initialTermMonths != null
       ? (commercialTerms.initialTermMonths > 0 ? `${commercialTerms.initialTermMonths} months` : 'None — month-to-month')
       : null],

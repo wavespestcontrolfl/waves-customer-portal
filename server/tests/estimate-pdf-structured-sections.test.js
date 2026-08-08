@@ -74,7 +74,7 @@ const STRUCTURED_ESTIMATE = {
       customerResponsibilities: ['Provide unit access with 24-hour tenant notice'],
       commercialTerms: {
         validDays: 30,
-        paymentTerms: 'Net-30 to the management company',
+        paymentTerms: 'net30',
         initialTermMonths: 0,
         cancellation: '30-day written notice, no cancellation fee',
       },
@@ -100,7 +100,7 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).toContain('Provide unit access with 24-hour tenant notice');
     // Structured terms as lines + demoted free-text terms. validDays never
     // renders — expires_at is the only validity date (codex 1A-i r1).
-    expect(text).toContain('Payment: Net-30 to the management company');
+    expect(text).toContain('Payment: Net-30');
     expect(text).not.toContain('Proposal valid: 30 days from issue');
     expect(text).toContain('Initial term: None');
     expect(text).toContain('Interior visits beyond the schedule are billed per visit.');

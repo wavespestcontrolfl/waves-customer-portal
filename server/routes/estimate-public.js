@@ -5400,8 +5400,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       // like the inclusions bullets above.
       // validDays never renders — the enforced expires_at is the only
       // validity date any renderer may print (see proposal-sections.js).
+      // Payment tokens are the canonical payer vocabulary → labels, same
+      // map as client proposal-sections.js PAYMENT_TERM_LABELS.
+      const proposalPaymentLabel = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
       const proposalTermRows = proposalForCard.commercialTerms ? [
-        ['Payment', proposalForCard.commercialTerms.paymentTerms],
+        ['Payment', proposalPaymentLabel[proposalForCard.commercialTerms.paymentTerms] || null],
         ['Initial term', proposalForCard.commercialTerms.initialTermMonths != null
           ? (proposalForCard.commercialTerms.initialTermMonths > 0 ? `${proposalForCard.commercialTerms.initialTermMonths} months` : 'None — month-to-month')
           : null],

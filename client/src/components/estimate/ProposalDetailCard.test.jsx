@@ -128,7 +128,7 @@ describe('ProposalDetailCard', () => {
       correctiveWork: [{ label: 'German roach cleanout', amount: 450, taxable: true, includes: ['Both kitchens', 'Follow-up at 2 weeks'] }],
       customerResponsibilities: ['Provide unit access with 24-hour tenant notice'],
       commercialTerms: {
-        validDays: 30, paymentTerms: 'Net-30', initialTermMonths: 0,
+        validDays: 30, paymentTerms: 'net30', initialTermMonths: 0,
         renewal: null, priceAdjustment: null, cancellation: '30-day written notice', accessRequirements: null,
       },
     }} />);
@@ -143,6 +143,8 @@ describe('ProposalDetailCard', () => {
     // validDays never renders — the enforced expires_at is the only validity
     // date any surface may print (codex 1A-i r1).
     expect(text).not.toContain('30 days from issue');
+    // Canonical payment token renders its label.
+    expect(text).toContain('Net-30');
     expect(text).toContain('None — month-to-month');
     // Structured terms are authored terms — the canned inclusions stack
     // must not sit beside them (same rule as free-text terms).

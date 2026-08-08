@@ -300,17 +300,16 @@ async function flagProposalCustomerCommercialIfTaxable({ trx, customerId, propos
   }
 }
 
-// Net-terms from the structured commercial terms (slice 1A-i). Only the
-// strict "Net-N" form is recognized — it is the one payment term whose due
-// date is mechanically derivable. Anything else ("Due on receipt", free
-// prose) states no due period, so due-today remains correct for it. Without
-// this, a proposal accepted on authored "Net-30 …" terms invoiced as due
+// Net-terms from the structured commercial terms (slice 1A-i). paymentTerms
+// is the CANONICAL payer vocabulary (estimate-proposal.js normalizes to
+// payer.js's PAYMENT_TERMS tokens), so this is a lookup, never a parse —
+// the same term language payer statements read (codex #3297 r2). Without
+// it, a proposal accepted on authored Net-30 terms invoiced as due
 // immediately (codex 1A-i r4 P0).
+const NET_TERM_DAYS = { net15: 15, net30: 30 };
+
 function proposalNetTermDays(proposal) {
-  const match = String(proposal?.commercialTerms?.paymentTerms || '').trim().match(/^net[- ]?(\d{1,3})\b/i);
-  if (!match) return 0;
-  const days = Number(match[1]);
-  return Number.isInteger(days) && days >= 1 && days <= 120 ? days : 0;
+  return NET_TERM_DAYS[proposal?.commercialTerms?.paymentTerms] || 0;
 }
 
 async function createProposalAcceptanceInvoice({ trx, estimate, proposal, customerId }) {
