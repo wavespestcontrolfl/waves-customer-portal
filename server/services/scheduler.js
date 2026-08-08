@@ -1454,6 +1454,12 @@ function initScheduledJobs() {
       await ImpactTracker.sweepNewlyLive({});
       await ImpactTracker.checkPending({});
       await ImpactTracker.checkAeoVisibility({});
+      // Leg 4 — surface what the sweep just found (halted lanes, weekly
+      // verdicts). Chained here rather than given its own cron so it always
+      // describes POST-sweep state; a mid-sweep tick would stamp its weekly
+      // marker on stale counts and suppress the corrected rollup for six days.
+      // Its own markers make a skipped day self-heal on the next tick.
+      await require('./seo/impact-verdict-digest').sendImpactDigestsIfDue({});
     } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
