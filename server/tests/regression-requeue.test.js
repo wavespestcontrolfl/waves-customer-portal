@@ -14,20 +14,24 @@ const { requeueRegressedPages, requeueStatusFor } = requeue;
 // is recorded with the id it was keyed on, and every whereRaw bind is captured
 // so the cooldown's page-identity predicate can be asserted.
 function makeDb({ pending = [], cooldownHit = false } = {}) {
-  const state = { updates: [], rawBinds: [], excluded: [], evidence: [] };
+  const state = { updates: [], rawBinds: [], excluded: [], evidence: [], statusFilters: [], orderBy: [] };
   const fakeDb = () => {
     const q = {
       _id: null,
       _limit: null,
       where: (col, val) => {
-        // The paused-bucket exclusion is a callback predicate.
+        // Both the paused-bucket exclusion and the parked-status exclusion are
+        // callback predicates.
         if (typeof col === 'function') {
           const sub = {
             whereRaw: () => sub,
             whereNull: () => sub,
             orWhereNotIn: (_c, vals) => { state.excluded.push(...vals); return sub; },
             whereIn: (_c, vals) => { state.evidence.push(...vals); return sub; },
-            orWhere: (_c, _op, v) => { state.evidence.push(v); return sub; },
+            orWhere: (_c, op, v) => {
+              if (op === '<>') state.statusFilters.push(v); else state.evidence.push(v);
+              return sub;
+            },
           };
           col(sub);
           return q;
@@ -40,7 +44,7 @@ function makeDb({ pending = [], cooldownHit = false } = {}) {
       whereRaw: (sql, binds) => { state.rawBinds.push(...(binds || [])); return q; },
       whereNotNull: () => q,
       whereNull: () => q,
-      orderBy: () => q,
+      orderBy: (...a) => { state.orderBy.push(a); return q; },
       limit: (n) => { q._limit = n; return q; },
       select: async () => pending.slice(0, q._limit || pending.length),
       first: async () => (cooldownHit ? { id: 'prior-row' } : undefined),
@@ -156,16 +160,25 @@ describe('requeueRegressedPages', () => {
     expect(out).toMatchObject({ queued: 0, skipped: 1 });
   });
 
-  test('a target outside the lane (no blog_posts row) is recorded and counted, not retried', async () => {
+  test('a target outside the lane is PARKED, not consumed — requeued_at stays null', async () => {
     const db = makeDb({ pending: [row()] });
     const refreshAudit = audit({ resolvePublishedPostByUrl: jest.fn(async () => null) });
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
     expect(db.state.updates[0]).toMatchObject({ requeue_status: 'unsupported_target' });
-    // Countable rather than silent — enqueueRefresh is blogPostId-keyed, so a
-    // city/service Astro page genuinely cannot be handed to this lane.
+    // The crucial bit: NOT marked handled. enqueueRefresh is blogPostId-keyed
+    // so a city/service Astro page cannot be handed to this lane today — but
+    // when a URL-keyed path lands, clearing this status alone revives them all.
+    expect(db.state.updates[0].requeued_at).toBeUndefined();
     expect(out.unsupported).toBe(1);
+  });
+
+  test('parked targets are excluded from the scan so they cost nothing nightly', async () => {
+    const db = makeDb({ pending: [row()] });
+    await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() });
+    // The scan filters them out by status rather than by a handled-marker.
+    expect(db.state.statusFilters).toContain('unsupported_target');
   });
 
   test('after a failed stamp, the retry RECOVERS its own queue row as success', async () => {
@@ -220,13 +233,26 @@ describe('requeueRegressedPages', () => {
     }
   });
 
-  test('a page stuck behind other edits is retired at the cap, not retried forever', async () => {
-    const db = makeDb({ pending: [row({ requeue_attempts: requeue.THRESHOLDS.MAX_TRANSIENT_ATTEMPTS - 1 })] });
-    const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => ({ queued: false, own: false, status: 'claimed' })) });
+  test('a page blocked for many days is NEVER retired — the blocking edit will clear', async () => {
+    // A legitimate pending_review edit can hold a page well past any small
+    // retry cap; retiring the regression then would discard it at exactly the
+    // moment the block lifts.
+    const db = makeDb({ pending: [row({ requeue_attempts: 40 })] });
+    const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => ({ queued: false, own: false, status: 'pending_review' })) });
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
-    expect(out.results[0].status).toBe('inflight:claimed_exhausted');
-    expect(db.state.updates[0].requeued_at).toBeInstanceOf(Date);
+    expect(out.results[0].status).toBe('inflight:pending_review');
+    expect(db.state.updates[0]).toMatchObject({ requeue_attempts: 41 });
+    expect(db.state.updates[0].requeued_at).toBeUndefined();
+    expect(out.blocked).toBe(1);
+  });
+
+  test('blocked rows are DEMOTED, not dropped — fewest attempts sort first', async () => {
+    const db = makeDb({ pending: [row()] });
+    await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() });
+    // Ordering is what stops a stuck row occupying the bounded batch.
+    expect(db.state.orderBy[0]).toEqual(['requeue_attempts', 'asc']);
+    expect(db.state.orderBy[1]).toEqual(['checked_21d_at', 'asc']);
   });
 
   test('a coded refusal from the refresh lane is terminal and stamped', async () => {
@@ -252,18 +278,14 @@ describe('requeueRegressedPages', () => {
     expect(db.state.updates[0].requeue_status).toBeUndefined();
   });
 
-  test('a row that keeps failing is retired at the cap, so it cannot starve the batch', async () => {
-    const attempts = requeue.THRESHOLDS.MAX_TRANSIENT_ATTEMPTS - 1;
-    const db = makeDb({ pending: [row({ requeue_attempts: attempts })] });
+  test('a persistently failing row keeps counting attempts but is never consumed', async () => {
+    const db = makeDb({ pending: [row({ requeue_attempts: 25 })] });
     const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => { throw new Error('still broken'); }) });
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
-    expect(out.results[0].status).toBe('error_exhausted');
-    expect(db.state.updates[0]).toMatchObject({
-      requeue_status: 'error_exhausted',
-      requeue_attempts: requeue.THRESHOLDS.MAX_TRANSIENT_ATTEMPTS,
-    });
-    expect(db.state.updates[0].requeued_at).toBeInstanceOf(Date);
+    expect(out.results[0].status).toBe('error');
+    expect(db.state.updates[0]).toMatchObject({ requeue_attempts: 26 });
+    expect(db.state.updates[0].requeued_at).toBeUndefined();
   });
 
   test('gate OFF does not even count a transient failure', async () => {
