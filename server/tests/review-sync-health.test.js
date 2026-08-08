@@ -135,7 +135,10 @@ describe('_assessReviewSyncHealth (escalation)', () => {
 
   test('problems email contact@ FIRST with the ACT:/FIX: subject and bell as dedupe marker', async () => {
     installDb({ aggregates: [], stats: [] }); // venice-class everywhere: zero rows
-    const out = await gbp._assessReviewSyncHealth({ bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' }, {});
+    const out = await gbp._assessReviewSyncHealth(
+      { bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' },
+      { bradenton: 0, parrish: 0, sarasota: 0, venice: 0 },
+    );
     expect(out.emailed).toBe(true);
     const sent = mockEmailSend.mock.calls[0][0];
     expect(sent.to).toBe('contact@wavespestcontrol.com');
@@ -145,6 +148,12 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     // The dedupe/backup bell must survive GATE_ADMIN_BELL_POLICY — without
     // the explicit tag the marker vanishes and the email resends hourly.
     expect(mockNotifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true });
+    // Marker-first ordering: the durable claim lands BEFORE the SMTP send.
+    expect(mockNotifyAdmin.mock.invocationCallOrder[0])
+      .toBeLessThan(mockEmailSend.mock.invocationCallOrder[0]);
+    // Signature-keyed title: a different location/class set must NOT be
+    // suppressed by this escalation's dedupe row.
+    expect(mockNotifyAdmin.mock.calls[0][1]).toMatch(/^Review sync health escalation \[.*silent_empty/);
   });
 
   test('feed_down escalates the subject to FIX:', async () => {
@@ -160,14 +169,26 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     expect(mockEmailSend).not.toHaveBeenCalled();
   });
 
-  test('email failure falls back to a bell that carries the full body', async () => {
+  test('email failure still leaves the full escalation on the bell', async () => {
     mockEmailSend.mockResolvedValueOnce({ ok: false, error: 'smtp down' });
     installDb({ aggregates: [], stats: [] });
     const out = await gbp._assessReviewSyncHealth({ venice: 'gbp' });
     expect(out.emailed).toBe(false);
+    // The bell always carries the whole body — it is the durable claim AND
+    // the backup surface, written before the send.
     const bell = mockNotifyAdmin.mock.calls[0];
-    expect(bell[2]).toContain('EMAIL FAILED');
     expect(bell[2]).toContain('silent_empty');
+    expect(bell[2]).toMatch(/^ACT: Google review sync/);
+  });
+
+  test('a failed marker write blocks the email — no marker, no send', async () => {
+    // notifyAdmin swallows DB errors and returns null; sending anyway would
+    // resend the email every hourly run with no dedupe row to stop it.
+    mockNotifyAdmin.mockResolvedValueOnce(null);
+    installDb({ aggregates: [], stats: [] });
+    const out = await gbp._assessReviewSyncHealth({ venice: 'gbp' });
+    expect(out).toEqual({ skipped: 'marker_failed' });
+    expect(mockEmailSend).not.toHaveBeenCalled();
   });
 
   test('kill switch REVIEW_SYNC_HEALTH_EMAIL=off disables the whole check', async () => {

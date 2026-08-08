@@ -1111,9 +1111,12 @@ class GoogleBusinessService {
     if (!findings.length) return { healthy: true };
 
     const anyFix = findings.some((f) => f.severity === 'FIX');
-    const title = 'Review sync health escalation';
-    // 24h dedupe — same notifications-table pattern as _notifyDegradedSync,
-    // under an advisory lock so overlapping runners can't double-send.
+    // Signature-keyed dedupe (pre-push audit): a constant title would let one
+    // location's stats_stale suppress a DIFFERENT location going feed_down an
+    // hour later. Same finding set → deduped 24h; any new/changed finding →
+    // new title → sends immediately.
+    const signature = findings.map((f) => `${f.loc.id}:${f.cls}`).sort().join('|');
+    const title = `Review sync health escalation [${signature}]`;
     const result = await runExclusive('gbp-sync-health-notify', async () => {
       const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
       const recent = await db('notifications')
@@ -1133,28 +1136,34 @@ class GoogleBusinessService {
       ].join('\n');
       const subject = `${anyFix ? 'FIX' : 'ACT'}: Google review sync — ${findings.length} location${findings.length === 1 ? '' : 's'} degraded or stale`;
 
+      // Durable claim BEFORE the external send (pre-push audit): SMTP
+      // succeeding before the marker lands would resend the email every
+      // hourly run if the process died or the insert failed (notifyAdmin
+      // swallows DB errors → null). The bell row is the claim AND the backup
+      // surface, so it always carries the full body; no marker → no send,
+      // and the next hourly tick retries the whole escalation.
+      const marker = await NotificationService.notifyAdmin(
+        'review',
+        title,
+        `${subject}\n\n${body}`,
+        // bell: true — GATE_ADMIN_BELL_POLICY suppressing this row would
+        // erase the dedupe marker (codex #3298 r1).
+        { link: '/admin/reviews', bell: true },
+      );
+      if (!marker) return { skipped: 'marker_failed' };
+
       let emailed = false;
       try {
         const email = require('./email');
         const sent = await email.send({ to: 'contact@wavespestcontrol.com', subject, heading: 'Review sync health', body });
         emailed = !!sent?.ok;
-      } catch { /* fall through to the bell */ }
-
-      // The bell doubles as the dedupe marker; on email failure it is also
-      // the backup surface (email-first per the approvals rule).
-      await NotificationService.notifyAdmin(
-        'review',
-        title,
-        emailed ? `Emailed ${subject} to contact@.` : `EMAIL FAILED — acting surface is this bell. ${subject}\n\n${body}`,
-        // bell: true — this row is BOTH the 24h dedupe marker and the
-        // email-failure backup surface; GATE_ADMIN_BELL_POLICY suppressing
-        // it would erase the marker and let an ongoing fault resend the
-        // email every hourly sync (codex #3298 r1).
-        { link: '/admin/reviews', bell: true },
-      );
+      } catch { /* the bell already carries the full body */ }
+      if (!emailed) {
+        logger.warn('[gbp] sync-health escalation email failed — the bell carries the full escalation');
+      }
       return { emailed, findings: findings.length };
     }, { recordHealth: false });
-    if (result?.skipped) return { skipped: 'lock' };
+    if (result?.skipped === true) return { skipped: 'lock' };
     return result;
   }
 
