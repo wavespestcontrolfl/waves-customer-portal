@@ -32,6 +32,7 @@ const contentGuardrails = require('../content/content-guardrails');
 const { refineFootprintFindings } = require('../content/footprint-claim-classifier');
 const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
+const complianceGate = require('../content/compliance-gate');
 const { describeHeroForAlt } = require('../content/hero-alt-vision');
 const { normalizeContentUrl } = require('../content/content-registry');
 const { normalizeSpokeSites, SPOKE_SITE_KEYS, HUB_SITE_KEYS } = require('./spoke-sites');
@@ -860,6 +861,43 @@ async function assertFactCheckClear({ title, body, city, keyword, tag }, label) 
   }
 }
 
+// Run the LLM SEMANTIC compliance check and throw BLOG_COMPLIANCE_FAILED on a
+// P0. The regex guardrails above already blocked every violation they can
+// match; this catches the paraphrases their representation cannot express —
+// most importantly whether a dry/timing clause actually GOVERNS the safety
+// predicate ("safe once dry", exempt) or some other one ("safe for pets and
+// works after it dries", a bare unconditional claim). Same fail-open posture
+// as the fact-check above, so this only throws on a real compliance block.
+// `meta` carries the EDITABLE metadata strings this lane actually writes —
+// meta description, meta title, hero alt. The deterministic guard scans them as
+// publishable text (content-guardrails.js `publishableText`), and a
+// clause-attachment violation in a meta description is exactly as
+// customer-visible as one in the body, so the semantic layer must see the same
+// surface (Codex PR #3295 r1). Refresh lanes pass no hero alt, mirroring the
+// regex gate: publishRefresh freezes frontmatter, so an alt it will not commit
+// must not park the run. The sanctioned {{cityPhone}} token is scrubbed for the
+// same reason the regex gate scrubs it — it is contract-required boilerplate,
+// not prose, and only the deterministic guard polices where it may appear.
+async function assertComplianceClear({ title, body, meta = [], city, keyword, tag }, label) {
+  const metaText = meta
+    .filter(Boolean)
+    .map((v) => String(v).replace(/\{\{\s*cityPhone\s*\}\}/g, '').trim())
+    .filter(Boolean)
+    .join('\n\n');
+  const publishableText = metaText ? `${body}\n\n${metaText}` : body;
+  const compliance = await complianceGate.evaluate({ title, body: publishableText, city, keyword, tag });
+  if (!compliance.pass) {
+    const blocking = compliance.findings.filter((f) => f.severity === 'P0');
+    const err = new Error(`compliance gate failed: ${blocking.map((f) => `${f.code} ${f.message}`).join(' | ')}`);
+    err.code = 'BLOG_COMPLIANCE_FAILED';
+    err.details = blocking;
+    throw err;
+  }
+  if (compliance.findings.length) {
+    logger.info(`[astro-publisher] compliance advisory for ${label}: ${compliance.findings.map((f) => `${f.severity} ${f.code} ${f.message}`).join(' | ')}`);
+  }
+}
+
 async function publishAstro(postId) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
@@ -1078,6 +1116,23 @@ async function publishAstro(postId) {
     // reviewer byline. Fail-open; blocks only on P0/P1 findings.
     await assertFactCheckClear(
       { title: post.title, body, city: post.city, keyword: post.keyword, tag: post.tag },
+      slug,
+    );
+
+    // 2c-2. LLM SEMANTIC compliance check — the second layer for the two hard
+    // codes. Gate 2b's regexes catch every phrasing they encode; this reads for
+    // meaning and catches the ones no pattern can express (see compliance-gate
+    // header). Runs AFTER the deterministic gate so the cheap check rejects the
+    // obvious cases first and the model only sees copy that already passed.
+    await assertComplianceClear(
+      {
+        title: post.title,
+        body,
+        meta: [data.metaTitle, data.meta_description, data.hero_image_alt, data.hero_image?.alt],
+        city: post.city,
+        keyword: post.keyword,
+        tag: post.tag,
+      },
       slug,
     );
 
@@ -1666,6 +1721,19 @@ async function publishOrUpdatePage(draft, brief = {}) {
     tag: frontmatter.category,
   }, slug);
 
+  // Semantic compliance, same placement as the fact-check above. This is the
+  // UNATTENDED lane — an autonomous draft that clears every gate publishes with
+  // no human in the loop — so it needs the semantic layer at least as much as
+  // the admin lane does. Hero alt is included: publishOrUpdatePage writes it.
+  await assertComplianceClear({
+    title: frontmatter.title,
+    body,
+    meta: [frontmatter.metaTitle, frontmatter.meta_description, frontmatter.hero_image_alt, frontmatter.hero_image?.alt],
+    city: brief.city || (Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag[0] : ''),
+    keyword: frontmatter.primary_keyword,
+    tag: frontmatter.category,
+  }, slug);
+
   // Resolve the real hero: reuse a hero already committed on main (update /
   // refresh runs must not regenerate), otherwise generate + compress one to
   // commit into this branch. Fails CLOSED (deterministic publish error) —
@@ -1680,6 +1748,26 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // same policy here — a violating alt falls back to the already-scanned
   // draft alt instead of bypassing the gates.
   stampAutonomousHero(frontmatter, hero.src, vetGeneratedAlt(hero.alt, heroAlt, Array.isArray(frontmatter.domains) ? frontmatter.domains : null));
+
+  // The compliance gate above scanned the DRAFT alt; a generated hero replaces
+  // it, and vetGeneratedAlt is the deterministic guard only — so the alt that
+  // actually ships never saw the semantic layer (Codex PR #3295 r3). The
+  // reasoning is already in the comment above for the regex guard; it applies
+  // identically here. Re-checked only when the stamped alt DIFFERS from the one
+  // already scanned, so a reused hero costs nothing. The main gate stays before
+  // hero resolution so a compliance block still never burns image-generation
+  // cost — this is the narrow second pass for text that did not exist yet.
+  const stampedAlt = String(frontmatter.hero_image?.alt || '').trim();
+  if (stampedAlt && stampedAlt !== heroAlt) {
+    await assertComplianceClear({
+      title: frontmatter.title,
+      body: '',
+      meta: [stampedAlt],
+      city: brief.city || (Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag[0] : ''),
+      keyword: frontmatter.primary_keyword,
+      tag: frontmatter.category,
+    }, `${slug} (generated hero alt)`);
+  }
 
   // Binding validation — runs on the FINAL frontmatter, after hero stamping,
   // so what we validate is exactly what we commit.
@@ -1852,6 +1940,22 @@ async function publishMetadataRewrite(draft, brief = {}) {
     };
   }
 
+  // Semantic compliance on the METADATA lane. This is the fourth publisher
+  // entry point and the easiest one to overlook, because it writes no body —
+  // but a meta description is customer-visible on every SERP and social card,
+  // and the compliance codes govern it exactly as they govern prose. Runs
+  // BEFORE branch creation so a blocked rewrite never opens an orphan PR, same
+  // placement rationale as the fact-check on the other lanes. There is no body
+  // here, so the effective title + description ARE the publishable text.
+  await assertComplianceClear({
+    title: nextFrontmatter.title,
+    body: '',
+    meta: [nextFrontmatter.title, nextFrontmatter.metaTitle, nextFrontmatter.meta_description, nextFrontmatter.metaDescription],
+    city: brief.city || '',
+    keyword: brief.primary_keyword || '',
+    tag: nextFrontmatter.category || '',
+  }, filePath);
+
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/meta-${branchSlug}-${shortId()}`;
   await gh.createBranch(branch);
@@ -1998,6 +2102,26 @@ async function publishRefresh(draft, brief = {}) {
       tag: nextFrontmatter.category,
     }, filePath);
   }
+
+  // Semantic compliance on the refresh lane too, for EVERY customer-facing
+  // target — not just blogs. The fact-check above is blog-scoped because its
+  // prompt is blog-tuned (pest biology, turf pathogens, county ordinances);
+  // the compliance codes are not. An unconditional safety claim or a
+  // wildlife-trapping offer on a SERVICE or LOCATION page is the same
+  // violation, on a page with more commercial intent than most blog posts.
+  // Also NOT gated on bodyChanged, unlike the fact-check: a refresh can rewrite
+  // only the meta description, and that description ships. Hero alt is EXCLUDED
+  // here, mirroring the regex gate — publishRefresh freezes frontmatter and
+  // applies only the title/meta fields, so an alt it never commits must not
+  // park the run.
+  await assertComplianceClear({
+    title: nextFrontmatter.title,
+    body: newBody,
+    meta: [nextFrontmatter.metaTitle, nextFrontmatter.meta_description, nextFrontmatter.metaDescription],
+    city: brief.city || (Array.isArray(nextFrontmatter.service_areas_tag) ? nextFrontmatter.service_areas_tag[0] : ''),
+    keyword: nextFrontmatter.primary_keyword,
+    tag: nextFrontmatter.category,
+  }, filePath);
 
   const markdown = fm.stringify(nextFrontmatter, `${newBody}\n`);
 
