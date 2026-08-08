@@ -571,7 +571,7 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx) {
     }
     joinedWentStale = true;
   }
-  const planned = await findLeadForCall(callLog);
+  const planned = await findLeadForCall(callLog, { dbc: trx });
   if (!planned?.leadId) {
     return { match: null, reason: joinedWentStale ? 'lead_not_live' : 'lead_not_found' };
   }
@@ -586,23 +586,35 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx) {
   return { match: { ...planned, customerId: plannedOwner?.customer_id || planned.customerId || null } };
 }
 
-async function findLeadForCall(callLog) {
-  const plan = leadMatchPlan(callLog);
-  if (!plan) return null;
-
-  let query = db('leads').select('id', 'customer_id').whereNull('deleted_at');
+// ONE definition of the plan's matching predicate, used by the resolver AND
+// re-applied atomically inside the attribution UPDATE (pre-push P1 r7): the
+// lead's customer, phone, or contact time can change between resolution and
+// the write, and a lead that no longer matches the call must not be
+// attributed. The match object carries the plan fields, so the write-time
+// recheck needs no second lookup.
+function applyLeadPlanPredicates(query, plan) {
+  let q = query;
   if (plan.strategy === 'customer_id') {
-    query = query.where({ customer_id: plan.customerId });
+    q = q.where({ customer_id: plan.customerId });
   } else {
-    query = query.whereRaw(
+    q = q.whereRaw(
       "RIGHT(REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?",
       [plan.phoneLast10],
     );
   }
-
-  const lead = await query
+  return q
     .where('first_contact_at', '>=', plan.startAt)
-    .where('first_contact_at', '<=', plan.endAt)
+    .where('first_contact_at', '<=', plan.endAt);
+}
+
+async function findLeadForCall(callLog, { dbc = db } = {}) {
+  const plan = leadMatchPlan(callLog);
+  if (!plan) return null;
+
+  const lead = await applyLeadPlanPredicates(
+    dbc('leads').select('id', 'customer_id').whereNull('deleted_at'),
+    plan,
+  )
     .orderByRaw('ABS(EXTRACT(EPOCH FROM (first_contact_at - ?::timestamptz))) ASC', [plan.callAt])
     .orderBy('created_at', 'desc')
     .first();
@@ -623,10 +635,15 @@ async function updateLeadAttribution(leadMatch, bridgeSource, now, { linkageCall
   // With `linkageCallId` (the joined-lead arm), the sid/stamp linkage is
   // revalidated ATOMICALLY with the write via the correlated EXISTS —
   // never from the pre-scan snapshot (pre-push P1 r1).
+  // A PLAN-resolved match re-applies its own matching predicate here
+  // (pre-push P1 r7) — the match object carries the plan fields — so a
+  // lead whose customer/phone/contact time changed since resolution
+  // writes zero rows instead of being attributed anyway.
   let query = dbc('leads')
     .where({ id: leadMatch.leadId })
     .whereNull('deleted_at');
   if (linkageCallId) query = whereCallStillLinked(query, linkageCallId);
+  else if (leadMatch.strategy && leadMatch.strategy !== 'joined_lead') query = applyLeadPlanPredicates(query, leadMatch);
   const updated = await query.update({
     lead_source_id: bridgeSource.id,
     updated_at: now,
@@ -778,14 +795,23 @@ async function applyBridge(options = {}) {
                 // live-ness and the CURRENT owner are read under the row
                 // lock, so a concurrent soft-delete or customer
                 // reassignment can't produce a stale attribution pair.
-                const lm = await findLeadForCall(match.callLog).catch(() => null);
+                const lm = await findLeadForCall(match.callLog, { dbc: trx }).catch(() => null);
                 if (lm?.leadId) {
                   const lockedFallback = await trx('leads')
                     .where({ id: lm.leadId })
                     .whereNull('deleted_at')
                     .forUpdate()
                     .first('id', 'customer_id');
-                  if (lockedFallback) {
+                  // Lock, THEN re-check the plan predicate as a second
+                  // statement (same two-statement rule as the linkage
+                  // check; pre-push P1 r6/r7) — a lead whose matching
+                  // fields changed while we waited must not feed the
+                  // funnel.
+                  const stillMatches = lockedFallback && await applyLeadPlanPredicates(
+                    trx('leads').where({ id: lm.leadId }).whereNull('deleted_at'),
+                    lm,
+                  ).first('id');
+                  if (stillMatches) {
                     backfillLeadId = lm.leadId;
                     backfillCustomerId = lockedFallback.customer_id || lm.customerId || backfillCustomerId;
                   }
