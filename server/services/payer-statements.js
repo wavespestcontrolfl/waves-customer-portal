@@ -15,8 +15,10 @@ const logger = require('./logger');
 const { etMonthStart, etMonthEnd, etDateString, addETDays } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 
-// NET term → days the statement is due after its close date.
-const STATEMENT_TERM_DAYS = { net15: 15, net30: 30 };
+// NET term → days the statement is due after its close date — the canonical
+// map lives with the payer vocabulary (payer.js), shared with proposal
+// acceptance invoicing so term semantics can never drift between the two.
+const { PAYMENT_TERM_NET_DAYS: STATEMENT_TERM_DAYS } = require('./payer');
 
 function generateStatementToken() {
   return crypto.randomBytes(32).toString('hex');

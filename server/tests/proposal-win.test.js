@@ -1,6 +1,16 @@
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/invoice', () => ({ create: jest.fn() }));
-jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-06-20' }));
+jest.mock('../utils/datetime-et', () => ({
+  // No-arg calls resolve the mocked "today"; date-arg calls format the date,
+  // so Net-N due-date tests can assert actual offsets from mocked today.
+  etDateString: (date) => (date ? date.toISOString().slice(0, 10) : '2026-06-20'),
+  addETDays: (_date, days) => new Date(Date.UTC(2026, 5, 20 + (days || 0))),
+}));
+jest.mock('../services/payer', () => ({
+  PAYMENT_TERMS: ['due_on_receipt', 'net15', 'net30'],
+  PAYMENT_TERM_NET_DAYS: { net15: 15, net30: 30 },
+  resolveForInvoice: jest.fn().mockResolvedValue({ payerId: null, paymentTerms: null }),
+}));
 jest.mock('../routes/admin-customers', () => ({
   ensureCustomerAccount: jest.fn(),
   createDefaultCustomerRows: jest.fn().mockResolvedValue(),
@@ -10,6 +20,7 @@ const InvoiceService = require('../services/invoice');
 const adminCustomers = require('../routes/admin-customers');
 const {
   buildProposalFirstInvoice,
+  proposalNetTermDays,
   createProposalAcceptanceInvoice,
   ensureCustomerForProposalWin,
   promoteLinkedCustomerForProposalWin,
@@ -38,6 +49,21 @@ const SIESTA_PROPOSAL = {
   ],
 };
 
+describe('proposalNetTermDays', () => {
+  test('maps only the canonical payer tokens — lookup, never a parse (codex #3297 r2)', () => {
+    const withTerms = (paymentTerms) => ({ commercialTerms: { paymentTerms } });
+    expect(proposalNetTermDays(withTerms('net30'))).toBe(30);
+    expect(proposalNetTermDays(withTerms('net15'))).toBe(15);
+    expect(proposalNetTermDays(withTerms('due_on_receipt'))).toBe(0);
+    // Non-canonical strings never reach here (the normalizer nulls them and
+    // the PUT route 400s them) — and this lookup ignores them regardless.
+    expect(proposalNetTermDays(withTerms('Net-30 to the management company'))).toBe(0);
+    expect(proposalNetTermDays(withTerms(''))).toBe(0);
+    expect(proposalNetTermDays({})).toBe(0);
+    expect(proposalNetTermDays(null)).toBe(0);
+  });
+});
+
 describe('buildProposalFirstInvoice', () => {
   test('bills every line once with building prefix + first-period labels and mixed tax', () => {
     const built = buildProposalFirstInvoice(SIESTA_PROPOSAL);
@@ -52,6 +78,56 @@ describe('buildProposalFirstInvoice', () => {
     expect(built.taxAmount).toBe(49.7);
     expect(built.total).toBe(2259.7);
     // Blended rate must reproduce the exact tax dollars through a single-rate invoice.
+    expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
+  });
+
+  test('bills structured corrective-work lines too — the accepted remediation must reach the invoice (slice 1A-i)', () => {
+    const built = buildProposalFirstInvoice({
+      ...SIESTA_PROPOSAL,
+      correctiveWork: [
+        { label: 'German roach cleanout — Units 2 & 4', amount: 450, taxable: true, includes: ['Both kitchens'] },
+        { label: 'Soffit exclusion', amount: 300, taxable: false },
+        { label: 'Zero-dollar note', amount: 0 },
+      ],
+    });
+    expect(built.lineItems.slice(-2)).toEqual([
+      { description: 'German roach cleanout — Units 2 & 4', quantity: 1, unit_price: 450 },
+      { description: 'Soffit exclusion', quantity: 1, unit_price: 300 },
+    ]);
+    expect(built.subtotal).toBe(2960);           // 2210 + 750
+    expect(built.taxableSubtotal).toBe(1160);    // 710 + 450
+    expect(built.taxAmount).toBe(81.2);          // 1160 * 0.07
+    expect(built.total).toBe(3041.2);
+    expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
+  });
+
+  test('rounds recurring and one-time tax buckets separately, matching computeProposalTotals (codex 1A-i r3 P0)', () => {
+    // Two $100.07 taxable amounts at 7%: each bucket's tax is $7.0049 →
+    // $7.00 rounded per bucket = $14.00 total. A merged bucket would round
+    // $14.0098 → $14.01 and invoice a cent more than the accepted proposal.
+    const built = buildProposalFirstInvoice({
+      taxRate: 0.07,
+      buildings: [{
+        name: 'B',
+        lineItems: [{ description: 'Annual program', quantity: 1, unitPrice: 100.07, frequency: 'annual', taxable: true, amount: 100.07 }],
+      }],
+      correctiveWork: [{ label: 'Cleanout', amount: 100.07, taxable: true }],
+    });
+    expect(built.taxAmount).toBe(14);
+    expect(built.total).toBe(214.14);
+    const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
+    const totals = computeProposalTotals(normalizeProposal({
+      estimate_data: {
+        proposal: {
+          enabled: true,
+          taxRate: 0.07,
+          buildings: [{ name: 'B', lineItems: [{ description: 'Annual program', unitPrice: 100.07, frequency: 'annual', taxable: true }] }],
+          correctiveWork: [{ label: 'Cleanout', amount: 100.07, taxable: true }],
+        },
+      },
+    }));
+    // The invoice's tax dollars equal the proposal's for coinciding amounts.
+    expect(built.taxAmount).toBe(totals.totalTax);
     expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
   });
 
@@ -104,6 +180,7 @@ function makeInvoiceTrx({ propertyType } = {}) {
   const trx = jest.fn(() => {
     const builder = {
       where() { return builder; },
+      forShare() { return builder; },
       first: async () => (propertyType === undefined ? null : { property_type: propertyType }),
       update(patch) { ops.updates.push(patch); return Promise.resolve(1); },
     };
@@ -130,7 +207,71 @@ describe('createProposalAcceptanceInvoice', () => {
     expect(args.lineItems).toHaveLength(3);
     expect(Math.round(2210 * args.taxRate * 100) / 100).toBe(49.7);
     expect(invoice.invoice_number).toBe('WPC-2026-0007');
+    // No authored payment terms → due on receipt (mocked today).
+    expect(args.dueDate).toBe('2026-06-20');
     expect(ops.updates).toHaveLength(0); // already commercial → no re-flag
+  });
+
+  test('authored Net-15 terms push the invoice due date 15 ET days out (codex 1A-i r4 P0)', async () => {
+    InvoiceService.create.mockResolvedValue({ id: 8, invoice_number: 'WPC-2026-0008', total: 1 });
+    const { trx } = makeInvoiceTrx({ propertyType: 'commercial' });
+    await createProposalAcceptanceInvoice({
+      trx,
+      estimate: { id: 42 },
+      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net15' } },
+      customerId: 'cust-1',
+    });
+    expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-07-05');
+  });
+
+  test('payer-term resolution: match proceeds on payer terms, mismatch REJECTS acceptance, self-pay uses the proposal term (codex #3297 r2d)', async () => {
+    const { resolveForInvoice } = require('../services/payer');
+    // Payer resolution runs TWICE per win (lock-then-re-resolve, codex
+    // #3297 r4b) — queue each payer scenario's value for both reads.
+    const queuePayer = (value) => {
+      resolveForInvoice.mockResolvedValueOnce(value).mockResolvedValueOnce(value);
+    };
+    // Active payer whose terms MATCH the authored term → invoices on it.
+    InvoiceService.create.mockResolvedValue({ id: 10, invoice_number: 'WPC-2026-0010', total: 1 });
+    queuePayer({ payerId: 77, paymentTerms: 'net30' });
+    await createProposalAcceptanceInvoice({
+      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
+      estimate: { id: 42 },
+      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net30' } },
+      customerId: 'cust-1',
+    });
+    expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-07-20');
+
+    // Active payer CONTRADICTING the rendered agreement → 409, no invoice —
+    // acceptance must never silently bill a term the customer didn't see.
+    queuePayer({ payerId: 77, paymentTerms: 'net30' });
+    await expect(createProposalAcceptanceInvoice({
+      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
+      estimate: { id: 43 },
+      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net15' } },
+      customerId: 'cust-1',
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+
+    // Payer with terms but NO authored term → payer terms, no conflict.
+    queuePayer({ payerId: 77, paymentTerms: 'net15' });
+    await createProposalAcceptanceInvoice({
+      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
+      estimate: { id: 44 },
+      proposal: SIESTA_PROPOSAL,
+      customerId: 'cust-1',
+    });
+    expect(InvoiceService.create.mock.calls[1][0].dueDate).toBe('2026-07-05');
+
+    // Self-pay resolution falls back to the authored proposal term.
+    resolveForInvoice.mockResolvedValueOnce({ payerId: null, paymentTerms: null });
+    await createProposalAcceptanceInvoice({
+      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
+      estimate: { id: 45 },
+      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net15' } },
+      customerId: 'cust-1',
+    });
+    expect(InvoiceService.create.mock.calls[2][0].dueDate).toBe('2026-07-05');
   });
 
   test('flags a non-commercial customer commercial when the proposal is taxable', async () => {

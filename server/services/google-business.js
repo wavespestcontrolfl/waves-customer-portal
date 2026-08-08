@@ -890,6 +890,11 @@ class GoogleBusinessService {
     let totalSynced = 0, totalNew = 0;
     const errors = [];
     const sources = {};
+    // Current-run pull sizes per location — the health check must judge the
+    // FEED, not retained rows (a wiped profile keeps its old rows with
+    // missing_since stamps, so a stored-row count reads healthy forever —
+    // codex #3298 r1).
+    const pulledCounts = {};
     // Unlinked-review notifications collected across the WHOLE run and fired
     // after every location's reviews are inserted/linked — the likely-reviewer
     // exclusion must see the full batch (codex #3264 r2).
@@ -924,6 +929,7 @@ class GoogleBusinessService {
             // fallback and stall reconciliation. Pagination fetches all
             // pages regardless.
             const reviews = await this.getAllLocationReviews(loc.googleLocationResourceName, loc.id);
+            pulledCounts[loc.id] = reviews.length;
             for (const review of reviews) {
               const normalized = this._normalizeGbpReview(review, loc);
               const result = await this._upsertGbpReview(normalized, locSyncStart, pendingUnlinked);
@@ -964,6 +970,7 @@ class GoogleBusinessService {
           }
           if (GOOGLE_KEY) {
             const sample = await this._syncPlacesReviewSampleForLocation(loc, GOOGLE_KEY, pendingUnlinked);
+            pulledCounts[loc.id] = sample.synced;
             totalSynced += sample.synced;
             totalNew += sample.new;
             sources[loc.id] = sample.synced > 0 ? 'places_fallback' : 'none';
@@ -1000,7 +1007,176 @@ class GoogleBusinessService {
       logger.warn(`[gbp] Review incentive sync skipped: ${err?.code || err?.name || 'Error'}`);
     }
 
+    // Outcome-level health check (2026-08-08 audit): the degraded-sync bell
+    // only fires when the sync MECHANICS fail this run. Two silent classes
+    // slipped through it for months: a GBP pull that "succeeds" with an
+    // empty feed (Venice — Google wiped the profile's reviews and nothing
+    // noticed), and Places stats failing quietly under its catch→warn
+    // (every location's _stats froze). Reviewers on a dead feed can never
+    // auto-mark as having reviewed, so they keep getting asked — the exact
+    // class the 2026-08-08 manual review-status backfill fixed by hand.
+    // Best-effort: health
+    // reporting must never break the sync itself.
+    await this._assessReviewSyncHealth(sources, pulledCounts).catch((err) => {
+      logger.warn(`[gbp] review sync health assessment failed: ${err.message}`);
+    });
+
     return { synced: totalSynced, new: totalNew, errors, sources };
+  }
+
+  /**
+   * Pure classifier for one location's sync-health picture. Returns null when
+   * healthy, else { cls, severity ('FIX'|'ACT'), detail }.
+   *
+   * Classes:
+   *   feed_down     FIX  nothing synced this run (no GBP, no Places sample)
+   *   feed_degraded ACT  GBP creds broken; running on the ~5-review sample
+   *   silent_empty  ACT  GBP pull succeeds but the feed has ZERO reviews
+   *                      (the Venice wipe class — mechanically "healthy")
+   *   ingest_stale  ACT  Google shows more reviews than we ever ingested and
+   *                      nothing new has landed in 14d — reviewers exist that
+   *                      auto-mark can never see
+   *   stats_stale   ACT  no _stats row, or Places stats older than 7d — the
+   *                      totals cross-check above is running blind
+   */
+  _classifyLocationSyncHealth({ hasResource, source, pulledCount, rowCount, newestIngestAt, statsUpdatedAt, statsTotal, now = Date.now() }) {
+    if (!hasResource) return null;               // not a GBP-tracked location
+    if (source === 'concurrent_skip') return null; // another runner owns this cycle
+    const days = (ts) => (ts ? (now - new Date(ts).getTime()) / 86400000 : Infinity);
+
+    if (source === 'none') {
+      return { cls: 'feed_down', severity: 'FIX', detail: 'nothing synced this run — GBP pull failed and no Places sample landed' };
+    }
+    if (source === 'places_fallback') {
+      return { cls: 'feed_degraded', severity: 'ACT', detail: 'GBP credentials are broken — running on the ~5-review Places sample; removals and most new reviews are invisible' };
+    }
+    // Judged on the CURRENT pull, not retained rows: a wiped profile keeps
+    // its historical rows (missing_since-stamped, never deleted), so a
+    // stored-row count would read healthy forever after the wipe.
+    if (source === 'gbp' && Number(pulledCount) === 0) {
+      return { cls: 'silent_empty', severity: 'ACT', detail: 'the GBP pull succeeds but the feed returns ZERO reviews — profile wiped, suspended, or re-created (the Venice class)' };
+    }
+    if (Number.isFinite(statsTotal) && statsTotal > rowCount && days(newestIngestAt) > 14) {
+      return { cls: 'ingest_stale', severity: 'ACT', detail: `Google shows ${statsTotal} reviews but only ${rowCount} were ever ingested and nothing new in ${Math.floor(days(newestIngestAt))}d — those reviewers can never auto-mark` };
+    }
+    if (days(statsUpdatedAt) > 7) {
+      return { cls: 'stats_stale', severity: 'ACT', detail: statsUpdatedAt ? `Places stats last updated ${Math.floor(days(statsUpdatedAt))}d ago — the review-total cross-check is blind` : 'no Places stats row has ever been written for this location' };
+    }
+    return null;
+  }
+
+  /**
+   * Emailed escalation of the per-location classification — exceptions only
+   * (a healthy fleet sends nothing), email-first to contact@ with the FIX:/
+   * ACT: subject convention (bounce-rescue pattern), admin bell as the
+   * backup channel, 24h-deduped via the notifications table. Kill switch:
+   * REVIEW_SYNC_HEALTH_EMAIL=off (same convention as EMAIL_BOUNCE_RECOVERY).
+   */
+  async _assessReviewSyncHealth(sources = {}, pulledCounts = {}) {
+    if (String(process.env.REVIEW_SYNC_HEALTH_EMAIL || '').toLowerCase() === 'off') return { skipped: 'disabled' };
+    // A cycle split across overlapping runners (per-location locks) gives
+    // each runner a PARTIAL fleet view — two different signatures would both
+    // pass the signature-keyed dedupe and double-email in the same hour
+    // (pre-push audit r2). Defer to the next complete cycle instead; the
+    // hourly cadence makes that at most an hour of delay.
+    if (Object.values(sources).includes('concurrent_skip')) return { skipped: 'partial_cycle' };
+
+    const rows = await db('google_reviews')
+      .select('location_id')
+      // LIVE rows only — retained missing_since removal evidence must not
+      // count as coverage: 60 historical rows incl. 20 removals would make a
+      // Places total of 47 read fully ingested while the live feed holds 40
+      // (codex #3298 r2). newest_ingest_at stays all-rows: ingestion recency
+      // is about the pipeline moving, not the row's later removal.
+      .select(db.raw(`COUNT(*) FILTER (WHERE reviewer_name != '_stats' AND missing_since IS NULL) AS row_count`))
+      .select(db.raw(`MAX(created_at) FILTER (WHERE reviewer_name != '_stats') AS newest_ingest_at`))
+      // _syncPlacesStatsForLocation stamps synced_at (updated_at has no
+      // auto-touch trigger) — reading updated_at would mark every
+      // established location stats_stale forever (codex #3298 r1).
+      .select(db.raw(`MAX(COALESCE(synced_at, updated_at)) FILTER (WHERE reviewer_name = '_stats') AS stats_updated_at`))
+      .groupBy('location_id');
+    const byLoc = Object.fromEntries(rows.map((r) => [r.location_id, r]));
+
+    // _stats totals ride in the row's review_text as JSON ({rating, totalReviews}).
+    const statsRows = await db('google_reviews')
+      .where({ reviewer_name: '_stats' })
+      .select('location_id', 'review_text');
+    const totals = {};
+    for (const s of statsRows) {
+      try { totals[s.location_id] = Number(JSON.parse(s.review_text)?.totalReviews); } catch { /* unparseable stats */ }
+    }
+
+    const findings = [];
+    for (const loc of WAVES_LOCATIONS) {
+      const agg = byLoc[loc.id] || {};
+      const verdict = this._classifyLocationSyncHealth({
+        hasResource: !!loc.googleLocationResourceName,
+        source: sources[loc.id],
+        pulledCount: pulledCounts[loc.id],
+        rowCount: Number(agg.row_count) || 0,
+        newestIngestAt: agg.newest_ingest_at || null,
+        statsUpdatedAt: agg.stats_updated_at || null,
+        statsTotal: totals[loc.id],
+      });
+      if (verdict) findings.push({ loc, ...verdict });
+    }
+    if (!findings.length) return { healthy: true };
+
+    const anyFix = findings.some((f) => f.severity === 'FIX');
+    // Signature-keyed dedupe (pre-push audit): a constant title would let one
+    // location's stats_stale suppress a DIFFERENT location going feed_down an
+    // hour later. Same finding set → deduped 24h; any new/changed finding →
+    // new title → sends immediately.
+    const signature = findings.map((f) => `${f.loc.id}:${f.cls}`).sort().join('|');
+    const title = `Review sync health escalation [${signature}]`;
+    const result = await runExclusive('gbp-sync-health-notify', async () => {
+      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const recent = await db('notifications')
+        .where({ recipient_type: 'admin', title })
+        .where('created_at', '>', dayAgo)
+        .first();
+      if (recent) return { deduped: true };
+
+      const lines = findings.map((f) => `${f.severity} ${f.loc.name} [${f.cls}]: ${f.detail}`);
+      const body = [
+        'Hourly Google review sync — per-location health check found problems the mechanical degraded-sync alert cannot see:',
+        '',
+        ...lines,
+        '',
+        'A dead or stale feed means reviewers on that profile are never auto-marked as having reviewed, so review asks keep going to customers who already reviewed.',
+        'Remediation: reconnect the GBP account for credential failures (/admin/reviews sync status); for silent_empty confirm the profile state in Google Business Profile (removed/suspended listings need the support case); stats_stale usually means the Places API call is failing — check GOOGLE_MAPS_API_KEY quota/validity.',
+      ].join('\n');
+      const subject = `${anyFix ? 'FIX' : 'ACT'}: Google review sync — ${findings.length} location${findings.length === 1 ? '' : 's'} degraded or stale`;
+
+      // Durable claim BEFORE the external send (pre-push audit): SMTP
+      // succeeding before the marker lands would resend the email every
+      // hourly run if the process died or the insert failed (notifyAdmin
+      // swallows DB errors → null). The bell row is the claim AND the backup
+      // surface, so it always carries the full body; no marker → no send,
+      // and the next hourly tick retries the whole escalation.
+      const marker = await NotificationService.notifyAdmin(
+        'review',
+        title,
+        `${subject}\n\n${body}`,
+        // bell: true — GATE_ADMIN_BELL_POLICY suppressing this row would
+        // erase the dedupe marker (codex #3298 r1).
+        { link: '/admin/reviews', bell: true },
+      );
+      if (!marker) return { skipped: 'marker_failed' };
+
+      let emailed = false;
+      try {
+        const email = require('./email');
+        const sent = await email.send({ to: 'contact@wavespestcontrol.com', subject, heading: 'Review sync health', body });
+        emailed = !!sent?.ok;
+      } catch { /* the bell already carries the full body */ }
+      if (!emailed) {
+        logger.warn('[gbp] sync-health escalation email failed — the bell carries the full escalation');
+      }
+      return { emailed, findings: findings.length };
+    }, { recordHealth: false });
+    if (result?.skipped === true) return { skipped: 'lock' };
+    return result;
   }
 
   /**

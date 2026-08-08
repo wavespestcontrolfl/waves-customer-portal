@@ -1,5 +1,6 @@
 import { fmtMoney } from '../../lib/money';
 import { glassRowInclusions } from '../../lib/estimate-glass-copy';
+import { commercialTermRows, proposalHasAuthoredTerms } from '../../lib/proposal-sections';
 import { estimateCard, estimateInnerBox } from './cardStyles';
 import { W } from './tokens';
 
@@ -55,14 +56,27 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
   // bullets claiming the opposite (codex #3281 r1). The gate lives
   // server-side: /data only ships a `proposal` block under
   // GATE_ESTIMATE_COMMERCIAL_GLASS.
-  const inclusions = proposal.pestRecurringOnly === true && !proposal.terms
+  // Structured commercialTerms are authored terms in the same sense as the
+  // free-text block, so they suppress the canned stack the same way.
+  const inclusions = proposal.pestRecurringOnly === true && !proposalHasAuthoredTerms(proposal)
     ? (glassRowInclusions('commercial_pest') || null)
     : null;
+  // Structured agreement sections (slice 1A-i) — every one optional; a legacy
+  // proposal (buildings + free terms) renders exactly as before.
+  const propertyScopeItems = proposal.propertyScope?.items || [];
+  const correctiveWork = Array.isArray(proposal.correctiveWork) ? proposal.correctiveWork : [];
+  const responsibilities = Array.isArray(proposal.customerResponsibilities)
+    ? proposal.customerResponsibilities : [];
+  const termRows = commercialTermRows(proposal.commercialTerms);
+  const sectionTitle = {
+    fontSize: 14, fontWeight: 800, color: W.blueDeeper, marginTop: 14, marginBottom: 2,
+  };
   // Taxable-line identification (codex #3281 r4) — parity with the PDF and
   // the pdfkit document it replaced: mark each taxed amount, show the rate,
   // explain the marker. A mixed taxable/exempt proposal must let the
   // customer verify the calculation line by line.
-  const anyTaxableLine = proposal.buildings.some((b) => (b.lineItems || []).some((li) => li.taxable === true));
+  const anyTaxableLine = proposal.buildings.some((b) => (b.lineItems || []).some((li) => li.taxable === true))
+    || correctiveWork.some((work) => work.taxable === true);
   const taxRateSource = Number(totals.taxRate) > 0 ? Number(totals.taxRate) : Number(proposal.taxRate);
   const taxRatePct = taxRateSource > 0 ? (taxRateSource * 100).toFixed(2) : null;
   // One-time-only proposals have no plan year — "First-year total" would
@@ -82,6 +96,18 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
           ? 'Everything in your formal proposal, itemized — the emailed PDF carries this same detail.'
           : 'Everything in your formal proposal, itemized.'}
       </div>
+
+      {propertyScopeItems.length ? (
+        <div style={{ marginBottom: 6 }}>
+          <div style={{ ...sectionTitle, marginTop: 0 }}>Property scope</div>
+          {propertyScopeItems.map((item, idx) => (
+            <div key={`${item.label}-${idx}`} style={{ ...lineRow, padding: '6px 0' }}>
+              <span style={{ color: W.textCaption }}>{item.label}</span>
+              <span style={{ fontWeight: 600, color: W.textBody, textAlign: 'right', minWidth: 0 }}>{item.value}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
 
       {proposal.buildings.map((building, bIdx) => (
         <div key={`${building.name || 'building'}-${bIdx}`} style={{ marginTop: bIdx === 0 ? 0 : 14 }}>
@@ -110,6 +136,42 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
           ))}
         </div>
       ))}
+
+      {correctiveWork.length ? (
+        <div>
+          <div style={sectionTitle}>Corrective work (one-time)</div>
+          {correctiveWork.map((work, idx) => (
+            <div key={`${work.label}-${idx}`} style={lineRow}>
+              <span style={{ minWidth: 0 }}>
+                {work.label}
+                {(work.includes || []).length ? (
+                  <ul style={{ margin: '2px 0 0', paddingLeft: 20 }}>
+                    {work.includes.map((inc) => (
+                      <li key={inc} style={{ fontSize: 14, color: W.textCaption, lineHeight: 1.55 }}>{inc}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </span>
+              <span style={amtStyle}>
+                {fmtMoney(work.amount)}
+                {work.taxable === true ? ' *' : ''}
+                <span style={{ fontWeight: 500, color: W.textCaption }}> one-time</span>
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {responsibilities.length ? (
+        <div>
+          <div style={sectionTitle}>Customer responsibilities</div>
+          <ul style={{ margin: 0, paddingLeft: 20 }}>
+            {responsibilities.map((line) => (
+              <li key={line} style={{ fontSize: 14, color: W.textBody, lineHeight: 1.6 }}>{line}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       <div style={{ marginTop: 14 }}>
         {Number(totals.annualRecurring) > 0 ? (
@@ -151,9 +213,24 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
         ) : null}
       </div>
 
+      {termRows.length ? (
+        <div>
+          <div style={sectionTitle}>Service terms</div>
+          {termRows.map(([label, value]) => (
+            <div key={label} style={{ ...lineRow, padding: '6px 0' }}>
+              <span style={{ flex: 'none', width: 150, color: W.textCaption }}>{label}</span>
+              <span style={{ minWidth: 0, textAlign: 'right' }}>{value}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {proposal.terms ? (
-        <div style={{ marginTop: 14, fontSize: 14, color: W.textBody, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>
-          {proposal.terms}
+        <div>
+          {termRows.length ? <div style={sectionTitle}>Additional terms</div> : null}
+          <div style={{ marginTop: termRows.length ? 0 : 14, fontSize: 14, color: W.textBody, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>
+            {proposal.terms}
+          </div>
         </div>
       ) : null}
 

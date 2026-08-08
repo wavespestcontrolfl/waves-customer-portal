@@ -47,6 +47,13 @@ function registrableDomain(url) {
 }
 // SQL: registrable domain of a gsc_pages.domain value (drops a leading www.).
 const REGISTRABLE_DOMAIN_SQL = "regexp_replace(lower(domain), '^www[.]', '')";
+// SQL: registrable domain of a column holding a BARE domain that may still
+// carry a scheme, a path, or a port (blog_posts.target_domain is hand-set in
+// places). hostRegistrableSql is for full-URL columns and returns '' here,
+// because a bare domain has no '//' to split on. `col` is an internal literal.
+function bareDomainSql(col) {
+  return `regexp_replace(regexp_replace(split_part(split_part(regexp_replace(lower(${col}), '^[a-z]+://', ''), '/', 1), ':', 1), '^www[.]', ''), '\\s', '', 'g')`;
+}
 // SQL: registrable host extracted from a full-URL column (no literal '?' — that
 // collides with knex bind placeholders; '/' and '//' are safe). `col` is internal.
 function hostRegistrableSql(col) {
@@ -141,6 +148,14 @@ const TAG_TO_SERVICE = {
   'tree-shrub': 'tree-shrub',
   tree_shrub: 'tree-shrub',
 };
+
+// Distinct from "no such page": a duplicate blog row is transient, so callers
+// must be able to retry rather than write the page off.
+function ambiguous(url) {
+  const err = new Error(`more than one blog_posts row matches ${url} on its domain`);
+  err.code = 'AMBIGUOUS_URL';
+  return err;
+}
 
 function pageUrlFor(post) {
   if (post.astro_live_url) return post.astro_live_url;
@@ -288,6 +303,73 @@ class RefreshAudit {
   }
 
   /**
+   * Resolve a page URL to the blog_posts row it belongs to, or null.
+   *
+   * enqueueRefresh is deliberately keyed by blogPostId because a bare path is
+   * ambiguous on this hub/spoke network. Non-UI producers (the regression
+   * re-queue leg) only have a URL, so the domain-safe resolution lives HERE,
+   * next to the helpers that already know how paths and domains are keyed —
+   * rather than being re-derived by every caller.
+   *
+   * Resolves page IDENTITY, deliberately not publication state. A published
+   * match wins, but a temporarily draft/scheduled post still resolves —
+   * enqueueRefresh's own NOT_PUBLISHED check is the right place to reject it,
+   * and callers treat that as a recoverable outcome. Filtering drafts out here
+   * would make them indistinguishable from a URL with no blog_posts row at
+   * all, and a caller that parks the latter would park a post that is about to
+   * be republished.
+   *
+   * Fails closed on ambiguity, but DISTINGUISHABLY: null means a confirmed
+   * absence, while more than one match throws AMBIGUOUS_URL. Guessing between
+   * them is the exact hazard the blogPostId-only rule exists to prevent — but
+   * the two are not the same fact. An absence is structural; an ambiguity is a
+   * duplicate row somebody will clean up, so a caller that permanently parks
+   * absences must be able to keep retrying ambiguities.
+   */
+  async resolvePostByUrl(url) {
+    // Published first, so a live page is never shadowed by a stale draft that
+    // happens to share its path; any-status second, for the draft case above.
+    return (await this._resolveByUrl(url, true)) || (await this._resolveByUrl(url, false));
+  }
+
+  async _resolveByUrl(url, publishedOnly) {
+    const domain = registrableDomain(url);
+    const path = urlToPath(url);
+    if (!domain || !path) return null;
+
+    const columns = ['id', 'slug', 'status', 'astro_live_url', 'target_domain', 'tag', 'city', 'keyword', 'publish_date', 'updated_at'];
+
+    // Primary: the live URL is authoritative for BOTH path and domain, so a
+    // match here cannot cross sites.
+    const live = await db('blog_posts')
+      .modify((q) => { if (publishedOnly) q.where('status', 'published'); })
+      .whereNotNull('astro_live_url')
+      .whereRaw(`${canonPathSql('astro_live_url')} = ?`, [path])
+      .whereRaw(`${hostRegistrableSql('astro_live_url')} = ?`, [domain])
+      .select(columns)
+      .limit(2);
+    if (live.length === 1) return live[0];
+    if (live.length > 1) throw ambiguous(url);
+
+    // Fallback for a row that has no live URL recorded yet: match on slug
+    // path, still domain-scoped via target_domain (or the hub default, so a
+    // hub URL resolves a hub post whose target_domain was never set).
+    const bySlug = await db('blog_posts')
+      .modify((q) => { if (publishedOnly) q.where('status', 'published'); })
+      .whereNull('astro_live_url')
+      // trim(both '/') mirrors slugPath(): a slug stored with a leading slash
+      // must not become '//slug', which canonPathSql would not normalize.
+      .whereRaw(`${canonPathSql(`'/' || trim(both '/' from slug)`)} = ?`, [path])
+      // target_domain is a BARE domain ("wavespestcontrol.com"), not a URL —
+      // hostRegistrableSql would return '' on it (no '//' to split on).
+      .whereRaw(`coalesce(nullif(${bareDomainSql('target_domain')}, ''), ?) = ?`, [HUB_DOMAIN, domain])
+      .select(columns)
+      .limit(2);
+    if (bySlug.length > 1) throw ambiguous(url);
+    return bySlug.length === 1 ? bySlug[0] : null;
+  }
+
+  /**
    * Hand a chosen published page to the existing autonomous refresh engine by
    * seeding opportunity_queue (action_type=refresh_existing_page). Idempotent via
    * dedupe_key; never resets a row the runner already claimed/finished. Safe by
@@ -297,8 +379,19 @@ class RefreshAudit {
    * raw-URL lookup is unsafe on this hub/spoke network (paths are shared across
    * domains, so a URL could resolve to the wrong domain's post). blogPostId is
    * unambiguous and pins the exact page + its domain (via astro_live_url).
+   *
+   * `cycleKey` (optional) starts a NEW refresh cycle for a page that already
+   * has a completed one. Without it the dedupe key is stable per page and the
+   * upsert preserves status='done', so a page can be refreshed through this
+   * path exactly once, ever — fine for the operator button (a second click on
+   * a finished page should be a no-op) but wrong for an automated caller
+   * reacting to a NEW signal months later, which would otherwise be told
+   * "already handled" forever. A distinct cycleKey gives that cycle its own
+   * key while every other guard still applies unchanged: the page-edit
+   * arbitration below is keyed on the PAGE, not the dedupe key, so a new cycle
+   * still cannot race a pending/claimed edit on the same page.
    */
-  async enqueueRefresh({ blogPostId = null } = {}) {
+  async enqueueRefresh({ blogPostId = null, cycleKey = null } = {}) {
     if (!blogPostId) {
       const err = new Error('blogPostId is required');
       err.code = 'BAD_REQUEST';
@@ -344,6 +437,22 @@ class RefreshAudit {
       throw err;
     }
 
+    // Built BEFORE the in-flight checks, not just before the insert: those
+    // checks return early, and a caller retrying after its own stamp failed
+    // will find the very row IT created sitting there as pending/claimed.
+    // Comparing dedupe keys is what lets it tell its own work apart from a
+    // foreign page edit — without this the retry reads its own refresh as
+    // someone else's and eventually retires the regression as a no-op.
+    //
+    // The cycle suffix must SURVIVE truncation: slicing after appending would,
+    // on a long domain/slug, cut the suffix off and collide distinct cycles
+    // with each other (or with the stable key), silently restoring the
+    // "refreshed once, ever" behaviour the suffix exists to fix. Reserve its
+    // length from the base instead.
+    const cycleSuffix = cycleKey ? `:${String(cycleKey).replace(/[^a-zA-Z0-9._-]/g, '')}` : '';
+    const dedupeBase = `refresh-audit:${targetDomain}:${post.slug || post.id}`;
+    const dedupeKey = `${dedupeBase.slice(0, 200 - cycleSuffix.length)}${cycleSuffix}`;
+
     // Don't double-queue: an in-flight refresh for this page may already exist
     // under ANOTHER bucket's dedupe_key (e.g. the GSC miner's decay_refresh), and
     // our refresh-audit key won't collide with it. claimNext only acts on one
@@ -368,7 +477,7 @@ class RefreshAudit {
       .first();
     const inflight = await inflightRefreshFor(db);
     if (inflight) {
-      return { queued: false, status: inflight.status, url: inflight.page_url, dedupeKey: inflight.dedupe_key };
+      return { queued: false, own: inflight.dedupe_key === dedupeKey, status: inflight.status, url: inflight.page_url, dedupeKey: inflight.dedupe_key };
     }
 
     const qa = await db('seo_content_qa_scores')
@@ -433,9 +542,8 @@ class RefreshAudit {
     const ageDays = ageDaysFrom(post, Date.now());
     const { priority, reasons } = scorePriority({ ageDays, qa: qa || null, decay: decay || null });
     const score = Math.max(ENQUEUE_FLOOR, priority);
-    // Domain in the key: hub + spoke pages can share a slug/path, and a
-    // domain-less key would conflate them under ON CONFLICT.
-    const dedupeKey = `refresh-audit:${targetDomain}:${post.slug || post.id}`.slice(0, 200);
+    // dedupeKey is built above, before the in-flight checks — they return
+    // early and need it to tell this caller's own row from a foreign edit.
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
     // Mirror intercept-brief-seeder's upsert: never reset a claimed/done/in-review
@@ -518,7 +626,7 @@ class RefreshAudit {
       );
     });
     if (result.__inflight) {
-      return { queued: false, status: result.__inflight.status, url: result.__inflight.page_url, dedupeKey: result.__inflight.dedupe_key };
+      return { queued: false, own: result.__inflight.dedupe_key === dedupeKey, status: result.__inflight.status, url: result.__inflight.page_url, dedupeKey: result.__inflight.dedupe_key };
     }
 
     const row = result.rows && result.rows[0];
@@ -529,8 +637,17 @@ class RefreshAudit {
     // the UI doesn't show "Queued" for a no-op on an already-handled page.
     const queued = status === 'pending';
     logger.info(`[refresh-audit] enqueue refresh ${pageUrl} (score ${score}) → status ${status}, queued=${queued}`);
-    return { queued, status, url: pageUrl, score, dedupeKey };
+    return { queued, own: true, status, url: pageUrl, score, dedupeKey };
   }
 }
 
-module.exports = new RefreshAudit();
+const refreshAudit = new RefreshAudit();
+
+// Page-identity helpers, exported so other producers key pages the SAME way
+// this module does. The hub/spoke network shares paths across domains and GSC
+// reports www/non-www + ?utm variants, so "same page" is (registrable domain,
+// canonical path) — never a raw URL string comparison. Duplicating these
+// expressions per caller is how two lanes end up disagreeing about identity.
+refreshAudit._identity = { canonPathSql, hostRegistrableSql, urlToPath, registrableDomain };
+
+module.exports = refreshAudit;
