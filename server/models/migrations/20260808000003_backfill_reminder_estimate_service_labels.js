@@ -24,10 +24,21 @@ function acceptedMixServiceName(notes) {
     .replace(/\b\d+x\s+/gi, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
-  if (!cleaned || /[&+,]/.test(cleaned)) return null;
+  // Multi-service detection keys on the producer's literal ' + ' join
+  // (formatServiceProfileLabel) — '&'/commas occur in legitimate
+  // single-service names ("Tree & Shrub") and must not disqualify recovery.
+  if (!cleaned || cleaned.includes(' + ')) return null;
   // No length cap: appointment_reminders.service_type is text
   // (20260428000010 widened it precisely so joined labels never truncate).
   return cleaned;
+}
+
+// Mirror of slot-reservation's cappedServiceType — the stored fall-through
+// value is this transform of estimates.service_interest.
+function cappedInterestForm(value) {
+  const label = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!label || label.length <= 100) return label;
+  return `${label.slice(0, 97).trimEnd()}...`;
 }
 
 exports.up = async function up(knex) {
@@ -46,7 +57,7 @@ exports.up = async function up(knex) {
 
   for (const row of rows) {
     const stored = String(row.service_type || '').trim();
-    const interest = String(row.service_interest || '').trim();
+    const interest = cappedInterestForm(row.service_interest);
     if (!stored) continue;
     if (stored !== interest && stored !== 'Estimate service') continue;
     const next = acceptedMixServiceName(row.notes);

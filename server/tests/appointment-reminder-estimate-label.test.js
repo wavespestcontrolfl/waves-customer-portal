@@ -57,10 +57,14 @@ describe('acceptedMixServiceName', () => {
     expect(acceptedMixServiceName('Accepted service mix: 6x Lawn Care.')).toBe('Lawn Care');
   });
 
-  test('rejects multi-service mixes — the addon join owns joined labels', () => {
+  test("rejects multi-service mixes by the producer's ' + ' join — the addon join owns joined labels", () => {
     expect(acceptedMixServiceName('Accepted service mix: 4x Pest Control + 12x Lawn Care.')).toBeNull();
-    expect(acceptedMixServiceName('Accepted service mix: Lawn Care & Mosquito.')).toBeNull();
-    expect(acceptedMixServiceName('Accepted service mix: A, B, and C.')).toBeNull();
+  });
+
+  test("preserves '&' and commas in legitimate single-service names", () => {
+    expect(acceptedMixServiceName('Accepted service mix: Tree & Shrub.')).toBe('Tree & Shrub');
+    expect(acceptedMixServiceName('Accepted service mix: Rodent Trapping, Exclusion & Sanitation Service.'))
+      .toBe('Rodent Trapping, Exclusion & Sanitation Service');
   });
 
   test('returns null when no mix line exists', () => {
@@ -125,6 +129,27 @@ describe('estimateBackedServiceName', () => {
     });
     await expect(estimateBackedServiceName('svc-1', 'Lawn Care'))
       .resolves.toBe('Lawn Care');
+  });
+
+  test('matches the fall-through signature through cappedServiceType normalization', async () => {
+    // The booking path stores cappedServiceType(service_interest) — collapsed
+    // whitespace and a 100-char '...' cap. The raw interest differs from the
+    // stored value in both cases; the comparison must still match.
+    mockServiceLookup({
+      notes: 'Accepted service mix: Pre-Slab Termiticide Treatment.',
+      service_interest: '  Termite   Category ',
+    });
+    await expect(estimateBackedServiceName('svc-1', 'Termite Category'))
+      .resolves.toBe('Pre-Slab Termiticide Treatment');
+
+    const longInterest = 'X'.repeat(120);
+    const cappedStored = `${'X'.repeat(97)}...`;
+    mockServiceLookup({
+      notes: 'Accepted service mix: Slab Pre-Treat Termite Service.',
+      service_interest: longInterest,
+    });
+    await expect(estimateBackedServiceName('svc-1', cappedStored))
+      .resolves.toBe('Slab Pre-Treat Termite Service');
   });
 
   test('passes through when the visit has no estimate or no mix line', async () => {

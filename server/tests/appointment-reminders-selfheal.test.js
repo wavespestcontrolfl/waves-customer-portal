@@ -141,6 +141,13 @@ describe('selfHealMissingReminderRows', () => {
 
   test('registerVisitReminderInTx stamps the caller-provided booking time as created_at', async () => {
     const bookedAt = new Date('2026-07-09T15:00:00.000Z');
+    // estimateBackedServiceName's enrichment lookup runs first on conn; null
+    // row → label passes through unchanged.
+    const estimateLookup = {
+      leftJoin: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
+    };
     const lookup = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
     const sameTime = {
       where: jest.fn().mockReturnThis(),
@@ -153,7 +160,7 @@ describe('selfHealMissingReminderRows', () => {
       insert: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'rem-9' }]),
     };
-    const queue = [lookup, sameTime, insertRow];
+    const queue = [estimateLookup, lookup, sameTime, insertRow];
     const conn = jest.fn(() => queue.shift());
     conn.raw = jest.fn().mockResolvedValue();
 

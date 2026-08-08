@@ -569,10 +569,24 @@ function acceptedMixServiceName(notes) {
     .replace(/\b\d+x\s+/gi, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
-  if (!cleaned || /[&+,]/.test(cleaned)) return null;
+  // Multi-service detection keys on the producer's literal ' + ' join
+  // (formatServiceProfileLabel in estimate-slot-availability.js) — '&' and
+  // commas appear in legitimate single-service names ("Tree & Shrub") and
+  // must not disqualify recovery.
+  if (!cleaned || cleaned.includes(' + ')) return null;
   // No length cap: appointment_reminders.service_type is text
   // (20260428000010 widened it precisely so joined labels never truncate).
   return cleaned;
+}
+
+// Mirror of slot-reservation's cappedServiceType (whitespace collapse, trim,
+// 100-char cap with a '...' tail): the stored fall-through value is that
+// transform of estimates.service_interest, so the signature comparison must
+// apply the same transform or long/odd-whitespace interests never match.
+function cappedInterestForm(value) {
+  const label = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!label || label.length <= 100) return label;
+  return `${label.slice(0, 97).trimEnd()}...`;
 }
 
 // Returns the accepted-estimate service name when the stored parent label is
@@ -589,7 +603,7 @@ async function estimateBackedServiceName(scheduledServiceId, parentName, conn = 
       .where('s.id', scheduledServiceId)
       .first('s.notes', 'e.service_interest');
     if (!svc) return parentName;
-    const interest = String(svc.service_interest || '').trim();
+    const interest = cappedInterestForm(svc.service_interest);
     if (stored !== interest && stored !== 'Estimate service') return parentName;
     const mixName = acceptedMixServiceName(svc.notes);
     if (!mixName || mixName === stored) return parentName;
@@ -1186,12 +1200,12 @@ const AppointmentReminders = {
     const apptTime = parseETDateTime(appointmentTime);
     if (isNaN(apptTime.getTime())) return null;
     const now = new Date();
-    // Estimate-backed label recovery reads through the pool, not conn:
-    // same-txn seeded visits aren't estimate fall-through cases (their row
-    // wouldn't be visible to the pool yet and passes through unchanged),
-    // while the self-heal backfill registers rows whose visit is long
-    // committed — the only case the recovery targets.
-    const estimateBacked = await estimateBackedServiceName(scheduledServiceId, serviceType);
+    // Label recovery reads through the caller's conn — borrowing a second
+    // pool connection while conn holds a transaction could stall the
+    // payment/booking txn behind pool exhaustion (max 20). Same-txn seeded
+    // visits are visible on conn and simply aren't fall-through cases; the
+    // helper fails open on error either way.
+    const estimateBacked = await estimateBackedServiceName(scheduledServiceId, serviceType, conn);
     const serviceLabel = smsServiceLabelStored(estimateBacked) || estimateBacked || null;
     const reminderSource = source || 'system_seed';
     // Optional booking-time override (self-heal passes the visit's real
