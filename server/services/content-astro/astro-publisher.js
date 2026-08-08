@@ -1749,6 +1749,26 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // draft alt instead of bypassing the gates.
   stampAutonomousHero(frontmatter, hero.src, vetGeneratedAlt(hero.alt, heroAlt, Array.isArray(frontmatter.domains) ? frontmatter.domains : null));
 
+  // The compliance gate above scanned the DRAFT alt; a generated hero replaces
+  // it, and vetGeneratedAlt is the deterministic guard only — so the alt that
+  // actually ships never saw the semantic layer (Codex PR #3295 r3). The
+  // reasoning is already in the comment above for the regex guard; it applies
+  // identically here. Re-checked only when the stamped alt DIFFERS from the one
+  // already scanned, so a reused hero costs nothing. The main gate stays before
+  // hero resolution so a compliance block still never burns image-generation
+  // cost — this is the narrow second pass for text that did not exist yet.
+  const stampedAlt = String(frontmatter.hero_image?.alt || '').trim();
+  if (stampedAlt && stampedAlt !== heroAlt) {
+    await assertComplianceClear({
+      title: frontmatter.title,
+      body: '',
+      meta: [stampedAlt],
+      city: brief.city || (Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag[0] : ''),
+      keyword: frontmatter.primary_keyword,
+      tag: frontmatter.category,
+    }, `${slug} (generated hero alt)`);
+  }
+
   // Binding validation — runs on the FINAL frontmatter, after hero stamping,
   // so what we validate is exactly what we commit.
   assertValidBlogFrontmatter(frontmatter);

@@ -56,6 +56,7 @@ const COMPLIANCE_TIMEOUT_MS = Number.parseInt(process.env.COMPLIANCE_TIMEOUT_MS,
 // Only these two — a code outside the set is a model hallucination and is
 // dropped rather than surfaced under a name nothing downstream understands.
 const VALID_CODES = new Set(['REENTRY_SAFETY_CLAIM', 'BANNED_TOPIC']);
+const VALID_SEVERITIES = new Set(['P0', 'P1', 'P2']);
 
 // The rule text is NOT restated here. gate-retry-directives.js is already the
 // single source of truth consumed by the writer prompts, precisely so that
@@ -141,16 +142,25 @@ function validateResponse(result) {
     // routed to a retry directive or explained to a reviewer — and dropping it
     // would turn a reported violation into a pass. Reject the route instead.
     if (!VALID_CODES.has(code)) return `unknown_code:${code || 'missing'}`;
+    // Severity gets the SAME treatment, for the same reason (Codex PR #3295
+    // r3). Coercing an unreadable severity to P2 silently converts a reported
+    // violation into a non-blocking advisory: a mistyped "PO" would return
+    // checked:true / pass:true and publish, without the fallback provider ever
+    // being asked. Severity decides whether content ships — it is not a field
+    // to be lenient about.
+    const severity = String(f.severity || '').trim().toUpperCase();
+    if (!VALID_SEVERITIES.has(severity)) return `unknown_severity:${severity || 'missing'}`;
   }
   return null;
 }
 
 function normalizeFinding(f) {
-  // Severity is only prompt-constrained, so normalize casing/space before the
-  // allowlist — otherwise a real P0 lands outside the set and gets demoted to
-  // the non-blocking P2 and ships (the same trap fact-check-gate guards).
+  // Casing/space normalization only — `' p0 '` is a P0. The VALUE is already
+  // guaranteed valid by validateResponse, which rejects the route on anything
+  // outside the set rather than letting a fallback coercion decide whether
+  // content ships. The `|| 'P2'` is unreachable defence, not policy.
   const sev = String((f && f.severity) || '').trim().toUpperCase();
-  const severity = ['P0', 'P1', 'P2'].includes(sev) ? sev : 'P2';
+  const severity = VALID_SEVERITIES.has(sev) ? sev : 'P2';
   const code = String((f && f.code) || '').trim().toUpperCase();
   const claim = String((f && f.claim) || '').slice(0, 300);
   const issue = String((f && f.issue) || '').slice(0, 600);
@@ -216,6 +226,6 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
 module.exports = {
   evaluate,
   _internals: {
-    normalizeFinding, validateResponse, SYSTEM_PROMPT, VALID_CODES, COMPLIANCE_TIMEOUT_MS,
+    normalizeFinding, validateResponse, SYSTEM_PROMPT, VALID_CODES, VALID_SEVERITIES, COMPLIANCE_TIMEOUT_MS,
   },
 };

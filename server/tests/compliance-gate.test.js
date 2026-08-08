@@ -221,11 +221,17 @@ describe('semantic compliance gate', () => {
     expect(mockDispatch).toHaveBeenCalled();
   });
 
-  test('coerces an unknown severity to P2 (non-blocking)', async () => {
-    reply([{ severity: 'banana', code: 'BANNED_TOPIC', claim: 'x', issue: 'y' }]);
-    const r = await load().evaluate(DRAFT);
-    expect(r.findings[0].severity).toBe('P2');
-    expect(r.pass).toBe(true);
+  test('REJECTS an unreadable severity rather than demoting it to P2', () => {
+    // Coercing an unreadable severity to the non-blocking P2 silently converts
+    // a reported violation into a pass — a mistyped "PO" would publish, and the
+    // fallback provider would never be asked (Codex PR #3295 r3). Severity
+    // decides whether content ships; it gets the same allowlist as the code.
+    const v = load()._internals.validateResponse;
+    expect(v({ json: { findings: [{ severity: 'PO', code: 'BANNED_TOPIC' }] } })).toBe('unknown_severity:PO');
+    expect(v({ json: { findings: [{ severity: 'banana', code: 'BANNED_TOPIC' }] } })).toBe('unknown_severity:BANANA');
+    expect(v({ json: { findings: [{ code: 'BANNED_TOPIC' }] } })).toBe('unknown_severity:missing');
+    // Casing and padding are still normalization, not corruption.
+    expect(v({ json: { findings: [{ severity: ' p0 ', code: 'BANNED_TOPIC' }] } })).toBeNull();
   });
 
   test('normalizes a lowercase/padded severity rather than demoting it to P2', async () => {

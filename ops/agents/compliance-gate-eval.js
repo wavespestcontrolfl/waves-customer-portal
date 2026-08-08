@@ -61,7 +61,44 @@ function parseArgs(argv) {
  * Anything else is counted as unparsed and REPORTED — a silently dropped case
  * would make coverage look better than it is.
  */
-function extractCorpus(src) {
+// Prose inside JS comments is NOT a fixture (Codex PR #3295 r3). The literal
+// scan below collects every quoted string in a block, and this file's comments
+// quote example phrases when explaining a rule — so `"safe UNTIL dry"` from a
+// comment was entering the corpus as a labelled blocking case. Calibration
+// would then spend a live call on text production never receives and fold its
+// verdict into recall and precision.
+// Truncates at a `//` that is OUTSIDE a string, and drops /* */ regions, so a
+// URL ("https://…") or an apostrophe inside a fixture is untouched.
+function stripJsComments(src) {
+  const out = [];
+  let inBlock = false;
+  for (const raw of src.split('\n')) {
+    let line = '';
+    let quote = null;
+    for (let i = 0; i < raw.length; i += 1) {
+      const ch = raw[i];
+      if (inBlock) {
+        if (ch === '*' && raw[i + 1] === '/') { inBlock = false; i += 1; }
+        continue;
+      }
+      if (quote) {
+        line += ch;
+        if (ch === '\\') { line += raw[i + 1] ?? ''; i += 1; continue; }
+        if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === '`') { quote = ch; line += ch; continue; }
+      if (ch === '/' && raw[i + 1] === '/') break;
+      if (ch === '/' && raw[i + 1] === '*') { inBlock = true; i += 1; continue; }
+      line += ch;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+function extractCorpus(rawSrc) {
+  const src = stripJsComments(rawSrc);
   const lines = src.split('\n');
   const cases = [];
   let unparsed = 0;
@@ -233,8 +270,15 @@ async function main() {
     return { ...c, semanticBlocked, codeMatched, regexBlocked, checked };
   });
 
-  const usable = results.filter((r) => r.semanticBlocked !== null && r.checked);
-  const failOpen = results.length - usable.length;
+  // A fail-open case is NOT excluded from the metrics (Codex PR #3295 r3).
+  // Production treats checked:false as a pass, so an unchecked violation is a
+  // real hole — dropping it from the denominator would let selective failures
+  // on the hardest inputs RAISE the reported recall. Scored as unblocked, which
+  // is exactly what production does with it; the availability count is reported
+  // separately so a bad run is still visible as a bad run.
+  const usable = results.filter((r) => r.semanticBlocked !== null);
+  const failOpen = usable.filter((r) => !r.checked).length;
+  const errored = results.length - usable.length;
 
   const shouldBlock = usable.filter((r) => r.shouldBlock);
   const shouldPass = usable.filter((r) => !r.shouldBlock);
@@ -246,7 +290,13 @@ async function main() {
   console.log('\n─── semantic gate (blocking verdict, as production computes it) ───');
   console.log(`recall    ${caught}/${shouldBlock.length}  (${pct(caught, shouldBlock.length)}) — violations caught`);
   console.log(`precision ${shouldPass.length - falsePos}/${shouldPass.length}  (${pct(shouldPass.length - falsePos, shouldPass.length)}) — compliant copy left alone`);
-  if (failOpen) console.log(`fail-open ${failOpen} case(s) returned unchecked (model unavailable) and are excluded`);
+  if (failOpen) {
+    const failOpenViolations = shouldBlock.filter((r) => !r.checked).length;
+    console.log(`fail-open ${failOpen} case(s) returned unchecked (model unavailable) — SCORED AS UNBLOCKED, matching production`);
+    if (failOpenViolations) console.log(`          ${failOpenViolations} of them were violations, and count against recall above`);
+    console.log('          a high count means the run is unreliable, not that the gate is bad — re-run before deciding');
+  }
+  if (errored) console.log(`errored   ${errored} case(s) threw and could not be scored at all`);
 
   // Reported separately because it does not affect whether content publishes —
   // a blocked draft is blocked either way — but a systematically swapped code
