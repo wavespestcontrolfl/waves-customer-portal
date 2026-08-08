@@ -2712,6 +2712,18 @@ router.patch('/:id', async (req, res, next) => {
     // accept racing this PATCH can't be silently overwritten.
     let updateQuery = db('estimates').where({ id: req.params.id });
     if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status });
+    // Turning invoice mode OFF is predicated on the stored proposal STILL
+    // having no structured payment term at write time — the pre-read guard
+    // above can race a concurrent proposal PUT that saves one (the PUT's
+    // write predicates on bill_by_invoice=true; this is the mirror side, so
+    // the two writes serialize instead of interleaving into a promised term
+    // with no billing path — codex #3297 r4d). JSONB path verified against
+    // the live schema.
+    if (updates.bill_by_invoice === false) {
+      updateQuery = updateQuery.whereRaw(
+        "COALESCE(estimate_data->'proposal'->'commercialTerms'->>'paymentTerms', '') = ''",
+      );
+    }
     const updatedCount = await updateQuery.update(updates);
     if (!updatedCount) {
       return res.status(409).json({ error: 'Estimate changed while you were editing. Refresh and retry.' });
