@@ -4935,8 +4935,12 @@ function EstimateViewPageInner() {
 
   // Headless document capture (?mode=pdf): the loaded data renders as the
   // print document — no shell, no configurator, no side effects. Mirrors
-  // ReportViewPage's mode==='pdf' branch.
-  if (pdfDocumentMode) {
+  // ReportViewPage's mode==='pdf' branch. SERVER-AFFIRMED: documentRender
+  // only exists on the payload while GATE_ESTIMATE_DOC_PDF is on, so the
+  // kill switch also kills this mode (fail-closed — a bare ?mode=pdf with
+  // the gate off falls through to the normal page rather than rendering an
+  // official-looking document with no pricing).
+  if (pdfDocumentMode && data.documentRender === true) {
     return <EstimateProposalDocument data={data} token={token} />;
   }
 

@@ -524,8 +524,11 @@ window.fetch = async (input, init) => {
 
   if (url.includes('/api/estimates/') && url.includes('/data')) {
     // Prod sends glassDefault per eligible category with the gate unset =
-    // ALL categories, so the harness mirrors the live copy pack.
-    return respond({ ...PAYLOADS[scenario](), glassDefault: true });
+    // ALL categories, so the harness mirrors the live copy pack. The
+    // documentRender affirmation mirrors the server's gated pdf-pass payload
+    // so ?mode=pdf previews render the print document.
+    const pdfPass = new URLSearchParams(window.location.search).get('mode') === 'pdf';
+    return respond({ ...PAYLOADS[scenario](), glassDefault: true, ...(pdfPass ? { documentRender: true } : {}) });
   }
   if (url.includes('/available-slots')) {
     const params = new URL(url, window.location.origin).searchParams;

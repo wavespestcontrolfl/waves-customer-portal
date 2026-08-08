@@ -7982,11 +7982,14 @@ async function handleEstimateView(req, res, next) {
     // assignment below.
     const adminPreviewRequested = req.query.adminPreview === '1';
     // Headless estimate-document render (?mode=pdf): the browser pass must
-    // always reach the React page — EstimateProposalDocument only exists
-    // there — regardless of this estimate's v1/v2 assignment. Never counts
-    // as a customer view (the /data route skips its view side effects) and
-    // never enters the experiment below.
-    const estimatePdfRenderPass = req.query.mode === 'pdf';
+    // reach the React page — EstimateProposalDocument only exists there —
+    // regardless of this estimate's v1/v2 assignment. Gate-tied so the kill
+    // switch fully restores today's routing: with GATE_ESTIMATE_DOC_PDF off,
+    // ?mode=pdf changes nothing (a v1 estimate keeps its legacy SSR page).
+    // Verified renders never count as customer views (the /data route skips
+    // their side effects) and never enter the experiment below.
+    const estimatePdfRenderPass = req.query.mode === 'pdf'
+      && featureGates.isEnabled('estimateDocPdf');
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
@@ -20300,11 +20303,17 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // glass gate. Key only exists for gated proposal estimates so every
       // other response stays byte-identical.
       ...(proposalPublicView ? { proposal: proposalPublicView } : {}),
-      // Canonical public origin for links baked into the rendered document —
-      // the headless browser reaches this page through an internal hostname,
-      // so window.location.origin would leak it into a customer artifact
-      // (same rule as the service-report document). pdf-pass only.
-      ...(isPdfRenderPass ? { publicOrigin: require('../utils/portal-url').configuredPublicPortalOrigin() } : {}),
+      // Document-mode affirmation + canonical public origin, BOTH gated on
+      // GATE_ESTIMATE_DOC_PDF: the client renders EstimateProposalDocument
+      // only when the server affirms documentRender (fail-closed — with the
+      // gate off, ?mode=pdf falls through to the normal page instead of an
+      // official-looking document with no pricing). publicOrigin exists so
+      // the headless browser's internal hostname never leaks into the
+      // artifact's links (same rule as the service-report document).
+      ...(isPdfRenderPass && featureGates.isEnabled('estimateDocPdf') ? {
+        documentRender: true,
+        publicOrigin: require('../utils/portal-url').configuredPublicPortalOrigin(),
+      } : {}),
       // Only present on a verified staff draft preview — the React page keys
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
