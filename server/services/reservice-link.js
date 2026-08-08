@@ -33,13 +33,6 @@ function reserviceSmsLineFor(url) {
   return url ? `Book your free re-service here: ${url}\n\n` : '';
 }
 
-// Clause for the automatic post-service texts ({reservice_line} in the
-// completion/report/review templates) — context-framed so it reads as "if
-// something comes back" rather than the composer line's bare imperative.
-function reserviceFollowupLineFor(url) {
-  return url ? `If a covered issue comes back, book a free re-service: ${url}\n\n` : '';
-}
-
 async function buildReserviceLink(customerId) {
   try {
     if (!customerId || !reserviceSelfServeEnabled()) return { url: null, line: '' };
@@ -70,30 +63,22 @@ async function buildReserviceLink(customerId) {
  * The {reservice_line} value for the automatic post-service texts
  * (service_complete* / service_report_v1* / review_request).
  *
- * '' — the safe, byte-identical-to-today render — unless ALL of:
- *   - GATE_RESERVICE_STREAMLINE on (the delivery streamline is Adam's flip;
- *     buildReserviceLink's own GATE_RESERVICE_SELF_SERVE check still applies
- *     underneath, so both gates must be lit),
- *   - the customer's LIVE plan state grants a pest or lawn lane
- *     (reserviceLanesForCustomer — a mosquito-only or lapsed plan never gets
- *     the line; the office-call families stay office calls),
- *   - the customer row is active with a reservice_token.
+ * RETIRED — owner directive 2026-08-08: the automatic texts no longer carry a
+ * re-service booking link. Always ''. The contract half (migration
+ * 20260808060000) strips the {reservice_line} token from those template
+ * bodies; this helper stays wired into every render site because an
+ * UNSUPPLIED key suppresses the whole message (getTemplate's
+ * unresolved-placeholder check), so any body still carrying the token — an
+ * owner-customized variant, a row restored from backup, a database the
+ * migration has not reached yet — must resolve to empty rather than silence a
+ * completion text.
  *
- * Never throws: every render site passes this value into a template that
- * carries the {reservice_line} token, and an UNSUPPLIED key suppresses the
- * whole message (getTemplate's unresolved-placeholder check) — so this
- * helper must always resolve to a string.
+ * The re-service scheduler itself is untouched: the portal card, the report
+ * footer link, and the admin composer's insert-link button all still run off
+ * buildReserviceLink / reserviceStreamlineAccess below.
  */
-async function reserviceLineForCustomer(customerId) {
-  try {
-    const access = await reserviceStreamlineAccess(customerId);
-    if (!access) return '';
-    const { url } = await buildReserviceLink(customerId);
-    return reserviceFollowupLineFor(url);
-  } catch (err) {
-    logger.warn(`[reservice-link] line lookup failed for ${customerId}: ${err.message}`);
-    return '';
-  }
+async function reserviceLineForCustomer() {
+  return '';
 }
 
 /**
@@ -124,7 +109,6 @@ async function reserviceStreamlineAccess(customerId) {
 module.exports = {
   buildReserviceLink,
   reserviceSmsLineFor,
-  reserviceFollowupLineFor,
   reserviceLineForCustomer,
   reserviceStreamlineAccess,
 };
