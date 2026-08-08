@@ -1518,6 +1518,8 @@ describe('rain-out service', () => {
       // span or a clause boundary (r20).
       blocked('Treatment is safe once dry. Your technician confirms arrival timing; the office confirms timing.');
       blocked('Treatment is safe once dry. Your technician confirms arrival timing and the office confirms timing.');
+      // ...nor across a conjunction to another subject's verb (r21).
+      blocked('Treatment is safe once dry. Your technician checks the gate and the office confirms timing.');
       // Passive order can't smuggle logistics past the strip either (r12).
       blocked('Treatment is safe once dry. Appointment timing will be confirmed by your technician.');
       expect(sanitize()('Treatment is safe once dry. Timing will be confirmed by your technician.'))
