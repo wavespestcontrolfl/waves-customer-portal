@@ -560,12 +560,14 @@ function complianceOverclaims(text, { impliedTreatmentContext = false } = {}) {
       .replace(SAFE_FROM_PEST_RE, '')
       .replace(WORKER_SAFETY_RE, '');
     if (impliedTreatmentContext) {
-      safetyScope = safetyScope.replace(WELL_WISH_SAFE_RE, '');
-      // Protective advice only reads as a product claim when the sentence
-      // names the product/treatment — otherwise "keep your pets safe
-      // indoors during the storm" is weather advice (r16).
+      // Well-wishes and protective advice only read as claims when the
+      // sentence names the product — "stay safe out there" and "keep
+      // your pets safe indoors" are weather advice, but "Treatment will
+      // be safe" is a product claim and must keep its "safe" (r16/r17).
       if (!PRODUCT_CONTEXT_RE.test(sentence)) {
-        safetyScope = safetyScope.replace(PROTECTIVE_ADVICE_SAFE_RE, '');
+        safetyScope = safetyScope
+          .replace(WELL_WISH_SAFE_RE, '')
+          .replace(PROTECTIVE_ADVICE_SAFE_RE, '');
       }
     }
     // Copy that ALWAYS accompanies a treatment message (rain-out dispatcher

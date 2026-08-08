@@ -185,10 +185,13 @@ function noteComplianceTrips(note) {
     if (!sentence.trim()) continue;
     let scope = (idiomAllowed ? sentence.replace(NOTE_SAFE_DRY_IDIOM_RE, '') : sentence)
       .replace(NOTE_SAFE_FROM_RE, '')
-      .replace(NOTE_WORKER_SAFETY_RE, '')
-      .replace(NOTE_WELL_WISH_SAFE_RE, '');
+      .replace(NOTE_WORKER_SAFETY_RE, '');
+    // Well-wish/advice strips only apply when the sentence names no
+    // product — "Treatment will be safe" keeps its claim (r17).
     if (!NOTE_PRODUCT_CTX_RE.test(sentence)) {
-      scope = scope.replace(NOTE_PROTECTIVE_ADVICE_RE, '');
+      scope = scope
+        .replace(NOTE_WELL_WISH_SAFE_RE, '')
+        .replace(NOTE_PROTECTIVE_ADVICE_RE, '');
     }
     if (NOTE_SAFETY_WORD_RE.test(scope)) return true;
   }

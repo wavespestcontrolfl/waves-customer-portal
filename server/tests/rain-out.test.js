@@ -1504,6 +1504,10 @@ describe('rain-out service', () => {
       // word in the sentence, so it stays sendable (r16).
       expect(sanitize()('Keep your pets safe indoors during the storm'))
         .toEqual({ note: 'Keep your pets safe indoors during the storm' });
+      // ...but a well-wish phrasing wrapped around the PRODUCT is still a
+      // claim (r17).
+      blocked('Treatment will be safe');
+      blocked('Our pesticide will be safe');
       // Nor can an arbitrary noun qualify the time object — only filler
       // words (articles/possessives) may sit between the confirm verb and
       // its timing object (r15).
