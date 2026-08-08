@@ -279,6 +279,10 @@ function googleAdsBridgeMetadata(metadata) {
 
 function shouldRetryLeadAttribution(match) {
   if (match?.status !== 'already_bridged' || !match.callLog?.id) return false;
+  // A terminal no-attribution verdict (spam/voicemail/non-lead) is final:
+  // nothing to attribute, and re-attributing would recreate rows the
+  // processor retired (codex P1, PR #3303).
+  if (match.callLog.noAttribution) return false;
   if (!match.callLog.googleAdsLeadMatched) return true;
   // A SETTLED stamp can still be repointed by a later force-reprocess
   // (codex P1, PR #3303): the recorded leadMatch then references the OLD
@@ -848,7 +852,7 @@ async function applyBridge(options = {}) {
         && match.callLog.googleAdsCallResourceName === match.googleCall.resourceName;
 
       if (!shouldRetryLeadAttribution(match)) {
-        if (bridgedToThisCall) {
+        if (bridgedToThisCall && !match.callLog?.noAttribution) {
           // Backfill the funnel row for calls bridged before this shipped (idempotent).
           // call_log.lead_id is only populated by the twilio_call_sid join; a call
           // lead-matched by phone/customer (recorded in metadata) has it null, so
