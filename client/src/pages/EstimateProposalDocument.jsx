@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
+import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { fmtMoney } from '../lib/money';
 import { glassCtaMicroForKeys, glassRowInclusions, glassServiceSlug } from '../lib/estimate-glass-copy';
 
@@ -195,6 +195,12 @@ export default function EstimateProposalDocument({ data, token }) {
   // still print, with a plain "Total".
   const quotesPerApp = buildings.some((b) => (b.lineItems || []).some((li) => li.frequency === 'per_application'));
   const suppressPlanTotals = !authoredProposal && quotesPerApp;
+  // Taxable-line identification (codex #3281 r3) — parity with the pdfkit
+  // document it replaces: a mixed taxable/exempt proposal marks each taxed
+  // amount with '*', prints the rate beside the tax total, and explains the
+  // marker, so the customer can verify the calculation line by line.
+  const anyTaxableLine = buildings.some((b) => (b.lineItems || []).some((li) => li.taxable === true));
+  const taxRatePct = Number(totals.taxRate) > 0 ? (Number(totals.taxRate) * 100).toFixed(2) : null;
   const showRecurringTotals = !suppressPlanTotals && Number(totals.annualRecurring) > 0;
   const showGrandTotal = !suppressPlanTotals || Number(totals.annualRecurring) <= 0;
   const grandTotalLabel = Number(totals.annualRecurring) > 0 ? 'First-year total' : 'Total';
@@ -291,6 +297,7 @@ export default function EstimateProposalDocument({ data, token }) {
                     </span>
                     <span style={{ whiteSpace: 'nowrap', fontWeight: 700, color: NAVY, fontVariantNumeric: 'tabular-nums' }}>
                       {fmtMoney(item.amount)}
+                      {item.taxable === true ? ' *' : ''}
                       {item.frequencyLabel ? (
                         <span style={{ fontWeight: 400, color: MUTED }}> {String(item.frequencyLabel).toLowerCase()}</span>
                       ) : null}
@@ -314,7 +321,10 @@ export default function EstimateProposalDocument({ data, token }) {
               ) : null}
               {totals.hasTax ? (
                 <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: 11.5 }}>
-                  <span style={{ color: MUTED }}>{proposal?.taxLabel || 'Sales tax'}</span>
+                  <span style={{ color: MUTED }}>
+                    {proposal?.taxLabel || 'Sales tax'}
+                    {taxRatePct ? ` (${taxRatePct}%)` : ''}
+                  </span>
                   <span style={{ fontWeight: 700, color: INK, fontVariantNumeric: 'tabular-nums' }}>{fmtMoney(totals.totalTax)}</span>
                 </div>
               ) : null}
@@ -333,6 +343,13 @@ export default function EstimateProposalDocument({ data, token }) {
               {authoredProposal && showRecurringTotals ? (
                 <div style={{ fontSize: 10.5, color: MUTED, marginTop: 2 }}>
                   Averages {fmtMoney(totals.monthlyEquivalent)}/month across the year for the recurring service.
+                </div>
+              ) : null}
+              {totals.hasTax || anyTaxableLine ? (
+                <div style={{ fontSize: 10, color: MUTED, marginTop: 3, lineHeight: 1.5 }}>
+                  * Taxable line. Tax applies only to lines marked taxable, at the Florida state rate plus
+                  the service county surtax. Residential pest control and residential lawn maintenance are
+                  tax-exempt in Florida; commercial services may be taxable.
                 </div>
               ) : null}
             </div>
@@ -403,8 +420,9 @@ export default function EstimateProposalDocument({ data, token }) {
             </p>
           ) : authoredProposal ? (
             <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-              Your Waves account manager will follow up to answer questions and finalize this proposal —
-              or call {WAVES_SUPPORT_PHONE_DISPLAY} any time. Your live estimate stays available at{' '}
+              {WAVES_ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, will follow up to answer
+              questions and finalize this proposal — or call {WAVES_SUPPORT_PHONE_DISPLAY} any time.
+              Your live estimate stays available at{' '}
               <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
             </p>
           ) : cta.quoteRequired === true || cta.reviewBeforeBooking === true ? (

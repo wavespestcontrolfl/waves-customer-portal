@@ -286,4 +286,66 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('Total');
     expect(text).not.toContain('First-year total');
   });
+
+  it('identifies taxable lines like the pdfkit document — marker, rate, disclosure (codex #3281 r3)', () => {
+    const mixed = {
+      ...BASE_DATA,
+      proposal: {
+        ...BASE_DATA.proposal,
+        buildings: [{
+          name: '600 Sample Plaza Dr',
+          note: null,
+          lineItems: [
+            {
+              description: 'Recurring service plan',
+              quantity: 1,
+              unitPrice: 120,
+              amount: 120,
+              frequency: 'quarterly',
+              frequencyLabel: 'Quarterly',
+              taxable: true,
+            },
+            {
+              description: 'Grounds maintenance',
+              quantity: 1,
+              unitPrice: 200,
+              amount: 200,
+              frequency: 'quarterly',
+              frequencyLabel: 'Quarterly',
+              taxable: false,
+            },
+          ],
+        }],
+        totals: {
+          annualRecurring: 1280.00,
+          monthlyEquivalent: 106.67,
+          oneTime: 0,
+          taxRate: 0.07,
+          totalTax: 33.60,
+          firstYearTotal: 1313.60,
+          hasTax: true,
+          isMultiBuilding: false,
+        },
+      },
+    };
+    const { container } = render(<EstimateProposalDocument data={mixed} token="tok-123" />);
+    const text = container.textContent;
+    // The taxed amount carries the marker; the exempt one doesn't.
+    expect(text).toContain('$120.00 *');
+    expect(text).toContain('$200.00 quarterly');
+    expect(text).not.toContain('$200.00 *');
+    // The tax total states its rate, and the marker is explained.
+    expect(text).toContain('Sales tax (7.00%)');
+    expect(text).toContain('* Taxable line.');
+  });
+
+  it('explains the taxable marker even when totals omit the rate', () => {
+    // BASE_DATA's totals carry hasTax without taxRate — the label stays
+    // plain and the disclosure still renders beside the marked line.
+    const { container } = render(<EstimateProposalDocument data={BASE_DATA} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('$120.00 *');
+    expect(text).toContain('* Taxable line.');
+    expect(text).not.toContain('(NaN');
+  });
 });

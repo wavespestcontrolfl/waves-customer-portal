@@ -15,7 +15,7 @@ import WavesShell from '../components/brand/WavesShell';
 // the preview's colors drift from the real page.
 import '../styles/brand-tokens.css';
 
-const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'accepted', 'proposal'];
+const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'accepted', 'proposal', 'proposal_terms'];
 const scenario = (() => {
   const requested = new URLSearchParams(window.location.search).get('scenario');
   return SCENARIOS.includes(requested) ? requested : 'pest';
@@ -475,6 +475,59 @@ function proposalScenario() {
   };
 }
 
+// Authored proposal WITH operator terms (codex #3281 r3): the terms govern,
+// so the page must read the terms-neutral commercial pack — no pest hero
+// promises, no canned inclusions beside the authored 12-month commitment.
+// Same fictional shape as proposalScenario with a mixed taxable/exempt line
+// pair, so ?mode=pdf also proves the taxable '*' marker and rate disclosure.
+function proposalTermsScenario() {
+  const base = proposalScenario();
+  return {
+    ...base,
+    proposal: {
+      ...base.proposal,
+      // The rodent monitoring line makes the server's truth-scope classifier
+      // return false here — the fixture mirrors what /data would project.
+      pestRecurringOnly: false,
+      terms: '12-month service agreement. Cancellation requires 30 days’ written notice. Interior service visits beyond the quarterly schedule are billed per visit.',
+      buildings: [{
+        name: '600 Sample Plaza Dr',
+        note: null,
+        lineItems: [
+          {
+            description: 'Quarterly pest control — small multifamily building (interior + exterior)',
+            quantity: 1,
+            unitPrice: 120,
+            amount: 120,
+            frequency: 'quarterly',
+            frequencyLabel: 'Quarterly',
+            taxable: true,
+          },
+          {
+            description: 'Grounds rodent station monitoring',
+            quantity: 1,
+            unitPrice: 65,
+            amount: 65,
+            frequency: 'quarterly',
+            frequencyLabel: 'Quarterly',
+            taxable: false,
+          },
+        ],
+      }],
+      totals: {
+        annualRecurring: 740.00,
+        monthlyEquivalent: 61.67,
+        oneTime: 0,
+        taxRate: 0.07,
+        totalTax: 33.60,
+        firstYearTotal: 773.60,
+        hasTax: true,
+        isMultiBuilding: false,
+      },
+    },
+  };
+}
+
 const PAYLOADS = {
   pest: pestScenario,
   preslab: preslabScenario,
@@ -483,6 +536,7 @@ const PAYLOADS = {
   lawn: lawnScenario,
   accepted: acceptedScenario,
   proposal: proposalScenario,
+  proposal_terms: proposalTermsScenario,
 };
 
 // ── canned endpoint responses ───────────────────────────────────────────

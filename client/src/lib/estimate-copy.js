@@ -164,6 +164,24 @@ export const SERVICE_COPY = {
     ],
     priceWording: {},
   },
+  // Terms-neutral commercial (codex #3281 r3) — mirrors the
+  // GLASS_COMMERCIAL_NEUTRAL pack: authored proposals and non-pest
+  // commercial subtypes must not inherit the pest pack's interior/tenant
+  // chips or the satellite-measurement claim (an authored proposal may be
+  // hand-priced). Claim-free strings only.
+  commercial_neutral: {
+    headline: "Hey {first}, here's your commercial service plan.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'This plan was prepared for your property',
+    aiBody: 'The services and pricing in this plan were scoped to your property specifically.',
+    askChips: [
+      'What does each visit include?',
+      'How often are visits?',
+      'How was this priced?',
+      'How do I get started?',
+    ],
+    priceWording: {},
+  },
   bundle: {
     headline: "Hey {first}, here's your custom Waves plan.",
     aiEyebrow: 'Waves AI',

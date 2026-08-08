@@ -305,4 +305,17 @@ describe('commercial glass release', () => {
     expect(pack.eyebrow).toBe('Your commercial service plan');
     expect(`${pack.heroSub} ${pack.aiBody}`).not.toMatch(/90-day|money-back/i);
   });
+
+  it('keeps the neutral commercial pack claim-free (codex #3281 r3)', () => {
+    setGlassDefault(true);
+    const pack = glassEstimateCopyFor('commercial_neutral');
+    expect(pack.eyebrow).toBe('Your commercial service plan');
+    const all = `${pack.heroH1} ${pack.heroSub} ${pack.aiTitle} ${pack.aiBody} ${pack.ctaMicro} ${pack.askChips.join(' ')}`;
+    // No pest-scope, contract, tenant, or pricing-methodology claims —
+    // authored proposals and non-pest commercial subtypes read this pack,
+    // so any promise here could contradict operator terms or the actual
+    // quoted service.
+    expect(all).not.toMatch(/interior|tenant|long-term contract|satellite|county/i);
+    expect(all).not.toMatch(/90-day|money-back|auto pay|unlimited/i);
+  });
 });

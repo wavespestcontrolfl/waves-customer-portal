@@ -179,9 +179,33 @@ const GLASS_COMMERCIAL = {
   ctaMicro: GLASS_COMMERCIAL_CTA_MICRO,
 };
 
+// Terms-neutral commercial pack (codex #3281 r3) — the commercial identity
+// is confirmed but the PEST pack's promises are not: authored proposals
+// (operator-entered terms govern, and may state a commitment or per-visit
+// interior billing the pest hero would contradict) and the non-pest
+// commercial subtypes (lawn/tree/mosquito/termite/rodent never carry the
+// interior-treatment or tenant-re-service promises). Every string here is
+// claim-free: no scope, contract, or pricing-methodology assertions — the
+// line items and authored terms speak for themselves.
+const GLASS_COMMERCIAL_NEUTRAL = {
+  heroH1: 'Hello {first}, your commercial service plan is ready!',
+  heroSub: 'Prepared for your property — the services, pricing, and terms below show exactly what’s included.',
+  eyebrow: 'Your commercial service plan',
+  aiTitle: 'This plan was prepared for your property',
+  aiBody: 'The services and pricing in this plan were scoped to your property specifically — not a generic average.',
+  askChips: [
+    'What does each visit include?',
+    'How often are visits?',
+    'How was this priced?',
+    'How do I get started?',
+  ],
+  ctaMicro: 'Licensed & insured · Satisfaction guaranteed',
+};
+
 const GLASS_PACKS = {
   pest_control: GLASS_PEST,
   commercial: GLASS_COMMERCIAL,
+  commercial_neutral: GLASS_COMMERCIAL_NEUTRAL,
   lawn_care: {
     heroH1: 'Hello {first}, your greener-lawn game plan is ready!',
     heroSub: 'Built for your actual turf — feeding, weed control, and fungus watch on a program that fits your lawn, backed by a 90-day money-back guarantee.',

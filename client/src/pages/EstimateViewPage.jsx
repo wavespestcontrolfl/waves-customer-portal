@@ -42,7 +42,6 @@ import { isNativeApp } from '../native/platform';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
 import useIsMobile from '../hooks/useIsMobile';
 import DocumentActionBar from '../components/DocumentActionBar';
-import GoogleProfilesCard from '../components/estimate/GoogleProfilesCard';
 import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/glass/EstimateGlassTheme';
 
 // Payment Element renders inside Stripe's iframe, so the glass theme can't
@@ -4961,8 +4960,27 @@ function EstimateViewPageInner() {
     && (cta?.commercialProposal === true
       || cta?.commercialAutoPriced === true
       || cta?.quoteRequiredReason === 'commercial_proposal');
+  // Truth scope WITHIN the commercial identity (codex #3281 r3): the
+  // commercial pack's hero/chips promise interior treatment, tenant
+  // re-service, and no-contract terms — claims that only hold for a
+  // recurring commercial-PEST plan with no authored terms. Authored
+  // proposals key on the server's truth-scope classification plus
+  // terms-govern rule (the SAME condition the SSR card and the PDF
+  // document apply); auto-priced commercial keys on its actual service
+  // rows — every row must classify as pest work (commercial identity is
+  // already established, so plain pest rows qualify; any lawn/tree/
+  // mosquito/termite/rodent row demotes). Everything else reads the
+  // terms-neutral commercial pack, which makes no claims at all.
+  const authoredProposalOnPage = data?.proposal?.enabled === true;
+  const commercialRowSlugs = services.map((s) => glassServiceSlug(s?.key || s?.name));
+  const copyCommercialPest = copyCommercial && (
+    authoredProposalOnPage
+      ? (data.proposal.pestRecurringOnly === true && !data.proposal.terms)
+      : (commercialRowSlugs.length > 0
+        && commercialRowSlugs.every((slug) => slug === 'commercial_pest' || slug === 'pest_control'))
+  );
   const serviceCategory = copyCommercial
-    ? 'commercial'
+    ? (copyCommercialPest ? 'commercial' : 'commercial_neutral')
     : estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
   const copy = estimateCopyFor(serviceCategory);
   // Glass copy pack — null unless glass is active; every service category
@@ -5442,6 +5460,21 @@ function EstimateViewPageInner() {
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
         {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+        {/* Commercial proposal: the what-happens-next card sits directly under
+            the hero identity block (owner 2026-08-08) — at the bottom it
+            repeated the hero's "your formal proposal is ready" and read as a
+            duplicate. Every other terminal state keeps the card in its
+            original slot below the content. */}
+        {isCommercialProposal ? (
+          <TerminalStateCard
+            state={cta.terminalState}
+            customerFirstName={estimate.customerFirstName}
+            address={estimate.address}
+            quoteReason={quoteRequiredReason}
+            isProposal
+            proposalPdfEmailed={proposalPdfEmailed}
+          />
+        ) : null}
         {/* Authored commercial proposal, on-page (GATE_ESTIMATE_COMMERCIAL_GLASS
             → /data ships `proposal`): the line items + totals + included-service
             terms the customer used to get only inside the emailed PDF. Rendered
@@ -5464,17 +5497,18 @@ function EstimateViewPageInner() {
             chips={askChips}
           />
         ) : null}
-        <TerminalStateCard
-          state={cta.terminalState}
-          customerFirstName={estimate.customerFirstName}
-          address={estimate.address}
-          quoteReason={quoteRequiredReason}
-          isProposal={isCommercialProposal}
-          proposalPdfEmailed={proposalPdfEmailed}
-        />
+        {isCommercialProposal ? null : (
+          <TerminalStateCard
+            state={cta.terminalState}
+            customerFirstName={estimate.customerFirstName}
+            address={estimate.address}
+            quoteReason={quoteRequiredReason}
+            isProposal={isCommercialProposal}
+            proposalPdfEmailed={proposalPdfEmailed}
+          />
+        )}
         <AppShowcaseCard />
         <CustomerReviews />
-        <GoogleProfilesCard />
       </Page>
     );
   }
@@ -5553,7 +5587,6 @@ function EstimateViewPageInner() {
         <ReviewBeforeBookingCard reason={cta?.reviewReason} />
         <AppShowcaseCard />
         <CustomerReviews />
-        <GoogleProfilesCard />
       </Page>
     );
   }
@@ -5874,10 +5907,10 @@ function EstimateViewPageInner() {
                   showcase card was removed from the estimate page entirely
                   (owner 2026-07-11). This branch's approved reviews-before-app
                   order is preserved. */}
+              {/* GBP proof now rides inside CustomerReviews (owner 2026-08-08
+                  — the standalone card read as a duplicate review section). */}
               <CustomerReviews onJoinNeighbors={canShowSlotPicker ? scrollToBookingSection : null} />
               <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
-              {/* GBP proof directly above Ask Waves (owner 2026-07-06). */}
-              <GoogleProfilesCard />
               <EstimateAskBar
                 token={token}
                 askToken={estimate.askToken}
@@ -5903,7 +5936,6 @@ function EstimateViewPageInner() {
         <>
           <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
           <CustomerReviews />
-          <GoogleProfilesCard />
         </>
       )}
       {/* Sticky mobile book bar (glass, ≤640px via CSS): live price/period +
