@@ -11,7 +11,7 @@ const { tallyVerdicts, pausedMarkerKey } = digest._internals;
 // other table read resolves to `rows`. Records what was inserted/deleted so
 // the marker lifecycle can be asserted.
 function makeDb({ rows = [], markers = [] } = {}) {
-  const state = { markers: [...markers], deleted: [], upserts: [], checkedSince: [] };
+  const state = { markers: [...markers], deleted: [], upserts: [], upsertRows: [], checkedSince: [], checkedUntil: null };
   const fakeDb = (table) => {
     if (table === 'ops_email_send_state') {
       const builder = {
@@ -29,7 +29,7 @@ function makeDb({ rows = [], markers = [] } = {}) {
           ? state.markers.filter((m) => String(m.email_key).startsWith(builder._likePrefix))
           : state.markers),
         del: async () => { state.deleted.push(builder._key); state.markers = state.markers.filter((m) => m.email_key !== builder._key); return 1; },
-        insert: (row) => ({ onConflict: () => ({ merge: async () => { state.upserts.push(row.email_key); state.markers.push(row); } }) }),
+        insert: (row) => ({ onConflict: () => ({ merge: async () => { state.upserts.push(row.email_key); state.upsertRows.push(row); state.markers.push(row); } }) }),
       };
       return builder;
     }
@@ -40,6 +40,7 @@ function makeDb({ rows = [], markers = [] } = {}) {
       // single-verdict-per-row semantics and the inclusive/exclusive window
       // are assertable.
       whereRaw: (sql, binds) => {
+        if (sql.includes('<=')) { state.checkedUntil = binds && binds[0]; return q; }
         const op = /COALESCE\([^)]*\)\s*(>=|>)/.exec(sql);
         state.checkedSince.push({ sql, op: op ? op[1] : null, since: binds && binds[0] });
         return q;
@@ -253,6 +254,19 @@ describe('rollup leg — quiet windows do not stamp the weekly marker', () => {
 
     const rollupQuery = fakeDb.state.checkedSince.at(-1);
     expect(rollupQuery.op).toBe('>=');
+  });
+
+  test('the query is upper-bounded and the STAMP is that same cutoff, not the send time', async () => {
+    // checkPending runs outside this module's lock. Without an upper bound,
+    // a verdict written by a concurrent sweep after our query but before our
+    // stamp would fall below the next window's `>` boundary and be lost.
+    const fakeDb = makeDb({ rows: [{ verdict: 'improved' }] });
+    await digest.sendImpactDigestsIfDue({ db: fakeDb, sendgrid, tracker: { pausedBuckets: async () => [] } });
+
+    const cutoff = fakeDb.state.checkedUntil;
+    expect(cutoff).toBeInstanceOf(Date);
+    const stamped = fakeDb.state.upsertRows.find((r) => r.email_key === 'impact-verdict-rollup');
+    expect(stamped.last_sent_at.getTime()).toBe(cutoff.getTime());
   });
 
   test('the window keys on the LATEST check, so the verdict always matches the event', async () => {

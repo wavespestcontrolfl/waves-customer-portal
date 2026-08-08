@@ -103,13 +103,16 @@ async function sentRecently(database, key) {
   }
 }
 
-async function stampSendMarker(database, key) {
+// `at` lets the rollup stamp its pre-query CUTOFF rather than the send time —
+// see rollupWindowStart. The dedupe-only markers just use now().
+async function stampSendMarker(database, key, at = null) {
   try {
     const now = new Date();
+    const stampedAt = at || now;
     await database('ops_email_send_state')
-      .insert({ email_key: key, last_sent_at: now, updated_at: now })
+      .insert({ email_key: key, last_sent_at: stampedAt, updated_at: now })
       .onConflict('email_key')
-      .merge({ last_sent_at: now, updated_at: now });
+      .merge({ last_sent_at: stampedAt, updated_at: now });
   } catch (err) {
     logger.warn(`[impact-digest] send-marker write failed for ${key} (${err.message}) — next tick may re-send`);
   }
@@ -311,16 +314,19 @@ function composeVerdictRollup(rows, { days = ROLLUP_WINDOW_DAYS } = {}) {
  * graded at 14d and re-graded at 21d still returns one verdict. Copy that
  * says "N checks" would be unsupportable — see composeBlindLoopAlert.
  */
-function checkedSince(database, since, { exclusive = false } = {}) {
+function checkedSince(database, since, { exclusive = false, until = null } = {}) {
   const op = exclusive ? '>' : '>=';
-  return database('content_optimization_impact')
-    .whereRaw(`COALESCE(checked_21d_at, checked_14d_at) ${op} ?`, [since])
+  const q = database('content_optimization_impact')
+    .whereRaw(`COALESCE(checked_21d_at, checked_14d_at) ${op} ?`, [since]);
+  // Upper bound, paired with stamping that same cutoff: see rollupWindowStart.
+  if (until) q.whereRaw('COALESCE(checked_21d_at, checked_14d_at) <= ?', [until]);
+  return q
     .select('bucket', 'page_url', 'verdict', 'estimated_lift_position', 'estimated_lift_clicks_pct');
 }
 
 // ── send legs ───────────────────────────────────────────────────────
 
-async function sendComposed(composed, { mailer, database, markerKey, categories, label }) {
+async function sendComposed(composed, { mailer, database, markerKey, markerAt = null, categories, label }) {
   if (!digestEnabled()) {
     logger.info(`[impact-digest] gated OFF — would send: ${composed.subject}`);
     return { skipped: 'gated', subject: composed.subject };
@@ -356,7 +362,7 @@ async function sendComposed(composed, { mailer, database, markerKey, categories,
     return { sent: false, error: true };
   }
 
-  await stampSendMarker(database, markerKey);
+  await stampSendMarker(database, markerKey, markerAt);
   logger.info(`[impact-digest] sent ${label}: ${composed.subject}`);
   return { sent: true, subject: composed.subject };
 }
@@ -457,6 +463,21 @@ async function alertBlindLoop({ database, mailer }) {
  * EXCLUSIVE watermark. It also closes the gap the fixed window would leave —
  * after a skipped week, everything since the last real send is reported
  * rather than only the last seven days.
+ *
+ * The watermark is paired with a pre-query CUTOFF (see sendVerdictRollup),
+ * because an exclusive watermark stamped at SEND time turns a harmless
+ * double-count into a permanent skip: checkPending runs outside this module's
+ * advisory lock, so during a Railway deploy overlap the other instance can
+ * still be writing verdicts while this one queries. Anything it wrote between
+ * our query and our stamp would fall below the next window's `>` boundary and
+ * never be reported at all. Bounding the query at a cutoff taken BEFORE it
+ * runs, and stamping that same cutoff, makes the windows exactly abut: later
+ * writes land above the cutoff and are picked up next time.
+ *
+ * (Wrapping the whole sweep + digest in one cross-instance lock would also
+ * work, but it would serialize the tracker's measurement pass behind the
+ * reporting leg for a reporting-only concern — a much larger blast radius
+ * than an upper-bounded query.)
  */
 async function rollupWindowStart(database) {
   const fallback = addETDays(new Date(), -ROLLUP_WINDOW_DAYS);
@@ -471,8 +492,8 @@ async function rollupWindowStart(database) {
 
 // Whole days covered by the window, for the subject line — a fixed "7d" would
 // misdescribe the first send, or the catch-up send after a skipped week.
-function windowDays(since) {
-  return Math.max(1, Math.round((Date.now() - since.getTime()) / 86400000));
+function windowDays(since, until) {
+  return Math.max(1, Math.round((until.getTime() - since.getTime()) / 86400000));
 }
 
 // Leg 3 — weekly rollup of what was actually graded.
@@ -480,15 +501,18 @@ async function sendVerdictRollup({ database, mailer }) {
   if (await sentRecently(database, ROLLUP_MARKER_KEY)) return { skipped: 'not-due' };
 
   const { since, exclusive } = await rollupWindowStart(database);
+  // Taken BEFORE the query and stamped as the watermark, so a concurrent
+  // sweep's writes land above it instead of being skipped forever.
+  const cutoff = new Date();
   let rows;
   try {
-    rows = await checkedSince(database, since, { exclusive });
+    rows = await checkedSince(database, since, { exclusive, until: cutoff });
   } catch (err) {
     logger.error(`[impact-digest] rollup query failed: ${err.message}`);
     return { skipped: 'error' };
   }
 
-  const composed = composeVerdictRollup(rows, { days: windowDays(since) });
+  const composed = composeVerdictRollup(rows, { days: windowDays(since, cutoff) });
   // Quiet window: nothing graded. No email, and NO marker stamp — the first
   // real verdict after a quiet stretch goes out on the next tick rather than
   // waiting out an arbitrary weekly slot.
@@ -498,6 +522,8 @@ async function sendVerdictRollup({ database, mailer }) {
     mailer,
     database,
     markerKey: ROLLUP_MARKER_KEY,
+    // Stamp the CUTOFF, not the send time — the two windows must abut exactly.
+    markerAt: cutoff,
     categories: ['content-engine', 'impact-rollup'],
     label: 'verdict rollup',
   });
