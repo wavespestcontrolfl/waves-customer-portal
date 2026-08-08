@@ -34,16 +34,14 @@ function makeDb({ rows = [], markers = [] } = {}) {
       return builder;
     }
     const q = {
-      // checkedSince passes a callback predicate; capture the comparison so
-      // the rollup's window boundary (inclusive vs exclusive) is assertable.
-      where: (arg) => {
-        if (typeof arg === 'function') {
-          const rec = {
-            where: (col, op, since) => { state.checkedSince.push({ col, op, since }); return rec; },
-            orWhere: () => rec,
-          };
-          arg.call(rec);
-        }
+      where: () => q,
+      // checkedSince keys the window on COALESCE(checked_21d_at,
+      // checked_14d_at). Capture the SQL + boundary so both the
+      // single-verdict-per-row semantics and the inclusive/exclusive window
+      // are assertable.
+      whereRaw: (sql, binds) => {
+        const op = /COALESCE\([^)]*\)\s*(>=|>)/.exec(sql);
+        state.checkedSince.push({ sql, op: op ? op[1] : null, since: binds && binds[0] });
         return q;
       },
       orWhere: () => q,
@@ -97,15 +95,23 @@ describe('composePausedAlert', () => {
 });
 
 describe('composeBlindLoopAlert', () => {
-  test('stays silent below the checked floor — a quiet engine is not a blind one', () => {
-    expect(composeBlindLoopAlert({ checked: 4 })).toBeNull();
-    expect(composeBlindLoopAlert({ checked: 0 })).toBeNull();
+  test('stays silent below the measured floor — a quiet engine is not a blind one', () => {
+    expect(composeBlindLoopAlert({ ungraded: 4 })).toBeNull();
+    expect(composeBlindLoopAlert({ ungraded: 0 })).toBeNull();
   });
 
-  test('fires FIX: once enough rows were checked and none graded', () => {
-    const out = composeBlindLoopAlert({ checked: 12 });
-    expect(out.subject).toBe('FIX: impact loop graded nothing in 21 days — 12 checks, all insufficient data');
+  test('fires FIX: once enough optimizations were measured and none graded', () => {
+    const out = composeBlindLoopAlert({ ungraded: 12 });
+    expect(out.subject).toBe('FIX: impact loop graded nothing in 21 days — 12 measured, none graded');
     expect(out.text).toContain('cannot grade its own work');
+  });
+
+  test('counts OPTIMIZATIONS, never "checks" — one row can carry two check events but only one verdict', () => {
+    // checkPending writes a provisional verdict at 14d and overwrites it at
+    // 21d, so the row set cannot honestly report a number of check events.
+    const out = composeBlindLoopAlert({ ungraded: 12 });
+    expect(out.text).not.toMatch(/\bchecks\b/);
+    expect(out.subject).not.toMatch(/\bchecks\b/);
   });
 });
 
@@ -249,6 +255,18 @@ describe('rollup leg — quiet windows do not stamp the weekly marker', () => {
     expect(rollupQuery.op).toBe('>=');
   });
 
+  test('the window keys on the LATEST check, so the verdict always matches the event', async () => {
+    // One row = one verdict (21d overwrites 14d). Selecting on "either
+    // timestamp in window" would report a 14d-selected row under a verdict
+    // written at 21d.
+    const fakeDb = makeDb({ rows: [{ verdict: 'improved' }] });
+    await digest.sendImpactDigestsIfDue({ db: fakeDb, sendgrid, tracker: { pausedBuckets: async () => [] } });
+
+    for (const q of fakeDb.state.checkedSince) {
+      expect(q.sql).toContain('COALESCE(checked_21d_at, checked_14d_at)');
+    }
+  });
+
   test('the subject describes the ACTUAL window, not a hardcoded 7d', async () => {
     const lastSent = new Date(Date.now() - 12 * 86400000);
     const fakeDb = makeDb({
@@ -266,7 +284,7 @@ describe('email links', () => {
     // /admin/blog?tab=autopilot.
     for (const email of [
       composePausedAlert([{ bucket: 'thin_content', regressions: 3 }]),
-      composeBlindLoopAlert({ checked: 12 }),
+      composeBlindLoopAlert({ ungraded: 12 }),
       composeVerdictRollup([{ verdict: 'improved' }]),
     ]) {
       expect(email.text).toContain('/admin/blog?tab=autopilot');

@@ -66,7 +66,7 @@ async function main() {
         ['paused-lane', digest.composePausedAlert(paused)],
         ['blind-loop', ['improved', 'neutral', 'regressed'].some((k) => blindCounts[k] > 0)
           ? null
-          : digest.composeBlindLoopAlert({ checked: blindCounts.insufficient_data })],
+          : digest.composeBlindLoopAlert({ ungraded: blindCounts.insufficient_data })],
         ['weekly-rollup', digest.composeVerdictRollup(rollupRows)],
       ];
       for (const [name, email] of composed) {

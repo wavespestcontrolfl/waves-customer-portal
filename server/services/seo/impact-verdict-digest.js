@@ -16,10 +16,11 @@
  *      CLEARED when a bucket stops being paused, so a later re-pause alerts
  *      immediately instead of being swallowed by a stale marker.
  *
- *   2. Blind-loop alert (FIX:) — the sweep checked plenty of rows over
- *      BLIND_LOOP_DAYS and every one came back insufficient_data. A grader
- *      that can never grade looks identical to a healthy one on a dashboard;
- *      it is only visible as an absence, so the absence is the alert.
+ *   2. Blind-loop alert (FIX:) — a meaningful number of optimizations were
+ *      measured over BLIND_LOOP_DAYS and not one carries a graded verdict. A
+ *      grader that can never grade looks identical to a healthy one on a
+ *      dashboard; it is only visible as an absence, so the absence is the
+ *      alert.
  *
  *   3. Weekly verdict rollup (OK:/FYI:) — what the loop actually measured in
  *      the last ROLLUP_WINDOW_DAYS. Sends only when at least one verdict was
@@ -56,9 +57,9 @@ const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wa
 const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
 const ROLLUP_WINDOW_DAYS = 7;
 const BLIND_LOOP_DAYS = 21;
-// Below this many checked-but-ungraded rows the silence is just a quiet
-// engine, not a blind grader. Keeps the alert off a young/low-volume lane.
-const BLIND_LOOP_MIN_CHECKED = 5;
+// Below this many measured-but-ungraded optimizations the silence is just a
+// quiet engine, not a blind grader. Keeps the alert off a young/low-volume lane.
+const BLIND_LOOP_MIN_MEASURED = 5;
 
 const PAUSED_MARKER_PREFIX = 'impact-paused:';
 const BLIND_MARKER_KEY = 'impact-loop-blind';
@@ -179,36 +180,40 @@ function composePausedAlert(buckets) {
 }
 
 /**
- * composeBlindLoopAlert({ checked, days }) → email | null
+ * composeBlindLoopAlert({ ungraded, days }) → email | null
  *
- * Fires only when the sweep graded NOTHING across a long window despite
- * checking a meaningful number of rows: every verdict came back
- * insufficient_data. That is a threshold/traffic problem (MIN_IMPRESSIONS,
- * or too few control pages), not a quiet week, and it silently disables the
- * judgment half of the loop.
+ * Fires when a meaningful number of optimizations were MEASURED across a long
+ * window and not one of them carries a graded verdict. Phrased in terms of
+ * optimizations rather than "checks" on purpose: the table keeps one verdict
+ * per optimization, the confirmed 21-day one, so the number of underlying
+ * check events is not something this row set can honestly report.
+ *
+ * That state is a threshold/traffic problem (MIN_IMPRESSIONS, or too few
+ * control pages), not a quiet week, and it silently disables the judgment half
+ * of the loop.
  */
-function composeBlindLoopAlert({ checked, days = BLIND_LOOP_DAYS, minChecked = BLIND_LOOP_MIN_CHECKED } = {}) {
-  const count = Number(checked) || 0;
-  if (count < minChecked) return null;
+function composeBlindLoopAlert({ ungraded, days = BLIND_LOOP_DAYS, minMeasured = BLIND_LOOP_MIN_MEASURED } = {}) {
+  const count = Number(ungraded) || 0;
+  if (count < minMeasured) return null;
 
   const impactUrl = `${adminPortalUrl()}/admin/blog?tab=autopilot`;
-  const subject = `FIX: impact loop graded nothing in ${days} days — ${count} checks, all insufficient data`;
+  const subject = `FIX: impact loop graded nothing in ${days} days — ${count} measured, none graded`;
   const html = shell(
     'Impact loop is measuring but not grading',
-    `Every one of the last ${esc(count)} impact checks over ${esc(days)} days returned <strong>insufficient_data</strong> — no improved, neutral, or regressed verdict was recorded. The optimization loop is publishing and measuring but cannot grade its own work, so nothing can be paused or reverted on evidence. Usual causes: pages below the impressions floor, or too few usable control pages. Verdicts: <a href="${impactUrl}">${impactUrl}</a>.`,
+    `${esc(count)} optimizations were measured over the last ${esc(days)} days and every one of them still carries <strong>insufficient_data</strong> — not one improved, neutral, or regressed verdict. The loop is publishing and measuring but cannot grade its own work, so nothing can be paused or re-queued on evidence. Usual causes: pages below the impressions floor, or too few usable control pages. Verdicts: <a href="${impactUrl}">${impactUrl}</a>.`,
     [],
   );
   const text = [
     'Impact loop is measuring but not grading',
     '',
-    `Every one of the last ${count} impact checks over ${days} days returned insufficient_data — no improved, neutral, or regressed verdict was recorded.`,
-    'The loop is publishing and measuring but cannot grade its own work, so nothing can be paused or reverted on evidence.',
+    `${count} optimizations were measured over the last ${days} days and every one still carries insufficient_data — not one improved, neutral, or regressed verdict.`,
+    'The loop is publishing and measuring but cannot grade its own work, so nothing can be paused or re-queued on evidence.',
     'Usual causes: pages below the impressions floor, or too few usable control pages.',
     '',
     `Verdicts: ${impactUrl}`,
   ].join('\n');
 
-  return { subject, html, text, checked: count };
+  return { subject, html, text, ungraded: count };
 }
 
 function tallyVerdicts(rows) {
@@ -286,12 +291,30 @@ function composeVerdictRollup(rows, { days = ROLLUP_WINDOW_DAYS } = {}) {
 // Window boundaries are real Date objects built with the ET helpers — a naive
 // 'YYYY-MM-DD' string in a timestamptz WHERE is read as UTC and slides the
 // window 4-5 hours, moving boundary rows into the wrong day (AGENTS.md).
+/**
+ * Optimizations whose LATEST measurement landed in the window.
+ *
+ * content_optimization_impact stores ONE verdict per optimization: checkPending
+ * writes a provisional verdict at 14 days and OVERWRITES it at 21 days, which
+ * is the confirmed one ("the 21d check confirms the 14d verdict and is the
+ * final one persisted"). There is no per-window verdict history to read.
+ *
+ * So the window keys on COALESCE(checked_21d_at, checked_14d_at) — the check
+ * that produced the verdict currently on the row. The previous
+ * "either timestamp is in the window" form was logically EQUIVALENT (21d is
+ * never earlier than 14d, so a 14d hit implies a 21d hit whenever 21d exists);
+ * COALESCE is used because it states the invariant the callers rely on —
+ * one row, one measurement event, one matching verdict — instead of leaving
+ * it to be re-derived, and it also drops the anomalous-ordering edge case.
+ *
+ * What this canNOT give callers is a count of check EVENTS: a row that was
+ * graded at 14d and re-graded at 21d still returns one verdict. Copy that
+ * says "N checks" would be unsupportable — see composeBlindLoopAlert.
+ */
 function checkedSince(database, since, { exclusive = false } = {}) {
   const op = exclusive ? '>' : '>=';
   return database('content_optimization_impact')
-    .where(function whereChecked() {
-      this.where('checked_21d_at', op, since).orWhere('checked_14d_at', op, since);
-    })
+    .whereRaw(`COALESCE(checked_21d_at, checked_14d_at) ${op} ?`, [since])
     .select('bucket', 'page_url', 'verdict', 'estimated_lift_position', 'estimated_lift_clicks_pct');
 }
 
@@ -412,7 +435,7 @@ async function alertBlindLoop({ database, mailer }) {
   const measured = MEASURED_VERDICTS.reduce((sum, key) => sum + counts[key], 0);
   if (measured > 0) return { skipped: 'grading' };
 
-  const composed = composeBlindLoopAlert({ checked: counts.insufficient_data, days: BLIND_LOOP_DAYS });
+  const composed = composeBlindLoopAlert({ ungraded: counts.insufficient_data, days: BLIND_LOOP_DAYS });
   if (!composed) return { skipped: 'below-floor' };
 
   return sendComposed(composed, {
@@ -532,5 +555,5 @@ module.exports = {
   composeBlindLoopAlert,
   composeVerdictRollup,
   _internals: { tallyVerdicts, pausedMarkerKey, checkedSince },
-  THRESHOLDS: { ROLLUP_WINDOW_DAYS, BLIND_LOOP_DAYS, BLIND_LOOP_MIN_CHECKED, SIX_DAYS_MS },
+  THRESHOLDS: { ROLLUP_WINDOW_DAYS, BLIND_LOOP_DAYS, BLIND_LOOP_MIN_MEASURED, SIX_DAYS_MS },
 };
