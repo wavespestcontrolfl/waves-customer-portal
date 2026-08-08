@@ -111,7 +111,7 @@ function noteGuardTrips(note) {
 // drying/re-entry timing ("confirms the gate code" does not exempt;
 // "when"/"ready" only count tied to drying/safety so "gate code is
 // ready" doesn't either — keep in sync with TECH_CONFIRM_CONTEXT_RE).
-const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+(?:dr(?:y|ies|ying)(?:[\s-]+tim(?:e|es|ing))?|re-?ent\w*(?:[\s-]+tim(?:e|es|ing))?|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|\bconfirm\w*(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+timing\b|(?<=(?:^|[.!?\n,;:—–-])\s*(?:the\s+|your\s+|exact\s+)?|\b(?:drying|dry|re-?entry)[\s-]+|\bthe\s+|\byour\s+)timing\b[^.!?\n]{0,30}\bconfirm/i;
+const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+(?:dr(?:y|ies|ying)(?:[\s-]+tim(?:e|es|ing))?|re-?ent\w*(?:[\s-]+tim(?:e|es|ing))?|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|(?:^|[.!?\n,;:—–-]\s*|\b(?:the|your|our|exact|drying|dry|re-?entry)[\s-]+)timing\b[^.!?\n]{0,30}\bconfirm\w*\s+by\s+(?:your\s+|our\s+|the\s+)?tech(?:nician)?s?\b/i;
 // A confirmation about appointment logistics ("confirms arrival timing")
 // is not a drying confirmation — stripped before the confirm test. Gap is
 // tempered so "confirms DRYING time at the appointment" survives. Both
@@ -147,11 +147,25 @@ const NOTE_AGRONOMIC_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|o
 // directive whose object may be implicit ("Stay off for 30 minutes" after
 // "We treated the lawn.") — the treated-area noun can live in another
 // sentence, so the directive alone counts under implied context.
-const NOTE_IMPLIED_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b/i;
+const NOTE_IMPLIED_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b|\bbefore\s+(?:re-?)?enter\w*\b|\b(?:don['’]t|do\s+not|cannot|can['’]t|never|no)\s+(?:re-?)?enter\w*\b|\benter\w*\s+(?:for|in|until|after)\b/i;
+// Protective ADVICE ("keep your pets safe indoors during the storm") is
+// not a product claim — stripped only when the sentence carries no
+// product word, same guard as the server (PRODUCT_CONTEXT_RE mirror).
+const NOTE_PROTECTIVE_ADVICE_RE = /\b(?:keep(?:s|ing)?|stay(?:s|ing)?|remain(?:s|ing)?|be)\b[^.!?\n]{0,25}\bsafe(?:ly)?\b/gi;
+const NOTE_PRODUCT_CTX_RE = /\b(?:pesticides?|products?|treatments?|sprays?(?:ing)?|chemicals?|applications?|pest\s+control|exterminat\w*)\b/i;
+// Same sentence split as the server: decimals masked first so "1.5
+// hours" stays one sentence — no lookbehind (fatal parse on Safari
+// <16.4).
+function noteSentences(note) {
+  return note
+    .replace(/(\d)\.(?=\d)/g, '$1\u0001')
+    .split(/[.!?\n]+/)
+    .map((s) => s.replace(/\u0001/g, '.'));
+}
 // Same clause walk as the canonical checker (sentence → clause on
 // commas/semicolons/conjunctions; agronomic clauses exempt).
 function noteTimingTrips(note) {
-  for (const sentence of note.split(/[!?\n]+|(?<!\d)\.+|\.+(?!\d)/)) {
+  for (const sentence of noteSentences(note)) {
     for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
       if (!clause.trim()) continue;
       if (NOTE_TIMING_DURATION_RE.test(clause)
@@ -163,14 +177,21 @@ function noteTimingTrips(note) {
 }
 function noteComplianceTrips(note) {
   const idiomAllowed = NOTE_TECH_CONFIRM_RE.test(note.replace(NOTE_UNRELATED_CONFIRM_RE, ''));
-  // The server walks sentences; testing the whole post-strip note is
-  // equivalent for a yes/no verdict because every strip regex is bounded
-  // by [^.!?\n] and cannot span a sentence itself.
-  const scope = (idiomAllowed ? note.replace(NOTE_SAFE_DRY_IDIOM_RE, '') : note)
-    .replace(NOTE_SAFE_FROM_RE, '')
-    .replace(NOTE_WORKER_SAFETY_RE, '')
-    .replace(NOTE_WELL_WISH_SAFE_RE, '');
-  if (NOTE_SAFETY_WORD_RE.test(scope)) return true;
+  // Per-sentence walk, same order of strips as the server: the
+  // protective-advice strip is sentence-scoped (guarded on that
+  // sentence's product context), so the whole-note shortcut no longer
+  // holds.
+  for (const sentence of noteSentences(note)) {
+    if (!sentence.trim()) continue;
+    let scope = (idiomAllowed ? sentence.replace(NOTE_SAFE_DRY_IDIOM_RE, '') : sentence)
+      .replace(NOTE_SAFE_FROM_RE, '')
+      .replace(NOTE_WORKER_SAFETY_RE, '')
+      .replace(NOTE_WELL_WISH_SAFE_RE, '');
+    if (!NOTE_PRODUCT_CTX_RE.test(sentence)) {
+      scope = scope.replace(NOTE_PROTECTIVE_ADVICE_RE, '');
+    }
+    if (NOTE_SAFETY_WORD_RE.test(scope)) return true;
+  }
   if (NOTE_SAFETY_OVERCLAIMS_RE.test(note)) return true;
   return noteTimingTrips(note);
 }

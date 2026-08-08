@@ -492,8 +492,11 @@ const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|when)\s+(?:completely\
 // count tied to drying/safety ("when it's dry", "ready for re-entry") —
 // bare they'd leak "confirms the gate code is ready" (pre-push r11).
 // "will let you know" carries the when by itself only when it takes no
-// other object (end of clause or followed by "when").
-const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+(?:dr(?:y|ies|ying)(?:[\s-]+tim(?:e|es|ing))?|re-?ent\w*(?:[\s-]+tim(?:e|es|ing))?|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|\bconfirm\w*(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+timing\b|(?<=(?:^|[.!?\n,;:—–-])\s*(?:the\s+|your\s+|exact\s+)?|\b(?:drying|dry|re-?entry)[\s-]+|\bthe\s+|\byour\s+)timing\b[^.!?\n]{0,30}\bconfirm/i;
+// other object (end of clause or followed by "when"). Every alternative
+// requires the TECHNICIAN — "The office confirms timing"/"confirmed by
+// dispatch" defers to nobody qualified to judge drying (codex r16); the
+// passive tail is prefix-anchored (no lookbehind — Safari <16.4 parse).
+const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+(?:dr(?:y|ies|ying)(?:[\s-]+tim(?:e|es|ing))?|re-?ent\w*(?:[\s-]+tim(?:e|es|ing))?|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|(?:^|[.!?\n,;:—–-]\s*|\b(?:the|your|our|exact|drying|dry|re-?entry)[\s-]+)timing\b[^.!?\n]{0,30}\bconfirm\w*\s+by\s+(?:your\s+|our\s+|the\s+)?tech(?:nician)?s?\b/i;
 // A confirmation ABOUT something other than drying/re-entry ("technician
 // confirms ARRIVAL timing", "confirms the appointment") defers appointment
 // logistics, not the drying claim — it must not exempt "safe once dry"
@@ -521,14 +524,28 @@ const WELL_WISH_SAFE_RE = /\b(?:stay|be|drive|travel|get\s+home)\s+safe(?:ly)?\b
 // minutes" after "We treated the lawn."). REENTRY_CONTEXT_RE needs the
 // treated-area noun in the same clause, so cross-sentence notes slip it;
 // under impliedTreatmentContext the directive alone carries the meaning.
-const IMPLIED_REENTRY_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b/i;
+// Plain enter/entry directives count too — "Wait 30 minutes before
+// entering", "Don't enter for 30 minutes" (codex #3278 r16). Bare
+// "enter" stays out so "enter through the side gate" remains prose.
+const IMPLIED_REENTRY_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b|\bbefore\s+(?:re-?)?enter\w*\b|\b(?:don['’]t|do\s+not|cannot|can['’]t|never|no)\s+(?:re-?)?enter\w*\b|\benter\w*\s+(?:for|in|until|after)\b/i;
+// Protective ADVICE ("keep your pets safe indoors during the storm") is
+// not a product-safety claim — stripped under impliedTreatmentContext
+// ONLY when the sentence carries no product word, so "our treatment
+// keeps your pets safe" still blocks (codex #3278 r16).
+const PROTECTIVE_ADVICE_SAFE_RE = /\b(?:keep(?:s|ing)?|stay(?:s|ing)?|remain(?:s|ing)?|be)\b[^.!?\n]{0,25}\bsafe(?:ly)?\b/gi;
 
 function complianceOverclaims(text, { impliedTreatmentContext = false } = {}) {
   const issues = [];
   // Split on sentence enders, but a period BETWEEN digits is a decimal
   // ("1.5 hours"), not a boundary — splitting there hid the duration
-  // from the re-entry check (codex pre-push #3278 r13).
-  const sentences = String(text || '').split(/[!?\n]+|(?<!\d)\.+|\.+(?!\d)/);
+  // from the re-entry check (codex pre-push #3278 r13). Decimals are
+  // masked before the split instead of a lookbehind so the client can
+  // mirror this verbatim (lookbehind parses fatally on Safari <16.4 —
+  // codex #3278 r16).
+  const sentences = String(text || '')
+    .replace(/(\d)\.(?=\d)/g, '$1\u0001')
+    .split(/[.!?\n]+/)
+    .map((s) => s.replace(/\u0001/g, '.'));
   // The technician-confirms framing may legitimately sit in an ADJACENT
   // sentence ("… safe once dry. Your technician confirms timing.") — test
   // the whole copy once; the idiom strip itself stays per-sentence.
@@ -542,7 +559,15 @@ function complianceOverclaims(text, { impliedTreatmentContext = false } = {}) {
       : sentence)
       .replace(SAFE_FROM_PEST_RE, '')
       .replace(WORKER_SAFETY_RE, '');
-    if (impliedTreatmentContext) safetyScope = safetyScope.replace(WELL_WISH_SAFE_RE, '');
+    if (impliedTreatmentContext) {
+      safetyScope = safetyScope.replace(WELL_WISH_SAFE_RE, '');
+      // Protective advice only reads as a product claim when the sentence
+      // names the product/treatment — otherwise "keep your pets safe
+      // indoors during the storm" is weather advice (r16).
+      if (!PRODUCT_CONTEXT_RE.test(sentence)) {
+        safetyScope = safetyScope.replace(PROTECTIVE_ADVICE_SAFE_RE, '');
+      }
+    }
     // Copy that ALWAYS accompanies a treatment message (rain-out dispatcher
     // notes) carries product context implicitly — "Treatment today. Totally
     // safe." must block even though the sentences never co-occur (codex

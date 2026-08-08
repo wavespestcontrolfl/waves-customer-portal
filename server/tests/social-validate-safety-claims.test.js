@@ -54,6 +54,9 @@ const FLAGGED_PRODUCT_SAFETY = [
   // #3278 r15: arbitrary nouns can't qualify the time object either.
   'Treatment is safe once dry. Your technician confirms the invoice time.',
   'Treatment is safe once dry. The invoice timing will be confirmed by your technician.',
+  // #3278 r16: the confirmation must come from the technician.
+  'Treatment is safe once dry. The office confirms timing.',
+  'Treatment is safe once dry. Timing will be confirmed by dispatch.',
   // r6: "safe UNTIL dry" claims wet-safety — the opposite of the idiom.
   'Our treatments are safe until dry; your technician confirms timing',
   'safe pesticide treatments',

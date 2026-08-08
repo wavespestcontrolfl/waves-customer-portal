@@ -1493,6 +1493,17 @@ describe('rain-out service', () => {
       blocked('Treatment is safe once dry. Your technician confirms the gate code.');
       blocked('Treatment is safe once dry. Your technician confirms the gate code is ready.');
       blocked('Treatment is safe once dry. Your technician will let you know the gate code.');
+      // The confirmation must come from the TECHNICIAN — office/dispatch
+      // can't stand in (r16).
+      blocked('Treatment is safe once dry. The office confirms timing.');
+      blocked('Treatment is safe once dry. Timing will be confirmed by dispatch.');
+      // Plain enter directives are fixed re-entry timing too (r16).
+      blocked('Wait 30 minutes before entering');
+      blocked("Don't enter for 30 minutes");
+      // Protective weather advice is NOT a product claim — no product
+      // word in the sentence, so it stays sendable (r16).
+      expect(sanitize()('Keep your pets safe indoors during the storm'))
+        .toEqual({ note: 'Keep your pets safe indoors during the storm' });
       // Nor can an arbitrary noun qualify the time object — only filler
       // words (articles/possessives) may sit between the confirm verb and
       // its timing object (r15).
