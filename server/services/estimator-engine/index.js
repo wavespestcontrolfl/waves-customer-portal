@@ -321,6 +321,46 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     if (!dryRun) {
       const existing = await existingDraftForCall(callLogId);
       if (existing) {
+        // Stale-linkage reconciliation (codex P1, PR #3304): an
+        // in-pipeline draft can persist against a stamp a later retry
+        // then cleared or repointed — and this short-circuit would return
+        // it forever, leaving estimate_data.lead_id and leads.estimate_id
+        // advancing the WRONG pipeline record. The context above resolved
+        // the call's CURRENT linkage; when the draft's recorded lead
+        // differs, both links are re-pointed (or cleared) here.
+        // Non-blocking, like the original link write: worst case the
+        // draft stays unlinked and advancement falls back to contact
+        // matching.
+        try {
+          const draftData = (() => {
+            try {
+              const data = typeof existing.estimate_data === 'string'
+                ? JSON.parse(existing.estimate_data) : (existing.estimate_data || {});
+              return data && typeof data === 'object' ? data : {};
+            } catch { return {}; }
+          })();
+          const draftLeadId = draftData.lead_id ? String(draftData.lead_id) : null;
+          const currentLeadId = (context?.lead?.id && context?.leadIsForThisCall)
+            ? String(context.lead.id) : null;
+          if (draftLeadId !== currentLeadId) {
+            if (currentLeadId) draftData.lead_id = currentLeadId;
+            else delete draftData.lead_id;
+            await db('estimates').where({ id: existing.id })
+              .update({ estimate_data: JSON.stringify(draftData), updated_at: new Date() });
+            if (draftLeadId) {
+              // Only if the OLD lead still points at this draft — a lead
+              // relinked elsewhere is not ours to touch.
+              await db('leads').where({ id: draftLeadId, estimate_id: existing.id })
+                .update({ estimate_id: null });
+            }
+            if (currentLeadId) {
+              await db('leads').where({ id: currentLeadId }).update({ estimate_id: existing.id });
+            }
+            logger.info(`[estimator-engine] relinked existing draft ${existing.id} after call linkage change (${draftLeadId || 'none'} → ${currentLeadId || 'none'})`);
+          }
+        } catch (relinkErr) {
+          logger.warn(`[estimator-engine] existing-draft relink failed (non-blocking): ${relinkErr.message}`);
+        }
         result.lane = 'existing';
         result.reasons = ['draft already exists for this call'];
         result.estimateId = existing.id;
