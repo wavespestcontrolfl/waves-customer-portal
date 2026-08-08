@@ -32,6 +32,7 @@ const contentGuardrails = require('../content/content-guardrails');
 const { refineFootprintFindings } = require('../content/footprint-claim-classifier');
 const comparisonTableGate = require('../content/comparison-table-gate');
 const factCheckGate = require('../content/fact-check-gate');
+const complianceGate = require('../content/compliance-gate');
 const { describeHeroForAlt } = require('../content/hero-alt-vision');
 const { normalizeContentUrl } = require('../content/content-registry');
 const { normalizeSpokeSites, SPOKE_SITE_KEYS, HUB_SITE_KEYS } = require('./spoke-sites');
@@ -860,6 +861,27 @@ async function assertFactCheckClear({ title, body, city, keyword, tag }, label) 
   }
 }
 
+// Run the LLM SEMANTIC compliance check and throw BLOG_COMPLIANCE_FAILED on a
+// P0. The regex guardrails above already blocked every violation they can
+// match; this catches the paraphrases their representation cannot express —
+// most importantly whether a dry/timing clause actually GOVERNS the safety
+// predicate ("safe once dry", exempt) or some other one ("safe for pets and
+// works after it dries", a bare unconditional claim). Same fail-open posture
+// as the fact-check above, so this only throws on a real compliance block.
+async function assertComplianceClear({ title, body, city, keyword, tag }, label) {
+  const compliance = await complianceGate.evaluate({ title, body, city, keyword, tag });
+  if (!compliance.pass) {
+    const blocking = compliance.findings.filter((f) => f.severity === 'P0');
+    const err = new Error(`compliance gate failed: ${blocking.map((f) => `${f.code} ${f.message}`).join(' | ')}`);
+    err.code = 'BLOG_COMPLIANCE_FAILED';
+    err.details = blocking;
+    throw err;
+  }
+  if (compliance.findings.length) {
+    logger.info(`[astro-publisher] compliance advisory for ${label}: ${compliance.findings.map((f) => `${f.severity} ${f.code} ${f.message}`).join(' | ')}`);
+  }
+}
+
 async function publishAstro(postId) {
   const post = await db('blog_posts').where({ id: postId }).first();
   if (!post) throw new Error(`blog_post ${postId} not found`);
@@ -1077,6 +1099,16 @@ async function publishAstro(postId) {
     // ordinance date. This gate does, before the post ships under the licensed
     // reviewer byline. Fail-open; blocks only on P0/P1 findings.
     await assertFactCheckClear(
+      { title: post.title, body, city: post.city, keyword: post.keyword, tag: post.tag },
+      slug,
+    );
+
+    // 2c-2. LLM SEMANTIC compliance check — the second layer for the two hard
+    // codes. Gate 2b's regexes catch every phrasing they encode; this reads for
+    // meaning and catches the ones no pattern can express (see compliance-gate
+    // header). Runs AFTER the deterministic gate so the cheap check rejects the
+    // obvious cases first and the model only sees copy that already passed.
+    await assertComplianceClear(
       { title: post.title, body, city: post.city, keyword: post.keyword, tag: post.tag },
       slug,
     );

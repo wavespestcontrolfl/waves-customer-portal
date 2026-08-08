@@ -3749,6 +3749,11 @@ function isDeterministicPublishError(err) {
   // draft. (Guardrails don't run on the autonomous publish path, so the
   // fact-check is the first edit-required gate to reach this publisher.)
   if (err?.code === 'BLOG_FACTCHECK_FAILED') return true;
+  // Compliance P0 is edit-required for the same reason: the copy states an
+  // unconditional safety claim or offers a service Waves does not provide, and
+  // re-running the identical draft through the identical gate cannot change
+  // that. Park it for review instead of releasing the claim.
+  if (err?.code === 'BLOG_COMPLIANCE_FAILED') return true;
   // Hero generation/compression failure is fail-closed: the post cannot ship
   // without committed hero bytes (the schema requires hero_image and the live
   // hero is the LCP element), so park the run for review instead of
