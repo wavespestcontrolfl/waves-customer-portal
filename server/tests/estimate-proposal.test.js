@@ -131,6 +131,27 @@ describe('estimate-proposal', () => {
       expect(t.firstYearTotal).toBe(1200);
     });
 
+    it('folds corrective-work amounts into the one-time totals with per-line tax', () => {
+      const estimate = {
+        estimate_data: {
+          proposal: {
+            enabled: true,
+            taxRate: 0.07,
+            buildings: [{ name: 'B', lineItems: [{ description: 'pest', unitPrice: 100, frequency: 'monthly' }] }],
+            correctiveWork: [
+              { label: 'German roach cleanout — Units 2 & 4', amount: 450, taxable: true },
+              { label: 'Exclusion — soffit gaps', amount: 300 },
+            ],
+          },
+        },
+      };
+      const t = computeProposalTotals(normalizeProposal(estimate));
+      expect(t.oneTime).toBe(750);
+      expect(t.taxableOneTime).toBe(450);
+      expect(t.totalTax).toBe(31.5);              // 450 * 0.07
+      expect(t.firstYearTotal).toBe(1981.5);      // 1200 + 750 + 31.5
+    });
+
     it('flags multi-building proposals', () => {
       const estimate = {
         estimate_data: { proposal: { enabled: true, buildings: [
@@ -140,6 +161,73 @@ describe('estimate-proposal', () => {
       };
       expect(computeProposalTotals(normalizeProposal(estimate)).isMultiBuilding).toBe(true);
     });
+  });
+});
+
+describe('structured proposal sections (slice 1A-i)', () => {
+  const authored = (extra) => ({
+    estimate_data: {
+      proposal: {
+        enabled: true,
+        buildings: [{ name: 'B', lineItems: [{ description: 'pest', unitPrice: 100, frequency: 'monthly' }] }],
+        ...extra,
+      },
+    },
+  });
+
+  it('normalizes every structured section and RETURNS it (PUT persists the normalizer output — an unreturned field is silently dropped on save)', () => {
+    const p = normalizeProposal(authored({
+      propertyScope: { items: [{ label: 'Units', value: '4 residential units' }, { label: '', value: 'dropped' }] },
+      correctiveWork: [{ label: 'Cleanout', amount: 450.005, taxable: true, includes: ['Kitchens', '', 'Follow-up at 2 weeks'] }],
+      customerResponsibilities: ['Provide unit access with 24-hour tenant notice', '  '],
+      commercialTerms: { validDays: 30, paymentTerms: 'Net-30', initialTermMonths: 0, renewal: null, priceAdjustment: '', cancellation: '30-day written notice', accessRequirements: null },
+      accountManager: 'Adam',
+    }));
+    expect(p.propertyScope).toEqual({ items: [{ label: 'Units', value: '4 residential units' }] });
+    expect(p.correctiveWork).toEqual([{
+      label: 'Cleanout', amount: 450.01, taxable: true, includes: ['Kitchens', 'Follow-up at 2 weeks'],
+    }]);
+    expect(p.customerResponsibilities).toEqual(['Provide unit access with 24-hour tenant notice']);
+    expect(p.commercialTerms).toEqual({
+      validDays: 30,
+      paymentTerms: 'Net-30',
+      initialTermMonths: 0,
+      renewal: null,
+      priceAdjustment: null,
+      cancellation: '30-day written notice',
+      accessRequirements: null,
+    });
+    expect(p.accountManager).toBe('Adam');
+  });
+
+  it('normalizes every absent section to null so legacy proposals render exactly as before', () => {
+    const p = normalizeProposal(authored({}));
+    expect(p.propertyScope).toBeNull();
+    expect(p.correctiveWork).toBeNull();
+    expect(p.customerResponsibilities).toBeNull();
+    expect(p.commercialTerms).toBeNull();
+    expect(p.accountManager).toBeNull();
+  });
+
+  it('clamps hostile structured input: negative amounts to 0, out-of-range term numbers to null, empty sections to null', () => {
+    const p = normalizeProposal(authored({
+      correctiveWork: [{ label: 'Hostile', amount: -500 }, { amount: 100 }],
+      propertyScope: { items: [{ label: 'x' }] },
+      customerResponsibilities: [],
+      commercialTerms: { validDays: 4000, initialTermMonths: -3, paymentTerms: '   ' },
+    }));
+    expect(p.correctiveWork).toEqual([{ label: 'Hostile', amount: 0, taxable: false, includes: [] }]);
+    expect(p.propertyScope).toBeNull();          // label without value drops the row
+    expect(p.customerResponsibilities).toBeNull();
+    expect(p.commercialTerms).toBeNull();        // every field invalid → whole block null
+  });
+
+  it('never authors structured sections onto a synthesized fallback', () => {
+    const p = normalizeProposal({ customer_name: 'Y', monthly_total: 120, estimate_data: {} });
+    expect(p.synthesized).toBe(true);
+    expect(p.propertyScope).toBeNull();
+    expect(p.correctiveWork).toBeNull();
+    expect(p.commercialTerms).toBeNull();
   });
 });
 

@@ -253,6 +253,71 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('Licensed & insured · Satisfaction guaranteed');
   });
 
+  it('renders the structured agreement sections when authored (slice 1A-i)', () => {
+    const { container } = render(<EstimateProposalDocument data={{
+      ...BASE_DATA,
+      proposal: {
+        ...BASE_DATA.proposal,
+        propertyScope: { items: [{ label: 'Units', value: '4 residential units' }] },
+        correctiveWork: [{ label: 'German roach cleanout', amount: 450, taxable: true, includes: ['Both kitchens'] }],
+        customerResponsibilities: ['Provide unit access with 24-hour tenant notice'],
+        commercialTerms: {
+          validDays: 30, paymentTerms: 'Net-30', initialTermMonths: 12,
+          renewal: null, priceAdjustment: null, cancellation: '30-day written notice', accessRequirements: null,
+        },
+        accountManager: 'Adam',
+      },
+    }} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('Property scope');
+    expect(text).toContain('4 residential units');
+    expect(text).toContain('Corrective work (one-time)');
+    expect(text).toContain('$450.00 *');
+    expect(text).toContain('Both kitchens');
+    expect(text).toContain('Customer responsibilities');
+    expect(text).toContain('Service terms');
+    expect(text).toContain('30 days from issue');
+    expect(text).toContain('12 months');
+    // Structured terms are authored terms: the canned commercial inclusions
+    // stack (with its no-long-term-contract claim beside a 12-month initial
+    // term) must not render.
+    expect(text).not.toContain('What your commercial pest service includes');
+    expect(text).not.toContain('No long-term contract');
+    // Neutral terms line still present.
+    expect(text).toContain('Licensed & insured · Satisfaction guaranteed');
+  });
+
+  it('demotes free-text terms to Additional terms beside structured terms and keeps them inline otherwise', () => {
+    const structured = render(<EstimateProposalDocument data={{
+      ...BASE_DATA,
+      proposal: {
+        ...BASE_DATA.proposal,
+        terms: 'Interior visits billed per visit.',
+        commercialTerms: {
+          validDays: 30, paymentTerms: null, initialTermMonths: null,
+          renewal: null, priceAdjustment: null, cancellation: null, accessRequirements: null,
+        },
+      },
+    }} token="tok-123" />);
+    expect(structured.container.textContent).toContain('Additional terms');
+    expect(structured.container.textContent).toContain('Interior visits billed per visit.');
+    const legacy = render(<EstimateProposalDocument data={{
+      ...BASE_DATA,
+      proposal: { ...BASE_DATA.proposal, terms: 'Interior visits billed per visit.' },
+    }} token="tok-123" />);
+    expect(legacy.container.textContent).not.toContain('Additional terms');
+    expect(legacy.container.textContent).toContain('Interior visits billed per visit.');
+  });
+
+  it('renders a legacy proposal with no structured keys without any new section headings', () => {
+    const { container } = render(<EstimateProposalDocument data={BASE_DATA} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).not.toContain('Property scope');
+    expect(text).not.toContain('Corrective work');
+    expect(text).not.toContain('Customer responsibilities');
+    expect(text).not.toContain('Service terms');
+  });
+
   it('keeps a plain Total for one-time-only documents', () => {
     const oneTime = {
       ...BASE_DATA,

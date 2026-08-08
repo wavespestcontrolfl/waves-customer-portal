@@ -1953,6 +1953,13 @@ router.put('/:id/proposal', async (req, res, next) => {
     if (hasNegativeLine) {
       return res.status(400).json({ error: 'Proposal line items cannot have negative quantities or unit prices.' });
     }
+    // Same feedback-over-silent-clamp rule for structured corrective-work
+    // amounts (slice 1A-i) — they fold into the one-time totals like any
+    // one_time line, so a negative here is the same repricing hazard.
+    if (Array.isArray(incoming.correctiveWork)
+      && incoming.correctiveWork.some((w) => Number(w?.amount ?? w?.price) < 0)) {
+      return res.status(400).json({ error: 'Corrective work amounts cannot be negative.' });
+    }
 
     // per_application is a RENDERING-only cadence (the estimate PDF's
     // synthesized lines). It must never be persisted here: the editor payload

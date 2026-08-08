@@ -242,6 +242,52 @@ function buildingBlock(ctx, building, y, taxRate) {
   return y;
 }
 
+// Structured corrective-work lines (slice 1A-i). Their amounts are inside
+// computeProposalTotals' one-time totals, so this fallback document must
+// print the rows too — a totals line with no visible source would look like
+// a billing error.
+function correctiveWorkBlock(ctx, correctiveWork, y) {
+  const { doc } = ctx;
+  if (!Array.isArray(correctiveWork) || correctiveWork.length === 0) return y;
+  y = ensureSpace(ctx, y, 40);
+  y = sectionLabel(doc, 'Corrective work (one-time)', L, y);
+  for (const work of correctiveWork) {
+    const includeLines = (work.includes || []).map((inc) => `• ${inc}`).join('\n');
+    doc.fontSize(10);
+    const labelH = doc.heightOfString(work.label, { width: COL_W.desc });
+    doc.fontSize(9);
+    const includesH = includeLines ? doc.heightOfString(includeLines, { width: COL_W.desc }) + 2 : 0;
+    const rowH = Math.max(labelH + includesH + 6, 18);
+    y = ensureSpace(ctx, y, rowH + 4);
+    doc.fontSize(10).font('Helvetica').fillColor(INK).text(work.label, COL.desc, y, { width: COL_W.desc });
+    if (includeLines) {
+      doc.fontSize(9).fillColor(MUTED).text(includeLines, COL.desc, y + labelH + 2, { width: COL_W.desc });
+    }
+    doc.fontSize(9).fillColor(BODY).text('One-time', COL.freq, y + 1, { width: COL_W.freq });
+    doc.fontSize(10).fillColor(INK)
+      .text(currency(work.amount) + (work.taxable ? ' *' : ''), COL.amount, y, { width: COL_W.amount, align: 'right' });
+    y += rowH;
+  }
+  return y + 6;
+}
+
+// Structured commercial terms (slice 1A-i) → the flat lines this document's
+// terms block prints. Labels mirror client/src/lib/proposal-sections.js.
+function commercialTermLines(commercialTerms) {
+  if (!commercialTerms || typeof commercialTerms !== 'object') return [];
+  return [
+    ['Proposal valid', commercialTerms.validDays != null ? `${commercialTerms.validDays} days from issue` : null],
+    ['Payment', commercialTerms.paymentTerms],
+    ['Initial term', commercialTerms.initialTermMonths != null
+      ? (commercialTerms.initialTermMonths > 0 ? `${commercialTerms.initialTermMonths} months` : 'None — month-to-month')
+      : null],
+    ['Renewal', commercialTerms.renewal],
+    ['Price adjustment', commercialTerms.priceAdjustment],
+    ['Cancellation', commercialTerms.cancellation],
+    ['Property access', commercialTerms.accessRequirements],
+  ].filter(([, value]) => value != null).map(([label, value]) => `${label}: ${value}`);
+}
+
 function quotesPerApplication(proposal) {
   return (proposal.buildings || []).some((building) => (building.lineItems || [])
     .some((item) => item.frequency === 'per_application'));
@@ -307,11 +353,14 @@ function totalsBlock(ctx, totals, y) {
 function termsBlock(ctx, proposal, totals, y) {
   const { doc } = ctx;
   const lines = [];
-  if (totals.hasTax || (proposal.buildings || []).some((b) => b.lineItems.some((i) => i.taxable))) {
+  if (totals.hasTax
+    || (proposal.buildings || []).some((b) => b.lineItems.some((i) => i.taxable))
+    || (proposal.correctiveWork || []).some((w) => w.taxable)) {
     lines.push('* Taxable line. Tax applies only to lines marked taxable, at the Florida state rate plus the service county surtax. Residential pest control and residential lawn maintenance are tax-exempt in Florida; commercial services may be taxable.');
   }
   lines.push(`Licensed & insured — Florida FDACS #${WAVES_FDACS_LICENSE_NUMBER}. Certificate of Insurance available on request.`);
   lines.push('Integrated Pest Management (IPM) program with documented service records and a callback guarantee between scheduled visits.');
+  lines.push(...commercialTermLines(proposal.commercialTerms));
   if (proposal.terms) lines.push(proposal.terms);
 
   y = ensureSpace(ctx, y, 26);
@@ -383,6 +432,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
     y = buildingBlock(ctx, building, y, proposal.taxRate);
   }
 
+  y = correctiveWorkBlock(ctx, proposal.correctiveWork, y);
   y = totalsBlock(ctx, totals, y + 4);
   y = termsBlock(ctx, proposal, totals, y + 8);
 
