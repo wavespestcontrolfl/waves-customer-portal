@@ -3258,6 +3258,16 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('treatment context BEFORE the action and keep-indoors forms block (Codex PR r11 audit)', () => {
+    const before = guardrails.evaluate({ body: 'Wait 30 minutes after treatment before going outside.' }, {});
+    expect(before.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const indoors = guardrails.evaluate({ body: 'Keep the family indoors for 30 minutes after treatment.' }, {});
+    expect(indoors.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // The r1 bait-timing exemption holds — no treated/treatment anchor.
+    const bait = guardrails.evaluate({ body: 'Wait 30 minutes before returning to check whether ants took the bait.' }, {});
+    expect(bait.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
   test('go-inside/go-into re-entry instructions carry the figure too (Codex PR r7)', () => {
     const inside = guardrails.evaluate({ body: 'Do not go inside the treated home for 30 minutes.' }, {});
     expect(inside.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3630,6 +3640,10 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
       'We provide information about wildlife removal and licensed referrals.',
       'Waves provides a guide to wildlife removal by licensed specialists.',
       'Our team offers advice about structural fumigation.',
+      // Referral objects are the wanted copy (Codex PR r11 audit).
+      'We offer referrals for structural fumigation.',
+      'We provide referrals to licensed wildlife removal specialists.',
+      'We offer fumigation referrals.',
     ]) {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
