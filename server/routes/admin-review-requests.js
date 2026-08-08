@@ -3,7 +3,6 @@ const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const ReviewService = require('../services/review-request');
 const db = require('../models/db');
-const { publicPortalUrl } = require('../utils/portal-url');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -98,7 +97,11 @@ router.post('/tech-trigger', async (req, res, next) => {
 
     res.json({
       sent: true,
-      reviewUrl: `${publicPortalUrl()}/rate/${request.token}`,
+      // The gate-respecting tokenized link (/go behind GATE_REVIEW_DIRECT_LINK)
+      // — this used to hand back a raw /rate/<token> URL, the last send-path
+      // surface still emitting the rate page after the direct-link flip
+      // (2026-08-07 audit, item 3).
+      reviewUrl: ReviewService.unshortenedReviewUrl(request.token),
     });
   } catch (err) { next(err); }
 });

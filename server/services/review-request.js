@@ -206,26 +206,16 @@ const REVIEW_LINKS = Object.fromEntries(
   WAVES_LOCATIONS.filter((l) => l.googleReviewUrl).map((l) => [l.id, l.googleReviewUrl]),
 );
 
-// City → location for review routing. Shares the canonical office map
-// (config/locations.js) so cities added there — including ZIP-recovered ones
-// (utils/zip-to-city.js) — route reviews to the right GBP automatically rather
-// than silently defaulting to Bradenton. The overrides are deliberate
-// review-only exceptions where reviews go to a different GBP than the lead
-// office (Palmetto/Longboat Key → Bradenton GBP) plus finer-grained
-// neighborhood keys not needed for lead routing.
-const { CITY_TO_LOCATION: CANONICAL_CITY_TO_LOCATION } = require("../config/locations");
-const CITY_TO_LOCATION = {
-  ...CANONICAL_CITY_TO_LOCATION,
-  palmetto: "bradenton",
-  "longboat key": "bradenton",
-  "braden river": "bradenton",
-  "bee ridge": "sarasota",
-  "gulf gate": "sarasota",
-};
+// Review routing goes through the ONE resolver in config/locations.js
+// (city → zip → nearest office → the id stored on the ask). This module used to
+// keep its own city table, routes/satisfaction.js kept a second one, and
+// routes/review-gate.js resolved by geography alone — three answers for the same
+// question, which is how a Palmetto customer could be sent to the Parrish
+// profile by the tokenized link and the Bradenton profile by the follow-up text.
+const { resolveReviewLocationId } = require("../config/locations");
 
 function resolveLocation(customer) {
-  const city = (customer.city || "").toLowerCase().trim();
-  return CITY_TO_LOCATION[city] || "bradenton";
+  return resolveReviewLocationId(customer || {});
 }
 
 function generateToken() {
@@ -262,12 +252,16 @@ const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company h
  * the gate removes that friction. Gate off = the tokenized /rate/<token> page,
  * exactly the pre-rollout behavior.
  */
-async function buildReviewUrl(request, customerId) {
+function unshortenedReviewUrl(token) {
   const { isEnabled } = require("../config/feature-gates");
   const domain = publicPortalUrl();
-  const longUrl = isEnabled("reviewDirectLink")
-    ? `${domain}/api/rate/${request.token}/go`
-    : `${domain}/rate/${request.token}`;
+  return isEnabled("reviewDirectLink")
+    ? `${domain}/api/rate/${token}/go`
+    : `${domain}/rate/${token}`;
+}
+
+async function buildReviewUrl(request, customerId) {
+  const longUrl = unshortenedReviewUrl(request.token);
   return shortenOrPassthrough(longUrl, {
     kind: "review",
     entityType: "review_requests",
@@ -1699,8 +1693,10 @@ const ReviewService = {
     await db("review_requests").where({ id: request.id }).update(updates);
 
     const customer = await db("customers")
+      // lat/lng feed the review resolver's geo fallback for an address whose
+      // city and ZIP are both unmapped.
+      .select("first_name", "last_name", "city", "zip", "latitude", "longitude")
       .where({ id: request.customer_id })
-      .select("first_name", "last_name", "city", "zip")
       .first();
 
     // Tech photo. Mirrors the pattern in track-public.js (#344) and
@@ -1747,8 +1743,12 @@ const ReviewService = {
       /* table might not exist */
     }
 
-    // Resolve which Google review link to use
-    const location = resolveLocation(customer || {});
+    // Resolve which Google review link to use. Passing the ask's stored
+    // location_id keeps the rate page pointed at the SAME profile the token's
+    // /go link resolves to, even if the customer's address changed since.
+    const location = resolveReviewLocationId(customer || {}, {
+      storedLocationId: request.location_id || null,
+    });
     const googleReviewUrl =
       REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
 
@@ -2232,6 +2232,7 @@ const ReviewService = {
     triggeredBy = "admin",
     expiresAt,
     manageRetryVia = "cron",
+    skipLegacyFollowup = false,
   }) {
     if (!customer || !customer.id) return { ok: false, reason: "no_customer", terminal: true };
     if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
@@ -2540,7 +2541,11 @@ const ReviewService = {
         // Sequence touches, no-link check-ins AND one-ask-by-design templates
         // (first_treatment_ask sent manually — codex #3235 r12 P1) skip the
         // legacy Day-3 followup.
-        followup_sent: sequenceId || isNoLinkSms || (templateId && OUTREACH.CAP_EXEMPT_TEMPLATE_KEYS.includes(templateId)) ? true : false,
+        // skipLegacyFollowup: the portal satisfaction ask opts out. Folding
+        // that path into the outreach machinery must not silently ADD a
+        // customer touch it never had — the Day-3 follow-up is a separate
+        // decision for the owner to make, not a side effect of the fold.
+        followup_sent: sequenceId || isNoLinkSms || skipLegacyFollowup || (templateId && OUTREACH.CAP_EXEMPT_TEMPLATE_KEYS.includes(templateId)) ? true : false,
         expires_at: expiresAt || new Date(Date.now() + 14 * 86400000).toISOString(),
       })
       .returning("*");
@@ -2760,6 +2765,199 @@ const ReviewService = {
   },
 
   /**
+   * Send ONE unscheduled review ask through the full gate stack — the single
+   * entry point for every ask that is NOT a cadence step.
+   *
+   * Two callers: the admin one-off send (routes/admin-reviews.js) and the
+   * customer-portal satisfaction prompt (routes/satisfaction.js). The portal
+   * path used to text a BARE g.page link with no review_requests row at all, so
+   * those asks were invisible to the 3-ask cap, the 30-day cooldown, the
+   * already-reviewed flag, and the outreach funnel — a second review-ask
+   * mechanism running beside this one. Both now land here.
+   *
+   * Gates applied, in order (each one fails CLOSED — a DB error throws rather
+   * than letting an at-cap / in-cooldown customer through):
+   *   - customer exists, is not archived, is not already marked as reviewed
+   *   - has a consented SMS recipient
+   *   - per-customer advisory lock, so a double-tap can't slip two asks past
+   *     the cap
+   *   - not already owned by an active cadence (asks only; no-link check-ins
+   *     are deliberately exempt)
+   *   - lifetime 3-ask/180d cap and 30-day cooldown (asks only)
+   *   - an already-queued ask is reused rather than stacked
+   *
+   * Then delegates to sendOutreachTouch, which mints the token, writes the
+   * review_requests row, and sends — so the ask is attributable like every
+   * other touch.
+   *
+   * @returns {{ outcome: string, requestId?: string, reviewUrl?: string,
+   *   locationId?: string, nextAllowedAt?: *, code?: string, reason?: string }}
+   *   outcome ∈ sent | deferred | already_queued | in_cadence | at_cap |
+   *   cooldown | blocked | send_failed | concurrent | no_customer | archived |
+   *   already_reviewed | no_contact
+   */
+  async sendGatedAsk({
+    customerId,
+    customer: customerArg = null,
+    channel = "sms",
+    templateId = null,
+    body = null,
+    serviceType = null,
+    techName = null,
+    serviceDate = null,
+    serviceRecordId = null,
+    locationId = null,
+    triggeredBy = "admin",
+    manageRetryVia = "cron",
+    skipLegacyFollowup = false,
+  }) {
+    const customer = customerArg
+      || (customerId ? await db("customers").where({ id: customerId }).first() : null);
+    if (!customer) return { outcome: "no_customer" };
+    if (customer.deleted_at) return { outcome: "archived" };
+    if (customer.has_left_google_review) return { outcome: "already_reviewed" };
+
+    const { getServiceContactSmsRecipient } = require("./customer-contact");
+    const contact = getServiceContactSmsRecipient(customer);
+    if (channel === "sms" && !contact.phone) return { outcome: "no_contact" };
+
+    const { isEnabled } = require("../config/feature-gates");
+    const cid = customer.id;
+
+    // Non-blocking per-customer lock — a second in-flight send to the same
+    // customer is rejected rather than queued (audit O7).
+    // recordHealth: false — per-customer lock, not a scheduled job.
+    const result = await runExclusive(`review-send:${cid}`, async () => {
+      // Private no-link check-ins (resolution_check / satisfaction_confirm) are
+      // NOT review asks: they bypass the cap, the cooldown, the queued-ask
+      // reuse, and the active-cadence block. getDeliveredAskStats ignores them.
+      const isAsk = OUTREACH.isAskTemplate(templateId);
+
+      // An active cadence already owns this customer's review ASKS (and its
+      // touches can sit 'deferred' where the queued-row check below cannot see
+      // them), so a one-off ask here would double-contact. Only enforced while
+      // GATE_REVIEW_SEQUENCES is ON — with the gate off the cadence cron is
+      // frozen, and a stranded 'active' row must not lock the customer out of
+      // one-off asks forever (Codex P2, PR #3104 r4).
+      if (isAsk && isEnabled("reviewSequences")) {
+        const activeSeq = await db("review_sequences")
+          .where({ customer_id: cid, status: "active" }).first().catch(() => null);
+        if (activeSeq) return { outcome: "in_cadence" };
+      }
+
+      if (isAsk) {
+        const thirtyDaysAgo = Date.now() - 30 * 86400000;
+        // Channel-complete across SMS + email. No .catch → a DB error throws
+        // instead of silently reading as zero asks.
+        const stats = await this.getDeliveredAskStats(cid);
+        if (stats.count >= 3) return { outcome: "at_cap" };
+        if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
+          return { outcome: "cooldown" };
+        }
+        // A previous send may have hit a transient failure, leaving a pending
+        // row scheduled for processScheduled() with no sent timestamp. The cap
+        // counts only DELIVERED asks, so a second attempt would queue ANOTHER
+        // pending row and processScheduled would send both. Reuse instead.
+        const queued = await db("review_requests")
+          .where({ customer_id: cid, status: "pending" })
+          .whereNull("sms_sent_at")
+          .whereNotNull("scheduled_for")
+          // Only a queued ASK blocks another ask — a deferred no-link check-in
+          // must not make a real review request report as already queued.
+          .whereRaw(OUTREACH.ASK_TOUCH_SQL)
+          .orderBy("scheduled_for", "asc")
+          .first();
+        if (queued) {
+          return { outcome: "already_queued", nextAllowedAt: queued.scheduled_for };
+        }
+      }
+
+      const loc = locationId
+        ? locationId
+        : resolveLocation(customer);
+
+      let svcType = serviceType;
+      let tName = techName;
+      let svcDate = serviceDate;
+      if (!svcType || !tName || !svcDate) {
+        const lastSvc = await db("scheduled_services")
+          .where({ customer_id: cid, status: "completed" })
+          .orderBy("scheduled_date", "desc")
+          .first()
+          .catch(() => null);
+        svcType = svcType || lastSvc?.service_type || "pest control";
+        tName = tName || lastSvc?.tech_name || null;
+        svcDate = svcDate || lastSvc?.scheduled_date || null;
+      }
+
+      const touch = await this.sendOutreachTouch({
+        customer,
+        channel,
+        templateId,
+        body: typeof body === "string" ? body : null,
+        locationId: loc,
+        techName: tName,
+        serviceType: svcType,
+        serviceDate: svcDate,
+        serviceRecordId,
+        triggeredBy,
+        manageRetryVia,
+        skipLegacyFollowup,
+      });
+
+      if (touch.ok && touch.sent) {
+        // The caller may want to show the SAME tokenized destination in-app
+        // (the portal's "Leave a review" button).
+        let reviewUrl = null;
+        try {
+          const row = await db("review_requests")
+            .select("token").where({ id: touch.requestId }).first();
+          if (row?.token) reviewUrl = unshortenedReviewUrl(row.token);
+        } catch { /* the in-app link is a nicety; the SMS already went */ }
+        return {
+          outcome: "sent",
+          requestId: touch.requestId,
+          reviewUrl,
+          locationId: loc,
+        };
+      }
+      if (touch.deferred) {
+        return { outcome: "deferred", nextAllowedAt: touch.nextAllowedAt, requestId: touch.requestId };
+      }
+      if (touch.blocked || touch.terminal) {
+        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null };
+      }
+      return { outcome: "send_failed", code: touch.code || null, reason: touch.reason || null };
+    }, { recordHealth: false });
+
+    if (result && result.skipped) return { outcome: "concurrent" };
+    return result;
+  },
+
+  /**
+   * The customer's most recent still-live tokenized review link, or null.
+   *
+   * Used when an in-app "Leave a review" button needs a destination but no
+   * fresh ask was minted — the customer is at cap, in cooldown, or already in a
+   * cadence. Reusing their live token keeps the click attributable instead of
+   * dropping to an untracked g.page URL. Never returns an expired or already
+   * redeemed token, and never mints one (a button render is not an ask).
+   */
+  async livePortalReviewUrlFor(customerId) {
+    if (!customerId) return null;
+    const row = await db("review_requests")
+      .where({ customer_id: customerId })
+      .whereNotNull("token")
+      .where((b) => b.whereNull("expires_at").orWhere("expires_at", ">", new Date()))
+      .whereNull("redirected_at")
+      .whereNull("submitted_at")
+      .orderBy("created_at", "desc")
+      .first()
+      .catch(() => null);
+    return row?.token ? unshortenedReviewUrl(row.token) : null;
+  },
+
+  /**
    * Start a multi-touch review cadence for one customer. Idempotent: a customer
    * with an active sequence returns that one instead of starting a second
    * (also enforced by the partial unique index). Fires step 0 immediately.
@@ -2955,7 +3153,11 @@ const ReviewService = {
       svcType = svcType || lastSvc?.service_type || null;
       tName = tName || lastSvc?.tech_name || "Adam";
     }
-    const locId = locationId || customer.nearest_location_id || resolveLocation(customer);
+    // NOT customer.nearest_location_id: that column is pure straight-line
+    // geography, which is exactly the signal that mis-routes downtown Sarasota
+    // to the Bradenton profile. resolveLocation() consults it (as its geo
+    // fallback) only after city and ZIP have both missed.
+    const locId = locationId || resolveLocation(customer);
 
     let sequence;
     const insertReplacement = () => db.transaction(async (trx) => {
@@ -4200,10 +4402,16 @@ ReviewService.__private = {
   buildReviewUrl,
 };
 
-// The digital-card mint (services/customer-card.js) routes its review QR with
-// the SAME city→GBP map as review asks — including the review-only overrides
-// above (palmetto → bradenton etc.) — instead of forking another copy of the
-// location list. Returns a location id string ('bradenton' | ...).
+// The digital-card mint (services/customer-card.js) routes its review QR
+// through the SAME canonical resolver as review asks — including the
+// review-only overrides (longboat key → bradenton) — instead of forking
+// another copy of the location list. Returns a location id ('bradenton' | …).
 ReviewService.resolveReviewLocationId = resolveLocation;
+
+// The tokenized review destination in its long form, honoring
+// GATE_REVIEW_DIRECT_LINK (/go vs the rate page). Route handlers that hand a
+// review link back to a caller (tech-trigger) must use this — never build a
+// raw /rate/<token> URL, which bypasses the gate and the click stamp.
+ReviewService.unshortenedReviewUrl = unshortenedReviewUrl;
 
 module.exports = ReviewService;

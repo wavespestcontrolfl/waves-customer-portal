@@ -770,123 +770,71 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Unknown templateId' });
     }
 
-    const customer = await db('customers').where({ id: customerId }).first();
-    if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    if (customer.deleted_at) return res.status(409).json({ error: 'Customer is archived' });
-    if (customer.has_left_google_review) {
-      return res.status(409).json({ error: 'Customer is marked as already having left a Google review' });
-    }
+    // The whole gate stack (archived / already-reviewed / consented recipient /
+    // per-customer lock / active-cadence block / 3-ask cap / 30-day cooldown /
+    // queued-ask reuse) lives in ReviewService.sendGatedAsk, shared with the
+    // customer-portal satisfaction prompt so there is ONE unscheduled-ask path.
+    // This route only maps the outcome onto HTTP.
+    const result = await ReviewService.sendGatedAsk({
+      customerId,
+      channel: 'sms',
+      templateId: templateId || null,
+      body: typeof body === 'string' ? body : null,
+      serviceType: serviceType || null,
+      techName: techName || null,
+      triggeredBy: 'admin',
+      manageRetryVia: 'cron',
+    });
 
-    const contact = getServiceContactSmsRecipient(customer);
-    if (!contact.phone) return res.status(400).json({ error: 'No SMS-capable phone on file' });
-
-    // Serialize concurrent sends to the same customer so a double-click / retry
-    // can't slip two messages past the cap + cooldown (audit O7). The lock is
-    // non-blocking — a second in-flight send to the same customer is rejected.
-    // recordHealth: false — per-customer lock, not a scheduled job.
-    const result = await runExclusive(`review-send:${customerId}`, async () => {
-      // Private no-link check-ins (resolution_check / satisfaction_confirm) are
-      // NOT review asks, so they bypass the review 3-cap / 30-day cooldown, the
-      // queued-ask reuse, AND the active-cadence block below (a recovery message
-      // is intentionally non-ask outreach). getDeliveredAskStats doesn't count them.
-      const isAsk = OUTREACH.isAskTemplate(templateId);
-
-      // An active cadence already owns this customer's review ASKS (and its
-      // touches can sit 'deferred' where the queued-row check can't see them), so
-      // a one-off ASK here would double-contact. Check-ins are allowed through.
-      // Only enforced while GATE_REVIEW_SEQUENCES is ON — with the gate off the
-      // cadence cron is frozen, so a stranded 'active' row must not lock the
-      // customer out of one-off asks forever (Codex P2, PR #3104 r4); the
-      // per-step staleness/supersede checks retire that row if the gate later
-      // returns.
-      if (isAsk && isEnabled('reviewSequences')) {
-        const activeSeq = await db('review_sequences')
-          .where({ customer_id: customer.id, status: 'active' }).first().catch(() => null);
-        if (activeSeq) {
-          return { status: 409, payload: { error: 'Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.' } };
-        }
-      }
-
-      const thirtyDaysAgo = Date.now() - 30 * 86400000;
-      // Channel-complete cap/cooldown across SMS + email (audit). Fail CLOSED:
-      // a DB error here must NOT let an at-cap / in-cooldown customer through —
-      // it throws to next(err) rather than the old silent catch→0.
-      if (isAsk) {
-        const stats = await ReviewService.getDeliveredAskStats(customer.id);
-        if (stats.count >= 3) return { status: 409, payload: { error: 'Customer has already received 3 review requests in the last 6 months' } };
-        if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
-          return { status: 409, payload: { error: 'Customer received a review request in the last 30 days' } };
-        }
-        // A previous send may have hit a transient
-        // failure, leaving a pending row scheduled for processScheduled() with no
-        // sent timestamp. The cap counts only delivered asks, so a second click on
-        // the 202 response would queue ANOTHER pending row and processScheduled
-        // would send both → duplicate texts. Reuse the existing queued row instead.
-        const queued = await db('review_requests')
-          .where({ customer_id: customer.id, status: 'pending' })
-          .whereNull('sms_sent_at')
-          .whereNotNull('scheduled_for')
-          // Only a queued ASK should block another ask — a deferred no-link
-          // check-in must not make a real review request return alreadyQueued.
-          .whereRaw(OUTREACH.ASK_TOUCH_SQL)
-          .orderBy('scheduled_for', 'asc')
-          .first();
-        if (queued) {
-          return { status: 202, payload: {
-            success: false, deferred: true, alreadyQueued: true,
-            nextAllowedAt: queued.scheduled_for,
-            message: 'A review request to this customer is already queued and will send automatically.',
-          } };
-        }
-      }
-
-      const loc = WAVES_LOCATIONS.find(l => l.id === customer.nearest_location_id) || WAVES_LOCATIONS[0];
-      const lastSvc = await db('scheduled_services')
-        .where({ customer_id: customerId, status: 'completed' })
-        .orderBy('scheduled_date', 'desc').first();
-
-      const outcome = await ReviewService.sendOutreachTouch({
-        customer,
-        channel: 'sms',
-        templateId: templateId || null,
-        body: typeof body === 'string' ? body : null,
-        locationId: loc.id,
-        techName: techName || lastSvc?.tech_name || null,
-        serviceType: serviceType || lastSvc?.service_type || 'pest control',
-        serviceDate: lastSvc?.scheduled_date || null,
-        triggeredBy: 'admin',
-        manageRetryVia: 'cron',
-      });
-
-      if (outcome.ok && outcome.sent) {
+    switch (result.outcome) {
+      case 'sent': {
+        const loc = WAVES_LOCATIONS.find(l => l.id === result.locationId) || WAVES_LOCATIONS[0];
+        const customer = await db('customers').where({ id: customerId }).first().catch(() => null);
         await db('activity_log').insert({
-          customer_id: customer.id, action: 'review_requested',
-          description: `Review request sent to ${customer.first_name} ${customer.last_name} (${loc.name})`,
+          customer_id: customerId, action: 'review_requested',
+          description: `Review request sent to ${customer?.first_name || ''} ${customer?.last_name || ''}`.trim()
+            + ` (${loc.name})`,
         }).catch(() => {});
-        return { status: 200, payload: { success: true, requestId: outcome.requestId } };
+        return res.status(200).json({ success: true, requestId: result.requestId });
       }
-      if (outcome.deferred) {
-        return { status: 202, payload: {
+      case 'no_customer':
+        return res.status(404).json({ error: 'Customer not found' });
+      case 'archived':
+        return res.status(409).json({ error: 'Customer is archived' });
+      case 'already_reviewed':
+        return res.status(409).json({ error: 'Customer is marked as already having left a Google review' });
+      case 'no_contact':
+        return res.status(400).json({ error: 'No SMS-capable phone on file' });
+      case 'concurrent':
+        return res.status(409).json({ error: 'A review request to this customer is already being sent.' });
+      case 'in_cadence':
+        return res.status(409).json({ error: 'Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.' });
+      case 'at_cap':
+        return res.status(409).json({ error: 'Customer has already received 3 review requests in the last 6 months' });
+      case 'cooldown':
+        return res.status(409).json({ error: 'Customer received a review request in the last 30 days' });
+      case 'already_queued':
+        return res.status(202).json({
+          success: false, deferred: true, alreadyQueued: true,
+          nextAllowedAt: result.nextAllowedAt,
+          message: 'A review request to this customer is already queued and will send automatically.',
+        });
+      case 'deferred':
+        return res.status(202).json({
           success: false, deferred: true,
-          nextAllowedAt: outcome.nextAllowedAt,
+          nextAllowedAt: result.nextAllowedAt,
           message: 'Send deferred. Queued — it will send automatically on the next retry.',
-        } };
-      }
-      if (outcome.blocked || outcome.terminal) {
-        return { status: 409, payload: {
-          error: `Review request was not sent (${outcome.code || outcome.reason || 'blocked'}). Check the customer's messaging consent / suppression.`,
-        } };
-      }
-      return { status: 202, payload: {
-        success: false, queued: true,
-        message: 'Send failed transiently and was queued for automatic retry.',
-      } };
-    }, { recordHealth: false });
-
-    if (result && result.skipped) {
-      return res.status(409).json({ error: 'A review request to this customer is already being sent.' });
+        });
+      case 'blocked':
+        return res.status(409).json({
+          error: `Review request was not sent (${result.code || result.reason || 'blocked'}). Check the customer's messaging consent / suppression.`,
+        });
+      default:
+        return res.status(202).json({
+          success: false, queued: true,
+          message: 'Send failed transiently and was queued for automatic retry.',
+        });
     }
-    return res.status(result.status).json(result.payload);
   } catch (err) { next(err); }
 });
 
@@ -1322,12 +1270,14 @@ router.get('/qr/:locationId', async (req, res, next) => {
 
     const reviewUrl = loc.googleReviewUrl;
 
-    // Generate QR code SVG using a lightweight approach via Google Charts API
-    // This avoids adding a QR library dependency
-    const qrApiUrl = `https://chart.googleapis.com/chart?cht=qr&chs=400x400&chl=${encodeURIComponent(reviewUrl)}&choe=UTF-8`;
+    // QR image via the QR Server API — no library dependency. This used to
+    // point at chart.googleapis.com Image Charts, which Google retired, so the
+    // primary URL had been serving 404s (2026-08-07 audit, item 4). qrserver
+    // was already the working fallback; it is now the only URL. qrImageUrlAlt
+    // kept as an alias so any direct-URL consumer of the old JSON shape still
+    // gets a working image.
+    const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(reviewUrl)}`;
 
-    // Return the URL and also an inline SVG-compatible data URI
-    // For direct embedding, use the Google Charts URL
     const { format } = req.query;
 
     if (format === 'redirect') {
@@ -1340,8 +1290,7 @@ router.get('/qr/:locationId', async (req, res, next) => {
       locationName: loc.name,
       reviewUrl,
       qrImageUrl: qrApiUrl,
-      // Also provide a self-hosted version via QR Server API (no Google dependency)
-      qrImageUrlAlt: `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(reviewUrl)}`,
+      qrImageUrlAlt: qrApiUrl,
     });
   } catch (err) { next(err); }
 });

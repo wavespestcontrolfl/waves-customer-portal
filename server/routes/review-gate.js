@@ -8,24 +8,22 @@ const { noStore } = require('../middleware/no-store');
 // Token-keyed review pages carry the customer's name and service history —
 // keep them out of caches and search indexes.
 router.use(noStore);
-const { WAVES_LOCATIONS, nearestLocation } = require('../config/locations');
+const {
+  WAVES_LOCATIONS,
+  resolveReviewLocation: resolveReviewLocationCanonical,
+} = require('../config/locations');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 
-// Nearest GBP to the customer's geocoded address, with fallbacks. Prefers the
-// haversine winner when the customer has a lat/lng; otherwise falls back to
-// whatever location the review request was tagged with at creation time
-// (review-request.js already city-routes on create).
+// The GBP profile this ask points at. Delegates to the ONE review-routing
+// resolver in config/locations.js (city → zip → nearest office → the id stored
+// on the ask). This used to run nearest-office FIRST, which sent downtown
+// Sarasota (34236) to the Bradenton profile — the Sarasota office is in 34240,
+// farther from downtown than Bradenton is.
 function resolveReviewLocation(request, customer) {
-  if (customer && customer.latitude != null && customer.longitude != null) {
-    const hit = nearestLocation(customer.latitude, customer.longitude);
-    if (hit) return hit;
-  }
-  if (request && request.location_id) {
-    const byId = WAVES_LOCATIONS.find((l) => l.id === request.location_id);
-    if (byId) return byId;
-  }
-  return WAVES_LOCATIONS[0];
+  return resolveReviewLocationCanonical(customer || {}, {
+    storedLocationId: request?.location_id || null,
+  });
 }
 
 // Admin alert recipient — must be a real cell, never one of our own Twilio
@@ -100,13 +98,21 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     if (!/^[a-f0-9]{64}$/.test(token)) return res.redirect(302, ratePageFallback);
     const request = await db('review_requests').where({ token }).first();
     if (!request) return res.redirect(302, ratePageFallback);
-    if (request.expires_at && new Date(request.expires_at) < new Date()) {
-      return res.redirect(302, ratePageFallback);
-    }
+    const expired = !!(request.expires_at && new Date(request.expires_at) < new Date());
 
     const customer = await db('customers').where({ id: request.customer_id }).first();
     const loc = resolveReviewLocation(request, customer);
     if (!loc || !loc.googleReviewUrl) return res.redirect(302, ratePageFallback);
+
+    // An EXPIRED token still 302s to the review form, but records NOTHING —
+    // no click stamp, no cadence stop, no owner bell. Tokens expire after 14
+    // days; a customer who finally taps a three-week-old text is a willing
+    // reviewer, and the old behavior dead-ended them on a rate page reading
+    // "link expired". The write path stays closed because the ask it belonged
+    // to is long over and a stamp that late would corrupt the funnel.
+    if (expired) {
+      return res.redirect(302, loc.googleReviewUrl);
+    }
 
     // Scanner/preview fetches (iMessage unfurlers, carrier link scanners,
     // Slack/WhatsApp previews) follow SMS links without a human tap. Issue
