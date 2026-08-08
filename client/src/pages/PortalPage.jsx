@@ -12275,14 +12275,23 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const fileRef = useRef(null);
 
   useEffect(() => {
-    if (open) {
-      setSubmitError('');
-      api.getServices({ limit: 1 }).then(d => {
-        if (d.services?.length) setLastService(d.services[0]);
-      }).catch(() => {});
-      api.getNextService().then(d => setNextService(d.next || null)).catch(() => {});
-      api.getSchedule().then(d => setScheduleData(d || null)).catch(() => {});
-    }
+    if (!open) return undefined;
+    let stale = false;
+    setSubmitError('');
+    api.getServices({ limit: 1 }).then(d => {
+      if (!stale && d.services?.length) setLastService(d.services[0]);
+    }).catch(() => {});
+    api.getNextService().then(d => { if (!stale) setNextService(d.next || null); }).catch(() => {});
+    // Fail-closed on every path: reset BEFORE the fetch and null on failure,
+    // so a reopen after the streamline kill switch (or an eligibility change)
+    // can never keep serving a stale handoff off the previous payload — a
+    // fetch miss renders the classic ticket form. The stale flag discards
+    // responses from an obsolete open/close cycle.
+    setScheduleData(null);
+    api.getSchedule()
+      .then(d => { if (!stale) setScheduleData(d || null); })
+      .catch(() => { if (!stale) setScheduleData(null); });
+    return () => { stale = true; };
   }, [open]);
 
   const requestCategories = [

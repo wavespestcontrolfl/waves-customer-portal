@@ -34,6 +34,15 @@ const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wavespestcontrol.com').replace(/\/+$/, '');
 
 const MAX_PER_SECTION = 12;
+// The request lane runs a HIGHER cap than the rolling lanes: it has no
+// created_at horizon (a ticket stays until a terminal status releases it), so
+// a row past the cap would stay invisible indefinitely rather than age out —
+// and this email is the queue's only pager (the /admin/requests triage page
+// was removed). 25 keeps the mail readable while covering several times the
+// worst backlog ever observed (14, 2026-08-08); a backlog past the cap is
+// itself the emergency the overflow count reports, and rows re-enter the
+// visible window as older ones resolve.
+const MAX_REQUEST_ROWS = 25;
 // Outbound types that count as a human answer — automated broadcasts
 // (reminders, en-route, receipts, review asks) must not clear a waiting
 // customer from the digest (codex #3232 r1).
@@ -539,7 +548,7 @@ async function loadOpenServiceRequests(cutoff = new Date()) {
     ORDER BY CASE WHEN sr.urgency = 'urgent' THEN 0 ELSE 1 END, sr.created_at ASC
     LIMIT :cap
     `,
-    { cap: MAX_PER_SECTION, cutoff },
+    { cap: MAX_REQUEST_ROWS, cutoff },
   );
   return rows;
 }
