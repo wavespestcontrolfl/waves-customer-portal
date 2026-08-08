@@ -11,6 +11,7 @@ const {
   signEstimateDocPin,
   verifyEstimateDocPin,
   estimateDocumentUrl,
+  renderEstimateDocumentPdf,
 } = require('../services/pdf/estimate-doc-pdf');
 
 const AUTHORED_PROPOSAL = {
@@ -138,6 +139,22 @@ describe('estimate document render pin', () => {
     const pinned = estimateDocumentUrl(TOKEN, { validThrough: VALID_THROUGH });
     expect(pinned).toContain('mode=pdf');
     expect(pinned).toContain('dpin=');
+  });
+
+  test('render concurrency is bounded — excess renders throw busy for the pdfkit fallback', async () => {
+    // Saturate the semaphore with renders that park inside the browser
+    // launch (playwright isn't installed in tests, so each occupies a slot
+    // until its launch rejects) — the cap is what matters: the (cap+1)th
+    // caller must fail FAST with the busy code, before any browser work.
+    const cap = Math.max(1, Number(process.env.ESTIMATE_DOC_PDF_MAX_CONCURRENT || 2));
+    const estimate = { token: 'c'.repeat(64) };
+    const parked = Array.from({ length: cap }, () => renderEstimateDocumentPdf(estimate).catch((e) => e));
+    // The in-flight renders hold their slots synchronously, so the next
+    // call sees a full house immediately.
+    await expect(renderEstimateDocumentPdf(estimate)).rejects.toMatchObject({ code: 'estimate_doc_render_busy' });
+    const settled = await Promise.all(parked);
+    // The parked renders fail on the missing browser, never on the semaphore.
+    for (const err of settled) expect(err.code).not.toBe('estimate_doc_render_busy');
   });
 
   test('fails closed when no signing secret is available — never an unpinned render URL', () => {

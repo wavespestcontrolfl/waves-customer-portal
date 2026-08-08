@@ -19488,7 +19488,20 @@ const dataLimiter = rateLimit({
 // of the document is byte-identical. Gated by isEstimateCustomerViewable —
 // identical exposure rules to /:token/data (drafts/expired/send_failed 404;
 // accepted/declined terminal views stay downloadable).
-router.get('/:token/pdf', dataLimiter, async (req, res, next) => {
+// Dedicated tight limiter for the PDF download: with GATE_ESTIMATE_DOC_PDF
+// on, each request can launch a Chromium render — the shared dataLimiter's
+// ceiling (60/min) would let one token holder stack browsers. Belt to the
+// renderer's in-process concurrency semaphore (estimate-doc-pdf.js), which
+// backstops distributed callers this per-IP window can't see.
+const estimatePdfLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many download requests. Please try again shortly.' },
+});
+
+router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.set('Referrer-Policy', 'no-referrer');

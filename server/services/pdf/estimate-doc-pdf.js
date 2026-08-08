@@ -93,11 +93,34 @@ function estimateDocumentUrl(token, { validThrough = null } = {}) {
   return `${base}/estimate/${encodeURIComponent(token)}?mode=pdf&dpin=${encodeURIComponent(pin)}`;
 }
 
+// Bounded render concurrency — every render launches a Chromium process,
+// and the public /:token/pdf route is reachable by any token holder. The
+// per-IP route limiter can be bypassed by distributed callers, so this
+// in-process semaphore is the real backstop: past the cap, renders throw
+// `estimate_doc_render_busy` and every caller serves its pdfkit fallback
+// instead of stacking browsers until Railway runs out of memory.
+const MAX_CONCURRENT_DOC_RENDERS = Math.max(1, Number(process.env.ESTIMATE_DOC_PDF_MAX_CONCURRENT || 2));
+let activeDocRenders = 0;
+
 // Renders the document → Buffer. Throws on any failure; callers fall back
 // to the pdfkit generator. Mirrors renderReportPdfWithBrowser's settings
 // (Letter, print media, 0.5in margins, page-number footer).
 async function renderEstimateDocumentPdf(estimate, { validThrough = null } = {}) {
   if (!estimate?.token) throw new Error('estimate token required for document render');
+  if (activeDocRenders >= MAX_CONCURRENT_DOC_RENDERS) {
+    const busy = new Error(`estimate document render capacity reached (${MAX_CONCURRENT_DOC_RENDERS} concurrent)`);
+    busy.code = 'estimate_doc_render_busy';
+    throw busy;
+  }
+  activeDocRenders += 1;
+  try {
+    return await renderEstimateDocumentPdfInner(estimate, { validThrough });
+  } finally {
+    activeDocRenders -= 1;
+  }
+}
+
+async function renderEstimateDocumentPdfInner(estimate, { validThrough = null } = {}) {
   const url = estimateDocumentUrl(estimate.token, { validThrough });
   const browser = await launchBrowser();
   let page = null;

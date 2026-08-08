@@ -42,12 +42,20 @@ function portalBase(publicOrigin) {
   return PORTAL_FALLBACK;
 }
 
+// Instant values (created_at) format in ET like every customer surface.
+// UTC-midnight values are CALENDAR dates (the legacy PDF's
+// formatDisplayDate deliberately preserves them) — format those in UTC so
+// "valid through Sept 6" never renders as Sept 5 (AGENTS.md timezone
+// discipline; same rule as ServiceReportDocument's fmtServiceDate).
 function fmtDate(value) {
   if (!value) return '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
+  const isUtcMidnight = /T00:00:00(\.000)?(Z|\+00:00)$/.test(String(value))
+    || (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value));
   return date.toLocaleDateString('en-US', {
-    timeZone: 'America/New_York', month: 'long', day: 'numeric', year: 'numeric',
+    timeZone: isUtcMidnight ? 'UTC' : 'America/New_York',
+    month: 'long', day: 'numeric', year: 'numeric',
   });
 }
 
