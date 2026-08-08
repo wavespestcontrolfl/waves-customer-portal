@@ -6297,6 +6297,12 @@ const CallRecordingProcessor = {
     let v2SmsClearedByImpliedConsent = false;
     let v2EmailBlocked = false;
     let v2CanonicalWriteBlocked = false;
+    // Does the veto include a DEFINITIVE content rejection? Only
+    // spam_or_wrong_number proves prior attribution fraudulent —
+    // out_of_service_area and do_not_contact_requested are policy holds,
+    // and force-reprocessing a previously booked call under one must not
+    // delete its accumulated revenue (pre-push P0 r15).
+    let v2VetoDefinitiveRejection = false;
     let v2ApprovedExtraction = null;
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
@@ -6705,6 +6711,7 @@ const CallRecordingProcessor = {
             }
             v2RoutingBlocked = true;
             v2CanonicalWriteBlocked = hasCanonicalWriteBlock(finalFlags);
+            v2VetoDefinitiveRejection = (finalFlags || []).includes('spam_or_wrong_number');
             logger.info(`[call-proc-v2] Routing blocked for ${callSid}: ${triageReasons.join(', ')}${v2CanonicalWriteBlocked ? ' (canonical-write veto)' : ''}`);
           } else {
             // Approved — dispatch proceeds on the AV-normalized address
@@ -7056,7 +7063,7 @@ const CallRecordingProcessor = {
       // write throws inside the transaction so the retire and stamp clear
       // roll back with it.
       const vetoSettled = await db.transaction(async (trx) => {
-        const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'retire' });
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: v2VetoDefinitiveRejection ? 'retire' : 'keep' });
         if (!settled) return false;
         const vetoWrote = await trx('call_log')
           .where({ id: call.id })
@@ -9220,7 +9227,14 @@ const CallRecordingProcessor = {
       //     force-reprocess must NEVER delete that history just because
       //     the stage now prevents creating another lead.
       if (nonLeadCall) deferredNonLeadAttributionRetire = true;
-      if (priorStampedLeadId) {
+      // The stamp settle too is CONTENT-only (pre-push P0 r15): a
+      // lifecycle skip (prospect since advanced to won/active_customer)
+      // does not invalidate the call→lead linkage — clearing it read as an
+      // unlink to the bridge's repoint reconciliation, which then deleted
+      // the booked/completed attribution row the lifecycle branch
+      // deliberately preserves. The stamp, the lead's state, and the
+      // funnel row all stand.
+      if (nonLeadCall && priorStampedLeadId) {
       // The retry was VETOED out of lead creation but an earlier attempt
       // stamped a lead — the stamp must not survive a non-lead verdict,
       // and the lead's prior summary comes back with the clear, in one
@@ -12119,6 +12133,20 @@ const CallRecordingProcessor = {
       // The non-lead verdict's attribution retire becomes durable HERE,
       // atomically with the final status (pre-push P0 r12) — never on the
       // earlier settle, whose pass could still have failed into a retry.
+      if (written > 0 && !deferredNonLeadAttributionRetire) {
+        // A successful non-rejecting pass SUPERSEDES a previous
+        // no-attribution verdict (pre-push P1 r15): without clearing the
+        // marker, the bridge would never attribute the corrected call —
+        // shouldRetryLeadAttribution exits on it forever.
+        try {
+          const mdRaw = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+          if (mdRaw && mdRaw.no_attribution) {
+            await trx('call_log').where({ id: call.id }).update({
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution'"),
+            });
+          }
+        } catch { /* unparseable metadata: leave the marker, conservative */ }
+      }
       if (written > 0 && deferredNonLeadAttributionRetire) {
         await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id);
         // Durable no-attribution verdict, same transaction (pre-push P1
