@@ -83,6 +83,9 @@ const FLAGGED_TIMING = [
   // treat the decimal point in "1.5" as a boundary.
   'keep pets off treated areas for 30m',
   're-enter treated areas in 1.5 hours',
+  // #3278 r18: seconds are the same banned class.
+  'keep pets off treated areas for 30 seconds',
+  're-enter treated areas in 90 sec',
   // A clock time asserts the same fixed re-entry moment a duration does
   // (codex P1 #3176 r20).
   'safe to return after 7 PM',

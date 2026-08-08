@@ -1532,6 +1532,9 @@ describe('rain-out service', () => {
       // and "30m" / "1.5 hours" / "E.P.A." are the same banned classes.
       blocked('Stay off for 30m');
       blocked('Re-enter in 1.5 hours');
+      // Seconds are the same banned class (r18).
+      blocked('Keep pets off treated areas for 30 seconds');
+      blocked('Re-enter in 90 sec');
       blocked('This is E.P.A. approved');
       // ...but only APPROVED-status EPA claims block — label-direction
       // references are compliant (r14 client-parity case).
