@@ -232,6 +232,10 @@ function shapeCallLog(row) {
     customerId: row.customer_id || null,
     customerName: [row.customer_first_name, row.customer_last_name].filter(Boolean).join(' ') || null,
     leadId: row.lead_id || null,
+    // The joined lead's owner: a phone-less reused lead converted/assigned
+    // after the call leaves call_log.customer_id null while the lead knows
+    // its customer — attribution needs it (codex P2, PR #3275).
+    leadCustomerId: row.lead_customer_id || null,
     leadSourceName: row.lead_source_name || null,
     googleAdsCallResourceName: row.google_ads_call_resource_name || null,
     googleAdsBridgedAt: row.google_ads_bridged_at || null,
@@ -339,22 +343,95 @@ async function fetchCrmCalls(days = 30) {
   const since = addETDays(new Date(), -safeDays);
   const target = mainLine();
 
+  // The 500-call bound stays INSIDE Postgres (codex P2, PR #3275). Capping
+  // in JS made the cron/admin bridge materialize every call in the window
+  // plus every OR-join duplicate before discarding the tail — memory and
+  // latency growing with 90 days of history to keep 500 rows. This subquery
+  // has no joins, so its LIMIT counts DISTINCT calls; the join below then
+  // adds at most the stale-stamp twin for each of them.
+  const newestCallIds = db('call_log')
+    .select('id')
+    .where('direction', 'inbound')
+    .whereIn('to_phone', phoneVariants(target.number))
+    .where('created_at', '>=', since)
+    .orderBy('created_at', 'desc')
+    .limit(500);
+
   return db('call_log as c')
     .leftJoin('customers as cu', 'c.customer_id', 'cu.id')
-    .leftJoin('leads as l', 'c.twilio_call_sid', 'l.twilio_call_sid')
+    // The sid join misses a phone-less reused-lead call: the lead keeps its
+    // ORIGINAL call's sid and the later call links via the durable
+    // call_log.metadata.lead_id stamp instead (codex P1, PR #3275). A stale
+    // stamp CAN transiently coexist with a different sid-linked lead (a
+    // retry that minted before its cleanup ran), which would duplicate the
+    // call row through this OR join and make buildMatches read the twin as
+    // an equal-score second candidate → false ambiguity; dedupeCrmCallRows
+    // below collapses that shape, sid-linked lead winning. Two live leads
+    // genuinely sharing one sid stay multi-row, so their ambiguity — and
+    // the conservative no-bridge it triggers — survives.
+    .leftJoin('leads as l', function joinLeadForCall() {
+      this.on(function linkageArms() {
+        this.on('c.twilio_call_sid', 'l.twilio_call_sid')
+          .orOn(db.raw("c.metadata->>'lead_id' = l.id::text"));
+      // A soft-deleted lead must never ride the join into attribution —
+      // findLeadForCall enforces whereNull(deleted_at), and the joined
+      // shortcut must match its eligibility (codex P2, PR #3275).
+      }).andOn(db.raw('l.deleted_at IS NULL'));
+    })
     .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
-    .where('c.direction', 'inbound')
-    .whereIn('c.to_phone', phoneVariants(target.number))
-    .where('c.created_at', '>=', since)
+    .whereIn('c.id', newestCallIds)
     .select(
       'c.*',
       'cu.first_name as customer_first_name',
       'cu.last_name as customer_last_name',
       'l.id as lead_id',
+      'l.customer_id as lead_customer_id',
+      'l.twilio_call_sid as lead_call_sid',
       'ls.name as lead_source_name',
     )
     .orderBy('c.created_at', 'desc')
-    .limit(500);
+    // No LIMIT here — it would count JOIN ROWS, so a call kept ambiguous
+    // below could push an older DISTINCT call out of the window and leave a
+    // paid call unbridged for the organic sweep. The distinct-call bound is
+    // the newestCallIds subquery above (codex P2, PR #3275).
+    .then(dedupeCrmCallRows);
+}
+
+// Collapse ONLY the stamp-plus-sid duplicate the OR join above can
+// transiently produce (a stale stamp coexisting with a different sid-linked
+// lead); the sid-linked lead is authoritative — same precedence
+// findReusableCallLead uses (codex P2, PR #3275).
+//
+// Genuine ambiguity is PRESERVED: leads.twilio_call_sid carries no unique
+// index, so two live leads can share one sid. Those rows made buildMatches
+// see an equal-score second candidate and mark the google call ambiguous —
+// a conservative no-bridge. Collapsing them to whichever row Postgres
+// returned first would let the bridge rewrite an arbitrary lead's source
+// and leave the real one unattributed, so multi-sid-linked calls keep every
+// sid-linked row (codex P2, PR #3275).
+function dedupeCrmCallRows(rows) {
+  const isSidLinked = (r) => !!(r.lead_call_sid && r.twilio_call_sid && r.lead_call_sid === r.twilio_call_sid);
+  const byId = new Map();
+  for (const row of rows) {
+    if (!byId.has(row.id)) byId.set(row.id, []);
+    byId.get(row.id).push(row);
+  }
+  const deduped = [];
+  for (const group of byId.values()) {
+    if (group.length === 1) { deduped.push(group[0]); continue; }
+    const seenLeadIds = new Set();
+    const sidLinked = group.filter((r) => {
+      if (!isSidLinked(r)) return false;
+      const key = String(r.lead_id);
+      if (seenLeadIds.has(key)) return false;
+      seenLeadIds.add(key);
+      return true;
+    });
+    if (sidLinked.length === 1) deduped.push(sidLinked[0]);
+    else if (sidLinked.length > 1) deduped.push(...sidLinked);
+    else deduped.push(group[0]);
+  }
+  return deduped;
 }
 
 async function ensureBridgeLeadSource() {
@@ -394,6 +471,27 @@ async function ensureBridgeLeadSource() {
   });
 }
 
+// The JOINED lead (sid- or metadata-stamp-linked in fetchCrmCalls) is
+// authoritative when present — findLeadForCall's plan needs a customer link
+// or a usable caller phone and returns null for exactly the phone-less
+// reused-lead calls the stamp join exists for, so the confirmed Google call
+// never repointed its lead and the unclaimed sweep later recorded that paid
+// lead as organic (codex P1 ×2, PR #3275 — the first fix covered only the
+// already-bridged retry path; the primary ready path is the one that marks
+// the call Google Ads). The joined lead's own customer rides along so
+// writeCallPpcAttribution can create the funnel row for a lead claimed
+// after the call.
+async function joinedOrPlannedLeadMatch(callLog) {
+  if (callLog?.leadId) {
+    return {
+      strategy: 'joined_lead',
+      leadId: callLog.leadId,
+      customerId: callLog.customerId || callLog.leadCustomerId || null,
+    };
+  }
+  return findLeadForCall(callLog);
+}
+
 async function findLeadForCall(callLog) {
   const plan = leadMatchPlan(callLog);
   if (!plan) return null;
@@ -421,13 +519,21 @@ async function findLeadForCall(callLog) {
 
 async function updateLeadAttribution(leadMatch, bridgeSource, now) {
   if (!leadMatch?.leadId) return false;
-  await db('leads')
+  // Live-lead check happens HERE, at write time, not only in the fetch join
+  // (codex P2, PR #3275): previewBridge awaits the Google Ads scan between
+  // fetchCrmCalls and apply, and a lead soft-deleted in that gap would
+  // otherwise be updated and stamped as this call's match — blocking later
+  // retries from resolving a live replacement. findLeadForCall enforces the
+  // same predicate; the joined shortcut now matches it. A zero-row update
+  // reports false so the caller does not record a bridge match.
+  const updated = await db('leads')
     .where({ id: leadMatch.leadId })
+    .whereNull('deleted_at')
     .update({
       lead_source_id: bridgeSource.id,
       updated_at: now,
     });
-  return true;
+  return !!updated;
 }
 
 function summarize(matches, crmCalls) {
@@ -525,7 +631,7 @@ async function applyBridge(options = {}) {
           // lead-matched by phone/customer (recorded in metadata) has it null, so
           // resolve the lead in that case before attributing.
           let backfillLeadId = match.callLog?.leadId || null;
-          let backfillCustomerId = match.callLog?.customerId || null;
+          let backfillCustomerId = match.callLog?.customerId || match.callLog?.leadCustomerId || null;
           if (!backfillLeadId) {
             const lm = await findLeadForCall(match.callLog).catch(() => null);
             if (lm?.leadId) { backfillLeadId = lm.leadId; backfillCustomerId = lm.customerId || backfillCustomerId; }
@@ -537,13 +643,27 @@ async function applyBridge(options = {}) {
       }
 
       try {
-        const leadMatch = await findLeadForCall(match.callLog);
+        // The JOINED lead (sid- or metadata-stamp-linked in fetchCrmCalls)
+        // is authoritative when present — findLeadForCall's plan needs a
+        // customer link or a usable caller phone and returns null for
+        // exactly the phone-less reused-lead calls the stamp join exists
+        // for; skipping them confirmed the Google call but never repointed
+        // its lead, and the unclaimed sweep later recorded that paid lead
+        // as organic (codex P1, PR #3275).
+        const leadMatch = await joinedOrPlannedLeadMatch(match.callLog);
         if (!leadMatch?.leadId) {
           skipped.push({ ...match, skipReason: 'lead_not_found' });
           continue;
         }
 
-        await updateLeadAttribution(leadMatch, bridgeSource, now);
+        // A joined lead soft-deleted between fetch and apply writes zero
+        // rows — do NOT stamp it as this call's match, or a later retry can
+        // never resolve a live replacement (codex P2, PR #3275). Not a
+        // write_failed: the retry lane re-evaluates it on the next pass.
+        if (!await updateLeadAttribution(leadMatch, bridgeSource, now)) {
+          skipped.push({ ...match, skipReason: 'lead_not_live' });
+          continue;
+        }
         await db('call_log')
           .where({ id: match.callLog.id })
           .update({
@@ -581,9 +701,12 @@ async function applyBridge(options = {}) {
         reasons: match.reasons,
         bridgedAt: now.toISOString(),
       };
-      const leadMatch = await findLeadForCall(match.callLog);
-      if (leadMatch) {
-        await updateLeadAttribution(leadMatch, bridgeSource, now);
+      const leadMatch = await joinedOrPlannedLeadMatch(match.callLog);
+      // The google call is confirmed either way; only the LEAD attribution
+      // is conditional. A lead soft-deleted between fetch and apply writes
+      // zero rows, and recording it would block a later retry from finding
+      // the live replacement (codex P2, PR #3275).
+      if (leadMatch && await updateLeadAttribution(leadMatch, bridgeSource, now)) {
         bridgePayload.leadMatch = redactedLeadMatch(leadMatch);
         bridgePayload.leadAttributedAt = now.toISOString();
       }
@@ -649,6 +772,7 @@ module.exports = {
   _private: {
     areaCode,
     buildMatches,
+    dedupeCrmCallRows,
     findLeadForCall,
     googleAdsBridgeMetadata,
     leadMatchPlan,
