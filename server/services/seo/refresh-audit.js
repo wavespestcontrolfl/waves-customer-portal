@@ -295,7 +295,7 @@ class RefreshAudit {
   }
 
   /**
-   * Resolve a page URL to the published blog_posts row it belongs to, or null.
+   * Resolve a page URL to the blog_posts row it belongs to, or null.
    *
    * enqueueRefresh is deliberately keyed by blogPostId because a bare path is
    * ambiguous on this hub/spoke network. Non-UI producers (the regression
@@ -303,12 +303,26 @@ class RefreshAudit {
    * next to the helpers that already know how paths and domains are keyed —
    * rather than being re-derived by every caller.
    *
+   * Resolves page IDENTITY, deliberately not publication state. A published
+   * match wins, but a temporarily draft/scheduled post still resolves —
+   * enqueueRefresh's own NOT_PUBLISHED check is the right place to reject it,
+   * and callers treat that as a recoverable outcome. Filtering drafts out here
+   * would make them indistinguishable from a URL with no blog_posts row at
+   * all, and a caller that parks the latter would park a post that is about to
+   * be republished.
+   *
    * Fails closed: returns null when nothing matches AND when more than one row
    * matches. An ambiguous match is the exact hazard the blogPostId-only rule
    * exists to prevent — guessing a domain would point the refresh engine at
    * the wrong site's page.
    */
-  async resolvePublishedPostByUrl(url) {
+  async resolvePostByUrl(url) {
+    // Published first, so a live page is never shadowed by a stale draft that
+    // happens to share its path; any-status second, for the draft case above.
+    return (await this._resolveByUrl(url, true)) || (await this._resolveByUrl(url, false));
+  }
+
+  async _resolveByUrl(url, publishedOnly) {
     const domain = registrableDomain(url);
     const path = urlToPath(url);
     if (!domain || !path) return null;
@@ -318,7 +332,7 @@ class RefreshAudit {
     // Primary: the live URL is authoritative for BOTH path and domain, so a
     // match here cannot cross sites.
     const live = await db('blog_posts')
-      .where('status', 'published')
+      .modify((q) => { if (publishedOnly) q.where('status', 'published'); })
       .whereNotNull('astro_live_url')
       .whereRaw(`${canonPathSql('astro_live_url')} = ?`, [path])
       .whereRaw(`${hostRegistrableSql('astro_live_url')} = ?`, [domain])
@@ -327,11 +341,11 @@ class RefreshAudit {
     if (live.length === 1) return live[0];
     if (live.length > 1) return null;
 
-    // Fallback for a published row that has no live URL recorded yet: match on
-    // slug path, still domain-scoped via target_domain (or the hub default, so
-    // a hub URL resolves a hub post whose target_domain was never set).
+    // Fallback for a row that has no live URL recorded yet: match on slug
+    // path, still domain-scoped via target_domain (or the hub default, so a
+    // hub URL resolves a hub post whose target_domain was never set).
     const bySlug = await db('blog_posts')
-      .where('status', 'published')
+      .modify((q) => { if (publishedOnly) q.where('status', 'published'); })
       .whereNull('astro_live_url')
       // trim(both '/') mirrors slugPath(): a slug stored with a leading slash
       // must not become '//slug', which canonPathSql would not normalize.

@@ -80,7 +80,7 @@ const identity = {
 
 const audit = (over = {}) => ({
   _identity: identity,
-  resolvePublishedPostByUrl: jest.fn(async () => ({ id: 42, slug: 'bed-bugs-bradenton' })),
+  resolvePostByUrl: jest.fn(async () => ({ id: 42, slug: 'bed-bugs-bradenton' })),
   enqueueRefresh: jest.fn(async () => ({ queued: true, status: 'pending' })),
   ...over,
 });
@@ -154,7 +154,7 @@ describe('requeueRegressedPages', () => {
     const refreshAudit = audit();
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
-    expect(refreshAudit.resolvePublishedPostByUrl).not.toHaveBeenCalled();
+    expect(refreshAudit.resolvePostByUrl).not.toHaveBeenCalled();
     expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
     // A cooldown EXPIRES — it defers the regression, it does not consume it.
     expect(db.state.updates[0]).toMatchObject({ requeue_status: 'cooldown', requeue_attempts: 1 });
@@ -164,7 +164,7 @@ describe('requeueRegressedPages', () => {
 
   test('a target outside the lane is PARKED, not consumed — requeued_at stays null', async () => {
     const db = makeDb({ pending: [row()] });
-    const refreshAudit = audit({ resolvePublishedPostByUrl: jest.fn(async () => null) });
+    const refreshAudit = audit({ resolvePostByUrl: jest.fn(async () => null) });
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
@@ -294,7 +294,7 @@ describe('requeueRegressedPages', () => {
   test('gate OFF does not even count a transient failure', async () => {
     process.env.GATE_REGRESSION_REQUEUE = 'false';
     const db = makeDb({ pending: [row()] });
-    const refreshAudit = audit({ resolvePublishedPostByUrl: jest.fn(async () => { throw new Error('boom'); }) });
+    const refreshAudit = audit({ resolvePostByUrl: jest.fn(async () => { throw new Error('boom'); }) });
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(db.state.updates).toHaveLength(0);
@@ -359,7 +359,7 @@ describe('requeueRegressedPages', () => {
   test('one bad page does not stop the rest of the batch', async () => {
     const db = makeDb({ pending: [row(), row({ id: 'imp-2', page_url: 'https://www.wavespestcontrol.com/b/' })] });
     const refreshAudit = audit({
-      resolvePublishedPostByUrl: jest.fn()
+      resolvePostByUrl: jest.fn()
         .mockImplementationOnce(async () => { throw new Error('boom'); })
         .mockImplementationOnce(async () => ({ id: 43 })),
     });
@@ -385,6 +385,6 @@ describe('requeueRegressedPages', () => {
     const refreshAudit = audit();
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
     expect(out).toMatchObject({ scanned: 0, queued: 0, skipped: 0 });
-    expect(refreshAudit.resolvePublishedPostByUrl).not.toHaveBeenCalled();
+    expect(refreshAudit.resolvePostByUrl).not.toHaveBeenCalled();
   });
 });

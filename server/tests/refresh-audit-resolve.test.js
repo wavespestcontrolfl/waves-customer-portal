@@ -19,6 +19,7 @@ function scriptDb(resultsPerCall) {
       whereRaw: (sql, binds) => { rec.whereRaw.push([sql, binds]); return q; },
       whereNull: (c) => { rec.whereNull.push(c); return q; },
       whereNotNull: (c) => { rec.whereNotNull.push(c); return q; },
+      modify: (fn) => { fn(q); return q; },
       select: () => q,
       limit: () => Promise.resolve(rows),
     };
@@ -75,10 +76,10 @@ describe('enqueueRefresh — recognising its own queue row', () => {
   });
 });
 
-describe('resolvePublishedPostByUrl', () => {
+describe('resolvePostByUrl', () => {
   test('returns the single published post whose LIVE URL matches path + domain', async () => {
     const calls = scriptDb([[{ id: 7, slug: 'bed-bugs-bradenton' }]]);
-    const post = await RefreshAudit.resolvePublishedPostByUrl('https://www.wavespestcontrol.com/bed-bugs-bradenton/?utm_source=x');
+    const post = await RefreshAudit.resolvePostByUrl('https://www.wavespestcontrol.com/bed-bugs-bradenton/?utm_source=x');
 
     expect(post).toMatchObject({ id: 7 });
     expect(calls[0].table).toBe('blog_posts');
@@ -92,12 +93,12 @@ describe('resolvePublishedPostByUrl', () => {
 
   test('FAILS CLOSED on an ambiguous live match rather than guessing a domain', async () => {
     scriptDb([[{ id: 7 }, { id: 8 }]]);
-    expect(await RefreshAudit.resolvePublishedPostByUrl('https://www.wavespestcontrol.com/a/')).toBeNull();
+    expect(await RefreshAudit.resolvePostByUrl('https://www.wavespestcontrol.com/a/')).toBeNull();
   });
 
   test('falls back to a domain-scoped slug match when no live URL is recorded', async () => {
     const calls = scriptDb([[], [{ id: 9, slug: 'lawn-care-venice' }]]);
-    const post = await RefreshAudit.resolvePublishedPostByUrl('https://www.wavespestcontrol.com/lawn-care-venice/');
+    const post = await RefreshAudit.resolvePostByUrl('https://www.wavespestcontrol.com/lawn-care-venice/');
 
     expect(post).toMatchObject({ id: 9 });
     expect(calls[1].whereNull).toContain('astro_live_url');
@@ -106,24 +107,44 @@ describe('resolvePublishedPostByUrl', () => {
 
   test('FAILS CLOSED on an ambiguous slug fallback', async () => {
     scriptDb([[], [{ id: 9 }, { id: 10 }]]);
-    expect(await RefreshAudit.resolvePublishedPostByUrl('https://www.wavespestcontrol.com/a/')).toBeNull();
+    expect(await RefreshAudit.resolvePostByUrl('https://www.wavespestcontrol.com/a/')).toBeNull();
   });
 
   test('null when nothing matches', async () => {
     scriptDb([[], []]);
-    expect(await RefreshAudit.resolvePublishedPostByUrl('https://www.wavespestcontrol.com/nope/')).toBeNull();
+    expect(await RefreshAudit.resolvePostByUrl('https://www.wavespestcontrol.com/nope/')).toBeNull();
   });
 
   test('null (no query) on unusable input', async () => {
     scriptDb([]);
-    expect(await RefreshAudit.resolvePublishedPostByUrl(null)).toBeNull();
-    expect(await RefreshAudit.resolvePublishedPostByUrl('')).toBeNull();
+    expect(await RefreshAudit.resolvePostByUrl(null)).toBeNull();
+    expect(await RefreshAudit.resolvePostByUrl('')).toBeNull();
     expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a temporarily DRAFT post still resolves — publication state is enqueueRefresh\'s call', async () => {
+    // Both published passes miss, then the any-status pass finds it. Filtering
+    // drafts out here would make them look like a URL with no blog_posts row,
+    // and the caller parks those permanently — so republishing would never
+    // revive the regression.
+    const calls = scriptDb([[], [], [{ id: 12, status: 'draft' }]]);
+    const post = await RefreshAudit.resolvePostByUrl('https://www.wavespestcontrol.com/being-edited/');
+
+    expect(post).toMatchObject({ id: 12, status: 'draft' });
+    // The first pass constrains on published; the recovering pass does not.
+    expect(calls[0].where).toContainEqual(['status', 'published']);
+    expect(calls[2].where).not.toContainEqual(['status', 'published']);
+  });
+
+  test('a PUBLISHED match wins over a same-path draft', async () => {
+    scriptDb([[{ id: 7, status: 'published' }], [{ id: 99, status: 'draft' }]]);
+    const post = await RefreshAudit.resolvePostByUrl('https://www.wavespestcontrol.com/a/');
+    expect(post).toMatchObject({ id: 7 });
   });
 
   test('a spoke URL is scoped to the spoke domain, never the hub', async () => {
     const calls = scriptDb([[{ id: 11 }]]);
-    await RefreshAudit.resolvePublishedPostByUrl('https://parrishexterminator.com/bed-bugs-bradenton/');
+    await RefreshAudit.resolvePostByUrl('https://parrishexterminator.com/bed-bugs-bradenton/');
     const binds = calls[0].whereRaw.map(([, b]) => b[0]);
     expect(binds).toContain('parrishexterminator.com');
     expect(binds).not.toContain('wavespestcontrol.com');

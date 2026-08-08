@@ -303,7 +303,7 @@ async function requeueRegressedPagesLocked(opts = {}) {
       if (await inCooldown(database, refreshAudit, row.page_url, cooldownSince)) {
         status = 'cooldown';
       } else {
-        post = await refreshAudit.resolvePublishedPostByUrl(row.page_url);
+        post = await refreshAudit.resolvePostByUrl(row.page_url);
         if (!post) {
           // Out of this lane's reach, not a transient miss. enqueueRefresh is
           // keyed by blogPostId, so a regressed page with no blog_posts row —
