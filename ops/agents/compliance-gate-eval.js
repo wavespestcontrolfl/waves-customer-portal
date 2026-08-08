@@ -97,11 +97,40 @@ const SHELL_SELF_CHECK = [DOC_SHELL_TITLE, ...DOC_SHELL_BEFORE, ...DOC_SHELL_AFT
 // Mirrors assertComplianceClear: body plus the editable meta, joined as blocks,
 // with the title passed as its own field. Same construction the publisher uses,
 // so document mode exercises the payload production actually builds.
-function buildDocument(text) {
-  const body = [...DOC_SHELL_BEFORE, text, ...DOC_SHELL_AFTER].join('\n\n');
+//
+// The fixture ROTATES through the three customer-visible positions (Codex PR
+// #3295 r6). Pinning it mid-body left title and trailing meta as fixed
+// compliant constants, so the run could not establish recall for a violation in
+// either — and a meta-description violation is the case that motivated the
+// whole publishable-surface fix in r1. Rotation is by index so coverage spreads
+// across the corpus without tripling the call count, and per-position metrics
+// are reported so a position-specific weakness is visible rather than averaged
+// away.
+const DOC_POSITIONS = ['body', 'title', 'meta'];
+
+function buildDocument(text, position) {
+  const shellBody = [...DOC_SHELL_BEFORE, ...DOC_SHELL_AFTER];
+  if (position === 'title') {
+    return {
+      title: text,
+      body: `${shellBody.join('\n\n')}\n\n${DOC_SHELL_META}`,
+      city: 'Sarasota',
+      keyword: 'pest control sarasota fl',
+      tag: 'Pest Control',
+    };
+  }
+  if (position === 'meta') {
+    return {
+      title: DOC_SHELL_TITLE,
+      body: `${shellBody.join('\n\n')}\n\n${text}`,
+      city: 'Sarasota',
+      keyword: 'pest control sarasota fl',
+      tag: 'Pest Control',
+    };
+  }
   return {
     title: DOC_SHELL_TITLE,
-    body: `${body}\n\n${DOC_SHELL_META}`,
+    body: `${[...DOC_SHELL_BEFORE, text, ...DOC_SHELL_AFTER].join('\n\n')}\n\n${DOC_SHELL_META}`,
     city: 'Sarasota',
     keyword: 'pest control sarasota fl',
     tag: 'Pest Control',
@@ -346,13 +375,26 @@ async function main() {
       for (const f of shellFindings) console.error(`  ${f.code} ${f.message}`);
       process.exit(1);
     }
-    console.log(`document shell self-check: clean (${shellCheck.checked ? 'checked' : 'UNCHECKED — fail-open, results unreliable'})`);
+    // An UNCHECKED self-check is not a passed self-check (Codex PR #3295 r6).
+    // The gate fails open, so a timed-out shell request returns no findings —
+    // indistinguishable from a clean one. If the providers then recover for the
+    // corpus calls, the run produces usable-looking numbers having never
+    // established that the shared ~978-word shell is neutral, and a shell-level
+    // P0 would contaminate every document verdict. Abort, don't warn.
+    if (!shellCheck.checked) {
+      console.error('ABORT: the document shell self-check returned UNCHECKED (fail-open — providers unavailable).');
+      console.error('       An unverified shell cannot be assumed neutral; every document verdict would rest on it.');
+      console.error('       Re-run when the providers are reachable.');
+      process.exit(1);
+    }
+    console.log('document shell self-check: clean (checked)');
     console.log(`document payload: ~${shellWordCount()} shell words + the fixture, plus title and meta`);
     console.log('                  (production targets 900-1500 words for city-service / supporting-blog)\n');
   }
 
-  const results = await runPool(selected, args.concurrency, async (c) => {
-    const payload = args.document ? buildDocument(c.text) : { body: c.text };
+  const results = await runPool(selected, args.concurrency, async (c, idx) => {
+    const position = args.document ? DOC_POSITIONS[idx % DOC_POSITIONS.length] : null;
+    const payload = args.document ? buildDocument(c.text, position) : { body: c.text };
     const { body } = payload;
     let semanticBlocked = null;
     let codeMatched = null;
@@ -374,7 +416,7 @@ async function main() {
     }
     // The regex verdict is recorded for COMPARISON only — never as the label.
     const regexBlocked = guardrails.evaluate({ body }, {}).findings.some((f) => f.code === c.code);
-    return { ...c, semanticBlocked, codeMatched, regexBlocked, checked };
+    return { ...c, semanticBlocked, codeMatched, regexBlocked, checked, position };
   });
 
   // A fail-open case is NOT excluded from the metrics (Codex PR #3295 r3).
@@ -395,8 +437,17 @@ async function main() {
   const pct = (n, d) => (d === 0 ? 'n/a' : `${((n / d) * 100).toFixed(1)}%`);
 
   console.log('\n─── semantic gate (blocking verdict, as production computes it) ───');
-  console.log(`recall    ${caught}/${shouldBlock.length}  (${pct(caught, shouldBlock.length)}) — violations caught`);
-  console.log(`precision ${shouldPass.length - falsePos}/${shouldPass.length}  (${pct(shouldPass.length - falsePos, shouldPass.length)}) — compliant copy left alone`);
+  console.log(`recall      ${caught}/${shouldBlock.length}  (${pct(caught, shouldBlock.length)}) — violations caught`);
+  // BLOCK PRECISION is the activation number (Codex PR #3295 r6): of everything
+  // the gate blocked, how much deserved it. What this line printed before was
+  // SPECIFICITY — compliant cases left alone over all compliant cases — which
+  // stays high whenever the corpus has many easy negatives, even while most
+  // actual blocks are wrong. With 3 real catches and 2 false blocks, specificity
+  // can read ~98% while only 60% of the parks are justified, and parks are the
+  // cost the operator actually feels. Both are printed, correctly named.
+  const blockedTotal = caught + falsePos;
+  console.log(`precision   ${caught}/${blockedTotal}  (${pct(caught, blockedTotal)}) — of everything it BLOCKED, how much deserved it  <- the activation number`);
+  console.log(`specificity ${shouldPass.length - falsePos}/${shouldPass.length}  (${pct(shouldPass.length - falsePos, shouldPass.length)}) — compliant copy left alone`);
   if (failOpen) {
     const failOpenViolations = shouldBlock.filter((r) => !r.checked).length;
     console.log(`fail-open ${failOpen} case(s) returned unchecked (model unavailable) — SCORED AS UNBLOCKED, matching production`);
@@ -411,6 +462,21 @@ async function main() {
   const blockedCorrectly = shouldBlock.filter((r) => r.semanticBlocked);
   const rightCode = blockedCorrectly.filter((r) => r.codeMatched).length;
   console.log(`code accuracy ${rightCode}/${blockedCorrectly.length} (${pct(rightCode, blockedCorrectly.length)}) — of the violations it caught, how many it labelled with the expected code`);
+
+  // Per-position breakdown: an averaged number hides a gate that reads the body
+  // well and ignores the title, which is a realistic failure mode for a prompt
+  // that describes "content" without naming where it lives.
+  if (args.document) {
+    console.log('\n─── by fixture position (rotated: body / title / meta) ───');
+    for (const pos of DOC_POSITIONS) {
+      const at = usable.filter((r) => r.position === pos);
+      const atBlock = at.filter((r) => r.shouldBlock);
+      const atPass = at.filter((r) => !r.shouldBlock);
+      const atCaught = atBlock.filter((r) => r.semanticBlocked).length;
+      const atFalse = atPass.filter((r) => r.semanticBlocked).length;
+      console.log(`${pos.padEnd(6)} recall ${atCaught}/${atBlock.length} (${pct(atCaught, atBlock.length)})   false blocks ${atFalse}/${atPass.length}`);
+    }
+  }
 
   // The decision that matters: does the PAIR regress anywhere the regex alone
   // already succeeded? A semantic miss is acceptable where the regex catches
