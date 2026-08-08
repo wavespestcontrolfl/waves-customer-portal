@@ -2287,12 +2287,142 @@ function metadataWithStampedRefund(rawMeta, refundId) {
 /**
  * charge.refunded — Update refund status on payments table
  */
+// charge.refunded does not reliably carry the refund that triggered it: on the
+// pinned API version `charge.refunds` is a NON-expanded list (data absent or
+// empty) and `charge.latest_refund` can be absent too, so both id sources come
+// back null. Everything downstream is keyed on that id — the failed-refund
+// fence, the stamped-refund record, `payments.stripe_refund_id`, and the
+// refund-email idempotency key — so a null degrades all four at once. Fetch it
+// from Stripe when the event doesn't supply it. Best-effort: a lookup failure
+// leaves refundId null (the same state as before this call existed), never
+// throws into the webhook.
+// Upper bound on how much refund history we will page through for one charge.
+// Far above anything real (a charge carries one or two refunds); it exists so
+// a pathological charge cannot spin the webhook through unbounded pagination.
+const REFUND_HISTORY_CAP = 1000;
+
+// Walk an oldest-first refund list and return the refund whose cumulative
+// total reaches exactly `snapshotCents` — i.e. the refund that brought the
+// charge to the amount_refunded the event snapshot reports. Returns null when
+// nothing lands on the target, which the caller treats as unattributable.
+function matchRefundToSnapshot(oldestFirst, snapshotCents) {
+  let running = 0;
+  for (const refund of oldestFirst) {
+    running += Number(refund.amount) || 0;
+    if (running === snapshotCents) return refund;
+  }
+  return null;
+}
+
+async function resolveRefundIdForCharge(charge) {
+  const fromEvent = (Array.isArray(charge.refunds?.data) ? charge.refunds.data[0]?.id : null)
+    || charge.latest_refund
+    || null;
+  if (fromEvent) return { refundId: fromEvent, refund: charge.refunds?.data?.[0] || null };
+
+  const stripe = getStripe();
+  if (!stripe) {
+    // FAIL CLOSED: without a client we cannot attribute this refund, and
+    // proceeding would stamp a null id and re-send the duplicate email.
+    throw new Error(`Stripe client unavailable — cannot resolve the refund id for charge ${charge.id}`);
+  }
+
+  let refunds;
+  try {
+    // Paginate: a single page is not the charge's full refund history, and
+    // treating it as one makes the cumulative walk fail permanently once a
+    // charge carries more refunds than the page size (codex P1).
+    refunds = await stripe.refunds
+      .list({ charge: charge.id, limit: 100 })
+      .autoPagingToArray({ limit: REFUND_HISTORY_CAP });
+  } catch (err) {
+    // THROW, don't degrade (codex P0): the dispatcher turns this into a 500
+    // "Stripe will retry" without marking the event processed. Continuing
+    // with a null would stamp `stripe_refund_id = null` over an id
+    // StripeService.refund() already recorded, strand the id the bounce
+    // handler needs to unwind a later failure, AND still send the duplicate
+    // email — all for a transient API blip that a retry fixes.
+    logger.error(`[stripe-webhook] refund lookup failed for charge ${charge.id} — retrying event: ${err.message}`);
+    throw err;
+  }
+
+  // Identify the refund THIS event's snapshot describes, not merely the
+  // newest one (codex P0). charge.amount_refunded is cumulative at snapshot
+  // time, so walking the refunds oldest-first and taking the one whose
+  // running total equals the snapshot pins the exact refund — which keeps
+  // two out-of-order charge.refunded events for two partial refunds mapped
+  // to their own ids instead of both collapsing onto the newest.
+  //
+  // Ordering comes from REVERSING Stripe's documented newest-first list, not
+  // from sorting on `created` (codex P0): `created` has second precision and
+  // refund ids are opaque, so a comparator tie-break would reorder two
+  // same-second refunds arbitrarily and attribute the event to the wrong one.
+  // The list order is authoritative; filtering preserves it.
+  const snapshotCents = Number(charge.amount_refunded) || 0;
+  const history = Array.isArray(refunds) ? refunds : [];
+
+  // We are comparing an OLD event snapshot against the CURRENT refund
+  // history, so two readings are possible and they must agree before either
+  // is trusted (codex P0):
+  //
+  //  - live-only, because Stripe drops failed/canceled refunds from
+  //    amount_refunded — the normal reading;
+  //  - all-inclusive, because a delayed id-less event can arrive after its
+  //    own refund bounced, and then only the history as it stood at emission
+  //    matches (codex P1). Resolving that hands the event to the existing
+  //    failed-refund fences instead of retrying until Stripe gives up.
+  //
+  // When both readings match but name DIFFERENT refunds, the snapshot is
+  // genuinely ambiguous and neither may be trusted: e.g. A=$100 and B=$50
+  // give B's event a $150 snapshot; if A later fails and C=$100 is created,
+  // the live walk lands on C while the true subject is B. Accepting either
+  // would stamp the wrong stripe_refund_id, corrupt bounce attribution, and
+  // pick the wrong email dedupe key — so fail closed and let the retry (or a
+  // visible failed event) sort it out.
+  const live = history.filter((r) => r && r.status !== 'failed' && r.status !== 'canceled').reverse();
+  const liveMatch = matchRefundToSnapshot(live, snapshotCents);
+  const allMatch = matchRefundToSnapshot([...history].reverse(), snapshotCents);
+
+  if (liveMatch && allMatch && liveMatch.id !== allMatch.id) {
+    throw new Error(
+      `charge.refunded for ${charge.id}: snapshot of ${snapshotCents} cents is ambiguous — `
+      + `live history points at ${liveMatch.id} but full history points at ${allMatch.id}; `
+      + 'refusing to guess which refund this event describes',
+    );
+  }
+
+  const match = liveMatch || allMatch;
+  if (match) {
+    if (!liveMatch) {
+      logger.warn(`[stripe-webhook] charge.refunded for ${charge.id} only matches once failed/canceled refunds are counted — resolved ${match.id} (status=${match.status}); the failed-refund fences own it from here`);
+    } else {
+      logger.info(`[stripe-webhook] charge.refunded for ${charge.id} carried no refund id — matched ${match.id} to the event snapshot (${snapshotCents} cents cumulative)`);
+    }
+    return { refundId: match.id, refund: match };
+  }
+  // FAIL CLOSED (codex P0): an empty, stale, truncated, or otherwise
+  // unmatchable response must not be processed. Continuing would stamp
+  // `stripe_refund_id = null` over an id StripeService.refund() already
+  // recorded, leave the failed-refund fence without the id it needs to unwind
+  // a later bounce, and email on a payment-scoped key that cannot match the
+  // admin path's refund-id key — i.e. the duplicate this fix exists to stop.
+  // Throwing returns 500 "Stripe will retry" without marking the event
+  // processed; a genuinely permanent mismatch surfaces as a failed event in
+  // the Stripe dashboard rather than as silently wrong books.
+  throw new Error(
+    `charge.refunded for ${charge.id}: no refund matches the snapshot's cumulative ${snapshotCents} cents `
+    + `across ${history.length} refund(s) — refusing to process an unattributable refund`,
+  );
+}
+
 async function handleChargeRefunded(charge) {
   const chargeId = charge.id;
   logger.info(`[stripe-webhook] Charge refunded: ${chargeId}`);
 
-  const latestRefund = Array.isArray(charge.refunds?.data) ? charge.refunds.data[0] : null;
-  const refundId = latestRefund?.id || charge.latest_refund || null;
+  const resolved = await resolveRefundIdForCharge(charge);
+  const latestRefund = (Array.isArray(charge.refunds?.data) ? charge.refunds.data[0] : null)
+    || resolved.refund;
+  const refundId = resolved.refundId;
   const refundDate = latestRefund?.created ? new Date(latestRefund.created * 1000) : new Date();
   const refundReason = latestRefund?.reason || 'Account adjustment';
   const refundAmountCents = latestRefund?.amount || charge.amount_refunded || 0;
@@ -2425,7 +2555,10 @@ async function handleChargeRefunded(charge) {
           PaymentLifecycleEmail.sendRefundIssued({
             customerId: markerWritten.customer_id,
             paymentId: markerWritten.id,
-            refundId: refundId || chargeId,
+            // Same rule as the main refund tail below: a charge id here would
+            // mint an idempotency key that can never match the refund-id key
+            // StripeService.refund() uses, so the customer gets two emails.
+            refundId: refundId || null,
             refundAmount: refundAmountDollars,
             refundDate,
             refundReason,
@@ -2655,7 +2788,15 @@ async function handleChargeRefunded(charge) {
     PaymentLifecycleEmail.sendRefundIssued({
       customerId: refundedPayment.customer_id,
       paymentId: refundedPayment.id,
-      refundId: refundId || chargeId,
+      // NEVER fall back to the charge id. sendRefundIssued builds its
+      // idempotency key from this value, and StripeService.refund() (the
+      // admin-initiated path, which emails first) keys on the REFUND id — a
+      // charge id here mints a different key, the dedupe misses, and the
+      // customer gets the same refund email twice. resolveRefundIdForCharge
+      // now throws rather than yield an unresolved id, so this is a standing
+      // invariant guard rather than a live path: keep it, so reintroducing a
+      // charge-id fallback takes a deliberate edit.
+      refundId: refundId || null,
       refundAmount: refundAmountDollars,
       refundDate,
       refundReason,
@@ -5110,6 +5251,7 @@ module.exports = router;
 // Exposed for unit tests.
 module.exports._handleRefundFailed = handleRefundFailed;
 module.exports._handleChargeRefunded = handleChargeRefunded;
+module.exports._resolveRefundIdForCharge = resolveRefundIdForCharge;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
 module.exports._handleSetupIntentFailed = handleSetupIntentFailed;
 module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucceededPaymentIntentIfSettled;
