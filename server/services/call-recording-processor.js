@@ -8159,6 +8159,15 @@ const CallRecordingProcessor = {
                 updated_at: new Date(),
               });
             }
+            // Every path above that CLEARED or RE-POINTED a prior stamp must
+            // also take the prior attempt's rolling summary off that lead
+            // (audit P1 r18) — the lead is no longer this call's, so the
+            // call's summary must not linger on it. Same exact-match revert
+            // as the terminal rejection paths; a stamp that stayed on the
+            // same lead skips (the summary is legitimately this call's).
+            if (priorStampedLeadId && priorStampedLeadId !== String(leadId || '')) {
+              await revertStampedLeadSummary(call, priorStampedLeadId, callSid);
+            }
             phoneLessLinkagePending = false;
           }
 
@@ -8452,6 +8461,9 @@ const CallRecordingProcessor = {
         wrapped.abortProcessing = true;
         throw wrapped;
       }
+      // The stamp is gone — the rejected call's rolling summary must leave
+      // the reused lead with it (audit P1 r18).
+      await revertStampedLeadSummary(call, priorStampedLeadId, callSid);
     }
 
     // Quote promised but NO lead artifact — an established customer past the
