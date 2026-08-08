@@ -44,6 +44,39 @@ const LIFT_POSITION_REGRESSED = -3;
 const LIFT_CLICKS_REGRESSED_PCT = -25;
 const REGRESSION_PAUSE_THRESHOLD = 3;
 
+// ── launch regime (net-new pages) ───────────────────────────────────
+// A brand-new page has NO trailing-28d baseline — it did not exist — so
+// diff-in-differences cannot grade it: baseline impressions are 0 by
+// definition and the insufficient_data short-circuit fires every single time.
+// In prod that was 100% of measured rows (28/28 insufficient_data, across
+// pages holding 287 clicks and up to 8,283 impressions between them). The
+// engine mostly PUBLISHES rather than refreshes, so the measurement design and
+// the work being measured were mismatched.
+//
+// Launches are therefore graded on what the page ACTUALLY EARNED. Pages with a
+// real baseline keep the control-adjusted diff-in-diff below, which is correct
+// for them and starts mattering as soon as the refresh lanes carry volume.
+//
+// The regime is chosen from the DATA — "is there a baseline to difference
+// against?" — never from action_type. new_supporting_blog does NOT prove the
+// page is new: astro-publisher adopts and rewrites a post that already renders
+// the route, and pages-poll says so outright ("new_supporting_blog, which can
+// UPDATE an existing slug"). Routing on the action type would take a page with
+// a genuine 2,000-impression baseline, ignore it, and score ordinary existing
+// traffic as a successful launch — even if the page actually declined.
+// The routing predicate is ZERO baseline presence — no impressions, no clicks,
+// no position in the whole 28-day baseline window. Not "thin": a page with 29
+// baseline impressions HAS a presence, and grading it on absolute window
+// traffic could call a real decline (pos 5 -> 25, clicks 3 -> 1) an
+// improvement while clearing its lift and disabling regression pausing. Thin
+// baselines stay insufficient_data, which is the honest answer for them.
+//
+// Residual, and acceptable: a page that technically pre-existed but had
+// literally no search presence routes here too. For that page "did it earn
+// anything?" is the right question regardless of when the file was created.
+const LAUNCH_MIN_IMPRESSIONS = 30;  // same "did it register at all" floor
+const LAUNCH_RANKED_POSITION = 20;  // ranking somewhere a human might see it
+
 // AEO visibility feedback loop (aeo_gap rows only).
 const AEO_REPROBE_DAYS = 21;        // wait this many days post-deploy before judging
 const AEO_MIN_OBSERVATIONS = 5;     // distinct post-deploy probe-days needed for a verdict
@@ -55,6 +88,47 @@ function aeoVerdict({ observedDays, wavesHitDays, minObservations = AEO_MIN_OBSE
   if (observedDays < minObservations) return { verdict: 'insufficient_data', nowCited: null };
   const nowCited = wavesHitDays > 0;
   return { verdict: nowCited ? 'now_cited' : 'still_absent', nowCited };
+}
+
+/**
+ * Pure: grade a NET-NEW page on what it earned, with no baseline to diff.
+ *
+ * Never returns 'regressed'. A page cannot lose ground it never had, and
+ * pausedBuckets counts regressed rows — so a dud launch must not be able to
+ * pause an entire content lane. A launch that goes nowhere is 'neutral'.
+ *
+ * `confidence` here answers "is there enough data to call this yet", NOT the
+ * control-adjusted noise question the diff regime asks — a launch has no
+ * control to adjust against, so borrowing MIN_CONFIDENCE would be meaningless.
+ */
+/**
+ * Pure: did this page have ANY search presence in the baseline window?
+ * Zero on every axis is the only state that makes a difference impossible.
+ */
+function isEmptyBaseline(baseline) {
+  const impressions = Number(baseline?.impressions) || 0;
+  const clicks = Number(baseline?.clicks) || 0;
+  const position = Number(baseline?.position) || 0;
+  return impressions === 0 && clicks === 0 && position === 0;
+}
+
+function launchVerdict({ window: win } = {}) {
+  const impressions = Number(win?.impressions) || 0;
+  const clicks = Number(win?.clicks) || 0;
+  const position = win?.position == null ? null : Number(win.position);
+  const ranked = position != null && position > 0 && position <= LAUNCH_RANKED_POSITION;
+  const confidence = Math.round(Math.min(1, impressions / 200) * 100) / 100;
+
+  let verdict;
+  if (impressions < LAUNCH_MIN_IMPRESSIONS && clicks === 0) {
+    verdict = 'insufficient_data';           // genuinely nothing to judge yet
+  } else if (impressions >= LAUNCH_MIN_IMPRESSIONS && (clicks > 0 || ranked)) {
+    verdict = 'improved';                    // it launched and it is earning
+  } else {
+    verdict = 'neutral';                     // registered, but going nowhere
+  }
+  // Lift is a diff-regime concept; leaving it null is honest for a launch.
+  return { verdict, confidence, estimated_lift_position: null, estimated_lift_clicks_pct: null };
 }
 
 function median(nums) {
@@ -93,6 +167,10 @@ function confidenceScore({ baselineImpressions, windowImpressions, controlCount 
  */
 function computeVerdict({ baseline, window, controlDeltas = [] }) {
   const baselineImpr = Number(baseline?.impressions) || 0;
+  // ZERO baseline presence → the page had nothing to difference against →
+  // grade it on what it earned. Anything with a presence, however thin, falls
+  // through to the diff regime (and its own floors). See the LAUNCH_* block.
+  if (isEmptyBaseline(baseline)) return launchVerdict({ window });
   const windowImpr = Number(window?.impressions) || 0;
   const controlCount = controlDeltas.length;
 
@@ -106,6 +184,9 @@ function computeVerdict({ baseline, window, controlDeltas = [] }) {
   const confidence = confidenceScore({ baselineImpressions: baselineImpr, windowImpressions: windowImpr, controlCount });
 
   let verdict;
+  // The baseline floor is live again: routing above only diverts rows with
+  // ZERO presence, so a thin-but-present baseline still lands here and must
+  // still report insufficient_data rather than being graded.
   if (baselineImpr < MIN_IMPRESSIONS || windowImpr < MIN_IMPRESSIONS || controlCount < 1) {
     verdict = 'insufficient_data';
   } else if ((liftPos >= LIFT_POSITION_IMPROVED || liftClicksPct >= LIFT_CLICKS_IMPROVED_PCT) && confidence >= MIN_CONFIDENCE) {
@@ -674,10 +755,13 @@ module.exports = {
   // exposed for tests / reuse
   aggregatePageMetrics,
   selectControlPages,
+  launchVerdict,
+  isEmptyBaseline,
   _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, normalizeQueryCohort, queryLift, domainFromUrl },
   THRESHOLDS: {
     BASELINE_DAYS, DEPLOY_LAG_DAYS, MIN_IMPRESSIONS, MIN_CONFIDENCE,
     LIFT_POSITION_IMPROVED, LIFT_CLICKS_IMPROVED_PCT,
     LIFT_POSITION_REGRESSED, LIFT_CLICKS_REGRESSED_PCT, REGRESSION_PAUSE_THRESHOLD,
+    LAUNCH_MIN_IMPRESSIONS, LAUNCH_RANKED_POSITION,
   },
 };
