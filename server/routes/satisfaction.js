@@ -195,7 +195,7 @@ router.post('/', async (req, res, next) => {
       // not consume it, so the customer would review AND still get the SMS
       // (codex #3285 r3). No actionable fallback in that window; the queued
       // text carries the link.
-      const askQueued = ['deferred', 'already_queued', 'send_failed', 'concurrent'].includes(asked.outcome);
+      const askQueued = ['deferred', 'already_queued', 'send_failed'].includes(asked.outcome);
       let reviewLink = asked.reviewUrl || null;
       if (!reviewLink && !askQueued && asked.outcome !== 'already_reviewed') {
         // BOTH fallbacks skip the queued window (codex #3285 r4): an older
@@ -208,7 +208,20 @@ router.post('/', async (req, res, next) => {
         // the cadence chase a customer who already reviewed (pre-push audit
         // r4).
         reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
-        if (!reviewLink && asked.outcome !== 'in_cadence') reviewLink = office.googleReviewUrl;
+        if (!reviewLink) {
+          let bareOk = asked.outcome !== 'in_cadence';
+          if (asked.outcome === 'concurrent') {
+            // Lock contention alone doesn't prove a review ask will exist —
+            // the same review-send lock wraps private no-link check-ins, and
+            // an in-flight ask can finish blocked without persisting a retry
+            // (codex #3285 r9). Suppress the CTA only when a durably queued
+            // ask is confirmed on the books; otherwise show the bare link
+            // rather than promising a text that may never come.
+            const gate = await ReviewService.checkUnscheduledAskGates(customer.id).catch(() => null);
+            bareOk = !(gate && gate.outcome === 'already_queued');
+          }
+          if (bareOk) reviewLink = office.googleReviewUrl;
+        }
       }
 
       return res.json({
