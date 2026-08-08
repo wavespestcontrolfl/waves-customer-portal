@@ -141,6 +141,8 @@ const NOTE_SAFETY_OVERCLAIMS_RE = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effe
 // everything the server rejects: spelled-out durations ("two hours"),
 // clock times, and the full re-entry phrasing set.
 const NOTE_TIMING_DURATION_RE = /\b(?:\d+(?:\.\d+)?\s*(?:[-–]\s*(?:\d+(?:\.\d+)?\s*)?)?(?:minutes?|mins?|seconds?|secs?|hours?|hrs?|m|h|s)\b|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|seconds?|secs?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b|\d{1,2}:\d{2}\b)/i;
+// Mirror of TIMING_STRICT_DURATION_RE (durations only, no clock times).
+const NOTE_TIMING_STRICT_RE = /\b(?:\d+(?:\.\d+)?\s*(?:[-–]\s*(?:\d+(?:\.\d+)?\s*)?)?(?:minutes?|mins?|seconds?|secs?|hours?|hrs?|m|h|s)\b|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|seconds?|secs?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour)/i;
 const NOTE_REENTRY_CONTEXT_RE = /\bre-?ent\w*|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\benter(?:ing)?\b[^.!?\n]{0,30}\b(?:treated|areas?|lawn|yard|home|house)\b|\b(?:treated|areas?|lawn|yard|home|house)\b[^.!?\n]{0,30}\benter(?:ing)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family|residents?|occupants?|everyone)\b[^.!?\n]{0,20}\breturn\w*\b|^\s*return(?:ing)?\b/i;
 const NOTE_AGRONOMIC_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|overseed\w*|aerat\w*|rain)\b/i;
 // Mirror of the server's IMPLIED_REENTRY_DIRECTIVE_RE: a keep-away
@@ -173,23 +175,25 @@ function noteSentences(note) {
 // qualifying directive in the ADJACENT clause governs a bare duration
 // (directive-only — never the standalone dry/safe REENTRY words, so
 // "Stay dry! See you at 2:30." stays sendable).
-function noteDirectiveQualifies(clause) {
-  return NOTE_IMPLIED_DIRECTIVE_RE.test(clause)
-    && (!NOTE_IMPLIED_NONTREATMENT_RE.test(clause)
-      || NOTE_TREATMENT_WORD_RE.test(clause)
-      || NOTE_PRODUCT_CTX_RE.test(clause));
-}
 function noteTimingTrips(note) {
   const clauses = noteSentences(note)
     .flatMap((s) => s.split(/[,;]+|\s+(?:and|but|while|then)\s+/i))
     .filter((c) => c.trim());
+  // Treatment context in an adjacent clause carries into the premises
+  // exemption; adjacency propagation needs a DURATION figure, never an
+  // arrival clock ("Please wait inside. We will arrive at 2:30." passes).
+  const treatmentNear = (i) => [clauses[i], clauses[i - 1], clauses[i + 1]]
+    .some((c) => c && (NOTE_TREATMENT_WORD_RE.test(c) || NOTE_PRODUCT_CTX_RE.test(c)));
+  const qualifies = (i) => NOTE_IMPLIED_DIRECTIVE_RE.test(clauses[i])
+    && (!NOTE_IMPLIED_NONTREATMENT_RE.test(clauses[i]) || treatmentNear(i));
   for (let i = 0; i < clauses.length; i++) {
     const clause = clauses[i];
     if (!NOTE_TIMING_DURATION_RE.test(clause)) continue;
     const governed = NOTE_REENTRY_CONTEXT_RE.test(clause)
-      || noteDirectiveQualifies(clause)
-      || (i > 0 && noteDirectiveQualifies(clauses[i - 1]))
-      || (i + 1 < clauses.length && noteDirectiveQualifies(clauses[i + 1]));
+      || qualifies(i)
+      || (NOTE_TIMING_STRICT_RE.test(clause)
+        && ((i > 0 && qualifies(i - 1))
+          || (i + 1 < clauses.length && qualifies(i + 1))));
     if (governed && !NOTE_AGRONOMIC_RE.test(clause)) return true;
   }
   return false;
@@ -216,6 +220,14 @@ function noteComplianceTrips(note) {
   }
   if (NOTE_SAFETY_OVERCLAIMS_RE.test(note)) return true;
   return noteTimingTrips(note);
+}
+// Mirror of the server's foldForCompliance (rain-out.js — keep in sync):
+// NFKC + default-ignorable characters stripped, so invisible joiners
+// can't hide "1970"/"safe" from the guard and compliance mirrors — the
+// server folds before ITS checks, and the advisor must see the same text.
+const NOTE_FOLD_RE = /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFE00-\uFE0F\uFEFF]/g;
+function foldNote(raw) {
+  return String(raw).normalize('NFKC').replace(NOTE_FOLD_RE, '');
 }
 // Same canonicalization the server runs before the shortener test —
 // encoded/unicode-dot hosts (`bit%2ely`, `bit。ly`) resolve to real links.
@@ -391,9 +403,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const noteLink = NOTE_SHORTENER_RE.test(note) || NOTE_SHORTENER_RE.test(noteCanonical)
     || NOTE_URL_RE.test(note) || NOTE_URL_RE.test(noteCanonical)
     || noteContainsBareHost(note) || noteContainsBareHost(noteCanonical);
+  const noteFolded = foldNote(note);
   const noteEmoji = NOTE_EMOJI_RE.test(note);
-  const noteGuard = noteGuardTrips(note);
-  const noteCompliance = noteComplianceTrips(note);
+  const noteGuard = noteGuardTrips(noteFolded);
+  const noteCompliance = noteComplianceTrips(noteFolded);
   const noteBlocked = notify && (noteLink || noteEmoji || noteGuard || noteCompliance);
   const noteBlockedCopy = noteLink ? ERROR_COPY.note_link_blocked
     : noteEmoji ? ERROR_COPY.note_emoji_blocked

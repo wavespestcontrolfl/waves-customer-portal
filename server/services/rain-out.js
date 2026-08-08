@@ -149,6 +149,14 @@ function normalizeForLinkCheck(raw) {
   return out;
 }
 
+// Compliance fold: compatibility normalization + default-ignorable
+// characters (soft hyphen, joiners, directional marks, variation
+// selectors, BOM) removed — keep in sync with the client's foldNote.
+const DEFAULT_IGNORABLE_RE = /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFE00-\uFE0F\uFEFF]/g;
+function foldForCompliance(text) {
+  return String(text).normalize('NFKC').replace(DEFAULT_IGNORABLE_RE, '');
+}
+
 function sanitizeCustomerNote(raw) {
   if (raw == null) return { note: null };
   if (typeof raw !== 'string') return { error: 'note_invalid' };
@@ -195,8 +203,14 @@ function sanitizeCustomerNote(raw) {
   // the lawn. Stay off for 30 minutes." must block even though the claim
   // and its context sit in different sentences (codex pre-push r10) —
   // the social surfaces keep the same-sentence co-occurrence rule.
+  // Validate a compliance-FOLDED copy: normalizeGsmPunctuation deliberately
+  // preserves U+200C/U+200D (emoji joins), so "sa‍fe" would slip every
+  // \b-anchored compliance regex while rendering as the banned word to the
+  // customer (codex r24). NFKC + default-ignorable strip closes it; the
+  // SENT text stays gsm.
+  const folded = foldForCompliance(gsm);
   const { complianceLanguageIssues } = require('./social-media');
-  const complianceIssues = complianceLanguageIssues(gsm, { impliedTreatmentContext: true });
+  const complianceIssues = complianceLanguageIssues(folded, { impliedTreatmentContext: true });
   if (complianceIssues.length) return { error: 'note_compliance_blocked', complianceIssues };
   return { note };
 }

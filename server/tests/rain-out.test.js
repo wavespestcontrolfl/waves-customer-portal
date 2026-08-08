@@ -1560,6 +1560,16 @@ describe('rain-out service', () => {
       // ...but a bare duration next to a well-wish stays sendable.
       expect(sanitize()('Stay dry! See you at 2:30.'))
         .toEqual({ note: 'Stay dry! See you at 2:30.' });
+      // Invisible joiners can't split a banned word past the compliance
+      // regexes — validation runs on a folded copy (r24).
+      blocked('Our treatment is sa\u200Dfe');
+      // Treatment context in the PRIOR clause defeats the premises
+      // exemption (r24).
+      blocked('We treated the lawn. Stay inside near the gate for 30 minutes before going outside.');
+      // An arrival clock next to a stay directive is not a re-entry time —
+      // adjacency propagation needs a duration figure (r24).
+      expect(sanitize()('Please wait inside. We will arrive at 2:30.'))
+        .toEqual({ note: 'Please wait inside. We will arrive at 2:30.' });
       blocked('This is E.P.A. approved');
       // ...but only APPROVED-status EPA claims block — label-direction
       // references are compliant (r14 client-parity case).

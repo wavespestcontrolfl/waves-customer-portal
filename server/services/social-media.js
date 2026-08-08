@@ -398,6 +398,10 @@ const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|sa
 // still needs the re-entry context AND no agronomic exemption, so business
 // hours and appointment windows in ordinary copy stay legal.
 const TIMING_DURATION_RE = /\b(?:\d+(?:\.\d+)?\s*(?:[-–]\s*(?:\d+(?:\.\d+)?\s*)?)?(?:minutes?|mins?|seconds?|secs?|hours?|hrs?|m|h|s)\b|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|seconds?|secs?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b|\d{1,2}:\d{2}\b)/i;
+// Duration figures ONLY (no clock times) — adjacency propagation must not
+// bind an arrival clock in the next clause to a prior stay directive
+// ("Please wait inside. We will arrive at 2:30." — codex #3278 r24).
+const TIMING_STRICT_DURATION_RE = /\b(?:\d+(?:\.\d+)?\s*(?:[-–]\s*(?:\d+(?:\.\d+)?\s*)?)?(?:minutes?|mins?|seconds?|secs?|hours?|hrs?|m|h|s)\b|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|seconds?|secs?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour)/i;
 const REENTRY_CONTEXT_RE = /\bre-?ent\w*|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\benter(?:ing)?\b[^.!?\n]{0,30}\b(?:treated|areas?|lawn|yard|home|house)\b|\b(?:treated|areas?|lawn|yard|home|house)\b[^.!?\n]{0,30}\benter(?:ing)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family|residents?|occupants?|everyone)\b[^.!?\n]{0,20}\breturn\w*\b|^\s*return(?:ing)?\b/i;
 // Agronomic aftercare timing (mowing/watering windows) is legitimate copy,
 // and cadence copy uses days — only minute/hour figures are the banned class.
@@ -601,21 +605,31 @@ function complianceOverclaims(text, { impliedTreatmentContext = false } = {}) {
   // governs a bare duration too (codex #3278 r23). Directive-only on
   // purpose — the standalone dry/safe words of REENTRY_CONTEXT_RE would
   // make "Stay dry! See you at 2:30." false-positive.
-  const impliedDirectiveQualifies = (cl) => IMPLIED_REENTRY_DIRECTIVE_RE.test(cl)
-    && (!IMPLIED_NONTREATMENT_RE.test(cl)
-      || IMPLIED_TREATMENT_WORD_RE.test(cl)
-      || PRODUCT_CONTEXT_RE.test(cl));
   const clauses = sentences
     .flatMap((s) => s.split(/[,;]+|\s+(?:and|but|while|then)\s+/i))
     .filter((c) => c.trim());
+  // Treatment context established in an ADJACENT clause carries into the
+  // premises exemption ("We treated the lawn. Stay inside near the gate
+  // for 30 minutes…" — the gate can't launder it; codex r24).
+  const treatmentNear = (i) => [clauses[i], clauses[i - 1], clauses[i + 1]]
+    .some((c) => c && (IMPLIED_TREATMENT_WORD_RE.test(c) || PRODUCT_CONTEXT_RE.test(c)));
+  const impliedDirectiveQualifies = (i) => {
+    const cl = clauses[i];
+    return IMPLIED_REENTRY_DIRECTIVE_RE.test(cl)
+      && (!IMPLIED_NONTREATMENT_RE.test(cl) || treatmentNear(i));
+  };
   for (let i = 0; i < clauses.length; i++) {
     const clause = clauses[i];
     if (!TIMING_DURATION_RE.test(clause)) continue;
+    // Adjacency propagation requires a DURATION figure — an arrival clock
+    // next to a stay directive ("Please wait inside. We will arrive at
+    // 2:30.") is not a re-entry time (codex r24).
     const governed = REENTRY_CONTEXT_RE.test(clause)
       || (impliedTreatmentContext
-        && (impliedDirectiveQualifies(clause)
-          || (i > 0 && impliedDirectiveQualifies(clauses[i - 1]))
-          || (i + 1 < clauses.length && impliedDirectiveQualifies(clauses[i + 1]))));
+        && (impliedDirectiveQualifies(i)
+          || (TIMING_STRICT_DURATION_RE.test(clause)
+            && ((i > 0 && impliedDirectiveQualifies(i - 1))
+              || (i + 1 < clauses.length && impliedDirectiveQualifies(i + 1))))));
     if (governed && !agronomicExemptionApplies(clause)) {
       issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
       break;
