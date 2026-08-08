@@ -185,6 +185,7 @@ describe('recordCallPpcAttribution', () => {
       customer_id: 'C1',
       lead_id: 'L1',
       service_line: 'mosquito',
+      source_call_id: null,
       specific_service: 'mosquito_program',
       service_bucket: 'recurring',
       lead_date: '2026-03-15',

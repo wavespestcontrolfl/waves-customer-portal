@@ -110,6 +110,12 @@ async function recordCallPpcAttribution({
   leadDate,
   serviceInterest = null,
   isPaid = true,
+  // Which call_log row this attribution derives from — the bridge's
+  // repoint reconciliation identifies THE EXACT row a call created by it
+  // (codex P1, PR #3303). Written on insert and backfilled onto an
+  // existing row that lacks it, so a row first created by the immediate
+  // call path gains provenance on the bridge's next pass.
+  sourceCallId = null,
   // Transaction handle for the ad_service_attribution statements. The
   // google-call bridge attributes while holding a FOR UPDATE lock on the
   // lead; this table's lead_id foreign-key check takes FOR KEY SHARE on
@@ -194,6 +200,7 @@ async function recordCallPpcAttribution({
       applyService('service_line', serviceLine);
       applyService('specific_service', specificService);
       applyService('service_bucket', serviceBucket);
+      if (sourceCallId && !existing.source_call_id) patch.source_call_id = sourceCallId;
       if (Object.keys(patch).length) {
         patch.updated_at = new Date();
         await dbc('ad_service_attribution').where({ id: existing.id }).update(patch);
@@ -215,6 +222,7 @@ async function recordCallPpcAttribution({
       lead_date: day,
       lead_source: leadSource,
       lead_source_detail: leadSourceDetail,
+      source_call_id: sourceCallId,
       funnel_stage: 'lead',
       // Calls carry no click ids (gclid/fbclid), so this flag — not a cookie — is
       // how the paid filters count them: a paid-number call (google_ads/facebook)

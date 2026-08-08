@@ -244,6 +244,7 @@ function shapeCallLog(row) {
     // shouldRetryLeadAttribution compares it against the CURRENT joined
     // lead (codex P1, PR #3303).
     googleAdsLeadMatchedLeadId: bridgeMetadata?.leadMatch?.leadId || null,
+    googleAdsLeadMatchedStrategy: bridgeMetadata?.leadMatch?.strategy || null,
     googleAdsLeadMatchedAt: bridgeMetadata?.leadAttributedAt || null,
   };
 }
@@ -272,8 +273,17 @@ function shouldRetryLeadAttribution(match) {
   // which re-runs attribution against the live linkage and reconciles the
   // old funnel row.
   const recordedLeadId = match.callLog.googleAdsLeadMatchedLeadId;
+  if (!recordedLeadId) return false;
   const joinedLeadId = match.callLog.leadId;
-  return !!(recordedLeadId && joinedLeadId && String(recordedLeadId) !== String(joinedLeadId));
+  // A joined lead that DIFFERS from the recorded one is a repoint — stale
+  // either way. A missing joined lead is stale ONLY when the recorded
+  // match was itself joined-linkage (codex P1, PR #3303: a cleared stamp
+  // or deleted joined lead must enter reconciliation, or the old lead's
+  // paid attribution stands indefinitely) — plan-attributed calls
+  // (customer/phone strategies) never had a joined lead, and treating
+  // their normal state as stale would churn re-attribution every scan.
+  if (joinedLeadId) return String(recordedLeadId) !== String(joinedLeadId);
+  return match.callLog.googleAdsLeadMatchedStrategy === 'joined_lead';
 }
 
 function redactedLeadMatch(leadMatch) {
@@ -637,6 +647,33 @@ async function findLeadForCall(callLog, { dbc = db } = {}) {
   return lead?.id ? { ...plan, leadId: lead.id, customerId: plan.customerId || lead.customer_id || null } : null;
 }
 
+// Reconcile the funnel row THIS call created when its attribution moves
+// (codex P1, PR #3303) — identified by EXACT provenance
+// (ad_service_attribution.source_call_id), never a heuristic that could hit
+// a same-day row another paid call legitimately owns or miss a row
+// lead-funnel-bridge advanced past funnel_stage='lead'. TRANSFERRED to the
+// new lead when that slot is free (funnel stage and metrics ride along),
+// retired when the new lead already owns a row or the link cleared
+// entirely. Pre-provenance rows (NULL source_call_id, written before the
+// column shipped) are conservatively left alone — the bridge backfills the
+// stamp on its next ordinary pass, after which repoints reconcile.
+async function reconcileMovedCallAttribution(trx, callLogId, recordedLeadId, newLeadId, now) {
+  const oldRow = await trx('ad_service_attribution')
+    .where({ lead_id: recordedLeadId, source_call_id: callLogId })
+    .first('id');
+  if (!oldRow) return;
+  if (newLeadId) {
+    const conflict = await trx('ad_service_attribution').where({ lead_id: newLeadId }).first('id');
+    if (!conflict) {
+      await trx('ad_service_attribution')
+        .where({ id: oldRow.id })
+        .update({ lead_id: newLeadId, updated_at: now });
+      return;
+    }
+  }
+  await trx('ad_service_attribution').where({ id: oldRow.id }).del();
+}
+
 async function updateLeadAttribution(leadMatch, bridgeSource, now, { linkageCallId = null, dbc = db } = {}) {
   if (!leadMatch?.leadId) return false;
   // Live-lead check happens HERE, at write time, not only in the fetch join
@@ -749,6 +786,7 @@ async function applyBridge(options = {}) {
       leadSourceDetail: match.googleCall.campaignName || GOOGLE_ADS_BRIDGE_SOURCE_NAME,
       googleCampaignId: match.googleCall.campaignId,
       leadDate: match.callLog?.createdAt || null, // date by the actual call, not this run
+      sourceCallId: match.callLog?.id || null,
       dbc: trx,
     });
     // recordCallPpcAttribution CATCHES its own SQL errors and returns
@@ -853,29 +891,36 @@ async function applyBridge(options = {}) {
         // landed update proceeds, and stamp reconciliation cannot
         // interleave between the lead write and the call record. Not a
         // write_failed on skip: the retry lane re-evaluates next pass.
+        const recordedLeadId = match.callLog.googleAdsLeadMatchedLeadId || null;
         const attribution = await db.transaction(async (trx) => {
           const res = await attributeResolvedLead(match.callLog, bridgeSource, now, trx);
-          if (!res.match) return res;
+          if (!res.match) {
+            // Recorded match with NO resolvable lead — the CLEARED-link
+            // case (codex P1, PR #3303): retire this call's own funnel row
+            // (exact provenance) and clear the recorded match, so the
+            // bridge stops asserting an attribution its linkage no longer
+            // supports and a future re-link can attribute cleanly. The
+            // google call itself stays bridged.
+            if (recordedLeadId) {
+              await reconcileMovedCallAttribution(trx, match.callLog.id, recordedLeadId, null, now);
+              await trx('call_log')
+                .where({ id: match.callLog.id })
+                .update({
+                  metadata: bridgeMetadataPatch({ leadMatch: null, leadAttributedAt: null }),
+                  updated_at: now,
+                });
+              return { match: null, cleared: true };
+            }
+            return res;
+          }
           // Stamp REPOINTED since the recorded match (codex P1, PR #3303):
-          // this call's paid funnel row moved with it — retire the OLD
-          // lead's row so the call isn't counted paid twice. Tightly
-          // fingerprinted to the row THIS call's attribution created:
-          // call-sourced google_ads (every web-attributed row carries a
-          // click id or UTM and is protected, same guards as
-          // recordCallPpcAttribution), dated by this call. A same-day row
-          // another paid call legitimately owns re-heals on that call's
-          // next bridge pass. The old lead's lead_source_id is left as-is:
-          // the prior value was never recorded, and guessing would corrupt
+          // this call's paid funnel row moves with it — transferred or
+          // retired by EXACT provenance (source_call_id), never a
+          // heuristic. The old lead's lead_source_id is left as-is: the
+          // prior value was never recorded, and guessing would corrupt
           // real attribution.
-          const recordedLeadId = match.callLog.googleAdsLeadMatchedLeadId;
           if (recordedLeadId && String(recordedLeadId) !== String(res.match.leadId)) {
-            await trx('ad_service_attribution')
-              .where({ lead_id: recordedLeadId, lead_source: 'google_ads', funnel_stage: 'lead' })
-              .where({ lead_date: etDateString(match.callLog.createdAt ? new Date(match.callLog.createdAt) : new Date(now)) })
-              .whereNull('gclid').whereNull('wbraid').whereNull('gbraid')
-              .whereNull('fbclid').whereNull('fbc')
-              .whereNull('utm_campaign').whereNull('utm_term')
-              .del();
+            await reconcileMovedCallAttribution(trx, match.callLog.id, recordedLeadId, res.match.leadId, now);
           }
           await trx('call_log')
             .where({ id: match.callLog.id })
@@ -898,6 +943,10 @@ async function applyBridge(options = {}) {
           }
           return res;
         });
+        if (attribution.cleared) {
+          applied.push({ ...match, status: 'lead_attribution_cleared' });
+          continue;
+        }
         const leadMatch = attribution.match;
         if (!leadMatch) {
           skipped.push({ ...match, skipReason: attribution.reason });
