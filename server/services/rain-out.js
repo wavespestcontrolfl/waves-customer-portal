@@ -186,11 +186,13 @@ function sanitizeCustomerNote(raw) {
   if (!guard.ok) return { error: 'note_guard_blocked', guardReason: guard.reason };
   // Compliance-language hard rules (product-safety "safe" claims,
   // EPA-approved, fixed re-entry timing) apply to EVERY customer surface —
-  // free-form notes included (codex pre-push r5). Deterministic extraction
-  // of the social-compliance-judge rules; see customer-copy-compliance.js.
-  const { findComplianceViolation } = require('./messaging/customer-copy-compliance');
-  const violation = findComplianceViolation(gsm);
-  if (violation) return { error: 'note_compliance_blocked', complianceRule: violation.rule };
+  // free-form notes included (codex pre-push r5/r6). This is the CANONICAL
+  // clause-level checker from social-media.js (same regression matrix as
+  // validateContent), not a parallel weaker copy: bare "safe once dry"
+  // without technician-confirmed timing blocks here too.
+  const { complianceLanguageIssues } = require('./social-media');
+  const complianceIssues = complianceLanguageIssues(gsm);
+  if (complianceIssues.length) return { error: 'note_compliance_blocked', complianceIssues };
   return { note };
 }
 

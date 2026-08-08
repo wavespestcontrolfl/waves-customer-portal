@@ -1471,20 +1471,25 @@ describe('rain-out service', () => {
       expect(sanitize()('value un\u2060defined here')).toEqual({ error: 'note_guard_blocked', guardReason: 'broken-render:undefined' });
     });
 
-    test('sanitizer: compliance hard rules \u2014 no safe claims / EPA-approved / fixed re-entry timing', () => {
-      // Deterministic extraction of the social-compliance-judge hard rules
-      // (codex r5) \u2014 free-form notes are customer copy like any other.
-      expect(sanitize()('our treatment is pet-safe')).toEqual({ error: 'note_compliance_blocked', complianceRule: 'safety' });
-      expect(sanitize()('products are totally safe for kids')).toEqual({ error: 'note_compliance_blocked', complianceRule: 'safety' });
-      expect(sanitize()('EPA-approved products only')).toEqual({ error: 'note_compliance_blocked', complianceRule: 'epa' });
-      expect(sanitize()('re-enter after 30 minutes')).toEqual({ error: 'note_compliance_blocked', complianceRule: 'reentry_timing' });
-      expect(sanitize()('wait an hour before letting pets out')).toEqual({ error: 'note_compliance_blocked', complianceRule: 'reentry_timing' });
-      // Approved idioms and unrelated durations pass.
-      expect(sanitize()('yard is safe once completely dry')).toEqual({ note: 'yard is safe once completely dry' });
+    test('sanitizer: compliance hard rules via the CANONICAL social-media checker', () => {
+      // complianceLanguageIssues (social-media.js) \u2014 same clause logic and
+      // regression matrix as validateContent, not a parallel weaker copy
+      // (codex r5/r6). Free-form notes are customer copy like any other.
+      const blocked = (s) => expect(sanitize()(s)).toMatchObject({ error: 'note_compliance_blocked' });
+      blocked('our treatment is pet-safe');
+      blocked('products are totally safe for kids');
+      blocked('EPA-approved products only');
+      blocked('re-enter after 30 minutes');
+      blocked('keep pets off treated areas for 30 minutes');
+      // Bare dry-idiom WITHOUT technician-confirmed timing blocks too \u2014
+      // the canonical rule, stricter than a naive idiom allowlist.
+      blocked('treatment is safe once dry');
+      // Approved framings and unrelated durations pass.
+      expect(sanitize()('Safe once dry - your technician confirms timing')).toEqual({ note: 'Safe once dry - your technician confirms timing' });
       expect(sanitize()('keeping your home safe from termites')).toEqual({ note: 'keeping your home safe from termites' });
       expect(sanitize()('EPA-registered product, same as always')).toEqual({ note: 'EPA-registered product, same as always' });
       expect(sanitize()('visit takes about 45 minutes')).toEqual({ note: 'visit takes about 45 minutes' });
-      expect(sanitize()('barrier lasts 21-30 days')).toEqual({ note: 'barrier lasts 21-30 days' });
+      expect(sanitize()('avoid watering for 24 hours')).toEqual({ note: 'avoid watering for 24 hours' });
     });
 
     test('sanitizer: rejects emoji BEFORE the move (send layer would block the SMS after)', () => {

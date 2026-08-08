@@ -588,18 +588,26 @@ try {
 
 const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500, tiktok: 2200, twitter: 250 };
 
+// The compliance-language subset of validateContent, callable on its own
+// (exported below for non-social customer copy like Quick Move notes).
+function complianceLanguageIssues(text) {
+  const issues = [];
+  if (SAFETY_OVERCLAIMS.test(String(text || ''))) {
+    issues.push('Contains safety overclaim (guaranteed, 100% effective, etc.)');
+  }
+  for (const issue of new Set(complianceOverclaims(text))) {
+    issues.push(issue);
+  }
+  return issues;
+}
+
 function validateContent(text, platform) {
   const issues = [];
 
   if (PRICING_PATTERNS.test(text)) {
     issues.push('Contains pricing claim — link to /pest-control-calculator/ instead');
   }
-  if (SAFETY_OVERCLAIMS.test(text)) {
-    issues.push('Contains safety overclaim (guaranteed, 100% effective, etc.)');
-  }
-  for (const issue of new Set(complianceOverclaims(text))) {
-    issues.push(issue);
-  }
+  issues.push(...complianceLanguageIssues(text));
 
   const phones = text.match(PHONE_PATTERN) || [];
   for (const phone of phones) {
@@ -2562,6 +2570,12 @@ module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
 // `module.exports = SocialMediaService` reassignment on the line above, which
 // discards any property set earlier in the file.
 module.exports.stripFixedReentryTiming = stripFixedReentryTiming;
+// Compliance-language check ONLY (no pricing/phone/platform-length rules) —
+// for short customer-facing operator copy such as dispatch Quick Move
+// notes. Same regexes, clause logic, and regression matrix as
+// validateContent — one definition per rule, never a second weaker copy
+// per surface.
+module.exports.complianceLanguageIssues = complianceLanguageIssues;
 module.exports.sanitizeProductTargets = sanitizeProductTargets;
 module.exports.isPausedByAdmin = isPausedByAdmin;
 module.exports.assertSocialPublishingReady = assertSocialPublishingReady;
