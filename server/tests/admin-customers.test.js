@@ -56,6 +56,20 @@ describe('stageLifecycleStamps', () => {
     expect(s.member_since).toBe(TODAY);
   });
 
+  test('archiving a churned customer as past_customer PRESERVES churn history', () => {
+    const s = stageLifecycleStamps('churned', 'past_customer', { member_since: '2025-01-01', churned_at: '2026-03-01' }, { today: TODAY });
+    expect(s).not.toHaveProperty('churned_at');
+    expect(s).not.toHaveProperty('churn_reason');
+    expect(s).not.toHaveProperty('member_since');
+  });
+
+  test('reactivating OUT of past_customer still clears a preserved churn stamp', () => {
+    const s = stageLifecycleStamps('past_customer', 'active_customer', { member_since: '2025-01-01', churned_at: '2026-03-01' }, { today: TODAY });
+    expect(s.churned_at).toBeNull();
+    expect(s.churn_reason).toBeNull();
+    expect(s).not.toHaveProperty('member_since');
+  });
+
   test('always stamps churned_at (ET date) on churn; reason set to value or null', () => {
     const withReason = stageLifecycleStamps('active_customer', 'churned', { member_since: '2025-01-01' }, { today: TODAY, churnReason: 'moved' });
     expect(withReason.churned_at).toBe(TODAY);

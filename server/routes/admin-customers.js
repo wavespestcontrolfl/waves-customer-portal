@@ -781,8 +781,11 @@ function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason
     // Reactivation / any non-churned target: clear a stale churn stamp so a
     // reactivated customer never carries a leftover churned_at. Keyed on the
     // STAMP's presence, not just oldStage, since churned_at can exist on a
-    // non-churned row (e.g. a deactivation backfill).
-    if (oldStage === 'churned' || customer.churned_at) {
+    // non-churned row (e.g. a deactivation backfill). EXCEPTION: moving to
+    // past_customer is an archival relabel, not a reactivation — the real
+    // cancellation history survives the filing change (codex #3282 P2); it
+    // still clears later if the row genuinely reactivates out of the archive.
+    if (newStage !== 'past_customer' && (oldStage === 'churned' || customer.churned_at)) {
       stamps.churned_at = null;
       stamps.churn_reason = null;
     }

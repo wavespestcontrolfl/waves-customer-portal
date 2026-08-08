@@ -2517,6 +2517,19 @@ async function createSelfBooking(payload = {}) {
     const { booking, serviceRow } = txResult;
     // (new-booking intents already converted in the transaction above)
 
+    // Winback/conversion promotion — the canonical booking-promotion helper,
+    // same as the admin and call paths (codex #3282 P2): a former customer
+    // (churned/past_customer/dormant) or a stage-stranded lead who self-books
+    // is a live customer again; without this the row stays outside every
+    // live-customer surface. Post-commit and contained: a promotion hiccup
+    // must never fail a committed customer booking.
+    try {
+      const { promoteCustomerOnBooking } = require('../services/customer-stages');
+      await promoteCustomerOnBooking(db, custId);
+    } catch (e) {
+      logger.warn(`[booking:confirm] post-commit customer promotion failed (non-blocking) for customer=${custId}: ${e.message}`);
+    }
+
     // Appointment-type automations (tagging, prep guide emails) — same hook
     // the admin scheduling path runs. Post-commit and fire-and-forget so the
     // booking response never waits on it.
