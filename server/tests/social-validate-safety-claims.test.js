@@ -51,6 +51,9 @@ const FLAGGED_PRODUCT_SAFETY = [
   'Treatment is safe once dry. Your technician will let you know the gate code.',
   // #3278 r12: passive order — logistics noun before the confirm verb.
   'Treatment is safe once dry. Appointment timing will be confirmed by your technician.',
+  // #3278 r15: arbitrary nouns can't qualify the time object either.
+  'Treatment is safe once dry. Your technician confirms the invoice time.',
+  'Treatment is safe once dry. The invoice timing will be confirmed by your technician.',
   // r6: "safe UNTIL dry" claims wet-safety — the opposite of the idiom.
   'Our treatments are safe until dry; your technician confirms timing',
   'safe pesticide treatments',

@@ -493,7 +493,7 @@ const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|when)\s+(?:completely\
 // bare they'd leak "confirms the gate code is ready" (pre-push r11).
 // "will let you know" carries the when by itself only when it takes no
 // other object (end of clause or followed by "when").
-const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)[^.!?\n]{0,30}\b(?:dr(?:y|ies|ying)|re-?ent\w*|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
+const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+(?:dr(?:y|ies|ying)(?:[\s-]+tim(?:e|es|ing))?|re-?ent\w*(?:[\s-]+tim(?:e|es|ing))?|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|\bconfirm\w*(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+timing\b|(?<=(?:^|[.!?\n,;:—–-])\s*(?:the\s+|your\s+|exact\s+)?|\b(?:drying|dry|re-?entry)[\s-]+|\bthe\s+|\byour\s+)timing\b[^.!?\n]{0,30}\bconfirm/i;
 // A confirmation ABOUT something other than drying/re-entry ("technician
 // confirms ARRIVAL timing", "confirms the appointment") defers appointment
 // logistics, not the drying claim — it must not exempt "safe once dry"
