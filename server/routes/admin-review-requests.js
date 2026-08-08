@@ -31,7 +31,12 @@ router.get('/', async (req, res, next) => {
 // POST /trigger — manually trigger a review request for a customer
 router.post('/trigger', async (req, res, next) => {
   try {
-    const { customerId, serviceRecordId, scheduledServiceId, triggeredBy } = req.body;
+    const { customerId, serviceRecordId, scheduledServiceId } = req.body;
+    // Allowlisted manual provenance only — NEVER the caller's raw string. A
+    // request body claiming 'auto' would bypass the manual-trigger gate stack
+    // in ReviewService.create and leave a scheduled ask processScheduled()
+    // sends without rechecking (pre-push audit r1).
+    const triggeredBy = ['admin', 'csr'].includes(req.body.triggeredBy) ? req.body.triggeredBy : 'admin';
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     let resolvedServiceRecordId = serviceRecordId || null;
     let serviceContext = {};

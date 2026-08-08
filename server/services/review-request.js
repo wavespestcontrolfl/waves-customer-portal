@@ -437,18 +437,8 @@ const ReviewService = {
    * @param {string} triggeredBy - 'auto' (post-payment), 'tech' (in-person), 'admin'
    * @param {number} delayMinutes - 0 for immediate (tech trigger), or 90-180 for auto
    */
-  async create({
-    customerId,
-    serviceRecordId,
-    triggeredBy = "auto",
-    delayMinutes,
-    locationId,
-    techName: overrideTechName,
-    serviceType: overrideServiceType,
-    serviceDate: overrideServiceDate,
-    technicianId: overrideTechnicianId,
-    expiresAt,
-  }) {
+  async create(args = {}) {
+    const { customerId, triggeredBy = "auto" } = args;
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     // Event-driven callers (paid-invoice webhook, completion flows,
@@ -459,6 +449,45 @@ const ReviewService = {
       throw new Error("Customer is archived — review outreach not created");
     }
 
+    // Manual triggers run gate-check + insert + send under the SAME
+    // per-customer advisory lock sendGatedAsk uses — without it, concurrent
+    // trigger/tech/IB requests (or one racing sendGatedAsk) could all pass
+    // the gates before any row is visible and send past the cap (pre-push
+    // audit r1). Non-blocking: a second in-flight create is rejected. The
+    // auto path stays lock-free — webhook retries rely on the idempotent
+    // per-service-record dedupe, and a skipped lock would turn a retry that
+    // used to succeed idempotently into a failure.
+    if (triggeredBy !== "auto") {
+      const result = await runExclusive(
+        `review-send:${customerId}`,
+        () => this._createGated({ ...args, triggeredBy }, customer),
+        { recordHealth: false },
+      );
+      if (result && result.skipped) {
+        throw Object.assign(
+          new Error("A review request to this customer is already being sent."),
+          { statusCode: 409, code: "concurrent" },
+        );
+      }
+      return result;
+    }
+    return this._createGated({ ...args, triggeredBy }, customer);
+  },
+
+  // The body of create() — only ever called with the manual-path advisory
+  // lock held (or from the auto path, which needs no lock). Not for callers.
+  async _createGated({
+    customerId,
+    serviceRecordId,
+    triggeredBy = "auto",
+    delayMinutes,
+    locationId,
+    techName: overrideTechName,
+    serviceType: overrideServiceType,
+    serviceDate: overrideServiceDate,
+    technicianId: overrideTechnicianId,
+    expiresAt,
+  }, customer) {
     // Don't create duplicate for same service
     if (serviceRecordId) {
       const existing = await db("review_requests")
@@ -2829,8 +2858,11 @@ const ReviewService = {
     const { isEnabled } = require("../config/feature-gates");
 
     if (isEnabled("reviewSequences")) {
+      // No .catch — this helper's contract is fail-closed, and a swallowed DB
+      // error here would permit a one-off ask while a cadence may already own
+      // the customer (pre-push audit r1). Matches the cap and queued checks.
       const activeSeq = await db("review_sequences")
-        .where({ customer_id: customerId, status: "active" }).first().catch(() => null);
+        .where({ customer_id: customerId, status: "active" }).first();
       if (activeSeq) return { allowed: false, outcome: "in_cadence" };
     }
 

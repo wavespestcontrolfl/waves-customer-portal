@@ -18,6 +18,13 @@ jest.mock('../services/customer-contact', () => ({
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn((url) => Promise.resolve(url)),
 }));
+// Manual create() runs under the per-customer advisory lock; with the db mock
+// there is no pool so the real runExclusive would fail closed (skipped:
+// no_connection). The lock's own behavior is covered by its suite — here it
+// just runs the body.
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: async (_key, fn) => fn(),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
