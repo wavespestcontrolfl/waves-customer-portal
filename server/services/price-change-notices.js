@@ -242,7 +242,7 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars }) {
 
 // Same { sent, attempted } contract as the email leg — a phone on file
 // with a template/provider failure is retryable, no phone is not.
-async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg }) {
+async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorInitiated = false }) {
   let attempted = false;
   try {
     const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -269,6 +269,12 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg }) {
       // can suppress the SMS for email-preferring customers without
       // silencing SMS-only ones (policy.js 'opt_in' channelGate contract).
       hasEmailLeg: !!hasEmailLeg,
+      // Send-window operator marker: the batch only fires from the
+      // authenticated preview→confirm route, which passes this through
+      // createAndSendBatch. An operator confirming after 8 PM chose the
+      // moment; without it every SMS-only recipient would be recorded
+      // 'unreachable' (see validators/send-window.js).
+      ...(operatorInitiated ? { operatorInitiated: true } : {}),
       metadata: { original_message_type: 'price_change_notice', adminUserId: actorId || undefined },
     });
     // A policy block (sms_enabled=false, STOP suppression, billing pref)
@@ -282,7 +288,7 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg }) {
   }
 }
 
-async function createAndSendBatch({ locationId = null, increase, effectiveDate, cadenceLabel = 'month', expectedCount, expectedDigest = null, actorId = null } = {}) {
+async function createAndSendBatch({ locationId = null, increase, effectiveDate, cadenceLabel = 'month', expectedCount, expectedDigest = null, actorId = null, operatorInitiated = false } = {}) {
   const inc = parseIncrease(increase);
   const loc = parseLocation(locationId);
   const effective = validateEffectiveDate(effectiveDate);
@@ -402,7 +408,7 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
         // resolved recipient so a corrected address sends fresh.
         const idempotencyKeyBase = `price_change:${row.customerId}:${effective}:${row.currentCents}:${row.newCents}`;
         const email = await sendNoticeEmail({ customer, idempotencyKeyBase, vars });
-        const sms = await sendNoticeSms({ customer, vars, actorId, hasEmailLeg: email.sent });
+        const sms = await sendNoticeSms({ customer, vars, actorId, hasEmailLeg: email.sent, operatorInitiated });
         if (email.sent) summary.emailed += 1;
         if (sms.sent) summary.texted += 1;
 

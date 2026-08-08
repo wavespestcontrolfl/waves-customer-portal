@@ -44,6 +44,7 @@ const { loadSuppressionState, checkSuppression } = require('./validators/suppres
 const { checkLineType } = require('./validators/line-type');
 const { validateRequiredIds, validateIdentityTrust, resolveTrustLevel } = require('./validators/identity');
 const { validateNoCustomerEmoji } = require('./validators/voice');
+const { checkSendWindow } = require('./validators/send-window');
 const { checkContactCompliance } = require('./compliance-contact-checks');
 const { countSegments } = require('./segment-counter');
 const { normalizeGsmPunctuation } = require('./gsm-normalize');
@@ -184,6 +185,9 @@ async function sendCustomerMessage(input) {
     { name: 'check_autopay_sms_gate',      fn: () => checkAutopayCustomerSmsGate(sendInput) },
     { name: 'validate_identity_trust',    fn: () => validateIdentityTrust(sendInput, policy, contactState) },
     { name: 'validate_no_customer_emoji', fn: () => validateNoCustomerEmoji(sendInput, policy) },
+    // Send window before line-type: a deferred-to-morning send must not pay
+    // for a Lookup it isn't going to use tonight.
+    { name: 'check_send_window',          fn: () => checkSendWindow(sendInput, policy, contactState) },
     // Last: only pay for a Twilio line-type Lookup when the message would
     // otherwise actually send (gated dark behind GATE_PROACTIVE_LINETYPE_LOOKUP).
     { name: 'check_line_type',            fn: () => checkLineType(sendInput, policy, contactState) },
@@ -201,6 +205,13 @@ async function sendCustomerMessage(input) {
         code: result.code,
         reason: result.reason,
         validator: step.name,
+        // Deferral contract (send-window): callers that reschedule off
+        // { retryable, deferred, nextAllowedAt } — review requests, card-
+        // request nudges — must see a window block as "try again at 8 AM",
+        // not a terminal refusal.
+        retryable: result.retryable === true,
+        deferred: result.deferred === true,
+        nextAllowedAt: result.nextAllowedAt || undefined,
       };
       break;
     }
@@ -225,17 +236,21 @@ async function sendCustomerMessage(input) {
       blocked: true,
       code: blockedBy.code,
       reason: blockedBy.reason,
+      ...(blockedBy.retryable ? { retryable: true } : {}),
+      ...(blockedBy.deferred ? { deferred: true } : {}),
+      ...(blockedBy.nextAllowedAt ? { nextAllowedAt: blockedBy.nextAllowedAt } : {}),
       auditLogId: audit.id,
       segmentCount: segmentMeta.segmentCount,
       encoding: segmentMeta.encoding,
     };
   }
 
-  // 6.5 Caller-supplied final recheck — the LAST await before the provider
-  //     handoff, so callers with race-sensitive sends (clarify asks: an
-  //     answer can arrive while the validators above run) get their
-  //     freshest possible abort point inside the canonical path. Fail
-  //     closed: a throwing check blocks the send.
+  // 6.5 Caller-supplied final recheck — the last caller-visible abort point
+  //     before dispatch (only the provider-internal send-window boundary
+  //     re-check runs later), so callers with race-sensitive sends (clarify
+  //     asks: an answer can arrive while the validators above run) get
+  //     their freshest possible abort point inside the canonical path.
+  //     Fail closed: a throwing check blocks the send.
   if (typeof preDispatchCheck === 'function') {
     let verdict;
     try {
@@ -270,8 +285,48 @@ async function sendCustomerMessage(input) {
     }
   }
 
-  // 7. Dispatch to provider
-  const providerOutcome = await dispatchToProvider(sendInput);
+  // 7. Dispatch to provider. preSendCheck is the send-window boundary
+  // re-check, run by the provider IMMEDIATELY before the Twilio
+  // messages.create() call: the pipeline check above ran before the
+  // line-type Lookup and the caller's preDispatchCheck, and the provider
+  // itself awaits an internal-redirect check, the SMS-template lookup and a
+  // customer/location query before the handoff — any of which can straddle
+  // the 20:00 ET cutoff. Re-checking at the last await means a send that
+  // entered the pipeline at 19:59 can't reach Twilio at 20:01. Same
+  // deferral contract as the pipeline block; cheap (pure clock math) and a
+  // no-op for exempt inputs.
+  const providerOutcome = await dispatchToProvider(sendInput, {
+    preSendCheck: () => checkSendWindow(sendInput, policy, contactState),
+  });
+
+  // 7.5 Provider-handoff block (preSendCheck said no): map back onto the
+  // same blocked/deferral contract as a pipeline validator, with a
+  // dedicated validator name so audit rows distinguish the boundary race
+  // from the ordinary pipeline block.
+  if (providerOutcome.blocked) {
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['check_send_window_boundary'],
+      blockedBy: { code: providerOutcome.code, reason: providerOutcome.error },
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      code: providerOutcome.code,
+      reason: providerOutcome.error,
+      ...(providerOutcome.retryable ? { retryable: true } : {}),
+      ...(providerOutcome.deferred ? { deferred: true } : {}),
+      ...(providerOutcome.nextAllowedAt ? { nextAllowedAt: providerOutcome.nextAllowedAt } : {}),
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
 
   // 8. Persist final audit row with provider outcome. A throw past this
   // point carries the KNOWN provider outcome on the error, so callers with
@@ -369,9 +424,9 @@ function validateContract(input) {
  * Per-channel provider routing. Only sms ships in this commit; email and
  * portal_chat dispatchers land when the corresponding call sites migrate.
  */
-async function dispatchToProvider(input) {
+async function dispatchToProvider(input, hooks = {}) {
   if (input.channel === 'sms') {
-    return sendViaTwilio(input);
+    return sendViaTwilio(input, hooks);
   }
   return {
     sent: false,

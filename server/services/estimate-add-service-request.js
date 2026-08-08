@@ -530,7 +530,38 @@ async function sendCustomerConfirmations({
         },
       });
       if (!smsResult.sent) {
-        logger.warn(`[estimate-add-service-request] confirmation SMS blocked/failed for request ${request.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        // Send-window hold: the request committed and nothing retries this
+        // one-shot acknowledgment — queue it for the window open so a
+        // customer without a usable email still hears the request landed.
+        if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred && smsResult.nextAllowedAt) {
+          try {
+            const TWILIO_NUMBERS = require('../config/twilio-numbers');
+            await db('sms_log').insert({
+              customer_id: customer.id,
+              direction: 'outbound',
+              from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+              to_phone: phone,
+              message_body: body,
+              status: 'scheduled',
+              scheduled_for: new Date(smsResult.nextAllowedAt),
+              message_type: 'estimate_add_service_request_received',
+              metadata: JSON.stringify({
+                entry_point: 'estimate_add_service_request_deferred',
+                service_request_id: request.id,
+                estimate_id: estimate.id,
+                original_block_code: smsResult.code,
+                replay_purpose: 'support_resolution',
+                refresh_customer_phone: true,
+                resolve_from_by_customer: true,
+              }),
+            });
+            logger.info(`[estimate-add-service-request] confirmation SMS for request ${request.id} held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
+          } catch (queueErr) {
+            logger.error(`[estimate-add-service-request] held confirmation requeue failed for request ${request.id}: ${queueErr.message}`);
+          }
+        } else {
+          logger.warn(`[estimate-add-service-request] confirmation SMS blocked/failed for request ${request.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        }
       }
     } catch (err) {
       logger.error(`[estimate-add-service-request] confirmation SMS failed for request ${request.id}: ${err.message}`);

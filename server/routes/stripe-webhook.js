@@ -50,7 +50,7 @@ async function sendBillingSms(customer, body, metadata = {}) {
   if (!customer?.phone || !customer?.id) {
     return { sent: false, blocked: true, code: 'MISSING_CUSTOMER_CONTACT' };
   }
-  return sendCustomerMessage({
+  const result = await sendCustomerMessage({
     to: customer.phone,
     body,
     channel: 'sms',
@@ -61,6 +61,53 @@ async function sendBillingSms(customer, body, metadata = {}) {
     entryPoint: 'stripe_webhook',
     metadata,
   });
+  // Send-window hold: a Stripe event (ACH failure, requires-action,
+  // setup-failure) fires ONCE and is deduped — no morning retry exists, so
+  // a held notice must persist its own on the scheduled-SMS rail or the
+  // customer permanently misses an actionable billing message.
+  // replay_purpose pins the 8 AM dispatch to the same payment_failure
+  // policy this immediate send ran under. Reported as { scheduled: true }
+  // so callers log deferred, not lost; a failed enqueue falls through and
+  // returns the block unchanged (loudly logged).
+  if (!result.sent
+    && result.code === 'QUIET_HOURS_HOLD'
+    && result.deferred
+    && result.nextAllowedAt) {
+    try {
+      const TWILIO_NUMBERS = require('../config/twilio-numbers');
+      await db('sms_log').insert({
+        customer_id: customer.id,
+        direction: 'outbound',
+        from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+        to_phone: customer.phone,
+        message_body: body,
+        status: 'scheduled',
+        scheduled_for: new Date(result.nextAllowedAt),
+        message_type: metadata.original_message_type || 'billing_reminder',
+        metadata: JSON.stringify({
+          ...metadata,
+          entry_point: 'stripe_webhook_billing_deferred',
+          original_block_code: result.code,
+          replay_purpose: 'payment_failure',
+          refresh_customer_phone: true,
+          resolve_from_by_customer: true,
+        }),
+      });
+      logger.info(`[stripe-webhook] Billing SMS for customer ${customer.id} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt} (${metadata.original_message_type || 'billing'})`);
+      return { ...result, scheduled: true };
+    } catch (queueErr) {
+      // The queued row is the ONLY durable form of this notice (the Stripe
+      // event dedupes once the handler succeeds) — a lost enqueue must
+      // fail the handler so Stripe redelivers; the ACH replay path's
+      // notice probe then allows the SMS re-attempt without re-counting
+      // the failure.
+      logger.error(`[stripe-webhook] Held billing SMS requeue FAILED for customer ${customer.id}: ${queueErr.message} — failing the handler so the event redelivers`);
+      const err = new Error(`Held billing SMS could not be queued: ${queueErr.message}`);
+      err.code = 'BILLING_NOTICE_ENQUEUE_FAILED';
+      throw err;
+    }
+  }
+  return result;
 }
 
 // Advance `from` by `days` ET weekdays (Mon–Fri). Used to render the
@@ -3765,10 +3812,42 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     // is idempotent, but the customer SMS and the dunning-hold counter below
     // are NOT — a duplicate webhook delivery must not resend notices or
     // advance/release held follow-up sequences for a failure that already
-    // did both.
+    // did both. EXCEPTION: if the prior delivery's notice never became
+    // durable (the send threw AND its quiet-hours enqueue failed, so the
+    // handler 500'd and Stripe redelivered), no sms_log row exists for this
+    // PI — a full skip would permanently lose the actionable notice, so
+    // fall through to the SMS block only (the follow-up counters below
+    // stay replay-skipped either way).
+    let replaySkipFollowups = false;
     if (achReplay) {
-      logger.info(`[stripe-webhook] ACH failure replay for PI ${piId} — skipping SMS + follow-up side effects`);
-      return;
+      let noticeExists = true;
+      try {
+        // Two durable notice shapes: an immediate send leaves a
+        // provider-accepted messaging_audit_log row (the canonical sender
+        // persists the PI in its metadata); a quiet-hours hold leaves a
+        // queued sms_log row. Either one means the customer's notice is
+        // owned — only their joint absence proves the prior delivery lost
+        // it. Fail closed to skip on a probe error (never double-text).
+        const auditNotice = await db('messaging_audit_log')
+          .where({ entry_point: 'stripe_webhook' })
+          .whereNotNull('provider_message_id')
+          .whereRaw("metadata->>'stripe_payment_intent_id' = ?", [String(piId)])
+          .first('id');
+        const queuedNotice = auditNotice ? null : await db('sms_log')
+          .where({ direction: 'outbound' })
+          .whereIn('status', ['queued', 'sent', 'delivered', 'scheduled', 'sending'])
+          .whereRaw("metadata->>'stripe_payment_intent_id' = ?", [String(piId)])
+          .first('id');
+        noticeExists = !!(auditNotice || queuedNotice);
+      } catch (probeErr) {
+        logger.warn(`[stripe-webhook] ACH replay notice probe failed (skipping resend, fail closed): ${probeErr.message}`);
+      }
+      if (noticeExists) {
+        logger.info(`[stripe-webhook] ACH failure replay for PI ${piId} — skipping SMS + follow-up side effects`);
+        return;
+      }
+      replaySkipFollowups = true;
+      logger.warn(`[stripe-webhook] ACH failure replay for PI ${piId} with NO durable notice — re-attempting the customer SMS only`);
     }
 
     // Send SMS outside the transaction so a slow provider call doesn't
@@ -3808,15 +3887,22 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
         }
       }
     } catch (smsErr) {
+      // A failed durable enqueue must fail the handler (Stripe redelivers;
+      // the replay notice-probe re-attempts the SMS without re-counting).
+      if (smsErr.code === 'BILLING_NOTICE_ENQUEUE_FAILED') throw smsErr;
       logger.error(`[stripe-webhook] ACH failure SMS failed: ${smsErr.message}`);
     }
 
     // Notify the per-invoice follow-up engine — increments autopay-hold counters
-    // and releases sequences once the threshold is crossed.
-    try {
-      await require('../services/invoice-followups').handleAutopayFailure(customer.id);
-    } catch (e) {
-      logger.error(`[invoice-followups] handleAutopayFailure failed: ${e.message}`);
+    // and releases sequences once the threshold is crossed. Skipped on the
+    // notice-only replay path: the original delivery already counted this
+    // failure, only its SMS was lost.
+    if (!replaySkipFollowups) {
+      try {
+        await require('../services/invoice-followups').handleAutopayFailure(customer.id);
+      } catch (e) {
+        logger.error(`[invoice-followups] handleAutopayFailure failed: ${e.message}`);
+      }
     }
   } catch (err) {
     // Rethrow so the router records the error and returns 500 — the event
@@ -4057,6 +4143,11 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
         // row's credit_applied back IN SQL so total stays the real value — else the
         // succeeded handler recomputes amount due off the collapsed total.
         total: db.raw('ROUND((? + COALESCE(credit_applied, 0))::numeric, 2)', [amount]),
+        // The unacknowledged-ack sweep ages candidates on updated_at; an
+        // old invoice whose ACH began today must date from THIS
+        // transition, or the 3-day ceiling silently excludes it and a
+        // crash-lost acknowledgment never recovers.
+        updated_at: new Date(),
       });
     if (!invoiceRowsUpdated) {
       throw new Error(`ACH processing PI ${piId} could not bind invoice ${lockedInvoice.id}; retry webhook`);
@@ -4074,120 +4165,255 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
   // invoices.ach_processing_notified_at: the worker whose update flips
   // the column from NULL to a timestamp wins the one-shot lock and
   // proceeds to send. Concurrent duplicates and Stripe replays lose
-  // the race (affected rows == 0) and bail. A failure to deliver after
+  // the race (affected rows == 0) and bail. A failure to DELIVER after
   // the claim is deliberately not retried here — see the prior threads
   // on this PR for the trade-off rationale; the per-attempt clear in
   // handlePaymentIntentFailed handles the realistic re-attempt case.
+  // One exception: a failed durable ENQUEUE of a window-held SMS
+  // releases the claim (the rail row is the only durable form of the
+  // notice once this handler acks) — see the worker's catch.
   // Channels run independently: missing phone skips SMS but email
   // still fires, and vice versa.
   //
   // Fire-and-forget via setImmediate so a Twilio/SendGrid hiccup
   // doesn't make Stripe retry the entire webhook (which would re-run
   // the amount-mismatch + status guards above).
-  setImmediate(async () => {
-    try {
-      const freshInvoice = await db('invoices').where({ id: invoice.id }).first();
-      if (!freshInvoice) return;
-      if (freshInvoice.ach_processing_notified_at) return;
-      if (freshInvoice.status !== 'processing') return;
-
-      // Third-party Bill-To: an AP ACH payment processing on a payer-billed
-      // invoice must not text/email the homeowner the bank-transfer notice (the
-      // sendAchProcessing email also self-guards, but the direct SMS below
-      // wouldn't). The payer AP contact authorized this transfer, not the
-      // service recipient.
-      if (freshInvoice.payer_id) return;
-
-      const customer = freshInvoice.customer_id
-        ? await db('customers').where({ id: freshInvoice.customer_id }).first()
-        : null;
-      if (!customer) return;
-
-      // Atomic claim: the UPDATE doubles as the dedupe lock. Two concurrent
-      // workers (Stripe duplicate delivery, processing-after-downgrade
-      // replay) both reach the pre-read with notified_at NULL; only the one
-      // whose UPDATE flips rows from 0 to 1 proceeds to dispatch. The
-      // status filter also closes a race with payment_intent.succeeded —
-      // if .succeeded flipped the invoice to 'paid' between the pre-read
-      // and this UPDATE, affectedRows is 0 and we bail rather than send a
-      // contradictory "processing" message after the receipt fired.
-      // Stripe doesn't guarantee webhook ordering. A stale processing
-      // event for a prior, abandoned PI on the same invoice could
-      // otherwise win this claim and send an acknowledgment for the
-      // wrong attempt. The transaction above already bound
-      // invoices.stripe_payment_intent_id to piId, so requiring it
-      // here matches "this event is for the currently active PI."
-      const claimed = await db('invoices')
-        .where({ id: freshInvoice.id })
-        .where({ status: 'processing' })
-        .where({ stripe_payment_intent_id: piId })
-        .whereNull('ach_processing_notified_at')
-        .update({ ach_processing_notified_at: new Date() });
-      if (!claimed) return;
-
-      if (customer.phone) {
-        try {
-          const smsBody = await renderRequiredSmsTemplate('ach_payment_processing', {
-            first_name: customer.first_name || 'there',
-            invoice_number: freshInvoice.invoice_number || '',
-          }, {
-            workflow: 'ach_payment_processing',
-            entity_type: 'invoice',
-            entity_id: freshInvoice.id,
-          });
-          const smsResult = await sendBillingSms(customer, smsBody, {
-            original_message_type: 'ach_payment_processing',
-            stripe_payment_intent_id: piId,
-            invoice_id: freshInvoice.id,
-          });
-          if (!smsResult.sent) {
-            logger.warn(`[stripe-webhook] ACH processing SMS blocked/failed for invoice ${freshInvoice.invoice_number}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-          }
-        } catch (smsErr) {
-          logger.error(`[stripe-webhook] ACH processing SMS failed for invoice ${freshInvoice.invoice_number}: ${smsErr.message}`);
-        }
-      }
-
-      // Anchor on the Stripe event's recorded transition time — that's
-      // the closest proxy for "customer authorized the transfer." Never
-      // use paymentIntent.created: the PI is minted upstream at
-      // /pay/:token/setup and reused via /update-amount, so its created
-      // timestamp can predate authorization by hours or days. Fall back
-      // to now() only when the event timestamp wasn't threaded through.
-      const initiatedAt = eventCreated
-        ? new Date(eventCreated * 1000)
-        : new Date();
-      const expectedClearDate = addBusinessDays(initiatedAt, 5);
-      const emailResult = await PaymentLifecycleEmail.sendAchProcessing({
-        customerId: freshInvoice.customer_id,
-        invoiceId: freshInvoice.id,
-        amountPaid: amount,
-        initiatedAt,
-        expectedClearDate,
-        // Scope by event id, not just (invoice, PI). services/stripe.js
-        // updates an existing PI in requires_payment_method on retry
-        // instead of minting a new one, so piId is stable across attempts
-        // and a key of `{invoiceId}:{piId}` would dedupe forever after the
-        // first send. Every payment_intent.processing delivery has a
-        // unique event id; duplicate webhook deliveries of the *same*
-        // event share an id (so email_messages.idempotency_key still
-        // dedupes those), but a genuine new attempt fires a new event id
-        // and gets a fresh email. Falls back to (invoice, PI) if the
-        // event id wasn't threaded — preserves the prior behavior.
-        idempotencyKey: eventId
-          ? `payment.ach_processing:${freshInvoice.id}:${eventId}`
-          : `payment.ach_processing:${freshInvoice.id}:${piId}`,
-      }).catch((err) => ({ ok: false, error: err.message }));
-      if (!emailResult?.ok) {
-        const reason = emailResult?.reason || emailResult?.error || 'unknown';
-        if (reason !== 'missing_email' && reason !== 'customer_not_found') {
-          logger.warn(`[stripe-webhook] ACH processing email not sent for invoice ${freshInvoice.invoice_number}: ${reason}`);
-        }
-      }
-    } catch (err) {
-      logger.error(`[stripe-webhook] ACH processing acknowledgment failed for PI ${piId}: ${err.message}`, { stack: err.stack });
-    }
+  setImmediate(() => {
+    dispatchAchProcessingAcknowledgment({ invoiceId: invoice.id, piId, amount, eventCreated, eventId })
+      .catch((err) => {
+        logger.error(`[stripe-webhook] ACH processing acknowledgment failed for PI ${piId}: ${err.message}`, { stack: err.stack });
+      });
   });
+}
+
+// Detached worker behind the payment_intent.processing acknowledgment.
+// Extracted (and exported for unit tests) so the claim/release semantics
+// are testable without driving the full webhook handler; the setImmediate
+// caller logs any rejection. `amount` is the ACH cash amount the handler
+// validated above. `smsOnly` is the unacknowledged-ack sweep's mode: the
+// inline run already attempted the email leg (it follows the SMS catch
+// unconditionally, keyed on the Stripe event id), so a swept re-run must
+// not repeat it under a different idempotency key.
+async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, eventCreated, eventId, smsOnly = false }) {
+  const freshInvoice = await db('invoices').where({ id: invoiceId }).first();
+  if (!freshInvoice) return;
+  if (freshInvoice.ach_processing_notified_at) return;
+  if (freshInvoice.status !== 'processing') return;
+
+  // Third-party Bill-To: an AP ACH payment processing on a payer-billed
+  // invoice must not text/email the homeowner the bank-transfer notice (the
+  // sendAchProcessing email also self-guards, but the direct SMS below
+  // wouldn't). The payer AP contact authorized this transfer, not the
+  // service recipient.
+  if (freshInvoice.payer_id) return;
+
+  const customer = freshInvoice.customer_id
+    ? await db('customers').where({ id: freshInvoice.customer_id }).first()
+    : null;
+  if (!customer) return;
+
+  // Atomic claim: the UPDATE doubles as the dedupe lock. Two concurrent
+  // workers (Stripe duplicate delivery, processing-after-downgrade
+  // replay) both reach the pre-read with notified_at NULL; only the one
+  // whose UPDATE flips rows from 0 to 1 proceeds to dispatch. The
+  // status filter also closes a race with payment_intent.succeeded —
+  // if .succeeded flipped the invoice to 'paid' between the pre-read
+  // and this UPDATE, affectedRows is 0 and we bail rather than send a
+  // contradictory "processing" message after the receipt fired.
+  // Stripe doesn't guarantee webhook ordering. A stale processing
+  // event for a prior, abandoned PI on the same invoice could
+  // otherwise win this claim and send an acknowledgment for the
+  // wrong attempt. The transaction above already bound
+  // invoices.stripe_payment_intent_id to piId, so requiring it
+  // here matches "this event is for the currently active PI."
+  const claimed = await db('invoices')
+    .where({ id: freshInvoice.id })
+    .where({ status: 'processing' })
+    .where({ stripe_payment_intent_id: piId })
+    .whereNull('ach_processing_notified_at')
+    .update({ ach_processing_notified_at: new Date() });
+  if (!claimed) return;
+
+  if (customer.phone) {
+    try {
+      const smsBody = await renderRequiredSmsTemplate('ach_payment_processing', {
+        first_name: customer.first_name || 'there',
+        invoice_number: freshInvoice.invoice_number || '',
+      }, {
+        workflow: 'ach_payment_processing',
+        entity_type: 'invoice',
+        entity_id: freshInvoice.id,
+      });
+      const smsResult = await sendBillingSms(customer, smsBody, {
+        original_message_type: 'ach_payment_processing',
+        stripe_payment_intent_id: piId,
+        invoice_id: freshInvoice.id,
+      });
+      if (!smsResult.sent) {
+        logger.warn(`[stripe-webhook] ACH processing SMS blocked/failed for invoice ${freshInvoice.invoice_number}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+      }
+    } catch (smsErr) {
+      if (smsErr.code === 'BILLING_NOTICE_ENQUEUE_FAILED') {
+        // Unlike the sibling handlers, this runs inside a detached
+        // setImmediate — the webhook is already acked, so a rethrow
+        // lands in the outer catch below and the failure is swallowed
+        // with the one-shot claim consumed and the email leg skipped.
+        // Release the claim instead (guarded by PI + status so a
+        // meanwhile-succeeded payment is untouched) and fall through to
+        // the email leg now. The release alone creates no retry
+        // obligation (the acked event's redelivery is discarded by the
+        // processed-event dedupe) — the released NULL is durable state
+        // that the 15-minute unacknowledged-ack sweep picks up and
+        // re-runs SMS-only, so the acknowledgment survives even a
+        // process restart. The failed-payment per-attempt clear remains
+        // a second rescue when the payment later fails.
+        try {
+          await db('invoices')
+            .where({ id: freshInvoice.id, stripe_payment_intent_id: piId, status: 'processing' })
+            .whereNotNull('ach_processing_notified_at')
+            .update({ ach_processing_notified_at: null });
+          logger.error(`[stripe-webhook] ACH processing SMS enqueue failed for invoice ${freshInvoice.invoice_number} — claim released for re-attempt: ${smsErr.message}`);
+        } catch (releaseErr) {
+          logger.error(`[stripe-webhook] ACH processing SMS enqueue failed AND claim release failed for invoice ${freshInvoice.invoice_number} — needs manual follow-up (enqueue: ${smsErr.message}; release: ${releaseErr.message})`);
+        }
+      } else {
+        logger.error(`[stripe-webhook] ACH processing SMS failed for invoice ${freshInvoice.invoice_number}: ${smsErr.message}`);
+      }
+    }
+  }
+
+  // Sweep mode stops here: the email leg already ran on the inline pass
+  // (see the smsOnly note on the signature).
+  if (smsOnly) return;
+
+  // Anchor on the Stripe event's recorded transition time — that's
+  // the closest proxy for "customer authorized the transfer." Never
+  // use paymentIntent.created: the PI is minted upstream at
+  // /pay/:token/setup and reused via /update-amount, so its created
+  // timestamp can predate authorization by hours or days. Fall back
+  // to now() only when the event timestamp wasn't threaded through.
+  const initiatedAt = eventCreated
+    ? new Date(eventCreated * 1000)
+    : new Date();
+  const expectedClearDate = addBusinessDays(initiatedAt, 5);
+  const emailResult = await PaymentLifecycleEmail.sendAchProcessing({
+    customerId: freshInvoice.customer_id,
+    invoiceId: freshInvoice.id,
+    amountPaid: amount,
+    initiatedAt,
+    expectedClearDate,
+    // Scope by event id, not just (invoice, PI). services/stripe.js
+    // updates an existing PI in requires_payment_method on retry
+    // instead of minting a new one, so piId is stable across attempts
+    // and a key of `{invoiceId}:{piId}` would dedupe forever after the
+    // first send. Every payment_intent.processing delivery has a
+    // unique event id; duplicate webhook deliveries of the *same*
+    // event share an id (so email_messages.idempotency_key still
+    // dedupes those), but a genuine new attempt fires a new event id
+    // and gets a fresh email. Falls back to (invoice, PI) if the
+    // event id wasn't threaded — preserves the prior behavior.
+    idempotencyKey: eventId
+      ? `payment.ach_processing:${freshInvoice.id}:${eventId}`
+      : `payment.ach_processing:${freshInvoice.id}:${piId}`,
+  }).catch((err) => ({ ok: false, error: err.message }));
+  if (!emailResult?.ok) {
+    const reason = emailResult?.reason || emailResult?.error || 'unknown';
+    if (reason !== 'missing_email' && reason !== 'customer_not_found') {
+      logger.warn(`[stripe-webhook] ACH processing email not sent for invoice ${freshInvoice.invoice_number}: ${reason}`);
+    }
+  }
+}
+
+// Durable backstop for the detached ACH acknowledgment. The enqueue-
+// failure release above cannot rely on Stripe for a retry (the event was
+// acked, so redelivery is discarded by the processed-event dedupe before
+// the worker runs again), and any in-process timer dies with a restart —
+// but the released claim itself is durable state: status='processing' +
+// ach_processing_notified_at NULL. This sweep (scheduler, every 15 min)
+// re-runs the worker from that state. The age floor lets the inline
+// setImmediate worker finish first; the 3-day ceiling matches the ACH
+// decision window and keeps the sweep off legacy/stuck processing
+// invoices that predate the acknowledgment claim (texting "we got your
+// bank transfer" about a weeks-old anomaly would be wrong, not late).
+// Re-claiming goes through the worker's own atomic UPDATE, so a webhook
+// racing the sweep still yields at-most-once.
+//
+// Email leg: a NULL claim covers two histories — the enqueue-failure
+// release (inline pass already attempted the email under the event-id
+// idempotency key) and a worker that never ran at all (crash after the
+// webhook ack; email-only customers got NOTHING). The durable
+// email_messages ledger distinguishes them: any prior
+// payment.ach_processing attempt for this invoice → SMS-only (a swept
+// email under the (invoice, PI) fallback key would bypass the event-id
+// dedupe and double-send); no prior attempt → run the email leg too.
+// The probe fails CLOSED to SMS-only — never risk a duplicate email on
+// an unreadable ledger.
+async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
+  const youngerThan = new Date(Date.now() - 3 * 24 * 3600 * 1000);
+  const olderThan = new Date(Date.now() - 10 * 60 * 1000);
+  const rows = await db('invoices')
+    .where({ status: 'processing' })
+    .whereNull('ach_processing_notified_at')
+    .whereNull('payer_id')
+    // The worker returns BEFORE claiming for these two guards — without
+    // the mirrors here the sweep would re-find such rows every tick.
+    .whereNotNull('customer_id')
+    .whereNotNull('stripe_payment_intent_id')
+    .where('updated_at', '>', youngerThan)
+    .where('updated_at', '<', olderThan)
+    .orderBy('updated_at', 'asc')
+    .limit(limit)
+    .select('id', 'stripe_payment_intent_id', 'invoice_number', 'total', 'credit_applied');
+  const stripeClient = rows.length ? getStripe() : null;
+  for (const row of rows) {
+    // ACH-evidence gate: status='processing' + a PI is NOT proof of a bank
+    // transfer — the saved-card ambiguity paths (admin-dispatch parked
+    // charge, stripe-terminal) also park CARD invoices in 'processing'
+    // with a PI and fresh updated_at, and after the 10-minute floor this
+    // sweep would claim them and falsely tell the customer we received
+    // their bank transfer. The PI record is the durable evidence: require
+    // a bank-debit payment_method_type AND a still-processing PI. Fails
+    // CLOSED (skip, retry next tick) when Stripe can't be read — never
+    // acknowledge unverified.
+    if (!stripeClient) {
+      logger.warn('[stripe-webhook] ACH ack sweep: Stripe client unavailable — skipping this tick');
+      break;
+    }
+    let pi = null;
+    try {
+      pi = await stripeClient.paymentIntents.retrieve(row.stripe_payment_intent_id);
+    } catch (piErr) {
+      logger.warn(`[stripe-webhook] ACH ack sweep could not read PI ${row.stripe_payment_intent_id} for invoice ${row.id}: ${piErr.message} — skipping (retry next tick)`);
+      continue;
+    }
+    const methodTypes = pi?.payment_method_types || [];
+    const isBankDebit = methodTypes.includes('us_bank_account') || methodTypes.includes('ach_debit');
+    if (!isBankDebit || pi.status !== 'processing') {
+      logger.info(`[stripe-webhook] ACH ack sweep skipping invoice ${row.invoice_number || row.id}: PI ${pi.id} is ${isBankDebit ? `status=${pi.status}` : `non-ACH (${methodTypes.join(',') || 'unknown'})`} — not an in-flight bank transfer`);
+      continue;
+    }
+    const priorEmailAttempt = await db('email_messages')
+      .whereRaw('idempotency_key LIKE ?', [`payment.ach_processing:${row.id}:%`])
+      .first('id')
+      .catch(() => ({ id: 'probe-failed' }));
+    // The processing transition restored `total` to the GROSS amount
+    // (cash + applied credit) — subtract the credit back out so the
+    // email states the actual bank transfer, never an overstated total
+    // (sendAchProcessing's own fallback is the gross total).
+    const cashAmount = Math.round((Number(row.total || 0) - Number(row.credit_applied || 0)) * 100) / 100;
+    logger.warn(`[stripe-webhook] ACH ack sweep re-running acknowledgment for invoice ${row.invoice_number || row.id} (claim was released or never taken; email ${priorEmailAttempt ? 'already attempted — SMS-only' : 'never attempted — both legs'})`);
+    await dispatchAchProcessingAcknowledgment({
+      invoiceId: row.id,
+      piId: row.stripe_payment_intent_id,
+      amount: cashAmount > 0 ? cashAmount : null,
+      eventCreated: null,
+      eventId: null,
+      smsOnly: !!priorEmailAttempt,
+    }).catch((err) => {
+      logger.error(`[stripe-webhook] ACH ack sweep failed for invoice ${row.id}: ${err.message}`);
+    });
+  }
+  return { candidates: rows.length };
 }
 
 /**
@@ -4223,6 +4449,7 @@ async function handlePaymentIntentRequiresAction(paymentIntent) {
       }
     }
   } catch (err) {
+    if (err.code === 'BILLING_NOTICE_ENQUEUE_FAILED') throw err;
     logger.error(`[stripe-webhook] requires_action handler failed: ${err.message}`);
   }
 }
@@ -5096,14 +5323,27 @@ async function handleSetupIntentFailed(setupIntent) {
         const smsResult = await sendBillingSms(
           customer,
           body,
-          { original_message_type: 'bank_verification_failed', stripe_setup_intent_id: setupIntent.id }
+          {
+            original_message_type: 'bank_verification_failed',
+            stripe_setup_intent_id: setupIntent.id,
+            // Customer linkage for the deferred-replay recheck: a night-
+            // held copy of this notice must suppress at 8 AM if the
+            // customer added/verified a replacement bank method overnight
+            // — "verification failed" after the portal shows a verified
+            // method reads broken. (sms_log.customer_id exists on the
+            // queued row, but the executor hands rechecks METADATA only.)
+            waves_customer_id: customer.id,
+          }
         );
         if (!smsResult.sent) {
           logger.warn(`[stripe-webhook] Setup-failed SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
         }
       }
     }
-  } catch { /* non-critical */ }
+  } catch (err) {
+    if (err?.code === 'BILLING_NOTICE_ENQUEUE_FAILED') throw err;
+    /* non-critical otherwise */
+  }
 }
 
 module.exports = router;
@@ -5114,6 +5354,8 @@ module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
 module.exports._handleSetupIntentFailed = handleSetupIntentFailed;
 module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucceededPaymentIntentIfSettled;
 module.exports._handlePaymentIntentFailed = handlePaymentIntentFailed;
+module.exports._dispatchAchProcessingAcknowledgment = dispatchAchProcessingAcknowledgment;
+module.exports.sweepUnacknowledgedAchProcessingAcks = sweepUnacknowledgedAchProcessingAcks;
 module.exports._handleAchFailure = handleAchFailure;
 module.exports._armMonthlyAutopayRetryForAsyncFailure = armMonthlyAutopayRetryForAsyncFailure;
 module.exports._handlePaymentIntentSucceeded = handlePaymentIntentSucceeded;

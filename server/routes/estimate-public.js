@@ -10822,8 +10822,40 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 entryPoint: 'estimate_accept_onetime_booking',
                 metadata: { original_message_type: 'estimate_accepted_onetime' },
               });
-              if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-              logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+              // Send-window hold: a web acceptance is not an SMS reply, so
+              // the text defers — the page and the acceptance email carry
+              // the moment; the booking-link SMS queues for 8:00 AM.
+              if (!sendResult.sent && sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
+                try {
+                  const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                  await db('sms_log').insert({
+                    customer_id: customerId || null,
+                    direction: 'outbound',
+                    from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                    to_phone: estimate.customer_phone,
+                    message_body: customerBody,
+                    status: 'scheduled',
+                    scheduled_for: new Date(sendResult.nextAllowedAt),
+                    message_type: 'estimate_accepted_onetime',
+                    metadata: JSON.stringify({
+                      entry_point: 'estimate_accept_onetime_booking_deferred',
+                      estimate_id: estimate.id,
+                      original_block_code: sendResult.code,
+                      replay_purpose: 'estimate_followup',
+                      ...(customerId
+                        ? { refresh_customer_phone: true, resolve_from_by_customer: true }
+                        : { consent_basis: { status: 'transactional_allowed', source: 'estimate_token_acceptance' } }),
+                    }),
+                  });
+                  logger.info(`[estimate-accept] Booking SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
+                } catch (queueErr) {
+                  logger.error(`[estimate-accept] Held booking SMS requeue failed for estimate ${estimate.id}: ${queueErr.message}`);
+                }
+              } else if (sendResult.blocked || sendResult.sent === false) {
+                throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+              } else {
+                logger.info(`[estimate-accept] One-time booking SMS sent for estimate ${estimate.id} - ${primarySvc.label}`);
+              }
             }
           } else {
             const scheduledDate = dateOnly(confirmedAppointmentRow?.scheduled_date);
@@ -10912,6 +10944,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                   entryPoint: 'estimate_accept_onetime_confirmed',
                   metadata: { original_message_type: 'appointment_confirmation' },
                 });
+                // Send-window hold: hand the confirmation to the
+                // stranded-confirmation sweep instead of dropping it. This
+                // flow registered the reminder with sendConfirmation:false
+                // (it owns the confirmation itself), so nothing else would
+                // retry a held send — re-arming confirmation_sent puts the
+                // row in the 15-minute sweep, whose deliverConfirmation
+                // pre-check defers to the 8:00 AM window open and then
+                // sends the standard confirmation for this visit.
+                if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && confirmedAppointmentRow?.id) {
+                  try {
+                    await db('appointment_reminders')
+                      .where({ scheduled_service_id: confirmedAppointmentRow.id })
+                      .where({ cancelled: false })
+                      .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                    logger.info(`[estimate-accept] Confirmation SMS held (send window) for estimate ${estimate.id} — re-armed for the stranded-confirmation sweep`);
+                  } catch (rearmErr) {
+                    logger.error(`[estimate-accept] confirmation re-arm failed for ${confirmedAppointmentRow.id}: ${rearmErr.message}`);
+                  }
+                  return false;
+                }
                 if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
                 logger.info(`[estimate-accept] One-time confirmation SMS sent for estimate ${estimate.id} - ${confirmedServiceLabel}`);
                 return sendResult.sent === true;
@@ -10949,8 +11001,39 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               entryPoint: 'estimate_accept_annual_prepay',
               metadata: { original_message_type: 'estimate_accepted_annual_prepay' },
             });
-            if (sendResult.blocked || sendResult.sent === false) throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
-            logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
+            // Send-window hold — same web-acceptance deferral as the
+            // one-time booking SMS above.
+            if (!sendResult.sent && sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && sendResult.nextAllowedAt) {
+              try {
+                const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                await db('sms_log').insert({
+                  customer_id: customerId || null,
+                  direction: 'outbound',
+                  from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                  to_phone: estimate.customer_phone,
+                  message_body: customerBody,
+                  status: 'scheduled',
+                  scheduled_for: new Date(sendResult.nextAllowedAt),
+                  message_type: 'estimate_accepted_annual_prepay',
+                  metadata: JSON.stringify({
+                    entry_point: 'estimate_accept_annual_prepay_deferred',
+                    estimate_id: estimate.id,
+                    original_block_code: sendResult.code,
+                    replay_purpose: 'estimate_followup',
+                    ...(customerId
+                      ? { refresh_customer_phone: true, resolve_from_by_customer: true }
+                      : { consent_basis: { status: 'transactional_allowed', source: 'estimate_token_acceptance' } }),
+                  }),
+                });
+                logger.info(`[estimate-accept] Annual-prepay SMS for estimate ${estimate.id} held outside the 8AM-8PM ET send window — queued for ${sendResult.nextAllowedAt}`);
+              } catch (queueErr) {
+                logger.error(`[estimate-accept] Held annual-prepay SMS requeue failed for estimate ${estimate.id}: ${queueErr.message}`);
+              }
+            } else if (sendResult.blocked || sendResult.sent === false) {
+              throw new Error(`customer SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
+            } else {
+              logger.info(`[estimate-accept] Annual prepay acceptance SMS sent for estimate ${estimate.id}`);
+            }
           }
         }
         // Standard recurring accepts no longer send a separate acceptance SMS;
@@ -19775,7 +19858,28 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       return TwilioService.sendSMS(
         contact.customerPhone,
         `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
-        { customerId: estimate.customer_id || null, messageType: 'estimate_service_details' },
+        {
+          customerId: estimate.customer_id || null,
+          messageType: 'estimate_service_details',
+          // Send-window classification at the provider handoff: this text
+          // is the customer's OWN live request — they tapped "text me the
+          // packet" on the estimate page seconds ago — the same
+          // self-service class as an inbound reply, so it carries
+          // conversationalContext and sends at night by design. Routed
+          // through the canonical validator anyway (this legacy path
+          // bypasses sendCustomerMessage) so any future change to that
+          // classification automatically applies here too.
+          preSendCheck: () => {
+            const { checkSendWindow } = require('../services/messaging/validators/send-window');
+            return checkSendWindow({
+              channel: 'sms',
+              audience: 'customer',
+              purpose: 'conversational',
+              conversationalContext: true,
+              to: contact.customerPhone,
+            }, null, null);
+          },
+        },
       );
     })();
     serviceDetailsSmsClaims.set(dedupKey, { promise: sendPromise });

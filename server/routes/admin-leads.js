@@ -1141,6 +1141,11 @@ router.post('/:id/send-sms', async (req, res, next) => {
       purpose: 'conversational',
       leadId: lead.id,
       identityTrustLevel: 'phone_provided_unverified',
+      // Send-window operator provenance: this is the Leads-page manual
+      // send — an authenticated operator typed and clicked this message,
+      // so it's allowlisted in validators/send-window.js like the other
+      // admin compose surfaces.
+      entryPoint: 'admin_leads_send_sms',
       metadata: {
         original_message_type: 'lead_outreach',
         adminUserId: req.technicianId,

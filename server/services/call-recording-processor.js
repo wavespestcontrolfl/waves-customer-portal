@@ -10229,6 +10229,7 @@ const CallRecordingProcessor = {
                 serviceLabel: serviceType,
                 smsAttempt: async () => {
                   smsRan = true;
+                  let confirmationRearmed = false;
                   // SMS leg held (implied consent, no consented recipient):
                   // skip only the primary text — the channel email leg and
                   // the gated fan-out/email-only legs below still run.
@@ -10249,6 +10250,30 @@ const CallRecordingProcessor = {
                     });
                   const primaryOk = !(sendResult.blocked || sendResult.sent === false);
                   if (!primaryOk) {
+                    // Send-window hold: this after-hours phone booking
+                    // registered its reminder with sendConfirmation:false
+                    // (this path owns the confirmation), so nothing would
+                    // retry a held text and the customer never learns their
+                    // visit is booked. Re-arm confirmation_sent so the
+                    // 15-minute stranded-confirmation sweep delivers the
+                    // standard confirmation at the 8:00 AM window open —
+                    // same handoff as the estimate-accept flow.
+                    if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && scheduledServiceId) {
+                      try {
+                        await db('appointment_reminders')
+                          .where({ scheduled_service_id: scheduledServiceId })
+                          .where({ cancelled: false })
+                          .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                        // The sweep's canonical confirmation fans out to
+                        // EVERY appointment contact — the secondary loop
+                        // below must not also queue held copies, or those
+                        // contacts get both at 8:00 AM.
+                        confirmationRearmed = true;
+                        logger.info(`[call-proc] Confirmation for ${scheduledServiceId} held (send window) — re-armed for the stranded-confirmation sweep`);
+                      } catch (rearmErr) {
+                        logger.error(`[call-proc] confirmation re-arm failed for ${scheduledServiceId}: ${rearmErr.message}`);
+                      }
+                    }
                     logger.warn(`[call-proc] Appointment SMS blocked for customer ${customerId}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
                     appointmentResult = {
                       smsSent: false,
@@ -10340,7 +10365,7 @@ const CallRecordingProcessor = {
                           .first()
                           .catch(() => null);
                         if (recentDup) continue;
-                        await sendCustomerMessage({
+                        const contactResult = await sendCustomerMessage({
                           to: contact.phone,
                           body: contactBody,
                           channel: 'sms',
@@ -10356,7 +10381,55 @@ const CallRecordingProcessor = {
                             appointment_contact_role: contact.role,
                           },
                         });
-                        logger.info(`[call-proc] Appointment SMS fanned out to ${contact.role} for customer ${customerId}`);
+                        if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
+                          && contactResult.deferred && contactResult.nextAllowedAt
+                          && confirmationRearmed) {
+                          // Primary was held too and the confirmation sweep
+                          // was successfully re-armed — its 8:00 AM canonical
+                          // send fans out to every appointment contact, so a
+                          // queued copy here would double-text this contact.
+                          logger.info(`[call-proc] held ${contact.role} confirmation NOT queued — re-armed sweep owns delivery to all contacts`);
+                        } else if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
+                          && contactResult.deferred && contactResult.nextAllowedAt) {
+                          // The primary confirmation reached Twilio before the
+                          // 20:00 cutoff but THIS contact's send crossed it —
+                          // re-arming the whole confirmation would duplicate
+                          // the delivered primary, so persist only the held
+                          // secondary on the scheduled-SMS rail. NO
+                          // refresh_customer_phone: this row belongs to the
+                          // CONTACT's phone; a send-time swap to the account
+                          // holder's number would misdeliver. The reprocess
+                          // dedupe above also matches this queued row (same
+                          // phone/type/body), so a re-run can't double-queue.
+                          try {
+                            const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                            await db('sms_log').insert({
+                              customer_id: customerId,
+                              direction: 'outbound',
+                              from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                              to_phone: contact.phone,
+                              message_body: contactBody,
+                              status: 'scheduled',
+                              scheduled_for: new Date(contactResult.nextAllowedAt),
+                              message_type: 'confirmation',
+                              metadata: JSON.stringify({
+                                entry_point: 'call_booking_contact_confirmation_deferred',
+                                scheduled_service_id: scheduledServiceId,
+                                appointment_contact_role: contact.role,
+                                original_block_code: contactResult.code,
+                                replay_purpose: 'appointment_confirmation',
+                                resolve_from_by_customer: true,
+                              }),
+                            });
+                            logger.info(`[call-proc] Appointment SMS to ${contact.role} held outside the 8AM-8PM ET send window — queued for ${contactResult.nextAllowedAt}`);
+                          } catch (queueErr) {
+                            logger.error(`[call-proc] held contact-confirmation requeue failed for ${contact.role} (customer ${customerId}): ${queueErr.message}`);
+                          }
+                        } else if (!contactResult.sent) {
+                          logger.warn(`[call-proc] Appointment SMS fan-out to ${contact.role} blocked/failed for customer ${customerId}: ${contactResult.code || contactResult.reason || 'unknown'}`);
+                        } else {
+                          logger.info(`[call-proc] Appointment SMS fanned out to ${contact.role} for customer ${customerId}`);
+                        }
                       }
                       // Email-only service contacts never appear in the SMS
                       // contact list (getAppointmentContacts is phone-based)

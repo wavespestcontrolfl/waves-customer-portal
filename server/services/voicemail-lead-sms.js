@@ -77,9 +77,12 @@ function capitalizeName(name) {
   return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
 }
 
-// Stamp the one-shot status onto the lead's extracted_data jsonb. Best-effort:
-// the durable dedupe is the sms_log row, this is the visible breadcrumb (and
-// the atomic claim below is what prevents a concurrent double-send).
+// Stamp the one-shot status onto the lead's extracted_data jsonb. Best-effort
+// for the inline send path (the durable dedupe is the sms_log row, this is
+// the visible breadcrumb, and the atomic claim below is what prevents a
+// concurrent double-send) — but returns success so the deferred-replay
+// finalize can ride the durable retry rail instead of swallowing a
+// transient DB failure as settled.
 async function stampStatus(leadId, status) {
   try {
     await db('leads').where({ id: leadId }).update({
@@ -89,8 +92,10 @@ async function stampStatus(leadId, status) {
       ),
       updated_at: new Date(),
     });
+    return true;
   } catch (e) {
     logger.warn(`[voicemail-sms] status stamp failed for lead ${leadId}: ${e.message}`);
+    return false;
   }
 }
 
@@ -116,18 +121,24 @@ async function logActivity(leadId, activityType, description, metadata = {}) {
 async function releasePhoneClaim(phone) {
   try {
     await db('voicemail_sms_claims').where({ phone }).del();
+    return true;
   } catch (e) {
     logger.warn(`[voicemail-sms] phone claim release failed for ${maskPhone(phone)}: ${e.message}`);
+    return false;
   }
 }
 
-// Stamp the final outcome on the kept claim row (visibility only; the row's
-// existence is the dedupe, the outcome column is the breadcrumb).
+// Stamp the final outcome on the kept claim row (the row's existence is the
+// dedupe; the outcome column drives the bounce handler's claimed-lead
+// correlation and the admin breadcrumb). Returns success for the same
+// durable-finalize reason as stampStatus above.
 async function stampPhoneClaim(phone, outcome) {
   try {
     await db('voicemail_sms_claims').where({ phone }).update({ outcome });
+    return true;
   } catch (e) {
     logger.warn(`[voicemail-sms] phone claim stamp failed for ${maskPhone(phone)}: ${e.message}`);
+    return false;
   }
 }
 
@@ -142,8 +153,10 @@ async function clearLeadClaim(leadId) {
       extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'quote_link_sms_status'"),
       updated_at: new Date(),
     });
+    return true;
   } catch (e) {
     logger.warn(`[voicemail-sms] lead claim clear failed for lead ${leadId}: ${e.message}`);
+    return false;
   }
 }
 
@@ -351,6 +364,11 @@ async function sendClaimedVoicemailQuoteLink({ leadId, extracted, call, phone })
         metadata: JSON.stringify({
           entry_point: 'voicemail_lead_sms_deferred',
           lead_id: leadId,
+          // Replay lifecycle keys (deferred-replay registry): finalize
+          // stamps both claims 'sent'; onTerminal releases them so a
+          // repeat caller can re-arm. The phone already lives in the
+          // row's to_phone column — this copy just reaches the hooks.
+          voicemail_phone: phone,
           call_sid: call.twilio_call_sid || null,
           original_block_code: result.code || null,
           // The scheduled-SMS cron replays this row through sendCustomerMessage,
@@ -502,3 +520,6 @@ async function handleUndeliveredQuoteLink({ sid, status, errorCode, to } = {}) {
 }
 
 module.exports = { sendVoicemailQuoteLink, handleUndeliveredQuoteLink, MESSAGE_TYPE };
+// Deferred-replay registry hooks — settle the lead/phone claims when the
+// scheduled executor delivers or terminally fails the queued text-back.
+module.exports._deferredClaims = { stampStatus, stampPhoneClaim, clearLeadClaim, releasePhoneClaim };

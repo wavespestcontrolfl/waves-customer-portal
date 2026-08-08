@@ -500,6 +500,40 @@ const TwilioService = {
         explicitMedia = [{ url: options.mediaUrl, index: 0 }];
       }
       if (urls.length > 0) msgPayload.mediaUrl = urls;
+      // Caller-supplied final gate, awaited as the LAST step before the
+      // Twilio handoff. The canonical messaging pipeline passes its
+      // send-window boundary re-check here: every await above (redirect
+      // check, template lookup, customer/location query) can straddle the
+      // 20:00 ET cutoff, so checking any earlier lets a 19:59 send reach
+      // Twilio at 20:01. Fail closed: a throwing check blocks the send.
+      // Legacy direct sendSMS callers don't pass it and are unaffected.
+      if (typeof options.preSendCheck === "function") {
+        let verdict;
+        try {
+          verdict = await options.preSendCheck();
+        } catch (err) {
+          verdict = {
+            ok: false,
+            code: "PRE_SEND_CHECK_FAILED",
+            reason: err.message,
+          };
+        }
+        if (!verdict || verdict.ok !== true) {
+          logger.warn(
+            `[twilio] SMS to ${maskPhone(to)} blocked at provider handoff: ${verdict?.code || "PRE_SEND_CHECK_FAILED"} — ${verdict?.reason || "pre-send check did not pass"}`,
+          );
+          return {
+            success: false,
+            sid: null,
+            preSendBlocked: true,
+            code: verdict?.code || "PRE_SEND_CHECK_FAILED",
+            error: verdict?.reason || "pre-send check did not pass",
+            retryable: verdict?.retryable === true,
+            deferred: verdict?.deferred === true,
+            nextAllowedAt: verdict?.nextAllowedAt,
+          };
+        }
+      }
       const message = await c.messages.create(msgPayload);
       logger.info(
         `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,
@@ -681,7 +715,7 @@ const TwilioService = {
    * Phase 1 callers always pass a token (minted by migration backfill);
    * legacy callers that pass nothing still get a sensible bodyless message.
    */
-  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null) {
+  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
@@ -800,6 +834,10 @@ const TwilioService = {
               isServiceContactRole(contact.role)
                 ? "service_contact_authorized"
                 : "phone_matches_customer",
+            // Send-window operator marker — threaded from markEnRoute for
+            // manual tech/admin taps only; geofence/system transitions
+            // never set it (validators/send-window.js).
+            ...(operatorInitiated ? { operatorInitiated: true } : {}),
             metadata: { original_message_type: "tech_en_route" },
           }),
         );
@@ -977,6 +1015,17 @@ const TwilioService = {
     //    the arrival is HANDLED — the caller must keep the guard stamped, else a
     //    later same-job signal could fire a stale "has arrived" if the
     //    suppression/number is fixed while the job is still on-property.
+    // Send-window hold is HANDLED, not retryable, for this one notification:
+    // "has arrived" is only true at arrival time. Releasing the guard on a
+    // night hold lets the next morning's GPS/geofence re-fire of an
+    // on_property row text "has arrived" hours after the fact (markOnProperty
+    // deliberately retries stamped-but-unsent rows on every later signal).
+    // Dropping the text is the correct outcome — same call as the completion
+    // SMS's no-retry rail documented in the PR body.
+    const heldByWindow = results.some((r) => r?.code === "QUIET_HOURS_HOLD");
+    if (heldByWindow) {
+      return { success: false, suppressed: true, reason: "send_window_hold", results };
+    }
     const anyRetryable = results.length === 0 || results.some((r) => r?.retryable);
     if (anyRetryable) return { success: false, results };
     return { success: false, suppressed: true, reason: "blocked", results };

@@ -338,7 +338,14 @@ async function markEnRoute(serviceId, opts = {}) {
         svc.customer_id,
         techName,
         etaMinutes,
-        trackToken
+        trackToken,
+        {
+          // Send-window operator provenance: a tech/admin manually marking
+          // a late visit en route chose the moment and the customer notice
+          // is the time-sensitive point of the tap — the tech is literally
+          // driving there. Geofence/system transitions stay fenced.
+          operatorInitiated: ['tech', 'admin'].includes(String(opts.actorType || '')),
+        },
       );
 
       // sendTechEnRoute can return undefined (opt-out path), falsy results,

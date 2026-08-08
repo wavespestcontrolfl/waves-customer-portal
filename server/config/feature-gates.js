@@ -538,6 +538,15 @@ const gates = {
   // verified. This does not affect internal admin alerts.
   autopayCustomerSms: process.env.GATE_AUTOPAY_CUSTOMER_SMS === 'true',
 
+  // Customer SMS send window (owner ruling 2026-08-07): automated customer/
+  // lead texts only between 8:00 AM and 8:00 PM ET — an evening schedule
+  // change had the reminder cron texting customers at 9:15 PM. Enforced as
+  // a sendCustomerMessage validator plus a pre-send guard in the reminder
+  // cron (24h reminders that would defer into the visit's own day are
+  // skipped outright). Operator-initiated sends and conversational replies
+  // are exempt. Opt-in in EVERY environment; unset = today's behavior.
+  smsSendWindow: process.env.GATE_SMS_SEND_WINDOW === 'true',
+
   // Estimate Deposit-Abandonment SMS — texts customers who started the
   // deposit payment step on a public estimate (a pending Stripe
   // PaymentIntent in estimate_deposits) but never completed it. Customer-
