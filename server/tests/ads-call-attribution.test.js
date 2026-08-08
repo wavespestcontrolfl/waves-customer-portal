@@ -392,3 +392,36 @@ describe('recordCallPpcAttribution', () => {
     expect(insertCalls).toHaveLength(0);
   });
 });
+
+describe("call provenance protects another call's row (PR #3303)", () => {
+  test('a different call never patches a provenanced row', async () => {
+    firstByTable.ad_service_attribution = {
+      id: 'row-p', lead_source: 'google_ads', customer_id: null,
+      campaign_id: null, lead_source_detail: 'inbound call', source_call_id: 'call-A',
+    };
+    firstByTable.ad_campaigns = { id: 'local-9' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', googleCampaignId: '22594274874',
+      leadSourceDetail: 'New Campaign', sourceCallId: 'call-B',
+    });
+
+    expect(res).toEqual({ recorded: false, reason: 'other_call' });
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  test('a lead-centric backfill (no call identity) still repairs the row', async () => {
+    firstByTable.ad_service_attribution = {
+      id: 'row-p', lead_source: 'google_ads', customer_id: null,
+      campaign_id: null, lead_source_detail: 'inbound call', source_call_id: 'call-A',
+    };
+    firstByTable.ad_campaigns = { id: 'local-9' };
+
+    const res = await CallAttribution.recordCallPpcAttribution({
+      customerId: 'C1', leadId: 'L1', googleCampaignId: '22594274874', leadSourceDetail: 'New Campaign',
+    });
+
+    expect(res).toMatchObject({ recorded: true, updated: true });
+    expect(updateCalls[0].row).toMatchObject({ customer_id: 'C1', campaign_id: 'local-9' });
+  });
+});

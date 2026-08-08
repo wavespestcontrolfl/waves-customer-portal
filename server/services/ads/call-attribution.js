@@ -168,6 +168,18 @@ async function recordCallPpcAttribution({
       if (existing.lead_source && existing.lead_source !== leadSource) {
         return { recorded: false, reason: 'other_source' };
       }
+      // A row PROVENANCED to a DIFFERENT call is that call's evidence
+      // (pre-push P1 r10): after a repoint's retired_conflict — the target
+      // lead already owned another call's row — this call's later
+      // attribution pass must not overwrite that row's campaign/detail/
+      // service placeholders. One refusal here closes every caller
+      // (processor re-attribution, settleClear transfers, the bridge).
+      // Callers WITHOUT call identity (claim-time backfill, the unclaimed
+      // sweep) are lead-centric repairs and still patch.
+      if (sourceCallId && existing.source_call_id
+        && String(existing.source_call_id) !== String(sourceCallId)) {
+        return { recorded: false, reason: 'other_call' };
+      }
       // A web-attributed row owns this lead's first-touch PPC attribution — via a
       // click id (Google: gclid/wbraid/gbraid, Meta: fbclid/_fbc) OR, for
       // consent/ad-blocker cases with no click id, via UTM (utm_campaign/utm_term).
