@@ -312,20 +312,18 @@ function proposalNetTermDays(proposal) {
   return NET_TERM_DAYS[proposal?.commercialTerms?.paymentTerms] || 0;
 }
 
-// One resolved term for the acceptance invoice: a linked payer's canonical
-// payment_terms are the STANDING billing relationship (they also drive
-// statement accrual), so they take precedence; the proposal's authored term
-// applies only for self-pay customers. Precedence keeps the due date and the
-// accrual behavior reading the same term (codex #3297 r2b).
+// One resolved term for the acceptance invoice: an ACTIVE linked payer's
+// canonical payment_terms are the STANDING billing relationship (they also
+// drive statement accrual), so they take precedence; the proposal's authored
+// term applies only for self-pay customers. Resolution goes through the
+// canonical PayerService.resolveForInvoice — it owns active-payer filtering
+// and fail-soft-to-self-pay, so an inactive payer's stale terms can never
+// override the accepted proposal (codex #3297 r2c).
 async function resolveAcceptanceTermDays({ trx, customerId, proposal }) {
-  try {
-    const customer = await trx('customers').where({ id: customerId }).first('payer_id');
-    if (customer?.payer_id) {
-      const payer = await trx('payers').where({ id: customer.payer_id }).first('payment_terms');
-      if (payer) return NET_TERM_DAYS[payer.payment_terms] || 0;
-    }
-  } catch (err) {
-    logger.warn(`[proposal-win] payer term lookup failed for customer ${customerId}: ${err.message}`);
+  const { resolveForInvoice } = require('./payer');
+  const resolved = await resolveForInvoice({ database: trx, customerId });
+  if (resolved?.payerId != null && resolved.paymentTerms) {
+    return NET_TERM_DAYS[resolved.paymentTerms] || 0;
   }
   return proposalNetTermDays(proposal);
 }
