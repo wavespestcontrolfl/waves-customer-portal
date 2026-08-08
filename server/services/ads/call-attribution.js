@@ -110,6 +110,14 @@ async function recordCallPpcAttribution({
   leadDate,
   serviceInterest = null,
   isPaid = true,
+  // Transaction handle for the ad_service_attribution statements. The
+  // google-call bridge attributes while holding a FOR UPDATE lock on the
+  // lead; this table's lead_id foreign-key check takes FOR KEY SHARE on
+  // that same lead row, so running the insert on the global connection
+  // self-deadlocks behind the caller's own lock (pre-push P1, PR
+  // stamp-consumers-ops). Reads (leads / ad_campaigns) stay on the global
+  // connection — plain SELECTs take no row locks.
+  dbc = db,
 } = {}) {
   if (!customerId) return { recorded: false, reason: 'no_customer' };
   if (!leadId) return { recorded: false, reason: 'no_lead' };
@@ -143,7 +151,7 @@ async function recordCallPpcAttribution({
 
     // One funnel row per lead — dedupe by lead_id. Backfill richer data onto an
     // existing row (e.g. the bridge later supplies the campaign).
-    const existing = await db('ad_service_attribution').where({ lead_id: leadId }).first();
+    const existing = await dbc('ad_service_attribution').where({ lead_id: leadId }).first();
     if (existing) {
       // The lead already has a funnel row. If it belongs to a DIFFERENT source
       // (e.g. it was first a WEB-form lead and the customer later called the paid
@@ -188,7 +196,7 @@ async function recordCallPpcAttribution({
       applyService('service_bucket', serviceBucket);
       if (Object.keys(patch).length) {
         patch.updated_at = new Date();
-        await db('ad_service_attribution').where({ id: existing.id }).update(patch);
+        await dbc('ad_service_attribution').where({ id: existing.id }).update(patch);
         return { recorded: true, updated: true, campaignId: campaignId || existing.campaign_id || null };
       }
       return { recorded: false, reason: 'already_recorded' };
@@ -197,7 +205,7 @@ async function recordCallPpcAttribution({
     // ON CONFLICT (lead_id) DO NOTHING — two overlapping bridge-apply runs could
     // both miss the lookup above; the unique index + ignore prevents a duplicate
     // row (the loser is a no-op; a later run backfills any missing campaign).
-    await db('ad_service_attribution').insert({
+    await dbc('ad_service_attribution').insert({
       campaign_id: campaignId,
       customer_id: customerId,
       lead_id: leadId,

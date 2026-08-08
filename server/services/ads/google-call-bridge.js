@@ -675,12 +675,21 @@ async function applyBridge(options = {}) {
   // Ads call. Used by both the fresh-bridge path and the already-bridged path so
   // calls bridged BEFORE this shipped (and lead-retry calls) also land in the
   // funnel. customerId may come from a freshly-matched lead or the call_log.
-  const writeCallPpcAttribution = async (match, customerId, leadId) => {
+  const writeCallPpcAttribution = async (match, customerId, leadId, trx) => {
     // Require an actual lead — a confirmed Google Ads call from an EXISTING
     // customer that matched no lead (e.g. a service/support call) must not be
     // counted as a new PPC lead. Mirrors the lead-creation gate in
     // call-recording-processor (LEAD_PIPELINE_STAGES).
     if (!customerId || !leadId) return;
+    // `trx` is the caller's lead-locking transaction — the funnel insert's
+    // lead_id FK check takes FOR KEY SHARE on the locked lead row, so it
+    // MUST ride the same connection or it self-deadlocks behind our own
+    // FOR UPDATE (pre-push P1 r4). Consequence: a funnel SQL failure
+    // aborts the transaction and rolls the whole attribution round back —
+    // the retry lane re-attempts it, attribution and funnel staying
+    // consistent. recordCallPpcAttribution's declined outcomes
+    // (other_source / web_attributed / already_recorded) return without
+    // erroring and roll nothing back.
     await require('./call-attribution').recordCallPpcAttribution({
       customerId,
       leadId: leadId || null,
@@ -688,7 +697,8 @@ async function applyBridge(options = {}) {
       leadSourceDetail: match.googleCall.campaignName || GOOGLE_ADS_BRIDGE_SOURCE_NAME,
       googleCampaignId: match.googleCall.campaignId,
       leadDate: match.callLog?.createdAt || null, // date by the actual call, not this run
-    }).catch((e) => logger.warn(`[google-call-bridge] PPC attribution failed: ${e.message}`));
+      dbc: trx,
+    });
   };
 
   for (const match of preview.matches) {
@@ -711,29 +721,34 @@ async function applyBridge(options = {}) {
           // P1 r1/r2/r3): the joined lead only feeds the funnel row while
           // it is still live AND still linked to this call — revalidated
           // UNDER THE LEAD'S ROW LOCK, held until the funnel write
-          // completes, so reconciliation cannot clear the stamp in between
-          // (it queues on this same lock). Its CURRENT owner wins over the
-          // call's own customer link. Otherwise drop to the plan. The
-          // funnel write itself stays best-effort (the wrapper swallows
-          // its own errors), so a funnel failure never rolls anything
-          // back — the transaction exists purely to hold the lock.
-          await db.transaction(async (trx) => {
-            let backfillLeadId = match.callLog?.leadId || null;
-            let backfillCustomerId = match.callLog?.customerId || null;
-            if (backfillLeadId) {
-              const liveJoined = await joinedLeadLiveRow(match.callLog, { dbc: trx, lock: true });
-              if (liveJoined) {
-                backfillCustomerId = liveJoined.customer_id || backfillCustomerId;
-              } else {
-                backfillLeadId = null;
+          // commits on the SAME connection (pre-push P1 r4: the FK check
+          // takes FOR KEY SHARE on the locked lead, so a second
+          // connection self-deadlocks), and reconciliation queues on this
+          // lock so the verified linkage cannot be cleared in between.
+          // Its CURRENT owner wins over the call's own customer link.
+          // Otherwise drop to the plan. Best-effort at the BLOCK level:
+          // a failure rolls back only this backfill and is logged.
+          try {
+            await db.transaction(async (trx) => {
+              let backfillLeadId = match.callLog?.leadId || null;
+              let backfillCustomerId = match.callLog?.customerId || null;
+              if (backfillLeadId) {
+                const liveJoined = await joinedLeadLiveRow(match.callLog, { dbc: trx, lock: true });
+                if (liveJoined) {
+                  backfillCustomerId = liveJoined.customer_id || backfillCustomerId;
+                } else {
+                  backfillLeadId = null;
+                }
               }
-            }
-            if (!backfillLeadId) {
-              const lm = await findLeadForCall(match.callLog).catch(() => null);
-              if (lm?.leadId) { backfillLeadId = lm.leadId; backfillCustomerId = lm.customerId || backfillCustomerId; }
-            }
-            await writeCallPpcAttribution(match, backfillCustomerId, backfillLeadId);
-          });
+              if (!backfillLeadId) {
+                const lm = await findLeadForCall(match.callLog).catch(() => null);
+                if (lm?.leadId) { backfillLeadId = lm.leadId; backfillCustomerId = lm.customerId || backfillCustomerId; }
+              }
+              await writeCallPpcAttribution(match, backfillCustomerId, backfillLeadId, trx);
+            });
+          } catch (backfillErr) {
+            logger.warn(`[google-call-bridge] PPC attribution backfill failed: ${backfillErr.message}`);
+          }
         }
         skipped.push({ ...match, skipReason: 'already_bridged' });
         continue;
@@ -758,13 +773,15 @@ async function applyBridge(options = {}) {
               }),
               updated_at: now,
             });
-          // Funnel write while the lead lock is still held (pre-push P1
-          // r3): reconciliation queues on this lock, so the linkage the
-          // attribution just verified cannot be cleared before the funnel
-          // row lands. Best-effort semantics preserved — the wrapper
-          // swallows its own errors.
+          // Funnel write while the lead lock is still held, on the SAME
+          // connection (pre-push P1 r3/r4): reconciliation queues on this
+          // lock, so the verified linkage cannot be cleared before the
+          // funnel row lands — and the FK check's FOR KEY SHARE on the
+          // locked lead must not come from a second connection. A funnel
+          // SQL failure rolls the round back to the retry lane,
+          // attribution and funnel staying consistent.
           if (bridgedToThisCall) {
-            await writeCallPpcAttribution(match, res.match.customerId || match.callLog?.customerId || null, res.match.leadId);
+            await writeCallPpcAttribution(match, res.match.customerId || match.callLog?.customerId || null, res.match.leadId, trx);
           }
           return res;
         });
@@ -831,12 +848,17 @@ async function applyBridge(options = {}) {
         // wrote zero rows — a permanent funnel row for a deleted lead that
         // later double-counts when retry finds the live replacement. The
         // call's own customer link stands on its own either way. Written
-        // while the lead lock is still held (pre-push P1 r3), so the
-        // verified linkage cannot be cleared before the row lands.
+        // while the lead lock is still held, on the SAME connection
+        // (pre-push P1 r3/r4): the verified linkage cannot be cleared
+        // before the row lands, and the FK check's FOR KEY SHARE on the
+        // locked lead must not come from a second connection. A funnel
+        // SQL failure rolls this bridge write back to write_failed and
+        // the next run re-applies it.
         await writeCallPpcAttribution(
           match,
           attributed?.customerId || match.callLog?.customerId || null,
           attributed?.leadId || null,
+          trx,
         );
       });
 
