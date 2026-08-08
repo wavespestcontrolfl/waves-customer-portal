@@ -529,6 +529,18 @@ async function markEstimateManuallyAccepted({
         customerId: updatedEstimate.customer_id,
         proposal: normalizeProposal(updatedEstimate),
       });
+      // A NON-invoice-mode win with authored structured payment terms has no
+      // path that consumes them — the customer accepted a payment promise
+      // nothing will enforce (billing mode may have been flipped after
+      // authoring; the PUT guard can't see that). Reject with direction
+      // rather than record the win (codex #3297 r4).
+      if (!updatedEstimate.bill_by_invoice
+        && normalizeProposal(updatedEstimate).commercialTerms?.paymentTerms) {
+        throw httpError(
+          'This proposal promises structured payment terms, which only invoice-mode billing enforces. Turn on Bill by invoice, or move the payment language to Additional terms, then mark won again.',
+          409,
+        );
+      }
       // Invoice-mode win: build the first invoice from the proposal line items.
       if (updatedEstimate.bill_by_invoice) {
         try {

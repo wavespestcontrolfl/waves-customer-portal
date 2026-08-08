@@ -329,6 +329,11 @@ async function resolveAcceptanceTermDays({ trx, customerId, proposal }) {
   const resolved = await resolveForInvoice({ database: trx, customerId, throwOnError: true });
   const authoredTerm = proposal?.commercialTerms?.paymentTerms || null;
   if (resolved?.payerId != null && resolved.paymentTerms) {
+    // Hold a share lock on the payer row until commit: InvoiceService.create
+    // resolves the payer AGAIN for its snapshot, and under READ COMMITTED a
+    // concurrent payer edit between the two reads could split the due date
+    // from the snapshot/statement terms (codex #3297 r4).
+    await trx('payers').where({ id: resolved.payerId }).forShare().first('id');
     if (authoredTerm && authoredTerm !== resolved.paymentTerms) {
       throw winError(
         `This proposal promises ${authoredTerm} payment terms but the customer bills through a payer on ${resolved.paymentTerms} terms. `

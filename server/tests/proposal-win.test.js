@@ -178,6 +178,7 @@ function makeInvoiceTrx({ propertyType } = {}) {
   const trx = jest.fn(() => {
     const builder = {
       where() { return builder; },
+      forShare() { return builder; },
       first: async () => (propertyType === undefined ? null : { property_type: propertyType }),
       update(patch) { ops.updates.push(patch); return Promise.resolve(1); },
     };

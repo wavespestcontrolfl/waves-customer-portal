@@ -2008,6 +2008,14 @@ router.put('/:id/proposal', async (req, res, next) => {
       if (rawPaymentTerms != null && String(rawPaymentTerms).trim() !== '' && canonicalPaymentTerms === null) {
         return res.status(400).json({ error: 'Payment terms must be one of: Due on receipt, Net-15, Net-30.' });
       }
+      // Structured payment terms exist because billing CONSUMES them (the
+      // acceptance invoice's due date). Only invoice-mode proposals have
+      // that path — on any other proposal the field would render a promise
+      // no invoice ever reads. Payment language for manually-billed
+      // agreements belongs in Additional terms (codex #3297 r4).
+      if (canonicalPaymentTerms && !estimate.bill_by_invoice) {
+        return res.status(400).json({ error: 'Structured payment terms require Bill by invoice. Put payment language in Additional terms, or turn on invoice billing for this proposal.' });
+      }
       // A linked ACTIVE payer's terms are the standing billing relationship
       // (they drive statement accrual and the acceptance invoice via
       // resolveAcceptanceTermDays). Authoring a CONTRADICTING term here

@@ -925,9 +925,11 @@ export default function CommercialProposalPage() {
                 <label className="block">
                   <span className={LABEL}>Payment terms</span>
                   {/* Canonical payer vocabulary only (server rejects free
-                      text) — billing derives due dates from these tokens. */}
+                      text) — billing derives due dates from these tokens,
+                      which only exists for invoice-mode proposals. */}
                   <Select
-                    size="sm" className="mt-1" value={commercialTerms.paymentTerms} disabled={!!locked}
+                    size="sm" className="mt-1" value={commercialTerms.paymentTerms}
+                    disabled={!!locked || !estimate?.billByInvoice}
                     onChange={(e) => { setDirty(true); setCommercialTerms((prev) => ({ ...prev, paymentTerms: e.target.value })); }}
                   >
                     <option value="">Not set</option>
@@ -935,6 +937,11 @@ export default function CommercialProposalPage() {
                     <option value="net15">Net-15</option>
                     <option value="net30">Net-30</option>
                   </Select>
+                  {!estimate?.billByInvoice && (
+                    <span className="mt-1 block text-11 text-zinc-400">
+                      Requires Bill by invoice — for manually billed agreements, put payment language in Additional terms.
+                    </span>
+                  )}
                 </label>
                 {/* maxLength mirrors normalizeCommercialTerms' clamps so a
                     contractual sentence can never silently truncate on save
