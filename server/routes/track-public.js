@@ -291,18 +291,36 @@ async function buildSummary(service) {
     invoiceToken = null;
   }
 
-  // Review request — most recent for this customer; TrackPage uses the
-  // /rate/:token link, which routes to the closest-office GBP itself.
+  // Review request — most recent LIVE one for this customer.
+  //
+  // This CTA rides along in nearly every visit SMS (the track link), so it was
+  // the review surface customers saw most, and it was the least gated one:
+  //   - it linked the raw /rate/:token page, bypassing the tokenized /go
+  //     redirect that stamps the click and stops the cadence, so every review
+  //     that came through here was unattributable;
+  //   - it ignored has_left_google_review, so a customer who had already
+  //     reviewed kept being asked;
+  //   - it ignored expires_at, so a stale token rendered "link expired".
+  // Now it points at /api/rate/:token/go (same destination the texts use) and
+  // is hidden for already-reviewed customers and dead tokens.
+  //
   // Suppressed completion summaries (internal-only consultations / disabled
   // delivery) must not surface a review CTA from an older request either.
   let reviewUrl = null;
   try {
     if (!suppressCustomerArtifacts) {
-      const rr = await db('review_requests')
-        .where({ customer_id: service.customer_id })
-        .orderBy('created_at', 'desc')
-        .first('token');
-      if (rr?.token) reviewUrl = `/rate/${rr.token}`;
+      const reviewer = await db('customers')
+        .select('has_left_google_review')
+        .where({ id: service.customer_id })
+        .first();
+      if (!reviewer?.has_left_google_review) {
+        const rr = await db('review_requests')
+          .where({ customer_id: service.customer_id })
+          .where((b) => b.whereNull('expires_at').orWhere('expires_at', '>', new Date()))
+          .orderBy('created_at', 'desc')
+          .first('token');
+        if (rr?.token) reviewUrl = `/api/rate/${rr.token}/go`;
+      }
     }
   } catch (err) {
     logger.warn(`[track-public] review_request lookup failed: ${err.message}`);

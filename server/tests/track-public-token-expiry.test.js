@@ -22,7 +22,9 @@ function makeQuery({ firstResult = null, selectResult = [] } = {}) {
   return chain;
 }
 
-function installSummaryDb({ record = null, photos = [], reviewRequest = null, invoice = null } = {}) {
+function installSummaryDb({
+  record = null, photos = [], reviewRequest = null, invoice = null, customer = null,
+} = {}) {
   mockDb.mockImplementation((table) => {
     if (table === 'invoices') {
       return makeQuery({ firstResult: invoice });
@@ -32,6 +34,9 @@ function installSummaryDb({ record = null, photos = [], reviewRequest = null, in
     }
     if (table === 'service_photos') {
       return makeQuery({ selectResult: photos });
+    }
+    if (table === 'customers') {
+      return makeQuery({ firstResult: customer });
     }
     if (table === 'review_requests') {
       return makeQuery({ firstResult: reviewRequest });
@@ -185,10 +190,58 @@ describe('public track token expiry', () => {
       'https://signed.example/after-1.jpg',
       'https://signed.example/after-2.jpg',
     ]);
-    expect(summary.reviewUrl).toBe('/rate/review-token');
+    // The tracked /go redirect, NOT the raw /rate page: the track link rides
+    // along in nearly every visit SMS, so this was the most-seen review CTA and
+    // the only one whose clicks were unattributable.
+    expect(summary.reviewUrl).toBe('/api/rate/review-token/go');
     expect(mockDb.mock.calls.map(([table]) => table)).toContain('service_photos');
     expect(mockDb.mock.calls.map(([table]) => table)).toContain('review_requests');
     expect(mockGetViewUrl).toHaveBeenCalledTimes(2);
+  });
+
+  test('hides the review CTA from a customer already marked as having reviewed', async () => {
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      customer: { has_left_google_review: true },
+      reviewRequest: { token: 'review-token' },
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.reviewUrl).toBeNull();
+    // ...and it never even looks for a token.
+    expect(mockDb.mock.calls.map(([table]) => table)).not.toContain('review_requests');
+  });
+
+  test('hides the review CTA when the customer has no live token left', async () => {
+    // Tokens expire after 14 days; the query filters expired rows out, so the
+    // lookup comes back empty rather than handing over a dead link that used to
+    // render "link expired".
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      customer: { has_left_google_review: false },
+      reviewRequest: null,
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.reviewUrl).toBeNull();
   });
 
   // Backdated quiet closeout (PR #2897 fix round 9, Codex P1): the review
