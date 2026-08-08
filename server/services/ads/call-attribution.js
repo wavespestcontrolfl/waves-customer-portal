@@ -202,6 +202,12 @@ async function recordCallPpcAttribution({
       applyService('service_line', serviceLine);
       applyService('specific_service', specificService);
       applyService('service_bucket', serviceBucket);
+      // Ownership REPAIR, fill-only (pre-push P1 r9): a row transferred to
+      // an unclaimed lead carries customer_id NULL, and the claim-time
+      // backfill lands here with the newly established owner — without
+      // this, customer-scoped attribution queries missed the row
+      // permanently. An already-owned row is never repointed.
+      if (customerId && !existing.customer_id) patch.customer_id = customerId;
       if (Object.keys(patch).length) {
         patch.updated_at = new Date();
         await dbc('ad_service_attribution').where({ id: existing.id }).update(patch);

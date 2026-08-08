@@ -8448,10 +8448,21 @@ const CallRecordingProcessor = {
               // re-stamps; overwriting a different lead's ledger stranded
               // the anonymous call's enrichment on a now-claimed lead
               // permanently.
+              // The funnel-row TRANSFER does NOT ride this standalone
+              // settle (pre-push P1 r9): if the stamp/enrich transaction
+              // below then failed, the call would land extraction_failed
+              // with no stamp while its attribution sat on a target whose
+              // linkage never committed — and a later rejection could not
+              // retire it. The settle only clears/restores ('keep'); the
+              // transfer runs INSIDE the stamp transaction, after the
+              // replacement linkage is written (see preSettleStampedLeadId
+              // below).
+              let preSettleStampedLeadId = null;
               if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
+                preSettleStampedLeadId = currentStampedLeadId;
                 let priorSettled;
                 try {
-                  priorSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'transfer', transferToLeadId: leadId });
+                  priorSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'keep' });
                 } catch (settleErr) {
                   if (settleErr.abortProcessing) throw settleErr;
                   const wrapped = new Error(`call→lead link pre-stamp settle failed: ${settleErr.code || settleErr.name || 'db_error'}`);
@@ -8664,6 +8675,15 @@ const CallRecordingProcessor = {
                   const lost = new Error('processing claim lost during call→lead link stamp');
                   lost.abortProcessing = true;
                   throw lost;
+                }
+                // The moved linkage just COMMITTED (stamp written in this
+                // transaction) — now the funnel row this call created on
+                // the previously stamped lead follows it, stages intact
+                // (pre-push P0/P1 r8/r9). Same transaction, same lead lock.
+                if (preSettleStampedLeadId && String(preSettleStampedLeadId) !== String(leadId)) {
+                  await require('./ads/call-attribution').reconcileMovedCallAttributionRow(
+                    trx, call.id, preSettleStampedLeadId, leadId, new Date(),
+                  );
                 }
                 return enrichmentWrite.transacting(trx).update(effectiveUpdates);
               });

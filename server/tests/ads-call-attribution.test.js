@@ -303,7 +303,7 @@ describe('recordCallPpcAttribution', () => {
   });
 
   test('does not overwrite an already-set campaign with a different one (first-touch wins)', async () => {
-    firstByTable.ad_service_attribution = { id: 'row-y', lead_source: 'google_ads', campaign_id: 'local-existing', lead_source_detail: 'Old Campaign', service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring' };
+    firstByTable.ad_service_attribution = { id: 'row-y', lead_source: 'google_ads', customer_id: 'C1', campaign_id: 'local-existing', lead_source_detail: 'Old Campaign', service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring' };
     firstByTable.ad_campaigns = { id: 'local-9' };
 
     const res = await CallAttribution.recordCallPpcAttribution({
@@ -380,7 +380,7 @@ describe('recordCallPpcAttribution', () => {
   });
 
   test('does not touch an existing lead row that already has its campaign', async () => {
-    firstByTable.ad_service_attribution = { id: 'row-2', campaign_id: 'local-existing', lead_source_detail: 'x', service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring' };
+    firstByTable.ad_service_attribution = { id: 'row-2', customer_id: 'C1', campaign_id: 'local-existing', lead_source_detail: 'x', service_line: 'pest', specific_service: 'quarterly_pest', service_bucket: 'recurring' };
     firstByTable.ad_campaigns = { id: 'local-9' };
 
     const res = await CallAttribution.recordCallPpcAttribution({
