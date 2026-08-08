@@ -562,7 +562,12 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx) {
   if (!await updateLeadAttribution(planned, bridgeSource, now, { dbc: trx })) {
     return { match: null, reason: 'lead_not_live' };
   }
-  return { match: planned };
+  // The landed update holds the row exclusively for the rest of this
+  // transaction — re-read the owner on the same connection so the funnel
+  // pair carries the lead's CURRENT customer, not the plan's unlocked
+  // snapshot (same rule as the joined arm; pre-push P1 r2/r5).
+  const plannedOwner = await trx('leads').where({ id: planned.leadId }).first('customer_id');
+  return { match: { ...planned, customerId: plannedOwner?.customer_id || planned.customerId || null } };
 }
 
 async function findLeadForCall(callLog) {
@@ -684,13 +689,8 @@ async function applyBridge(options = {}) {
     // `trx` is the caller's lead-locking transaction — the funnel insert's
     // lead_id FK check takes FOR KEY SHARE on the locked lead row, so it
     // MUST ride the same connection or it self-deadlocks behind our own
-    // FOR UPDATE (pre-push P1 r4). Consequence: a funnel SQL failure
-    // aborts the transaction and rolls the whole attribution round back —
-    // the retry lane re-attempts it, attribution and funnel staying
-    // consistent. recordCallPpcAttribution's declined outcomes
-    // (other_source / web_attributed / already_recorded) return without
-    // erroring and roll nothing back.
-    await require('./call-attribution').recordCallPpcAttribution({
+    // FOR UPDATE (pre-push P1 r4).
+    const result = await require('./call-attribution').recordCallPpcAttribution({
       customerId,
       leadId: leadId || null,
       leadSource: 'google_ads',
@@ -699,6 +699,21 @@ async function applyBridge(options = {}) {
       leadDate: match.callLog?.createdAt || null, // date by the actual call, not this run
       dbc: trx,
     });
+    // recordCallPpcAttribution CATCHES its own SQL errors and returns
+    // { reason: 'error' } — but a failed statement has already put this
+    // transaction in aborted state, and PostgreSQL turns the COMMIT into
+    // a silent ROLLBACK without a protocol error. Swallowing it here
+    // would record the match as applied while every write in the round
+    // was rolled back — and the scheduler's irreversible
+    // unclaimed→organic sweep could then run against a paid lead the
+    // bridge believes it attributed (pre-push P1 r5). Throw so the
+    // transaction visibly fails into the caller's skip/error handling;
+    // declined outcomes (other_source / web_attributed /
+    // already_recorded / no_lead) are clean returns and roll nothing
+    // back.
+    if (result?.reason === 'error') {
+      throw new Error(`PPC attribution failed: ${result.error || 'unknown'}`);
+    }
   };
 
   for (const match of preview.matches) {
@@ -741,8 +756,24 @@ async function applyBridge(options = {}) {
                 }
               }
               if (!backfillLeadId) {
+                // The plan fallback resolves on the global connection —
+                // lock and revalidate the selected lead INSIDE this
+                // transaction before it feeds the funnel (pre-push P1 r5):
+                // live-ness and the CURRENT owner are read under the row
+                // lock, so a concurrent soft-delete or customer
+                // reassignment can't produce a stale attribution pair.
                 const lm = await findLeadForCall(match.callLog).catch(() => null);
-                if (lm?.leadId) { backfillLeadId = lm.leadId; backfillCustomerId = lm.customerId || backfillCustomerId; }
+                if (lm?.leadId) {
+                  const lockedFallback = await trx('leads')
+                    .where({ id: lm.leadId })
+                    .whereNull('deleted_at')
+                    .forUpdate()
+                    .first('id', 'customer_id');
+                  if (lockedFallback) {
+                    backfillLeadId = lm.leadId;
+                    backfillCustomerId = lockedFallback.customer_id || lm.customerId || backfillCustomerId;
+                  }
+                }
               }
               await writeCallPpcAttribution(match, backfillCustomerId, backfillLeadId, trx);
             });
