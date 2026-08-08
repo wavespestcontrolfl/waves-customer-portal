@@ -1014,7 +1014,8 @@ class GoogleBusinessService {
     // noticed), and Places stats failing quietly under its catch→warn
     // (every location's _stats froze). Reviewers on a dead feed can never
     // auto-mark as having reviewed, so they keep getting asked — the exact
-    // class the Nicole backfill had to fix by hand. Best-effort: health
+    // class the 2026-08-08 manual review-status backfill fixed by hand.
+    // Best-effort: health
     // reporting must never break the sync itself.
     await this._assessReviewSyncHealth(sources, pulledCounts).catch((err) => {
       logger.warn(`[gbp] review sync health assessment failed: ${err.message}`);
