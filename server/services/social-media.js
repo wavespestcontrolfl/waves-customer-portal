@@ -502,8 +502,11 @@ const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+
 // the verb and the logistics noun is TEMPERED to stop at a drying/re-entry
 // object — "confirms DRYING time at the appointment" is a drying
 // confirmation whose location happens to be the appointment, not an
-// unrelated one (codex #3278 r8).
-const UNRELATED_CONFIRM_RE = /\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))(?:(?!\b(?:dr(?:y|ies|ying)|re-?ent))[^.!?\n]){0,25}\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b(?:[^.!?\n]{0,15}\btim(?:es?|ing)?\b)?/gi;
+// unrelated one (codex #3278 r8). Covers BOTH orders: verb-first
+// ("confirms arrival timing") and passive noun-first ("appointment
+// timing will be confirmed") — the passive form otherwise satisfies
+// the timing…confirm alternative (pre-push r12).
+const UNRELATED_CONFIRM_RE = /\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))(?:(?!\b(?:dr(?:y|ies|ying)|re-?ent))[^.!?\n]){0,25}\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b(?:[^.!?\n]{0,15}\btim(?:es?|ing)?\b)?|\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b[^.!?\n]{0,15}\btim(?:es?|ing)?\b(?:(?!\b(?:dr(?:y|ies|ying)|re-?ent))[^.!?\n]){0,30}\b(?:confirm\w*|advise\w*)/gi;
 const SAFE_FROM_PEST_RE = /\bsafe(?:ly|ty)?\s+from\s+[\w'-]+(?:\s+(?:and|or)\s+[\w'-]+)?/gi;
 // Worker-safety mentions ("technicians ... stay safe while applying") are
 // about the crew's PPE, not a product claim — stripped before testing.

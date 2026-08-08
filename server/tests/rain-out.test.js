@@ -1493,6 +1493,10 @@ describe('rain-out service', () => {
       blocked('Treatment is safe once dry. Your technician confirms the gate code.');
       blocked('Treatment is safe once dry. Your technician confirms the gate code is ready.');
       blocked('Treatment is safe once dry. Your technician will let you know the gate code.');
+      // Passive order can't smuggle logistics past the strip either (r12).
+      blocked('Treatment is safe once dry. Appointment timing will be confirmed by your technician.');
+      expect(sanitize()('Treatment is safe once dry. Timing will be confirmed by your technician.'))
+        .toEqual({ note: 'Treatment is safe once dry. Timing will be confirmed by your technician.' });
       // ...while the object-less and drying-tied forms still exempt.
       expect(sanitize()('Treatment is safe once dry. Your technician will let you know.'))
         .toEqual({ note: 'Treatment is safe once dry. Your technician will let you know.' });

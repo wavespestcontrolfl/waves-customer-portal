@@ -114,8 +114,10 @@ function noteGuardTrips(note) {
 const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)[^.!?\n]{0,30}\b(?:dr(?:y|ies|ying)|re-?ent\w*|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
 // A confirmation about appointment logistics ("confirms arrival timing")
 // is not a drying confirmation — stripped before the confirm test. Gap is
-// tempered so "confirms DRYING time at the appointment" survives.
-const NOTE_UNRELATED_CONFIRM_RE = /\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))(?:(?!\b(?:dr(?:y|ies|ying)|re-?ent))[^.!?\n]){0,25}\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b(?:[^.!?\n]{0,15}\btim(?:es?|ing)?\b)?/gi;
+// tempered so "confirms DRYING time at the appointment" survives. Both
+// orders stripped: verb-first and passive noun-first ("appointment
+// timing will be confirmed").
+const NOTE_UNRELATED_CONFIRM_RE = /\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))(?:(?!\b(?:dr(?:y|ies|ying)|re-?ent))[^.!?\n]){0,25}\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b(?:[^.!?\n]{0,15}\btim(?:es?|ing)?\b)?|\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b[^.!?\n]{0,15}\btim(?:es?|ing)?\b(?:(?!\b(?:dr(?:y|ies|ying)|re-?ent))[^.!?\n]){0,30}\b(?:confirm\w*|advise\w*)/gi;
 // Verbatim mirrors of the canonical strips (social-media.js
 // SAFE_DRY_IDIOM_RE / SAFE_FROM_PEST_RE / WORKER_SAFETY_RE /
 // WELL_WISH_SAFE_RE — keep in sync). The server checks the note with
