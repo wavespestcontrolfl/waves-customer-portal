@@ -91,7 +91,7 @@ describe('hasWorkableLeadSignal voicemail waiver', () => {
 describe('hasWorkableLeadSignal anonymous-caller (no phone) path', () => {
   test('valid spoken email + service intent is workable with no phone at all', () => {
     expect(hasWorkableLeadSignal({
-      extracted: { matched_service: 'pest control', email: 'jeff@example.com' },
+      extracted: { matched_service: 'pest control', email: 'pat@example.com' },
       phone: null,
     })).toBe(true);
   });
@@ -105,14 +105,14 @@ describe('hasWorkableLeadSignal anonymous-caller (no phone) path', () => {
 
   test('a garbled email does not qualify', () => {
     expect(hasWorkableLeadSignal({
-      extracted: { matched_service: 'pest control', email: 'jeff at gmail' },
+      extracted: { matched_service: 'pest control', email: 'pat at example' },
       phone: null,
     })).toBe(false);
   });
 
   test('email without service intent is still not workable', () => {
     expect(hasWorkableLeadSignal({
-      extracted: { email: 'jeff@example.com' },
+      extracted: { email: 'pat@example.com' },
       phone: null,
     })).toBe(false);
   });
@@ -127,7 +127,7 @@ describe('hasWorkableLeadSignal anonymous-caller (no phone) path', () => {
 
   test('a phone-less voicemail with a valid spoken email IS workable (same branch as live calls)', () => {
     expect(hasWorkableLeadSignal({
-      extracted: { matched_service: 'pest control', email: 'jeff@example.com' },
+      extracted: { matched_service: 'pest control', email: 'pat@example.com' },
       phone: null,
       voicemail: true,
     })).toBe(true);
@@ -182,17 +182,17 @@ describe('findReusableCallLead identity keys', () => {
   });
 
   test('no phone: matches by lowercased trimmed email, unclaimed leads only', async () => {
-    const db = makeDb({ id: 'lead-2', first_name: 'Jeff', last_name: 'Brooks' });
+    const db = makeDb({ id: 'lead-2', first_name: 'Pat', last_name: 'Sample' });
     const found = await findReusableCallLead(db, {
       phone: null,
-      email: '  JBrooks00005@Example.com ',
-      firstName: 'Jeff',
-      lastName: 'Brooks',
+      email: '  PSample00005@Example.com ',
+      firstName: 'Pat',
+      lastName: 'Sample',
       workableUnnamedLead: true,
     });
-    expect(found).toEqual({ id: 'lead-2', first_name: 'Jeff', last_name: 'Brooks' });
+    expect(found).toEqual({ id: 'lead-2', first_name: 'Pat', last_name: 'Sample' });
     const raw = db.calls.find(([m]) => m === 'whereRaw');
-    expect(raw[1][1]).toEqual(['jbrooks00005@example.com']);
+    expect(raw[1][1]).toEqual(['psample00005@example.com']);
     expect(db.calls.some(([m, a]) => m === 'where' && a[0] === 'phone')).toBe(false);
     // Weak identity: an email match must never land on a customer-owned lead.
     expect(db.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(true);
@@ -220,32 +220,32 @@ describe('findReusableCallLead identity keys', () => {
     const found = await findReusableCallLead(db, {
       phone: null,
       email: 'shared@example.com',
-      firstName: 'Jeff',
-      lastName: 'Brooks',
+      firstName: 'Pat',
+      lastName: 'Sample',
       workableUnnamedLead: true,
     });
     expect(found).toBeNull();
   });
 
   test('email match with a POSITIVELY corroborated first name is reusable (case-insensitive)', async () => {
-    const sameName = makeDb({ id: 'lead-5', first_name: 'Jeff', last_name: 'Brooks' });
+    const sameName = makeDb({ id: 'lead-5', first_name: 'Pat', last_name: 'Sample' });
     expect(await findReusableCallLead(sameName, {
       phone: null,
       email: 'shared@example.com',
-      firstName: 'jeff',
-      lastName: 'BROOKS',
+      firstName: 'pat',
+      lastName: 'SAMPLE',
       workableUnnamedLead: true,
-    })).toEqual({ id: 'lead-5', first_name: 'Jeff', last_name: 'Brooks' });
+    })).toEqual({ id: 'lead-5', first_name: 'Pat', last_name: 'Sample' });
 
     // A missing last name on either side does not block a first-name match.
-    const noLastName = makeDb({ id: 'lead-5b', first_name: 'Jeff', last_name: null });
+    const noLastName = makeDb({ id: 'lead-5b', first_name: 'Pat', last_name: null });
     expect(await findReusableCallLead(noLastName, {
       phone: null,
       email: 'shared@example.com',
-      firstName: 'Jeff',
-      lastName: 'Brooks',
+      firstName: 'Pat',
+      lastName: 'Sample',
       workableUnnamedLead: true,
-    })).toEqual({ id: 'lead-5b', first_name: 'Jeff', last_name: null });
+    })).toEqual({ id: 'lead-5b', first_name: 'Pat', last_name: null });
   });
 
   test('email match WITHOUT positive name corroboration forces a fresh lead — missing names never merge', async () => {
@@ -256,12 +256,12 @@ describe('findReusableCallLead identity keys', () => {
     expect(await findReusableCallLead(namelessCandidate, {
       phone: null,
       email: 'shared@example.com',
-      firstName: 'Jeff',
-      lastName: 'Brooks',
+      firstName: 'Pat',
+      lastName: 'Sample',
       workableUnnamedLead: true,
     })).toBeNull();
 
-    const namelessCaller = makeDb({ id: 'lead-6b', first_name: 'Jeff', last_name: 'Brooks' });
+    const namelessCaller = makeDb({ id: 'lead-6b', first_name: 'Pat', last_name: 'Sample' });
     expect(await findReusableCallLead(namelessCaller, {
       phone: null,
       email: 'shared@example.com',
@@ -273,19 +273,19 @@ describe('findReusableCallLead identity keys', () => {
 
   test('email match scans past a housemate\'s newer lead to the caller\'s own row', async () => {
     // Shared inbox with two active unclaimed leads: newest belongs to Maria,
-    // older one to Jeff. Jeff calling back must reuse HIS row, not mint a
+    // older one to Pat. Pat calling back must reuse HIS row, not mint a
     // duplicate because Maria's happens to be newest.
     const db = makeDb([
       { id: 'lead-maria', first_name: 'Maria', last_name: 'Lopez' },
-      { id: 'lead-jeff', first_name: 'Jeff', last_name: 'Brooks' },
+      { id: 'lead-pat', first_name: 'Pat', last_name: 'Sample' },
     ]);
     expect(await findReusableCallLead(db, {
       phone: null,
       email: 'shared@example.com',
-      firstName: 'Jeff',
-      lastName: 'Brooks',
+      firstName: 'Pat',
+      lastName: 'Sample',
       workableUnnamedLead: true,
-    })).toEqual({ id: 'lead-jeff', first_name: 'Jeff', last_name: 'Brooks' });
+    })).toEqual({ id: 'lead-pat', first_name: 'Pat', last_name: 'Sample' });
   });
 
   test('a retry of the SAME call reuses its own lead by call SID — no name corroboration needed', async () => {
@@ -310,7 +310,7 @@ describe('findReusableCallLead identity keys', () => {
     // Attempt 1 reused an older email-matched lead (different sid) and
     // stamped call_log.metadata.lead_id. The retry must treat that stamp as
     // same-call identity even though contact fields may have changed.
-    const own = { id: 'lead-stamped', first_name: 'Jeff', last_name: 'Brooks', twilio_call_sid: 'CA-original-call' };
+    const own = { id: 'lead-stamped', first_name: 'Pat', last_name: 'Sample', twilio_call_sid: 'CA-original-call' };
     const db = makeDb(own);
     expect(await findReusableCallLead(db, {
       phone: null,
@@ -327,8 +327,8 @@ describe('findReusableCallLead identity keys', () => {
     const db = makeDb({ id: 'lead-7', first_name: 'Maria', last_name: 'Lopez' });
     expect(await findReusableCallLead(db, {
       phone: '+19415550101',
-      firstName: 'Jeff',
-      lastName: 'Brooks',
+      firstName: 'Pat',
+      lastName: 'Sample',
       workableUnnamedLead: true,
     })).toEqual({ id: 'lead-7', first_name: 'Maria', last_name: 'Lopez' });
   });
@@ -590,7 +590,7 @@ describe('reconcileConditionalLeadFieldsUnderLock — conditional re-decision un
       { extracted_data: stalePayload, is_qualified: true },
       {
         extracted_data: JSON.stringify({ needs_confirmation: ['address_unverified'] }),
-        first_name: 'Jeff', last_name: 'Brooks', address: '1 Palm Ct', email: '',
+        first_name: 'Pat', last_name: 'Sample', address: '1 Palm Ct', email: '',
       },
       { bridgeNeedsConfirmation: ['email_unverified'], leadQuality: 'hot' },
     );
@@ -607,7 +607,7 @@ describe('reconcileConditionalLeadFieldsUnderLock — conditional re-decision un
   test('this pass\'s effective fills count toward qualification', () => {
     const { updates } = reconcileConditionalLeadFieldsUnderLock(
       { email: 'j@example.com', extracted_data: JSON.stringify({}), is_qualified: false },
-      { first_name: 'Jeff', last_name: 'Brooks', address: '1 Palm Ct', email: null },
+      { first_name: 'Pat', last_name: 'Sample', address: '1 Palm Ct', email: null },
       { bridgeNeedsConfirmation: [], leadQuality: 'warm' },
     );
     expect(updates.is_qualified).toBe(true);
@@ -630,26 +630,26 @@ describe('reaffirmedFilledLeadFields — successor ownership of restated fills',
     // claim this call's written ledger never owned it — and a predecessor
     // later reprocessed as spam would restore it to null.
     const out = reaffirmedFilledLeadFields(
-      { email: 'JBrooks00005@Gmail.com ', first_name: 'Jeff' },
-      { email: 'jbrooks00005@gmail.com', first_name: 'Jeff' },
+      { email: 'PSample00005@Example.com ', first_name: 'Pat' },
+      { email: 'psample00005@example.com', first_name: 'Pat' },
     );
-    expect(out).toEqual({ email: 'jbrooks00005@gmail.com', first_name: 'Jeff' });
+    expect(out).toEqual({ email: 'psample00005@example.com', first_name: 'Pat' });
   });
 
   test('a DIFFERING supplied value is not a reaffirmation and claims nothing', () => {
     const out = reaffirmedFilledLeadFields(
       { email: 'other@example.com' },
-      { email: 'jbrooks00005@gmail.com' },
+      { email: 'psample00005@example.com' },
     );
     expect(out).toEqual({});
   });
 
   test('phone compares on the last 10 digits across formats', () => {
     const out = reaffirmedFilledLeadFields(
-      { phone: '(941) 555-0134' },
-      { phone: '+19415550134' },
+      { phone: '(202) 555-0134' },
+      { phone: '+12025550134' },
     );
-    expect(out).toEqual({ phone: '+19415550134' });
+    expect(out).toEqual({ phone: '+12025550134' });
   });
 
   test('empty lead values and unsupplied fields claim nothing', () => {
@@ -667,17 +667,17 @@ describe('reaffirmedFilledLeadFields — sequential restatement (raw extraction 
     // would have omitted email entirely because `current` already carried
     // it, which is the normal sequential restatement the claim exists for.
     const rawExtractionShaped = {
-      phone: null, first_name: 'jeff', last_name: 'brooks',
-      email: 'jbrooks00005@gmail.com', address: undefined, city: undefined, zip: undefined,
+      phone: null, first_name: 'pat', last_name: 'sample',
+      email: 'psample00005@example.com', address: undefined, city: undefined, zip: undefined,
     };
     const out = reaffirmedFilledLeadFields(rawExtractionShaped, {
-      email: 'JBrooks00005@gmail.com', first_name: 'Jeff', last_name: 'Brooks',
-      phone: '+19415550134', address: '6903 Winners Cir',
+      email: 'PSample00005@example.com', first_name: 'Pat', last_name: 'Sample',
+      phone: '+12025550134', address: '123 Sample St',
     });
     expect(out).toEqual({
-      email: 'JBrooks00005@gmail.com',
-      first_name: 'Jeff',
-      last_name: 'Brooks',
+      email: 'PSample00005@example.com',
+      first_name: 'Pat',
+      last_name: 'Sample',
     });
     // null/undefined supplied values (phone, address) claim nothing even
     // though the lead carries values there.

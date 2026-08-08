@@ -8297,24 +8297,29 @@ const CallRecordingProcessor = {
             // the pipeline surfaces the owed quote (agent said "we'll send it
             // this afternoon"). Before 5 PM ET → today 5 PM; after → tomorrow
             // 10 AM. Never moves an EARLIER existing follow-up later.
-            if (callQuotePromised) {
+            // Computed as a standalone value (not just assigned inline) so
+            // the chronological-restamp settle path can RE-SUPPLY it after
+            // the rollback empties the row (codex P1 r6).
+            const quotePromisedDue = callQuotePromised ? (() => {
               try {
                 const nowET = new Date();
-                const todayFive = parseETDateTime(`${etDateString(nowET)}T17:00`);
-                let quoteDue = todayFive;
+                let quoteDue = parseETDateTime(`${etDateString(nowET)}T17:00`);
                 if (!(quoteDue instanceof Date) || isNaN(quoteDue.getTime()) || quoteDue <= nowET) {
                   const tomorrow = new Date(nowET.getTime() + 24 * 60 * 60 * 1000);
                   quoteDue = parseETDateTime(`${etDateString(tomorrow)}T10:00`);
                 }
-                const existingFollowUp = current?.next_follow_up_at ? new Date(current.next_follow_up_at) : null;
-                // Only PULL IN the follow-up (or set one where none exists) —
-                // an existing earlier or already-overdue follow-up stays put.
-                if (quoteDue instanceof Date && !isNaN(quoteDue.getTime())
-                    && (!existingFollowUp || isNaN(existingFollowUp.getTime()) || existingFollowUp > quoteDue)) {
-                  leadUpdates.next_follow_up_at = quoteDue;
-                }
+                return (quoteDue instanceof Date && !isNaN(quoteDue.getTime())) ? quoteDue : null;
               } catch (dueErr) {
                 logger.warn(`[call-proc] quote-due follow-up stamp skipped: ${dueErr.message}`);
+                return null;
+              }
+            })() : null;
+            if (quotePromisedDue) {
+              const existingFollowUp = current?.next_follow_up_at ? new Date(current.next_follow_up_at) : null;
+              // Only PULL IN the follow-up (or set one where none exists) —
+              // an existing earlier or already-overdue follow-up stays put.
+              if (!existingFollowUp || isNaN(existingFollowUp.getTime()) || existingFollowUp > quotePromisedDue) {
+                leadUpdates.next_follow_up_at = quotePromisedDue;
               }
             }
             leadUpdates.updated_at = new Date();
@@ -8482,6 +8487,42 @@ const CallRecordingProcessor = {
                       throw lost;
                     }
                     lockedLead = await lockLeadRow();
+                    // RE-SUPPLY the payload keys the pre-settle read hid
+                    // (codex P1 r6): leadUpdates was built against
+                    // `current`, where THIS call's own first-run values sat
+                    // in the fill-only and fill-if-empty columns — the
+                    // settle just rolled them back to baseline, and the
+                    // drop/reconcile helpers below can only REMOVE keys, so
+                    // the accepted reprocessing would commit with its own
+                    // extraction erased. Add each supply back when absent;
+                    // the under-lock deciders (dropFilledLeadColumns + the
+                    // conditional reconcile) then gate every one of them
+                    // against the POST-SETTLE row, exactly as if the
+                    // payload had been built there.
+                    const resupply = (f, v) => {
+                      if (v && !Object.prototype.hasOwnProperty.call(leadUpdates, f)) leadUpdates[f] = v;
+                    };
+                    resupply('phone', phone);
+                    resupply('first_name', extracted.first_name ? capitalizeName(extracted.first_name) : null);
+                    resupply('last_name', extracted.last_name ? capitalizeName(extracted.last_name) : null);
+                    resupply('email', extracted.email);
+                    resupply('address', extracted.address_line1);
+                    resupply('city', extracted.city);
+                    resupply('zip', extracted.zip);
+                    if (serviceInterestLabel && !Object.prototype.hasOwnProperty.call(leadUpdates, 'service_interest')) {
+                      leadUpdates.service_interest = serviceInterestLabel;
+                      persistedServiceInterestLabel = serviceInterestLabel;
+                      persistedServiceInterestExtras = serviceInterestLabel === matchedForCompose
+                        ? null
+                        : serviceInterestLabel.slice(String(matchedForCompose || '').length);
+                    }
+                    if (extracted.lead_quality && !Object.prototype.hasOwnProperty.call(leadUpdates, 'urgency')) {
+                      leadUpdates.urgency = 'normal';
+                    }
+                    if (existingLead && !Object.prototype.hasOwnProperty.call(leadUpdates, 'status')) {
+                      leadUpdates.status = 'new';
+                    }
+                    resupply('next_follow_up_at', quotePromisedDue);
                   }
                 }
                 // Fill-only columns are re-decided against the LOCKED row
