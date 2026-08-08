@@ -2336,9 +2336,33 @@ const STAMPED_LEAD_RESTORE_FIELDS = [
   'is_qualified', 'status', 'next_follow_up_at', 'customer_id',
 ];
 
+// Key-sorted deep copy so two JSON values that are structurally equal
+// serialize to the SAME string. The prior side of a ledger snapshot comes
+// back through PostgreSQL's JSONB (which re-keys objects), while the
+// written side is this process's own stringify — comparing the raw strings
+// with === skipped successor re-parenting on identical values (pre-push P1
+// r3), and a later rejection then restored the earlier rejected call's
+// extraction. The SQL CAS casts to ::jsonb and never had the problem;
+// canonicalizing at snapshot time makes the JS-side comparisons match it.
+function canonicalJsonValue(v) {
+  if (Array.isArray(v)) return v.map(canonicalJsonValue);
+  if (v && typeof v === 'object') {
+    const out = {};
+    for (const k of Object.keys(v).sort()) out[k] = canonicalJsonValue(v[k]);
+    return out;
+  }
+  return v;
+}
+
 function serializeStampedLeadValue(field, v) {
   if (v instanceof Date) return v.toISOString();
-  if (field === 'extracted_data' && v != null && typeof v !== 'string') return JSON.stringify(v);
+  if (field === 'extracted_data' && v != null) {
+    try {
+      return JSON.stringify(canonicalJsonValue(typeof v === 'string' ? JSON.parse(v) : v));
+    } catch {
+      return typeof v === 'string' ? v : JSON.stringify(v);
+    }
+  }
   return v ?? null;
 }
 
@@ -2521,12 +2545,12 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
     }
     const priorState = md.lead_prior_state && typeof md.lead_prior_state === 'object' ? md.lead_prior_state : null;
     const writtenState = md.lead_written_state && typeof md.lead_written_state === 'object' ? md.lead_written_state : null;
-    const ownStampedAt = typeof md.lead_stamped_at === 'string' ? md.lead_stamped_at : null;
+    const ownSeq = Number.isFinite(Number(md.lead_stamp_seq)) ? Number(md.lead_stamp_seq) : null;
     const cleared = await trx('call_log')
       .where({ id: call.id })
       .where('processing_token', procToken)
       .update({
-        metadata: db.raw("(((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state') - 'lead_stamped_at'"),
+        metadata: db.raw("(((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state') - 'lead_stamp_seq'"),
         updated_at: new Date(),
       });
     if (!cleared) return false;
@@ -2551,11 +2575,15 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
           try { sm = typeof s.metadata === 'string' ? JSON.parse(s.metadata) : (s.metadata || {}); } catch { sm = null; }
           return { id: s.id, md: sm };
         });
-      // "Later" uses the same lead_stamped_at ordering the re-parent loop
-      // does; a missing marker on either side skips conservatively.
+      // "Later" uses the same lead_stamp_seq ordering the re-parent loop
+      // does — a per-lead monotonic integer allocated under the lead lock,
+      // NOT a wall-clock timestamp (pre-push P1 r3: millisecond app clocks
+      // collide under concurrency and skew across pods, and a misordered
+      // marker preserves or resurrects the wrong call's values). A missing
+      // marker on either side skips conservatively.
       const laterSnapshots = successors.filter((s) => {
-        const sStampedAt = typeof s.md?.lead_stamped_at === 'string' ? s.md.lead_stamped_at : null;
-        return ownStampedAt && sStampedAt && sStampedAt > ownStampedAt;
+        const sSeq = Number.isFinite(Number(s.md?.lead_stamp_seq)) ? Number(s.md.lead_stamp_seq) : null;
+        return ownSeq !== null && sSeq !== null && sSeq > ownSeq;
       });
       const ownedByLater = new Set();
       for (const s of laterSnapshots) {
@@ -8379,13 +8407,13 @@ const CallRecordingProcessor = {
                 try {
                   freshMd = typeof freshCall?.metadata === 'string' ? JSON.parse(freshCall.metadata) : (freshCall?.metadata || {});
                 } catch { freshMd = {}; }
-                const ownStampedAt = (freshMd?.lead_id && String(freshMd.lead_id) === String(leadId)
-                  && typeof freshMd.lead_stamped_at === 'string') ? freshMd.lead_stamped_at : null;
-                if (ownStampedAt) {
+                const ownSeq = (freshMd?.lead_id && String(freshMd.lead_id) === String(leadId)
+                  && Number.isFinite(Number(freshMd.lead_stamp_seq))) ? Number(freshMd.lead_stamp_seq) : null;
+                if (ownSeq !== null) {
                   const interveningStamp = await trx('call_log')
                     .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
                     .whereNot('id', call.id)
-                    .whereRaw("metadata->>'lead_stamped_at' > ?", [ownStampedAt])
+                    .whereRaw("COALESCE((metadata->>'lead_stamp_seq')::bigint, 0) > ?", [ownSeq])
                     .first('id');
                   if (interveningStamp) {
                     const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx);
@@ -8438,14 +8466,24 @@ const CallRecordingProcessor = {
                 const writtenExpr = `CASE WHEN ${sameLead}`
                   + " THEN COALESCE(metadata->'lead_written_state', '{}'::jsonb) || ?::jsonb"
                   + ' ELSE ?::jsonb END';
-                const stampedAtExpr = `CASE WHEN ${sameLead}`
-                  + " THEN COALESCE(metadata->'lead_stamped_at', ?::jsonb) ELSE ?::jsonb END";
-                const nowIso = JSON.stringify(new Date().toISOString());
+                const seqExpr = `CASE WHEN ${sameLead}`
+                  + " THEN COALESCE(metadata->'lead_stamp_seq', ?::jsonb) ELSE ?::jsonb END";
+                // The ordering marker is a PER-LEAD MONOTONIC INTEGER, not a
+                // wall-clock timestamp (pre-push P1 r3: millisecond app
+                // clocks collide under concurrency and skew across pods,
+                // and the strict > comparisons then misorder rejection
+                // re-parenting). Allocation is race-free because every
+                // stamper holds this lead's row lock.
+                const seqRow = await trx('call_log')
+                  .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
+                  .select(db.raw("COALESCE(MAX((metadata->>'lead_stamp_seq')::bigint), 0) + 1 AS next_seq"))
+                  .first();
+                const nextSeq = JSON.stringify(Number(seqRow?.next_seq || 1));
                 const stamped = await trx('call_log')
                   .where({ id: call.id })
                   .where('processing_token', procToken)
                   .update({
-                    // lead_stamped_at is the ORDERING marker for rejection
+                    // lead_stamp_seq is the ORDERING marker for rejection
                     // re-parenting (only snapshots stamped AFTER this call's
                     // may be re-parented — a predecessor's baseline must
                     // never be rewritten; codex P2 r13). Preserved on a
@@ -8456,12 +8494,12 @@ const CallRecordingProcessor = {
                       "jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)"
                       + `, '{lead_prior_state}', ${priorExpr}, true)`
                       + `, '{lead_written_state}', ${writtenExpr}, true)`
-                      + `, '{lead_stamped_at}', ${stampedAtExpr}, true)`,
+                      + `, '{lead_stamp_seq}', ${seqExpr}, true)`,
                       [
                         JSON.stringify(String(leadId)),
                         String(leadId), JSON.stringify(prior), JSON.stringify(prior),
                         String(leadId), JSON.stringify(written), JSON.stringify(written),
-                        String(leadId), nowIso, nowIso,
+                        String(leadId), nextSeq, nextSeq,
                       ],
                     ),
                     updated_at: new Date(),
