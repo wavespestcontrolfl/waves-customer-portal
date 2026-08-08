@@ -64,8 +64,16 @@ const REGRESSION_PAUSE_THRESHOLD = 3;
 // UPDATE an existing slug"). Routing on the action type would take a page with
 // a genuine 2,000-impression baseline, ignore it, and score ordinary existing
 // traffic as a successful launch — even if the page actually declined.
-// An absent baseline, by contrast, IS the precondition: it is exactly the
-// state in which no difference can be computed.
+// The routing predicate is ZERO baseline presence — no impressions, no clicks,
+// no position in the whole 28-day baseline window. Not "thin": a page with 29
+// baseline impressions HAS a presence, and grading it on absolute window
+// traffic could call a real decline (pos 5 -> 25, clicks 3 -> 1) an
+// improvement while clearing its lift and disabling regression pausing. Thin
+// baselines stay insufficient_data, which is the honest answer for them.
+//
+// Residual, and acceptable: a page that technically pre-existed but had
+// literally no search presence routes here too. For that page "did it earn
+// anything?" is the right question regardless of when the file was created.
 const LAUNCH_MIN_IMPRESSIONS = 30;  // same "did it register at all" floor
 const LAUNCH_RANKED_POSITION = 20;  // ranking somewhere a human might see it
 
@@ -93,6 +101,17 @@ function aeoVerdict({ observedDays, wavesHitDays, minObservations = AEO_MIN_OBSE
  * control-adjusted noise question the diff regime asks — a launch has no
  * control to adjust against, so borrowing MIN_CONFIDENCE would be meaningless.
  */
+/**
+ * Pure: did this page have ANY search presence in the baseline window?
+ * Zero on every axis is the only state that makes a difference impossible.
+ */
+function isEmptyBaseline(baseline) {
+  const impressions = Number(baseline?.impressions) || 0;
+  const clicks = Number(baseline?.clicks) || 0;
+  const position = Number(baseline?.position) || 0;
+  return impressions === 0 && clicks === 0 && position === 0;
+}
+
 function launchVerdict({ window: win } = {}) {
   const impressions = Number(win?.impressions) || 0;
   const clicks = Number(win?.clicks) || 0;
@@ -148,10 +167,10 @@ function confidenceScore({ baselineImpressions, windowImpressions, controlCount 
  */
 function computeVerdict({ baseline, window, controlDeltas = [] }) {
   const baselineImpr = Number(baseline?.impressions) || 0;
-  // No usable baseline → nothing to difference against → grade the page on
-  // what it earned. See the LAUNCH_* block above for why this keys on the data
-  // rather than on action_type.
-  if (baselineImpr < LAUNCH_MIN_IMPRESSIONS) return launchVerdict({ window });
+  // ZERO baseline presence → the page had nothing to difference against →
+  // grade it on what it earned. Anything with a presence, however thin, falls
+  // through to the diff regime (and its own floors). See the LAUNCH_* block.
+  if (isEmptyBaseline(baseline)) return launchVerdict({ window });
   const windowImpr = Number(window?.impressions) || 0;
   const controlCount = controlDeltas.length;
 
@@ -165,10 +184,10 @@ function computeVerdict({ baseline, window, controlDeltas = [] }) {
   const confidence = confidenceScore({ baselineImpressions: baselineImpr, windowImpressions: windowImpr, controlCount });
 
   let verdict;
-  // No baseline check here: the launch-regime routing above already returned
-  // for every row under the floor, so `baselineImpr < MIN_IMPRESSIONS` is
-  // unreachable at this point. Leaving it in would read as a live guard.
-  if (windowImpr < MIN_IMPRESSIONS || controlCount < 1) {
+  // The baseline floor is live again: routing above only diverts rows with
+  // ZERO presence, so a thin-but-present baseline still lands here and must
+  // still report insufficient_data rather than being graded.
+  if (baselineImpr < MIN_IMPRESSIONS || windowImpr < MIN_IMPRESSIONS || controlCount < 1) {
     verdict = 'insufficient_data';
   } else if ((liftPos >= LIFT_POSITION_IMPROVED || liftClicksPct >= LIFT_CLICKS_IMPROVED_PCT) && confidence >= MIN_CONFIDENCE) {
     verdict = 'improved';
@@ -737,6 +756,7 @@ module.exports = {
   aggregatePageMetrics,
   selectControlPages,
   launchVerdict,
+  isEmptyBaseline,
   _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, normalizeQueryCohort, queryLift, domainFromUrl },
   THRESHOLDS: {
     BASELINE_DAYS, DEPLOY_LAG_DAYS, MIN_IMPRESSIONS, MIN_CONFIDENCE,

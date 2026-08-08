@@ -186,12 +186,34 @@ describe('launchVerdict — net-new pages, no baseline to diff against', () => {
 });
 
 describe('computeVerdict routing — chosen by the DATA, never by action_type', () => {
-  test('no usable baseline → launch regime, so a page that earned traffic is graded', () => {
+  test('ZERO baseline presence → launch regime, so a page that earned traffic is graded', () => {
     expect(computeVerdict({
       baseline: { impressions: 0, clicks: 0, position: 0 },
       window: { impressions: 900, clicks: 20, position: 6 },
       controlDeltas: [],
     }).verdict).toBe('improved');
+  });
+
+  test('a THIN but present baseline is NOT a launch — a decline there must not read as improved', () => {
+    // 29 impressions is thin, not absent. Grading it on absolute window
+    // traffic would call this decline (pos 5 -> 25, clicks 3 -> 1) an
+    // improvement, clear its lift, and disable regression pausing for it.
+    const r = computeVerdict({
+      baseline: { impressions: 29, clicks: 3, position: 5 },
+      window: { impressions: 40, clicks: 1, position: 25 },
+      controlDeltas: [{ position_delta: 0, clicks_pct: 0 }],
+    });
+    expect(r.verdict).toBe('insufficient_data');
+    expect(r.verdict).not.toBe('improved');
+  });
+
+  test('isEmptyBaseline is zero on EVERY axis, not just impressions', () => {
+    const { isEmptyBaseline } = tracker;
+    expect(isEmptyBaseline({ impressions: 0, clicks: 0, position: 0 })).toBe(true);
+    expect(isEmptyBaseline({})).toBe(true);
+    expect(isEmptyBaseline({ impressions: 0, clicks: 0, position: 18 })).toBe(false);
+    expect(isEmptyBaseline({ impressions: 0, clicks: 2, position: 0 })).toBe(false);
+    expect(isEmptyBaseline({ impressions: 5, clicks: 0, position: 0 })).toBe(false);
   });
 
   test('a page WITH a real baseline is never treated as a launch, even if it declined', () => {
@@ -262,24 +284,10 @@ describe('computeVerdict (diff-in-diff)', () => {
     expect(r.estimated_lift_position).toBeLessThanOrEqual(-3);
   });
 
-  test('thin baseline routes OUT of the diff regime — it cannot be differenced', () => {
-    // Previously insufficient_data. A 12-impression baseline cannot support a
-    // difference, so this now goes to the launch regime and is graded on what
-    // the page earned: 20 impressions with clicks is real but far too thin to
-    // call a win, hence neutral. "We measured it and it is not moving" is a
-    // more honest report than "we could not measure it".
+  test('thin baseline impressions → insufficient_data (unchanged: thin is not absent)', () => {
     const r = computeVerdict({
       baseline: { position: 15, clicks: 2, impressions: 12 },
       window: { position: 9, clicks: 5, impressions: 20 },
-      controlDeltas: ctrlFlat,
-    });
-    expect(r.verdict).toBe('neutral');
-  });
-
-  test('a thin baseline with a genuinely dead window is still insufficient_data', () => {
-    const r = computeVerdict({
-      baseline: { position: 15, clicks: 0, impressions: 5 },
-      window: { position: null, clicks: 0, impressions: 3 },
       controlDeltas: ctrlFlat,
     });
     expect(r.verdict).toBe('insufficient_data');

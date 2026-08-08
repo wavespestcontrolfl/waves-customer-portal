@@ -5,13 +5,20 @@
  * NULL, so without this every optimization measured before the regime landed
  * keeps its insufficient_data verdict forever — including (at time of writing)
  * 24 pages that demonstrably earned traffic, one of them 8,283 impressions and
- * 75 clicks. The rollup would report nothing until brand-new pages aged 21
- * days, which is exactly the blindness the regime change exists to end.
+ * 75 clicks.
+ *
+ * SCOPE, stated honestly: this fixes the admin impact view and stops the
+ * blind-loop alert firing on data that IS gradeable. It does NOT retro-send a
+ * weekly rollup for these rows — the digest watermarks on
+ * COALESCE(checked_21d_at, checked_14d_at), and those timestamps are the real
+ * measurement times, which this migration will not falsify to force an email.
+ * The rollup picks up rows measured from here on.
  *
  * Pure recomputation from metrics ALREADY stored on the row — no GSC re-query,
  * no measurement re-run. The cohort is chosen the same way the runtime chooses
- * the regime: rows with NO USABLE BASELINE (< 30 impressions), which is the
- * precondition that makes a difference impossible to compute. Deliberately NOT
+ * the regime: rows with ZERO baseline presence — no impressions, no clicks, no
+ * position — which is the only state that makes a difference impossible. A
+ * thin-but-present baseline is NOT swept in; it stays insufficient_data. Deliberately NOT
  * action_type — new_supporting_blog can update an existing slug, so it would
  * sweep in pages that have a real baseline and score their ordinary traffic as
  * a launch. Rows with a baseline are left alone: diff-in-diff is right there.
@@ -35,7 +42,9 @@ exports.up = async function up(knex) {
              ) AS m
       FROM content_optimization_impact i
       WHERE i.verdict = 'insufficient_data'
-        AND COALESCE(i.baseline_impressions, 0) < 30
+        AND COALESCE(i.baseline_impressions, 0) = 0
+        AND COALESCE(i.baseline_clicks, 0) = 0
+        AND COALESCE(i.baseline_position, 0) = 0
         AND (i.checked_14d_at IS NOT NULL OR i.checked_21d_at IS NOT NULL)
     ), scored AS (
       SELECT id,
