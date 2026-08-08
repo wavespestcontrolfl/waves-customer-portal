@@ -50,6 +50,11 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
   // TIGHTENS the guard, and spoke seeds carry it outside the intercept
   // bucket.
   const faqBlockedTopic = brief?.voice_constraints?.operator_brief?.faq_blocked_topic || null;
+  // Same rationale for family rows: specialty→pest canonicalization hides
+  // the specific blocked topic in gsc_signal (Codex r25 on #3258; DROPPED
+  // in the extraction and restored by the PR r11 audit — without it a
+  // bed-bug family draft passes FAQ_BLOCKED_SERVICE as coarse 'pest').
+  const specialtyTopic = brief?.gsc_signal?.specialty_topic || null;
   const baseService = opp?.service || brief.service || null;
   // Brief-mandated internal links are binding writer instructions (the
   // prompt calls internal_links_to_add a checklist), so they are allowed on
@@ -68,7 +73,9 @@ function deriveSyncGuardrailOptions(opp = {}, brief = {}) {
   ];
   const isRefresh = brief.action_type === 'refresh_existing_page';
   return {
-    service: faqBlockedTopic ? [baseService, faqBlockedTopic].filter(Boolean) : baseService,
+    service: (faqBlockedTopic || specialtyTopic)
+      ? [baseService, faqBlockedTopic, specialtyTopic].filter(Boolean)
+      : baseService,
     primaryKeyword: brief.target_keyword || null,
     domains: spokeDomains.length ? spokeDomains : null,
     operatorFaqException,

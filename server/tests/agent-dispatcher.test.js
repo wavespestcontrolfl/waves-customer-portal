@@ -217,6 +217,22 @@ describe('emit_draft tool sink', () => {
   });
 });
 
+describe('deriveSyncGuardrailOptions service derivation', () => {
+  const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+
+  test('gsc_signal.specialty_topic folds into service — family rows keep their blocked topic (Codex #3258 r25, restored PR r11 audit)', () => {
+    const specialty = deriveSyncGuardrailOptions({ service: 'pest' }, { gsc_signal: { specialty_topic: 'bed-bug' } });
+    expect(specialty.service).toEqual(['pest', 'bed-bug']);
+    const both = deriveSyncGuardrailOptions(
+      { service: 'pest' },
+      { gsc_signal: { specialty_topic: 'bed-bug' }, voice_constraints: { operator_brief: { faq_blocked_topic: 'german-roach' } } },
+    );
+    expect(both.service).toEqual(['pest', 'german-roach', 'bed-bug']);
+    const plain = deriveSyncGuardrailOptions({ service: 'pest' }, {});
+    expect(plain.service).toBe('pest');
+  });
+});
+
 describe('emit_draft in-loop self-lint (W1)', () => {
   const { registerSessionLint } = tools;
   const CLEAN_BODY = 'Ant trails around Sarasota patios usually start with moisture. Follow the label re-entry directions after any professional application.';
