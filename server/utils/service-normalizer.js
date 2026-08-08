@@ -120,7 +120,12 @@ function detectServiceCategory(serviceType) {
   if (treeShrubToken && !lawnSurfaceToken && !s.includes('mosquito') && !s.includes('termite') && !s.includes('wdo')) return 'tree_shrub';
   if (s.includes('lawn') || s.includes('turf') || s.includes('fertil') || s.includes('weed') || s.includes('dethatch') || s.includes('top dress') || s.includes('aerat') || s.includes('sod')) return 'lawn';
   if (s.includes('mosquito')) return 'mosquito';
-  if (s.includes('termite') || s.includes('wdo') || s.includes('bora') || s.includes('trelona')) return 'termite';
+  // 'foam' is a termite token: the drill-and-foam services ("Foam Drill",
+  // "Recurring Foam Treatment (Quarterly)") are the only foam work Waves
+  // sells, and neither name carries the word "termite" — without this they
+  // fell through to 'pest' and drew the blue pest block on the calendar
+  // instead of the amber termite one.
+  if (s.includes('termite') || s.includes('wdo') || s.includes('bora') || s.includes('trelona') || s.includes('foam')) return 'termite';
   if (s.includes('tree') || s.includes('shrub') || s.includes('palm') || s.includes('arborjet') || s.includes('ornamental')) return 'tree_shrub';
   if (s.includes('rodent') || s.includes('rat') || s.includes('mouse') || s.includes('mole')) return 'rodent';
   if (s.includes('callback') || s.includes('re-treat')) return 'callback';

@@ -33,7 +33,10 @@ export function detectServiceCategory(serviceType) {
   if (treeToken && !lawnSurfaceToken && !/mosquito|termite|wdo/.test(s)) return 'tree';
   if (/lawn|turf|fertil|weed|dethatch|aerat|sod|top\s*dress/.test(s)) return 'lawn';
   if (/mosquito/.test(s)) return 'mosquito';
-  if (/termite|wdo|bora|termidor|trelona/.test(s)) return 'termite';
+  // 'foam' is a termite token: "Foam Drill" / "Recurring Foam Treatment
+  // (Quarterly)" are drill-and-foam termite work and carry no "termite"
+  // token of their own (mirrors the server normalizer).
+  if (/termite|wdo|bora|termidor|trelona|foam/.test(s)) return 'termite';
   if (/rodent|rat|mouse|mice/.test(s)) return 'rodent';
   if (/tree|shrub|palm|arborjet|ornamental/.test(s)) return 'tree';
   if (/inspect|assessment|consultation|estimat/.test(s)) return 'inspection';

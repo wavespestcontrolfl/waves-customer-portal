@@ -199,7 +199,7 @@ function detectServiceLine(serviceType) {
     && !/\b(lawn|turf|grass|sod|dethatch|aerat)\b/.test(text)) return 'tree_shrub';
   if (/\b(lawn|turf|grass|weed|fertil|dethatch|top\s*dress|aerat|sod)\b/.test(text)) return 'lawn';
   if (text.includes('mosquito')) return 'mosquito';
-  if (/\b(termite|wdo|bora|trelona)\b/.test(text)) return 'termite';
+  if (/\b(termite|wdo|bora|trelona|foam)\b/.test(text)) return 'termite';
   if (/\b(rodent|rat|rats|mouse|mice|mole)\b/.test(text)) return 'rodent';
   if (/\b(tree|shrub|arborjet)\b/.test(text)) return 'tree_shrub';
   return 'pest';
