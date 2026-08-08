@@ -367,41 +367,45 @@ export default function CommercialProposalPage() {
     },
   });
 
-  // Returns true on success so download/send can persist edits first.
+  // Returns true ONLY when the persisted proposal equals the on-screen
+  // state — download/send/Mark-won gate on this, and a true returned while
+  // newer keystrokes sit unsaved would let them act on a stale snapshot
+  // (codex #3297 r5 P0). Mid-save edits re-save in a bounded loop.
   const save = async () => {
-    const payload = buildPayload();
-    if (payload.proposal.buildings.length === 0) {
-      setError('Add at least one building with a described line item.');
-      return false;
-    }
     setSaving(true);
     setError(null);
-    // Applying the normalized reload below is only safe if no keystroke
-    // landed while the round-trip was in flight — otherwise it would
-    // silently discard those edits (codex #3297 r5).
-    const genAtSave = editGenRef.current;
     try {
-      await adminFetch(`/admin/estimates/${estimateId}/proposal`, {
-        method: 'PUT',
-        body: JSON.stringify(payload),
-      });
-      // Swap in the NORMALIZED state before download/send can proceed — the
-      // operator must see exactly what persisted (the server clamps string
-      // lengths as a safety net; approving un-normalized local state could
-      // send a document that differs from the screen — codex #3297 r2).
-      // Direct fetch, NOT reload(): reload swallows its error into the
-      // page-level banner and resolves, which would let save() return true
-      // without the normalized swap (codex #3297 r3).
-      const fresh = await adminFetch(`/admin/estimates/${estimateId}/proposal`);
-      if (editGenRef.current === genAtSave) {
-        applyLoaded(fresh);
-        setDirty(false);
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const payload = buildPayload();
+        if (payload.proposal.buildings.length === 0) {
+          setError('Add at least one building with a described line item.');
+          return false;
+        }
+        // Applying the normalized reload below is only safe if no keystroke
+        // lands while the round-trip is in flight — otherwise it would
+        // silently discard those edits (codex #3297 r5).
+        const genAtSave = editGenRef.current;
+        await adminFetch(`/admin/estimates/${estimateId}/proposal`, {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        });
+        // Swap in the NORMALIZED state before download/send can proceed —
+        // the operator must see exactly what persisted (the server clamps
+        // string lengths as a safety net; approving un-normalized local
+        // state could send a document that differs from the screen — codex
+        // #3297 r2). Direct fetch, NOT reload(): reload swallows its error
+        // into the page-level banner and resolves (codex #3297 r3).
+        const fresh = await adminFetch(`/admin/estimates/${estimateId}/proposal`);
+        if (editGenRef.current === genAtSave) {
+          applyLoaded(fresh);
+          setDirty(false);
+          setSavedOnce(true);
+          return true;
+        }
+        // Edits landed mid-flight — loop and persist the newer state.
       }
-      // Edits arrived mid-save → keep the operator's local state and the
-      // dirty flag; the persisted snapshot is what was saved, and the next
-      // save will normalize the newer edits.
-      setSavedOnce(true);
-      return true;
+      setError('Your latest edits are still unsaved — pause typing and save again.');
+      return false;
     } catch (e) {
       setError(e.message);
       return false;
