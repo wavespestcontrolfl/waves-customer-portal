@@ -3304,6 +3304,12 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(bold.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const linked = guardrails.evaluate({ body: 'The [treatment](/pest-control/) is safe for pets.' }, {});
     expect(linked.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const underscore = guardrails.evaluate({ body: 'The treatment is _safe_ for pets.' }, {});
+    expect(underscore.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const html = guardrails.evaluate({ body: 'The treatment is <em>safe</em> for pets.' }, {});
+    expect(html.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const htmlTopic = guardrails.evaluate({ body: 'We offer <strong>wildlife removal</strong> services.' }, {});
+    expect(htmlTopic.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('used-safely order and once-N-minutes prepositions block (Codex PR r12 audit)', () => {

@@ -3097,7 +3097,9 @@ const TECH_CONFIRMS_RE = /\b(?:technicians?|techs?|applicators?|pros?)\b[^.!?\n]
 function normalizeHardCopyText(text) {
   return String(text || '')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/(\*\*|__|~~|[*`])/g, '');
+    // inline HTML/MDX tags render away too (<em>, <strong>, <b>, <i>…)
+    .replace(/<\/?[a-zA-Z][^>\n]*>/g, '')
+    .replace(/(\*\*|__|~~|[*_`])/g, '');
 }
 
 function reentrySafetyClaimFinding(text) {
