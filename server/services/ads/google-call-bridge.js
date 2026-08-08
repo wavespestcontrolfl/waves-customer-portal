@@ -505,9 +505,25 @@ function whereCallStillLinked(builder, callLogId) {
 // the caller's transaction releases (pre-push P1 r3).
 async function joinedLeadLiveRow(callLog, { dbc = db, lock = false } = {}) {
   if (!callLog?.leadId || !callLog?.id) return null;
-  let query = dbc('leads').where({ id: callLog.leadId }).whereNull('deleted_at');
-  if (lock) query = query.forUpdate();
-  const row = await whereCallStillLinked(query, callLog.id).first('id', 'customer_id');
+  if (lock) {
+    // TWO statements, deliberately (pre-push P1 r6): take the row lock
+    // first, then re-check linkage in a fresh statement. Combined into
+    // one, READ COMMITTED evaluates the call_log EXISTS against the
+    // snapshot taken BEFORE this statement blocked on reconciliation's
+    // lead lock — returning the lead on the strength of a stamp that was
+    // just cleared. The second statement runs with the lock already held,
+    // so its snapshot sees reconciliation's committed writes.
+    const locked = await dbc('leads')
+      .where({ id: callLog.leadId })
+      .whereNull('deleted_at')
+      .forUpdate()
+      .first('id');
+    if (!locked) return null;
+  }
+  const row = await whereCallStillLinked(
+    dbc('leads').where({ id: callLog.leadId }).whereNull('deleted_at'),
+    callLog.id,
+  ).first('id', 'customer_id');
   return row || null;
 }
 
