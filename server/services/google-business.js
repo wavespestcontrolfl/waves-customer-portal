@@ -1000,7 +1000,144 @@ class GoogleBusinessService {
       logger.warn(`[gbp] Review incentive sync skipped: ${err?.code || err?.name || 'Error'}`);
     }
 
+    // Outcome-level health check (2026-08-08 audit): the degraded-sync bell
+    // only fires when the sync MECHANICS fail this run. Two silent classes
+    // slipped through it for months: a GBP pull that "succeeds" with an
+    // empty feed (Venice — Google wiped the profile's reviews and nothing
+    // noticed), and Places stats failing quietly under its catch→warn
+    // (every location's _stats froze). Reviewers on a dead feed can never
+    // auto-mark as having reviewed, so they keep getting asked — the exact
+    // class the Nicole backfill had to fix by hand. Best-effort: health
+    // reporting must never break the sync itself.
+    await this._assessReviewSyncHealth(sources).catch((err) => {
+      logger.warn(`[gbp] review sync health assessment failed: ${err.message}`);
+    });
+
     return { synced: totalSynced, new: totalNew, errors, sources };
+  }
+
+  /**
+   * Pure classifier for one location's sync-health picture. Returns null when
+   * healthy, else { cls, severity ('FIX'|'ACT'), detail }.
+   *
+   * Classes:
+   *   feed_down     FIX  nothing synced this run (no GBP, no Places sample)
+   *   feed_degraded ACT  GBP creds broken; running on the ~5-review sample
+   *   silent_empty  ACT  GBP pull succeeds but the feed has ZERO reviews
+   *                      (the Venice wipe class — mechanically "healthy")
+   *   ingest_stale  ACT  Google shows more reviews than we ever ingested and
+   *                      nothing new has landed in 14d — reviewers exist that
+   *                      auto-mark can never see
+   *   stats_stale   ACT  no _stats row, or Places stats older than 7d — the
+   *                      totals cross-check above is running blind
+   */
+  _classifyLocationSyncHealth({ hasResource, source, rowCount, newestIngestAt, statsUpdatedAt, statsTotal, now = Date.now() }) {
+    if (!hasResource) return null;               // not a GBP-tracked location
+    if (source === 'concurrent_skip') return null; // another runner owns this cycle
+    const days = (ts) => (ts ? (now - new Date(ts).getTime()) / 86400000 : Infinity);
+
+    if (source === 'none') {
+      return { cls: 'feed_down', severity: 'FIX', detail: 'nothing synced this run — GBP pull failed and no Places sample landed' };
+    }
+    if (source === 'places_fallback') {
+      return { cls: 'feed_degraded', severity: 'ACT', detail: 'GBP credentials are broken — running on the ~5-review Places sample; removals and most new reviews are invisible' };
+    }
+    if (rowCount === 0) {
+      return { cls: 'silent_empty', severity: 'ACT', detail: 'the GBP pull succeeds but the feed returns ZERO reviews — profile wiped, suspended, or re-created (the Venice class)' };
+    }
+    if (Number.isFinite(statsTotal) && statsTotal > rowCount && days(newestIngestAt) > 14) {
+      return { cls: 'ingest_stale', severity: 'ACT', detail: `Google shows ${statsTotal} reviews but only ${rowCount} were ever ingested and nothing new in ${Math.floor(days(newestIngestAt))}d — those reviewers can never auto-mark` };
+    }
+    if (days(statsUpdatedAt) > 7) {
+      return { cls: 'stats_stale', severity: 'ACT', detail: statsUpdatedAt ? `Places stats last updated ${Math.floor(days(statsUpdatedAt))}d ago — the review-total cross-check is blind` : 'no Places stats row has ever been written for this location' };
+    }
+    return null;
+  }
+
+  /**
+   * Emailed escalation of the per-location classification — exceptions only
+   * (a healthy fleet sends nothing), email-first to contact@ with the FIX:/
+   * ACT: subject convention (bounce-rescue pattern), admin bell as the
+   * backup channel, 24h-deduped via the notifications table. Kill switch:
+   * REVIEW_SYNC_HEALTH_EMAIL=off (same convention as EMAIL_BOUNCE_RECOVERY).
+   */
+  async _assessReviewSyncHealth(sources = {}) {
+    if (String(process.env.REVIEW_SYNC_HEALTH_EMAIL || '').toLowerCase() === 'off') return { skipped: 'disabled' };
+
+    const rows = await db('google_reviews')
+      .select('location_id')
+      .select(db.raw(`COUNT(*) FILTER (WHERE reviewer_name != '_stats') AS row_count`))
+      .select(db.raw(`MAX(created_at) FILTER (WHERE reviewer_name != '_stats') AS newest_ingest_at`))
+      .select(db.raw(`MAX(updated_at) FILTER (WHERE reviewer_name = '_stats') AS stats_updated_at`))
+      .groupBy('location_id');
+    const byLoc = Object.fromEntries(rows.map((r) => [r.location_id, r]));
+
+    // _stats totals ride in the row's review_text as JSON ({rating, totalReviews}).
+    const statsRows = await db('google_reviews')
+      .where({ reviewer_name: '_stats' })
+      .select('location_id', 'review_text');
+    const totals = {};
+    for (const s of statsRows) {
+      try { totals[s.location_id] = Number(JSON.parse(s.review_text)?.totalReviews); } catch { /* unparseable stats */ }
+    }
+
+    const findings = [];
+    for (const loc of WAVES_LOCATIONS) {
+      const agg = byLoc[loc.id] || {};
+      const verdict = this._classifyLocationSyncHealth({
+        hasResource: !!loc.googleLocationResourceName,
+        source: sources[loc.id],
+        rowCount: Number(agg.row_count) || 0,
+        newestIngestAt: agg.newest_ingest_at || null,
+        statsUpdatedAt: agg.stats_updated_at || null,
+        statsTotal: totals[loc.id],
+      });
+      if (verdict) findings.push({ loc, ...verdict });
+    }
+    if (!findings.length) return { healthy: true };
+
+    const anyFix = findings.some((f) => f.severity === 'FIX');
+    const title = 'Review sync health escalation';
+    // 24h dedupe — same notifications-table pattern as _notifyDegradedSync,
+    // under an advisory lock so overlapping runners can't double-send.
+    const result = await runExclusive('gbp-sync-health-notify', async () => {
+      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const recent = await db('notifications')
+        .where({ recipient_type: 'admin', title })
+        .where('created_at', '>', dayAgo)
+        .first();
+      if (recent) return { deduped: true };
+
+      const lines = findings.map((f) => `${f.severity} ${f.loc.name} [${f.cls}]: ${f.detail}`);
+      const body = [
+        'Hourly Google review sync — per-location health check found problems the mechanical degraded-sync alert cannot see:',
+        '',
+        ...lines,
+        '',
+        'A dead or stale feed means reviewers on that profile are never auto-marked as having reviewed, so review asks keep going to customers who already reviewed.',
+        'Remediation: reconnect the GBP account for credential failures (/admin/reviews sync status); for silent_empty confirm the profile state in Google Business Profile (removed/suspended listings need the support case); stats_stale usually means the Places API call is failing — check GOOGLE_MAPS_API_KEY quota/validity.',
+      ].join('\n');
+      const subject = `${anyFix ? 'FIX' : 'ACT'}: Google review sync — ${findings.length} location${findings.length === 1 ? '' : 's'} degraded or stale`;
+
+      let emailed = false;
+      try {
+        const email = require('./email');
+        const sent = await email.send({ to: 'contact@wavespestcontrol.com', subject, heading: 'Review sync health', body });
+        emailed = !!sent?.ok;
+      } catch { /* fall through to the bell */ }
+
+      // The bell doubles as the dedupe marker; on email failure it is also
+      // the backup surface (email-first per the approvals rule).
+      await NotificationService.notifyAdmin(
+        'review',
+        title,
+        emailed ? `Emailed ${subject} to contact@.` : `EMAIL FAILED — acting surface is this bell. ${subject}\n\n${body}`,
+        { link: '/admin/reviews' },
+      );
+      return { emailed, findings: findings.length };
+    }, { recordHealth: false });
+    if (result?.skipped) return { skipped: 'lock' };
+    return result;
   }
 
   /**

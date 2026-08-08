@@ -1,0 +1,161 @@
+/**
+ * Review sync health check (2026-08-08 audit follow-up): the degraded-sync
+ * bell only fires when the sync MECHANICS fail — these tests pin the
+ * OUTCOME-level classes it missed for months (Venice's silently-empty feed,
+ * frozen Places stats, never-ingested reviews) and the exception-only
+ * email-first escalation.
+ */
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+const mockNotifyAdmin = jest.fn(async () => ({}));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
+const mockEmailSend = jest.fn(async () => ({ ok: true }));
+jest.mock('../services/email', () => ({ send: (...a) => mockEmailSend(...a) }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: async (_k, fn) => fn() }));
+
+const db = require('../models/db');
+db.raw = (sql) => sql;
+const gbp = require('../services/google-business');
+
+const NOW = Date.parse('2026-08-08T12:00:00Z');
+const daysAgo = (n) => new Date(NOW - n * 86400000).toISOString();
+
+describe('_classifyLocationSyncHealth (pure classifier)', () => {
+  const classify = (over = {}) => gbp._classifyLocationSyncHealth({
+    hasResource: true,
+    source: 'gbp',
+    rowCount: 100,
+    newestIngestAt: daysAgo(1),
+    statsUpdatedAt: daysAgo(1),
+    statsTotal: 100,
+    now: NOW,
+    ...over,
+  });
+
+  test('healthy location classifies null', () => {
+    expect(classify()).toBeNull();
+  });
+
+  test('non-GBP location and concurrent skips are never findings', () => {
+    expect(classify({ hasResource: false, source: 'none', rowCount: 0 })).toBeNull();
+    expect(classify({ source: 'concurrent_skip', rowCount: 0 })).toBeNull();
+  });
+
+  test('nothing synced at all → feed_down FIX', () => {
+    expect(classify({ source: 'none' })).toMatchObject({ cls: 'feed_down', severity: 'FIX' });
+  });
+
+  test('Places-sample fallback → feed_degraded ACT', () => {
+    expect(classify({ source: 'places_fallback' })).toMatchObject({ cls: 'feed_degraded', severity: 'ACT' });
+  });
+
+  test('GBP pull succeeds on an EMPTY feed → silent_empty ACT (the Venice class)', () => {
+    // Mechanically "healthy": source is gbp, no error — but zero reviews
+    // ever ingested means the profile was wiped/suspended and reviewers
+    // there can never auto-mark.
+    expect(classify({ rowCount: 0, statsTotal: undefined, statsUpdatedAt: null, newestIngestAt: null }))
+      .toMatchObject({ cls: 'silent_empty', severity: 'ACT' });
+  });
+
+  test('Google shows more reviews than ever ingested + 14d of silence → ingest_stale ACT', () => {
+    expect(classify({ rowCount: 47, statsTotal: 60, newestIngestAt: daysAgo(58) }))
+      .toMatchObject({ cls: 'ingest_stale', severity: 'ACT' });
+    // Fresh ingest with the same totals gap is NOT stale — reviews may just
+    // be mid-sync this hour.
+    expect(classify({ rowCount: 47, statsTotal: 60, newestIngestAt: daysAgo(2) })).toBeNull();
+  });
+
+  test('frozen or missing Places stats → stats_stale ACT', () => {
+    expect(classify({ statsUpdatedAt: daysAgo(71) })).toMatchObject({ cls: 'stats_stale', severity: 'ACT' });
+    expect(classify({ statsUpdatedAt: null })).toMatchObject({ cls: 'stats_stale', severity: 'ACT' });
+    expect(classify({ statsUpdatedAt: daysAgo(2) })).toBeNull();
+  });
+});
+
+describe('_assessReviewSyncHealth (escalation)', () => {
+  function installDb({ aggregates = [], stats = [], recentNotification = null } = {}) {
+    db.mockImplementation((table) => {
+      const q = {
+        select: jest.fn(function () { return this; }),
+        groupBy: jest.fn(async function () { return aggregates; }),
+        where: jest.fn(function (a) {
+          this._statsQuery = a && a.reviewer_name === '_stats';
+          this._notifQuery = a && a.recipient_type === 'admin';
+          return this;
+        }),
+        first: jest.fn(async () => recentNotification),
+      };
+      // The _stats select resolves via .select() being awaited after .where()
+      q.select = jest.fn(function () {
+        if (this._statsQuery) return Promise.resolve(stats);
+        return this;
+      });
+      return q;
+    });
+  }
+
+  beforeEach(() => {
+    mockEmailSend.mockClear();
+    mockNotifyAdmin.mockClear();
+    delete process.env.REVIEW_SYNC_HEALTH_EMAIL;
+  });
+
+  test('healthy fleet sends NOTHING (exception-based)', async () => {
+    installDb({
+      aggregates: [
+        { location_id: 'bradenton', row_count: '109', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+        { location_id: 'parrish', row_count: '33', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+        { location_id: 'sarasota', row_count: '47', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+        { location_id: 'venice', row_count: '12', newest_ingest_at: daysAgo(1), stats_updated_at: daysAgo(1) },
+      ],
+      stats: [],
+    });
+    const out = await gbp._assessReviewSyncHealth({ bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' });
+    // NOTE: date-dependent classifier uses real now here; fresh timestamps keep it healthy.
+    expect(out).toEqual({ healthy: true });
+    expect(mockEmailSend).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('problems email contact@ FIRST with the ACT:/FIX: subject and bell as dedupe marker', async () => {
+    installDb({ aggregates: [], stats: [] }); // venice-class everywhere: zero rows
+    const out = await gbp._assessReviewSyncHealth({ bradenton: 'gbp', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' });
+    expect(out.emailed).toBe(true);
+    const sent = mockEmailSend.mock.calls[0][0];
+    expect(sent.to).toBe('contact@wavespestcontrol.com');
+    expect(sent.subject).toMatch(/^ACT: Google review sync/);
+    expect(sent.body).toContain('silent_empty');
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('feed_down escalates the subject to FIX:', async () => {
+    installDb({ aggregates: [], stats: [] });
+    await gbp._assessReviewSyncHealth({ bradenton: 'none', parrish: 'gbp', sarasota: 'gbp', venice: 'gbp' });
+    expect(mockEmailSend.mock.calls[0][0].subject).toMatch(/^FIX: Google review sync/);
+  });
+
+  test('24h dedupe: a recent notification row suppresses the resend', async () => {
+    installDb({ aggregates: [], stats: [], recentNotification: { id: 'n1' } });
+    const out = await gbp._assessReviewSyncHealth({ venice: 'gbp' });
+    expect(out).toEqual({ deduped: true });
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
+  test('email failure falls back to a bell that carries the full body', async () => {
+    mockEmailSend.mockResolvedValueOnce({ ok: false, error: 'smtp down' });
+    installDb({ aggregates: [], stats: [] });
+    const out = await gbp._assessReviewSyncHealth({ venice: 'gbp' });
+    expect(out.emailed).toBe(false);
+    const bell = mockNotifyAdmin.mock.calls[0];
+    expect(bell[2]).toContain('EMAIL FAILED');
+    expect(bell[2]).toContain('silent_empty');
+  });
+
+  test('kill switch REVIEW_SYNC_HEALTH_EMAIL=off disables the whole check', async () => {
+    process.env.REVIEW_SYNC_HEALTH_EMAIL = 'off';
+    const out = await gbp._assessReviewSyncHealth({ venice: 'none' });
+    expect(out).toEqual({ skipped: 'disabled' });
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+});
