@@ -306,7 +306,11 @@ async function loadIdentityCandidate(lead) {
       const { extraction, source } = extractionFromCall(row);
       if (source !== 'enriched') continue;
       const who = extraction?.caller || {};
-      if (String(who.first_name || '').trim() || String(who.last_name || '').trim()) return extraction;
+      // A nonblank LAST name is the matcher's contract (pre-push P1 r2):
+      // pickCustomerMatch's multi-row arm requires callerLast — a
+      // first-name-only extraction can never disambiguate, and returning
+      // it here would stop the scan before an older full-name call.
+      if (String(who.last_name || '').trim()) return extraction;
     }
   } catch (err) {
     logger.warn(`[agent-estimate] identity probe failed: ${err.message}`);
@@ -429,7 +433,12 @@ async function buildAgentEstimateContext(leadId) {
   const carriesCallerIdentity = (call) => {
     if (call.extraction_source !== 'enriched') return false;
     const who = call.extraction?.caller || {};
-    return !!(String(who.first_name || '').trim() || String(who.last_name || '').trim());
+    // A nonblank LAST name, specifically — pickCustomerMatch's multi-row
+    // arm requires callerLast, so a first-name-only extraction cannot
+    // disambiguate and preferring a newer first-only stamped call over an
+    // older full-name call turned a resolvable shared-phone customer into
+    // an ambiguous prospect (pre-push P1 r2).
+    return !!String(who.last_name || '').trim();
   };
   const identityCall = ownedCalls.find(carriesCallerIdentity) || null;
   const leadCall = identityCall || ownedCalls[0] || null;

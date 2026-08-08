@@ -533,6 +533,36 @@ describe('owned-call extraction shape handling (PR #3275)', () => {
     expect(extractionPassed?.caller).toEqual({ first_name: 'Pat', last_name: 'Prospect' });
   });
 
+  test('a newer FIRST-ONLY enriched call never outranks an older full-name call', async () => {
+    // pickCustomerMatch's multi-row arm requires caller.last_name — a
+    // first-name-only extraction can never disambiguate, so selecting the
+    // newer first-only call turned a resolvable shared-phone customer into
+    // an ambiguous prospect (pre-push P1).
+    mockContextStampedCallRows = [
+      {
+        id: 'call-new-firstonly', twilio_call_sid: 'CA-new', direction: 'inbound',
+        duration_seconds: 60, transcription: 'newer call, first name only', created_at: '2026-07-05',
+      },
+      {
+        id: 'call-old-fullname', twilio_call_sid: 'CA-old', direction: 'inbound',
+        duration_seconds: 90, transcription: 'older call, full name', created_at: '2026-07-01',
+      },
+    ];
+    mockExtractionByCallId['call-new-firstonly'] = {
+      source: 'enriched',
+      extraction: { property: {}, caller: { first_name: 'Pat' } },
+    };
+    mockExtractionByCallId['call-old-fullname'] = {
+      source: 'enriched',
+      extraction: { property: {}, caller: { first_name: 'Pat', last_name: 'Prospect' } },
+    };
+
+    await buildAgentEstimateContext('lead-1');
+
+    const [, extractionPassed] = mockLoadCustomerByPhone.mock.calls[0];
+    expect(extractionPassed?.caller).toEqual({ first_name: 'Pat', last_name: 'Prospect' });
+  });
+
   test('no enriched identity anywhere falls back to the newest owned call', async () => {
     mockContextStampedCallRows = [{
       id: 'call-only-v1', twilio_call_sid: 'CA-only', direction: 'inbound',
