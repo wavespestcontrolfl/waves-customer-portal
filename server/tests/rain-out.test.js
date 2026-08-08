@@ -1548,6 +1548,10 @@ describe('rain-out service', () => {
         .toEqual({ note: 'Stay inside for 30 minutes because of lightning' });
       expect(sanitize()('Avoid the flooded entrance for 30 minutes'))
         .toEqual({ note: 'Avoid the flooded entrance for 30 minutes' });
+      // ...but explicit treatment context in the clause overrides the
+      // premises exemption — an incidental logistics word can't launder a
+      // fixed re-entry time (r22).
+      blocked('Stay inside for 30 minutes after treatment because the gate is open');
       blocked('This is E.P.A. approved');
       // ...but only APPROVED-status EPA claims block — label-direction
       // references are compliant (r14 client-parity case).

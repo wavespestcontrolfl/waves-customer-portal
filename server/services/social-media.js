@@ -534,6 +534,11 @@ const IMPLIED_REENTRY_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30
 // the implied-directive route only; a clause naming the treated area
 // still blocks through REENTRY_CONTEXT_RE (codex #3278 r19).
 const IMPLIED_NONTREATMENT_RE = /\b(?:lightning|storms?|rain\w*|wind\w*|hail|thunder\w*|flood\w*|weather|heat|traffic|entrance|driveway|road|street|parking|office|gate)\b/i;
+// ...but explicit treatment context in the clause OVERRIDES the premises
+// exemption — "Stay inside for 30 minutes after treatment because the
+// gate is open" is re-entry timing no matter what logistics word tags
+// along (codex #3278 r22).
+const IMPLIED_TREATMENT_WORD_RE = /\btreat\w*\b/i;
 // Protective ADVICE ("keep your pets safe indoors during the storm") is
 // not a product-safety claim — stripped under impliedTreatmentContext
 // ONLY when the sentence carries no product word, so "our treatment
@@ -594,7 +599,9 @@ function complianceOverclaims(text, { impliedTreatmentContext = false } = {}) {
         && (REENTRY_CONTEXT_RE.test(clause)
           || (impliedTreatmentContext
             && IMPLIED_REENTRY_DIRECTIVE_RE.test(clause)
-            && !IMPLIED_NONTREATMENT_RE.test(clause)))
+            && (!IMPLIED_NONTREATMENT_RE.test(clause)
+              || IMPLIED_TREATMENT_WORD_RE.test(clause)
+              || PRODUCT_CONTEXT_RE.test(clause))))
         && !agronomicExemptionApplies(clause)) {
         issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
         break;

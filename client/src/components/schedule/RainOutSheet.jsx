@@ -151,6 +151,8 @@ const NOTE_IMPLIED_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b
 // Mirror of IMPLIED_NONTREATMENT_RE: weather/premises clauses are advice
 // about the weather, not implicit re-entry — implied route only.
 const NOTE_IMPLIED_NONTREATMENT_RE = /\b(?:lightning|storms?|rain\w*|wind\w*|hail|thunder\w*|flood\w*|weather|heat|traffic|entrance|driveway|road|street|parking|office|gate)\b/i;
+// Explicit treatment context overrides the premises exemption (r22).
+const NOTE_TREATMENT_WORD_RE = /\btreat\w*\b/i;
 // Protective ADVICE ("keep your pets safe indoors during the storm") is
 // not a product claim — stripped only when the sentence carries no
 // product word, same guard as the server (PRODUCT_CONTEXT_RE mirror).
@@ -174,7 +176,9 @@ function noteTimingTrips(note) {
       if (NOTE_TIMING_DURATION_RE.test(clause)
         && (NOTE_REENTRY_CONTEXT_RE.test(clause)
           || (NOTE_IMPLIED_DIRECTIVE_RE.test(clause)
-            && !NOTE_IMPLIED_NONTREATMENT_RE.test(clause)))
+            && (!NOTE_IMPLIED_NONTREATMENT_RE.test(clause)
+              || NOTE_TREATMENT_WORD_RE.test(clause)
+              || NOTE_PRODUCT_CTX_RE.test(clause))))
         && !NOTE_AGRONOMIC_RE.test(clause)) return true;
     }
   }
