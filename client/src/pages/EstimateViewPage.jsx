@@ -79,6 +79,7 @@ import { quoteRequiredReasonNote, quoteRequiredReasonText } from '../lib/quoteDi
 import { loadStripeSdk } from '../lib/stripeLoader';
 import useModalFocus from '../hooks/useModalFocus';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
+import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatETDate } from '../lib/timezone';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
@@ -4984,7 +4985,11 @@ function EstimateViewPageInner() {
   const commercialRowSlugs = services.map((s) => glassServiceSlug(s?.key || s?.name));
   const copyCommercialPest = copyCommercial && (
     authoredProposalOnPage
-      ? (data.proposal.pestRecurringOnly === true && !data.proposal.terms)
+      // Structured commercialTerms are authored terms too — the page copy
+      // must demote to the terms-neutral pack beside them exactly like it
+      // does beside free-text terms (codex #3297 r2; shared predicate with
+      // the card/document/SSR renderers).
+      ? (data.proposal.pestRecurringOnly === true && !proposalHasAuthoredTerms(data.proposal))
       : (commercialRowSlugs.length > 0
         && commercialRowSlugs.every((slug) => slug === 'commercial_pest' || slug === 'pest_control'))
   );

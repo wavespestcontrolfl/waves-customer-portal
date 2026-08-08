@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { fmtMoney } from '../lib/money';
 import { glassCtaMicroForKeys, glassRowInclusions, glassServiceSlug } from '../lib/estimate-glass-copy';
+import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-sections';
 
 // Work-order style estimate document (owner direction 2026-08-07, modeled on
 // ServiceReportDocument): this is what renders whenever the estimate is
@@ -158,8 +159,17 @@ export default function EstimateProposalDocument({ data, token }) {
   // 12-month commitment, written-notice cancellation, or per-visit interior
   // billing, and any canned inclusions bullet beside them could state the
   // opposite (codex #3281 r1). Terms present → no inclusions stacks at all;
-  // the line items + authored terms speak for themselves.
-  const authoredTermsPresent = Boolean(proposal?.terms);
+  // the line items + authored terms speak for themselves. The structured
+  // commercialTerms block (slice 1A-i) is authored terms in exactly that
+  // sense, so it suppresses the stacks the same way.
+  const authoredTermsPresent = proposalHasAuthoredTerms(proposal);
+  // Structured agreement sections (slice 1A-i) — all optional; a legacy
+  // proposal renders this document exactly as before.
+  const propertyScopeItems = proposal?.propertyScope?.items || [];
+  const correctiveWork = Array.isArray(proposal?.correctiveWork) ? proposal.correctiveWork : [];
+  const responsibilities = Array.isArray(proposal?.customerResponsibilities)
+    ? proposal.customerResponsibilities : [];
+  const termRows = commercialTermRows(proposal?.commercialTerms);
   const inclusionStacks = useMemo(() => {
     if (authoredTermsPresent) return [];
     if (isCommercial) {
@@ -222,7 +232,8 @@ export default function EstimateProposalDocument({ data, token }) {
   // document it replaces: a mixed taxable/exempt proposal marks each taxed
   // amount with '*', prints the rate beside the tax total, and explains the
   // marker, so the customer can verify the calculation line by line.
-  const anyTaxableLine = buildings.some((b) => (b.lineItems || []).some((li) => li.taxable === true));
+  const anyTaxableLine = buildings.some((b) => (b.lineItems || []).some((li) => li.taxable === true))
+    || correctiveWork.some((work) => work.taxable === true);
   const taxRatePct = Number(totals.taxRate) > 0 ? (Number(totals.taxRate) * 100).toFixed(2) : null;
   const showRecurringTotals = !suppressPlanTotals && Number(totals.annualRecurring) > 0;
   const showGrandTotal = !suppressPlanTotals || Number(totals.annualRecurring) <= 0;
@@ -297,6 +308,20 @@ export default function EstimateProposalDocument({ data, token }) {
           </div>
         </div>
 
+        {/* Property scope (slice 1A-i) — the estimator-captured facts the
+            price was scoped against. Authored proposals only; absent →
+            nothing renders. */}
+        {propertyScopeItems.length > 0 && (
+          <div className="doc-keep">
+            <SectionHeader>Property scope</SectionHeader>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '2px 22px' }}>
+              {propertyScopeItems.map((item, idx) => (
+                <InfoRow key={`${item.label}-${idx}`} label={item.label}>{item.value}</InfoRow>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Pricing */}
         {buildings.length > 0 && (
           <div className="doc-keep">
@@ -329,6 +354,33 @@ export default function EstimateProposalDocument({ data, token }) {
                 ))}
               </div>
             ))}
+            {correctiveWork.length > 0 && (
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: NAVY, padding: '6px 0 2px' }}>Corrective work (one-time)</div>
+                {correctiveWork.map((work, idx) => (
+                  <div key={`${work.label}-${idx}`} style={{
+                    display: 'flex', justifyContent: 'space-between', gap: 14,
+                    padding: '5px 0', borderBottom: `1px solid ${LINE}`, fontSize: 11.5, lineHeight: 1.5,
+                  }}>
+                    <span style={{ minWidth: 0, color: INK }}>
+                      {work.label}
+                      {(work.includes || []).length > 0 && (
+                        <div style={{ marginTop: 1 }}>
+                          {work.includes.map((inc) => (
+                            <div key={inc} style={{ fontSize: 10.5, color: MUTED, lineHeight: 1.45 }}>&bull; {inc}</div>
+                          ))}
+                        </div>
+                      )}
+                    </span>
+                    <span style={{ whiteSpace: 'nowrap', fontWeight: 700, color: NAVY, fontVariantNumeric: 'tabular-nums' }}>
+                      {fmtMoney(work.amount)}
+                      {work.taxable === true ? ' *' : ''}
+                      <span style={{ fontWeight: 400, color: MUTED }}> one-time</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
             <div style={{ marginTop: 8 }}>
               {showRecurringTotals ? (
                 <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: 11.5 }}>
@@ -376,9 +428,20 @@ export default function EstimateProposalDocument({ data, token }) {
                 </div>
               ) : null}
             </div>
-            {proposal?.terms ? (
+            {/* Free-text terms render here only on legacy proposals — once
+                structured terms exist they demote to "Additional terms" in
+                the Terms section below. */}
+            {proposal?.terms && termRows.length === 0 ? (
               <div style={{ marginTop: 8, fontSize: 11, color: INK, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{proposal.terms}</div>
             ) : null}
+          </div>
+        )}
+
+        {/* Customer responsibilities (slice 1A-i) */}
+        {responsibilities.length > 0 && (
+          <div className="doc-keep">
+            <SectionHeader>Customer responsibilities</SectionHeader>
+            {responsibilities.map((line) => <Bullet key={line}>{line}</Bullet>)}
           </div>
         )}
 
@@ -420,7 +483,19 @@ export default function EstimateProposalDocument({ data, token }) {
 
         {/* Terms + next steps */}
         <div className="doc-keep">
-          <SectionHeader>Terms</SectionHeader>
+          <SectionHeader>{termRows.length ? 'Service terms' : 'Terms'}</SectionHeader>
+          {termRows.map(([label, value]) => (
+            <div key={label} style={{ display: 'flex', gap: 8, padding: '2px 0', fontSize: 11.5, lineHeight: 1.45 }}>
+              <span style={{ color: MUTED, flex: 'none', width: 110 }}>{label}</span>
+              <span style={{ color: INK, minWidth: 0 }}>{value}</span>
+            </div>
+          ))}
+          {proposal?.terms && termRows.length > 0 ? (
+            <div style={{ marginTop: 4 }}>
+              <div style={{ fontSize: 10.5, fontWeight: 800, color: NAVY }}>Additional terms</div>
+              <div style={{ fontSize: 11, color: INK, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{proposal.terms}</div>
+            </div>
+          ) : null}
           <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{termsLine}</p>
         </div>
 
@@ -442,6 +517,11 @@ export default function EstimateProposalDocument({ data, token }) {
               we&rsquo;ll refresh the numbers with you.
             </p>
           ) : authoredProposal ? (
+            // Every customer surface (this document, the terminal card, the
+            // SSR banner) names the shared account-manager constant — a
+            // per-proposal override lands as one slice with its authoring
+            // path so the PDF can never name a different contact than the
+            // page it links to (codex #3297 r1/r3).
             <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
               {WAVES_ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, will follow up to answer
               questions and finalize this proposal — or call {WAVES_SUPPORT_PHONE_DISPLAY} any time.

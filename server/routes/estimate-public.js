@@ -5367,18 +5367,71 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       // Taxable-line identification + one-time total label (codex #3281 r4)
       // — SSR parity with ProposalDetailCard / EstimateProposalDocument.
       const proposalAnyTaxable = (proposalForCard.buildings || [])
-        .some((b) => (b.lineItems || []).some((li) => li.taxable === true));
+        .some((b) => (b.lineItems || []).some((li) => li.taxable === true))
+        // Corrective-work rows carry the same '*' marker, so they must arm
+        // the legend too — parity with the React card and both PDFs.
+        || (proposalForCard.correctiveWork || []).some((work) => work.taxable === true);
       const proposalTaxRatePct = proposalCardTotals.taxRate > 0
         ? (proposalCardTotals.taxRate * 100).toFixed(2)
         : null;
       const proposalGrandTotalLabel = proposalCardTotals.annualRecurring > 0 ? 'First-year total' : 'Total';
+      // Structured agreement sections (slice 1A-i) — FULL parity with the
+      // React card and document: this SSR card introduces itself as
+      // "everything in your formal proposal", so it must not omit material
+      // scope or obligations (codex 1A-i r1).
+      const proposalScopeHtml = (proposalForCard.propertyScope?.items || []).length ? `
+    <div class="proposal-section-title">Property scope</div>
+    ${proposalForCard.propertyScope.items.map((item) => `
+    <div class="proposal-term-row"><span class="proposal-term-label">${escapeHtml(item.label)}</span><span class="proposal-term-value">${escapeHtml(item.value)}</span></div>`).join('')}` : '';
+      const proposalResponsibilitiesHtml = (proposalForCard.customerResponsibilities || []).length ? `
+    <div class="proposal-section-title">Customer responsibilities</div>
+    <ul class="proposal-work-includes">
+      ${proposalForCard.customerResponsibilities.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}
+    </ul>` : '';
+      const proposalCorrectiveHtml = (proposalForCard.correctiveWork || []).length ? `
+    <div class="proposal-section-title">Corrective work (one-time)</div>
+    ${proposalForCard.correctiveWork.map((work) => `
+    <div class="proposal-line">
+      <span class="proposal-line-desc">${escapeHtml(work.label)}${work.includes.length ? `<ul class="proposal-work-includes">${work.includes.map((inc) => `<li>${escapeHtml(inc)}</li>`).join('')}</ul>` : ''}</span>
+      <span class="proposal-line-amt">${fmtMoney(work.amount)}${work.taxable === true ? ' *' : ''} <span class="proposal-line-freq">one-time</span></span>
+    </div>`).join('')}` : '';
+      // Same labels/formatting as the React card + document (COMMERCIAL_TERM_ROWS
+      // in client/src/lib/proposal-sections.js) — SSR duplicates them verbatim,
+      // like the inclusions bullets above.
+      // validDays never renders — the enforced expires_at is the only
+      // validity date any renderer may print (see proposal-sections.js).
+      // Payment tokens are the canonical payer vocabulary → labels, same
+      // map as client proposal-sections.js PAYMENT_TERM_LABELS.
+      const proposalPaymentLabel = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+      const proposalTermRows = proposalForCard.commercialTerms ? [
+        ['Payment', proposalPaymentLabel[proposalForCard.commercialTerms.paymentTerms] || null],
+        ['Initial term', proposalForCard.commercialTerms.initialTermMonths != null
+          ? (proposalForCard.commercialTerms.initialTermMonths > 0 ? `${proposalForCard.commercialTerms.initialTermMonths} months` : 'None — month-to-month')
+          : null],
+        ['Renewal', proposalForCard.commercialTerms.renewal],
+        ['Price adjustment', proposalForCard.commercialTerms.priceAdjustment],
+        ['Cancellation', proposalForCard.commercialTerms.cancellation],
+        ['Property access', proposalForCard.commercialTerms.accessRequirements],
+      ].filter(([, value]) => value != null) : [];
+      const proposalStructuredTermsHtml = proposalTermRows.length ? `
+    <div class="proposal-section-title">Service terms</div>
+    <div class="proposal-structured-terms">
+      ${proposalTermRows.map(([label, value]) => `<div class="proposal-term-row"><span class="proposal-term-label">${escapeHtml(label)}</span><span class="proposal-term-value">${escapeHtml(String(value))}</span></div>`).join('')}
+    </div>` : '';
+      // Free-text terms demote to "Additional terms" once structured terms
+      // exist; alone, they render untitled exactly as before.
+      const proposalFreeTermsHtml = proposalForCard.terms
+        ? `${proposalTermRows.length ? '<div class="proposal-section-title">Additional terms</div>' : ''}<div class="proposal-terms">${escapeHtml(proposalForCard.terms)}</div>`
+        : '';
       proposalCardHtml = `
   <section class="card proposal-card">
     <h2>${escapeHtml(proposalForCard.title || 'Commercial Service Proposal')}</h2>
     <p class="card-sub">${proposalPdfEmailed
       ? 'Everything in your formal proposal, itemized &mdash; the emailed PDF carries this same detail.'
       : 'Everything in your formal proposal, itemized.'}</p>
-    ${proposalBuildingsHtml}
+    ${proposalScopeHtml}
+    ${proposalBuildingsHtml}${proposalCorrectiveHtml}
+    ${proposalResponsibilitiesHtml}
     <div class="proposal-totals">
       ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">Recurring service (per year)</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.annualRecurring)}</span></div>` : ''}
       ${proposalCardTotals.oneTime > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">One-time services</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.oneTime)}</span></div>` : ''}
@@ -5387,8 +5440,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-monthly-note">Averages ${fmtMoney(proposalCardTotals.monthlyEquivalent)}/month across the year for the recurring service.</div>` : ''}
       ${proposalCardTotals.hasTax || proposalAnyTaxable ? `<div class="proposal-monthly-note">* Taxable line. Tax applies only to lines marked taxable, at the Florida state rate plus the service county surtax. Residential pest control and residential lawn maintenance are tax-exempt in Florida; commercial services may be taxable.</div>` : ''}
     </div>
-    ${proposalForCard.terms ? `<div class="proposal-terms">${escapeHtml(proposalForCard.terms)}</div>` : ''}
-    ${proposalPestRecurringOnly(proposalForCard, est) && !proposalForCard.terms ? `<div class="proposal-included">
+    ${proposalStructuredTermsHtml}
+    ${proposalFreeTermsHtml}
+    ${proposalPestRecurringOnly(proposalForCard, est) && !proposalForCard.terms && !proposalTermRows.length ? `<div class="proposal-included">
       <div class="proposal-included-title">What your commercial pest service includes</div>
       <ul>
         <li>Recurring exterior treatment &mdash; foundation, entry points, and grounds on your scheduled cadence</li>
@@ -5590,6 +5644,14 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .proposal-line-total .proposal-line-amt{font-size:18px}
   .proposal-monthly-note{margin-top:4px;font-size:14px;color:#475569}
   .proposal-terms{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;white-space:pre-wrap}
+  .proposal-section-title{margin-top:14px;font-size:14px;font-weight:800;color:#1B2C5B}
+  .proposal-work-includes{margin:2px 0 0;padding-left:20px}
+  .proposal-work-includes li{font-size:14px;color:#475569;line-height:1.55}
+  .proposal-structured-terms{margin-top:6px}
+  .proposal-term-row{display:flex;gap:12px;padding:5px 0;font-size:14px;line-height:1.5;border-bottom:1px solid #E2DCCB}
+  .proposal-term-row:last-child{border-bottom:0}
+  .proposal-term-label{flex:none;width:150px;color:#475569}
+  .proposal-term-value{min-width:0;color:#3F4A65}
   .proposal-included{margin-top:16px}
   .proposal-included-title{font-size:14px;font-weight:800;color:#1B2C5B;margin-bottom:6px}
   .proposal-included ul{margin:0;padding-left:20px}
@@ -20352,6 +20414,38 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
             })),
           })),
           totals: computeProposalTotals(proposalForView),
+          // Structured agreement sections (slice 1A-i) — projected
+          // field-by-field like everything above (the stored block is
+          // admin-authored and may grow internal fields the token holder
+          // shouldn't read). All null/absent for legacy proposals, so those
+          // responses stay byte-identical.
+          ...(proposalForView.propertyScope ? {
+            propertyScope: {
+              items: proposalForView.propertyScope.items.map((item) => ({
+                label: item.label, value: item.value,
+              })),
+            },
+          } : {}),
+          ...(proposalForView.correctiveWork ? {
+            correctiveWork: proposalForView.correctiveWork.map((work) => ({
+              label: work.label,
+              amount: work.amount,
+              taxable: work.taxable === true,
+              includes: work.includes,
+            })),
+          } : {}),
+          ...(proposalForView.customerResponsibilities
+            ? { customerResponsibilities: proposalForView.customerResponsibilities } : {}),
+          ...(proposalForView.commercialTerms ? {
+            commercialTerms: {
+              paymentTerms: proposalForView.commercialTerms.paymentTerms,
+              initialTermMonths: proposalForView.commercialTerms.initialTermMonths,
+              renewal: proposalForView.commercialTerms.renewal,
+              priceAdjustment: proposalForView.commercialTerms.priceAdjustment,
+              cancellation: proposalForView.commercialTerms.cancellation,
+              accessRequirements: proposalForView.commercialTerms.accessRequirements,
+            },
+          } : {}),
         };
         // On-page renders only itemize truly AUTHORED proposals — a raw
         // enabled flag with no buildings normalizes to the synthesized
