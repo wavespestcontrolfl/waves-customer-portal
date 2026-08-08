@@ -66,6 +66,16 @@ describe('ProposalDetailCard', () => {
     expect(container.textContent).not.toContain('Tenant-reported pests');
   });
 
+  it('suppresses the inclusions block beside authored terms', () => {
+    const { container } = render(<ProposalDetailCard proposal={{
+      ...PROPOSAL,
+      terms: '12-month service commitment. Cancellation requires 30 days written notice.',
+    }} />);
+    expect(container.textContent).toContain('12-month service commitment');
+    expect(container.textContent).not.toContain('What your commercial pest service includes');
+    expect(container.textContent).not.toContain('No long-term contract');
+  });
+
   it('names buildings only on multi-building proposals', () => {
     const single = render(<ProposalDetailCard proposal={PROPOSAL} />);
     expect(single.queryByText('600 Sample Plaza Dr')).toBeNull();

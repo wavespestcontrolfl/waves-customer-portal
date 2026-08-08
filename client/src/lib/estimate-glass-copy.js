@@ -406,12 +406,16 @@ export function glassCtaMicroForKeys(keys) {
 // pest copy, so callers keep the server-provided wording on null.
 export function glassServiceSlug(keyOrLabel) {
   const raw = String(keyOrLabel || '').toLowerCase();
-  // Commercial rows (commercial_pest keys / "Commercial Pest Control"
+  // Commercial PEST rows (commercial_pest keys / "Commercial Pest Control"
   // labels) get their own stack — but ONLY once the server has released
-  // commercial glass (cta.commercialGlass → setCommercialGlass). While the
-  // gate is off this falls through to the residential slugs, exactly
-  // today's behavior.
-  if (commercialGlassReleased && raw.includes('commercial')) return 'commercial_pest';
+  // commercial glass (cta.commercialGlass → setCommercialGlass). Scoped to
+  // pest deliberately: commercial_lawn / _tree_shrub / _mosquito /
+  // _termite_bait / _rodent_bait keep their existing service slugs (codex
+  // #3281 r1 — mapping every commercial row here promised pest-specific
+  // interior/tenant terms on non-pest commercial plans). While the gate is
+  // off this falls through to the residential slugs, exactly today's
+  // behavior.
+  if (commercialGlassReleased && raw.includes('commercial') && raw.includes('pest')) return 'commercial_pest';
   if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('mosquito')) return 'mosquito';

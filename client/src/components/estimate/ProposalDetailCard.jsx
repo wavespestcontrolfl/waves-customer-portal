@@ -41,7 +41,7 @@ const amtStyle = {
   fontVariantNumeric: 'tabular-nums',
 };
 
-export default function ProposalDetailCard({ proposal }) {
+export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
   if (!proposal || !Array.isArray(proposal.buildings) || !proposal.buildings.length) return null;
   const totals = proposal.totals || {};
   const multiBuilding = proposal.buildings.length > 1;
@@ -49,9 +49,13 @@ export default function ProposalDetailCard({ proposal }) {
   // this proposal's recurring lines as pest work (proposal.pestRecurringOnly,
   // truth-scope rule): a termite/rodent/mixed proposal must not promise
   // recurring pest treatment or cancellable-plan terms, so it shows its line
-  // items with no inclusions block at all. The gate lives server-side: /data
-  // only ships a `proposal` block under GATE_ESTIMATE_COMMERCIAL_GLASS.
-  const inclusions = proposal.pestRecurringOnly === true
+  // items with no inclusions block at all. Authored `terms` also suppress
+  // the stack — the operator's own terms (a commitment period, written
+  // cancellation, per-visit interior billing) must never sit beside canned
+  // bullets claiming the opposite (codex #3281 r1). The gate lives
+  // server-side: /data only ships a `proposal` block under
+  // GATE_ESTIMATE_COMMERCIAL_GLASS.
+  const inclusions = proposal.pestRecurringOnly === true && !proposal.terms
     ? (glassRowInclusions('commercial_pest') || null)
     : null;
 
@@ -61,7 +65,12 @@ export default function ProposalDetailCard({ proposal }) {
         {proposal.title || 'Commercial Service Proposal'}
       </div>
       <div style={{ fontSize: 14, color: W.textCaption, marginBottom: 14 }}>
-        Everything in your formal proposal, itemized — the PDF copy carries this same detail.
+        {/* Only reference the emailed PDF when one was actually delivered —
+            an SMS-only send or failed email leg must not recreate the
+            "check the email we sent" dead end this card exists to fix. */}
+        {pdfEmailed
+          ? 'Everything in your formal proposal, itemized — the emailed PDF carries this same detail.'
+          : 'Everything in your formal proposal, itemized.'}
       </div>
 
       {proposal.buildings.map((building, bIdx) => (

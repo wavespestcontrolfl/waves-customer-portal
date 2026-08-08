@@ -164,6 +164,65 @@ describe('EstimateProposalDocument', () => {
     expect(text).not.toContain('$376.00');
   });
 
+  it('follows the CTA state in next steps — accepted documents never say approve online', () => {
+    const accepted = {
+      ...BASE_DATA,
+      cta: { ...BASE_DATA.cta, terminalState: 'accepted' },
+    };
+    const { container } = render(<EstimateProposalDocument data={accepted} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('has been approved');
+    expect(text).not.toContain('approve online');
+  });
+
+  it('resolves residential terms from the line services — lawn never claims pest callbacks', () => {
+    const lawn = {
+      ...BASE_DATA,
+      estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL' },
+      proposal: {
+        ...BASE_DATA.proposal,
+        enabled: false,
+        synthesized: true,
+        pestRecurringOnly: false,
+        title: 'Service Proposal',
+        buildings: [{
+          name: '123 Palm Way',
+          note: null,
+          lineItems: [{
+            description: 'Lawn Care Program',
+            quantity: 1,
+            unitPrice: 85,
+            amount: 85,
+            frequency: 'monthly',
+            frequencyLabel: 'Monthly',
+            taxable: false,
+          }],
+        }],
+        totals: { annualRecurring: 1020, monthlyEquivalent: 85, oneTime: 0, totalTax: 0, firstYearTotal: 1020, hasTax: false, isMultiBuilding: false },
+      },
+      cta: { commercialProposal: false, commercialAutoPriced: false },
+    };
+    const { container } = render(<EstimateProposalDocument data={lawn} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).not.toContain('Unlimited free callbacks');
+    expect(text).toContain('Free between-visit service calls');
+  });
+
+  it('authored terms govern — inclusions and plan-terms claims stay out beside them', () => {
+    const authoredTerms = {
+      ...BASE_DATA,
+      proposal: {
+        ...BASE_DATA.proposal,
+        terms: '12-month service commitment. Cancellation requires 30 days written notice.',
+      },
+    };
+    const { container } = render(<EstimateProposalDocument data={authoredTerms} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('12-month service commitment');
+    expect(text).not.toContain('What your commercial pest service includes');
+    expect(text).not.toContain('Cancel your plan in the app');
+  });
+
   it('keeps non-pest commercial proposals terms-neutral with no pest inclusions', () => {
     const termite = {
       ...BASE_DATA,

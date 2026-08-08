@@ -270,6 +270,11 @@ describe('commercial glass release', () => {
     // Residential keys are untouched by the release.
     expect(glassServiceSlug('pest_control')).toBe('pest_control');
     expect(glassServiceSlug('lawn_care')).toBe('lawn_care');
+    // Commercial NON-pest lanes keep their service slugs (codex #3281 r1:
+    // commercial_lawn must never inherit pest interior/tenant promises).
+    expect(glassServiceSlug('commercial_lawn')).toBe('lawn_care');
+    expect(glassServiceSlug('commercial_termite_bait')).toBe('termite_bait');
+    expect(glassServiceSlug('commercial_rodent_bait')).toBe('rodent_bait');
   });
 
   it('gives commercial rows their own inclusions with no residential guarantee claims', () => {

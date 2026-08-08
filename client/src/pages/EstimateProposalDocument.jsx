@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { fmtMoney } from '../lib/money';
-import { glassRowInclusions, glassServiceSlug, GLASS_COPY } from '../lib/estimate-glass-copy';
+import { glassCtaMicroForKeys, glassRowInclusions, glassServiceSlug } from '../lib/estimate-glass-copy';
 
 // Work-order style estimate document (owner direction 2026-08-07, modeled on
 // ServiceReportDocument): this is what renders whenever the estimate is
@@ -131,7 +131,14 @@ export default function EstimateProposalDocument({ data, token }) {
   // line items with NO inclusions claims). Residential lines map per-line
   // through glassServiceSlug; unmappable lines simply contribute no stack.
   const pestRecurringOnly = proposal?.pestRecurringOnly === true;
+  // Authored proposal terms GOVERN — the operator may have written a
+  // 12-month commitment, written-notice cancellation, or per-visit interior
+  // billing, and any canned inclusions bullet beside them could state the
+  // opposite (codex #3281 r1). Terms present → no inclusions stacks at all;
+  // the line items + authored terms speak for themselves.
+  const authoredTermsPresent = Boolean(proposal?.terms);
   const inclusionStacks = useMemo(() => {
+    if (authoredTermsPresent) return [];
     if (isCommercial) {
       const stack = pestRecurringOnly ? glassRowInclusions('commercial_pest') : null;
       return stack ? [{ key: 'commercial_pest', title: 'What your commercial pest service includes', items: stack }] : [];
@@ -150,21 +157,31 @@ export default function EstimateProposalDocument({ data, token }) {
       }
     }
     return [...seen.values()];
-  }, [isCommercial, pestRecurringOnly, buildings]);
+  }, [isCommercial, pestRecurringOnly, authoredTermsPresent, buildings]);
 
   // Terms line — only claims the estimate page itself already makes for the
-  // same population: commercial PEST plans get the commercial terms, other
-  // commercial work (termite/rodent/mixed — pestRecurringOnly false) stays
-  // terms-neutral, recurring residential gets the shared recurring micro
-  // line, one-time-only quotes get the neutral licensed/guaranteed line
-  // (their category packs carry their own callback periods online).
-  const termsLine = isCommercial
-    ? (pestRecurringOnly
-      ? 'No long-term contract · Auto Pay billing · Cancel your plan in the app'
-      : 'Licensed & insured · Satisfaction guaranteed')
-    : estimate.isOneTimeOnly === true
-      ? 'Licensed & insured · Satisfaction guaranteed'
-      : GLASS_COPY.ctaMicro;
+  // same services. Authored terms govern (neutral line beside them, never a
+  // competing plan claim). Commercial PEST plans get the commercial terms;
+  // other commercial work stays terms-neutral. Residential recurring
+  // resolves through glassCtaMicroForKeys off the actual line services —
+  // the SAME distinct-micros rule the live page applies, so a lawn or
+  // rodent document never prints the pest callbacks/guarantee line the
+  // page deliberately withholds (codex #3281 r1). One-time-only (no
+  // recurring lines) resolves to the neutral line the same way.
+  const NEUTRAL_TERMS = 'Licensed & insured · Satisfaction guaranteed';
+  const recurringLineDescriptions = buildings
+    .flatMap((b) => (b.lineItems || []))
+    .filter((li) => li.frequency !== 'one_time')
+    .map((li) => String(li.description || ''));
+  const termsLine = authoredTermsPresent
+    ? NEUTRAL_TERMS
+    : isCommercial
+      ? (pestRecurringOnly
+        ? 'No long-term contract · Auto Pay billing · Cancel your plan in the app'
+        : NEUTRAL_TERMS)
+      : recurringLineDescriptions.length === 0
+        ? NEUTRAL_TERMS
+        : glassCtaMicroForKeys(recurringLineDescriptions);
 
   // Combined plan totals ("$X/mo" / "$X/yr") are prohibited on customer-facing
   // estimate surfaces (AGENTS.md "Per application price copy"); commercial
@@ -366,10 +383,31 @@ export default function EstimateProposalDocument({ data, token }) {
 
         <div className="doc-keep">
           <SectionHeader>Next steps</SectionHeader>
-          {authoredProposal ? (
+          {/* Next-step copy follows the CTA state (codex #3281 r1): accepted
+              and declined estimates stay downloadable, and quote-required /
+              review-gated ones can't self-book — none of them may be told to
+              "approve online". */}
+          {cta.terminalState === 'accepted' ? (
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+              This estimate has been approved — your live estimate at{' '}
+              <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a> has your visit details.
+              Questions? Call {WAVES_SUPPORT_PHONE_DISPLAY} any time.
+            </p>
+          ) : cta.terminalState === 'declined' ? (
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+              This estimate was declined. Changed your mind? Call {WAVES_SUPPORT_PHONE_DISPLAY} and
+              we&rsquo;ll refresh the numbers with you.
+            </p>
+          ) : authoredProposal ? (
             <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
               Your Waves account manager will follow up to answer questions and finalize this proposal —
               or call {WAVES_SUPPORT_PHONE_DISPLAY} any time. Your live estimate stays available at{' '}
+              <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
+            </p>
+          ) : cta.quoteRequired === true || cta.reviewBeforeBooking === true ? (
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+              Our team will confirm the final details and scheduling with you — call{' '}
+              {WAVES_SUPPORT_PHONE_DISPLAY} any time. Your live estimate stays available at{' '}
               <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
             </p>
           ) : (

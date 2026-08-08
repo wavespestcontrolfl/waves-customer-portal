@@ -5446,8 +5446,14 @@ function EstimateViewPageInner() {
             → /data ships `proposal`): the line items + totals + included-service
             terms the customer used to get only inside the emailed PDF. Rendered
             BEFORE the AI card — the price-before-AI ordering rule applies to a
-            proposal's price content too. */}
-        {isCommercialProposal && data.proposal ? <ProposalDetailCard proposal={data.proposal} /> : null}
+            proposal's price content too. Keyed off the payload's own enabled
+            flag, NOT isCommercialProposal: a higher-priority quote reason
+            (manager approval, quote-required line) outranks commercial_proposal
+            in resolveEstimateQuoteRequirement, and exactly those customers
+            still need their itemization (codex #3281 r1). */}
+        {data.proposal?.enabled === true
+          ? <ProposalDetailCard proposal={data.proposal} pdfEmailed={proposalPdfEmailed} />
+          : null}
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar ? (
           <EstimateAskBar

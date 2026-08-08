@@ -5362,7 +5362,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       proposalCardHtml = `
   <section class="card proposal-card">
     <h2>${escapeHtml(proposalForCard.title || 'Commercial Service Proposal')}</h2>
-    <p class="card-sub">Everything in your formal proposal, itemized — the emailed PDF carries this same detail.</p>
+    <p class="card-sub">${proposalPdfEmailed
+      ? 'Everything in your formal proposal, itemized &mdash; the emailed PDF carries this same detail.'
+      : 'Everything in your formal proposal, itemized.'}</p>
     ${proposalBuildingsHtml}
     <div class="proposal-totals">
       ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">Recurring service (per year)</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.annualRecurring)}</span></div>` : ''}
@@ -5372,7 +5374,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-monthly-note">Averages ${fmtMoney(proposalCardTotals.monthlyEquivalent)}/month across the year for the recurring service.</div>` : ''}
     </div>
     ${proposalForCard.terms ? `<div class="proposal-terms">${escapeHtml(proposalForCard.terms)}</div>` : ''}
-    ${proposalPestRecurringOnly(proposalForCard, est) ? `<div class="proposal-included">
+    ${proposalPestRecurringOnly(proposalForCard, est) && !proposalForCard.terms ? `<div class="proposal-included">
       <div class="proposal-included-title">What your commercial pest service includes</div>
       <ul>
         <li>Recurring exterior treatment &mdash; foundation, entry points, and grounds on your scheduled cadence</li>
@@ -19926,7 +19928,21 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       && Boolean(await verifyStaffBearer(req));
     const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
       && verifiedStaffPreview;
-    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview) {
+    // Signed document-render pin — verified BEFORE the viewability gate
+    // (codex #3281 r1): an operator resend of a proposal whose stored
+    // expires_at already passed supplies a pinned new validThrough, but the
+    // stored date would 404 this fetch and silently downgrade the emailed
+    // attachment to the pdfkit document. The pin only mints server-side, so
+    // honoring it here serves exactly the renders our own routes vetted —
+    // archived rows and unpublished drafts stay 404 even pinned.
+    const isPdfRenderPass = req.query.mode === 'pdf';
+    const docRenderPin = isPdfRenderPass && req.query.dpin
+      ? require('../services/pdf/estimate-doc-pdf').verifyEstimateDocPin(req.query.dpin, estimate.token)
+      : null;
+    const docPinViewBypass = docRenderPin !== null
+      && !estimate.archived_at
+      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to
       // a real, published estimate that died of expiry (never a draft), so the
       // SPA's not-found screen may offer the "Request an extension" button.
@@ -19958,16 +19974,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // mirroring /report/:token?mode=pdf). `mode` alone only shapes CONTENT
     // (the proposal block + publicOrigin below — data the token holder's own
     // PDF already carries). Side-effect suppression additionally requires the
-    // SIGNED render pin every server-driven render mints (estimate-doc-pdf
-    // signEstimateDocPin): without it, building the proposal email ATTACHMENT
+    // SIGNED render pin (isPdfRenderPass/docRenderPin resolved above the
+    // viewability gate): without it, building the proposal email ATTACHMENT
     // would stamp viewed_at and fire the "Estimate viewed" notification
     // before the customer ever opened the link — while a customer poking
     // ?mode=pdf by hand still counts as the view it is (unlike the refresh
     // param above, no public input can dodge first-view tracking).
-    const isPdfRenderPass = req.query.mode === 'pdf';
-    const docRenderPin = isPdfRenderPass && req.query.dpin
-      ? require('../services/pdf/estimate-doc-pdf').verifyEstimateDocPin(req.query.dpin, estimate.token)
-      : null;
     const verifiedPdfRenderPass = isPdfRenderPass && docRenderPin !== null;
     if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate)) {
       // ONE transaction for the aggregate counter + the per-open row: written
@@ -20421,7 +20433,15 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // Pinned override only on a signed pdf render pass — see docRenderPin.
         expiresAt: docRenderPin?.validThrough || estimate.expires_at,
         status: estimate.status,
-        satelliteUrl: estimate.satellite_url || null,
+        // On a pdf render pass the HEADLESS SERVER browser fetches this URL,
+        // so it must be a known-good public imagery host — satellite_url is
+        // staff-writable free text, and an internal/arbitrary URL here would
+        // let a saved estimate steer server-side GETs (SSRF; codex #3281 r1).
+        // The customer's own browser (normal page loads) keeps the stored
+        // value unfiltered, today's behavior.
+        satelliteUrl: isPdfRenderPass
+          ? (String(estimate.satellite_url || '').startsWith('https://maps.googleapis.com/') ? estimate.satellite_url : null)
+          : (estimate.satellite_url || null),
         intelligence,
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
