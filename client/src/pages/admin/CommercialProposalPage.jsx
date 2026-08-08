@@ -385,7 +385,10 @@ export default function CommercialProposalPage() {
       // operator must see exactly what persisted (the server clamps string
       // lengths as a safety net; approving un-normalized local state could
       // send a document that differs from the screen — codex #3297 r2).
-      await reload();
+      // Direct fetch, NOT reload(): reload swallows its error into the
+      // page-level banner and resolves, which would let save() return true
+      // without the normalized swap (codex #3297 r3).
+      await adminFetch(`/admin/estimates/${estimateId}/proposal`).then(applyLoaded);
       setSavedOnce(true);
       setDirty(false);
       return true;

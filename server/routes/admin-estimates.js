@@ -1987,7 +1987,15 @@ router.put('/:id/proposal', async (req, res, next) => {
       // match (codex #3297 r2d).
       if (canonicalPaymentTerms && estimate.customer_id) {
         const { resolveForInvoice } = require('../services/payer');
-        const payerResolution = await resolveForInvoice({ customerId: estimate.customer_id });
+        let payerResolution;
+        try {
+          // throwOnError: uncertainty must BLOCK authoring — fail-soft
+          // self-pay would let a contradicting term publish (codex 1A-i r3).
+          payerResolution = await resolveForInvoice({ customerId: estimate.customer_id, throwOnError: true });
+        } catch (resolveErr) {
+          logger.warn(`[admin-estimates] payer term check failed for estimate ${estimate.id}: ${resolveErr.message}`);
+          return res.status(503).json({ error: 'Could not verify the customer’s payer billing terms just now — try saving again.' });
+        }
         if (payerResolution?.payerId != null && payerResolution.paymentTerms
           && payerResolution.paymentTerms !== canonicalPaymentTerms) {
           const labels = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };

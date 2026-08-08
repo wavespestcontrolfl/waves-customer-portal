@@ -321,7 +321,12 @@ function proposalNetTermDays(proposal) {
 // never saw. The operator re-authors or clears the term (codex #3297 r2d).
 async function resolveAcceptanceTermDays({ trx, customerId, proposal }) {
   const { resolveForInvoice } = require('./payer');
-  const resolved = await resolveForInvoice({ database: trx, customerId });
+  // throwOnError: a transient lookup failure must ABORT the win, not
+  // fail-soft to self-pay — that would bypass the mismatch guard below and
+  // invoice a due date the standing payer relationship contradicts (codex
+  // 1A-i r3 P0). Same-trx resolution as InvoiceService.create's own
+  // payer snapshot keeps the two reads consistent.
+  const resolved = await resolveForInvoice({ database: trx, customerId, throwOnError: true });
   const authoredTerm = proposal?.commercialTerms?.paymentTerms || null;
   if (resolved?.payerId != null && resolved.paymentTerms) {
     if (authoredTerm && authoredTerm !== resolved.paymentTerms) {
