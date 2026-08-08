@@ -266,3 +266,46 @@ describe('isBridgeTargetNumber', () => {
     expect(GoogleCallBridge.isBridgeTargetNumber(null)).toBe(false);
   });
 });
+
+describe('dedupeCrmCallRows (PR #3275)', () => {
+  const { dedupeCrmCallRows } = GoogleCallBridge._private;
+  const row = (id, leadId, leadCallSid, callSid = 'CAcall') => ({
+    id, lead_id: leadId, lead_call_sid: leadCallSid, twilio_call_sid: callSid,
+  });
+
+  test('collapses the stale-stamp twin, sid-linked lead winning', () => {
+    // The OR join emits the stamp-linked lead first; the sid-linked lead is
+    // authoritative, so one row survives regardless of arrival order.
+    const stampFirst = dedupeCrmCallRows([row('c1', 'lead-stamp', null), row('c1', 'lead-sid', 'CAcall')]);
+    expect(stampFirst).toHaveLength(1);
+    expect(stampFirst[0].lead_id).toBe('lead-sid');
+
+    const sidFirst = dedupeCrmCallRows([row('c1', 'lead-sid', 'CAcall'), row('c1', 'lead-stamp', null)]);
+    expect(sidFirst).toHaveLength(1);
+    expect(sidFirst[0].lead_id).toBe('lead-sid');
+  });
+
+  test('KEEPS both rows when two live leads share one sid (ambiguity survives)', () => {
+    // leads.twilio_call_sid has no unique index. Collapsing these would let
+    // the bridge rewrite an arbitrary lead's source and leave the real one
+    // unattributed; buildMatches must still see the equal-score twin and
+    // mark the google call ambiguous.
+    const deduped = dedupeCrmCallRows([row('c1', 'lead-a', 'CAcall'), row('c1', 'lead-b', 'CAcall')]);
+    expect(deduped).toHaveLength(2);
+    expect(deduped.map((r) => r.lead_id).sort()).toEqual(['lead-a', 'lead-b']);
+  });
+
+  test('a stale stamp alongside two sid-linked leads keeps only the ambiguous pair', () => {
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-stamp', null),
+      row('c1', 'lead-a', 'CAcall'),
+      row('c1', 'lead-b', 'CAcall'),
+    ]);
+    expect(deduped.map((r) => r.lead_id)).toEqual(['lead-a', 'lead-b']);
+  });
+
+  test('passes through lead-less calls and never merges distinct calls', () => {
+    const deduped = dedupeCrmCallRows([row('c1', null, null), row('c2', null, null, 'CAother')]);
+    expect(deduped.map((r) => r.id)).toEqual(['c1', 'c2']);
+  });
+});

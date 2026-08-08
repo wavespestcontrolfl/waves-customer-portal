@@ -1866,10 +1866,20 @@ function leadContactCompleteness(fields = {}) {
 // definition, and that number IS the reachback (we text the quote link / call
 // back). Requiring email/address would drop exactly the "call me back about
 // pest control" messages the voicemail lead path exists to capture.
+// A caller with NO usable phone at all (blocked/anonymous caller ID — the
+// sentinel filter nulls it) can still be a workable lead, but only when they
+// spoke a VALID email: with no callback number the email is the office's only
+// way to reach them, so an address alone (locatable, not contactable) is not
+// enough, and the voicemail waiver can't apply — the reachback it waives INTO
+// is the phone. Without this branch a fully-identified prospect calling from
+// a blocked number produced no lead row anywhere (name + email + address +
+// quote promised → invisible in Leads/Customers, triage cards only).
 function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false } = {}) {
-  if (!phone) return false;
   const text = (v) => String(v == null ? '' : v).trim();
   const hasServiceIntent = !!(text(extracted.matched_service) || text(extracted.requested_service));
+  if (!phone) {
+    return hasServiceIntent && EMAIL_RE.test(text(extracted.email).toLowerCase());
+  }
   const hasReachback = !!(text(extracted.email) || text(extracted.address_line1));
   return hasServiceIntent && (hasReachback || voicemail === true);
 }
@@ -2164,7 +2174,9 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
   // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 }
 
-// Resolve which existing lead (if any) this call should reuse, by caller phone.
+// Resolve which existing lead (if any) this call should reuse, by caller phone
+// — or, when the caller ID was blocked/anonymous (phone null), by the spoken
+// email, so a repeat anonymous caller doesn't mint a duplicate lead per call.
 // Soft-deleted leads never absorb a new call — a fresh lead is made.
 // - Customer-less recovery path (workableUnnamedLead): only an ACTIVE lead
 //   (status not terminal, not converted), so a recovered inquiry lands on an
@@ -2177,9 +2189,78 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 //   and the booking-conversion ownership guard would then (rightly) refuse to
 //   close it — stranding this caller's booked deal with no convertible lead.
 //   A foreign-owned lead is invisible here; the caller gets a fresh row.
-async function findReusableCallLead(database, { phone, customerId, workableUnnamedLead, unclaimedOnly }) {
-  if (!phone) return null;
-  let query = database('leads').where('phone', phone).whereNull('deleted_at');
+async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null, stampedLeadId = null }) {
+  // Same-call retry FIRST, before any contact-based branch: a retry of this
+  // call (extraction_failed reprocessing) must reuse the lead an earlier
+  // attempt already inserted (matched by the call SID) OR already REUSED
+  // (matched by the call_log.metadata.lead_id stamp — a reused lead keeps
+  // its original call's sid, so the stamp IS the same-call identity there;
+  // codex P1 r19). Extracted phone/email are MUTABLE across reprocessing
+  // attempts — branching on them first let a retry whose contact fields
+  // changed reuse an unrelated phone-matched lead or mint a second lead for
+  // the same SID (codex P2 r8 + audit P1 r14). The same-call row still
+  // passes the SAME ownership/lifecycle filters as the contact-based
+  // lookups (audit P1 r17): a retry that now resolves to a different
+  // customer must not adopt a lead another customer owns, and the
+  // workableUnnamedLead path stays active-leads-only — an ineligible row
+  // falls through to contact reuse or a fresh mint like any other rejected
+  // candidate.
+  // The SID is AUTHORITATIVE over the stamp: a stale stamp can coexist with
+  // a newly inserted SID-linked lead when a prior attempt failed before the
+  // linkage-maintenance block — OR-ing the two and taking the newest let
+  // retries pick an arbitrary one (audit P1 r21). Resolve the SID lead
+  // first; consult the stamp only when no eligible SID lead exists. The
+  // maintenance block downstream repairs the conflict by clearing the stale
+  // stamp once the SID lead is selected.
+  const applySameCallFilters = (q) => {
+    let out = q;
+    if (workableUnnamedLead) {
+      out = out.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
+    }
+    if (unclaimedOnly || !customerId) {
+      // Anonymous retries require an UNCLAIMED row too, not just the
+      // shared-phone-ambiguity case: a stamped/sid lead assigned to a
+      // customer between attempts must be ineligible here — reusing it
+      // would let an anonymous caller's extraction overwrite a
+      // customer-owned lead (audit P1 r15). The rejected row falls through
+      // to contact reuse or a fresh mint like any other candidate.
+      out = out.whereNull('customer_id');
+    } else {
+      out = out.where((qq) => qq.whereNull('customer_id').orWhere('customer_id', customerId));
+    }
+    return out;
+  };
+  if (callSid) {
+    const own = await applySameCallFilters(
+      database('leads').whereNull('deleted_at').where('twilio_call_sid', callSid),
+    ).orderBy('created_at', 'desc').first();
+    if (own) return own;
+  }
+  if (stampedLeadId) {
+    const own = await applySameCallFilters(
+      database('leads').whereNull('deleted_at').where('id', stampedLeadId),
+    ).orderBy('created_at', 'desc').first();
+    if (own) return own;
+  }
+  // The email key must be a REAL email, validated here and not just at the
+  // workable-signal gate: customer-attached calls reach this lookup without
+  // passing hasWorkableLeadSignal, so a phone-less call carrying a malformed
+  // capture like "unknown" could otherwise reuse and claim an unrelated lead
+  // storing the same garbage value (pre-push audit P1, PR #3275).
+  const emailLcRaw = String(email || '').trim().toLowerCase();
+  const emailLc = EMAIL_RE.test(emailLcRaw) ? emailLcRaw : '';
+  if (!phone && !emailLc) return null;
+  let query = database('leads').whereNull('deleted_at');
+  // Email matching engages ONLY when there is no phone: a phone match stays
+  // the sole identity key for identified callers (an email-also match could
+  // absorb a different household member's lead sharing one inbox). And an
+  // email match may only land on an UNCLAIMED lead — a spoken email is weak
+  // identity (shared inbox, transcription collision), so a lead a customer
+  // owns is invisible here and the ambiguous caller gets a fresh row instead
+  // of overwriting someone else's lead (codex P1, PR #3275).
+  query = phone
+    ? query.where('phone', phone)
+    : query.whereRaw('LOWER(TRIM(email)) = ?', [emailLc]).whereNull('customer_id');
   if (workableUnnamedLead) {
     query = query.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
   }
@@ -2192,7 +2273,280 @@ async function findReusableCallLead(database, { phone, customerId, workableUnnam
   } else if (customerId) {
     query = query.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
   }
+  // Phone identity is strong — the newest match wins outright.
+  if (phone) return query.orderBy('created_at', 'desc').first();
+  // Email-matched candidates need POSITIVE identity corroboration, not just
+  // absence of conflict: two different anonymous callers can share one inbox
+  // (or a transcription collision can fabricate the overlap), and reusing
+  // across them overwrites the first prospect's rolling extraction and
+  // swallows the second's new-lead surfacing — a silently lost prospect.
+  // Reuse requires the stated first name and the candidate's to BOTH exist
+  // and match, with last names non-conflicting; missing name data on either
+  // side forces a fresh row instead (pre-push audit P1 r7 — the cost is a
+  // recoverable duplicate, fail-closed beats a cross-prospect merge).
+  // The corroboration lives IN the query, not in a post-fetch scan: a shared
+  // inbox can hold any number of active unclaimed leads, and the caller's
+  // own row must be found however deep it sits — a capped scan still minted
+  // duplicates past the cap (codex P2 r6/r13).
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const firstLc = norm(firstName);
+  if (!firstLc) return null; // positive corroboration impossible — fresh row
+  query = query.whereRaw('LOWER(TRIM(first_name)) = ?', [firstLc]);
+  const lastLc = norm(lastName);
+  if (lastLc) {
+    query = query.whereRaw(
+      "(last_name IS NULL OR TRIM(last_name) = '' OR LOWER(TRIM(last_name)) = ?)",
+      [lastLc],
+    );
+  }
   return query.orderBy('created_at', 'desc').first();
+}
+
+// The lead stamp an earlier attempt of this call may have written
+// (call_log.metadata.lead_id — the phone-less reused-lead linkage). One
+// parser for every site that reconciles it: Step 4b, the implausible-
+// transcript rejection, and the spam/veto terminal exits.
+function parseStampedLeadId(call) {
+  try {
+    const md = typeof call?.metadata === 'string' ? JSON.parse(call.metadata) : (call?.metadata || {});
+    return md?.lead_id ? String(md.lead_id) : null;
+  } catch { return null; }
+}
+
+// The lead columns the phone-less reuse enrichment can mutate — snapshotted
+// into call_log.metadata.lead_prior_state at stamp time and restored when a
+// later attempt rejects the call. One list so the stamp and the restore can
+// never drift.
+const STAMPED_LEAD_RESTORE_FIELDS = [
+  'first_name', 'last_name', 'email', 'phone', 'address', 'city', 'zip',
+  'service_interest', 'urgency', 'transcript_summary', 'extracted_data',
+  'is_qualified', 'status', 'next_follow_up_at', 'customer_id',
+];
+
+function serializeStampedLeadValue(field, v) {
+  if (v instanceof Date) return v.toISOString();
+  if (field === 'extracted_data' && v != null && typeof v !== 'string') return JSON.stringify(v);
+  return v ?? null;
+}
+
+// Snapshot ONLY the fields this call's enrichment is about to write — the
+// prior values (from the pre-enrichment row) and the written values (from
+// the actual update payload). Restore compares written vs current per
+// field, so a staff edit after enrichment survives rejection untouched.
+function snapshotStampedLeadStates(leadRow, leadUpdates) {
+  const prior = {};
+  const written = {};
+  for (const f of STAMPED_LEAD_RESTORE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(leadUpdates || {}, f)) continue;
+    prior[f] = serializeStampedLeadValue(f, leadRow?.[f]);
+    written[f] = serializeStampedLeadValue(f, leadUpdates[f]);
+  }
+  return { prior, written };
+}
+
+// The lead columns Step 4b writes FILL-ONLY (set only while the lead's own
+// value is still empty). Their decision basis is the `current` row, read
+// BEFORE the enrichment transaction takes its row lock — an admin edit or a
+// concurrent call can fill one of them in that gap, and re-applying the
+// stale decision would overwrite the newer entry despite the documented
+// fill-only behavior (codex P2 r17). Re-decided against the LOCKED row
+// inside the transaction; keep this list in step with the fill-if-empty
+// assignments in Step 4b.
+const FILL_ONLY_LEAD_FIELDS = ['phone', 'first_name', 'last_name', 'email', 'address', 'city', 'zip'];
+
+function dropFilledLeadColumns(leadUpdates, lockedLead) {
+  if (!lockedLead || !leadUpdates) return leadUpdates;
+  const stillEmpty = (v) => v === null || v === undefined || v === '';
+  let out = leadUpdates;
+  for (const f of FILL_ONLY_LEAD_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(out, f)) continue;
+    if (stillEmpty(lockedLead[f])) continue;
+    if (out === leadUpdates) out = { ...leadUpdates };
+    delete out[f];
+  }
+  return out;
+}
+
+// Postgres casts for the per-field compare-and-swap — parameters arrive as
+// text; non-text columns need explicit casts for IS NOT DISTINCT FROM.
+const STAMPED_LEAD_FIELD_CASTS = {
+  extracted_data: '::jsonb',
+  next_follow_up_at: '::timestamptz',
+  is_qualified: '::boolean',
+  customer_id: '::uuid',
+};
+
+// Clear the call's lead stamp AND put the stamped lead's prior state back in
+// ONE transaction, fenced on the processing token. The stamp row is
+// RE-READ inside the transaction (never the in-memory call object — an
+// in-flight attempt may have stamped after the row was loaded), and the
+// restore is a per-field COMPARE-AND-SWAP: each field goes back to its
+// pre-enrichment value ONLY while it still equals what this call wrote —
+// a staff edit made after the enrichment survives rejection untouched
+// (pre-push P0 r20: a row-level sentinel silently deleted admin edits to
+// fields the editor changes without touching the summary). The reused lead
+// itself is never retired here — it predates the call.
+// Returns false when the fence lost (peer owns the call); THROWS on
+// transient DB failure so callers escalate to the extraction_failed retry
+// instead of finalizing half-reconciled.
+async function clearStampAndRestoreLead(call, procToken, callSid) {
+  return db.transaction(async (trx) => {
+    const fresh = await trx('call_log').where({ id: call.id }).first('metadata');
+    let md = {};
+    try {
+      md = typeof fresh?.metadata === 'string' ? JSON.parse(fresh.metadata) : (fresh?.metadata || {});
+    } catch { md = {}; }
+    const stampedLeadId = md?.lead_id ? String(md.lead_id) : null;
+    if (!stampedLeadId) return true;
+    const priorState = md.lead_prior_state && typeof md.lead_prior_state === 'object' ? md.lead_prior_state : null;
+    const writtenState = md.lead_written_state && typeof md.lead_written_state === 'object' ? md.lead_written_state : null;
+    const ownStampedAt = typeof md.lead_stamped_at === 'string' ? md.lead_stamped_at : null;
+    const cleared = await trx('call_log')
+      .where({ id: call.id })
+      .where('processing_token', procToken)
+      .update({
+        metadata: db.raw("(((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state') - 'lead_stamped_at'"),
+        updated_at: new Date(),
+      });
+    if (!cleared) return false;
+    if (priorState && writtenState) {
+      // Successors are read BEFORE the restore because they gate it (codex
+      // P2 r19). Two calls can write the SAME value to a field — both
+      // setting urgency='urgent' or is_qualified=true is the common case —
+      // and the per-field CAS cannot tell whose value is live: it sees
+      // current == this call's written and restores the pre-THIS baseline,
+      // silently erasing a LATER accepted call's evidence. Re-parenting
+      // runs after the restore and only rewrites baselines, so it never
+      // puts that value back. A field any later snapshot also wrote is
+      // therefore left alone — it is that call's evidence too, and its own
+      // rejection will reconcile it.
+      const eq = (a, b) => (a ?? null) === (b ?? null);
+      const successors = (await trx('call_log')
+        .whereRaw("metadata->>'lead_id' = ?", [stampedLeadId])
+        .whereNot('id', call.id)
+        .select('id', 'metadata'))
+        .map((s) => {
+          let sm = null;
+          try { sm = typeof s.metadata === 'string' ? JSON.parse(s.metadata) : (s.metadata || {}); } catch { sm = null; }
+          return { id: s.id, md: sm };
+        });
+      // "Later" uses the same lead_stamped_at ordering the re-parent loop
+      // does; a missing marker on either side skips conservatively.
+      const laterSnapshots = successors.filter((s) => {
+        const sStampedAt = typeof s.md?.lead_stamped_at === 'string' ? s.md.lead_stamped_at : null;
+        return ownStampedAt && sStampedAt && sStampedAt > ownStampedAt;
+      });
+      const ownedByLater = new Set();
+      for (const s of laterSnapshots) {
+        const sWritten = s.md?.lead_written_state;
+        if (!sWritten || typeof sWritten !== 'object') continue;
+        for (const f of Object.keys(sWritten)) ownedByLater.add(f);
+      }
+      const frags = [];
+      const binds = [];
+      for (const f of STAMPED_LEAD_RESTORE_FIELDS) {
+        if (!Object.prototype.hasOwnProperty.call(writtenState, f)) continue;
+        if (ownedByLater.has(f)) continue;
+        const cast = STAMPED_LEAD_FIELD_CASTS[f] || '';
+        frags.push(`${f} = CASE WHEN ${f} IS NOT DISTINCT FROM ?${cast} THEN ?${cast} ELSE ${f} END`);
+        binds.push(writtenState[f] ?? null, (Object.prototype.hasOwnProperty.call(priorState, f) ? priorState[f] : null) ?? null);
+      }
+      if (frags.length) {
+        frags.push('updated_at = ?');
+        binds.push(new Date());
+        await trx.raw(
+          `UPDATE leads SET ${frags.join(', ')} WHERE id = ? AND deleted_at IS NULL`,
+          [...binds, stampedLeadId],
+        );
+        logger.info(`[call-proc] Reconciled the stamped lead's state after rejection for ${maskSid(callSid)}`);
+      }
+      // Re-parent SUCCESSOR snapshots (audit P1 r21): a call that reused
+      // this lead AFTER this one snapshotted THIS call's written values as
+      // its rollback baseline — if this call rejects first and the
+      // successor rejects later, the successor's restore would resurrect
+      // data belonging to an already-rejected call. Point those baseline
+      // entries at this call's own prior values instead. (The reverse order
+      // needs nothing: the successor's restore re-materializes this call's
+      // written values first, and this call's CAS then matches and restores
+      // its own prior.) Only snapshots stamped AFTER this call's are
+      // eligible — a PREDECESSOR whose prior value coincidentally equals
+      // this call's written value (an is_qualified flip-flop is the classic
+      // cycle) must keep its own baseline, or rejecting it later restores
+      // the wrong value (codex P2 r13) — which is exactly the
+      // laterSnapshots filter computed above. Successor lookup rides the
+      // metadata lead_id index.
+      for (const s of laterSnapshots) {
+        const sPrior = s.md?.lead_prior_state;
+        if (!sPrior || typeof sPrior !== 'object') continue;
+        let changed = false;
+        for (const f of Object.keys(writtenState)) {
+          if (Object.prototype.hasOwnProperty.call(sPrior, f) && eq(sPrior[f], writtenState[f])) {
+            sPrior[f] = Object.prototype.hasOwnProperty.call(priorState, f) ? (priorState[f] ?? null) : null;
+            changed = true;
+          }
+        }
+        if (changed) {
+          await trx('call_log').where({ id: s.id }).update({
+            metadata: db.raw(
+              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_prior_state}', ?::jsonb, true)",
+              [JSON.stringify(sPrior)],
+            ),
+            updated_at: new Date(),
+          });
+        }
+      }
+    }
+    return true;
+  });
+}
+
+// New-lead admin surfacing for a lead minted by call processing — the fresh
+// insert on a lookup miss AND the claim-race recovery mint (codex P2, PR
+// #3275: a race-recovered lead is just as new as a fresh one, and on the
+// phone-less path the SMS rail fails closed, so skipping this left it with
+// no bell or push at all). Untracked calls ring the admin bell directly —
+// category 'lead' is default-denied under GATE_ADMIN_BELL_POLICY, but a new
+// lead must ring like every other new lead. Tracked marketing calls fire the
+// same new_lead bell + Web Push the web-form path sends. Best-effort BY
+// CONTRACT: never throws — the race-mint call site sits inside the mint's
+// try/catch, where a thrown notify error would be misread as a mint failure
+// and null out a lead that DID insert.
+async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadSourceRow, call }) {
+  const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+    .filter(Boolean)
+    .join(' ');
+  if (!leadSourceId) {
+    try {
+      await require('./notification-service').notifyAdmin(
+        'lead',
+        'Untracked call lead',
+        `New lead from a call we couldn't attribute: ${callerName || 'Unknown caller'} (${phone || 'unknown number'}). No marketing source matched — tag the source or follow up.`,
+        {
+          link: `/admin/leads?lead=${leadId}`,
+          metadata: { leadId, phone, callSid: call.twilio_call_sid },
+          bell: true,
+        },
+      );
+    } catch (notifyErr) {
+      logger.warn(`[call-proc] untracked-call admin notify failed: ${notifyErr.message}`);
+    }
+  } else {
+    try {
+      const { triggerNotification } = require('./notification-triggers');
+      await triggerNotification('new_lead', {
+        title: extracted.is_voicemail ? 'New voicemail lead' : 'New call lead',
+        name: callerName || (phone ? maskPhone(phone) : null),
+        source: leadSourceRow?.name || null,
+        zip: extracted.zip || null,
+        service: extracted.matched_service || extracted.requested_service || null,
+        phone,
+        message: !!extracted.call_summary,
+        leadId,
+      });
+    } catch (notifyErr) {
+      logger.warn(`[call-proc] tracked-call new_lead notify failed: ${notifyErr.message}`);
+    }
+  }
 }
 
 // Convert the call's lead to won when the pipeline books an appointment,
@@ -5174,6 +5528,18 @@ const CallRecordingProcessor = {
         const rawPrior = call.transcription_metadata;
         priorMeta = typeof rawPrior === 'string' ? JSON.parse(rawPrior) : (rawPrior && typeof rawPrior === 'object' ? rawPrior : {});
       } catch { priorMeta = {}; }
+      // A prior attempt may have STAMPED a reused (different-sid) lead as
+      // this call's linkage — unlink it and restore that lead's prior
+      // summary, atomically and fenced, BEFORE the rejection update (codex
+      // P1 r16 / audit P1 r19: without this, the metadata-join consumers
+      // kept presenting the rejected call — and its hallucinated summary —
+      // as lead evidence). Fence-lost bails exactly like the rejection
+      // write's own 0-row path below.
+      const rejectionStampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
+      if (!rejectionStampSettled) {
+        logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+        return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
+      }
       // Fence on processing_token like the finalization write: if a peer
       // reclaimed the stale lock, this matches 0 rows and we bail without
       // overwriting the peer's state. Clear disposition + enriched extraction
@@ -5195,7 +5561,9 @@ const CallRecordingProcessor = {
           review_status: null,
           // A prior hallucinated extraction (force-reprocess path) may have
           // linked this empty voicemail to a phantom customer; the unified
-          // voice sync attaches messages whenever customer_id is set, so unlink.
+          // voice sync attaches messages whenever customer_id is set, so
+          // unlink. (Lead-stamp cleanup ran above in
+          // clearStampAndRestoreLead.)
           customer_id: null,
           processing_token: null,
           processing_started_at: null,
@@ -5472,10 +5840,17 @@ const CallRecordingProcessor = {
     let voicemailLeadPath = false;
     if (voicemailChannel && !extracted.is_spam && !isOutboundCall(call) && !voicemailContentVeto) {
       const vmPhone = resolveCallContactPhone(call, extracted.phone);
-      if (vmPhone && hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) {
+      // A blocked-caller-ID voicemail (vmPhone null) rides the same
+      // email-backed branch as a live anonymous call: hasWorkableLeadSignal
+      // demands a VALID spoken email when there is no phone, so "call me
+      // back" voicemails with no reachback still terminal-skip. The
+      // quote-link text-back downstream fails closed in the service
+      // (missing_input) — a phone-less voicemail lead is email-reachback
+      // only (codex P1, PR #3275).
+      if (hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) {
         const vmCustomer = call.customer_id
           ? { id: call.customer_id }
-          : await findCustomerForCallContact(vmPhone, extracted).catch(() => null);
+          : (vmPhone ? await findCustomerForCallContact(vmPhone, extracted).catch(() => null) : null);
         voicemailLeadPath = !vmCustomer;
       }
     }
@@ -5500,6 +5875,16 @@ const CallRecordingProcessor = {
 
     // Skip spam and non-workable voicemail
     if (extracted.is_spam || (voicemailChannel && !voicemailLeadPath)) {
+      // A retry newly classified spam/non-workable must first unlink any
+      // earlier attempt's lead stamp AND restore that lead's prior summary
+      // — atomically, fenced (codex P1 r15 / audit P1 r17/r19). A transient
+      // failure here throws to the outer extraction_failed guard rather
+      // than finalizing with the rejected linkage in place.
+      const stampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
+      if (!stampSettled) {
+        logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
+        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
+      }
       await writeLegacyShadowRouteDecision({
         call,
         extracted,
@@ -5511,13 +5896,25 @@ const CallRecordingProcessor = {
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
         processing_token: null,
         processing_started_at: null,
+        // (Lead-stamp cleanup ran above in clearStampAndRestoreLead.)
         updated_at: new Date(),
       };
       if (extracted.is_voicemail) {
         terminalUpdate.answered_by = 'voicemail';
         terminalUpdate.call_outcome = 'voicemail';
       }
-      await db('call_log').where({ id: call.id }).update(terminalUpdate);
+      // Fenced on the processing token (audit P1 r17): this update now also
+      // clears the lead stamp, and an UNfenced write from a stale worker
+      // resuming after a peer reclaimed the call would erase the new
+      // worker's durable call→lead link and terminal state.
+      const terminalWritten = await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update(terminalUpdate);
+      if (terminalWritten === 0) {
+        logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
+        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
+      }
       await updateUnifiedVoiceMessage(
         {
           ...call,
@@ -6376,17 +6773,35 @@ const CallRecordingProcessor = {
     // (no customer, no lead, no appointment, no automation). Mirrors the
     // spam/voicemail early-return below.
     if (v2CanonicalWriteBlocked) {
-      await db('call_log').where({ id: call.id }).update({
-        ai_extraction: JSON.stringify(extracted),
-        call_summary: extracted.call_summary || null,
-        sentiment: extracted.sentiment || null,
-        lead_quality: extracted.lead_quality || null,
-        processing_status: extracted.is_spam ? 'spam' : 'processed',
-        review_status: 'open',
-        processing_token: null,
-        processing_started_at: null,
-        updated_at: new Date(),
-      });
+      // Hard-veto exit precedes Step 4b's stamp reconciliation — unlink the
+      // earlier attempt's lead stamp and restore that lead's prior summary,
+      // atomically and fenced (codex P1 r15 / audit P1 r17/r19); a
+      // transient failure throws to the outer extraction_failed guard.
+      const vetoStampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
+      if (!vetoStampSettled) {
+        logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
+        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
+      }
+      // Fenced on the processing token (audit P1 r17) — a stale worker must
+      // not erase a peer's terminal state.
+      const vetoWritten = await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          ai_extraction: JSON.stringify(extracted),
+          call_summary: extracted.call_summary || null,
+          sentiment: extracted.sentiment || null,
+          lead_quality: extracted.lead_quality || null,
+          processing_status: extracted.is_spam ? 'spam' : 'processed',
+          review_status: 'open',
+          processing_token: null,
+          processing_started_at: null,
+          updated_at: new Date(),
+        });
+      if (vetoWritten === 0) {
+        logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
+        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
+      }
       await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
       logger.info(`[call-proc] V2 hard veto for ${callSid}; skipped canonical writes (customer/lead/appointment)`);
       return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };
@@ -7211,21 +7626,71 @@ const CallRecordingProcessor = {
         : `existing customer (${leadCustomer?.pipeline_stage || 'unknown'})`;
       logger.info(`[call-proc] Skipping lead creation for ${skipReason}, customer ${customerId || 'none'}`);
     }
+    // A stamp an EARLIER ATTEMPT of this call may have written
+    // (call_log.metadata.lead_id). Parsed OUTSIDE the lead section: it must
+    // be reconciled on EVERY retry outcome — including a retry that gained a
+    // phone or was vetoed out of lead creation entirely — or the OR-join
+    // consumers keep associating this call with a lead a prior attempt
+    // chose (audit P1 r22).
+    const priorStampedLeadId = parseStampedLeadId(call);
+    // Linkage completion flag: once this call's flow involves a reused lead
+    // or a prior stamp, it must EXIT with its linkage settled (stamped,
+    // re-pointed, or cleared by the maintenance block). A throw anywhere
+    // before that block would otherwise be swallowed by the section's
+    // non-blocking catch and finalize the call with missing or stale
+    // linkage (audit P1 r21) — the catch escalates while this is set.
+    // ARMED FROM THE PRIOR STAMP AT DECLARATION, not after the reuse
+    // lookup: a transient findReusableCallLead failure on a stamped retry
+    // would otherwise finalize with the old stamp unrevalidated (codex P1
+    // r14).
+    let phoneLessLinkagePending = !!priorStampedLeadId;
+    // Assigned inside the try once the lead source resolves; declared out
+    // here so the section catch can run it on a benign failure (codex P2
+    // r15). The default no-op keeps pre-lead-source failures safe.
+    let runCallPpcAttribution = () => {};
     if (shouldCreateLead) {
       try {
-        // Check if lead already exists for this phone (see findReusableCallLead
-        // for the per-path filters: soft-deleted excluded always; active-only
+        // Check if lead already exists for this phone — or by spoken email
+        // when the caller ID was blocked (see findReusableCallLead for the
+        // per-path filters: soft-deleted excluded always; active-only
         // on the customer-less recovery path; unclaimed-or-ours on the
         // customer-attached path, so a shared-phone lead owned by another
         // customer is never reused/overwritten; UNCLAIMED-only when the phone
         // is ambiguous across customers — this call must not enrich a lead
         // one of the candidates owns while the office adjudicates).
+        // priorStampedLeadId (parsed above) is same-call identity exactly
+        // like the sid — a reused lead keeps its original call's sid, so
+        // without the stamp a retry whose mutable contact fields changed
+        // would mint a second lead while the stamp still pointed at the
+        // first, and the OR-join consumers would associate this call with
+        // BOTH (codex P1 r19).
         const existingLead = await findReusableCallLead(db, {
           phone,
+          email: phone ? null : (extracted.email || null),
+          firstName: extracted.first_name || null,
+          lastName: extracted.last_name || null,
           customerId,
           workableUnnamedLead,
           unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
+          callSid: call.twilio_call_sid || null,
+          stampedLeadId: priorStampedLeadId,
         });
+        // Same-call reuse (retry reprocessing found the lead THIS call's
+        // earlier attempt inserted, by sid — or already reused, by stamp) is
+        // strong identity — the weak-identity write revalidation below must
+        // not apply its email/name predicates to it (a name-less caller's
+        // own row would fail them and re-mint).
+        const sameCallLeadReuse = !!(existingLead
+          && ((call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid)
+            || (priorStampedLeadId && String(existingLead.id) === priorStampedLeadId)));
+        // A fresh phone-less insert with no prior stamp self-links via its
+        // own sid at insert time — phone-less REUSE puts linkage state in
+        // play (a leftover stamp already armed the flag at declaration).
+        if (!phone && existingLead) phoneLessLinkagePending = true;
+        // The stamp as it stands NOW — updated when the in-loop stamp+write
+        // transaction runs, so the post-loop maintenance reconciles the
+        // ACTUAL stamp, not the one from processing start.
+        let currentStampedLeadId = priorStampedLeadId;
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -7261,6 +7726,45 @@ const CallRecordingProcessor = {
           logger.warn(`[call-proc] lead_source lookup failed: ${e.message}`);
         }
 
+        // Assigned HERE (before anything downstream can throw) and invoked
+        // after the enrichment/claim-race block — and also from the section
+        // catch on a benign failure, so a transient enrichment error cannot
+        // permanently drop the call from paid/organic funnel reporting
+        // (codex P2 r15). Reads leadId/customerId at CALL time (final
+        // values); fully self-guarded, never throws.
+        runCallPpcAttribution = () => {
+          try {
+            const callAttr = leadSourceRow
+              ? require('./ads/call-attribution').attributionForSourceType(leadSourceRow.source_type)
+              : null;
+            const isBridgeTarget = leadSourceRow
+              && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
+            if (leadId && customerId && callAttr && !isBridgeTarget) {
+              require('./ads/call-attribution').recordCallPpcAttribution({
+                customerId,
+                leadId,
+                leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
+                isPaid: callAttr.isPaid,
+                leadSourceDetail: leadSourceRow.name || 'inbound call',
+                // Pass the PRIMARY matched service, NOT the composed
+                // multi-service label (and not the lead row's
+                // service_interest, which enrichment may have just written
+                // as the composite): attribution derives a single
+                // service_line via inferServiceLine, whose keyword order
+                // (lawn before pest) would bucket a pest-primary "… + Lawn
+                // Care Service" composite as lawn and skew paid/organic ROI
+                // (codex r3). The secondary families live on the lead's
+                // service_interest; the single-line funnel field carries
+                // the primary by design.
+                serviceInterest: extracted.matched_service || extracted.requested_service || null,
+                leadDate: call.created_at || null, // date by the actual call
+              }).catch(() => {});
+            }
+          } catch (attrErr) {
+            logger.warn(`[call-proc] ppc attribution setup failed: ${attrErr.code || attrErr.name || 'error'}`);
+          }
+        };
+
         if (existingLead) {
           leadId = existingLead.id;
           logger.info(`[call-proc] Found existing lead ${leadId} for ${maskPhone(phone)}`);
@@ -7290,105 +7794,13 @@ const CallRecordingProcessor = {
           leadId = newLead.id;
           logger.info(`[call-proc] Created new lead ${leadId} (${maskPhone(phone)})${extracted.first_name ? '' : ' — no name captured'}`);
 
-          // Untracked inbound call → no lead_source matched (caller reached the
-          // main line / caller-ID didn't match a tracking number). These are the
-          // "Unattributed" call leads the dashboard surfaces — notify an admin so
-          // it can be source-tagged or followed up. Best-effort; a notify failure
-          // must never break call processing.
-          if (!leadSourceId) {
-            try {
-              const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
-                .filter(Boolean)
-                .join(' ');
-              await require('./notification-service').notifyAdmin(
-                'lead',
-                'Untracked call lead',
-                `New lead from a call we couldn't attribute: ${callerName || 'Unknown caller'} (${phone || 'unknown number'}). No marketing source matched — tag the source or follow up.`,
-                {
-                  link: `/admin/leads?lead=${leadId}`,
-                  metadata: { leadId, phone, callSid: call.twilio_call_sid },
-                  // These ARE new leads — category 'lead' is default-denied
-                  // under GATE_ADMIN_BELL_POLICY, but an unattributed call
-                  // lead must ring like every other new lead.
-                  bell: true,
-                },
-              );
-            } catch (notifyErr) {
-              logger.warn(`[call-proc] untracked-call admin notify failed: ${notifyErr.message}`);
-            }
-          } else {
-            // Tracked call lead (GBP/spoke/paid tracking number): fire the same
-            // new_lead bell + Web Push the web-form path sends. Until now ONLY
-            // untracked call leads notified anyone — a tracked marketing call
-            // lead (the common case) landed silently and relied on someone
-            // happening to open the Leads page. Best-effort; a notify failure
-            // must never break call processing.
-            try {
-              const callerName = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
-                .filter(Boolean)
-                .join(' ');
-              const { triggerNotification } = require('./notification-triggers');
-              await triggerNotification('new_lead', {
-                title: extracted.is_voicemail ? 'New voicemail lead' : 'New call lead',
-                name: callerName || (phone ? maskPhone(phone) : null),
-                source: leadSourceRow?.name || null,
-                zip: extracted.zip || null,
-                service: extracted.matched_service || extracted.requested_service || null,
-                phone,
-                message: !!extracted.call_summary,
-                leadId,
-              });
-            } catch (notifyErr) {
-              logger.warn(`[call-proc] tracked-call new_lead notify failed: ${notifyErr.message}`);
-            }
-          }
-        }
-
-        // Marketing call lead (matched a tracking number), NEW or reused -> surface
-        // it in the PPC funnel (ad_service_attribution) so it buckets into the same
-        // channel as a web-form lead from that source. attributionForSourceType maps
-        // the lead_sources.source_type to the funnel channel key + paid flag: PAID
-        // numbers (google_ads/facebook) stay paid; ORGANIC marketing sources (spoke
-        // domains -> domain_website, hub city pages -> waves_website, GBP ->
-        // google_business) are is_paid=false so they show as their own no-spend
-        // channels instead of being invisible (an organic call otherwise makes a
-        // lead but no funnel row, hiding whole channels from the LTV:CAC surfaces).
-        // Offline / word-of-mouth sources map to null and get no row. campaign_id is
-        // null here (the Google call-reporting bridge backfills it later for paid
-        // Google). recordCallPpcAttribution dedupes by lead_id and respects
-        // first-touch (a web-attributed lead keeps its source), so no double-count.
-        // EXCEPTION: the Google Ads call-bridge target number is SHARED (organic hub
-        // + paid Google call-extension), resolved by the bridge AFTER the fact — so
-        // never pre-attribute THAT one number (it would lock the row before the
-        // bridge can mark the call paid). Only that single number is suppressed; the
-        // other main_site city-page numbers attribute organic normally.
-        // NOTE: stays gated on customerId, so a customer-less recovery lead gets no
-        // ad_service_attribution row yet — the lead keeps its lead_source_id and is
-        // attributed when it converts to a customer. Lead-only PPC attribution needs
-        // schema work on the customer-keyed table; deferred out of this PR.
-        const callAttr = leadSourceRow
-          ? require('./ads/call-attribution').attributionForSourceType(leadSourceRow.source_type)
-          : null;
-        const isBridgeTarget = leadSourceRow
-          && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
-        if (leadId && customerId && callAttr && !isBridgeTarget) {
-          require('./ads/call-attribution').recordCallPpcAttribution({
-            customerId,
-            leadId,
-            leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
-            isPaid: callAttr.isPaid,
-            leadSourceDetail: leadSourceRow.name || 'inbound call',
-            // service_interest isn't on the lead row yet (enrichment writes it
-            // later) — pass the PRIMARY matched service, NOT the composed
-            // multi-service label: attribution derives a single service_line
-            // via inferServiceLine, whose keyword order (lawn before pest)
-            // would bucket a pest-primary "… + Lawn Care Service" composite
-            // as lawn and skew paid/organic ROI (codex r3). The secondary
-            // families live on the lead's service_interest; the single-line
-            // funnel field carries the primary by design.
-            serviceInterest: extracted.matched_service || extracted.requested_service || null,
-            leadDate: call.created_at || null, // date by the actual call
-          }).catch(() => {});
+          // Untracked inbound call → no lead_source matched → admin bell so the
+          // "Unattributed" lead can be source-tagged; tracked marketing call →
+          // the same new_lead bell + Web Push the web-form path sends. Both
+          // branches live in notifyNewCallLead (shared with the claim-race
+          // recovery mint below) and never throw — a notify failure must never
+          // break call processing.
+          await notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadSourceRow, call });
         }
 
         // Dropped-call detector, phase 1 of 2 (owner directive 2026-08-01): a
@@ -7405,6 +7817,10 @@ const CallRecordingProcessor = {
         // stamp.
         let droppedMidIntake = false;
         let droppedCallSeconds = 0;
+        // Raw detector verdict BEFORE the reused-lead-address suppression —
+        // the claim-race recovery below needs it to re-judge suppression
+        // against the replacement row (codex P2 r8).
+        let droppedDetectorFired = false;
         if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam
           && !isOutboundCall(call) && transcription) {
           try {
@@ -7418,12 +7834,13 @@ const CallRecordingProcessor = {
             // missing-address drop; don't card it or text for information
             // already on file (codex P1).
             const leadAddressOnFile = !!String(existingLead?.address || '').trim();
-            droppedMidIntake = !leadAddressOnFile && DroppedCallSmsDetect.detectDroppedMidIntake({
+            droppedDetectorFired = DroppedCallSmsDetect.detectDroppedMidIntake({
               durationSeconds: droppedCallSeconds,
               transcription,
               extracted,
               v2Extraction: v2Result?.status === 'valid' ? v2Result.extraction : null,
             });
+            droppedMidIntake = !leadAddressOnFile && droppedDetectorFired;
             // A PRE-EXISTING linked customer whose record already carries the
             // service address is not missing anything — the card would
             // falsely claim so (codex P2). One read, only when detection
@@ -7447,222 +7864,612 @@ const CallRecordingProcessor = {
         // inserted above) every column we'd touch is null, so the
         // empty-only rule is equivalent to "fill everything" anyway.
         if (leadId) {
-          const current = existingLead || (await db('leads').where({ id: leadId }).first());
+          let current = existingLead || (await db('leads').where({ id: leadId }).first());
           const isEmpty = (v) => v === null || v === undefined || v === '';
 
-          const leadUpdates = {};
-          if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = capitalizeName(extracted.first_name);
-          if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = capitalizeName(extracted.last_name);
-          if (extracted.email && isEmpty(current?.email)) leadUpdates.email = extracted.email;
-          if (extracted.address_line1 && isEmpty(current?.address)) leadUpdates.address = extracted.address_line1;
-          if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
-          if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
-          // Multi-service calls: matched_service is single-slot, so append the
-          // requested families it doesn't cover ("pest and lawn" must not
-          // price as pest-only). Fill-if-empty semantics unchanged.
-          // When the V2 gate approved this call, compose the extras from the
-          // V2-APPROVED service categories (primary + secondary_categories),
-          // mapped to scannable legacy service words: a V1-hallucinated
-          // family V2 rejected must not leak onto the lead label (codex r9),
-          // and flatView's requested_service is the raw primary category
-          // token ("pest_general"), which drops V2's secondaries and scans
-          // as nothing (codex r10). matched_service stays V1 here — the
-          // recurring-default backfill below re-asserts it post-merge.
-          const v2ServiceRequest = v2ApprovedExtraction?.service_request || null;
-          const v2RequestedForCompose = (() => {
-            if (!v2ServiceRequest) return null;
-            // composeWordsForV2Category, NOT mapServiceCategoryToLegacy: the
-            // legacy map collapses palm_injection into Tree & Shrub and
-            // hard-labels termite as inspection (codex r11).
-            let cats = [v2ServiceRequest.primary_service_category,
-              ...(Array.isArray(v2ServiceRequest.secondary_categories) ? v2ServiceRequest.secondary_categories : [])];
-            // A specialty catalog pick (flea/stinging/bed-bug) rides the
-            // coarse pest_general category in the V2 enum — the generic
-            // category word is the SAME job, not an extra pest request
-            // (codex r20).
-            const v2SpecificPick = flatView(v2ApprovedExtraction).specific_service_name;
-            if (v2SpecificPick && labelIsSpecialtyPestFamily(v2SpecificPick)) {
-              // Only the coarse category BACKING the specialty pick (the
-              // PRIMARY slot) is redundant — a separate pest_general
-              // SECONDARY is a real second request (codex r22).
-              cats = cats.filter((c, i) => !(i === 0 && (c === 'pest_general' || c === 'bundled_waveguard')));
-            }
-            // Null-mapped categories (other/inspection_only/future enums)
-            // yield an EMPTY category-authoritative request — never fall
-            // back to V1 caller text under V2 approval (codex r12)…
-            const words = cats.map((c) => composeWordsForV2Category(c)).filter(Boolean);
-            // …EXCEPT for families the V2 enum cannot express at all
-            // (tree/shrub, wildlife): those exist only in the caller text,
-            // so scan it for JUST them (codex r14 — closes the enum gap
-            // without reopening the V1-hallucination door).
-            const inexpressible = v2InexpressibleFamilyWords(extracted.requested_service);
-            return [words.join(' and '), inexpressible].filter(Boolean).join(' and ');
-          })();
-          // Prefix with the primary the V2 merge will adopt (same adoption
-          // rule as the merge below: V2 anchored a specific service, V1 had
-          // no label, or the category maps one-to-one) — a V1 primary V2
-          // rejected must not lead the label (codex r12).
-          const matchedForCompose = (() => {
-            if (v2ServiceRequest === null) return extracted.matched_service;
-            const v2Flat = flatView(v2ApprovedExtraction);
-            // A V2-anchored catalog pick IS the primary: "Palm Injection"
-            // must lead the label, not the coarse category mapping
-            // ("Tree & Shrub Care") that would then re-append the specific
-            // as a fake second service (codex r13).
-            if (v2Flat.specific_service_name) return v2Flat.specific_service_name;
-            const v2Cat = v2ServiceRequest.primary_service_category || null;
-            // Categories whose legacy mapping is null/coarse (stinging,
-            // exclusion) lead with their own family label — else a
-            // wasp-only call renders as two services (codex r15).
-            const catPrimary = v2PrimaryLabelForCategory(v2Cat);
-            if (catPrimary) return catPrimary;
-            // Termite category with no specific pick: flatView's coarse
-            // "Termite Inspection" would pair with the composed
-            // "+ Termite Service" as a phantom double — pick the single
-            // right primary from the caller's work cue (codex r22).
-            if (v2Cat === 'termite') {
-              return hasTermiteWorkCue(extracted.requested_service) ? 'Termite Service' : 'Termite Inspection';
-            }
-            const preciseV2Category = v2Cat === 'bed_bug' || v2Cat === 'wdo';
-            return v2Flat.matched_service
-              && (!extracted.matched_service || preciseV2Category)
-              ? v2Flat.matched_service
-              : extracted.matched_service;
-          })();
-          const serviceInterestLabel = composeServiceInterest(
-            v2ServiceRequest !== null
-              ? {
-                ...extracted,
-                matched_service: matchedForCompose,
-                requested_service: v2RequestedForCompose,
-                // Only the V2-ADOPTED specific may mark coverage — a stale
-                // V1 specific belonging to a secondary family (e.g. V1
-                // "Monthly Lawn Care Service" under V2 pest+lawn) would
-                // swallow that secondary's tail (codex r21).
-                specific_service_name: flatView(v2ApprovedExtraction).specific_service_name || null,
+          // The enrichment below runs as a PASS over `current` so the
+          // claim-race recovery can re-run the SAME pass against a freshly
+          // minted row instead of maintaining a second hand-built insert that
+          // drifts from this one (pre-push audit P1 r5; AGENTS.md: no
+          // parallel mechanisms). At most two passes ever run.
+          let leadUpdates;
+          let contact;
+          let enriched = 0;
+          let raceRecovered = false;
+          for (;;) {
+            leadUpdates = {};
+            // A retry can RECOVER a callback number and still reuse the
+            // phone-less lead via sid/stamp identity — without this fill the
+            // lead stayed unreachable by phone forever and later calls
+            // could not reuse it by number (codex P1 r15b). Fill-if-empty
+            // like the other identity fields; an existing phone never moves.
+            // (These fill-if-empty columns are listed in
+            // FILL_ONLY_LEAD_FIELDS and re-decided against the locked row
+            // inside the stamp transaction — keep the two in step.)
+            if (phone && isEmpty(current?.phone)) leadUpdates.phone = phone;
+            if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = capitalizeName(extracted.first_name);
+            if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = capitalizeName(extracted.last_name);
+            if (extracted.email && isEmpty(current?.email)) leadUpdates.email = extracted.email;
+            if (extracted.address_line1 && isEmpty(current?.address)) leadUpdates.address = extracted.address_line1;
+            if (extracted.city && isEmpty(current?.city)) leadUpdates.city = extracted.city;
+            if (extracted.zip && isEmpty(current?.zip)) leadUpdates.zip = extracted.zip;
+            // Multi-service calls: matched_service is single-slot, so append the
+            // requested families it doesn't cover ("pest and lawn" must not
+            // price as pest-only). Fill-if-empty semantics unchanged.
+            // When the V2 gate approved this call, compose the extras from the
+            // V2-APPROVED service categories (primary + secondary_categories),
+            // mapped to scannable legacy service words: a V1-hallucinated
+            // family V2 rejected must not leak onto the lead label (codex r9),
+            // and flatView's requested_service is the raw primary category
+            // token ("pest_general"), which drops V2's secondaries and scans
+            // as nothing (codex r10). matched_service stays V1 here — the
+            // recurring-default backfill below re-asserts it post-merge.
+            const v2ServiceRequest = v2ApprovedExtraction?.service_request || null;
+            const v2RequestedForCompose = (() => {
+              if (!v2ServiceRequest) return null;
+              // composeWordsForV2Category, NOT mapServiceCategoryToLegacy: the
+              // legacy map collapses palm_injection into Tree & Shrub and
+              // hard-labels termite as inspection (codex r11).
+              let cats = [v2ServiceRequest.primary_service_category,
+                ...(Array.isArray(v2ServiceRequest.secondary_categories) ? v2ServiceRequest.secondary_categories : [])];
+              // A specialty catalog pick (flea/stinging/bed-bug) rides the
+              // coarse pest_general category in the V2 enum — the generic
+              // category word is the SAME job, not an extra pest request
+              // (codex r20).
+              const v2SpecificPick = flatView(v2ApprovedExtraction).specific_service_name;
+              if (v2SpecificPick && labelIsSpecialtyPestFamily(v2SpecificPick)) {
+                // Only the coarse category BACKING the specialty pick (the
+                // PRIMARY slot) is redundant — a separate pest_general
+                // SECONDARY is a real second request (codex r22).
+                cats = cats.filter((c, i) => !(i === 0 && (c === 'pest_general' || c === 'bundled_waveguard')));
               }
-              : extracted,
-            // Caller wording still decides termite work-vs-inspection —
-            // families stay category-authoritative under V2 approval.
-            v2ServiceRequest !== null ? { cueText: extracted.requested_service } : {},
-          );
-          if (serviceInterestLabel && isEmpty(current?.service_interest)) {
-            leadUpdates.service_interest = serviceInterestLabel;
-            persistedServiceInterestLabel = serviceInterestLabel;
-            // composeServiceInterest always prefixes the label with the
-            // matched service it composed with (matchedForCompose under V2
-            // approval), so the slice is exactly the extras.
-            persistedServiceInterestExtras = serviceInterestLabel === matchedForCompose
-              ? null
-              : serviceInterestLabel.slice(String(matchedForCompose || '').length);
-          }
-          // Urgency is a triage signal, not a hand-edited field — and the
-          // leads schema defaults it to 'normal' at insert (migration
-          // 20260401000095_lead_attribution.js:43), so an empty-only guard
-          // here would never upgrade a freshly-inserted hot lead. Treat it
-          // as upgrade-only: a hot extraction always promotes to 'urgent';
-          // otherwise only fill if still empty so we don't downgrade an
-          // already-urgent lead when a cold follow-up call comes in.
-          if (extracted.lead_quality === 'hot') {
-            leadUpdates.urgency = 'urgent';
-          } else if (extracted.lead_quality && isEmpty(current?.urgency)) {
-            leadUpdates.urgency = 'normal';
-          }
-          // Always refresh the rolling AI-derived fields — they're a snapshot
-          // of the latest call, not user-curated content.
-          if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
-          // Qualification now requires BOTH buying intent (hot/warm) AND the
-          // contact info the office needs to work the lead: first + last name,
-          // a service street address, and an email. Evaluate against the MERGED
-          // record (this call OR what a prior call already stored) so a follow-up
-          // call that restates nothing doesn't un-qualify a complete lead.
-          const mergedContact = {
-            first_name: leadUpdates.first_name ?? current?.first_name,
-            last_name: leadUpdates.last_name ?? current?.last_name,
-            service_address: leadUpdates.address ?? current?.address,
-            email: leadUpdates.email ?? current?.email,
-          };
-          const contact = leadContactCompleteness(mergedContact);
-          // needs_confirmation is NOT a rolling snapshot like the fields
-          // around it: the reasons are read-back reminders that stand until
-          // the office confirms them, and a follow-up call that never
-          // restates the address/email must not erase the earlier call's
-          // warnings (a quick "slab or footer?" callback was wiping
-          // address_unverified/email_unverified off the lead). Union prior +
-          // this call; a recovered address supersedes its stale unverified.
-          const priorNeedsConfirmation = (() => {
-            try {
-              const data = typeof current?.extracted_data === 'string'
-                ? JSON.parse(current.extracted_data)
-                : (current?.extracted_data || {});
-              return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
-            } catch { return []; }
-          })();
-          const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);
-          leadUpdates.extracted_data = JSON.stringify({
-            pain_points: extracted.pain_points,
-            preferred_date_time: extracted.preferred_date_time,
-            sentiment: extracted.sentiment,
-            call_type: extracted.call_type || null,
-            ...(extracted.is_voicemail ? { voicemail: true } : {}),
-            ...(contact.missing.length ? { missing_for_qualification: contact.missing } : {}),
-            ...(mergedNeedsConfirmation.length ? { needs_confirmation: mergedNeedsConfirmation } : {}),
-            ...(callQuoteRequested ? { quote_requested: true } : {}),
-            ...(callQuotePromised ? { quote_promised: true } : {}),
-            ...(callAdditionalProps.length ? { additional_properties: callAdditionalProps } : {}),
-            ...(callSecondaryContact ? { secondary_contact: callSecondaryContact } : {}),
-          });
-          // hot/warm AND complete contact. Spam was already early-returned.
-          leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
-          // Only ever SET the customer link, never clear it. The unnamed-lead
-          // path runs with customerId null and can reuse an existing lead
-          // found by phone — writing customer_id = null there would detach a
-          // lead already linked to a customer.
-          if (customerId) leadUpdates.customer_id = customerId;
-          // Reopen a reused lead the office parked as 'unresponsive' — the
-          // prospect just called back, and 'unresponsive' buckets under
-          // closed/lost in the admin leads UI, so a silently reused row would
-          // stay hidden from Needs Review. Same reopen semantics as the
-          // webhook prefill attach ('unresponsive' → 'new'; real terminal
-          // statuses are excluded from reuse upstream on the recovery path
-          // and never reopened here).
-          if (existingLead && current?.status === 'unresponsive') leadUpdates.status = 'new';
-          // Quote promised on the call: stamp a same-day follow-up deadline so
-          // the pipeline surfaces the owed quote (agent said "we'll send it
-          // this afternoon"). Before 5 PM ET → today 5 PM; after → tomorrow
-          // 10 AM. Never moves an EARLIER existing follow-up later.
-          if (callQuotePromised) {
-            try {
-              const nowET = new Date();
-              const todayFive = parseETDateTime(`${etDateString(nowET)}T17:00`);
-              let quoteDue = todayFive;
-              if (!(quoteDue instanceof Date) || isNaN(quoteDue.getTime()) || quoteDue <= nowET) {
-                const tomorrow = new Date(nowET.getTime() + 24 * 60 * 60 * 1000);
-                quoteDue = parseETDateTime(`${etDateString(tomorrow)}T10:00`);
+              // Null-mapped categories (other/inspection_only/future enums)
+              // yield an EMPTY category-authoritative request — never fall
+              // back to V1 caller text under V2 approval (codex r12)…
+              const words = cats.map((c) => composeWordsForV2Category(c)).filter(Boolean);
+              // …EXCEPT for families the V2 enum cannot express at all
+              // (tree/shrub, wildlife): those exist only in the caller text,
+              // so scan it for JUST them (codex r14 — closes the enum gap
+              // without reopening the V1-hallucination door).
+              const inexpressible = v2InexpressibleFamilyWords(extracted.requested_service);
+              return [words.join(' and '), inexpressible].filter(Boolean).join(' and ');
+            })();
+            // Prefix with the primary the V2 merge will adopt (same adoption
+            // rule as the merge below: V2 anchored a specific service, V1 had
+            // no label, or the category maps one-to-one) — a V1 primary V2
+            // rejected must not lead the label (codex r12).
+            const matchedForCompose = (() => {
+              if (v2ServiceRequest === null) return extracted.matched_service;
+              const v2Flat = flatView(v2ApprovedExtraction);
+              // A V2-anchored catalog pick IS the primary: "Palm Injection"
+              // must lead the label, not the coarse category mapping
+              // ("Tree & Shrub Care") that would then re-append the specific
+              // as a fake second service (codex r13).
+              if (v2Flat.specific_service_name) return v2Flat.specific_service_name;
+              const v2Cat = v2ServiceRequest.primary_service_category || null;
+              // Categories whose legacy mapping is null/coarse (stinging,
+              // exclusion) lead with their own family label — else a
+              // wasp-only call renders as two services (codex r15).
+              const catPrimary = v2PrimaryLabelForCategory(v2Cat);
+              if (catPrimary) return catPrimary;
+              // Termite category with no specific pick: flatView's coarse
+              // "Termite Inspection" would pair with the composed
+              // "+ Termite Service" as a phantom double — pick the single
+              // right primary from the caller's work cue (codex r22).
+              if (v2Cat === 'termite') {
+                return hasTermiteWorkCue(extracted.requested_service) ? 'Termite Service' : 'Termite Inspection';
               }
-              const existingFollowUp = current?.next_follow_up_at ? new Date(current.next_follow_up_at) : null;
-              // Only PULL IN the follow-up (or set one where none exists) —
-              // an existing earlier or already-overdue follow-up stays put.
-              if (quoteDue instanceof Date && !isNaN(quoteDue.getTime())
-                  && (!existingFollowUp || isNaN(existingFollowUp.getTime()) || existingFollowUp > quoteDue)) {
-                leadUpdates.next_follow_up_at = quoteDue;
-              }
-            } catch (dueErr) {
-              logger.warn(`[call-proc] quote-due follow-up stamp skipped: ${dueErr.message}`);
+              const preciseV2Category = v2Cat === 'bed_bug' || v2Cat === 'wdo';
+              return v2Flat.matched_service
+                && (!extracted.matched_service || preciseV2Category)
+                ? v2Flat.matched_service
+                : extracted.matched_service;
+            })();
+            const serviceInterestLabel = composeServiceInterest(
+              v2ServiceRequest !== null
+                ? {
+                  ...extracted,
+                  matched_service: matchedForCompose,
+                  requested_service: v2RequestedForCompose,
+                  // Only the V2-ADOPTED specific may mark coverage — a stale
+                  // V1 specific belonging to a secondary family (e.g. V1
+                  // "Monthly Lawn Care Service" under V2 pest+lawn) would
+                  // swallow that secondary's tail (codex r21).
+                  specific_service_name: flatView(v2ApprovedExtraction).specific_service_name || null,
+                }
+                : extracted,
+              // Caller wording still decides termite work-vs-inspection —
+              // families stay category-authoritative under V2 approval.
+              v2ServiceRequest !== null ? { cueText: extracted.requested_service } : {},
+            );
+            if (serviceInterestLabel && isEmpty(current?.service_interest)) {
+              leadUpdates.service_interest = serviceInterestLabel;
+              persistedServiceInterestLabel = serviceInterestLabel;
+              // composeServiceInterest always prefixes the label with the
+              // matched service it composed with (matchedForCompose under V2
+              // approval), so the slice is exactly the extras.
+              persistedServiceInterestExtras = serviceInterestLabel === matchedForCompose
+                ? null
+                : serviceInterestLabel.slice(String(matchedForCompose || '').length);
             }
+            // Urgency is a triage signal, not a hand-edited field — and the
+            // leads schema defaults it to 'normal' at insert (migration
+            // 20260401000095_lead_attribution.js:43), so an empty-only guard
+            // here would never upgrade a freshly-inserted hot lead. Treat it
+            // as upgrade-only: a hot extraction always promotes to 'urgent';
+            // otherwise only fill if still empty so we don't downgrade an
+            // already-urgent lead when a cold follow-up call comes in.
+            if (extracted.lead_quality === 'hot') {
+              leadUpdates.urgency = 'urgent';
+            } else if (extracted.lead_quality && isEmpty(current?.urgency)) {
+              leadUpdates.urgency = 'normal';
+            }
+            // Always refresh the rolling AI-derived fields — they're a snapshot
+            // of the latest call, not user-curated content.
+            if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
+            // NOTE deliberately NOT rolling twilio_call_sid here: overwriting
+            // it would destroy the OLDER call's SID→lead identity (its retry
+            // could no longer find its own row, and SID-based attribution /
+            // history joins would lose the association — audit P1 r16). The
+            // current call's durable lead association is stamped on the
+            // call_log row after the enrichment loop instead.
+            // Qualification now requires BOTH buying intent (hot/warm) AND the
+            // contact info the office needs to work the lead: first + last name,
+            // a service street address, and an email. Evaluate against the MERGED
+            // record (this call OR what a prior call already stored) so a follow-up
+            // call that restates nothing doesn't un-qualify a complete lead.
+            const mergedContact = {
+              first_name: leadUpdates.first_name ?? current?.first_name,
+              last_name: leadUpdates.last_name ?? current?.last_name,
+              service_address: leadUpdates.address ?? current?.address,
+              email: leadUpdates.email ?? current?.email,
+            };
+            contact = leadContactCompleteness(mergedContact);
+            // needs_confirmation is NOT a rolling snapshot like the fields
+            // around it: the reasons are read-back reminders that stand until
+            // the office confirms them, and a follow-up call that never
+            // restates the address/email must not erase the earlier call's
+            // warnings (a quick "slab or footer?" callback was wiping
+            // address_unverified/email_unverified off the lead). Union prior +
+            // this call; a recovered address supersedes its stale unverified.
+            const priorNeedsConfirmation = (() => {
+              try {
+                const data = typeof current?.extracted_data === 'string'
+                  ? JSON.parse(current.extracted_data)
+                  : (current?.extracted_data || {});
+                return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
+              } catch { return []; }
+            })();
+            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);
+            leadUpdates.extracted_data = JSON.stringify({
+              pain_points: extracted.pain_points,
+              preferred_date_time: extracted.preferred_date_time,
+              sentiment: extracted.sentiment,
+              call_type: extracted.call_type || null,
+              ...(extracted.is_voicemail ? { voicemail: true } : {}),
+              ...(contact.missing.length ? { missing_for_qualification: contact.missing } : {}),
+              ...(mergedNeedsConfirmation.length ? { needs_confirmation: mergedNeedsConfirmation } : {}),
+              ...(callQuoteRequested ? { quote_requested: true } : {}),
+              ...(callQuotePromised ? { quote_promised: true } : {}),
+              ...(callAdditionalProps.length ? { additional_properties: callAdditionalProps } : {}),
+              ...(callSecondaryContact ? { secondary_contact: callSecondaryContact } : {}),
+              // Recovery-pass rows keep the audit stamp the mint used to
+              // carry — this write REPLACES extracted_data wholesale.
+              ...(raceRecovered ? { claim_race_recovery: true } : {}),
+            });
+            // hot/warm AND complete contact. Spam was already early-returned.
+            leadUpdates.is_qualified = ['hot', 'warm'].includes(extracted.lead_quality) && contact.complete;
+            // Only ever SET the customer link, never clear it. The unnamed-lead
+            // path runs with customerId null and can reuse an existing lead
+            // found by phone — writing customer_id = null there would detach a
+            // lead already linked to a customer.
+            if (customerId) leadUpdates.customer_id = customerId;
+            // Reopen a reused lead the office parked as 'unresponsive' — the
+            // prospect just called back, and 'unresponsive' buckets under
+            // closed/lost in the admin leads UI, so a silently reused row would
+            // stay hidden from Needs Review. Same reopen semantics as the
+            // webhook prefill attach ('unresponsive' → 'new'; real terminal
+            // statuses are excluded from reuse upstream on the recovery path
+            // and never reopened here).
+            if (existingLead && current?.status === 'unresponsive') leadUpdates.status = 'new';
+            // Quote promised on the call: stamp a same-day follow-up deadline so
+            // the pipeline surfaces the owed quote (agent said "we'll send it
+            // this afternoon"). Before 5 PM ET → today 5 PM; after → tomorrow
+            // 10 AM. Never moves an EARLIER existing follow-up later.
+            if (callQuotePromised) {
+              try {
+                const nowET = new Date();
+                const todayFive = parseETDateTime(`${etDateString(nowET)}T17:00`);
+                let quoteDue = todayFive;
+                if (!(quoteDue instanceof Date) || isNaN(quoteDue.getTime()) || quoteDue <= nowET) {
+                  const tomorrow = new Date(nowET.getTime() + 24 * 60 * 60 * 1000);
+                  quoteDue = parseETDateTime(`${etDateString(tomorrow)}T10:00`);
+                }
+                const existingFollowUp = current?.next_follow_up_at ? new Date(current.next_follow_up_at) : null;
+                // Only PULL IN the follow-up (or set one where none exists) —
+                // an existing earlier or already-overdue follow-up stays put.
+                if (quoteDue instanceof Date && !isNaN(quoteDue.getTime())
+                    && (!existingFollowUp || isNaN(existingFollowUp.getTime()) || existingFollowUp > quoteDue)) {
+                  leadUpdates.next_follow_up_at = quoteDue;
+                }
+              } catch (dueErr) {
+                logger.warn(`[call-proc] quote-due follow-up stamp skipped: ${dueErr.message}`);
+              }
+            }
+            leadUpdates.updated_at = new Date();
+            // findReusableCallLead already excludes a lead owned by ANOTHER
+            // customer from the lookup, so `current` is never foreign here. The
+            // write repeats that ownership predicate as the race backstop: a
+            // concurrent claim between the lookup and this update leaves the
+            // just-claimed lead untouched (0 rows) instead of overwriting the
+            // other customer's lead with this caller's extraction.
+            let enrichmentWrite = db('leads').where({ id: leadId });
+            if (customerId) {
+              enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+            }
+            if (!phone && sameCallLeadReuse && !customerId) {
+              // Same-call reuse skips the weak-identity revalidation, but an
+              // ANONYMOUS write still needs the unclaimed backstop — the
+              // lookup now rejects customer-claimed rows (audit P1 r15) and
+              // this repeats that predicate against the claim race between
+              // lookup and write; a 0-row lands in the recovery mint below.
+              enrichmentWrite = enrichmentWrite.whereNull('customer_id');
+            }
+            if (!phone && existingLead && !sameCallLeadReuse) {
+              // Email-matched REUSE revalidation (phone-less caller): weak
+              // identity, so the write repeats the FULL lookup eligibility —
+              // email + not-deleted + status/conversion + name corroboration
+              // — not just unclaimed-ness/ownership (codex P1 r2 / P2 r6 /
+              // P1 r8). An admin correcting the candidate's email or name or
+              // closing it between lookup and write must 0-row into the
+              // recovery mint below, never apply this caller's rolling
+              // extraction to a row that no longer matches. Applied for
+              // customer-attached phone-less reuse too (audit P1 r9), but
+              // ONLY when a candidate was actually reused: fresh phone-less
+              // inserts — which on the customer-attached path bypass
+              // hasWorkableLeadSignal and can carry an absent or malformed
+              // email — must not fail their own enrichment against these
+              // predicates (audit P1 r10). The strict unclaimed predicate
+              // stays anonymous-only, since a customer-attached write may
+              // land on a row this same customer just claimed. A pass-2
+              // recovery row (email/names from THIS extraction, status
+              // 'new') passes everything here.
+              if (!customerId) enrichmentWrite = enrichmentWrite.whereNull('customer_id');
+              enrichmentWrite = enrichmentWrite
+                .whereNull('deleted_at')
+                .whereRaw('LOWER(TRIM(email)) = ?', [String(extracted.email || '').trim().toLowerCase()]);
+              if (workableUnnamedLead) {
+                enrichmentWrite = enrichmentWrite
+                  .whereNotIn('status', TERMINAL_LEAD_STATUSES)
+                  .whereNull('converted_at');
+              }
+              // Reuse only ever happened with both first names present and
+              // matching, so the equality predicate is well-defined here.
+              enrichmentWrite = enrichmentWrite.whereRaw(
+                'LOWER(TRIM(first_name)) = ?',
+                [String(extracted.first_name || '').trim().toLowerCase()],
+              );
+              const statedLastLc = String(extracted.last_name || '').trim().toLowerCase();
+              if (statedLastLc) {
+                enrichmentWrite = enrichmentWrite.whereRaw(
+                  "(last_name IS NULL OR TRIM(last_name) = '' OR LOWER(TRIM(last_name)) = ?)",
+                  [statedLastLc],
+                );
+              }
+            }
+            // Phone-less reuse of a different-sid lead: the rollback
+            // snapshot (prior + written values) must be DURABLE BEFORE the
+            // lead mutation commits — the stamp and the enrichment write
+            // run in ONE transaction (audit P1 r20: a crash between them
+            // left the lead mutated with no rollback state, and a retry
+            // then snapshotted the mutated row as its baseline). When
+            // re-stamping the SAME lead on a retry, the existing
+            // lead_prior_state is preserved so the ORIGINAL baseline
+            // survives re-enrichment; lead_written_state always refreshes
+            // to THIS pass's payload.
+            const stampThisPass = !phone && existingLead && !raceRecovered
+              && !(call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid);
+            if (stampThisPass) {
+              // A prior stamp pointing at a DIFFERENT lead must be settled
+              // (cleared + its lead's state restored) BEFORE the
+              // replacement stamp overwrites the ledgers (codex P1 r14) —
+              // the CASE-merge in the stamp SQL only protects SAME-lead
+              // re-stamps; overwriting a different lead's ledger stranded
+              // the anonymous call's enrichment on a now-claimed lead
+              // permanently.
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
+                let priorSettled;
+                try {
+                  priorSettled = await clearStampAndRestoreLead(call, procToken, callSid);
+                } catch (settleErr) {
+                  if (settleErr.abortProcessing) throw settleErr;
+                  const wrapped = new Error(`call→lead link pre-stamp settle failed: ${settleErr.code || settleErr.name || 'db_error'}`);
+                  wrapped.abortProcessing = true;
+                  throw wrapped;
+                }
+                if (!priorSettled) {
+                  const lost = new Error('processing claim lost during call→lead link pre-stamp settle');
+                  lost.abortProcessing = true;
+                  throw lost;
+                }
+                currentStampedLeadId = null;
+              }
+              enriched = await db.transaction(async (trx) => {
+                // Snapshot under a ROW LOCK inside the same transaction that
+                // stamps and updates (codex P2 r16): two concurrent
+                // phone-less calls reusing one lead could both derive their
+                // baseline from the pre-both row, and the later call's
+                // rejection would then restore a snapshot that erases the
+                // earlier call's committed enrichment. The locked read
+                // serializes stampers so each baseline reflects committed
+                // state — and, since r17, so does the fill-only decision
+                // below (identity races stay the guarded write's job).
+                const lockedLead = await trx('leads')
+                  .where({ id: leadId })
+                  .forUpdate()
+                  .first();
+                // Fill-only columns are re-decided against the LOCKED row
+                // (codex P2 r17): `current` was read before the lock, so a
+                // name/email/address an admin or another call entered in
+                // that gap would otherwise be overwritten by this pass's
+                // stale fill. Dropping the key here also keeps it out of
+                // the rollback ledgers below — a field this call never
+                // wrote must never be restored by its rejection.
+                const effectiveUpdates = dropFilledLeadColumns(leadUpdates, lockedLead);
+                // Is this a CHRONOLOGICAL restamp — a force-reprocess of an
+                // older call after a DIFFERENT call enriched the same reused
+                // lead (codex P2 r17)? Merging ledgers would keep this
+                // call's original pre-first-run baseline, so a later
+                // rejection would restore straight over the intervening
+                // accepted state, and successor re-parenting could not
+                // recover it either (the other call's stamp is EARLIER than
+                // this one's, so the re-parent loop skips it by design).
+                // Rebase instead: fresh prior from the locked row — which
+                // already carries the intervening writes — fresh written,
+                // and a fresh lead_stamped_at that makes this restamp the
+                // newest ordered mutation on the lead.
+                const freshCall = await trx('call_log').where({ id: call.id }).first('metadata');
+                let freshMd = {};
+                try {
+                  freshMd = typeof freshCall?.metadata === 'string' ? JSON.parse(freshCall.metadata) : (freshCall?.metadata || {});
+                } catch { freshMd = {}; }
+                const ownStampedAt = (freshMd?.lead_id && String(freshMd.lead_id) === String(leadId)
+                  && typeof freshMd.lead_stamped_at === 'string') ? freshMd.lead_stamped_at : null;
+                let rebaseStamp = false;
+                if (ownStampedAt) {
+                  const interveningStamp = await trx('call_log')
+                    .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
+                    .whereNot('id', call.id)
+                    .whereRaw("metadata->>'lead_stamped_at' > ?", [ownStampedAt])
+                    .first('id');
+                  rebaseStamp = !!interveningStamp;
+                }
+                const { prior, written } = snapshotStampedLeadStates(lockedLead || current, effectiveUpdates);
+                // Ledger composition has THREE modes, not two (codex P2 r18).
+                // A rebase must NOT discard the restamp's original-only
+                // entries: when call A first filled `email` and this
+                // reprocess drops that column as already-filled, A is still
+                // the call that wrote it, and losing the entry would strand
+                // A's value on the lead through both rejection orders. So a
+                // rebase rewrites only the fields it actually re-wrote and
+                // KEEPS the rest:
+                //   different lead → fresh prior + fresh written
+                //   same lead, rebase → merged, THIS pass wins shared keys
+                //   same lead, retry → merged, the ORIGINAL baseline wins
+                // `written` merges the same way in both same-lead modes —
+                // fill-once fields absent from a later payload must survive
+                // so rejection can still restore them.
+                const sameLead = "COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ?";
+                const priorExpr = `CASE WHEN ${sameLead} THEN (CASE WHEN ?::boolean`
+                  + " THEN COALESCE(metadata->'lead_prior_state', '{}'::jsonb) || ?::jsonb"
+                  + " ELSE ?::jsonb || COALESCE(metadata->'lead_prior_state', '{}'::jsonb) END)"
+                  + ' ELSE ?::jsonb END';
+                const writtenExpr = `CASE WHEN ${sameLead}`
+                  + " THEN COALESCE(metadata->'lead_written_state', '{}'::jsonb) || ?::jsonb"
+                  + ' ELSE ?::jsonb END';
+                const stampedAtExpr = `CASE WHEN ${sameLead} AND NOT ?::boolean`
+                  + " THEN COALESCE(metadata->'lead_stamped_at', ?::jsonb) ELSE ?::jsonb END";
+                const nowIso = JSON.stringify(new Date().toISOString());
+                const stamped = await trx('call_log')
+                  .where({ id: call.id })
+                  .where('processing_token', procToken)
+                  .update({
+                    // Same-lead re-stamp MERGES both ledgers (audit P1 r21):
+                    // prior keeps the ORIGINAL baseline for shared keys and
+                    // only ADDS keys first written this pass; written keeps
+                    // fill-once fields from earlier passes (absent from later
+                    // payloads — replacing wholesale made rejection unable to
+                    // restore them) with this pass's values winning shared
+                    // keys. A different-lead stamp starts both fresh.
+                    // lead_stamped_at is the ORDERING marker for rejection
+                    // re-parenting (only snapshots stamped AFTER this call's
+                    // may be re-parented — a predecessor's baseline must
+                    // never be rewritten; codex P2 r13). Preserved on a
+                    // same-lead RETRY; a different-lead stamp and a
+                    // chronological rebase both take a fresh marker, which
+                    // is what makes the rebase the newest mutation.
+                    metadata: db.raw(
+                      "jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)"
+                      + `, '{lead_prior_state}', ${priorExpr}, true)`
+                      + `, '{lead_written_state}', ${writtenExpr}, true)`
+                      + `, '{lead_stamped_at}', ${stampedAtExpr}, true)`,
+                      [
+                        JSON.stringify(String(leadId)),
+                        String(leadId), rebaseStamp, JSON.stringify(prior), JSON.stringify(prior), JSON.stringify(prior),
+                        String(leadId), JSON.stringify(written), JSON.stringify(written),
+                        String(leadId), rebaseStamp, nowIso, nowIso,
+                      ],
+                    ),
+                    updated_at: new Date(),
+                  });
+                if (!stamped) {
+                  const lost = new Error('processing claim lost during call→lead link stamp');
+                  lost.abortProcessing = true;
+                  throw lost;
+                }
+                return enrichmentWrite.transacting(trx).update(effectiveUpdates);
+              });
+              currentStampedLeadId = String(leadId);
+            } else {
+              enriched = await enrichmentWrite.update(leadUpdates);
+            }
+            if (!enriched && existingLead && !sameCallLeadReuse && !phone && !raceRecovered) {
+              // sameCallLeadReuse is EXCLUDED from the remint (codex P2
+              // r16): a same-call row claimed between lookup and the
+              // anonymous unclaimed backstop is still THIS call's lead —
+              // keep its id and skip enrichment, exactly like a fresh
+              // insert claimed during its first attempt. Reminting here
+              // inserted and notified a duplicate for the identical call.
+              // Recovery is for REUSED email-matched candidates only (hence
+              // the existingLead gate): a 0-row write on a lead THIS call
+              // just inserted means an admin legitimately claimed our own
+              // fresh row mid-flight — it is still this call's lead, so the
+              // enrichment is simply skipped, never re-minted and re-notified
+              // as a duplicate (pre-push audit P1 r6). Customer-attached
+              // phone-less reuse recovers here too now that its write also
+              // carries the full email/name eligibility (audit P1 r9) — its
+              // mint keeps the customer link.
+              // The email-matched lead was claimed or corrected between
+              // lookup and the guarded write (0 rows). leadId must not keep
+              // pointing at a lead that is no longer this caller's —
+              // downstream writers (triage activity, text-back, follow-ups)
+              // would target the foreign row. Mint the fresh lead this caller
+              // would have gotten on a lookup miss — a MINIMAL identity row
+              // mirroring the normal fresh insert — then loop back and re-run the same
+              // enrichment pass against it, so the recovered lead keeps every
+              // current-call field (service_interest, quote markers, the
+              // follow-up deadline) and its qualification/completeness are
+              // judged on THIS call's extraction alone, never the foreign
+              // candidate's (codex P1 r3 + pre-push audit P1 r5). On mint
+              // failure, drop leadId so downstream skips cleanly.
+              try {
+                const [raceFresh] = await db('leads').insert({
+                  lead_source_id: leadSourceId,
+                  customer_id: customerId || null,
+                  phone: null,
+                  first_name: capitalizeName(extracted.first_name) || null,
+                  last_name: capitalizeName(extracted.last_name) || null,
+                  email: extracted.email || null,
+                  address: extracted.address_line1 || null,
+                  city: extracted.city || null,
+                  zip: extracted.zip || null,
+                  lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
+                  first_contact_at: new Date(),
+                  first_contact_channel: 'call',
+                  twilio_call_sid: call.twilio_call_sid,
+                  call_duration_seconds: call.duration_seconds,
+                  call_recording_url: call.recording_url,
+                  status: 'new',
+                }).returning('*');
+                logger.warn(`[call-proc] email-matched lead ${leadId} lost the claim race — minted fresh lead ${raceFresh.id}`);
+                leadId = raceFresh.id;
+                current = raceFresh;
+                raceRecovered = true;
+                // A race-recovery mint IS a new lead — surface it exactly like
+                // a fresh insert (codex P2 r5: the reuse path never runs the
+                // new-lead notification, and the phone-less SMS rail fails
+                // closed, so this lead otherwise landed with no bell or push).
+                // notifyNewCallLead never throws, so a notify failure cannot
+                // be mistaken for a mint failure by the catch below.
+                await notifyNewCallLead({ leadId, phone: null, extracted, leadSourceId, leadSourceRow, call });
+                // The dropped-call suppression above was judged against the
+                // REPLACED candidate's on-file address; the recovery row
+                // carries only this call's extraction, which the detector
+                // already found address-less. Revive detection here — inside
+                // the loop — so the pass-2 extracted_data, the triage note,
+                // and the phase-2 card/text all see it (codex P2 r8). The
+                // pre-existing-customer suppression still stands and is
+                // re-checked (the read never throws — a throw here would be
+                // misread as a mint failure).
+                if (droppedDetectorFired && !droppedMidIntake) {
+                  let reviveDropped = true;
+                  if (customerId && !createdCustomerFromCall) {
+                    const custAddr = await db('customers').where({ id: customerId })
+                      .first('address_line1').catch(() => null);
+                    if (String(custAddr?.address_line1 || '').trim()) reviveDropped = false;
+                  }
+                  if (reviveDropped) {
+                    droppedMidIntake = true;
+                    if (!bridgeNeedsConfirmation.includes('call_dropped_mid_intake')) {
+                      bridgeNeedsConfirmation.push('call_dropped_mid_intake');
+                    }
+                  }
+                }
+                continue;
+              } catch (raceErr) {
+                // Sanitized code only — a Postgres/Knex error message can
+                // echo the failing row's values, and this insert carries the
+                // caller's name/email/address (codex P1 r12).
+                logger.warn(`[call-proc] fresh-lead mint after claim race failed for ${maskSid(callSid)}: ${raceErr.code || raceErr.name || 'db_error'}`);
+                leadId = null;
+              }
+            }
+            // If the recovery pass ALSO wrote 0 rows (the just-minted row
+            // was claimed before this write landed), leadId is deliberately
+            // KEPT: the minted row persisted and IS this call's lead — the
+            // same reasoning as a claim on a fresh insert above. Nulling it
+            // marked the call lead_creation_failed and opened a false
+            // failure card even though the lead exists (codex P2 r13);
+            // enrichment simply skips via enriched=0.
+            break;
           }
-          leadUpdates.updated_at = new Date();
-          // findReusableCallLead already excludes a lead owned by ANOTHER
-          // customer from the lookup, so `current` is never foreign here. The
-          // write repeats that ownership predicate as the race backstop: a
-          // concurrent claim between the lookup and this update leaves the
-          // just-claimed lead untouched (0 rows) instead of overwriting the
-          // other customer's lead with this caller's extraction.
-          let enrichmentWrite = db('leads').where({ id: leadId });
-          if (customerId) {
-            enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+
+          // Call→lead linkage maintenance for the phone-less path, WITHOUT
+          // rolling the lead's twilio_call_sid (rolling it destroyed the
+          // older call's identity — audit P1 r16): a reused lead keeps its
+          // ORIGINAL call's sid, so this call's association lives in
+          // call_log.metadata.lead_id (codex P1 r15; same jsonb pattern as
+          // created_customer_id). The stamp is REQUIRED state, not
+          // best-effort — it is the only linkage admin history, agent
+          // context, and estimator grounding have for this call, and a stale
+          // stamp from an earlier attempt that reused a DIFFERENT lead
+          // double-associates the call under the OR-join consumers (codex
+          // P1 r19 ×2). Writes are fenced on the processing token; a lost
+          // fence or write failure aborts into the extraction_failed retry
+          // path via abortProcessing (the lead-section catch rethrows it).
+          if (!phone || currentStampedLeadId) {
+            const finalLeadCarriesSid = raceRecovered || !existingLead
+              || (!!call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid);
+            // Clearing a stamp ALSO restores that lead's prior state via the
+            // per-field compare-and-swap — one transaction, fenced (audit P1
+            // r18/r19/r20). Fence-lost maps to the same abortProcessing the
+            // direct writes use. The STAMP itself is written in-loop,
+            // atomically with the enrichment write — maintenance only ever
+            // clears.
+            const settleClear = async () => {
+              let ok;
+              try {
+                ok = await clearStampAndRestoreLead(call, procToken, callSid);
+              } catch (clearErr) {
+                if (clearErr.abortProcessing) throw clearErr;
+                const wrapped = new Error(`call→lead link clear failed: ${clearErr.code || clearErr.name || 'db_error'}`);
+                wrapped.abortProcessing = true;
+                throw wrapped;
+              }
+              if (!ok) {
+                const lost = new Error('processing claim lost during call→lead link clear');
+                lost.abortProcessing = true;
+                throw lost;
+              }
+            };
+            if (!leadId) {
+              // Mint failure dropped the lead — a leftover stamp would leave
+              // the OR-join consumers associating this call with a lead that
+              // is now foreign (it lost the claim race). Unlink.
+              if (currentStampedLeadId) await settleClear();
+            } else if (finalLeadCarriesSid) {
+              // The final lead is linked by its own sid — a leftover stamp
+              // pointing at a different lead must not survive.
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear();
+            } else if (phone) {
+              // Retry GAINED a phone and selected a phone-linked lead: its
+              // linkage is the phone, not the stamp — a stale stamp pointing
+              // at a different lead must not survive (audit P1 r22); a stamp
+              // already pointing at this lead stays accurate.
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear();
+            }
+            phoneLessLinkagePending = false;
           }
-          const enriched = await enrichmentWrite.update(leadUpdates);
 
           // Log AI triage activity — gated on the enrichment write landing, so
           // a lead lost to the ownership race above never gets this caller's
@@ -7724,6 +8531,39 @@ const CallRecordingProcessor = {
             }
           }
         }
+
+        // Marketing call lead (matched a tracking number), NEW or reused -> surface
+        // it in the PPC funnel (ad_service_attribution) so it buckets into the same
+        // channel as a web-form lead from that source. attributionForSourceType maps
+        // the lead_sources.source_type to the funnel channel key + paid flag: PAID
+        // numbers (google_ads/facebook) stay paid; ORGANIC marketing sources (spoke
+        // domains -> domain_website, hub city pages -> waves_website, GBP ->
+        // google_business) are is_paid=false so they show as their own no-spend
+        // channels instead of being invisible (an organic call otherwise makes a
+        // lead but no funnel row, hiding whole channels from the LTV:CAC surfaces).
+        // Offline / word-of-mouth sources map to null and get no row. campaign_id is
+        // null here (the Google call-reporting bridge backfills it later for paid
+        // Google). recordCallPpcAttribution dedupes by lead_id and respects
+        // first-touch (a web-attributed lead keeps its source), so no double-count.
+        // EXCEPTION: the Google Ads call-bridge target number is SHARED (organic hub
+        // + paid Google call-extension), resolved by the bridge AFTER the fact — so
+        // never pre-attribute THAT one number (it would lock the row before the
+        // bridge can mark the call paid). Only that single number is suppressed; the
+        // other main_site city-page numbers attribute organic normally.
+        // NOTE: stays gated on customerId, so a customer-less recovery lead gets no
+        // ad_service_attribution row yet — the lead keeps its lead_source_id and is
+        // attributed when it converts to a customer. Lead-only PPC attribution needs
+        // schema work on the customer-keyed table; deferred out of this PR.
+        // Runs AFTER the enrichment/claim-race block above so the funnel row
+        // targets the FINAL leadId — attribution kicked off before recovery
+        // could land on a lead the race rejected, leaving the replacement
+        // lead unattributed and reporting pointing at the wrong row (codex
+        // P1 r11). The body lives in runCallPpcAttribution (assigned near
+        // the lead-source resolution) so the section catch can also fire it
+        // on a benign enrichment failure — see that assignment for the full
+        // channel-mapping rationale. Fire-and-forget: nothing after this
+        // consumes its result.
+        runCallPpcAttribution();
 
         // Voicemail lead text-back (Layer 3): text the prospect a prefilled
         // quote-wizard link. Only on the voicemail lead path — new prospect,
@@ -7872,7 +8712,50 @@ const CallRecordingProcessor = {
         }
 
       } catch (leadErr) {
+        // Required-linkage failures must reach the outer extraction_failed
+        // guard — swallowing them finalized the call with its only
+        // call→lead association missing or stale (codex P1 r19). The
+        // pending flag catches the same failure ARRIVING EARLIER: any throw
+        // between the reuse decision and the maintenance block would
+        // otherwise finalize with unsettled linkage (audit P1 r21).
+        if (leadErr.abortProcessing) throw leadErr;
+        if (phoneLessLinkagePending) {
+          // Sanitized cause only — enrichment DB errors can echo the failing
+          // row's name/email/address, and the outer catch logs this message
+          // with its stack (codex P1 r15b).
+          const unsettled = new Error(`call exited with unsettled lead linkage: ${leadErr.code || leadErr.name || 'error'}`);
+          unsettled.abortProcessing = true;
+          throw unsettled;
+        }
+        // Benign (non-retrying) failure finalizes the call — fire the funnel
+        // attribution before doing so, or a transient enrichment error
+        // permanently drops a tracked customer-attached call from
+        // paid/organic reporting (codex P2 r15). leadId holds the final
+        // selection made before the throw; the escalating paths above skip
+        // this because their RETRY re-runs the whole section, attribution
+        // included (recordCallPpcAttribution dedupes by lead + first-touch).
+        runCallPpcAttribution();
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
+      }
+    } else if (priorStampedLeadId) {
+      // The retry was VETOED out of lead creation (non-lead nature /
+      // existing-customer stage) but an earlier attempt stamped a lead —
+      // the stamp must not survive a non-lead verdict, and the lead's prior
+      // summary comes back with the clear, in one fenced transaction (audit
+      // P1 r22/r18/r19). abortProcessing reaches the outer
+      // extraction_failed guard directly.
+      try {
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid);
+        if (!settled) {
+          const lost = new Error('processing claim lost during call→lead link clear (non-lead path)');
+          lost.abortProcessing = true;
+          throw lost;
+        }
+      } catch (clearErr) {
+        if (clearErr.abortProcessing) throw clearErr;
+        const wrapped = new Error(`call→lead link clear failed (non-lead path): ${clearErr.code || clearErr.name || 'db_error'}`);
+        wrapped.abortProcessing = true;
+        throw wrapped;
       }
     }
 
@@ -11152,6 +12035,8 @@ CallRecordingProcessor._test = {
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,
   findReusableCallLead,
+  dropFilledLeadColumns,
+  FILL_ONLY_LEAD_FIELDS,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
   resolveCallSecondaryContact,

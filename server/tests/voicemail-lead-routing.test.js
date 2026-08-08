@@ -26,7 +26,7 @@ const CallRecordingProcessor = require('../services/call-recording-processor');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const policy = require('../services/messaging/policy');
 
-const { hasWorkableLeadSignal } = CallRecordingProcessor._test;
+const { hasWorkableLeadSignal, findReusableCallLead } = CallRecordingProcessor._test;
 
 describe('hasWorkableLeadSignal voicemail waiver', () => {
   const PHONE = '+19415550101';
@@ -71,7 +71,7 @@ describe('hasWorkableLeadSignal voicemail waiver', () => {
     })).toBe(false);
   });
 
-  test('no callback number, no lead — voicemail or not', () => {
+  test('no callback number and no email, no lead — voicemail or not', () => {
     expect(hasWorkableLeadSignal({
       extracted: { matched_service: 'pest control' },
       phone: null,
@@ -85,6 +85,258 @@ describe('hasWorkableLeadSignal voicemail waiver', () => {
       phone: PHONE,
       voicemail: 'yes',
     })).toBe(false);
+  });
+});
+
+describe('hasWorkableLeadSignal anonymous-caller (no phone) path', () => {
+  test('valid spoken email + service intent is workable with no phone at all', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'pest control', email: 'jeff@example.com' },
+      phone: null,
+    })).toBe(true);
+  });
+
+  test('an address alone is not a reachback when there is no callback number', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'pest control', address_line1: '123 Palm Ave' },
+      phone: null,
+    })).toBe(false);
+  });
+
+  test('a garbled email does not qualify', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'pest control', email: 'jeff at gmail' },
+      phone: null,
+    })).toBe(false);
+  });
+
+  test('email without service intent is still not workable', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { email: 'jeff@example.com' },
+      phone: null,
+    })).toBe(false);
+  });
+
+  test('the voicemail waiver never substitutes for the email when phone-less', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'pest control', address_line1: '123 Palm Ave' },
+      phone: null,
+      voicemail: true,
+    })).toBe(false);
+  });
+
+  test('a phone-less voicemail with a valid spoken email IS workable (same branch as live calls)', () => {
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'pest control', email: 'jeff@example.com' },
+      phone: null,
+      voicemail: true,
+    })).toBe(true);
+  });
+});
+
+describe('findReusableCallLead identity keys', () => {
+  const makeDb = (rowOrRows = null) => {
+    const rows = Array.isArray(rowOrRows) ? rowOrRows : (rowOrRows ? [rowOrRows] : []);
+    const calls = [];
+    // The corroboration predicates live in SQL now — interpret the two name
+    // whereRaw shapes so these tests stay behavioral (a mock that returns
+    // rows regardless of WHERE would trivially pass every identity test).
+    const filtered = () => {
+      let out = rows;
+      for (const [m, a] of calls) {
+        if (m !== 'whereRaw') continue;
+        const [sql, binds] = a;
+        if (String(sql).includes('LOWER(TRIM(first_name))')) {
+          out = out.filter((r) => String(r.first_name || '').trim().toLowerCase() === binds[0]);
+        } else if (String(sql).includes('last_name IS NULL')) {
+          out = out.filter((r) => {
+            const ln = String(r.last_name || '').trim().toLowerCase();
+            return !ln || ln === binds[0];
+          });
+        }
+      }
+      return out;
+    };
+    const builder = {};
+    for (const m of ['where', 'orWhere', 'whereNull', 'whereRaw', 'whereNotIn', 'orderBy', 'limit']) {
+      builder[m] = (...a) => {
+        calls.push([m, a]);
+        // where-group callbacks (e.g. the same-call identity group) build
+        // their arms via this.orWhere — invoke them so those arms record.
+        if (typeof a[0] === 'function') a[0].call(builder);
+        return builder;
+      };
+    }
+    builder.first = async () => { calls.push(['first', []]); return filtered()[0] || null; };
+    // Some paths await the builder itself (knex builders are thenable).
+    builder.then = (resolve) => resolve(filtered());
+    const db = (table) => { calls.push(['table', [table]]); return builder; };
+    db.calls = calls;
+    return db;
+  };
+
+  test('phone present: matches by phone only — email never becomes an identity key', async () => {
+    const db = makeDb({ id: 'lead-1' });
+    const found = await findReusableCallLead(db, {
+      phone: '+19415550101',
+      email: 'shared@example.com',
+      workableUnnamedLead: false,
+    });
+    expect(found).toEqual({ id: 'lead-1' });
+    expect(db.calls.some(([m, a]) => m === 'where' && a[0] === 'phone')).toBe(true);
+    expect(db.calls.some(([m]) => m === 'whereRaw')).toBe(false);
+  });
+
+  test('no phone: matches by lowercased trimmed email, unclaimed leads only', async () => {
+    const db = makeDb({ id: 'lead-2', first_name: 'Jeff', last_name: 'Brooks' });
+    const found = await findReusableCallLead(db, {
+      phone: null,
+      email: '  JBrooks00005@Example.com ',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
+      workableUnnamedLead: true,
+    });
+    expect(found).toEqual({ id: 'lead-2', first_name: 'Jeff', last_name: 'Brooks' });
+    const raw = db.calls.find(([m]) => m === 'whereRaw');
+    expect(raw[1][1]).toEqual(['jbrooks00005@example.com']);
+    expect(db.calls.some(([m, a]) => m === 'where' && a[0] === 'phone')).toBe(false);
+    // Weak identity: an email match must never land on a customer-owned lead.
+    expect(db.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(true);
+  });
+
+  test('no phone and no email: returns null without querying', async () => {
+    const db = makeDb({ id: 'lead-3' });
+    const found = await findReusableCallLead(db, { phone: null, email: null });
+    expect(found).toBeNull();
+    expect(db.calls.length).toBe(0);
+  });
+
+  test('no phone with a NON-email capture ("unknown"): never an identity key, no query', async () => {
+    // Customer-attached calls reach this lookup without the workable-signal
+    // EMAIL_RE gate — the function itself must refuse a malformed capture, or
+    // two calls both storing "unknown" would reuse each other's leads.
+    const db = makeDb({ id: 'lead-junk' });
+    const found = await findReusableCallLead(db, { phone: null, email: 'unknown' });
+    expect(found).toBeNull();
+    expect(db.calls.length).toBe(0);
+  });
+
+  test('email match with a CONFLICTING stated name forces a fresh lead', async () => {
+    const db = makeDb({ id: 'lead-4', first_name: 'Maria', last_name: 'Lopez' });
+    const found = await findReusableCallLead(db, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
+      workableUnnamedLead: true,
+    });
+    expect(found).toBeNull();
+  });
+
+  test('email match with a POSITIVELY corroborated first name is reusable (case-insensitive)', async () => {
+    const sameName = makeDb({ id: 'lead-5', first_name: 'Jeff', last_name: 'Brooks' });
+    expect(await findReusableCallLead(sameName, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: 'jeff',
+      lastName: 'BROOKS',
+      workableUnnamedLead: true,
+    })).toEqual({ id: 'lead-5', first_name: 'Jeff', last_name: 'Brooks' });
+
+    // A missing last name on either side does not block a first-name match.
+    const noLastName = makeDb({ id: 'lead-5b', first_name: 'Jeff', last_name: null });
+    expect(await findReusableCallLead(noLastName, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
+      workableUnnamedLead: true,
+    })).toEqual({ id: 'lead-5b', first_name: 'Jeff', last_name: null });
+  });
+
+  test('email match WITHOUT positive name corroboration forces a fresh lead — missing names never merge', async () => {
+    // Shared inbox: a name-less candidate (or a name-less caller) could be a
+    // DIFFERENT prospect — reusing would overwrite the first prospect's
+    // extraction and swallow the second's new-lead surfacing.
+    const namelessCandidate = makeDb({ id: 'lead-6', first_name: null, last_name: null });
+    expect(await findReusableCallLead(namelessCandidate, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
+      workableUnnamedLead: true,
+    })).toBeNull();
+
+    const namelessCaller = makeDb({ id: 'lead-6b', first_name: 'Jeff', last_name: 'Brooks' });
+    expect(await findReusableCallLead(namelessCaller, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: null,
+      lastName: null,
+      workableUnnamedLead: true,
+    })).toBeNull();
+  });
+
+  test('email match scans past a housemate\'s newer lead to the caller\'s own row', async () => {
+    // Shared inbox with two active unclaimed leads: newest belongs to Maria,
+    // older one to Jeff. Jeff calling back must reuse HIS row, not mint a
+    // duplicate because Maria's happens to be newest.
+    const db = makeDb([
+      { id: 'lead-maria', first_name: 'Maria', last_name: 'Lopez' },
+      { id: 'lead-jeff', first_name: 'Jeff', last_name: 'Brooks' },
+    ]);
+    expect(await findReusableCallLead(db, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
+      workableUnnamedLead: true,
+    })).toEqual({ id: 'lead-jeff', first_name: 'Jeff', last_name: 'Brooks' });
+  });
+
+  test('a retry of the SAME call reuses its own lead by call SID — no name corroboration needed', async () => {
+    // extraction_failed reprocessing: the earlier attempt already inserted
+    // this call's lead. Same-SID reuse is the strongest identity there is —
+    // without it, a phone-less name-less caller minted (and notified) a new
+    // duplicate on every retry.
+    const own = { id: 'lead-own', first_name: null, last_name: null, twilio_call_sid: 'CA-retry-1' };
+    const db = makeDb(own);
+    expect(await findReusableCallLead(db, {
+      phone: null,
+      email: 'shared@example.com',
+      firstName: null,
+      lastName: null,
+      workableUnnamedLead: true,
+      callSid: 'CA-retry-1',
+    })).toEqual(own);
+    expect(db.calls.some(([m, a]) => (m === 'where' || m === 'orWhere') && a[0] === 'twilio_call_sid' && a[1] === 'CA-retry-1')).toBe(true);
+  });
+
+  test('a retry reuses the lead the earlier attempt STAMPED (metadata lead_id) — reused leads keep the original sid', async () => {
+    // Attempt 1 reused an older email-matched lead (different sid) and
+    // stamped call_log.metadata.lead_id. The retry must treat that stamp as
+    // same-call identity even though contact fields may have changed.
+    const own = { id: 'lead-stamped', first_name: 'Jeff', last_name: 'Brooks', twilio_call_sid: 'CA-original-call' };
+    const db = makeDb(own);
+    expect(await findReusableCallLead(db, {
+      phone: null,
+      email: 'different-now@example.com',
+      firstName: null,
+      lastName: null,
+      workableUnnamedLead: true,
+      callSid: 'CA-retry-2',
+      stampedLeadId: 'lead-stamped',
+    })).toEqual(own);
+  });
+
+  test('name conflict never blocks a PHONE match — corroboration is email-path only', async () => {
+    const db = makeDb({ id: 'lead-7', first_name: 'Maria', last_name: 'Lopez' });
+    expect(await findReusableCallLead(db, {
+      phone: '+19415550101',
+      firstName: 'Jeff',
+      lastName: 'Brooks',
+      workableUnnamedLead: true,
+    })).toEqual({ id: 'lead-7', first_name: 'Maria', last_name: 'Lopez' });
   });
 });
 
@@ -115,5 +367,50 @@ describe('scheduled-SMS rail purpose map', () => {
     expect(purposeForScheduledMessageType('appointment_reminder')).toBe('appointment');
     expect(purposeForScheduledMessageType('manual')).toBe('conversational');
     expect(purposeForScheduledMessageType(null)).toBe('conversational');
+  });
+});
+
+describe('dropFilledLeadColumns — fill-only re-decision under the row lock (PR #3275)', () => {
+  const { dropFilledLeadColumns, FILL_ONLY_LEAD_FIELDS } = CallRecordingProcessor._test;
+
+  test('drops a fill-only column an admin filled between the pre-lock read and the lock', () => {
+    // `current` (pre-lock) saw first_name empty, so the pass queued a fill.
+    // The LOCKED row already carries the admin's entry — re-applying the
+    // stale fill would overwrite it despite fill-only semantics.
+    const leadUpdates = { first_name: 'Bob', address: '12 Palm Ct', transcript_summary: 'called about ants' };
+    const out = dropFilledLeadColumns(leadUpdates, { first_name: 'Robert', address: null });
+
+    expect(out).not.toHaveProperty('first_name');
+    expect(out.address).toBe('12 Palm Ct');           // still empty under the lock → fill stands
+    expect(out.transcript_summary).toBe('called about ants'); // not fill-only → untouched
+  });
+
+  test('does not mutate the caller\'s payload (the loop reuses it on a race re-run)', () => {
+    const leadUpdates = { first_name: 'Bob', is_qualified: true };
+    const out = dropFilledLeadColumns(leadUpdates, { first_name: 'Robert' });
+
+    expect(leadUpdates.first_name).toBe('Bob');
+    expect(out).not.toBe(leadUpdates);
+    expect(out.is_qualified).toBe(true);
+  });
+
+  test('returns the payload untouched when nothing was filled in the gap', () => {
+    const leadUpdates = { email: 'a@b.com', city: 'Bradenton' };
+    const out = dropFilledLeadColumns(leadUpdates, { email: '', city: null, zip: '34205' });
+
+    expect(out).toBe(leadUpdates);
+  });
+
+  test('a missing locked row leaves the payload alone (no lock, no re-decision)', () => {
+    const leadUpdates = { first_name: 'Bob' };
+    expect(dropFilledLeadColumns(leadUpdates, null)).toBe(leadUpdates);
+  });
+
+  test('covers exactly the fill-if-empty identity columns Step 4b writes', () => {
+    // Guards against drift: a new fill-if-empty assignment that is not in
+    // this list silently keeps the stale pre-lock decision.
+    expect(FILL_ONLY_LEAD_FIELDS).toEqual(
+      ['phone', 'first_name', 'last_name', 'email', 'address', 'city', 'zip'],
+    );
   });
 });
