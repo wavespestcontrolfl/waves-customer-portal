@@ -91,7 +91,7 @@ async function dunningStoppedInvoiceIds(invoiceIds, { database = db } = {}) {
  * @returns {{ charged: number, failed: number, skipped: number, considered: number }}
  */
 async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, paymentMethodId, triggerScheduledServiceId = null }) {
-  const summary = { charged: 0, failed: 0, skipped: 0, considered: 0 };
+  const summary = { charged: 0, pending: 0, failed: 0, skipped: 0, considered: 0 };
   if (!isEnabled('completionBalanceSweep')) return { ...summary, gateOff: true };
   if (!customerId || !paymentMethodId) return summary;
 
@@ -120,7 +120,7 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
     const discountCents = Math.max(0, Math.round(Number(inv.discount_amount || 0) * 100));
     const maxAuthorizedSubtotal = Math.max(0, subtotalCents - discountCents) / 100;
     try {
-      await StripeService.chargeInvoiceWithSavedCard(inv.id, paymentMethodId, {
+      const outcome = await StripeService.chargeInvoiceWithSavedCard(inv.id, paymentMethodId, {
         maxAuthorizedSubtotal,
         // Full charge-base ceiling in cents (pre-push r2 P0): the subtotal
         // cap can't see tax/total retotals or a reversed credit — the locked
@@ -135,7 +135,17 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
         // preflight above is only a cheap skip (pre-push P0).
         refuseWhenDunningStopped: true,
       });
-      summary.charged += 1;
+      // Only a SETTLED outcome lets the sweep continue (pre-push r3 P0):
+      // the charge service resolves with 'processing' for a bank debit
+      // still in flight — that money can still fail, and fanning out
+      // further off-session debits behind it would stack attempts
+      // stop-on-failure can't see. 'paid' (card settled inline) and
+      // 'prepaid' (credit covered, no charge) are final; anything else
+      // records the in-flight fact and STOPS.
+      const outcomeStatus = String(outcome?.status || '').toLowerCase();
+      const settled = outcomeStatus === 'paid' || outcomeStatus === 'prepaid';
+      if (settled) summary.charged += 1;
+      else summary.pending += 1;
       try {
         await logAutopay(customerId, 'charge_success', {
           details: {
@@ -143,9 +153,14 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
             invoice_id: inv.id,
             invoice_number: inv.invoice_number,
             trigger_scheduled_service_id: triggerScheduledServiceId,
+            ...(settled ? {} : { in_flight: true, outcome_status: outcomeStatus || 'unknown' }),
           },
         });
       } catch (e) { /* log-only */ }
+      if (!settled) {
+        logger.info(`[balance-sweep] invoice ${inv.invoice_number} charge is '${outcomeStatus || 'unknown'}' (in flight) — sweep stopped for customer ${customerId}`);
+        break;
+      }
     } catch (err) {
       summary.failed += 1;
       const fenced = StripeService.savedCardChargeSuppressesAlternateCollection(err);

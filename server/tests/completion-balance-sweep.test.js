@@ -160,9 +160,38 @@ describe('completion balance sweep', () => {
     expect(mockCharge.mock.calls[0][0]).toBe('old-live');
   });
 
+  test('an in-flight (processing) outcome stops the sweep before later invoices', async () => {
+    // A resolved charge is NOT necessarily settled: a bank debit resolves
+    // 'processing' and can still fail — the sweep must never fan out more
+    // debits behind money in flight (pre-push r3 P0).
+    openBalanceResults.rows = [
+      { id: 'old-1', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00' },
+      { id: 'old-2', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00' },
+    ];
+    mockCharge.mockImplementationOnce(async () => ({ status: 'processing' }));
+    const result = await runCompletionBalanceSweep(baseArgs);
+    expect(result.charged).toBe(0);
+    expect(result.pending).toBe(1);
+    expect(mockCharge).toHaveBeenCalledTimes(1);
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'charge_success', expect.objectContaining({
+      details: expect.objectContaining({ in_flight: true, outcome_status: 'processing' }),
+    }));
+  });
+
+  test('a credit-covered (prepaid) outcome is final and the sweep continues', async () => {
+    openBalanceResults.rows = [
+      { id: 'old-1', invoice_number: 'INV-1', subtotal: '50.00', total: '50.00' },
+      { id: 'old-2', invoice_number: 'INV-2', subtotal: '60.00', total: '60.00' },
+    ];
+    mockCharge.mockImplementationOnce(async () => ({ covered_by_credit: true, status: 'prepaid' }));
+    const result = await runCompletionBalanceSweep(baseArgs);
+    expect(result.charged).toBe(2);
+    expect(mockCharge).toHaveBeenCalledTimes(2);
+  });
+
   test('missing method or customer → no-op, never throws', async () => {
     const result = await runCompletionBalanceSweep({ ...baseArgs, paymentMethodId: null });
-    expect(result).toEqual({ charged: 0, failed: 0, skipped: 0, considered: 0 });
+    expect(result).toEqual({ charged: 0, pending: 0, failed: 0, skipped: 0, considered: 0 });
     expect(mockCharge).not.toHaveBeenCalled();
   });
 });

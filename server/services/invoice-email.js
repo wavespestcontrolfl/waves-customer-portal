@@ -231,8 +231,14 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // nothing is folded into this bill. Rides the invoice_message template slot
   // on the SendGrid path so the live invoice.sent template needs no edit;
   // lookup failure sends the email exactly as today.
+  // Suppressed for ANY recipient override (pre-push r3 P0): an operator
+  // one-off send routes THIS invoice to an arbitrary address (bookkeeper,
+  // realtor) — that recipient is authorized for this invoice only, never for
+  // the account's balance across unrelated invoices. Only the customer's own
+  // saved billing recipient may see the note. (effectiveOverride also covers
+  // the payer-AP reroute, belt-and-braces with the payer_id check.)
   let previousBalanceNote = '';
-  if (isEnabled('balanceVisibility') && !invoice.payer_id && invoice.customer_id) {
+  if (isEnabled('balanceVisibility') && !invoice.payer_id && invoice.customer_id && !effectiveOverride) {
     try {
       const { openBalanceSummary } = require('./open-balance');
       const prev = await openBalanceSummary(invoice.customer_id, { excludeInvoiceId: invoice.id });

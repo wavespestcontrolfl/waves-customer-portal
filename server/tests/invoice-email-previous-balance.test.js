@@ -140,6 +140,24 @@ describe('sendInvoiceEmail previous-balance note', () => {
     expect(args.payload.invoice_message).toBe('Thanks for having us out!');
   });
 
+  test('a one-off recipient override never receives the balance note (pre-push r3 P0)', async () => {
+    // An operator one-off send routes THIS invoice to an arbitrary address —
+    // authorized for this invoice only, never the account's balance.
+    isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
+    openBalanceSummary.mockResolvedValue({ total: 450, count: 2, moreCount: 0, invoices: [{}, {}] });
+    mockDb(invoiceRow());
+
+    const result = await sendInvoiceEmail('inv-1', {
+      recipientOverride: { email: 'bookkeeper@example.com', name: 'Books', role: 'invoice_override' },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(openBalanceSummary).not.toHaveBeenCalled();
+    const args = EmailTemplates.sendTemplate.mock.calls[0][0];
+    expect(args.to).toBe('bookkeeper@example.com');
+    expect(args.payload.invoice_message).toBe('Thanks for having us out!');
+  });
+
   test('a balance lookup failure sends the email exactly as today', async () => {
     isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
     openBalanceSummary.mockRejectedValue(new Error('db down'));
