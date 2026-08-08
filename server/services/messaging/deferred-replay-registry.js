@@ -719,12 +719,91 @@ async function finalizeDeferredReplay(entryPoint, claimMeta = {}, ctx = {}) {
 
 async function onTerminalDeferredReplay(entryPoint, claimMeta = {}) {
   const entry = entryFor(entryPoint);
-  if (!entry || typeof entry.onTerminal !== 'function') return;
+  if (!entry || typeof entry.onTerminal !== 'function') return { ok: true };
   try {
     await entry.onTerminal(claimMeta);
+    return { ok: true };
   } catch (err) {
     logger.warn(`[deferred-replay] onTerminal failed for ${entryPoint}: ${err.message}`);
+    return { ok: false };
   }
+}
+
+// Durable wrapper for the executor's terminal-status sites. A terminal row
+// (blocked/failed) is never revisited by any sweep, so a hook that throws
+// on a transient DB error — releasing a voicemail claim, restoring
+// completion state, arming the cancellation email — would lose the
+// obligation forever. Stamp `terminal_pending` on the row FIRST (durable
+// obligation, attempts counted), run the hook, clear the stamp only on
+// success; sweepPendingTerminalHooks re-runs stamped rows bounded. Hooks
+// are idempotent by the registry contract (guarded deletes/updates,
+// idempotency-keyed emails), so a crash between hook success and the
+// clear re-runs harmlessly.
+const TERMINAL_HOOK_MAX_ATTEMPTS = 5;
+
+async function runTerminalHookDurably(msgId, entryPoint, claimMeta = {}) {
+  const entry = entryFor(entryPoint);
+  if (!entry || typeof entry.onTerminal !== 'function') return { ok: true };
+  if (msgId) {
+    await db('sms_log').where({ id: msgId }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', true, 'terminal_attempts', COALESCE((metadata->>'terminal_attempts')::int, 0) + 1)"),
+      updated_at: new Date(),
+    }).catch((err) => {
+      // Stamp failure → still run the hook now (today's behavior); only
+      // the crash/throw recovery is lost for this one row.
+      logger.warn(`[deferred-replay] terminal_pending stamp failed for ${msgId}: ${err.message}`);
+    });
+  }
+  const res = await onTerminalDeferredReplay(entryPoint, claimMeta);
+  if (res.ok && msgId) {
+    await db('sms_log').where({ id: msgId }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', false)"),
+    }).catch((err) => {
+      logger.warn(`[deferred-replay] terminal_pending clear failed for ${msgId}: ${err.message}`);
+    });
+  }
+  return res;
+}
+
+// Executor-tick sweep: re-run terminal hooks whose stamp never cleared
+// (hook threw, or the process died mid-hook). Bounded per row; exhaustion
+// CLEARS the stamp loudly — else the sweep loops on the row forever (same
+// lesson as the stranded-finalization sweep). Age floor keeps it off
+// rows whose first inline pass is still in flight.
+async function sweepPendingTerminalHooks({ limit = 25, now = new Date() } = {}) {
+  let rows = [];
+  try {
+    rows = await db('sms_log')
+      .whereIn('status', ['blocked', 'failed'])
+      .whereRaw("metadata->>'terminal_pending' = 'true'")
+      .where('updated_at', '<', new Date(now.getTime() - 5 * 60 * 1000))
+      .orderBy('updated_at', 'asc')
+      .limit(limit)
+      .select('id', 'metadata');
+  } catch (err) {
+    logger.warn(`[deferred-replay] terminal-hook sweep query failed: ${err.message}`);
+    return { candidates: 0, reran: 0 };
+  }
+  let reran = 0;
+  for (const row of rows) {
+    let meta = row.metadata;
+    if (typeof meta === 'string') {
+      try { meta = JSON.parse(meta); } catch { meta = {}; }
+    }
+    meta = meta || {};
+    const attempts = Number(meta.terminal_attempts) || 1;
+    if (!meta.entry_point || attempts >= TERMINAL_HOOK_MAX_ATTEMPTS) {
+      await db('sms_log').where({ id: row.id }).update({
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', false)"),
+        updated_at: new Date(),
+      }).catch(() => {});
+      logger.error(`[deferred-replay] terminal hook ${meta.entry_point ? 'EXHAUSTED' : 'has no entry_point'} for ${row.id} (${meta.entry_point || 'unknown'}) — obligation handoff may need manual sync`);
+      continue;
+    }
+    const res = await runTerminalHookDurably(row.id, meta.entry_point, meta);
+    if (res.ok) reran += 1;
+  }
+  return { candidates: rows.length, reran };
 }
 
 function requiresDurableFinalize(entryPoint) {
@@ -743,6 +822,8 @@ module.exports = {
   recheckDeferredReplay,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,
+  runTerminalHookDurably,
+  sweepPendingTerminalHooks,
   requiresDurableFinalize,
   DURABLE_FINALIZE_ENTRY_POINTS,
   _registry: REGISTRY,

@@ -69,7 +69,9 @@ describe('deferred-replay registry', () => {
   test('unregistered entry points are inert', async () => {
     expect(await recheckDeferredReplay('some_future_unregistered_deferred', {})).toBeNull();
     expect(await finalizeDeferredReplay('some_future_unregistered_deferred', {}, {})).toBeNull();
-    await expect(onTerminalDeferredReplay('some_future_unregistered_deferred', {})).resolves.toBeUndefined();
+    // No hook → ok:true (r16 durability contract: callers read .ok to
+    // decide whether the terminal_pending stamp clears).
+    await expect(onTerminalDeferredReplay('some_future_unregistered_deferred', {})).resolves.toEqual({ ok: true });
     expect(requiresDurableFinalize('some_future_unregistered_deferred')).toBe(false);
   });
 
@@ -298,6 +300,71 @@ describe('deferred-replay registry', () => {
     // Legacy rows without the customer linkage: inert, no blind delete.
     await onTerminalDeferredReplay('appointment_tagger_prep_deferred', { pest_type: 'cockroach' });
     expect(del.del).toHaveBeenCalledTimes(1);
+  });
+
+  test('terminal hooks are durable (r16): obligation stamped first, cleared only on success', async () => {
+    const { runTerminalHookDurably } = require('../services/messaging/deferred-replay-registry');
+    const upd = { where: jest.fn(() => upd), update: jest.fn(async () => 1) };
+    db.mockReturnValue(upd);
+
+    // Success: stamp (terminal_pending true + attempts) THEN hook THEN clear.
+    const ok = await runTerminalHookDurably('sms-1', 'voicemail_lead_sms_deferred', { lead_id: 'lead-1' });
+    expect(ok.ok).toBe(true);
+    expect(mockVmClaims.clearLeadClaim).toHaveBeenCalledWith('lead-1');
+    expect(upd.update).toHaveBeenCalledTimes(2);
+
+    // Hook failure: the stamp stays (no clear) so the sweep re-runs it.
+    jest.clearAllMocks();
+    db.mockReturnValue(upd);
+    mockVmClaims.clearLeadClaim.mockRejectedValueOnce(new Error('db down'));
+    const failed = await runTerminalHookDurably('sms-1', 'voicemail_lead_sms_deferred', { lead_id: 'lead-1' });
+    expect(failed.ok).toBe(false);
+    expect(upd.update).toHaveBeenCalledTimes(1);
+
+    // No hook registered → inert, no stamps.
+    jest.clearAllMocks();
+    db.mockReturnValue(upd);
+    const inert = await runTerminalHookDurably('sms-1', 'estimate_follow_up_deferred', {});
+    expect(inert.ok).toBe(true);
+    expect(upd.update).not.toHaveBeenCalled();
+    db.mockReset();
+  });
+
+  test('terminal-hook sweep (r16): re-runs stamped rows bounded, clears loudly at exhaustion', async () => {
+    const { sweepPendingTerminalHooks } = require('../services/messaging/deferred-replay-registry');
+    const makeSelectChain = (rows) => {
+      const q = {};
+      for (const m of ['whereIn', 'whereRaw', 'where', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
+      q.select = jest.fn(async () => rows);
+      q.update = jest.fn(async () => 1);
+      return q;
+    };
+    const upd = { where: jest.fn(() => upd), update: jest.fn(async () => 1) };
+
+    // Retryable row: hook re-runs and succeeds.
+    let first = true;
+    const selectChain = makeSelectChain([{
+      id: 'sms-9',
+      metadata: JSON.stringify({ entry_point: 'voicemail_lead_sms_deferred', lead_id: 'lead-9', terminal_pending: true, terminal_attempts: 1 }),
+    }]);
+    db.mockImplementation(() => { if (first) { first = false; return selectChain; } return upd; });
+    const res = await sweepPendingTerminalHooks({ now: new Date('2026-08-08T12:00:00Z') });
+    expect(res).toEqual({ candidates: 1, reran: 1 });
+    expect(mockVmClaims.clearLeadClaim).toHaveBeenCalledWith('lead-9');
+
+    // Exhausted row: cleared (no infinite loop), hook NOT re-run.
+    jest.clearAllMocks();
+    first = true;
+    const exhausted = makeSelectChain([{
+      id: 'sms-10',
+      metadata: JSON.stringify({ entry_point: 'voicemail_lead_sms_deferred', lead_id: 'lead-10', terminal_pending: true, terminal_attempts: 5 }),
+    }]);
+    db.mockImplementation(() => { if (first) { first = false; return exhausted; } return upd; });
+    const res2 = await sweepPendingTerminalHooks({ now: new Date('2026-08-08T12:00:00Z') });
+    expect(res2).toEqual({ candidates: 1, reran: 0 });
+    expect(mockVmClaims.clearLeadClaim).not.toHaveBeenCalled();
+    expect(upd.update).toHaveBeenCalledTimes(1);
+    db.mockReset();
   });
 
   test('lead-menu finalize stamps real sids and releases sentinel outcomes', async () => {

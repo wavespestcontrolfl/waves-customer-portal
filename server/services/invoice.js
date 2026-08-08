@@ -2299,7 +2299,14 @@ const InvoiceService = {
           logger.info(`[invoice] Pay-link SMS for invoice ${invoiceId} held outside the 8AM-8PM ET send window — queued for ${sms.nextAllowedAt}`);
         }
       } catch (queueErr) {
-        logger.error(`[invoice] Held pay-link SMS requeue FAILED for invoice ${invoiceId}: ${queueErr.message} — SMS leg may be lost (email leg proceeds)`);
+        // The scheduled rail does NOT own the held text — the email leg
+        // below must not run: its success would finalize the invoice and
+        // clear the send claim, permanently losing the requested SMS
+        // pay-link leg. Failing the whole send keeps the claim
+        // restorable, and the caller's retry adopts the queued row (or
+        // re-queues) via the idempotent lookup above.
+        sms.holdUnowned = true;
+        logger.error(`[invoice] Held pay-link SMS requeue FAILED for invoice ${invoiceId}: ${queueErr.message} — deferring the whole send (email leg skipped) so the claim stays retryable`);
       }
     }
     delete sms.heldBody;
@@ -2316,8 +2323,10 @@ const InvoiceService = {
     const scheduledSmsHeld = allowClaimed
       && sms.code === "QUIET_HOURS_HOLD"
       && Boolean(sms.nextAllowedAt);
-    if (scheduledSmsHeld) {
-      email.error = "Deferred with the held SMS leg — outside 8AM-8PM ET send window";
+    if (scheduledSmsHeld || sms.holdUnowned) {
+      email.error = sms.holdUnowned
+        ? "Held SMS pay link could not be queued — whole send deferred so the claim stays retryable"
+        : "Deferred with the held SMS leg — outside 8AM-8PM ET send window";
       email.code = "QUIET_HOURS_HOLD";
     } else {
       try {

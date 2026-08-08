@@ -241,8 +241,8 @@ async function recoverStaleScheduledSmsClaims(now) {
       if (meta.agent_decision_id) decisionIds.push(meta.agent_decision_id);
       if (Array.isArray(meta.parked_decision_ids)) decisionIds.push(...meta.parked_decision_ids);
       if (meta.entry_point) {
-        const { onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
-        await onTerminalDeferredReplay(meta.entry_point, meta);
+        const { runTerminalHookDurably } = require('./messaging/deferred-replay-registry');
+        await runTerminalHookDurably(row.id, meta.entry_point, meta);
       }
     }
     if (decisionIds.length) {
@@ -2454,6 +2454,19 @@ function initScheduledJobs() {
         } catch (recErr) {
           logger.warn(`[scheduled-sms] stranded-finalization recovery failed: ${recErr.message}`);
         }
+        // Terminal-hook twin of the recovery above: a blocked/failed row
+        // whose onTerminal hook threw (or died mid-run) keeps its
+        // terminal_pending stamp — re-run the idempotent handoff bounded
+        // instead of losing the obligation with the terminal row.
+        try {
+          const { sweepPendingTerminalHooks } = require('./messaging/deferred-replay-registry');
+          const term = await sweepPendingTerminalHooks({ now });
+          if (term.candidates) {
+            logger.warn(`[scheduled-sms] re-ran ${term.reran}/${term.candidates} pending terminal hook(s)`);
+          }
+        } catch (termErr) {
+          logger.warn(`[scheduled-sms] pending terminal-hook sweep failed: ${termErr.message}`);
+        }
         scheduled = await claimDueScheduledSms(now);
       } catch { return; /* scheduled_for column may not exist yet */ }
 
@@ -2523,7 +2536,7 @@ function initScheduledJobs() {
           // a read failure is retryable-ineligible (fail closed on both
           // sides of the attempt cap — never send unverified state).
           {
-            const { recheckDeferredReplay, onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
+            const { recheckDeferredReplay, runTerminalHookDurably } = require('./messaging/deferred-replay-registry');
             // Same enrichment the finalize call gets below: several
             // enqueue sites store the customer only on sms_log.customer_id
             // (not in metadata), and a recheck that keys on customer state
@@ -2577,7 +2590,9 @@ function initScheduledJobs() {
                 // A suppressed replay will never deliver — same obligation
                 // handoff as a terminal provider block (claim releases,
                 // fallback arms, status flips into the admin lane).
-                await onTerminalDeferredReplay(claimMeta.entry_point, recheckMeta);
+                // Durable: a throwing hook leaves terminal_pending stamped
+                // for the bounded re-run sweep.
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point, recheckMeta);
               }
               continue;
             }
@@ -2746,8 +2761,8 @@ function initScheduledJobs() {
               // Terminal for this row's obligation too — same registry
               // handoff as a terminal provider block (release once-ever
               // claims, arm fallbacks, flip state into the admin lane).
-              const { onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
-              await onTerminalDeferredReplay(claimMeta.entry_point, claimMeta);
+              const { runTerminalHookDurably } = require('./messaging/deferred-replay-registry');
+              await runTerminalHookDurably(msg.id, claimMeta.entry_point, claimMeta);
             }
             continue;
           }
@@ -2879,7 +2894,7 @@ function initScheduledJobs() {
             // finalization — a crash between this update and the hook below
             // must leave durable evidence, which the executor's stranded-
             // finalization sweep converts to a finalize_only retry.
-            const { requiresDurableFinalize, finalizeDeferredReplay: finalizeReplay, onTerminalDeferredReplay: onTerminalReplay } = require('./messaging/deferred-replay-registry');
+            const { requiresDurableFinalize, finalizeDeferredReplay: finalizeReplay } = require('./messaging/deferred-replay-registry');
             const owesFinalization = requiresDurableFinalize(claimMeta.entry_point);
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'sent',
@@ -3038,8 +3053,8 @@ function initScheduledJobs() {
               // the admin retry lane). Armed ONLY here, never on timers,
               // so fallbacks can't race a still-retryable replay.
               {
-                const { onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
-                await onTerminalDeferredReplay(claimMeta.entry_point, claimMeta);
+                const { runTerminalHookDurably } = require('./messaging/deferred-replay-registry');
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point, claimMeta);
               }
               // The customer was never answered — used + parked cards return.
               const blockedMeta = await readFreshMeta();
@@ -3130,8 +3145,8 @@ function initScheduledJobs() {
               } else {
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: failedAt });
                 if (failedMeta.entry_point) {
-                  const { onTerminalDeferredReplay } = require('./messaging/deferred-replay-registry');
-                  await onTerminalDeferredReplay(failedMeta.entry_point, failedMeta);
+                  const { runTerminalHookDurably } = require('./messaging/deferred-replay-registry');
+                  await runTerminalHookDurably(msg.id, failedMeta.entry_point, failedMeta);
                 }
                 await require('./sms-suggest-mode').reopenScheduledSuggestions({
                   decisionIds: [failedMeta.agent_decision_id, ...(Array.isArray(failedMeta.parked_decision_ids) ? failedMeta.parked_decision_ids : [])],

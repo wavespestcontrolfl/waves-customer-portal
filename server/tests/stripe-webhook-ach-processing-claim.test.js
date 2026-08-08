@@ -18,7 +18,17 @@
  *  - plain delivery failures (sent:false, no enqueue throw) keep the claim
  *    (the documented no-retry trade-off for delivery-after-claim).
  */
-jest.mock('stripe', () => jest.fn(() => ({})));
+jest.mock('stripe', () => jest.fn(() => ({
+  // The r16 sweep gate reads the PI as its durable ACH evidence. Defaults
+  // to an in-flight bank debit so the pre-gate sweep tests keep their
+  // shape; per-test overrides via mockState.piRow / piRetrieveError.
+  paymentIntents: {
+    retrieve: jest.fn(async () => {
+      if (mockState.piRetrieveError) throw new Error(mockState.piRetrieveError);
+      return mockState.piRow || { id: 'pi_1', status: 'processing', payment_method_types: ['us_bank_account'] };
+    }),
+  },
+})));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', webhookSecret: 'whsec_mock' }));
 jest.mock('../services/autopay-eligibility', () => ({ isBankMethodType: jest.fn(() => true) }));
@@ -71,6 +81,8 @@ function resetMockState() {
     failRelease: false,
     sweepRows: [],
     emailAttemptRow: null,
+    piRow: null,
+    piRetrieveError: null,
     updates: [], // { table, wheres, patch }
   });
 }
@@ -251,4 +263,46 @@ test('sweep (r14): a worker failure is contained per invoice, never rejects the 
   mockState.sweepRows = [{ id: 'inv-1', stripe_payment_intent_id: 'pi_1', invoice_number: 'WPC-2026-0091' }];
 
   await expect(sweepAcks()).resolves.toEqual({ candidates: 1 });
+});
+
+test('sweep (r16 P1): a CARD PI parked in processing is never acknowledged as a bank transfer', async () => {
+  // The saved-card ambiguity paths (admin-dispatch park, stripe-terminal)
+  // leave card invoices in status='processing' with a PI and fresh
+  // updated_at — the sweep must not claim them and text "we received your
+  // bank transfer".
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  mockState.sweepRows = [{ id: 'inv-1', stripe_payment_intent_id: 'pi_1', invoice_number: 'WPC-2026-0091' }];
+  mockState.piRow = { id: 'pi_1', status: 'requires_payment_method', payment_method_types: ['card'] };
+
+  const result = await sweepAcks();
+
+  expect(result.candidates).toBe(1);
+  expect(claimUpdates()).toHaveLength(0);
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(PaymentLifecycleEmail.sendAchProcessing).not.toHaveBeenCalled();
+});
+
+test('sweep (r16 P1): an ACH PI no longer processing is skipped (never a stale "in flight" ack)', async () => {
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  mockState.sweepRows = [{ id: 'inv-1', stripe_payment_intent_id: 'pi_1', invoice_number: 'WPC-2026-0091' }];
+  mockState.piRow = { id: 'pi_1', status: 'succeeded', payment_method_types: ['us_bank_account'] };
+
+  const result = await sweepAcks();
+
+  expect(result.candidates).toBe(1);
+  expect(claimUpdates()).toHaveLength(0);
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+});
+
+test('sweep (r16 P1): an unreadable PI fails CLOSED — row skipped this tick, claim untouched', async () => {
+  sendCustomerMessage.mockResolvedValue({ sent: true });
+  mockState.sweepRows = [{ id: 'inv-1', stripe_payment_intent_id: 'pi_1', invoice_number: 'WPC-2026-0091' }];
+  mockState.piRetrieveError = 'stripe unreachable';
+
+  const result = await sweepAcks();
+
+  expect(result.candidates).toBe(1);
+  expect(claimUpdates()).toHaveLength(0);
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(PaymentLifecycleEmail.sendAchProcessing).not.toHaveBeenCalled();
 });

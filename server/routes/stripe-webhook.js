@@ -4364,7 +4364,34 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
     .orderBy('updated_at', 'asc')
     .limit(limit)
     .select('id', 'stripe_payment_intent_id', 'invoice_number', 'total', 'credit_applied');
+  const stripeClient = rows.length ? getStripe() : null;
   for (const row of rows) {
+    // ACH-evidence gate: status='processing' + a PI is NOT proof of a bank
+    // transfer — the saved-card ambiguity paths (admin-dispatch parked
+    // charge, stripe-terminal) also park CARD invoices in 'processing'
+    // with a PI and fresh updated_at, and after the 10-minute floor this
+    // sweep would claim them and falsely tell the customer we received
+    // their bank transfer. The PI record is the durable evidence: require
+    // a bank-debit payment_method_type AND a still-processing PI. Fails
+    // CLOSED (skip, retry next tick) when Stripe can't be read — never
+    // acknowledge unverified.
+    if (!stripeClient) {
+      logger.warn('[stripe-webhook] ACH ack sweep: Stripe client unavailable — skipping this tick');
+      break;
+    }
+    let pi = null;
+    try {
+      pi = await stripeClient.paymentIntents.retrieve(row.stripe_payment_intent_id);
+    } catch (piErr) {
+      logger.warn(`[stripe-webhook] ACH ack sweep could not read PI ${row.stripe_payment_intent_id} for invoice ${row.id}: ${piErr.message} — skipping (retry next tick)`);
+      continue;
+    }
+    const methodTypes = pi?.payment_method_types || [];
+    const isBankDebit = methodTypes.includes('us_bank_account') || methodTypes.includes('ach_debit');
+    if (!isBankDebit || pi.status !== 'processing') {
+      logger.info(`[stripe-webhook] ACH ack sweep skipping invoice ${row.invoice_number || row.id}: PI ${pi.id} is ${isBankDebit ? `status=${pi.status}` : `non-ACH (${methodTypes.join(',') || 'unknown'})`} — not an in-flight bank transfer`);
+      continue;
+    }
     const priorEmailAttempt = await db('email_messages')
       .whereRaw('idempotency_key LIKE ?', [`payment.ach_processing:${row.id}:%`])
       .first('id')

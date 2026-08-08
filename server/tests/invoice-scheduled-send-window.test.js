@@ -316,6 +316,54 @@ describe('processScheduledSends send-window handling', () => {
     }
   });
 
+  test('sendViaSMSAndEmail (direct caller): a FAILED held-SMS requeue skips the email leg so the claim stays retryable (r16)', async () => {
+    // If the scheduled rail never took ownership of the held text, an
+    // email-alone success would finalize the invoice and clear the send
+    // claim — permanently losing the requested SMS pay-link leg. The whole
+    // send must fail (claim restored) so the caller's retry re-queues.
+    const { sendInvoiceEmail } = require('../services/invoice-email');
+    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockImplementation(async () => {
+      const err = new Error('payment-link SMS blocked: QUIET_HOURS_HOLD');
+      err.code = 'QUIET_HOURS_HOLD';
+      err.deferred = true;
+      err.nextAllowedAt = WINDOW_OPEN.toISOString();
+      err.smsBody = 'Hi Pat, your invoice is ready: https://pay.example/abc';
+      err.toPhone = '+19415550123';
+      throw err;
+    });
+    try {
+      const draftInvoice = {
+        id: 'inv-1',
+        status: 'draft',
+        customer_id: 'cust-1',
+        payer_id: null,
+        scheduled_request_review: false,
+        scheduled_review_delay_minutes: null,
+      };
+      const failingInsert = chain();
+      failingInsert.insert = jest.fn(() => { throw new Error('sms_log insert failed'); });
+      const restoreChain = chain();
+      restoreChain.catch = jest.fn(() => Promise.resolve());
+      db
+        .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
+        .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
+        .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
+        .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
+        .mockReturnValueOnce(failingInsert) // held-SMS scheduled-rail insert THROWS
+        .mockReturnValue(restoreChain); // restoreSendClaim + anything after
+
+      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+
+      expect(sendInvoiceEmail).not.toHaveBeenCalled();
+      expect(result.ok).toBe(false);
+      expect(result.email.code).toBe('QUIET_HOURS_HOLD');
+      expect(result.sms.scheduled).toBeUndefined();
+    } finally {
+      smsSpy.mockRestore();
+      db.mockReset();
+    }
+  });
+
   test('an ordinary failure still increments the attempt counter', async () => {
     isWithinSendWindowET.mockReturnValue(true);
     const staleRecovery = chain();
