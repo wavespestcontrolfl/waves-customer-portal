@@ -116,4 +116,18 @@ describe('estimate document render pin', () => {
     expect(pinned).toContain('mode=pdf');
     expect(pinned).toContain('dpin=');
   });
+
+  test('fails closed when no signing secret is available — never an unpinned render URL', () => {
+    const savedDoc = process.env.ESTIMATE_DOC_PIN_SECRET;
+    const savedJwt = process.env.JWT_SECRET;
+    delete process.env.ESTIMATE_DOC_PIN_SECRET;
+    delete process.env.JWT_SECRET;
+    try {
+      expect(() => estimateDocumentUrl(TOKEN)).toThrow(/cannot be signed/);
+      expect(signEstimateDocPin(TOKEN)).toBeNull();
+    } finally {
+      if (savedDoc !== undefined) process.env.ESTIMATE_DOC_PIN_SECRET = savedDoc;
+      if (savedJwt !== undefined) process.env.JWT_SECRET = savedJwt;
+    }
+  });
 });

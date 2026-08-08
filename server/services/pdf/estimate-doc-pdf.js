@@ -78,10 +78,19 @@ function verifyEstimateDocPin(pin, token) {
 
 function estimateDocumentUrl(token, { validThrough = null } = {}) {
   const base = serviceReportPublicBase(null).replace(/\/+$/, '');
-  const params = ['mode=pdf'];
   const pin = signEstimateDocPin(token, { validThrough });
-  if (pin) params.push(`dpin=${encodeURIComponent(pin)}`);
-  return `${base}/estimate/${encodeURIComponent(token)}?${params.join('&')}`;
+  if (!pin) {
+    // FAIL CLOSED (same trade as the service-report assessment pin): an
+    // unpinned server render would fire the estimate's view side effects —
+    // stamping viewed_at and pinging "Estimate viewed" from an attachment
+    // build. Throwing routes every caller onto the pdfkit fallback instead.
+    // A missing JWT_SECRET would already have broken auth app-wide, so this
+    // is not a realistic silent-degradation path.
+    const err = new Error('estimate doc render pin cannot be signed — set ESTIMATE_DOC_PIN_SECRET or JWT_SECRET');
+    err.code = 'estimate_doc_pin_unsignable';
+    throw err;
+  }
+  return `${base}/estimate/${encodeURIComponent(token)}?mode=pdf&dpin=${encodeURIComponent(pin)}`;
 }
 
 // Renders the document → Buffer. Throws on any failure; callers fall back
