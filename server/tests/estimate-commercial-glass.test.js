@@ -6,6 +6,24 @@
 // path is the pre-existing suites' unchanged assertions.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
+// Deterministic browser stand-in for the concurrency test: the real
+// launchBrowser hangs or succeeds depending on whether Playwright is
+// installed (it IS on CI), so the test controls a shared gate instead —
+// parked renders hold their semaphore slots until the gate rejects.
+jest.mock('../services/service-report/pdf-puppeteer', () => {
+  const real = jest.requireActual('../services/service-report/pdf-puppeteer');
+  let release;
+  const gate = new Promise((resolve, reject) => { release = reject; });
+  // Swallow the shared gate's rejection at definition time — every caller
+  // attaches its own handler, but Node flags the bare promise otherwise.
+  gate.catch(() => {});
+  return {
+    ...real,
+    launchBrowser: jest.fn(() => gate),
+    __releaseLaunchGate: () => release(new Error('mock launch failed')),
+  };
+});
+
 const { renderPage } = require('../routes/estimate-public');
 const {
   signEstimateDocPin,
@@ -142,18 +160,19 @@ describe('estimate document render pin', () => {
   });
 
   test('render concurrency is bounded — excess renders throw busy for the pdfkit fallback', async () => {
-    // Saturate the semaphore with renders that park inside the browser
-    // launch (playwright isn't installed in tests, so each occupies a slot
-    // until its launch rejects) — the cap is what matters: the (cap+1)th
-    // caller must fail FAST with the busy code, before any browser work.
+    // Saturate the semaphore with renders parked inside the mocked browser
+    // launch gate — the cap is what matters: the (cap+1)th caller must fail
+    // FAST with the busy code, before any browser work.
     const cap = Math.max(1, Number(process.env.ESTIMATE_DOC_PDF_MAX_CONCURRENT || 2));
     const estimate = { token: 'c'.repeat(64) };
     const parked = Array.from({ length: cap }, () => renderEstimateDocumentPdf(estimate).catch((e) => e));
-    // The in-flight renders hold their slots synchronously, so the next
+    // Slots are claimed synchronously before the first await, so the next
     // call sees a full house immediately.
     await expect(renderEstimateDocumentPdf(estimate)).rejects.toMatchObject({ code: 'estimate_doc_render_busy' });
+    // Release the gate: the parked renders fail on the (mock) launch error,
+    // never on the semaphore — and their slots free afterwards.
+    require('../services/service-report/pdf-puppeteer').__releaseLaunchGate();
     const settled = await Promise.all(parked);
-    // The parked renders fail on the missing browser, never on the semaphore.
     for (const err of settled) expect(err.code).not.toBe('estimate_doc_render_busy');
   });
 
