@@ -377,7 +377,7 @@ export default function EstimateProposalDocument({ data, token }) {
         )}
 
         {/* Pricing */}
-        {(buildings.length > 0 || programList.length > 0) && (
+        {(buildings.length > 0 || programList.length > 0 || correctiveWork.length > 0) && (
           <div className="doc-keep">
             <SectionHeader>
               {buildings.length > 0

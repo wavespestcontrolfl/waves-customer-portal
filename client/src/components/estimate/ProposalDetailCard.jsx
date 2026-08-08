@@ -46,7 +46,8 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
   // Programs-mode proposals (slice 1A-ii) have no top-level buildings —
   // either itemization renders the card.
   const programs = Array.isArray(proposal?.programs) ? proposal.programs : [];
-  if (!proposal || ((!Array.isArray(proposal.buildings) || !proposal.buildings.length) && !programs.length)) return null;
+  const correctiveOnly = Array.isArray(proposal?.correctiveWork) && proposal.correctiveWork.length;
+  if (!proposal || ((!Array.isArray(proposal.buildings) || !proposal.buildings.length) && !programs.length && !correctiveOnly)) return null;
   const totals = proposal.totals || {};
   const buildingsList = Array.isArray(proposal.buildings) ? proposal.buildings : [];
   const multiBuilding = buildingsList.length > 1;

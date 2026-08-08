@@ -588,13 +588,15 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
   const stored = estimateData.proposal;
 
-  // A stored proposal is authoritative when it carries EITHER itemization:
-  // legacy building line items or (slice 1A-ii) service programs. A
-  // programs-mode proposal has no top-level buildings by design and must
-  // not fall through to the synthesized fallback.
+  // A stored proposal is authoritative when it carries ANY itemization:
+  // legacy building line items, (1A-ii) service programs, or corrective
+  // work alone — a one-time-only commercial proposal is corrective-work-
+  // only by design. None of these may fall through to the synthesized
+  // fallback (which would double the charge beside them).
   const storedHasBuildings = stored && Array.isArray(stored.buildings) && stored.buildings.length;
   const storedHasPrograms = stored && Array.isArray(stored.programs) && stored.programs.length;
-  const base = storedHasBuildings || storedHasPrograms
+  const storedHasCorrective = stored && Array.isArray(stored.correctiveWork) && stored.correctiveWork.length;
+  const base = storedHasBuildings || storedHasPrograms || storedHasCorrective
     ? stored
     : synthesizeFallbackProposal(estimate, estimateData, { recurringMode, livePricing });
 

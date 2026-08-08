@@ -58,6 +58,11 @@ describe('programFamilyForService', () => {
     // treats it as non-pest, and pest inclusions must never attach to it.
     expect(programFamilyForService('foam_recurring')).toBe('termite');
     expect(programFamilyForService('foam_drill')).toBe('termite');
+    // Word-boundary matching — "Plant health" must NOT match /ant/ and
+    // acquire pest contract terms; unknown work fails closed to 'other'.
+    expect(programFamilyForService('plant_health')).toBe('other');
+    expect(programFamilyForService('Plant Health Program')).toBe('other');
+    expect(programFamilyForService('ant_control')).toBe('pest');
   });
 });
 
@@ -91,7 +96,9 @@ describe('deriveProposalDraft', () => {
       frequencyPerYear: 4,
       pricePerApplication: 117,
       annual: 468,
-      taxable: false,
+      // Canonical commercial default: non-lawn commercial work is taxable
+      // when the engine row carries no explicit flag.
+      taxable: true,
     });
     // Pest carries the owner-stated commercial terms; the cadence line is
     // derived from the priced row.
@@ -110,11 +117,11 @@ describe('deriveProposalDraft', () => {
 
   test('derives property scope from estimator inputs + prospect profile', () => {
     const draft = deriveProposalDraft(COMMERCIAL_ESTIMATE);
+    // Deterministic estimator inputs ONLY — the LLM prospect profile is
+    // internal and never promotes into customer-facing scope (codex r2f).
     expect(draft.propertyScope.items).toEqual([
       { label: 'Building', value: '2,000 sq ft · 2 stories' },
       { label: 'Lot', value: '5,850 sq ft' },
-      { label: 'Units', value: '4' },
-      { label: 'Property type', value: 'small multifamily' },
     ]);
   });
 
@@ -223,7 +230,7 @@ describe('deriveProposalDraft', () => {
       },
     });
     expect(withOneTime.correctiveWork).toEqual([{
-      label: 'German Cockroach Treatment', amount: 275, taxable: false, includes: ['Includes 1 treatment visit.'],
+      label: 'German Cockroach Treatment', amount: 275, taxable: true, includes: ['Includes 1 treatment visit.'],
     }]);
     expect(withOneTime.programs).toHaveLength(1);
 
@@ -263,6 +270,140 @@ describe('deriveProposalDraft', () => {
     });
     expect(tooMany.correctiveWork).toBeNull();
     expect(tooMany.warnings[0]).toMatch(/limited to 24/);
+  });
+
+  test('a fractional cadence (biennial 0.5/yr) fails the draft rather than rounding to a different program (pre-push P0)', () => {
+    const draft = deriveProposalDraft({
+      estimate_data: {
+        result: {
+          recurring: {
+            services: [
+              { service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 },
+              { service: 'palm_injection', name: 'Tree-Age Palm Treatment', appsPerYear: 0.5, annualAfterDiscount: 100 },
+            ],
+          },
+        },
+      },
+    });
+    expect(draft.programs).toBeNull();
+    expect(draft.warnings[0]).toMatch(/fractional visit cadence/);
+  });
+
+  test('corrective work prices from the operator-accepted net (manualFinalOneTime beats gross price)', () => {
+    const draft = deriveProposalDraft({
+      estimate_data: {
+        result: {
+          oneTime: { items: [{ name: 'Cleanout', price: 300, manualFinalOneTime: 250 }] },
+        },
+      },
+    });
+    expect(draft.correctiveWork).toEqual([{ label: 'Cleanout', amount: 250, taxable: true, includes: [] }]);
+  });
+
+  test('explicit zeros are authoritative: zeroed totals reject generated prices, comped rows fail the draft (codex r2c)', () => {
+    // Quote-required estimate deliberately zeroed → generated positive
+    // programs must NOT install.
+    const zeroed = deriveProposalDraft({
+      annual_total: 0,
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
+      },
+    });
+    expect(zeroed.programs).toBeNull();
+    expect(zeroed.warnings[0]).toMatch(/annual total/);
+
+    // Comped recurring service (explicit accepted zero) fails the draft.
+    const compedRecurring = deriveProposalDraft({
+      estimate_data: {
+        result: { recurring: { services: [
+          { service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 },
+          { service: 'mosquito', name: 'Comped Mosquito', visitsPerYear: 9, annualAfterDiscount: 585, manualFinalAnnual: 0 },
+        ] } },
+      },
+    });
+    expect(compedRecurring.programs).toBeNull();
+    expect(compedRecurring.warnings[0]).toMatch(/comped/i);
+
+    // Comped one-time item fails the one-time side.
+    const compedOneTime = deriveProposalDraft({
+      estimate_data: {
+        result: { oneTime: { items: [{ name: 'Comped Cleanout', price: 300, manualFinalOneTime: 0 }] } },
+      },
+    });
+    expect(compedOneTime.correctiveWork).toBeNull();
+    expect(compedOneTime.warnings[0]).toMatch(/comped/i);
+  });
+
+  test('taxability defaults: explicit flag wins, lawn exempt, null totals stay null (codex r2e)', () => {
+    const draft = deriveProposalDraft({
+      annual_total: null, // nullable DB column must NOT read as explicit $0
+      estimate_data: {
+        result: {
+          recurring: { services: [
+            { service: 'lawn_care', name: 'Lawn', visitsPerYear: 9, annualAfterDiscount: 540 },
+            { service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468, taxable: false },
+          ] },
+          // Same specialty row persisted twice (specItems duplication) —
+          // identity dedupe keeps one.
+          oneTime: { items: [{ service: 'exclusion_v', name: 'Exclusion', price: 900 }], specItems: [{ service: 'exclusion_v', name: 'Exclusion', price: 900 }] },
+        },
+      },
+    });
+    expect(draft.programs).toHaveLength(2);
+    expect(draft.programs[0].taxable).toBe(false); // lawn exempt by canonical rule
+    expect(draft.programs[1].taxable).toBe(false); // explicit engine false wins
+    expect(draft.correctiveWork).toHaveLength(1);  // deduped
+    expect(draft.warnings).toEqual([]);
+  });
+
+  test('a positive annual total with no representable recurring rows fails the draft (codex r2h)', () => {
+    const draft = deriveProposalDraft({
+      annual_total: 468,
+      onetime_total: 275,
+      estimate_data: {
+        result: {
+          recurring: { services: [] },
+          oneTime: { items: [{ name: 'Cleanout', price: 275 }] },
+        },
+      },
+    });
+    expect(draft.programs).toBeNull();
+    expect(draft.correctiveWork).toBeNull(); // all-or-nothing across sides
+    expect(draft.warnings[0]).toMatch(/no representable recurring services/);
+  });
+
+  test('monthly-only recurring rows price via the canonical resolver (monthly × 12 — codex r2i)', () => {
+    const draft = deriveProposalDraft({
+      estimate_data: {
+        result: {
+          recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 12, mo: 39 }] },
+        },
+      },
+    });
+    expect(draft.programs).toHaveLength(1);
+    expect(draft.programs[0]).toMatchObject({ frequencyPerYear: 12, pricePerApplication: 39, annual: 468 });
+  });
+
+  test('null annual_total falls back to monthly_total as the recurring authority (codex r2j)', () => {
+    const match = deriveProposalDraft({
+      annual_total: null,
+      monthly_total: 39,
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 12, mo: 39 }] } },
+      },
+    });
+    expect(match.programs).toHaveLength(1);
+    expect(match.warnings).toEqual([]);
+
+    const mismatch = deriveProposalDraft({
+      annual_total: null,
+      monthly_total: 45,
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 12, mo: 39 }] } },
+      },
+    });
+    expect(mismatch.programs).toBeNull();
+    expect(mismatch.warnings[0]).toMatch(/monthly total/);
   });
 
   test('returns null sections for an estimate with nothing to derive', () => {

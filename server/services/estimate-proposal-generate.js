@@ -25,7 +25,11 @@
 // Canonical cadence resolver — recognizes the persisted aliases
 // (visitsPerYear/appsPerYear/visits/apps/treatmentsPerYear) so palm/T&S
 // rows aren't misreported as cadence-less (codex 1A-ii r1).
-const { visitsPerYearForRecurringService } = require('./estimate-converter');
+const {
+  visitsPerYearForRecurringService,
+  estimateOneTimeItemsFromData,
+  recurringLineAnnualAmount,
+} = require('./estimate-converter');
 
 // Engine service key → proposal program family. Prefix/substring match on
 // the pricing-engine vocabulary (pest_control, commercial_pest,
@@ -33,17 +37,21 @@ const { visitsPerYearForRecurringService } = require('./estimate-converter');
 // (recurring spot-foam program) — the truth-scope classifier in
 // estimate-public.js treats it as non-pest for the same reason (codex
 // 1A-ii r1: pest inclusions must never attach to a foam program).
+// Matched against the key with separators normalized to spaces, using word
+// boundaries — an unbounded /ant/ would classify "Plant health" as pest and
+// attach interior-service contract terms to tree work (codex 1A-ii r2f).
+// Unrecognized services fail CLOSED to 'other' (no claims).
 const FAMILY_MATCHERS = [
-  ['termite', /termite|preslab|bora_care|wdo|foam/],
-  ['rodent', /rodent|exclusion/],
-  ['mosquito', /mosquito/],
-  ['tree_shrub', /tree_shrub|palm|ornamental/],
-  ['lawn', /lawn|turf|dethatch|aerat/],
-  ['pest', /pest|roach|flea|bed_bug|wasp|ant|spider/],
+  ['termite', /\btermite\b|\bpreslab\b|\bpre slab\b|\bbora care\b|\bwdo\b|\bfoam\b/],
+  ['rodent', /\brodent\b|\bexclusion\b/],
+  ['mosquito', /\bmosquito\b/],
+  ['tree_shrub', /\btree shrub\b|\bpalm\b|\bornamental\b/],
+  ['lawn', /\blawn\b|\bturf\b|\bdethatch|\baerat/],
+  ['pest', /\bpest\b|\broach\b|\bflea\b|\bbed ?bug\b|\bwasp\b|\bants?\b|\bspider\b/],
 ];
 
 function programFamilyForService(serviceKey) {
-  const key = String(serviceKey || '').toLowerCase();
+  const key = String(serviceKey || '').toLowerCase().replace(/[_-]+/g, ' ');
   for (const [family, re] of FAMILY_MATCHERS) {
     if (re.test(key)) return family;
   }
@@ -125,8 +133,25 @@ const FAMILY_RESPONSIBILITIES = {
 };
 
 function num(value) {
+  // Null/undefined/blank stay null — Number(null) is 0, and a nullable DB
+  // total column must never masquerade as an authoritative explicit zero
+  // (codex 1A-ii r2e).
+  if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+// Canonical commercial taxability: lawn AND tree/shrub work classify as
+// lawn_spraying_or_treatment (non-taxable) in the engine's commercial
+// configuration; other commercial families default taxable. An explicit
+// boolean on the row wins; absent metadata must neither silently exempt
+// taxable work nor tax exempt work (codex 1A-ii r2e/r2g). The operator
+// reviews the per-row Tax switch before anything saves.
+const TAX_EXEMPT_FAMILIES = new Set(['lawn', 'tree_shrub']);
+
+function commercialTaxableDefault(serviceKey, explicit) {
+  if (explicit === true || explicit === false) return explicit;
+  return !TAX_EXEMPT_FAMILIES.has(programFamilyForService(serviceKey));
 }
 
 function parseEstimateData(estimateData) {
@@ -142,13 +167,14 @@ function fmtSqft(value) {
   return n && n > 0 ? `${Math.round(n).toLocaleString('en-US')} sq ft` : null;
 }
 
-// Property scope rows from the estimator's own inputs first, then the
-// prospect research profile for the commercial-only facts (units,
-// building count). Only rows the estimator actually captured render.
+// Property scope rows from the estimator's own DETERMINISTIC inputs only.
+// The prospect brief (estimate_data.commercialProspect) is LLM-composed and
+// explicitly internal-only — promoting its facts (units, building counts)
+// into customer-facing contractual scope could publish hallucinated data
+// (codex 1A-ii r2f). Units/building rows stay operator-typed.
 function derivePropertyScope(estimateData) {
   // Estimator-tool drafts store `inputs`; agent drafts store `engineInputs`.
   const inputs = estimateData.inputs || estimateData.engineInputs || {};
-  const profile = estimateData.commercialProspect?.propertyProfile || {};
   const items = [];
 
   const building = fmtSqft(inputs.homeSqFt);
@@ -161,9 +187,6 @@ function derivePropertyScope(estimateData) {
   }
   const lot = fmtSqft(inputs.lotSqFt);
   if (lot) items.push({ label: 'Lot', value: lot });
-  if (num(profile.units)) items.push({ label: 'Units', value: String(Math.round(profile.units)) });
-  if (num(profile.buildings) > 1) items.push({ label: 'Buildings', value: String(Math.round(profile.buildings)) });
-  if (profile.propertyType) items.push({ label: 'Property type', value: String(profile.propertyType) });
 
   return items.length ? { items } : null;
 }
@@ -198,7 +221,7 @@ function derivePrograms(estimateData, estimate = {}) {
   // r1b). Rows from either shape flow through the same representability
   // rules — a lineItems row without a provable cadence fails generation
   // with the actionable warning rather than silently derailing.
-  const rows = Array.isArray(engineResult.recurring?.services)
+  const rows = Array.isArray(engineResult.recurring?.services) && engineResult.recurring.services.length
     ? engineResult.recurring.services
     : (Array.isArray(engineResult.lineItems)
       ? engineResult.lineItems.map((line) => ({
@@ -217,13 +240,38 @@ function derivePrograms(estimateData, estimate = {}) {
     warning: `Programs were not generated: ${reason} Author the programs manually so every priced service is represented.`,
   });
   for (const row of rows) {
-    const visits = Math.round(visitsPerYearForRecurringService(row) || 0);
+    const rawVisits = visitsPerYearForRecurringService(row) || 0;
+    // Fractional cadences are REAL (Tree-Age palm treatment persists
+    // appsPerYear 0.5 = biennial) but programs promise whole visits/year —
+    // rounding would sell a different cadence and derive a wrong
+    // per-application price that acceptance then invoices (pre-push codex
+    // P0). Fail the draft instead.
+    if (rawVisits > 0 && Math.abs(rawVisits - Math.round(rawVisits)) > 1e-9) {
+      const rowAnnual = num(row.manualFinalAnnual ?? row.annualAfterDiscount ?? row.annual);
+      if (rowAnnual > 0) {
+        unrepresentable.push(`${String(row.name || row.service || 'service')} (fractional visit cadence ${rawVisits}/yr)`);
+      }
+      continue;
+    }
+    const visits = Math.round(rawVisits);
     // The engine's discounted annual is the PRICING AUTHORITY (manual
     // discounts included) — normalizeProgram derives annual as price ×
     // frequency, so the per-application price MUST come from that annual
     // or a discounted row would save at list price and rewrite
     // estimates.annual_total upward (pre-push codex P0).
-    const annual = num(row.manualFinalAnnual ?? row.annualAfterDiscount ?? row.annual);
+    // An EXPLICIT accepted zero (comped service) is promised scope, not an
+    // unpriced row — dropping it would silently lose scope while totals
+    // still reconcile (codex 1A-ii r2c). Fail the draft instead.
+    if (row.manualFinalAnnual === 0) {
+      unrepresentable.push(`${String(row.name || row.service || 'service')} (comped/zero-priced service — represent it manually)`);
+      continue;
+    }
+    // manualFinalAnnual (operator-accepted net) outranks; otherwise the
+    // CANONICAL recurring resolver (annualAfterDiscount/annualAfterCredits/
+    // annual/ann, else monthly×12 — codex 1A-ii r2i) prices the row.
+    const annual = row.manualFinalAnnual != null
+      ? num(row.manualFinalAnnual)
+      : (recurringLineAnnualAmount(row) || null);
     if (!(annual > 0)) continue; // genuinely unpriced row — nothing to represent
     if (!(visits > 0)) {
       // PRICED but cadence-less: skipping would generate a partial list that
@@ -243,9 +291,10 @@ function derivePrograms(estimateData, estimate = {}) {
       frequencyPerYear: visits,
       pricePerApplication,
       annual,
-      // Taxability is the engine's call (commercial rows carry it) — forcing
-      // false here would undercharge tax on save (pre-push codex P0).
-      taxable: row.taxable === true,
+      // Explicit engine taxability wins; absent metadata falls to the
+      // canonical commercial rule (lawn exempt, else taxable) — never a
+      // silent exempt default (pre-push codex P0 / r2e).
+      taxable: commercialTaxableDefault(row.service || row.name, row.taxable),
       inclusions: inclusionsForProgram(family, visits),
       exclusions: PROGRAM_EXCLUSIONS[family] || [],
       buildings: [],
@@ -260,15 +309,37 @@ function derivePrograms(estimateData, estimate = {}) {
   // Reconcile against the estimate's authoritative annual total when one is
   // stored — a plan-level credit the rows don't carry would otherwise save a
   // programs total that contradicts what acceptance charges.
+  // Reconcile whenever the stored column is NON-NULL — including an
+  // explicit zero (quote-required/manual-review estimates are deliberately
+  // zeroed, and generating positive programs for them would invoice
+  // blocked prices — codex 1A-ii r2c).
   const storedAnnual = num(estimate.annual_total);
-  if (programs.length && storedAnnual > 0) {
+  if (programs.length && storedAnnual !== null) {
     const generatedAnnual = Math.round(programs.reduce((acc, p) => acc + p.annual, 0) * 100) / 100;
     // EXACT integer-cent agreement — the save overwrites the authoritative
     // annual_total, so even a one-cent drift silently changes customer
     // pricing (pre-push codex P0).
     if (Math.round(generatedAnnual * 100) !== Math.round(storedAnnual * 100)) {
-      return fail(`the priced services sum to $${generatedAnnual.toFixed(2)}/yr but the estimate's annual total is $${storedAnnual.toFixed(2)} (a plan-level discount or manual adjustment the rows don't carry).`);
+      return fail(`the priced services sum to $${generatedAnnual.toFixed(2)}/yr but the estimate's annual total is $${storedAnnual.toFixed(2)} (a plan-level discount, manual adjustment, or quote-required hold the rows don't carry).`);
     }
+  }
+  // annual_total is NULLABLE — when it is null the monthly_total column is
+  // the remaining recurring authority: reconcile the generated monthly
+  // equivalent against it, exact cent (codex 1A-ii r2j).
+  const storedMonthly = num(estimate.monthly_total);
+  if (programs.length && storedAnnual === null && storedMonthly !== null) {
+    const generatedAnnual = Math.round(programs.reduce((acc, p) => acc + p.annual, 0) * 100) / 100;
+    const generatedMonthly = Math.round((generatedAnnual / 12) * 100) / 100;
+    if (Math.round(generatedMonthly * 100) !== Math.round(storedMonthly * 100)) {
+      return fail(`the priced services average $${generatedMonthly.toFixed(2)}/mo but the estimate's monthly total is $${storedMonthly.toFixed(2)}.`);
+    }
+  }
+  // A positive stored recurring total (annual OR monthly) with NOTHING
+  // representable must fail loudly — otherwise a corrective-only draft
+  // could save alone and the PUT would rewrite the totals to zero (codex
+  // 1A-ii r2h/r2j).
+  if (!programs.length && (storedAnnual > 0 || storedMonthly > 0)) {
+    return fail('the estimate carries a recurring total but no representable recurring services were found.');
   }
   return { programs: programs.length ? programs : null, warning: null };
 }
@@ -281,30 +352,69 @@ function derivePrograms(estimateData, estimate = {}) {
 // onetime_total to the cent or fail the whole monetary draft.
 function deriveCorrectiveWork(estimateData, estimate = {}) {
   const engineResult = estimateData.result || estimateData.engineResult || estimateData || {};
-  const fromOneTime = Array.isArray(engineResult.oneTime?.items) ? engineResult.oneTime.items : [];
+  // Canonical extraction (estimate-converter): handles oneTime.items,
+  // specItems, nested results, one_time.items, and oneTimeItems shapes and
+  // filters included-on-program rows — never a narrower parallel walk
+  // (codex 1A-ii r2).
+  // Wrap the SELECTED engine result so the canonical extractor descends
+  // into agent-draft engineResult shapes too (codex 1A-ii r2b).
+  const fromOneTime = estimateOneTimeItemsFromData({ result: engineResult });
   const fromLineItems = Array.isArray(engineResult.lineItems)
     ? engineResult.lineItems.filter((line) => num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime) > 0)
     : [];
   const work = [];
+  const comped = [];
+  // Mapped estimates persist specialty rows in BOTH oneTime.specItems and
+  // root specItems as distinct objects — the canonical extractor dedupes by
+  // object identity only, so dedupe here by stable service+amount identity
+  // or every specialty charge doubles and reconciliation rejects the draft
+  // (codex 1A-ii r2e).
+  const seenIdentity = new Set();
   for (const item of fromOneTime) {
-    const amount = num(item.priceAfterDiscount ?? item.price ?? item.amount ?? item.total);
+    const identity = `${String(item.service || item.name || item.label || '').toLowerCase()}|${num(item.manualFinalOneTime ?? item.priceAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total ?? item.installation?.price) ?? ''}`;
+    if (seenIdentity.has(identity)) continue;
+    seenIdentity.add(identity);
+    // An EXPLICIT accepted zero is comped scope, not an unpriced row
+    // (codex 1A-ii r2c) — fail rather than silently lose it.
+    if (item.manualFinalOneTime === 0) {
+      comped.push(String(item.label || item.name || item.service || 'item'));
+      continue;
+    }
+    // manualFinalOneTime is the operator-ACCEPTED net (the engine keeps
+    // `price` gross) — it outranks everything (pre-push codex P0).
+    const amount = num(item.manualFinalOneTime
+      ?? item.priceAfterDiscount ?? item.totalAfterDiscount ?? item.price ?? item.amount ?? item.total
+      ?? item.installation?.price);
     if (!(amount > 0)) continue;
     work.push({
       label: String(item.label || item.name || item.service || 'One-time service').slice(0, 160),
       amount: Math.round(amount * 100) / 100,
-      taxable: item.taxable === true,
+      taxable: commercialTaxableDefault(item.service || item.name, item.taxable),
       includes: item.detail ? [String(item.detail).slice(0, 200)] : [],
     });
   }
   for (const line of fromLineItems) {
-    const amount = num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime);
+    if (line.manualFinalOneTime === 0) {
+      comped.push(String(line.displayName || line.name || line.service || 'item'));
+      continue;
+    }
+    const amount = num(line.manualFinalOneTime ?? line.oneTimePrice ?? line.onetime_price ?? line.oneTime);
     if (!(amount > 0)) continue;
+    const identity = `${String(line.service || line.name || '').toLowerCase()}|${amount}`;
+    if (seenIdentity.has(identity)) continue;
+    seenIdentity.add(identity);
     work.push({
       label: String(line.displayName || line.name || line.service || 'One-time service').slice(0, 160),
       amount: Math.round(amount * 100) / 100,
-      taxable: line.taxable === true,
+      taxable: commercialTaxableDefault(line.service || line.name, line.taxable),
       includes: [],
     });
+  }
+  if (comped.length) {
+    return {
+      correctiveWork: null,
+      warning: `One-time work was not generated: ${comped.join(', ')} is an accepted zero-priced (comped) item — author the corrective work manually so the promised scope is represented.`,
+    };
   }
   const storedOneTime = num(estimate.onetime_total);
   if (!work.length) {
@@ -327,7 +437,9 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
       warning: `One-time work was not generated: the estimate has ${work.length} one-time items and proposals are limited to 24 corrective-work lines. Author the corrective work manually.`,
     };
   }
-  if (storedOneTime > 0) {
+  // Non-null INCLUDING zero — a deliberately zeroed (quote-required) total
+  // must not accept generated positive work (codex 1A-ii r2c).
+  if (storedOneTime !== null) {
     const generated = Math.round(work.reduce((acc, w) => acc + w.amount, 0) * 100) / 100;
     if (Math.round(generated * 100) !== Math.round(storedOneTime * 100)) {
       return {

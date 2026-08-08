@@ -1963,8 +1963,11 @@ router.put('/:id/proposal', async (req, res, next) => {
     // One recurring itemization, never two that can disagree (slice 1A-ii):
     // a proposal is priced by its building line items OR by its service
     // programs. Program subdivisions carry the multi-building labels.
-    if (!hasBuildings && !hasPrograms) {
-      return res.status(400).json({ error: 'Add building line items or service programs — a proposal needs one priced itemization.' });
+    // Corrective work ALONE is a valid itemization too — a one-time-only
+    // commercial proposal has no recurring side (codex 1A-ii r2g).
+    const hasCorrective = Array.isArray(incoming.correctiveWork) && incoming.correctiveWork.length > 0;
+    if (!hasBuildings && !hasPrograms && !hasCorrective) {
+      return res.status(400).json({ error: 'Add building line items, service programs, or corrective work — a proposal needs a priced itemization.' });
     }
     if (hasPrograms && hasBuildings
       && incomingBuildings.some((b) => Array.isArray(b?.lineItems || b?.line_items) && (b.lineItems || b.line_items).length > 0)) {
@@ -2026,6 +2029,23 @@ router.put('/:id/proposal', async (req, res, next) => {
     if (Array.isArray(incoming.correctiveWork)
       && incoming.correctiveWork.some((w) => Number(w?.amount ?? w?.price) < 0)) {
       return res.status(400).json({ error: 'Corrective work amounts cannot be negative.' });
+    }
+    // Every corrective amount must be finite and cent-representable, and a
+    // corrective-ONLY itemization needs at least one positive amount — an
+    // all-zero (or NaN/Infinity) payload would normalize to nothing, clear
+    // the quote-required flags, and rewrite the authoritative totals to
+    // zero (codex 1A-ii r2i).
+    if (Array.isArray(incoming.correctiveWork) && incoming.correctiveWork.length) {
+      for (const w of incoming.correctiveWork) {
+        const amount = Number(w?.amount ?? w?.price ?? 0);
+        if (!Number.isFinite(amount) || Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-6) {
+          return res.status(400).json({ error: 'Corrective work amounts must be whole-cent dollar values.' });
+        }
+      }
+      if (!hasBuildings && !hasPrograms
+        && !incoming.correctiveWork.some((w) => Number(w?.amount ?? w?.price) >= 0.01)) {
+        return res.status(400).json({ error: 'A corrective-work-only proposal needs at least one item priced at $0.01 or more.' });
+      }
     }
     // Oversized structured-section lists get a 400, not a silent clamp —
     // normalizeProposal truncates lines and drops over-limit entries as a
@@ -2143,6 +2163,9 @@ router.put('/:id/proposal', async (req, res, next) => {
     // authoritative totals without it (pre-push codex P0). Fail loud.
     if (hasPrograms && (normalized.programs?.length ?? 0) !== incomingPrograms.length) {
       return res.status(400).json({ error: 'One or more service programs failed validation and would be dropped — fix or remove them, then save again.' });
+    }
+    if (hasCorrective && (normalized.correctiveWork?.length ?? 0) !== incoming.correctiveWork.length) {
+      return res.status(400).json({ error: 'One or more corrective-work items failed validation and would be dropped — fix or remove them, then save again.' });
     }
     const totals = computeProposalTotals(normalized);
 

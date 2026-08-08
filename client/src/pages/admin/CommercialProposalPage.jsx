@@ -237,6 +237,11 @@ export default function CommercialProposalPage() {
   // title/scope edit must not block program generation — codex 1A-ii r2).
   const buildingsEditedRef = React.useRef(false);
   const markBuildingsEdit = () => { buildingsEditedRef.current = true; markEdit(); };
+  // Building lines this PAGE has successfully persisted — a first save of
+  // the synthesized fallback makes those lines authored server-side even if
+  // a concurrent edit skipped applyLoaded (loadedAuthored still false), so
+  // a save retry must not treat them as discardable (codex 1A-ii r2f).
+  const persistedBuildingsRef = React.useRef(false);
 
   const applyLoaded = useCallback((data) => {
     const p = data.proposal || {};
@@ -296,6 +301,8 @@ export default function CommercialProposalPage() {
     setSavedOnce(p.enabled === true);
     setLoadedAuthored(p.enabled === true && p.synthesized !== true);
     buildingsEditedRef.current = false;
+    persistedBuildingsRef.current = p.enabled === true && p.synthesized !== true
+      && (p.buildings || []).some((b) => (b.lineItems || []).length > 0);
     setDirty(false);
   }, []);
 
@@ -342,6 +349,9 @@ export default function CommercialProposalPage() {
       // "empty when I clicked" (codex 1A-ii r1b).
       const live = formRef.current;
       let filled = 0;
+      // Monetary fills (programs/corrective) tracked separately — only they
+      // justify clearing the synthesized building pricing (codex 1A-ii r2h).
+      let monetaryFilled = 0;
       if (draft?.propertyScope?.items?.length && !live.scopeItems.some((i) => i.label.trim())) {
         setScopeItems(draft.propertyScope.items.map((item) => ({ label: item.label, value: item.value })));
         filled += 1;
@@ -353,7 +363,7 @@ export default function CommercialProposalPage() {
       // proposal was actually operator-authored or the operator edited this
       // session — a never-saved draft shows the server's SYNTHESIZED
       // fallback lines, which generation may freely replace (codex 1A-ii r1).
-      const hasAuthoredBuildingLines = (live.loadedAuthored || buildingsEditedRef.current)
+      const hasAuthoredBuildingLines = (live.loadedAuthored || buildingsEditedRef.current || persistedBuildingsRef.current)
         && live.buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim()));
       if (draft?.programs?.length && !live.programsState.some((p) => p.label.trim()) && !hasAuthoredBuildingLines) {
         setProgramsState(draft.programs.map((program) => ({
@@ -368,6 +378,7 @@ export default function CommercialProposalPage() {
           coversText: '',
         })));
         filled += 1;
+        monetaryFilled += 1;
       }
       if (draft?.correctiveWork?.length && !live.correctiveWork.some((w) => String(w.label || '').trim())) {
         setCorrectiveWork(draft.correctiveWork.map((w) => ({
@@ -377,12 +388,21 @@ export default function CommercialProposalPage() {
           includesText: (w.includes || []).join('\n'),
         })));
         filled += 1;
+        monetaryFilled += 1;
       }
       if (draft?.customerResponsibilities?.length && !live.responsibilitiesText.trim()) {
         setResponsibilitiesText(draft.customerResponsibilities.join('\n'));
         filled += 1;
       }
       if (filled > 0) {
+        // Monetary sections were installed — the on-screen SYNTHESIZED
+        // building lines describe the same charges and would double-count
+        // on save (codex 1A-ii r2g). Authored/edited/persisted lines never
+        // reach here (the guards above), so clearing is safe.
+        if (monetaryFilled > 0
+          && !(live.loadedAuthored || buildingsEditedRef.current || persistedBuildingsRef.current)) {
+          setBuildings([emptyBuilding(0)]);
+        }
         markEdit();
         // Partial generation still surfaces the programs warning.
         if (draft?.warnings?.length) setError(draft.warnings.join(' '));
@@ -537,14 +557,30 @@ export default function CommercialProposalPage() {
         // runs.)
         const genAtSave = editGenRef.current;
         const payload = buildPayload();
-        if (payload.proposal.buildings.length === 0 && !(payload.proposal.programs || []).length) {
-          setError('Add a service program, or a building with a described line item.');
+        if (payload.proposal.buildings.length === 0 && !(payload.proposal.programs || []).length
+          && !(payload.proposal.correctiveWork || []).length) {
+          setError('Add a service program, corrective work, or a building with a described line item.');
+          return false;
+        }
+        // Programs mode omits buildings from the payload — refuse to save
+        // while authored/edited building lines still exist so a manually
+        // added program can never silently discard the prior itemization
+        // and rewrite the totals without it (codex 1A-ii r2d). The
+        // synthesized fallback's own lines don't count.
+        if ((payload.proposal.programs || []).length
+          && (formRef.current.loadedAuthored || buildingsEditedRef.current || persistedBuildingsRef.current)
+          && formRef.current.buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim()))) {
+          setError('Programs replace building line items. Use “Clear building lines” (or remove the programs) before saving — building lines are never silently discarded.');
           return false;
         }
         await adminFetch(`/admin/estimates/${estimateId}/proposal`, {
           method: 'PUT',
           body: JSON.stringify(payload),
         });
+        // What this PUT just persisted is now the server-side truth — a
+        // retry (concurrent edit) must guard against discarding it even
+        // before applyLoaded refreshes loadedAuthored.
+        persistedBuildingsRef.current = payload.proposal.buildings.length > 0;
         // Swap in the NORMALIZED state before download/send can proceed —
         // the operator must see exactly what persisted (the server clamps
         // string lengths as a safety net; approving un-normalized local
@@ -995,9 +1031,17 @@ export default function CommercialProposalPage() {
           </Card>
 
           {programsMode && (
-            <div className="text-13 text-zinc-600 bg-zinc-50 border border-hairline border-zinc-200 rounded px-3 py-2">
-              Service programs are the recurring itemization — the building line-item editor is hidden and
-              won&rsquo;t be saved while a priced program exists. Use each program&rsquo;s &ldquo;Covers&rdquo; field for building labels.
+            <div className="flex flex-wrap items-center gap-3 text-13 text-zinc-600 bg-zinc-50 border border-hairline border-zinc-200 rounded px-3 py-2">
+              <span className="flex-1 min-w-[240px]">
+                Service programs are the recurring itemization — the building line-item editor is hidden and
+                building lines are not saved alongside programs. Use each program&rsquo;s &ldquo;Covers&rdquo; field for building labels.
+              </span>
+              {!locked && buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim())) && (
+                <Button variant="secondary" size="sm"
+                  onClick={() => { markBuildingsEdit(); setBuildings([emptyBuilding(0)]); }}>
+                  <Trash2 size={14} /> Clear building lines
+                </Button>
+              )}
             </div>
           )}
 
