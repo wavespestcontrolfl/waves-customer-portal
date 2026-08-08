@@ -40,6 +40,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { addETDays } = require('../../utils/datetime-et');
+const { runExclusive } = require('../../utils/cron-lock');
 
 // Dark-ship gate. While off, the sweep computes what it WOULD re-queue and
 // logs it, and stamps NOTHING — so flipping the gate acts on the real backlog
@@ -53,6 +54,12 @@ const COOLDOWN_DAYS = 90;
 // Bound the nightly fan-out. Each queued row becomes a full agent run; a
 // backlog should drain over days, not stampede in one tick.
 const MAX_PER_RUN = 5;
+// A transient failure does not consume the row's one attempt — but it can't
+// retry forever either. Without a cap, MAX_PER_RUN persistently-failing rows
+// would occupy every batch and starve every newer regression behind them
+// (they sort oldest-first). After this many transient failures the row is
+// stamped terminal and leaves the pool.
+const MAX_TRANSIENT_ATTEMPTS = 3;
 
 // enqueueRefresh's coded refusals, mapped straight through to requeue_status.
 // Anything uncoded is treated as transient and left unstamped for a retry.
@@ -85,36 +92,78 @@ function pendingRegressions(database, { limit = MAX_PER_RUN } = {}) {
     .whereNotNull('page_url')
     .orderBy('checked_21d_at', 'asc')
     .limit(limit)
-    .select('id', 'page_url', 'bucket', 'estimated_lift_position', 'checked_21d_at');
+    .select('id', 'page_url', 'bucket', 'estimated_lift_position', 'checked_21d_at', 'requeue_attempts');
 }
 
-// Has this page been re-queued inside the cooldown? Keyed on page_url as
-// stored: impact rows for one page carry the run's published_url, which is
-// stable across refreshes of that page.
-async function inCooldown(database, pageUrl, since) {
+/**
+ * Has this page been re-queued inside the cooldown?
+ *
+ * Keyed on (registrable domain, canonical path) — NOT on the raw page_url
+ * string. GSC reports www/non-www and ?utm variants, the hub and spokes share
+ * paths, and a later run can record a different representation of the same
+ * page; an exact-string match would let those variants slip past the loop
+ * breaker and re-queue the same page again. Uses refresh-audit's identity
+ * helpers so this lane and the refresh lane agree on what "same page" means.
+ */
+async function inCooldown(database, refreshAudit, pageUrl, since) {
+  const { canonPathSql, hostRegistrableSql, urlToPath, registrableDomain } = refreshAudit._identity;
+  const path = urlToPath(pageUrl);
+  const domain = registrableDomain(pageUrl);
+  if (!path || !domain) return false;
+
   const row = await database('content_optimization_impact')
-    .where('page_url', pageUrl)
     .whereNotNull('requeued_at')
     .where('requeued_at', '>=', since)
+    .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
+    .whereRaw(`${hostRegistrableSql('page_url')} = ?`, [domain])
     .first('id');
   return Boolean(row);
 }
 
-async function stamp(database, id, status) {
+async function stamp(database, id, status, attempts = null) {
+  const patch = { requeued_at: new Date(), requeue_status: String(status).slice(0, 40), updated_at: new Date() };
+  if (attempts != null) patch.requeue_attempts = attempts;
   try {
-    await database('content_optimization_impact')
-      .where('id', id)
-      .update({ requeued_at: new Date(), requeue_status: String(status).slice(0, 40), updated_at: new Date() });
+    await database('content_optimization_impact').where('id', id).update(patch);
   } catch (err) {
     logger.error(`[regression-requeue] failed to stamp impact ${id}: ${err.message}`);
   }
 }
 
+// Count a transient failure. Once the cap is hit the row is stamped terminal
+// so it stops occupying the bounded batch.
+async function noteTransientFailure(database, row) {
+  const attempts = (Number(row.requeue_attempts) || 0) + 1;
+  if (attempts >= MAX_TRANSIENT_ATTEMPTS) {
+    await stamp(database, row.id, 'error_exhausted', attempts);
+    return 'error_exhausted';
+  }
+  try {
+    await database('content_optimization_impact')
+      .where('id', row.id)
+      .update({ requeue_attempts: attempts, updated_at: new Date() });
+  } catch (err) {
+    logger.error(`[regression-requeue] failed to count attempt on impact ${row.id}: ${err.message}`);
+  }
+  return 'error';
+}
+
 /**
  * Daily sweep. Chained after the impact tracker so it reads verdicts the sweep
  * just wrote. `opts.db` and `opts.refreshAudit` are injectable for tests.
+ *
+ * Serialized with the repo's distributed cron lock: Railway runs overlapping
+ * old/new instances during a deploy, and two pods scanning the same unstamped
+ * rows would both resolve and enqueue them, then race to overwrite each
+ * other's terminal requeue_status. Sequential re-entry after the lock releases
+ * is already safe — the scan filters on requeued_at IS NULL, so a second tick
+ * simply sees no work.
  */
 async function requeueRegressedPages(opts = {}) {
+  return runExclusive('regression-requeue', () => requeueRegressedPagesLocked(opts));
+}
+
+async function requeueRegressedPagesLocked(opts = {}) {
   const database = opts.db || db;
   const refreshAudit = opts.refreshAudit || require('./refresh-audit');
   const limit = opts.limit || MAX_PER_RUN;
@@ -141,7 +190,7 @@ async function requeueRegressedPages(opts = {}) {
     let post = null;
 
     try {
-      if (await inCooldown(database, row.page_url, cooldownSince)) {
+      if (await inCooldown(database, refreshAudit, row.page_url, cooldownSince)) {
         status = 'cooldown';
       } else {
         post = await refreshAudit.resolvePublishedPostByUrl(row.page_url);
@@ -160,10 +209,18 @@ async function requeueRegressedPages(opts = {}) {
     } catch (err) {
       const code = err && err.code;
       if (!TERMINAL_ERROR_CODES.has(code)) {
-        // Transient (DB blip, unexpected throw): leave it unstamped so the next
-        // sweep retries rather than burning the page's one attempt.
+        // Transient (DB blip, unexpected throw): don't burn the page's one
+        // attempt — but DO count it, so a permanently-stuck row can't hold a
+        // slot in the bounded batch forever and starve newer regressions.
         logger.error(`[regression-requeue] ${row.page_url} failed transiently: ${err.message}`);
-        results.push({ id: row.id, page_url: row.page_url, status: 'error' });
+        if (!requeueEnabled()) {
+          logger.info(`[regression-requeue] gated OFF — not counting the failed attempt on ${row.page_url}`);
+          results.push({ id: row.id, page_url: row.page_url, status: 'gated' });
+          continue;
+        }
+        const outcome = await noteTransientFailure(database, row);
+        if (outcome === 'error_exhausted') skipped += 1;
+        results.push({ id: row.id, page_url: row.page_url, status: outcome });
         continue;
       }
       status = requeueStatusFor({ resolved: post, errorCode: code });
@@ -190,6 +247,6 @@ module.exports = {
   requeueRegressedPages,
   // exposed for tests / reuse
   requeueStatusFor,
-  _internals: { pendingRegressions, inCooldown },
-  THRESHOLDS: { COOLDOWN_DAYS, MAX_PER_RUN },
+  _internals: { pendingRegressions, inCooldown, noteTransientFailure },
+  THRESHOLDS: { COOLDOWN_DAYS, MAX_PER_RUN, MAX_TRANSIENT_ATTEMPTS },
 };

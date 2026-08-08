@@ -1,19 +1,26 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The real lock needs a DB session; assert only that the sweep runs THROUGH it.
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: jest.fn((_name, fn) => fn()),
+}));
 
+const { runExclusive } = require('../utils/cron-lock');
 const requeue = require('../services/seo/regression-requeue');
 const { requeueRegressedPages, requeueStatusFor } = requeue;
 
 // Minimal knex stand-in for content_optimization_impact. `pending` feeds the
 // scan; `cooldownHit` decides what the cooldown .first() sees; every .update()
-// is recorded with the id it was keyed on.
+// is recorded with the id it was keyed on, and every whereRaw bind is captured
+// so the cooldown's page-identity predicate can be asserted.
 function makeDb({ pending = [], cooldownHit = false } = {}) {
-  const state = { updates: [] };
+  const state = { updates: [], rawBinds: [] };
   const fakeDb = () => {
     const q = {
       _id: null,
       _limit: null,
       where: (col, val) => { if (col === 'id') q._id = val; return q; },
+      whereRaw: (sql, binds) => { state.rawBinds.push(...(binds || [])); return q; },
       whereNotNull: () => q,
       whereNull: () => q,
       orderBy: () => q,
@@ -37,13 +44,23 @@ const row = (over = {}) => ({
   ...over,
 });
 
+// Real identity helpers, mirrored from refresh-audit — the point of the
+// cooldown fix is that BOTH lanes key a page the same way.
+const identity = {
+  canonPathSql: (col) => `canon(${col})`,
+  hostRegistrableSql: (col) => `host(${col})`,
+  urlToPath: (u) => String(u).split('?')[0].replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/\/+$/, '') || '/',
+  registrableDomain: (u) => String(u).replace(/^[a-z]+:\/\//i, '').split('/')[0].replace(/^www\./i, '').toLowerCase(),
+};
+
 const audit = (over = {}) => ({
+  _identity: identity,
   resolvePublishedPostByUrl: jest.fn(async () => ({ id: 42, slug: 'bed-bugs-bradenton' })),
   enqueueRefresh: jest.fn(async () => ({ queued: true, status: 'pending' })),
   ...over,
 });
 
-beforeEach(() => { process.env.GATE_REGRESSION_REQUEUE = 'true'; });
+beforeEach(() => { process.env.GATE_REGRESSION_REQUEUE = 'true'; runExclusive.mockClear(); });
 afterAll(() => { delete process.env.GATE_REGRESSION_REQUEUE; });
 
 describe('requeueStatusFor', () => {
@@ -133,13 +150,59 @@ describe('requeueRegressedPages', () => {
     expect(out).toMatchObject({ queued: 0, skipped: 1 });
   });
 
-  test('a TRANSIENT failure leaves the row unstamped so the next sweep retries', async () => {
-    const db = makeDb({ pending: [row()] });
+  test('a TRANSIENT failure counts an attempt but does NOT stamp a terminal status', async () => {
+    const db = makeDb({ pending: [row({ requeue_attempts: 0 })] });
     const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => { throw new Error('connection reset'); }) });
     const out = await requeueRegressedPages({ db, refreshAudit });
 
-    expect(db.state.updates).toHaveLength(0);
     expect(out.results[0].status).toBe('error');
+    expect(db.state.updates).toHaveLength(1);
+    expect(db.state.updates[0]).toMatchObject({ requeue_attempts: 1 });
+    // Not stamped terminal — the next sweep retries it.
+    expect(db.state.updates[0].requeued_at).toBeUndefined();
+    expect(db.state.updates[0].requeue_status).toBeUndefined();
+  });
+
+  test('a row that keeps failing is retired at the cap, so it cannot starve the batch', async () => {
+    const attempts = requeue.THRESHOLDS.MAX_TRANSIENT_ATTEMPTS - 1;
+    const db = makeDb({ pending: [row({ requeue_attempts: attempts })] });
+    const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => { throw new Error('still broken'); }) });
+    const out = await requeueRegressedPages({ db, refreshAudit });
+
+    expect(out.results[0].status).toBe('error_exhausted');
+    expect(db.state.updates[0]).toMatchObject({
+      requeue_status: 'error_exhausted',
+      requeue_attempts: requeue.THRESHOLDS.MAX_TRANSIENT_ATTEMPTS,
+    });
+    expect(db.state.updates[0].requeued_at).toBeInstanceOf(Date);
+  });
+
+  test('gate OFF does not even count a transient failure', async () => {
+    process.env.GATE_REGRESSION_REQUEUE = 'false';
+    const db = makeDb({ pending: [row()] });
+    const refreshAudit = audit({ resolvePublishedPostByUrl: jest.fn(async () => { throw new Error('boom'); }) });
+    const out = await requeueRegressedPages({ db, refreshAudit });
+
+    expect(db.state.updates).toHaveLength(0);
+    expect(out.results[0].status).toBe('gated');
+  });
+
+  test('the sweep runs inside the distributed cron lock', async () => {
+    await requeueRegressedPages({ db: makeDb({ pending: [] }), refreshAudit: audit() });
+    expect(runExclusive).toHaveBeenCalledWith('regression-requeue', expect.any(Function));
+  });
+
+  test('cooldown is keyed on canonical domain + path, never the raw URL string', async () => {
+    const db = makeDb({
+      pending: [row({ page_url: 'https://www.wavespestcontrol.com/bed-bugs-bradenton/?utm_source=gbp' })],
+      cooldownHit: true,
+    });
+    await requeueRegressedPages({ db, refreshAudit: audit() });
+
+    // The ?utm variant and the trailing slash must be normalized away, and the
+    // domain must be bound — otherwise a www/non-www twin slips the loop breaker.
+    expect(db.state.rawBinds).toContain('/bed-bugs-bradenton');
+    expect(db.state.rawBinds).toContain('wavespestcontrol.com');
   });
 
   test('one bad page does not stop the rest of the batch', async () => {
@@ -153,8 +216,10 @@ describe('requeueRegressedPages', () => {
 
     expect(out.scanned).toBe(2);
     expect(out.queued).toBe(1);
-    expect(db.state.updates).toHaveLength(1);
-    expect(db.state.updates[0].id).toBe('imp-2');
+    // imp-1 only had its attempt counted; imp-2 still got its terminal stamp.
+    const stamped = db.state.updates.filter((u) => u.requeue_status);
+    expect(stamped).toHaveLength(1);
+    expect(stamped[0]).toMatchObject({ id: 'imp-2', requeue_status: 'queued' });
   });
 
   test('the nightly fan-out is bounded', async () => {

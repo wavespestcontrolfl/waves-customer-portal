@@ -590,4 +590,13 @@ class RefreshAudit {
   }
 }
 
-module.exports = new RefreshAudit();
+const refreshAudit = new RefreshAudit();
+
+// Page-identity helpers, exported so other producers key pages the SAME way
+// this module does. The hub/spoke network shares paths across domains and GSC
+// reports www/non-www + ?utm variants, so "same page" is (registrable domain,
+// canonical path) — never a raw URL string comparison. Duplicating these
+// expressions per caller is how two lanes end up disagreeing about identity.
+refreshAudit._identity = { canonPathSql, hostRegistrableSql, urlToPath, registrableDomain };
+
+module.exports = refreshAudit;

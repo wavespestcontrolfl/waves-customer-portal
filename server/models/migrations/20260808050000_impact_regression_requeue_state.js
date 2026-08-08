@@ -19,13 +19,19 @@ exports.up = async function up(knex) {
 
   const hasRequeuedAt = await knex.schema.hasColumn('content_optimization_impact', 'requeued_at');
   const hasRequeueStatus = await knex.schema.hasColumn('content_optimization_impact', 'requeue_status');
-  if (hasRequeuedAt && hasRequeueStatus) return;
+  const hasRequeueAttempts = await knex.schema.hasColumn('content_optimization_impact', 'requeue_attempts');
+  if (hasRequeuedAt && hasRequeueStatus && hasRequeueAttempts) return;
 
   await knex.schema.alterTable('content_optimization_impact', (t) => {
     // Stamped on every terminal attempt outcome, queued or refused — the row
     // is "handled" either way, and the reason column says which.
     if (!hasRequeuedAt) t.timestamp('requeued_at', { useTz: true });
     if (!hasRequeueStatus) t.string('requeue_status', 40);
+    // Transient failures (DB blip, uncoded throw) don't consume the row's one
+    // attempt — but they must not retry forever either, or a handful of stuck
+    // rows would occupy the bounded nightly batch and starve every newer
+    // regression behind them. Counted here, terminal after the cap.
+    if (!hasRequeueAttempts) t.integer('requeue_attempts').notNullable().defaultTo(0);
   });
 
   // The sweep's hot path: unhandled confirmed regressions. Partial index so it
@@ -54,10 +60,12 @@ exports.down = async function down(knex) {
 
   const hasRequeuedAt = await knex.schema.hasColumn('content_optimization_impact', 'requeued_at');
   const hasRequeueStatus = await knex.schema.hasColumn('content_optimization_impact', 'requeue_status');
-  if (!hasRequeuedAt && !hasRequeueStatus) return;
+  const hasRequeueAttempts = await knex.schema.hasColumn('content_optimization_impact', 'requeue_attempts');
+  if (!hasRequeuedAt && !hasRequeueStatus && !hasRequeueAttempts) return;
 
   await knex.schema.alterTable('content_optimization_impact', (t) => {
     if (hasRequeuedAt) t.dropColumn('requeued_at');
     if (hasRequeueStatus) t.dropColumn('requeue_status');
+    if (hasRequeueAttempts) t.dropColumn('requeue_attempts');
   });
 };
