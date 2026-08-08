@@ -21,6 +21,7 @@ const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-map
 
 afterEach(() => {
   LAWN_PRICING_V2.cadenceFreqDiscountArmed = true;
+  LAWN_PRICING_V2.edgeParityFloorArmed = true;
 });
 
 function tiersByVisits(result) {
@@ -80,6 +81,26 @@ describe('cadence discount arm switch (rollback semantics)', () => {
     const disarmed25k = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard' }));
     expect(disarmed25k[6].perApp).toBe(armed25k[6].perApp);
     expect(disarmed25k[12].perApp).toBeLessThanOrEqual(disarmed25k[9].perApp + 0.01);
+  });
+
+  it('rolled-back edge parity (edgeParityFloorArmed=false) restores FREQ_DISCOUNT semantics: caps at every size (audit P1)', () => {
+    // migrate:down of 20260808000000 restores the _FREQ_DISCOUNT version
+    // label AND writes this flag false in the same transaction — >20k must
+    // then price exactly as the _FREQ_DISCOUNT schedule did (caps applied
+    // above the table, no parity floor), so label and behavior revert
+    // together.
+    const parity = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard' }));
+    LAWN_PRICING_V2.edgeParityFloorArmed = false;
+    const rolledBack = tiersByVisits(priceLawnCare({ lawnSqFt: 25000 }, { tier: 'standard' }));
+
+    // Caps clamp again: 9x/12x fall back BELOW the parity-floored values...
+    expect(rolledBack[9].perApp).toBeLessThan(parity[9].perApp);
+    expect(rolledBack[12].perApp).toBeLessThan(parity[12].perApp);
+    // ...to the discounted relation the FREQ_DISCOUNT schedule enforced.
+    expect(rolledBack[9].perApp).toBeLessThanOrEqual(rolledBack[6].perApp * 0.96 + 0.01);
+    expect(rolledBack[12].perApp).toBeLessThanOrEqual(rolledBack[6].perApp * 0.92 + 0.01);
+    // The 6x anchor never moves either way.
+    expect(rolledBack[6].perApp).toBe(parity[6].perApp);
   });
 
   it('an explicit true (or absent key) keeps the caps armed', () => {

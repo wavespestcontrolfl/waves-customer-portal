@@ -269,6 +269,15 @@ const LAWN_PRICING_V2 = {
   // 12x-never-above-9x bound (2026-07-29, pre-dates the discount) is NOT
   // governed by this switch.
   cadenceFreqDiscountArmed: true,
+  // Edge-parity arm switch (pre-push audit P1 on the 20k-cutoff change):
+  // default ON — >20k extrapolated 9x/12x carry the per-app parity floor
+  // against the 6x anchor. migrate:down of 20260808000000 writes false so
+  // ROLLING BACK the edge-parity schedule also reverts runtime behavior
+  // (>20k falls back to the _FREQ_DISCOUNT semantics: the -4%/-8% caps
+  // applied at every size) in the same step that restores the version
+  // label — never a label/behavior mismatch. Only consulted while
+  // cadenceFreqDiscountArmed is on.
+  edgeParityFloorArmed: true,
   targetListMargin: null,
   useTargetListMargin: false,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',

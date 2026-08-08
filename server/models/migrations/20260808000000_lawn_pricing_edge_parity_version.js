@@ -11,15 +11,20 @@
  * price movement, so estimates priced before/after must stay
  * distinguishable in estimates.pricing_version (pre-push audit P1).
  *
- * Version-only: no bracket cells exist above the table, so no cell moves.
- * The engine behavior itself ships in code (service-pricing/estimateEngine)
- * and follows the same cadenceFreqDiscountArmed switch as the discount.
+ * No bracket cells exist above the table, so no cell moves. The engine
+ * behavior ships in code (service-pricing/estimateEngine) gated on
+ * lawn_pricing_v2.edgeParityFloorArmed (absent = armed in-code default,
+ * db-bridge rebases true; only consulted while cadenceFreqDiscountArmed
+ * is on).
  *
- * ROLLBACK CONTRACT — down() restores the audit-captured prior token, only
- * if the version is still EDGE_PARITY (ownership check under FOR UPDATE;
- * a later schedule advance is not this migration's to unwind). Writes are
- * atomic single-key jsonb_set — this row carries keys owned by other
- * migrations and live admin saves and is never read-modify-written
+ * ROLLBACK CONTRACT — down() restores the audit-captured prior token AND
+ * writes edgeParityFloorArmed=false in the same transaction, so the
+ * restored _FREQ_DISCOUNT label ships with _FREQ_DISCOUNT runtime behavior
+ * (>20k reverts to caps-at-every-size) — never a label/behavior mismatch.
+ * Only if the version is still EDGE_PARITY (ownership check under FOR
+ * UPDATE; a later schedule advance is not this migration's to unwind).
+ * Writes are atomic single-key jsonb_set — this row carries keys owned by
+ * other migrations and live admin saves and is never read-modify-written
  * wholesale.
  */
 
@@ -59,6 +64,21 @@ async function readRowForUpdate(knex) {
   return { data };
 }
 
+// Atomic single-key write for the edge-parity arm flag: value null deletes
+// the key (absent = armed in-code default), false disarms. Written by down()
+// in the same transaction as the version restore so the label and the >20k
+// runtime behavior can never diverge (pre-push audit P1).
+async function stampArmFlag(knex, value) {
+  await knex('pricing_config')
+    .where({ config_key: 'lawn_pricing_v2' })
+    .update({
+      data: value == null
+        ? knex.raw(`data - 'edgeParityFloorArmed'`)
+        : knex.raw(`jsonb_set(data, '{edgeParityFloorArmed}', to_jsonb(?::boolean), true)`, [value]),
+      updated_at: knex.fn.now(),
+    });
+}
+
 async function stampVersion(knex, version, expectCurrent) {
   let query = knex('pricing_config').where({ config_key: 'lawn_pricing_v2' });
   if (expectCurrent !== undefined) {
@@ -79,6 +99,9 @@ exports.up = async function up(knex) {
   if (prior === VERSION_TO) return; // re-run no-op: never shadow the real capture
 
   await stampVersion(knex, VERSION_TO);
+  // Re-arm the >20k parity floor: clear any edgeParityFloorArmed:false a
+  // prior down() left (absent = armed in-code default).
+  await stampArmFlag(knex, null);
   await auditInsert(
     knex,
     { pricingVersion: prior },
@@ -133,11 +156,15 @@ exports.down = async function down(knex) {
   }
 
   await stampVersion(knex, prior, VERSION_TO);
+  // Disarm the >20k parity floor in the SAME transaction: the restored
+  // _FREQ_DISCOUNT label must ship with _FREQ_DISCOUNT runtime behavior
+  // (caps at every size), never a label/behavior mismatch (audit P1).
+  await stampArmFlag(knex, false);
   await auditInsert(
     knex,
     { pricingVersion: VERSION_TO },
-    { pricingVersion: prior },
+    { pricingVersion: prior, edgeParityFloorArmed: false },
     `${MIGRATION_TAG}:down`,
-    'Rollback of the edge-parity version stamp; pricingVersion restored from the up() capture.',
+    'Rollback of the edge-parity schedule: pricingVersion restored from the up() capture and edgeParityFloorArmed set false so >20k lookups revert to the FREQ_DISCOUNT caps-at-every-size behavior with the label.',
   );
 };

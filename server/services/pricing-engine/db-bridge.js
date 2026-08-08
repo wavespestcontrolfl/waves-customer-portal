@@ -881,6 +881,9 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // key re-arms on the next sync rather than leaving a stale disarm
     // resident until restart (codex #3274 r3 P1).
     constants.LAWN_PRICING_V2.cadenceFreqDiscountArmed = true;
+    // Same kill-value shape for the >20k edge-parity floor (migrate:down of
+    // 20260808000000 writes false; deleting the key re-arms on next sync).
+    constants.LAWN_PRICING_V2.edgeParityFloorArmed = true;
     // Same rebase rule for the bermuda-suppression knobs: the singleton is
     // mutated in place across syncs, so deleting the DB key (or the row)
     // after an admin edit must restore the in-code defaults on the next

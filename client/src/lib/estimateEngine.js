@@ -384,6 +384,9 @@ const LAWN_PRICING_V2 = {
   // floor SELECTION matches the server-recomputed save (codex P2 on the
   // #2827 main-merge).
   useLawnCostFloor: false,
+  // Mirrors server edgeParityFloorArmed (>20k per-app parity floor arm;
+  // false = rolled-back edge-parity schedule, caps at every size).
+  edgeParityFloorArmed: true,
   // Mirrors server constants.LAWN_PRICING_V2.cadenceFreqDiscountArmed
   // (codex #3274 r3 P1): default ON — the baked grid ships discounted.
   // migrate:down of 20260807120000 writes false on the lawn_pricing_v2 row
@@ -439,6 +442,9 @@ export function applyServerLawnPricingConfig(config) {
   // migrate:down of 20260807120000); absent/invalid restores the in-code
   // armed default — same kill-value shape as the version stamp below.
   LAWN_PRICING_V2.cadenceFreqDiscountArmed = config?.cadenceFreqDiscountArmed !== false;
+  // >20k edge-parity floor arm (same kill-value shape; migrate:down of
+  // 20260808000000 writes false to revert behavior with the version label).
+  LAWN_PRICING_V2.edgeParityFloorArmed = config?.edgeParityFloorArmed !== false;
   // Version stamp rides the same row too (codex #3190 P2): fallback saves
   // stamp the pricing schedule they were priced under, so the live DB value
   // wins over the baked default; absent/invalid resets the in-code default —
@@ -1425,7 +1431,10 @@ function lawnLookup(lp, sf, freqIdx) {
   // PARITY FLOOR against the extrapolated 6x anchor removes it
   // (m9 ≥ ceil(m6·1.5), m12 ≥ ceil(m6·2)) and restores profit ordering.
   const discountLive = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false;
-  const inTable = sf <= LAWN_TABLE_MAX_SQFT;
+  // inTable also covers a rolled-back edge-parity schedule (server mirror):
+  // >20k then reverts to caps-at-every-size with the version label.
+  const inTable = sf <= LAWN_TABLE_MAX_SQFT
+    || LAWN_PRICING_V2.edgeParityFloorArmed === false;
   const standard = discountLive ? lawnLookupUncapped(lp, sf, 0) : null;
   if (freqIdx === 1) {
     if (standard && standard.monthly > 0) {
@@ -2123,7 +2132,7 @@ export function calculateEstimate(inputs) {
     // discount each keep the pre-existing behavior bit-for-bit.
     if (LAWN_PRICING_V2.useLawnCostFloor === true
       && LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false
-      && lsf <= LAWN_TABLE_MAX_SQFT
+      && (lsf <= LAWN_TABLE_MAX_SQFT || LAWN_PRICING_V2.edgeParityFloorArmed === false)
       && lawnCalcs.some((c) => c.floorApplied)) {
       const byFreq = {};
       lawnCalcs.forEach((c) => { byFreq[c.f.v] = c; });

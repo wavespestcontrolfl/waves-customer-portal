@@ -1854,7 +1854,12 @@ function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
   // restores 12x > 9x > 6x profit ordering (per-app parity ⇒ profit scales
   // with visits). Uses only the live extrapolated anchor — no shadow grid.
   const discountLive = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false;
-  const inTable = lawnSqFt <= LAWN_TABLE_MAX_SQFT;
+  // inTable ALSO covers a rolled-back edge-parity schedule (migrate:down of
+  // 20260808000000 writes edgeParityFloorArmed=false): >20k then falls back
+  // to the _FREQ_DISCOUNT semantics — caps applied at every size — so the
+  // restored version label and the runtime behavior revert together.
+  const inTable = lawnSqFt <= LAWN_TABLE_MAX_SQFT
+    || LAWN_PRICING_V2.edgeParityFloorArmed === false;
   const standard = discountLive
     ? lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.standard.index, track)
     : null;
@@ -2150,9 +2155,12 @@ function priceLawnCare(property, options = {}) {
   }
   // Discount scope mirrors lookupLawnBracket: armed AND inside the table —
   // above LAWN_TABLE_MAX_SQFT the discount (and therefore its floor-lift
-  // resolution) does not apply (owner ruling 2026-08-07 on #3274).
+  // resolution) does not apply (owner ruling 2026-08-07 on #3274), unless
+  // the edge-parity schedule is rolled back, which restores the
+  // _FREQ_DISCOUNT everywhere-semantics the lift shipped with.
   const cadenceDiscountArmed = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false
-    && lawnSqFt <= LAWN_TABLE_MAX_SQFT;
+    && (lawnSqFt <= LAWN_TABLE_MAX_SQFT
+      || LAWN_PRICING_V2.edgeParityFloorArmed === false);
   const tierCalcs = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;

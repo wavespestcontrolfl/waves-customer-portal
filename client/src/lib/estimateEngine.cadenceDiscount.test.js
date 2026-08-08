@@ -100,6 +100,16 @@ describe("cadence discount arm switch — client fallback mirror", () => {
     expect(disarmed[9].pa).toBeGreaterThanOrEqual(disarmed[6].pa - 0.01);
   });
 
+  it("rolled-back edge parity restores FREQ_DISCOUNT semantics >20k — client mirror (audit P1)", () => {
+    const parity = lawnByVisits(calculateEstimate(lawnInput({ measuredTurfSf: 25000 })));
+    applyServerLawnPricingConfig({ edgeParityFloorArmed: false });
+    const rolledBack = lawnByVisits(calculateEstimate(lawnInput({ measuredTurfSf: 25000 })));
+    expect(rolledBack[9].pa).toBeLessThan(parity[9].pa);
+    expect(rolledBack[9].pa).toBeLessThanOrEqual(rolledBack[6].pa * 0.96 + 0.01);
+    expect(rolledBack[12].pa).toBeLessThanOrEqual(rolledBack[6].pa * 0.92 + 0.01);
+    expect(rolledBack[6].pa).toBe(parity[6].pa);
+  });
+
   it("absent/invalid config keeps the armed default (kill-value pattern)", () => {
     applyServerLawnPricingConfig({});
     const by = lawnByVisits(calculateEstimate(lawnInput({ measuredTurfSf: 12500 })));
