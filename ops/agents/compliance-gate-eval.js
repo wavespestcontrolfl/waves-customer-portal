@@ -97,7 +97,12 @@ const DOC_SHELL_TITLE = 'Pest Control in Sarasota, FL: What to Expect Through th
 const DOC_SHELL_META = 'How pest pressure shifts across Southwest Florida seasons, what a technician checks on each visit, and which property conditions matter most in Manatee, Sarasota, and Charlotte counties.';
 // The shell must never itself trip a code, or every document-mode case would
 // be contaminated. Verified in sentence mode before any document run.
-const SHELL_SELF_CHECK = [DOC_SHELL_TITLE, ...DOC_SHELL_BEFORE, ...DOC_SHELL_AFTER, DOC_SHELL_META].join('\n\n');
+// The marker is read from the gate module itself so the harness cannot drift
+// from the payload shape astro-publisher/codex-remediation actually build
+// (Codex PR #3302 r1: metadata strings are field VALUES — the comment
+// exemption is scoped to body markup, and the marker is what scopes it).
+const { META_SECTION_MARKER } = require(path.join(REPO, 'server/services/content/compliance-gate'));
+const SHELL_SELF_CHECK = [DOC_SHELL_TITLE, ...DOC_SHELL_BEFORE, ...DOC_SHELL_AFTER, META_SECTION_MARKER, DOC_SHELL_META].join('\n\n');
 
 // Mirrors assertComplianceClear: body plus the editable meta, joined as blocks,
 // with the title passed as its own field. Same construction the publisher uses,
@@ -118,7 +123,7 @@ function buildDocument(text, position) {
   if (position === 'title') {
     return {
       title: text,
-      body: `${shellBody.join('\n\n')}\n\n${DOC_SHELL_META}`,
+      body: `${shellBody.join('\n\n')}\n\n${META_SECTION_MARKER}\n\n${DOC_SHELL_META}`,
       city: 'Sarasota',
       keyword: 'pest control sarasota fl',
       tag: 'Pest Control',
@@ -127,7 +132,7 @@ function buildDocument(text, position) {
   if (position === 'meta') {
     return {
       title: DOC_SHELL_TITLE,
-      body: `${shellBody.join('\n\n')}\n\n${text}`,
+      body: `${shellBody.join('\n\n')}\n\n${META_SECTION_MARKER}\n\n${text}`,
       city: 'Sarasota',
       keyword: 'pest control sarasota fl',
       tag: 'Pest Control',
@@ -135,7 +140,7 @@ function buildDocument(text, position) {
   }
   return {
     title: DOC_SHELL_TITLE,
-    body: `${[...DOC_SHELL_BEFORE, text, ...DOC_SHELL_AFTER].join('\n\n')}\n\n${DOC_SHELL_META}`,
+    body: `${[...DOC_SHELL_BEFORE, text, ...DOC_SHELL_AFTER].join('\n\n')}\n\n${META_SECTION_MARKER}\n\n${DOC_SHELL_META}`,
     city: 'Sarasota',
     keyword: 'pest control sarasota fl',
     tag: 'Pest Control',

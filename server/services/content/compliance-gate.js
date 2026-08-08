@@ -48,6 +48,16 @@ const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { GATE_RETRY_INSTRUCTIONS } = require('./gate-retry-directives');
 
+// Callers that append editable metadata strings (meta description, meta
+// title, hero alt) to the body MUST introduce them with this marker (Codex PR
+// #3302 r1). In those field VALUES, comment delimiters are literal
+// customer-visible characters — "<!-- pet-safe -->" in an alt text renders as
+// text — so the prompt's comment exemption is scoped to body markup and
+// explicitly withdrawn after this marker. One constant, three consumers
+// (astro-publisher, codex-remediation, the calibration harness), so the
+// calibrated payload shape and the production one cannot drift apart.
+const META_SECTION_MARKER = '--- EDITABLE METADATA FIELDS (titles, meta descriptions, alt text — these are field VALUES rendered as literal text; markup and comment delimiters here are customer-visible characters) ---';
+
 const COMPLIANCE_MODEL_OVERRIDE = process.env.MODEL_COMPLIANCE || null;
 // Same 60s ceiling and no-retry posture as fact-check-gate: DEEP thinks before
 // answering, and a slow check must fail open fast rather than hold the publish
@@ -118,9 +128,12 @@ exemption above covers only safety/service CLAIMS that contain no fixed
 duration.
 
 SCOPE — what the two rules reach, and what they do not:
-- Judge only text a customer will see rendered. Text inside HTML comments
-  (<!-- ... -->) or JSX/MDX comments ({/* ... */}) never renders — do not
-  flag it no matter what it says.
+- Judge only text a customer will see rendered. In the Markdown/MDX BODY,
+  text inside HTML comments (<!-- ... -->) or JSX/MDX comments ({/* ... */})
+  never renders — do not flag it. This exemption applies ONLY to body
+  markup: in the Title line, or anywhere after the "EDITABLE METADATA
+  FIELDS" marker, comment delimiters are literal characters the customer
+  sees, so the enclosed text is rendered copy and is judged like any other.
 - A re-entry, drying, or keep-off FIGURE is a violation ONLY when the copy
   ties it to a pesticide, treatment, application, or treated surface/area.
   Figures about anything else are compliant, even inside a pest-control
@@ -288,6 +301,7 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
 
 module.exports = {
   evaluate,
+  META_SECTION_MARKER,
   _internals: {
     normalizeFinding, validateResponse, SYSTEM_PROMPT, VALID_CODES, VALID_SEVERITIES, COMPLIANCE_TIMEOUT_MS,
   },

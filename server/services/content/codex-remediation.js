@@ -725,7 +725,9 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
     .join('\n\n');
   const complianceResult = await complianceEvaluate({
     title: fc.title || data.title || '',
-    body: metaText ? `${body}\n\n${metaText}` : body,
+    // Same marker as astro-publisher: metadata strings are field VALUES, and
+    // the gate's comment exemption must not apply to them (Codex PR #3302 r1).
+    body: metaText ? `${body}\n\n${complianceGate.META_SECTION_MARKER}\n\n${metaText}` : body,
     city: fc.city || (Array.isArray(data.service_areas_tag) ? data.service_areas_tag[0] : '') || '',
     keyword: fc.keyword || data.primary_keyword || '',
     tag: fc.tag || data.tag || data.category || '',

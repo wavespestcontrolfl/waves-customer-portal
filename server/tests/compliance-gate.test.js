@@ -306,6 +306,21 @@ describe('semantic compliance gate', () => {
     expect(SYSTEM_PROMPT).toMatch(/The area is safe after it dries\. Your technician confirms re-entry timing\./);
   });
 
+  test('the comment exemption is scoped to body markup and withdrawn for metadata field values (Codex #3302 r1)', () => {
+    const mod = load();
+    const { SYSTEM_PROMPT } = mod._internals;
+    // "<!-- The pesticide is EPA-approved -->" in an alt text or meta
+    // description is LITERAL rendered copy — an unscoped comment exemption
+    // told the model to ignore it while the deterministic guard blanks
+    // comment-shaped spans, leaving no layer covering the field-value case.
+    expect(SYSTEM_PROMPT).toMatch(/applies ONLY to body\s+markup/i);
+    expect(SYSTEM_PROMPT).toMatch(/EDITABLE METADATA\s+FIELDS/);
+    // The marker is exported so astro-publisher, codex-remediation, and the
+    // calibration harness all build the same payload shape.
+    expect(mod.META_SECTION_MARKER).toContain('EDITABLE METADATA FIELDS');
+    expect(mod.META_SECTION_MARKER).toMatch(/comment delimiters here are customer-visible/i);
+  });
+
   test('the prompt qualifies the negation exemption so negated FIGURES still block', () => {
     const { SYSTEM_PROMPT } = load()._internals;
     // "Do not re-enter until 30 minutes have passed" is negated AND carries a
