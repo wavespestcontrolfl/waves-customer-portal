@@ -96,6 +96,40 @@ function pickCardLocation(customer = {}) {
 }
 
 /**
+ * Heal a persisted card whose review target predates the canonical resolver.
+ * Card destinations are PERSISTED at mint (customer_cards.review_target_url +
+ * the tracked short_codes row the printed QR points at), so fixing the picker
+ * alone only fixes newly minted cards — a downtown-Sarasota card minted under
+ * the old geo-first logic would stay pointed at Bradenton forever
+ * (codex #3285 r2). Runs on every card access; the short link's destination
+ * is swappable by design, so the printed QR heals too. Best-effort — a
+ * failed heal serves the stored target rather than blocking the card.
+ */
+async function refreshCardReviewTarget(card, customer) {
+  try {
+    const loc = pickCardLocation(customer || {});
+    if (!loc?.googleReviewUrl || (loc.id === card.location_id && loc.googleReviewUrl === card.review_target_url)) {
+      return card;
+    }
+    await db('customer_cards').where({ id: card.id }).update({
+      location_id: loc.id,
+      review_target_url: loc.googleReviewUrl,
+      updated_at: new Date(),
+    });
+    if (card.review_short_code) {
+      await db('short_codes')
+        .where({ code: card.review_short_code })
+        .update({ target_url: loc.googleReviewUrl });
+    }
+    logger.info(`[customer-card] Healed card review target (cardId=${card.id} ${card.location_id}→${loc.id})`);
+    return { ...card, location_id: loc.id, review_target_url: loc.googleReviewUrl };
+  } catch (err) {
+    logger.warn(`[customer-card] Card review-target heal failed (cardId=${card.id}): ${err.message}`);
+    return card;
+  }
+}
+
+/**
  * Tech on record for a completion — service_records.technician_id with the
  * same scheduled_services fallback the review lane uses (legacy rows or
  * completions where the tech wasn't tagged on the record).
@@ -193,6 +227,11 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
       card = { ...card, first_visit_completed_at: stamp };
     }
   }
+
+  // Re-resolve a stale persisted review target (old geo-first mints) — runs
+  // OUTSIDE the mint branch, before the short-code mint, so a healed target
+  // is what a missing short link gets minted against.
+  card = await refreshCardReviewTarget(card, customer);
 
   // Short-link the review target so QR scans are click-tracked and the
   // destination stays swappable. Runs OUTSIDE the mint branch so a card
@@ -299,13 +338,19 @@ async function maybeSendCardEmail(card, customer) {
  */
 async function getCardData(token) {
   if (!/^[a-f0-9]{64}$/.test(String(token || ''))) return null;
-  const card = await db('customer_cards').where({ share_token: token }).first();
+  let card = await db('customer_cards').where({ share_token: token }).first();
   if (!card) return null;
 
   const customer = await db('customers')
     .where({ id: card.customer_id })
-    .first('id', 'first_name', 'member_since', 'created_at', 'has_left_google_review', 'deleted_at', 'referral_code');
+    // city/zip/lat-lng/nearest_location_id feed the review-target heal below.
+    .first('id', 'first_name', 'member_since', 'created_at', 'has_left_google_review', 'deleted_at', 'referral_code',
+      'city', 'zip', 'latitude', 'longitude', 'nearest_location_id');
   if (!customer || customer.deleted_at) return null;
+
+  // Card views are the touchpoint dormant cards actually get — heal a stale
+  // persisted target here too, not just on completions.
+  card = await refreshCardReviewTarget(card, customer);
 
   const location = WAVES_LOCATIONS.find((l) => l.id === card.location_id) || WAVES_LOCATIONS[0];
 

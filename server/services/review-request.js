@@ -1852,7 +1852,13 @@ const ReviewService = {
     const customer = await db("customers")
       .where({ id: request.customer_id })
       .first();
-    const location = resolveLocation(customer || {});
+    // The ask's stamped office is the last-resort stored id, same as the /go
+    // and getByToken paths — a Venice-stamped ask must not complete against
+    // Bradenton when the customer row has no usable address signals
+    // (codex #3285 r2).
+    const location = resolveReviewLocationId(customer || {}, {
+      storedLocationId: request.location_id || customer?.nearest_location_id || null,
+    });
     const isPromoter = rating >= 7; // 7+ goes to Google (per the case study discussion)
     const isDetractor = rating <= 4;
 
@@ -2187,8 +2193,13 @@ const ReviewService = {
       }
 
       // Followup points straight at the GBP review form — they ignored the
-      // tokenized rate page once, so reduce friction the second time.
-      const location = resolveLocation(customer || {});
+      // tokenized rate page once, so reduce friction the second time. The
+      // ask's stamped office rides along as the last-resort stored id so the
+      // Day-3 follow-up can never target a different profile than the ask it
+      // chases (codex #3285 r2).
+      const location = resolveReviewLocationId(customer || {}, {
+        storedLocationId: request.location_id || customer?.nearest_location_id || null,
+      });
       const googleReviewUrl =
         REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
 
@@ -2968,14 +2979,30 @@ const ReviewService = {
       let tName = techName;
       let svcDate = serviceDate;
       if (!svcType || !tName || !svcDate) {
-        const lastSvc = await db("scheduled_services")
-          .where({ customer_id: cid, status: "completed" })
-          .orderBy("scheduled_date", "desc")
-          .first()
-          .catch(() => null);
-        svcType = svcType || lastSvc?.service_type || "pest control";
-        tName = tName || lastSvc?.tech_name || null;
-        svcDate = svcDate || lastSvc?.scheduled_date || null;
+        if (serviceRecordId) {
+          // A record-scoped ask (the satisfaction route rates a SPECIFIC
+          // service) fills its context from THAT record — the latest-completed
+          // fallback below would stamp a newer service's type/date/tech onto a
+          // row linked to an older record (codex #3285 r2).
+          const sr = await db("service_records")
+            .where({ "service_records.id": serviceRecordId })
+            .leftJoin("technicians", "service_records.technician_id", "technicians.id")
+            .select("service_records.*", "technicians.name as tech_name")
+            .first()
+            .catch(() => null);
+          svcType = svcType || sr?.service_type || "pest control";
+          tName = tName || sr?.tech_name || null;
+          svcDate = svcDate || sr?.service_date || null;
+        } else {
+          const lastSvc = await db("scheduled_services")
+            .where({ customer_id: cid, status: "completed" })
+            .orderBy("scheduled_date", "desc")
+            .first()
+            .catch(() => null);
+          svcType = svcType || lastSvc?.service_type || "pest control";
+          tName = tName || lastSvc?.tech_name || null;
+          svcDate = svcDate || lastSvc?.scheduled_date || null;
+        }
       }
 
       const touch = await this.sendOutreachTouch({
