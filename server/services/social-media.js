@@ -527,7 +527,7 @@ const WELL_WISH_SAFE_RE = /\b(?:stay|be|drive|travel|get\s+home)\s+safe(?:ly)?\b
 // Plain enter/entry directives count too — "Wait 30 minutes before
 // entering", "Don't enter for 30 minutes" (codex #3278 r16). Bare
 // "enter" stays out so "enter through the side gate" remains prose.
-const IMPLIED_REENTRY_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b|\bbefore\s+(?:re-?)?enter\w*\b|\b(?:don['’]t|do\s+not|cannot|can['’]t|never|no)\s+(?:re-?)?enter\w*\b|\benter\w*\s+(?:for|in|until|after)\b/i;
+const IMPLIED_REENTRY_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b|\bbefore\s+(?:re-?)?enter\w*\b|\b(?:don['’]t|do\s+not|cannot|can['’]t|never|no)\s+(?:re-?)?enter\w*\b|\benter\w*\s+(?:for|in|until|after)\b|\b(?:go(?:ing)?|head(?:ing)?)\s+back\b/i;
 // A clause that names weather or premises logistics is advice about THAT
 // ("Stay inside for 30 minutes because of lightning", "Avoid the flooded
 // entrance for 30 minutes"), not implicit pesticide re-entry — it exempts
@@ -589,23 +589,36 @@ function complianceOverclaims(text, { impliedTreatmentContext = false } = {}) {
       && (impliedTreatmentContext || PRODUCT_CONTEXT_RE.test(safetyScope))) {
       issues.push('Contains a product-safety claim — never call a pesticide/treatment "safe" (idiom: "safe once dry")');
     }
-    // The agronomic exemption applies per CLAUSE, not per sentence — "keep
-    // pets off treated areas for 30 minutes, and avoid watering for 24
-    // hours" must still flag on its first clause.
-    // Coordinating conjunctions split clauses too — "… for 30 minutes and
-    // avoid watering …" must not let the aftercare half exempt the first.
-    for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
-      if (TIMING_DURATION_RE.test(clause)
-        && (REENTRY_CONTEXT_RE.test(clause)
-          || (impliedTreatmentContext
-            && IMPLIED_REENTRY_DIRECTIVE_RE.test(clause)
-            && (!IMPLIED_NONTREATMENT_RE.test(clause)
-              || IMPLIED_TREATMENT_WORD_RE.test(clause)
-              || PRODUCT_CONTEXT_RE.test(clause))))
-        && !agronomicExemptionApplies(clause)) {
-        issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
-        break;
-      }
+  }
+  // The agronomic exemption applies per CLAUSE, not per sentence — "keep
+  // pets off treated areas for 30 minutes, and avoid watering for 24
+  // hours" must still flag on its first clause.
+  // Coordinating conjunctions split clauses too — "… for 30 minutes and
+  // avoid watering …" must not let the aftercare half exempt the first.
+  // Under implied context a split instruction ("Stay off. Wait 30
+  // minutes.", "Wait 30 minutes, then go back on the lawn") is one
+  // instruction: a qualifying keep-away directive in the ADJACENT clause
+  // governs a bare duration too (codex #3278 r23). Directive-only on
+  // purpose — the standalone dry/safe words of REENTRY_CONTEXT_RE would
+  // make "Stay dry! See you at 2:30." false-positive.
+  const impliedDirectiveQualifies = (cl) => IMPLIED_REENTRY_DIRECTIVE_RE.test(cl)
+    && (!IMPLIED_NONTREATMENT_RE.test(cl)
+      || IMPLIED_TREATMENT_WORD_RE.test(cl)
+      || PRODUCT_CONTEXT_RE.test(cl));
+  const clauses = sentences
+    .flatMap((s) => s.split(/[,;]+|\s+(?:and|but|while|then)\s+/i))
+    .filter((c) => c.trim());
+  for (let i = 0; i < clauses.length; i++) {
+    const clause = clauses[i];
+    if (!TIMING_DURATION_RE.test(clause)) continue;
+    const governed = REENTRY_CONTEXT_RE.test(clause)
+      || (impliedTreatmentContext
+        && (impliedDirectiveQualifies(clause)
+          || (i > 0 && impliedDirectiveQualifies(clauses[i - 1]))
+          || (i + 1 < clauses.length && impliedDirectiveQualifies(clauses[i + 1]))));
+    if (governed && !agronomicExemptionApplies(clause)) {
+      issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
+      break;
     }
   }
   return issues;

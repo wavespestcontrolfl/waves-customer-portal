@@ -1552,6 +1552,14 @@ describe('rain-out service', () => {
       // premises exemption — an incidental logistics word can't launder a
       // fixed re-entry time (r22).
       blocked('Stay inside for 30 minutes after treatment because the gate is open');
+      // A split instruction is one instruction — the directive may sit in
+      // the adjacent clause or sentence (r23).
+      blocked('Stay off and wait 30 minutes');
+      blocked('Stay off. Wait 30 minutes.');
+      blocked('Wait 30 minutes, then go back on the lawn');
+      // ...but a bare duration next to a well-wish stays sendable.
+      expect(sanitize()('Stay dry! See you at 2:30.'))
+        .toEqual({ note: 'Stay dry! See you at 2:30.' });
       blocked('This is E.P.A. approved');
       // ...but only APPROVED-status EPA claims block — label-direction
       // references are compliant (r14 client-parity case).

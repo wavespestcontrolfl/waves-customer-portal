@@ -147,7 +147,7 @@ const NOTE_AGRONOMIC_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|o
 // directive whose object may be implicit ("Stay off for 30 minutes" after
 // "We treated the lawn.") — the treated-area noun can live in another
 // sentence, so the directive alone counts under implied context.
-const NOTE_IMPLIED_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b|\bbefore\s+(?:re-?)?enter\w*\b|\b(?:don['’]t|do\s+not|cannot|can['’]t|never|no)\s+(?:re-?)?enter\w*\b|\benter\w*\s+(?:for|in|until|after)\b/i;
+const NOTE_IMPLIED_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b|\bbefore\s+(?:re-?)?enter\w*\b|\b(?:don['’]t|do\s+not|cannot|can['’]t|never|no)\s+(?:re-?)?enter\w*\b|\benter\w*\s+(?:for|in|until|after)\b|\b(?:go(?:ing)?|head(?:ing)?)\s+back\b/i;
 // Mirror of IMPLIED_NONTREATMENT_RE: weather/premises clauses are advice
 // about the weather, not implicit re-entry — implied route only.
 const NOTE_IMPLIED_NONTREATMENT_RE = /\b(?:lightning|storms?|rain\w*|wind\w*|hail|thunder\w*|flood\w*|weather|heat|traffic|entrance|driveway|road|street|parking|office|gate)\b/i;
@@ -168,19 +168,29 @@ function noteSentences(note) {
     .map((s) => s.replace(/\u0001/g, '.'));
 }
 // Same clause walk as the canonical checker (sentence → clause on
-// commas/semicolons/conjunctions; agronomic clauses exempt).
+// commas/semicolons/conjunctions; agronomic clauses exempt). A split
+// instruction ("Stay off. Wait 30 minutes.") is one instruction: a
+// qualifying directive in the ADJACENT clause governs a bare duration
+// (directive-only — never the standalone dry/safe REENTRY words, so
+// "Stay dry! See you at 2:30." stays sendable).
+function noteDirectiveQualifies(clause) {
+  return NOTE_IMPLIED_DIRECTIVE_RE.test(clause)
+    && (!NOTE_IMPLIED_NONTREATMENT_RE.test(clause)
+      || NOTE_TREATMENT_WORD_RE.test(clause)
+      || NOTE_PRODUCT_CTX_RE.test(clause));
+}
 function noteTimingTrips(note) {
-  for (const sentence of noteSentences(note)) {
-    for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
-      if (!clause.trim()) continue;
-      if (NOTE_TIMING_DURATION_RE.test(clause)
-        && (NOTE_REENTRY_CONTEXT_RE.test(clause)
-          || (NOTE_IMPLIED_DIRECTIVE_RE.test(clause)
-            && (!NOTE_IMPLIED_NONTREATMENT_RE.test(clause)
-              || NOTE_TREATMENT_WORD_RE.test(clause)
-              || NOTE_PRODUCT_CTX_RE.test(clause))))
-        && !NOTE_AGRONOMIC_RE.test(clause)) return true;
-    }
+  const clauses = noteSentences(note)
+    .flatMap((s) => s.split(/[,;]+|\s+(?:and|but|while|then)\s+/i))
+    .filter((c) => c.trim());
+  for (let i = 0; i < clauses.length; i++) {
+    const clause = clauses[i];
+    if (!NOTE_TIMING_DURATION_RE.test(clause)) continue;
+    const governed = NOTE_REENTRY_CONTEXT_RE.test(clause)
+      || noteDirectiveQualifies(clause)
+      || (i > 0 && noteDirectiveQualifies(clauses[i - 1]))
+      || (i + 1 < clauses.length && noteDirectiveQualifies(clauses[i + 1]));
+    if (governed && !NOTE_AGRONOMIC_RE.test(clause)) return true;
   }
   return false;
 }
