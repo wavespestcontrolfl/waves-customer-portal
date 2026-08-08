@@ -33,11 +33,12 @@ const REPO = path.resolve(__dirname, '..', '..');
 const TEST_FILE = path.join(REPO, 'server/tests/content-guardrails.test.js');
 const CODES = ['REENTRY_SAFETY_CLAIM', 'BANNED_TOPIC'];
 
-// The gate ignores bodies under 50 chars (a publish-time guard against empty
-// drafts). Corpus sentences are often shorter, so each is padded with neutral,
-// compliant filler. The filler states no safety claim and offers no service, so
-// it cannot flip a verdict in either direction.
-const FILLER = ' Waves Pest Control serves Manatee, Sarasota, and Charlotte counties in Southwest Florida.';
+// No padding. The gate's floor is 12 chars and the extractor already discards
+// literals shorter than that, so every case reaches the gate exactly as
+// production would hand it over. An earlier version padded short fixtures to
+// clear a 50-char floor, which meant calibration measured slightly different
+// input than production sees — a small divergence, but the wrong kind in the
+// one instrument that decides whether to enable a blocking gate.
 
 function parseArgs(argv) {
   const args = { limit: 40, concurrency: 4, all: false, code: null };
@@ -99,7 +100,14 @@ function extractCorpus(src) {
       }
       if (arrayStart && depth <= 0 && j > i) { closed = true; break; }
       if (inlineBody) { closed = true; break; }
-      if (multilineBody && literals.length > 0 && j > i) { closed = true; break; }
+      // A multiline draft object must be read to its CLOSING brace, not to its
+      // first string (Codex PR #3295 r2). Stopping at the body captured the
+      // compliant body of a meta-only fixture and labelled it shouldBlock:true
+      // — a WRONG label, which is worse than a missing case: the gate would
+      // correctly pass it and be scored as a recall hole. The publishable
+      // fields are joined into one case below, mirroring what the gate is
+      // actually handed at publish time.
+      if (multilineBody && /^\s*\}(?:,|\s*\))/.test(lines[j]) && j > i) { closed = true; break; }
     }
     if (!closed || literals.length === 0) { unparsed += 1; continue; }
 
@@ -123,7 +131,15 @@ function extractCorpus(src) {
       continue;
     }
 
-    for (const text of literals) cases.push({ text, code, shouldBlock });
+    if (multilineBody) {
+      // ONE case per draft object: body + frontmatter meta are a single
+      // publishable surface, and the assertion's verdict is about the surface
+      // as a whole. Splitting them would attach a "blocks" label to whichever
+      // half happens to be compliant.
+      cases.push({ text: literals.join('\n\n'), code, shouldBlock });
+    } else {
+      for (const text of literals) cases.push({ text, code, shouldBlock });
+    }
     i = j;
   }
   return { cases, unparsed, otherCode };
@@ -193,7 +209,7 @@ async function main() {
   const guardrails = require(path.join(REPO, 'server/services/content/content-guardrails'));
 
   const results = await runPool(selected, args.concurrency, async (c) => {
-    const body = c.text.length >= 50 ? c.text : c.text + FILLER;
+    const body = c.text;
     let semanticBlocked = null;
     let codeMatched = null;
     let checked = false;

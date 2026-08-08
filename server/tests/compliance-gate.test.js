@@ -210,6 +210,17 @@ describe('semantic compliance gate', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
+  test('CHECKS a short metadata-only payload — the floor is 12, not 50', async () => {
+    // The metadata-rewrite lane has no body: its whole payload is a title plus
+    // a meta description. A short violating title is a real P0, and a 50-char
+    // floor would have skipped it silently (Codex PR #3295 r2).
+    reply([{ severity: 'P0', code: 'REENTRY_SAFETY_CLAIM', claim: 'Pet-safe lawn care', issue: 'pet-safe compound', fix: 'reword' }]);
+    const r = await load().evaluate({ ...DRAFT, body: 'Pet-safe lawn care' });
+    expect(r.checked).toBe(true);
+    expect(r.pass).toBe(false);
+    expect(mockDispatch).toHaveBeenCalled();
+  });
+
   test('coerces an unknown severity to P2 (non-blocking)', async () => {
     reply([{ severity: 'banana', code: 'BANNED_TOPIC', claim: 'x', issue: 'y' }]);
     const r = await load().evaluate(DRAFT);

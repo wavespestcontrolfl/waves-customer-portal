@@ -1920,6 +1920,22 @@ async function publishMetadataRewrite(draft, brief = {}) {
     };
   }
 
+  // Semantic compliance on the METADATA lane. This is the fourth publisher
+  // entry point and the easiest one to overlook, because it writes no body —
+  // but a meta description is customer-visible on every SERP and social card,
+  // and the compliance codes govern it exactly as they govern prose. Runs
+  // BEFORE branch creation so a blocked rewrite never opens an orphan PR, same
+  // placement rationale as the fact-check on the other lanes. There is no body
+  // here, so the effective title + description ARE the publishable text.
+  await assertComplianceClear({
+    title: nextFrontmatter.title,
+    body: '',
+    meta: [nextFrontmatter.title, nextFrontmatter.metaTitle, nextFrontmatter.meta_description, nextFrontmatter.metaDescription],
+    city: brief.city || '',
+    keyword: brief.primary_keyword || '',
+    tag: nextFrontmatter.category || '',
+  }, filePath);
+
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/meta-${branchSlug}-${shortId()}`;
   await gh.createBranch(branch);
@@ -2067,22 +2083,25 @@ async function publishRefresh(draft, brief = {}) {
     }, filePath);
   }
 
-  // Semantic compliance on the refresh lane too. NOT gated on bodyChanged like
-  // the fact-check above: a refresh can rewrite only the meta description, and
-  // that description ships on the live page — the compliance codes apply to it
-  // exactly as they do to the body. Hero alt is EXCLUDED here, mirroring the
-  // regex gate: publishRefresh freezes frontmatter and applies only the
-  // title/meta fields, so an alt it never commits must not park the run.
-  if (isBlogTarget(filePath)) {
-    await assertComplianceClear({
-      title: nextFrontmatter.title,
-      body: newBody,
-      meta: [nextFrontmatter.metaTitle, nextFrontmatter.meta_description],
-      city: brief.city || (Array.isArray(nextFrontmatter.service_areas_tag) ? nextFrontmatter.service_areas_tag[0] : ''),
-      keyword: nextFrontmatter.primary_keyword,
-      tag: nextFrontmatter.category,
-    }, filePath);
-  }
+  // Semantic compliance on the refresh lane too, for EVERY customer-facing
+  // target — not just blogs. The fact-check above is blog-scoped because its
+  // prompt is blog-tuned (pest biology, turf pathogens, county ordinances);
+  // the compliance codes are not. An unconditional safety claim or a
+  // wildlife-trapping offer on a SERVICE or LOCATION page is the same
+  // violation, on a page with more commercial intent than most blog posts.
+  // Also NOT gated on bodyChanged, unlike the fact-check: a refresh can rewrite
+  // only the meta description, and that description ships. Hero alt is EXCLUDED
+  // here, mirroring the regex gate — publishRefresh freezes frontmatter and
+  // applies only the title/meta fields, so an alt it never commits must not
+  // park the run.
+  await assertComplianceClear({
+    title: nextFrontmatter.title,
+    body: newBody,
+    meta: [nextFrontmatter.metaTitle, nextFrontmatter.meta_description, nextFrontmatter.metaDescription],
+    city: brief.city || (Array.isArray(nextFrontmatter.service_areas_tag) ? nextFrontmatter.service_areas_tag[0] : ''),
+    keyword: nextFrontmatter.primary_keyword,
+    tag: nextFrontmatter.category,
+  }, filePath);
 
   const markdown = fm.stringify(nextFrontmatter, `${newBody}\n`);
 

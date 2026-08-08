@@ -169,7 +169,12 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
   if (process.env.GATE_COMPLIANCE !== 'true') {
     return { pass: true, findings: [], checked: false, skipped: 'disabled' };
   }
-  if (!body || body.trim().length < 50) {
+  // The floor exists only to avoid calling the model on nothing. It is 12, not
+  // fact-check-gate's 50, because the metadata lane has NO body: its payload is
+  // a title plus a meta description, and a short violating title
+  // ("Pet-safe lawn care") is a real P0 that a 50-char floor would silently
+  // skip. Anything with words in it is worth checking.
+  if (!body || body.trim().length < 12) {
     return { pass: true, findings: [], checked: false, skipped: 'empty_body' };
   }
 
