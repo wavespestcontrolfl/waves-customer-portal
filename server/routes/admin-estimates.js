@@ -1960,6 +1960,20 @@ router.put('/:id/proposal', async (req, res, next) => {
       && incoming.correctiveWork.some((w) => Number(w?.amount ?? w?.price) < 0)) {
       return res.status(400).json({ error: 'Corrective work amounts cannot be negative.' });
     }
+    // Present-but-invalid term numbers get a 400, not a silent normalize:
+    // cleanBoundedInt rounds fractions and drops out-of-range values, so
+    // without this the operator could see "1.5" or "61" months while the
+    // saved proposal says "2 months" or omits the term (codex 1A-i r4).
+    const badBoundedInt = (value, min, max) => value != null && String(value).trim() !== ''
+      && (!Number.isInteger(Number(value)) || Number(value) < min || Number(value) > max);
+    if (incoming.commercialTerms && typeof incoming.commercialTerms === 'object') {
+      if (badBoundedInt(incoming.commercialTerms.initialTermMonths, 0, 60)) {
+        return res.status(400).json({ error: 'Initial term must be a whole number of months between 0 and 60.' });
+      }
+      if (badBoundedInt(incoming.commercialTerms.validDays, 1, 365)) {
+        return res.status(400).json({ error: 'Proposal validity must be a whole number of days between 1 and 365.' });
+      }
+    }
 
     // per_application is a RENDERING-only cadence (the estimate PDF's
     // synthesized lines). It must never be persisted here: the editor payload

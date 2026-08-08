@@ -10,6 +10,7 @@ const InvoiceService = require('../services/invoice');
 const adminCustomers = require('../routes/admin-customers');
 const {
   buildProposalFirstInvoice,
+  proposalNetTermDays,
   createProposalAcceptanceInvoice,
   ensureCustomerForProposalWin,
   promoteLinkedCustomerForProposalWin,
@@ -37,6 +38,23 @@ const SIESTA_PROPOSAL = {
     },
   ],
 };
+
+describe('proposalNetTermDays', () => {
+  test('recognizes only the strict Net-N form — anything else states no due period (codex 1A-i r4 P0)', () => {
+    const withTerms = (paymentTerms) => ({ commercialTerms: { paymentTerms } });
+    expect(proposalNetTermDays(withTerms('Net-30'))).toBe(30);
+    expect(proposalNetTermDays(withTerms('net 30'))).toBe(30);
+    expect(proposalNetTermDays(withTerms('Net-30 to the management company'))).toBe(30);
+    expect(proposalNetTermDays(withTerms('NET15'))).toBe(15);
+    // Unrecognized or unreasonable forms fall back to due-on-receipt.
+    expect(proposalNetTermDays(withTerms('Due on receipt'))).toBe(0);
+    expect(proposalNetTermDays(withTerms('Invoiced monthly'))).toBe(0);
+    expect(proposalNetTermDays(withTerms('Net-500'))).toBe(0);
+    expect(proposalNetTermDays(withTerms(''))).toBe(0);
+    expect(proposalNetTermDays({})).toBe(0);
+    expect(proposalNetTermDays(null)).toBe(0);
+  });
+});
 
 describe('buildProposalFirstInvoice', () => {
   test('bills every line once with building prefix + first-period labels and mixed tax', () => {

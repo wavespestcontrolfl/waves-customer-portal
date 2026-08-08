@@ -300,6 +300,19 @@ async function flagProposalCustomerCommercialIfTaxable({ trx, customerId, propos
   }
 }
 
+// Net-terms from the structured commercial terms (slice 1A-i). Only the
+// strict "Net-N" form is recognized — it is the one payment term whose due
+// date is mechanically derivable. Anything else ("Due on receipt", free
+// prose) states no due period, so due-today remains correct for it. Without
+// this, a proposal accepted on authored "Net-30 …" terms invoiced as due
+// immediately (codex 1A-i r4 P0).
+function proposalNetTermDays(proposal) {
+  const match = String(proposal?.commercialTerms?.paymentTerms || '').trim().match(/^net[- ]?(\d{1,3})\b/i);
+  if (!match) return 0;
+  const days = Number(match[1]);
+  return Number.isInteger(days) && days >= 1 && days <= 120 ? days : 0;
+}
+
 async function createProposalAcceptanceInvoice({ trx, estimate, proposal, customerId }) {
   if (!customerId) throw winError('A customer is required to invoice a proposal win.', 400);
   const built = buildProposalFirstInvoice(proposal);
@@ -321,7 +334,12 @@ async function createProposalAcceptanceInvoice({ trx, estimate, proposal, custom
     notes: `Generated from accepted commercial proposal (estimate #${estimate.id}). `
       + 'Covers one-time items plus the first period of each recurring service; '
       + 'ongoing recurring visits are billed as completed.',
-    dueDate: etDateString(),
+    // Honor authored Net-N terms. Calendar arithmetic on today's ET date
+    // string — adding 24h blocks to an instant drifts a day across DST.
+    dueDate: (() => {
+      const [y, m, d] = etDateString().split('-').map(Number);
+      return new Date(Date.UTC(y, m - 1, d + proposalNetTermDays(proposal))).toISOString().slice(0, 10);
+    })(),
   });
   logger.info(`[proposal-win] invoice ${invoice.invoice_number} ($${built.total}) from won proposal estimate ${estimate.id}`);
   return invoice;
@@ -335,5 +353,6 @@ module.exports = {
   promoteLinkedCustomerForProposalWin,
   ensureCustomerForProposalWin,
   flagProposalCustomerCommercialIfTaxable,
+  proposalNetTermDays,
   createProposalAcceptanceInvoice,
 };

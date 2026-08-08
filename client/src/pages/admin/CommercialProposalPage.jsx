@@ -937,7 +937,9 @@ export default function CommercialProposalPage() {
                   <label key={key} className="block">
                     <span className={LABEL}>{label}</span>
                     <Input
-                      size="sm" className="mt-1" type={type} min={type === 'number' ? '0' : undefined}
+                      size="sm" className="mt-1" type={type}
+                      min={type === 'number' ? '0' : undefined} step={type === 'number' ? '1' : undefined}
+                      max={key === 'initialTermMonths' ? '60' : undefined}
                       value={commercialTerms[key]} disabled={!!locked} placeholder={placeholder}
                       onChange={(e) => { setDirty(true); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
                     />
