@@ -884,13 +884,20 @@ const MOSQUITO = {
     //           seasonal9, monthly12
     // Repriced 2026-07 to a 60% target contribution margin on the real cost
     // basis (Bifen-only barrier, ~11min on-site via mist blower, 20min drive,
-    // $51/yr admin) — a uniform +10% over the 2026-06 market floor. Still well
-    // under Terminix ($131.11/mo mosquito+tick) and TruGreen ($85.56/app).
-    SMALL:   [r(73), r(66)],
-    QUARTER: [r(76), r(69)],
-    THIRD:   [r(79), r(73)],
-    HALF:    [r(86), r(77)],
-    ACRE:    [r(97), r(86)],
+    // $51/yr admin) — a uniform +10% over the 2026-06 market floor.
+    // Repriced 2026-08-08 (owner directive): +5% across the board, rounded
+    // half-up to whole dollars. Still well under Terminix ($131.11/mo
+    // mosquito+tick) and TruGreen ($85.56/app). The Monthly-vs-Seasonal
+    // per-application discount shape survives (~7-12% per bucket) and is
+    // now guarded at lookup time (mosquitoBoundedBasePrice) + pinned by
+    // mosquito-cadence-guard.test.js. DB-authoritative: migration
+    // 20260808010000 raises the live mosquito_base_prices row; this table
+    // is the fresh-env default.
+    SMALL:   [r(77), r(69)],
+    QUARTER: [r(80), r(72)],
+    THIRD:   [r(83), r(77)],
+    HALF:    [r(90), r(81)],
+    ACRE:    [r(102), r(90)],
   },
   tierVisits: { seasonal9: 9, monthly12: 12 },
   // Prices climb between bucket anchors in 500-sf steps (see
@@ -1294,17 +1301,20 @@ const ONE_TIME = {
   mosquito: {
     // Repriced 2026-07 to sit ~25% under the one-time pest band (quarterly
     // × 2.2, floor $199 → ~$199-290 for typical homes), scaled by lot bucket
-    // instead of footprint. ESTATE/ACRE_CLASS held at the 2026-06 values —
-    // they already sit inside that band and mosquito rates never get cut.
-    SMALL:   r(149),
-    STANDARD: r(169),
-    LARGE:   r(189),
-    XL:      r(209),
-    ESTATE:  r(239),
-    ACRE_CLASS: r(269),
-    OVER_ACRE: r(269),
+    // instead of footprint. Repriced 2026-08-08 (owner directive): +5%
+    // across the board, rounded half-up — buckets and the over-acre
+    // increment move; the station/dunk ADD-ONS are product-cost-linked and
+    // deliberately excluded from the percentage raise. DB-authoritative:
+    // migration 20260808010000 raises the live onetime_mosquito row.
+    SMALL:   r(156),
+    STANDARD: r(177),
+    LARGE:   r(198),
+    XL:      r(219),
+    ESTATE:  r(251),
+    ACRE_CLASS: r(282),
+    OVER_ACRE: r(282),
     overAcreIncrementSqFt: 10000,
-    overAcreIncrementPrice: r(40),
+    overAcreIncrementPrice: r(42),
     stationAddOn: r(75),
     dunkAddOn: r(15),
   },
