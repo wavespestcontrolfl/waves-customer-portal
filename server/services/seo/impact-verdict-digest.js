@@ -66,6 +66,12 @@ const ROLLUP_MARKER_KEY = 'impact-verdict-rollup';
 
 const MEASURED_VERDICTS = ['improved', 'neutral', 'regressed'];
 
+// Skips that mean a finding EXISTED but could not be delivered, or that state
+// could not be read at all. These become job_health failures. The expected
+// quiet outcomes — gated, none-paused, already-alerted, not-due, empty,
+// grading, below-floor — stay healthy; a quiet week is the normal case here.
+const DELIVERY_BLOCKING_SKIPS = new Set(['unconfigured', 'recipient', 'error']);
+
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -147,7 +153,7 @@ function composePausedAlert(buckets) {
   const rows = (buckets || []).filter((b) => b && b.bucket);
   if (!rows.length) return null;
 
-  const impactUrl = `${adminPortalUrl()}/admin/content`;
+  const impactUrl = `${adminPortalUrl()}/admin/blog?tab=autopilot`;
   const names = rows.map((r) => r.bucket).join(', ');
   const subject = rows.length === 1
     ? `FIX: content lane auto-paused — ${rows[0].bucket} (${rows[0].regressions} confirmed regressions)`
@@ -185,7 +191,7 @@ function composeBlindLoopAlert({ checked, days = BLIND_LOOP_DAYS, minChecked = B
   const count = Number(checked) || 0;
   if (count < minChecked) return null;
 
-  const impactUrl = `${adminPortalUrl()}/admin/content`;
+  const impactUrl = `${adminPortalUrl()}/admin/blog?tab=autopilot`;
   const subject = `FIX: impact loop graded nothing in ${days} days — ${count} checks, all insufficient data`;
   const html = shell(
     'Impact loop is measuring but not grading',
@@ -234,7 +240,7 @@ function composeVerdictRollup(rows, { days = ROLLUP_WINDOW_DAYS } = {}) {
   if (!measured) return null;
 
   const regressedRows = (rows || []).filter((r) => r?.verdict === 'regressed');
-  const impactUrl = `${adminPortalUrl()}/admin/content`;
+  const impactUrl = `${adminPortalUrl()}/admin/blog?tab=autopilot`;
 
   const parts = MEASURED_VERDICTS
     .filter((key) => counts[key] > 0)
@@ -280,10 +286,11 @@ function composeVerdictRollup(rows, { days = ROLLUP_WINDOW_DAYS } = {}) {
 // Window boundaries are real Date objects built with the ET helpers — a naive
 // 'YYYY-MM-DD' string in a timestamptz WHERE is read as UTC and slides the
 // window 4-5 hours, moving boundary rows into the wrong day (AGENTS.md).
-function checkedSince(database, since) {
+function checkedSince(database, since, { exclusive = false } = {}) {
+  const op = exclusive ? '>' : '>=';
   return database('content_optimization_impact')
     .where(function whereChecked() {
-      this.where('checked_21d_at', '>=', since).orWhere('checked_14d_at', '>=', since);
+      this.where('checked_21d_at', op, since).orWhere('checked_14d_at', op, since);
     })
     .select('bucket', 'page_url', 'verdict', 'estimated_lift_position', 'estimated_lift_clicks_pct');
 }
@@ -337,9 +344,14 @@ async function sendComposed(composed, { mailer, database, markerKey, categories,
 async function alertPausedLanes({ database, mailer, tracker }) {
   let paused = [];
   try {
-    paused = (await tracker.pausedBuckets({ db: database })) || [];
+    // strict: pausedBuckets swallows its own query error and returns [] by
+    // default. Here that reads as "every paused lane recovered", and the
+    // re-arm sweep below would delete every dedupe marker — so the next
+    // healthy tick re-emails lanes that never changed, inside the 6-day
+    // window the markers exist to enforce. Stand down instead.
+    paused = (await tracker.pausedBuckets({ db: database, strict: true })) || [];
   } catch (err) {
-    logger.error(`[impact-digest] pausedBuckets failed: ${err.message}`);
+    logger.error(`[impact-digest] pause state unreadable, standing down this tick: ${err.message}`);
     return { skipped: 'error' };
   }
 
@@ -412,19 +424,48 @@ async function alertBlindLoop({ database, mailer }) {
   });
 }
 
+/**
+ * The rollup window's start.
+ *
+ * A plain now-minus-7-days boundary double-counts: the previous rollup was
+ * itself sent by the 8am tick, so last week's checks are stamped at or just
+ * after that instant, and a `>=` comparison pulls that whole boundary batch
+ * into this week's email as well. The last successful send is therefore an
+ * EXCLUSIVE watermark. It also closes the gap the fixed window would leave —
+ * after a skipped week, everything since the last real send is reported
+ * rather than only the last seven days.
+ */
+async function rollupWindowStart(database) {
+  const fallback = addETDays(new Date(), -ROLLUP_WINDOW_DAYS);
+  try {
+    const row = await database('ops_email_send_state').where({ email_key: ROLLUP_MARKER_KEY }).first('last_sent_at');
+    if (row?.last_sent_at) return { since: new Date(row.last_sent_at), exclusive: true };
+  } catch (err) {
+    logger.warn(`[impact-digest] rollup watermark read failed (${err.message}) — falling back to a ${ROLLUP_WINDOW_DAYS}d window`);
+  }
+  return { since: fallback, exclusive: false };
+}
+
+// Whole days covered by the window, for the subject line — a fixed "7d" would
+// misdescribe the first send, or the catch-up send after a skipped week.
+function windowDays(since) {
+  return Math.max(1, Math.round((Date.now() - since.getTime()) / 86400000));
+}
+
 // Leg 3 — weekly rollup of what was actually graded.
 async function sendVerdictRollup({ database, mailer }) {
   if (await sentRecently(database, ROLLUP_MARKER_KEY)) return { skipped: 'not-due' };
 
+  const { since, exclusive } = await rollupWindowStart(database);
   let rows;
   try {
-    rows = await checkedSince(database, addETDays(new Date(), -ROLLUP_WINDOW_DAYS));
+    rows = await checkedSince(database, since, { exclusive });
   } catch (err) {
     logger.error(`[impact-digest] rollup query failed: ${err.message}`);
     return { skipped: 'error' };
   }
 
-  const composed = composeVerdictRollup(rows, { days: ROLLUP_WINDOW_DAYS });
+  const composed = composeVerdictRollup(rows, { days: windowDays(since) });
   // Quiet window: nothing graded. No email, and NO marker stamp — the first
   // real verdict after a quiet stretch goes out on the next tick rather than
   // waiting out an arbitrary weekly slot.
@@ -468,6 +509,19 @@ async function sendImpactDigestsLocked(opts = {}) {
       results[name] = { skipped: 'error' };
     }
   }
+
+  // A swallowed failure must still read as a FAILED run in job_health — the
+  // turf-variance convention (scheduler.js, codex #3230 P2). Otherwise
+  // runExclusive records a healthy run while a halted content lane never
+  // reached the owner, which is the same silence this whole module exists to
+  // end. Aggregated AFTER every leg has run, so throwing here never costs the
+  // leg isolation above: a failing rollup does not suppress a paused-lane
+  // alert, it only makes the job read as failed once both have been attempted.
+  const failed = Object.entries(results)
+    .filter(([, r]) => r?.error || DELIVERY_BLOCKING_SKIPS.has(r?.skipped))
+    .map(([name, r]) => `${name}:${r.skipped || 'send_failed'}`);
+  if (failed.length) throw new Error(`impact digest did not complete (${failed.join(', ')})`);
+
   return results;
 }
 

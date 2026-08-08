@@ -1451,15 +1451,27 @@ function initScheduledJobs() {
     logger.info('Running: content-optimization impact tracker');
     try {
       const ImpactTracker = require('./seo/impact-tracker');
-      await ImpactTracker.sweepNewlyLive({});
-      await ImpactTracker.checkPending({});
+      const live = await ImpactTracker.sweepNewlyLive({});
+      const checked = await ImpactTracker.checkPending({});
       await ImpactTracker.checkAeoVisibility({});
       // Leg 4 — surface what the sweep just found (halted lanes, weekly
       // verdicts). Chained here rather than given its own cron so it always
-      // describes POST-sweep state; a mid-sweep tick would stamp its weekly
-      // marker on stale counts and suppress the corrected rollup for six days.
-      // Its own markers make a skipped day self-heal on the next tick.
-      await require('./seo/impact-verdict-digest').sendImpactDigestsIfDue({});
+      // describes POST-sweep state. Its own markers make a skipped day
+      // self-heal on the next tick.
+      //
+      // But chaining alone is not enough: sweepNewlyLive/checkPending CATCH a
+      // failed query and resolve with { error } rather than throwing, so a
+      // failed sweep looks identical to a quiet one from here. Running the
+      // digest anyway would email and stamp a weekly rollup built on
+      // PRE-sweep verdicts and then suppress the corrected one for six days —
+      // exactly the stale-count outcome the chaining exists to prevent.
+      // (checkAeoVisibility is not gated on: it only writes aeo_* columns,
+      // which no digest leg reads.)
+      if (live?.error || checked?.error) {
+        logger.warn(`[impact-digest] sweep incomplete — skipping digests this tick (${live?.error || checked?.error})`);
+      } else {
+        await require('./seo/impact-verdict-digest').sendImpactDigestsIfDue({});
+      }
     } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
