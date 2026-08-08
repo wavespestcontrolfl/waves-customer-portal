@@ -7796,6 +7796,17 @@ const CallRecordingProcessor = {
             if (customerId) {
               enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
             }
+            if (!phone && sameCallLeadReuse && !customerId) {
+              // Same-call reuse skips the weak-identity revalidation, but an
+              // ANONYMOUS write still needs the unclaimed backstop — the
+              // lookup now rejects customer-claimed rows (audit P1 r15) and
+              // this repeats that predicate against the claim race between
+              // lookup and write; a 0-row lands in the recovery mint below.
+              // Without it the `if (customerId)` arm above never fires for an
+              // anonymous caller, leaving the write with NO ownership
+              // predicate at all.
+              enrichmentWrite = enrichmentWrite.whereNull('customer_id');
+            }
             if (!phone && existingLead && !sameCallLeadReuse) {
               // Email-matched REUSE revalidation (phone-less caller): weak
               // identity, so the write repeats the FULL lookup eligibility —
