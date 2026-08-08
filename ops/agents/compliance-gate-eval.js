@@ -20,10 +20,17 @@
  * fixture strings — no database, no customer records, no writes anywhere.
  *
  * Usage (from repo root):
- *   node ops/agents/compliance-gate-eval.js                 # 40-case sample
- *   node ops/agents/compliance-gate-eval.js --all           # full corpus
+ *   node ops/agents/compliance-gate-eval.js --document --all   # ACTIVATION RUN
+ *   node ops/agents/compliance-gate-eval.js                    # 40-case sample
+ *   node ops/agents/compliance-gate-eval.js --all              # full corpus
  *   node ops/agents/compliance-gate-eval.js --limit 80 --concurrency 6
  *   node ops/agents/compliance-gate-eval.js --code BANNED_TOPIC
+ *
+ * --document IS REQUIRED FOR AN ACTIVATION DECISION. Without it each call
+ * carries one isolated sentence, which measures discrimination but not
+ * long-document recall, and not whether a banned topic reads as offered-by-
+ * Waves vs merely discussed — context production always supplies. The other
+ * modes are for iterating on the prompt, not for deciding to flip the flag.
  */
 
 const fs = require('fs');
@@ -53,21 +60,56 @@ const CODES = ['REENTRY_SAFETY_CLAIM', 'BANNED_TOPIC'];
 // shape matches production. The shell is deliberately compliant and neutral;
 // it changes the DOCUMENT, never the labelled sentence, and its own copy is
 // asserted clean in sentence mode first (see SHELL_SELF_CHECK).
+// SIZED TO PRODUCTION. content-brief-builder's WORD_COUNT_TARGET is 900–1500
+// words for city-service and supporting-blog drafts (the two highest-volume
+// autonomous actions), so a 150-word shell would still not exercise
+// long-document recall — the thing document mode exists to measure. The shell
+// below is ~900 words of compliant SWFL pest-control prose. Deliberately free
+// of safety claims, EPA wording, fixed re-entry/drying figures, and every
+// banned topic, and the whole thing is asserted clean before any run.
 const DOC_SHELL_BEFORE = [
-  'Southwest Florida homeowners in Manatee, Sarasota, and Charlotte counties deal with pest pressure year round. Warm winters and heavy summer rain keep populations active in months when northern states get a break.',
-  'The most common questions we hear concern timing: when treatment happens, what the technician checks on each visit, and how the schedule shifts between the wet and dry seasons.',
-  'Our technicians inspect entry points, note conducive conditions such as standing water or wood-to-soil contact, and document what they find so the next visit builds on the last one.',
+  'Southwest Florida homeowners in Manatee, Sarasota, and Charlotte counties deal with pest pressure year round. Warm winters and heavy summer rain keep populations active through months when much of the country gets a genuine break, and that changes what a sensible service schedule looks like. A plan built for a climate with hard freezes does not transfer here. The pests never fully stop, so the work is about steady suppression and catching conditions early rather than a single seasonal push.',
+  'The questions we hear most often concern timing and expectations: when a visit happens, what the technician actually checks, how the interval shifts between the wet and dry seasons, and what a homeowner should watch for between visits. None of those have a single universal answer, because the right cadence depends on the structure, the landscaping around it, and what the last few inspections turned up.',
+  'A visit starts with an inspection rather than an application. The technician walks the perimeter looking at entry points, weep holes, utility penetrations, door sweeps, and window seals. Inside, the focus is on the rooms where activity tends to show first: kitchens, bathrooms, laundry areas, and anywhere plumbing passes through a wall. Attics and crawl spaces get attention when the structure has them and access is reasonable.',
+  'Conducive conditions matter as much as the pests themselves. Standing water in a bromeliad or a clogged gutter supports mosquito breeding far more reliably than anything drifting in from a neighbouring lot. Wood-to-soil contact gives subterranean termites a path that skips every barrier. Mulch piled against a foundation holds moisture where it does the most harm. Dense shrubs touching a wall act as a bridge over whatever is applied at ground level. Correcting those is often more durable than any product decision.',
+  'Findings are documented so the next visit builds on the last one instead of starting over. That record is what turns a series of appointments into an actual program: a technician arriving in September can see what was noted in June, whether the recommended trimming happened, and whether the ant pressure on the west side responded or moved.',
+  'Ants are the most common call in this region by a wide margin, and the species matters. Ghost ants trail along countertops and behave differently from the big-headed ants that push soil up through pavers, which behave differently again from carpenter ants working in damp wood. Treating all of them the same way produces inconsistent results, which is why identification comes before anything else.',
+  'German cockroaches are an indoor population problem rather than an outdoor intrusion, and they respond to sanitation and harbourage changes as much as to any treatment. The larger roaches most homeowners see on a lanai are usually outdoor species that wandered in, and those call for a different response entirely.',
+  'Mosquito pressure in Southwest Florida is driven overwhelmingly by container breeding on the property itself. Saucers under potted plants, tarps holding rainwater, boat covers, bird baths, and untreated bromeliads produce far more mosquitoes than the marsh half a mile away. Source reduction does more than anything else, and a walkthrough identifying those containers is usually the most productive part of a mosquito visit.',
+  'Lawns here run on warm-season grasses — St. Augustine, Bahia, Zoysia, and Bermuda — and each has its own tolerances for shade, traffic, and mowing height. Most of the problems that get reported as insect damage turn out to be irrigation, disease, or a mower set too low. Chinch bug damage in St. Augustine looks a great deal like drought stress, and the two are commonly confused, so the diagnosis matters before anything else happens.',
+  'County fertilizer ordinances in this part of the state restrict nitrogen application during the summer rainy season, which shapes what a lawn program can do and when. That is a regulatory constraint, not a preference, and any provider working here should be able to explain how their schedule accounts for it.',
 ];
 const DOC_SHELL_AFTER = [
-  'Seasonal timing matters more here than in most of the country. Subtropical humidity keeps activity high, so the interval between visits is set by pest pressure rather than by the calendar.',
-  'If you have questions about your service plan or want to review what the last visit covered, your technician can walk through the notes with you.',
+  'Seasonal timing matters more here than in most of the country. Subtropical humidity keeps activity high, so the interval between visits is set by observed pest pressure rather than by the calendar. A property backing onto a preserve behaves differently from one in the middle of a built-out subdivision, and the schedule should reflect that difference rather than a default.',
+  'The rainy season changes the picture again. Heavy afternoon storms wash surfaces, flush harbourage, and refill every container on the property within an hour. That is why the wet months usually need a tighter interval than the dry ones, and why a plan that looked right in February may need revisiting in July.',
+  'Between visits, the most useful thing a homeowner can do is watch and report. Sightings noted with a location and a rough time of day are far more actionable than a general impression that activity has increased. If something changes — a new trail, a swarm, damage that was not there last month — that information shapes the next visit more than any assumption made in advance.',
+  'Structural maintenance quietly does a lot of the work. Door sweeps that actually contact the threshold, screens without tears, gutters that drain, and shrubs trimmed back from the wall all reduce pressure without anything being applied. Those are the recommendations most likely to still be paying off a year later.',
+  'If you have questions about your service plan, or want to review what the last visit covered and why a particular recommendation was made, your technician can walk through the notes with you. The record exists to be used, and understanding why something was recommended tends to make it far likelier to get done.',
 ];
+// Production sends a title and editable meta alongside the body; document mode
+// must too, or it still measures a different payload than the publisher builds.
+const DOC_SHELL_TITLE = 'Pest Control in Sarasota, FL: What to Expect Through the Year';
+const DOC_SHELL_META = 'How pest pressure shifts across Southwest Florida seasons, what a technician checks on each visit, and which property conditions matter most in Manatee, Sarasota, and Charlotte counties.';
 // The shell must never itself trip a code, or every document-mode case would
 // be contaminated. Verified in sentence mode before any document run.
-const SHELL_SELF_CHECK = [...DOC_SHELL_BEFORE, ...DOC_SHELL_AFTER].join('\n\n');
+const SHELL_SELF_CHECK = [DOC_SHELL_TITLE, ...DOC_SHELL_BEFORE, ...DOC_SHELL_AFTER, DOC_SHELL_META].join('\n\n');
 
+// Mirrors assertComplianceClear: body plus the editable meta, joined as blocks,
+// with the title passed as its own field. Same construction the publisher uses,
+// so document mode exercises the payload production actually builds.
 function buildDocument(text) {
-  return [...DOC_SHELL_BEFORE, text, ...DOC_SHELL_AFTER].join('\n\n');
+  const body = [...DOC_SHELL_BEFORE, text, ...DOC_SHELL_AFTER].join('\n\n');
+  return {
+    title: DOC_SHELL_TITLE,
+    body: `${body}\n\n${DOC_SHELL_META}`,
+    city: 'Sarasota',
+    keyword: 'pest control sarasota fl',
+    tag: 'Pest Control',
+  };
+}
+
+function shellWordCount() {
+  return SHELL_SELF_CHECK.split(/\s+/).filter(Boolean).length;
 }
 
 function parseArgs(argv) {
@@ -304,16 +346,19 @@ async function main() {
       for (const f of shellFindings) console.error(`  ${f.code} ${f.message}`);
       process.exit(1);
     }
-    console.log(`document shell self-check: clean (${shellCheck.checked ? 'checked' : 'UNCHECKED — fail-open, results unreliable'})\n`);
+    console.log(`document shell self-check: clean (${shellCheck.checked ? 'checked' : 'UNCHECKED — fail-open, results unreliable'})`);
+    console.log(`document payload: ~${shellWordCount()} shell words + the fixture, plus title and meta`);
+    console.log('                  (production targets 900-1500 words for city-service / supporting-blog)\n');
   }
 
   const results = await runPool(selected, args.concurrency, async (c) => {
-    const body = args.document ? buildDocument(c.text) : c.text;
+    const payload = args.document ? buildDocument(c.text) : { body: c.text };
+    const { body } = payload;
     let semanticBlocked = null;
     let codeMatched = null;
     let checked = false;
     try {
-      const r = await complianceGate.evaluate({ body });
+      const r = await complianceGate.evaluate(payload);
       checked = r.checked;
       // Measure what PRODUCTION does: it blocks on ANY P0, regardless of which
       // of the two codes the model chose. Requiring the code to match the

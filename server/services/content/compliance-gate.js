@@ -33,7 +33,8 @@
  * publish, and its precision against real copy has not been measured yet —
  * enabling an unvalidated blocking gate on the auto-publish path would park
  * legitimate drafts for reasons nobody has checked. Run
- * `node ops/agents/compliance-gate-eval.js --all` (needs live API keys) to get
+ * `node ops/agents/compliance-gate-eval.js --document --all` (needs live API
+ * keys; --document is REQUIRED for an activation decision) to get
  * recall/precision over the 389-case labelled corpus, then flip the flag. If
  * precision is poor, tune the prompt before enabling rather than shipping the
  * block. Once enabled, GATE_COMPLIANCE=false is the one-click revoke.
