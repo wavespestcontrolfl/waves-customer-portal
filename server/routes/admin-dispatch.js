@@ -10087,6 +10087,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
               pay_url: payUrl,
+              reservice_line: completionReserviceLine,
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
@@ -10102,6 +10103,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             service_type: displayServiceType,
             portal_url: reportSmsUrl || reportUrl,
             pay_url: payUrl,
+            reservice_line: completionReserviceLine,
           }, {
             workflow: 'dispatch_service_complete',
             entity_type: 'service_record',

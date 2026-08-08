@@ -28,15 +28,18 @@ const OLD_SENTENCE = "We'll text you once it's assigned to a technician.";
 const NEW_SENTENCE = "We'll follow up as soon as we've reviewed it.";
 
 async function swapSentence(knex, from, to) {
-  if (!(await knex.schema.hasTable('sms_templates'))) return;
-  const row = await knex('sms_templates').where({ template_key: KEY }).first();
-  if (!row || typeof row.body !== 'string' || !row.body.includes(from)) return;
-  await knex('sms_templates').where({ id: row.id }).update({
-    body: row.body.split(from).join(to),
-    updated_at: knex.fn.now(),
-  });
-  // A/B variant bodies render IN PLACE OF the base body (getTemplate prefers
-  // variant.body), so any variant carrying the promise gets the same swap.
+  // Base row and variants are processed INDEPENDENTLY: getTemplate prefers
+  // variant.body, so a variant carrying the promise must be fixed even when
+  // the base row was already customized past the sentence (pre-push audit P1).
+  if (await knex.schema.hasTable('sms_templates')) {
+    const row = await knex('sms_templates').where({ template_key: KEY }).first();
+    if (row && typeof row.body === 'string' && row.body.includes(from)) {
+      await knex('sms_templates').where({ id: row.id }).update({
+        body: row.body.split(from).join(to),
+        updated_at: knex.fn.now(),
+      });
+    }
+  }
   if (await knex.schema.hasTable('sms_template_variants')) {
     const variants = await knex('sms_template_variants').where({ template_key: KEY });
     for (const v of variants) {
