@@ -18,6 +18,11 @@
  *
  * MAKES LIVE LLM CALLS. Never runs in CI; invoke it deliberately. Reads only
  * fixture strings — no database, no customer records, no writes anywhere.
+ * READ-ONLY is enforced, not just declared: the run disables the dispatcher's
+ * llm_dispatch_log recording before loading the gate and ABORTS if the gate
+ * still resolves enabled. `railway run` (the documented way to supply API
+ * keys) injects the live service env, so inheriting GATE_LLM_DISPATCH_METRICS
+ * is the normal case, not the exotic one.
  *
  * Usage (from repo root):
  *   node ops/agents/compliance-gate-eval.js --document --all   # ACTIVATION RUN
@@ -362,8 +367,39 @@ async function main() {
   // env-derived config at load (Codex PR #3295 r1).
   process.env.GATE_COMPLIANCE = 'true';
 
+  // NO DB WRITES FROM THIS HARNESS (Codex PR #3295 r8). dispatchWithFallback
+  // records one llm_dispatch_log row per completed chain whenever
+  // GATE_LLM_DISPATCH_METRICS is on — on success AND on all-providers-failed
+  // (server/services/llm/call.js:377,382). The documented way to get API keys
+  // for a calibration run is `railway run`, which injects the live service
+  // env, so an activation run would insert ~384 rows into the very
+  // `deepAnalysis` lane the daily exception digest reads. Worse than noise: a
+  // calibration corpus is adversarial by construction, so its validator
+  // rejections land in `failure_reasons` and could manufacture a
+  // fallback-rate-spike exception email to the company inbox from a run that
+  // was only ever measuring.
+  //
+  // This script is declared READ-ONLY, and that has to be ENFORCED rather than
+  // asserted in a header comment. Deleted rather than set to 'false' so a
+  // presence check can't see it either, and BEFORE the first require, because
+  // config/feature-gates snapshots the gate into a module-level object at load
+  // time (feature-gates.js:47) — setting it afterwards would do nothing.
+  delete process.env.GATE_LLM_DISPATCH_METRICS;
+
   const complianceGate = require(path.join(REPO, 'server/services/content/compliance-gate'));
   const guardrails = require(path.join(REPO, 'server/services/content/content-guardrails'));
+
+  // Verify, don't assume. The delete above only works while nothing has
+  // already loaded feature-gates; reordering the requires above it would
+  // silently restore the writes. A promise of "no DB access" that can be
+  // broken by moving a line is not a promise — so check the resolved gate and
+  // refuse to run rather than discover it in the table afterwards.
+  if (require(path.join(REPO, 'server/config/feature-gates')).isEnabled('llmDispatchMetrics')) {
+    console.error('ABORT: LLM dispatch metrics resolved ENABLED — this run would write llm_dispatch_log rows.');
+    console.error('       This harness is READ-ONLY and must not touch the database.');
+    console.error('       Unset GATE_LLM_DISPATCH_METRICS in the calling environment and re-run.');
+    process.exit(1);
+  }
 
   // Guard the instrument before trusting it: if the shell itself trips a code,
   // every document-mode verdict is contaminated and the run means nothing.
