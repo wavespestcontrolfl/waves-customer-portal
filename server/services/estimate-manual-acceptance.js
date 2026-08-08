@@ -540,6 +540,12 @@ async function markEstimateManuallyAccepted({
           });
         } catch (err) {
           logger.warn(`[estimate-manual-acceptance] proposal invoice failed for estimate ${updatedEstimate.id}: ${err.message}`);
+          // Expected validation conflicts (4xx, e.g. the payer-term mismatch
+          // 409) carry an actionable operator message — pass them through
+          // instead of flattening to a generic 500 (codex #3297 r2e).
+          if (Number.isInteger(err?.statusCode) && err.statusCode >= 400 && err.statusCode < 500) {
+            throw httpError(err.message, err.statusCode);
+          }
           throw httpError('Proposal invoice could not be created; estimate was not marked accepted.', 500);
         }
         // Invoice mode promises a first invoice. If the proposal has no billable
