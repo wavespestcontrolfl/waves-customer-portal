@@ -695,6 +695,11 @@ async function invoiceStillCollectible(meta) {
     const inv = await db('invoices').where({ id: meta.invoice_id }).first();
     if (!inv) return { eligible: false, reason: 'invoice-missing' };
     if (isTerminalInvoice(inv)) return { eligible: false, reason: `invoice-terminal:${inv.status}` };
+    // Third-party Bill-To adopted overnight: payer-billed invoices route
+    // AR to the payer's AP inbox (email) and billing texts must never
+    // reach the homeowner — same rule the decline-notice recheck and the
+    // receipt paths enforce.
+    if (inv.payer_id) return { eligible: false, reason: 'payer-billed' };
     if (meta.followup_sequence_id) {
       const seq = await db('invoice_followup_sequences')
         .where({ id: meta.followup_sequence_id })

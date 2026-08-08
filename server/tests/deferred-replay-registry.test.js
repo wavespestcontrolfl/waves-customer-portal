@@ -118,6 +118,19 @@ describe('deferred-replay registry', () => {
     expect(past.reason).toBe('visit-past');
   });
 
+  test('deferred invoice texts (r17 audit): a payer-billed invoice suppresses the homeowner replay', async () => {
+    // Third-party Bill-To adopted overnight — AR routes to the payer's AP
+    // inbox and billing texts must never reach the homeowner.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: 'payer-7' }));
+    const payerBilled = await recheckDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1' });
+    expect(payerBilled.eligible).toBe(false);
+    expect(payerBilled.reason).toBe('payer-billed');
+
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
+    const selfPay = await recheckDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1' });
+    expect(selfPay.eligible).toBe(true);
+  });
+
   test('call-booking contact confirmation (r17): dead or past visits suppress the fan-out replay', async () => {
     db.mockReturnValueOnce(firstChain({ status: 'cancelled', scheduled_date: '2026-08-09' }));
     const dead = await recheckDeferredReplay('call_booking_contact_confirmation_deferred', { scheduled_service_id: 'ss-1' });

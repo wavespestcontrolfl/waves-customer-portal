@@ -10229,6 +10229,7 @@ const CallRecordingProcessor = {
                 serviceLabel: serviceType,
                 smsAttempt: async () => {
                   smsRan = true;
+                  let confirmationRearmed = false;
                   // SMS leg held (implied consent, no consented recipient):
                   // skip only the primary text — the channel email leg and
                   // the gated fan-out/email-only legs below still run.
@@ -10263,6 +10264,11 @@ const CallRecordingProcessor = {
                           .where({ scheduled_service_id: scheduledServiceId })
                           .where({ cancelled: false })
                           .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
+                        // The sweep's canonical confirmation fans out to
+                        // EVERY appointment contact — the secondary loop
+                        // below must not also queue held copies, or those
+                        // contacts get both at 8:00 AM.
+                        confirmationRearmed = true;
                         logger.info(`[call-proc] Confirmation for ${scheduledServiceId} held (send window) — re-armed for the stranded-confirmation sweep`);
                       } catch (rearmErr) {
                         logger.error(`[call-proc] confirmation re-arm failed for ${scheduledServiceId}: ${rearmErr.message}`);
@@ -10376,6 +10382,14 @@ const CallRecordingProcessor = {
                           },
                         });
                         if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
+                          && contactResult.deferred && contactResult.nextAllowedAt
+                          && confirmationRearmed) {
+                          // Primary was held too and the confirmation sweep
+                          // was successfully re-armed — its 8:00 AM canonical
+                          // send fans out to every appointment contact, so a
+                          // queued copy here would double-text this contact.
+                          logger.info(`[call-proc] held ${contact.role} confirmation NOT queued — re-armed sweep owns delivery to all contacts`);
+                        } else if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
                           && contactResult.deferred && contactResult.nextAllowedAt) {
                           // The primary confirmation reached Twilio before the
                           // 20:00 cutoff but THIS contact's send crossed it —
