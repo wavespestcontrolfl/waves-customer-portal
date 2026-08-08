@@ -146,6 +146,10 @@ describe('service_request_confirmation copy migration (20260808020000)', () => {
     // The earlier attempt's guard body does NOT contain this sentence — that
     // mismatch is exactly why the promise survived it.
     expect(prior.OLD_BODY).not.toContain(migration.OLD_SENTENCE);
+    // …but it DOES contain the legacy sentence form, which a variant row can
+    // still carry (the house-voice sweep only rewrote sms_templates) — the
+    // migration retires both forms.
+    expect(prior.OLD_BODY).toContain(migration.OLD_SENTENCE_LEGACY);
   });
 
   test('replacement promises follow-up without inventing an assignment text', () => {

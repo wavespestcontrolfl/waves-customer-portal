@@ -308,6 +308,21 @@ router.post('/:id/reschedule', async (req, res, next) => {
           .where('description', 'like', `Appointment ${service.id}:%`)
           .first();
         deduped = !!existingOpen;
+        // A resubmit that REVISES the intent (new preferred date / new notes)
+        // must not be silently absorbed — fold it into the open request row
+        // so staff see the latest ask (codex P2: a preferred-date-only
+        // resubmission touched neither the visit notes nor the request).
+        if (existingOpen && (preferredDate || notes)) {
+          const updateLines = [
+            `Customer updated ${etDateString()}:`,
+            preferredDate ? `Preferred date: ${preferredDate}` : null,
+            notes ? `Customer notes: ${notes}` : null,
+          ].filter(Boolean);
+          await trx('service_requests').where({ id: existingOpen.id }).update({
+            description: `${existingOpen.description || ''}\n${updateLines.join('\n')}`.trim(),
+            updated_at: new Date(),
+          });
+        }
       }
       if (!deduped) {
         await trx('service_requests').insert({
