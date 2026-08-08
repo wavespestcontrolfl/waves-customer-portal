@@ -902,8 +902,15 @@ router.get('/:id', async (req, res, next) => {
             // Phone-less reuse: a later call that reused this lead carries a
             // DIFFERENT sid and no matchable phone — the processor links it
             // via the durable metadata stamp instead (the lead keeps its
-            // original call's sid; codex P1, PR #3275).
-            this.orWhereRaw("metadata->>'lead_id' = ?", [String(lead.id)]);
+            // original call's sid; codex P1, PR #3275). SETTLED stamps only
+            // (processing_token IS NULL — same rule as the bridge): a
+            // mid-flight pass's provisional stamp can still be cleared or
+            // repointed, and surfacing it here could expose another
+            // caller's transcript on the wrong lead card (pre-push P1 r3).
+            this.orWhere(function stampArm() {
+              this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
+                .whereNull('processing_token');
+            });
             if (ten) {
               this.orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);
               this.orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);

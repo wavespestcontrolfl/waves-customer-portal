@@ -215,7 +215,22 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
       .filter((arg) => typeof arg === 'function');
     const recorded = [];
     const group = {
-      orWhere: (...args) => { recorded.push(['orWhere', ...args]); return group; },
+      orWhere: (...args) => {
+        // A grouped arm (the settled-stamp arm wraps the metadata predicate
+        // with whereNull(processing_token)) — run the callback against a
+        // sub-recorder so its inner predicates are captured as
+        // 'orWhere>...' entries.
+        if (typeof args[0] === 'function') {
+          const sub = {
+            whereRaw: (...a) => { recorded.push(['orWhere>whereRaw', ...a]); return sub; },
+            whereNull: (...a) => { recorded.push(['orWhere>whereNull', ...a]); return sub; },
+          };
+          args[0].call(sub);
+          return group;
+        }
+        recorded.push(['orWhere', ...args]);
+        return group;
+      },
       orWhereRaw: (...args) => { recorded.push(['orWhereRaw', ...args]); return group; },
       whereNotNull: (...args) => { recorded.push(['whereNotNull', ...args]); return group; },
       orWhereNotNull: (...args) => { recorded.push(['orWhereNotNull', ...args]); return group; },
@@ -248,7 +263,11 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     });
 
     const recorded = recordedCallLogPredicates();
-    expect(recorded).toContainEqual(['orWhereRaw', "metadata->>'lead_id' = ?", ['lead-1']]);
+    expect(recorded).toContainEqual(['orWhere>whereRaw', "metadata->>'lead_id' = ?", ['lead-1']]);
+    // SETTLED stamps only — the arm requires processing_token IS NULL so a
+    // mid-flight pass's provisional stamp never surfaces another caller's
+    // transcript on the wrong card (pre-push P1).
+    expect(recorded).toContainEqual(['orWhere>whereNull', 'processing_token']);
     expect(recorded.filter((c) => c[0] === 'orWhere')).toEqual([]);
     expect(recorded.filter((c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892')).toEqual([]);
   });
@@ -271,7 +290,8 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     });
 
     const recorded = recordedCallLogPredicates();
-    expect(recorded).toContainEqual(['orWhereRaw', "metadata->>'lead_id' = ?", ['lead-2']]);
+    expect(recorded).toContainEqual(['orWhere>whereRaw', "metadata->>'lead_id' = ?", ['lead-2']]);
+    expect(recorded).toContainEqual(['orWhere>whereNull', 'processing_token']);
     expect(recorded.filter((c) => c[0] === 'orWhere')).toEqual([]);
   });
 
