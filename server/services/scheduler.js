@@ -1510,7 +1510,14 @@ function initScheduledJobs() {
     // never skipped. Moving it inside the lease would restore the starvation
     // above without buying anything.
     try {
-      await require('./seo/regression-requeue').requeueRegressedPages({});
+      const requeued = await require('./seo/regression-requeue').requeueRegressedPages({});
+      // runExclusive RETURNS { skipped: true, reason } rather than throwing.
+      // 'lease_held' is benign — another instance is doing the work. Anything
+      // else (notably 'no_connection' under pool exhaustion) means the sweep
+      // never ran, and must not read as a healthy night.
+      if (requeued?.skipped === true && requeued.reason !== 'lease_held') {
+        throw new Error(`regression re-queue did not run (${requeued.reason || 'unknown'})`);
+      }
     } catch (err) { logger.error(`Regression re-queue failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 

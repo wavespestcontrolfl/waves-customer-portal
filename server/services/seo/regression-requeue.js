@@ -261,9 +261,17 @@ async function requeueRegressedPagesLocked(opts = {}) {
   const tracker = opts.tracker || require('./impact-tracker');
   const limit = opts.limit || MAX_PER_RUN;
 
-  // Fetch once per sweep, not per row. Fail CLOSED on error: if we cannot tell
-  // which buckets are paused, re-queueing could launder work out of a lane
-  // that was stopped for repeated losses — the whole point of the pause.
+  // Both reads below RETHROW after logging. runExclusive records a successful
+  // run whenever its callback resolves, and the scheduler does not inspect the
+  // summary — so returning a zero-row result on a failed query would let a
+  // persistent DB or schema error leave every regression untouched while
+  // job_health reported this sweep healthy, night after night. A lane whose
+  // entire purpose is to stop losses going unnoticed must not itself fail
+  // quietly. (Same correction as the digest leg's job-health propagation.)
+  //
+  // Fail CLOSED on the pause read specifically: if we cannot tell which
+  // buckets are paused, re-queueing could launder work out of a lane that was
+  // stopped for repeated losses — the whole point of the pause.
   let excludeBuckets;
   try {
     // strict: pausedBuckets swallows its own query error and returns [] by
@@ -272,7 +280,7 @@ async function requeueRegressedPagesLocked(opts = {}) {
     excludeBuckets = ((await tracker.pausedBuckets({ db: database, strict: true })) || []).map((p) => p.bucket).filter(Boolean);
   } catch (err) {
     logger.error(`[regression-requeue] pausedBuckets unavailable, standing down this tick: ${err.message}`);
-    return { scanned: 0, queued: 0, skipped: 0, results: [] };
+    throw err;
   }
   if (excludeBuckets.length) {
     logger.info(`[regression-requeue] excluding paused bucket(s): ${excludeBuckets.join(', ')}`);
@@ -283,7 +291,7 @@ async function requeueRegressedPagesLocked(opts = {}) {
     rows = await pendingRegressions(database, { limit, excludeBuckets });
   } catch (err) {
     logger.error(`[regression-requeue] scan failed: ${err.message}`);
-    return { scanned: 0, queued: 0, skipped: 0, results: [] };
+    throw err;
   }
   if (!rows.length) return { scanned: 0, queued: 0, skipped: 0, results: [] };
 

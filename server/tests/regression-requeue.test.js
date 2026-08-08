@@ -46,7 +46,10 @@ function makeDb({ pending = [], cooldownHit = false } = {}) {
       whereNull: () => q,
       orderBy: (...a) => { state.orderBy.push(a); return q; },
       limit: (n) => { q._limit = n; return q; },
-      select: async () => pending.slice(0, q._limit || pending.length),
+      select: async () => {
+        if (state.failSelect) throw new Error('select failed');
+        return pending.slice(0, q._limit || pending.length);
+      },
       first: async () => (cooldownHit ? { id: 'prior-row' } : undefined),
       update: async (patch) => {
         if (state.failUpdates) throw new Error('update failed');
@@ -321,15 +324,23 @@ describe('requeueRegressedPages', () => {
     expect(db.state.excluded).toContain('thin_content');
   });
 
-  test('FAILS CLOSED when the paused-bucket list is unavailable', async () => {
+  test('FAILS CLOSED when the paused-bucket list is unavailable — and THROWS so job_health sees it', async () => {
     const db = makeDb({ pending: [row()] });
     const refreshAudit = audit();
     const broken = { pausedBuckets: jest.fn(async () => { throw new Error('db down'); }) };
-    const out = await requeueRegressedPages({ db, refreshAudit, tracker: broken });
 
+    // Returning a zero-row summary here would let runExclusive record a
+    // healthy run while every regression went untouched, night after night.
+    await expect(requeueRegressedPages({ db, refreshAudit, tracker: broken })).rejects.toThrow('db down');
     expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
     expect(db.state.updates).toHaveLength(0);
-    expect(out).toMatchObject({ scanned: 0, queued: 0 });
+  });
+
+  test('a failed SCAN also throws rather than reporting a quiet night', async () => {
+    const db = makeDb({ pending: [row()] });
+    db.state.failSelect = true;
+    await expect(requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() }))
+      .rejects.toThrow('select failed');
   });
 
   test('asks pausedBuckets in STRICT mode — the default swallows its own error and returns []', async () => {
