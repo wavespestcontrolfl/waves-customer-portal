@@ -1454,6 +1454,11 @@ function initScheduledJobs() {
       await ImpactTracker.sweepNewlyLive({});
       await ImpactTracker.checkPending({});
       await ImpactTracker.checkAeoVisibility({});
+      // Reversal leg — hand pages we confirmed we made WORSE back to the
+      // existing refresh lane. Chained here (not its own cron) so it reads the
+      // verdicts checkPending just wrote; each impact row is acted on exactly
+      // once, so a skipped day self-heals on the next tick.
+      await require('./seo/regression-requeue').requeueRegressedPages({});
     } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
