@@ -68,11 +68,9 @@ describe('acceptedMixServiceName', () => {
     expect(acceptedMixServiceName(null)).toBeNull();
   });
 
-  test('caps recovered labels at the 100-char service_type column limit', () => {
-    const long = `Accepted service mix: ${'Very Long Service Name '.repeat(8)}.`;
-    const result = acceptedMixServiceName(long);
-    expect(result.length).toBeLessThanOrEqual(100);
-    expect(result.endsWith('...')).toBe(true);
+  test('preserves long recovered labels intact — service_type is text (20260428000010)', () => {
+    const name = 'Very Long Service Name '.repeat(8).trim();
+    expect(acceptedMixServiceName(`Accepted service mix: ${name}.`)).toBe(name);
   });
 });
 

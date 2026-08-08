@@ -25,7 +25,8 @@ function acceptedMixServiceName(notes) {
     .replace(/\s{2,}/g, ' ')
     .trim();
   if (!cleaned || /[&+,]/.test(cleaned)) return null;
-  if (cleaned.length > 100) return `${cleaned.slice(0, 97).trimEnd()}...`;
+  // No length cap: appointment_reminders.service_type is text
+  // (20260428000010 widened it precisely so joined labels never truncate).
   return cleaned;
 }
 
