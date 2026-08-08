@@ -7338,6 +7338,10 @@ const CallRecordingProcessor = {
         : `existing customer (${leadCustomer?.pipeline_stage || 'unknown'})`;
       logger.info(`[call-proc] Skipping lead creation for ${skipReason}, customer ${customerId || 'none'}`);
     }
+    // Assigned inside the try once the lead source resolves; declared out
+    // here so the section catch can run it on a benign failure (codex P2).
+    // The default no-op keeps pre-lead-source failures safe.
+    let runCallPpcAttribution = () => {};
     if (shouldCreateLead) {
       try {
         // Check if lead already exists for this phone — or by spoken email
@@ -7398,6 +7402,45 @@ const CallRecordingProcessor = {
         } catch (e) {
           logger.warn(`[call-proc] lead_source lookup failed: ${e.message}`);
         }
+
+        // Assigned HERE (before anything downstream can throw) and invoked
+        // after the enrichment/claim-race block — and also from the section
+        // catch on a benign failure, so a transient enrichment error cannot
+        // permanently drop the call from paid/organic funnel reporting
+        // (codex P2). Reads leadId/customerId at CALL time (final values);
+        // fully self-guarded, never throws.
+        runCallPpcAttribution = () => {
+          try {
+            const callAttr = leadSourceRow
+              ? require('./ads/call-attribution').attributionForSourceType(leadSourceRow.source_type)
+              : null;
+            const isBridgeTarget = leadSourceRow
+              && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
+            if (leadId && customerId && callAttr && !isBridgeTarget) {
+              require('./ads/call-attribution').recordCallPpcAttribution({
+                customerId,
+                leadId,
+                leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
+                isPaid: callAttr.isPaid,
+                leadSourceDetail: leadSourceRow.name || 'inbound call',
+                // Pass the PRIMARY matched service, NOT the composed
+                // multi-service label (and not the lead row's
+                // service_interest, which enrichment may have just written
+                // as the composite): attribution derives a single
+                // service_line via inferServiceLine, whose keyword order
+                // (lawn before pest) would bucket a pest-primary "… + Lawn
+                // Care Service" composite as lawn and skew paid/organic ROI
+                // (codex r3). The secondary families live on the lead's
+                // service_interest; the single-line funnel field carries the
+                // primary by design.
+                serviceInterest: extracted.matched_service || extracted.requested_service || null,
+                leadDate: call.created_at || null, // date by the actual call
+              }).catch(() => {});
+            }
+          } catch (attrErr) {
+            logger.warn(`[call-proc] PPC attribution dispatch failed: ${attrErr.code || attrErr.name || 'error'}`);
+          }
+        };
 
         if (existingLead) {
           leadId = existingLead.id;
@@ -7952,32 +7995,10 @@ const CallRecordingProcessor = {
         // could land on a lead the race rejected, leaving the replacement
         // lead unattributed and reporting pointing at the wrong row
         // (codex P1 r11). Fire-and-forget stays fine here: nothing after
-        // this consumes its result.
-        const callAttr = leadSourceRow
-          ? require('./ads/call-attribution').attributionForSourceType(leadSourceRow.source_type)
-          : null;
-        const isBridgeTarget = leadSourceRow
-          && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
-        if (leadId && customerId && callAttr && !isBridgeTarget) {
-          require('./ads/call-attribution').recordCallPpcAttribution({
-            customerId,
-            leadId,
-            leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
-            isPaid: callAttr.isPaid,
-            leadSourceDetail: leadSourceRow.name || 'inbound call',
-            // Pass the PRIMARY matched service, NOT the composed
-            // multi-service label (and not the lead row's service_interest,
-            // which enrichment may have just written as the composite):
-            // attribution derives a single service_line via inferServiceLine,
-            // whose keyword order (lawn before pest) would bucket a
-            // pest-primary "… + Lawn Care Service" composite as lawn and
-            // skew paid/organic ROI (codex r3). The secondary families live
-            // on the lead's service_interest; the single-line funnel field
-            // carries the primary by design.
-            serviceInterest: extracted.matched_service || extracted.requested_service || null,
-            leadDate: call.created_at || null, // date by the actual call
-          }).catch(() => {});
-        }
+        // this consumes its result. The body lives in
+        // runCallPpcAttribution (assigned near the lead_source lookup) so
+        // the section catch can fire it too.
+        runCallPpcAttribution();
 
         // Voicemail lead text-back (Layer 3): text the prospect a prefilled
         // quote-wizard link. Only on the voicemail lead path — new prospect,
@@ -8126,6 +8147,15 @@ const CallRecordingProcessor = {
         }
 
       } catch (leadErr) {
+        // This catch FINALIZES the call (non-blocking) — fire the funnel
+        // attribution before doing so, or a transient enrichment error
+        // permanently drops a tracked customer-attached call from
+        // paid/organic reporting: the lead already exists, so the run still
+        // completes as `processed` and nothing retries it (codex P2).
+        // leadId holds the final selection made before the throw, and
+        // recordCallPpcAttribution dedupes by lead + first-touch, so a
+        // double fire is harmless.
+        runCallPpcAttribution();
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
       }
     }
