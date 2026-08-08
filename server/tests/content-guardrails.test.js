@@ -3334,6 +3334,87 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     }
   });
 
+  test('label separators, contracted subjects/copulas, wet-state exemption and passive attribution (Codex PR r22)', () => {
+    for (const body of [
+      // LABEL-style drying figures — the separator carries the figure.
+      'Treatment drying time: 30 minutes.',
+      'The treatment dry time — 30 minutes.',
+      'Drying period for the treatment: 30 minutes.',
+      // CONTRACTED copula — `is` dropped to two characters.
+      "The treatment's safe.",
+      "The pesticide's completely safe.",
+      'The application’s harmless.',
+      "The spray's risk-free.",
+      // AGENCY-SUBJECT reporting paraphrase of EPA approval.
+      'The EPA considers this pesticide approved for residential use.',
+      'The EPA says this product is approved for homes.',
+      // A competing WET-STATE claim disqualifies the dry exemption: both of
+      // these assert safety during the wet period and carry the
+      // technician-confirms clause, so the exemption must not apply.
+      'The treatment is safe while wet and once dry. Your technician confirms the timing.',
+      'The treatment is safe before, during, and after it dries. Your technician confirms re-entry timing.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      // CONTRACTED first-person ownership.
+      "We're proud to offer structural fumigation.",
+      "We'll remove raccoons from your attic.",
+      'We’ll trap wildlife around your property.',
+      'We’re ready to insulate your attic.',
+      // NOUN-form wildlife capture (r21 covered the verb only).
+      'We offer wildlife capture services in Sarasota.',
+      'Schedule a raccoon capture appointment today.',
+      // PASSIVE Waves attribution.
+      'Wildlife removal is offered by Waves Pest Control.',
+      'Raccoon trapping is provided by Waves.',
+      'Attic insulation is available from Waves Pest Control.',
+      'Structural fumigation can be booked through Waves.',
+      // Narrowing door-to-door to SALES must not weaken the sales forms.
+      'We do door-to-door sales in your neighborhood.',
+      'Our door-to-door canvassing team will stop by.',
+      'Our team goes door to door in your neighborhood.',
+      'Waves sends salespeople door to door.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    }
+    // door-to-door names a SALES channel, not a route: operational copy is
+    // legitimate and must stay clean (this false positive dated to the
+    // original W2 commit, not to a later fix).
+    for (const body of [
+      'We provide door-to-door inspections for condo associations.',
+      'Our technicians handle door-to-door treatments in multi-unit buildings.',
+      'We refer you to companies that go door to door.',
+      "We're not able to offer structural fumigation — we refer you out.",
+      'Wildlife removal is offered by licensed trappers in your county.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    }
+    // The contracted copula must not swallow the POSSESSIVE reading, and the
+    // label separator stays treatment-context-gated.
+    for (const body of [
+      "The treatment's safe handling instructions are on the label.",
+      "Read the product's safe storage guidelines before use.",
+      "The treatment's not safe for unsupervised pets.",
+      'Paint drying time: 30 minutes.',
+      'The EPA says approval was denied for that product.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    }
+    // The approved idiom itself is unaffected by the wet-state guard.
+    for (const body of [
+      'The treatment is safe once dry. Your technician confirms the timing.',
+      'The area is safe after it dries. Your technician confirms re-entry timing.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    }
+  });
+
   test('escaped quotes inside MDX expression props survive extraction (Codex PR r15)', () => {
     const r = guardrails.evaluate({ body: "<BottomLineBox verdict={'Waves\\' treatment is safe for pets > ordinary products.'} />" }, {});
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);

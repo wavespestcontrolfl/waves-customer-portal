@@ -2919,6 +2919,12 @@ const REENTRY_QUALIFIER_SRC = "(?:(?:about|around|roughly|approximately|between|
 // preposition that takes an object (Codex PR r17: "you may re-enter the
 // treated area 30 minutes later"). Same fixed figure, nothing after it.
 const REENTRY_AFTER_TAIL_SRC = "(?:afterwards?|after|following|later)";
+// The contracted copula is PREDICATIVE-only (Codex PR r22). "The treatment's
+// safe." is the same unconditional claim as "is safe", but `'s` is ambiguous
+// with the possessive, so the adjective must close a clause or take a
+// predicative complement. This keeps "the treatment's safe handling
+// instructions" — a possessive NOUN phrase, not a claim — out of the code.
+const REENTRY_PREDICATIVE_TAIL_SRC = "(?=\\s*(?:[.,;:!?)\\]\"”]|$)|\\s+(?:for|to|around|near|with|when|once|after|because|since|so|but|yet|if|unless|while)\\b)";
 // Drying-duration forms with no intrinsic re-entry word require PESTICIDE
 // context in the sentence (Codex PR r5): "Paint drying takes 30 minutes"
 // and "the caulk needs 30 minutes to dry" are home-maintenance advice —
@@ -2956,6 +2962,12 @@ const REENTRY_SAFETY_SRCS = [
   // (Codex PR r11: "The pesticide, when used as directed, is safe" is
   // label-style wording of the same claim).
   `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?|surfaces?|rooms?|turf|grass|homes?|houses?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)(?:,\\s*[^,.!?\\n]{0,40},)?\\s+(?:\\w+\\s+){0,2}?${REENTRY_LINKING_VERB_SRC}\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`,
+  // CONTRACTED copula (Codex PR r22): "The treatment's safe." is the copular
+  // claim above with `is` contracted — generated copy could bypass the whole
+  // predicate by dropping two characters. Straight and curly apostrophes.
+  // The predicative tail is what separates this from the possessive reading;
+  // negation stays outside via the same filler guard.
+  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|lawns?|yards?|areas?|surfaces?|rooms?|turf|grass|homes?|houses?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)['’]s\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)${REENTRY_PREDICATIVE_TAIL_SRC}`,
   // Abstract service nouns (service/program/plan) only count as pesticide
   // subjects with treatment context in the sentence (Codex PR r6: "your
   // service plan is safe from price increases" is not a pesticide claim;
@@ -3004,6 +3016,15 @@ const REENTRY_SAFETY_SRCS = [
   // approv\w+ also matches the bare noun ("EPA approval …"), so this
   // matcher carries the same postpositive-denial guard (Codex PR r8).
   "\\b(?:the\\s+)?EPA\\s+(?:has\\s+|have\\s+|had\\s+)?(?:approv\\w+|grant\\w+\\s+(?:its\\s+)?approval)\\b(?!(?:[^.!?\\n]){0,30}?\\b(?:not|never|denied|denies|refused|rejected|revoked|revokes|withdrawn|withdrew|withheld|isn['’]?t|wasn['’]?t|aren['’]?t)\\b)",
+  // AGENCY-SUBJECT reporting paraphrases (Codex PR r22): "The EPA considers
+  // this pesticide approved for residential use", "The EPA says this product
+  // is approved for homes". The matcher above requires `approv` immediately
+  // after EPA, so a bounded reporting clause in between hid the claim — which
+  // still represents a pesticide as EPA-approved, in the voice of the agency
+  // itself. The inner gap refuses denial words so "the EPA says approval was
+  // denied" stays accurate negated copy, and the postpositive guard matches
+  // the sibling branches.
+  `\\b(?:the\\s+)?EPA\\s+(?:has\\s+|have\\s+|had\\s+)?(?:considers?|considered|says?|said|states?|stated|reports?|reported|deems?|deemed|finds?|found|confirms?|confirmed|lists?|listed|classif(?:ies|ied)|regards?|regarded|treats?|treated|maintains?|maintained)\\b(?:(?!\\b(?:${NEGATION_WORD_SRC}|denied|denies|deny|refused|refuses|rejected|rejects|revoked|revokes|withdrawn|withdrew|withheld)\\b)[^.!?\\n]){0,40}?\\bapproved\\b(?!(?:[^.!?\\n]){0,30}?\\b(?:not|never|denied|denies|refused|rejected|revoked|revokes|withdrawn|withdrew|withheld|isn['’]?t|wasn['’]?t|aren['’]?t)\\b)`,
   // The noun forms honor POSTPOSITIVE denials too (Codex PR r8): "EPA
   // approval was not granted / was later revoked" is accurate negated
   // copy — the loop's negation guard only looks BEFORE the match.
@@ -3115,7 +3136,13 @@ const REENTRY_SAFETY_SRCS = [
   // drying takes 30 minutes" is maintenance advice). The treatment may sit
   // BETWEEN drying and its verb (Codex PR r6: "Drying the treatment takes
   // 30 minutes"), and "has a drying time of 30 minutes" is the same figure.
-  { src: `\\bdry(?:ing)?(?:\\s+time|\\s+period|\\s+window)?\\b[^.!?\\n]{0,40}?\\b(?:takes?|is|runs?|lasts?)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  // A LABEL separator carries the figure just as plainly as a verb (Codex PR
+  // r22): "Treatment drying time: 30 minutes", "The treatment dry time — 30
+  // minutes". Spec sheets and callout blocks write it this way by default,
+  // and the re-entry label branch already accepted the punctuation form —
+  // only the drying half was verb-gated. Still treatment-context-gated, so
+  // "Paint drying time: 30 minutes" stays maintenance advice.
+  { src: `\\bdry(?:ing)?(?:\\s+time|\\s+period|\\s+window)?\\b[^.!?\\n]{0,40}?(?:\\b(?:takes?|is|runs?|lasts?)\\s+|\\s*[:\\u2014\\u2013-]\\s*)${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   // "dry time" is the same noun as "drying time" (Codex PR r9: "has a
   // dry time of 30 minutes").
   { src: `\\bdry(?:ing)?\\s+(?:times?|periods?|windows?)\\s+of\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
@@ -3142,6 +3169,15 @@ const REENTRY_SAFETY_SRCS = [
 // ("will not be safe until it dries") is unaffected; it never reaches this
 // exemption, the polarity guards handle it.
 const DRY_CONDITION_RE = /\b(?:once|when|after)\b(?:(?!\bwet\b)[^.!?\n]){0,40}?\b(?:fully\s+|completely\s+)?dr(?:y|ies|ied)\b(?!\s*(?:or|and)\s+wet\b)/i;
+// A COMPETING pre-dry condition disqualifies the exemption (Codex PR r22).
+// DRY_CONDITION_RE only refuses "wet" INSIDE its own window, so a wet-state
+// claim sitting BEFORE the dry clause slipped past: "safe while wet and once
+// dry" and "safe before, during, and after it dries" both assert safety
+// during the wet period, which is precisely what the rule exists to forbid.
+// The trailing dry clause there is not the idiom's condition — it is one item
+// in a list that already includes the banned state, so the sentence claims
+// MORE than "safe once dry", not less.
+const WET_STATE_CLAIM_RE = /\b(?:while|when|whether|even\s+(?:when|while|if))\s+(?:it(?:['’]s)?\s+)?(?:still\s+)?wet\b|\bwet\s+(?:or|and)\s+dry\b|\bbefore\s+(?:it\s+|they\s+)?(?:dries|drying|dry\b)|\bbefore\s*,|\bbefore\s+and\s+after\b|\bduring\s+(?:the\s+)?drying\b/i;
 // The confirmation must CONCERN re-entry timing — "your technician
 // confirms the appointment address" is not the idiom's second part, and
 // neither is "confirms the appointment TIME" (Codex PR r6): bare
@@ -3374,7 +3410,11 @@ function reentrySafetyClaimFinding(text) {
       const isSafeClaim = /safe/i.test(m[0]);
       if (isSafeClaim) {
         const neighborhood = s.slice(Math.max(0, m.index - 240), m.index + m[0].length + 240);
-        if (DRY_CONDITION_RE.test(fullSentence) && TECH_CONFIRMS_RE.test(neighborhood)) {
+        if (
+          DRY_CONDITION_RE.test(fullSentence)
+          && !WET_STATE_CLAIM_RE.test(fullSentence)
+          && TECH_CONFIRMS_RE.test(neighborhood)
+        ) {
           if (m.index === re.lastIndex) re.lastIndex += 1;
           continue;
         }
@@ -3405,13 +3445,30 @@ function reentrySafetyClaimFinding(text) {
 // as trapping/removal (Codex PR r5: "our wildlife relocation service",
 // "we offer wildlife exclusion"). "animal control" stays out — it names
 // the county agency in legal referral copy ("contact animal control").
-const BANNED_TOPIC_CORE_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|wildlife\\s+(?:trapping|removal|control|relocation|exclusion|eviction|extraction)|animal\\s+(?:trapping|removal|relocation|exclusion|eviction|extraction)|(?:raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\s+(?:removal|trapping|eviction|exclusion|control|relocation|extraction)|(?:removals?|relocations?|extractions?|trapping|evictions?|exclusions?)\\s+of\\s+(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)|door[-\\s]?to[-\\s]?door)";
+// What the policy actually bans is door-to-door SALES, not the phrase (Codex
+// PR r22). Bare `door-to-door` in the core alternation swept in legitimate
+// operational copy — "door-to-door inspections for condo associations",
+// "door-to-door treatments in multi-unit buildings" — which describes how a
+// route is walked, not a sales channel. This false positive dates to the
+// original W2 commit (6b1765b), not to any later fix. A sales noun is now
+// required; the explicit sell/market/canvass and make/run/send/go/knock
+// branches below match the topic LITERALLY and are untouched, so "we go door
+// to door" and "Waves sends salespeople door to door" still block.
+const BANNED_TOPIC_D2D_SALES_NOUN_SRC = "(?:sales?|selling|salespeople|salesperson|salesm(?:a|e)n|reps?|representatives?|canvass\\w*|solicit\\w*|marketing|pitch(?:es|ing)?|knocking|quotes?|deals?|offers?|sign[-\\s]?ups?|contracts?|promotions?)";
+const BANNED_TOPIC_CORE_SRC = `(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|wildlife\\s+(?:trapping|removal|control|relocation|exclusion|eviction|extraction|capture)|animal\\s+(?:trapping|removal|relocation|exclusion|eviction|extraction|capture)|(?:raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\s+(?:removal|trapping|eviction|exclusion|control|relocation|extraction|capture)|(?:removals?|relocations?|extractions?|trapping|evictions?|exclusions?|captures?)\\s+of\\s+(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)|door[-\\s]?to[-\\s]?door(?=\\s+${BANNED_TOPIC_D2D_SALES_NOUN_SRC}\\b))`;
 const BANNED_TOPIC_SRC = `(?:${BANNED_TOPIC_CORE_SRC}|insulation)`;
 // The object gap between the service verb and the topic must be
 // negation-guarded exactly like the pre-verb filler — otherwise "We do NOT
 // offer fumigation" matches through the bare "do" verb with "not offer"
 // absorbed by the gap. Hyphens allowed ("whole-structure fumigation").
 const BANNED_TOPIC_GAP_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b)[\\w'’-]+\\s+){0,3}?`;
+// Ordinary CONTRACTIONS are the same first-person subject (Codex PR r22).
+// Every ownership branch anchored on bare `we`, so "We're proud to offer
+// structural fumigation" and "We'll remove raccoons from your attic" — the
+// most natural way to write a service offer — bypassed all of them. Straight
+// and curly apostrophes; `\b` alone would not have helped, since the branches
+// require whitespace after the subject and the apostrophe sits there instead.
+const BANNED_TOPIC_WE_SRC = "we(?:['’](?:re|ll|ve|d))?";
 // Content nouns that make a possessive INFORMATIONAL rather than a
 // service claim (Codex PR r5, extended r6): "our guide to wildlife
 // removal explains…", "our report on wildlife removal…".
@@ -3429,7 +3486,13 @@ const BANNED_TOPIC_ACTION_FILLER_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b|partners?\
 // BANNED_TOPIC_ACTION_FILLER_SRC still police everything else. Negation
 // stays outside it — "we cannot help you remove wildlife" never matches
 // the group, and the filler refuses the negation word behind it.
-const BANNED_TOPIC_AUX_FRAMING_SRC = "(?:(?:can|could|will|would|may)\\s+(?:help|assist)\\s+(?:you\\s+)?|(?:helps?|assists?)\\s+(?:you\\s+)?|(?:are|is|get|gets|got)\\s+(?:fully\\s+|properly\\s+|specially\\s+)?trained\\s+to\\s+|(?:are|is)\\s+(?:able|here|ready|available|equipped|certified|licensed)\\s+to\\s+)?";
+// The leading `are`/`is` is OPTIONAL because a contracted subject absorbs it
+// (Codex PR r22): in "We're ready to insulate your attic" the copula is
+// already spent on the contraction, so requiring it here would have left the
+// contraction fix half-working. The bounded action filler downstream still
+// caps how far these can reach, so a bare "ready to" never spans a
+// third-party subject.
+const BANNED_TOPIC_AUX_FRAMING_SRC = "(?:(?:can|could|will|would|may)\\s+(?:help|assist)\\s+(?:you\\s+)?|(?:helps?|assists?)\\s+(?:you\\s+)?|(?:(?:are|is|get|gets|got)\\s+)?(?:fully\\s+|properly\\s+|specially\\s+)?trained\\s+to\\s+|(?:(?:are|is)\\s+)?(?:able|here|ready|available|equipped|certified|licensed)\\s+to\\s+)?";
 // The insulation object gap must not match THROUGH inspection artifacts
 // (Codex PR r6): "we can provide photos of attic insulation during the
 // inspection" is rodent-inspection copy, not an insulation offering.
@@ -3437,6 +3500,10 @@ const BANNED_TOPIC_AUX_FRAMING_SRC = "(?:(?:can|could|will|would|may)\\s+(?:help
 // "our technicians install traps above attic insulation" installs traps —
 // insulation is merely the location.
 const BANNED_TOPIC_INSULATION_GAP_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b|${BANNED_TOPIC_INFO_NOUN_SRC}\\b|photos?\\b|pictures?\\b|images?\\b|records?\\b|observations?\\b|documentation\\b|videos?\\b|footage\\b|notes?\\b|evidence\\b|traps?\\b|stations?\\b|monitors?\\b|baits?\\b|barriers?\\b|above\\b|below\\b|under\\b|underneath\\b|beneath\\b|behind\\b|over\\b|near\\b|around\\b|beside\\b|atop\\b|inside\\b|into\\b|onto\\b|within\\b)[\\w'’-]+\\s+){0,3}?`;
+// Bounded affirmative passive predicate for the reverse-attribution matcher
+// (Codex PR r22). Negation-guarded in the adverb slot so "is not offered by
+// Waves" never satisfies it — that sentence is the wanted disclosure.
+const BANNED_TOPIC_PASSIVE_PREDICATE_SRC = `(?:\\s+(?:is|are|was|were|(?:can|could|may|will)\\s+be)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)\\w+\\s+){0,1}?(?:offered|provided|performed|handled|delivered|available|scheduled|booked|arranged|completed|done))?`;
 const BANNED_TOPIC_SRCS = [
   // "we/Waves/our team|services offer(s)/include(s)/help(s) with … <topic>"
   // — CORE topics only for the BROAD verbs (see BANNED_TOPIC_CORE_SRC).
@@ -3444,19 +3511,19 @@ const BANNED_TOPIC_SRCS = [
   // "we provide information about wildlife removal" / "Waves provides a
   // guide to wildlife removal" offer CONTENT about the topic, not the
   // service — the same exemption the possessive branch carries.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:(?:proud|pleased|happy|excited|glad|ready)\\s+to\\s+)?(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?|conducts?|manag(?:es?|ing)|carr(?:y|ies|ied)\\s+out)\\s+(?:(?!${NEGATION_WORD_SRC}\\b|${BANNED_TOPIC_INFO_NOUN_SRC}\\b|referrals?\\b|partners?\\b|specialists?\\b)[\\w'’-]+\\s+){0,3}?${BANNED_TOPIC_CORE_SRC}\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))`,
+  `\\b(?:${BANNED_TOPIC_WE_SRC}|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:(?:proud|pleased|happy|excited|glad|ready)\\s+to\\s+)?(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?|conducts?|manag(?:es?|ing)|carr(?:y|ies|ied)\\s+out)\\s+(?:(?!${NEGATION_WORD_SRC}\\b|${BANNED_TOPIC_INFO_NOUN_SRC}\\b|referrals?\\b|partners?\\b|specialists?\\b)[\\w'’-]+\\s+){0,3}?${BANNED_TOPIC_CORE_SRC}\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))`,
   // Insulation with SERVICE-UNAMBIGUOUS verbs only.
   // The insulation branch carries the full offering-verb set (Codex PR
   // r11 audit: "we specialize in attic insulation", "we can help with
   // attic insulation") — handle/tackle stay OUT so the r1 inspection
   // exemption ("handle attic insulation carefully") holds.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:(?:proud|pleased|happy|excited|glad|ready)\\s+to\\s+)?(?:offers?|provides?|sells?|installs?|replaces?|specializ\\w+\\s+in|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|delivers?|conducts?|manag(?:es?|ing)|carr(?:y|ies|ied)\\s+out)\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
+  `\\b(?:${BANNED_TOPIC_WE_SRC}|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:(?:proud|pleased|happy|excited|glad|ready)\\s+to\\s+)?(?:offers?|provides?|sells?|installs?|replaces?|specializ\\w+\\s+in|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|delivers?|conducts?|manag(?:es?|ing)|carr(?:y|ies|ied)\\s+out)\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
   // Work/project phrasing is an unambiguous insulation OFFERING even with
   // the broad verbs the bare-noun branch excludes (Codex PR r6): "we
   // perform attic insulation work" — the trailing work-noun is what
   // separates it from the legal "handle attic insulation carefully"
   // inspection copy.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:do(?:es)?\\b|perform\\w*|complet\\w*|handles?|tackles?)\\s+${BANNED_TOPIC_GAP_SRC}insulation\\s+(?:work|projects?|jobs?|installs?|installations?|services?|upgrades?)\\b`,
+  `\\b(?:${BANNED_TOPIC_WE_SRC}|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:do(?:es)?\\b|perform\\w*|complet\\w*|handles?|tackles?)\\s+${BANNED_TOPIC_GAP_SRC}insulation\\s+(?:work|projects?|jobs?|installs?|installations?|services?|upgrades?)\\b`,
   // Bare POSSESSIVE ownership — "our fumigation treatment", "our wildlife
   // removal keeps your attic quiet", with or without a service noun (Codex
   // PR r1) and with bounded, negation-guarded modifiers ("our professional
@@ -3477,35 +3544,35 @@ const BANNED_TOPIC_SRCS = [
   // technicians trap wildlife", "we remove raccoons", "we sell
   // door-to-door" — ownership expressed through the ACTION verb rather
   // than offer/provide.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}installs?\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_AUX_FRAMING_SRC}${BANNED_TOPIC_ACTION_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|captur\\w+|evicts?|extracts?|extracting|clears?|clearing|rids?|ridding|eliminat\\w+|eradicat\\w+)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
+  `\\b(?:${BANNED_TOPIC_WE_SRC}|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}installs?\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
+  `\\b(?:${BANNED_TOPIC_WE_SRC}|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_AUX_FRAMING_SRC}${BANNED_TOPIC_ACTION_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|captur\\w+|evicts?|extracts?|extracting|clears?|clearing|rids?|ridding|eliminat\\w+|eradicat\\w+)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
   // EXCLUDE also means "omit" (Codex PR r6): only a physical
   // location/entry-point tail makes it the wildlife-exclusion service —
   // "we exclude wildlife examples from this comparison" stays legal.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}exclud(?:es?|ing)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b[^.!?\\n]{0,30}?\\b(?:from\\b[^.!?\\n]{0,20}?\\b(?:attics?|homes?|houses?|structures?|buildings?|crawl\\s?spaces?|soffits?|roofs?|eaves|walls?|properties|property|gara?ges?|sheds?|yards?|chimneys?|vents?)|entry\\s+points?)\\b`,
+  `\\b(?:${BANNED_TOPIC_WE_SRC}|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}exclud(?:es?|ing)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b[^.!?\\n]{0,30}?\\b(?:from\\b[^.!?\\n]{0,20}?\\b(?:attics?|homes?|houses?|structures?|buildings?|crawl\\s?spaces?|soffits?|roofs?|eaves|walls?|properties|property|gara?ges?|sheds?|yards?|chimneys?|vents?)|entry\\s+points?)\\b`,
   // Get-out paraphrase of wildlife removal: "we get raccoons out of your
   // attic", "our team gets squirrels out" (Codex PR r3).
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}(?:get(?:s|ting)?|took|take(?:s|n|ing)?)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b[^.!?\\n]{0,20}?\\bout\\b`,
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:sell|market|canvass)\\w*\\s+${BANNED_TOPIC_GAP_SRC}door[-\\s]?to[-\\s]?door\\b`,
+  `\\b(?:${BANNED_TOPIC_WE_SRC}|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}(?:get(?:s|ting)?|took|take(?:s|n|ing)?)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b[^.!?\\n]{0,20}?\\bout\\b`,
+  `\\b(?:${BANNED_TOPIC_WE_SRC}|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:sell|market|canvass)\\w*\\s+${BANNED_TOPIC_GAP_SRC}door[-\\s]?to[-\\s]?door\\b`,
   // The insulation VERB is the same offering as the noun (Codex PR r21):
   // "we insulate attics", "our technicians can insulate your attic". The
   // aux-framing group rides along so the can/are-trained-to forms are
   // covered; an OBJECT is required so informational verb use ("insulating
   // an attic reduces…") has no first-person service anchor.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_AUX_FRAMING_SRC}${BANNED_TOPIC_ACTION_FILLER_SRC}insulates?\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w'’-]+\\s+){0,2}?(?:attics?|homes?|houses?|crawl\\s?spaces?|walls?|ceilings?|garages?|properties|property)\\b`,
+  `\\b(?:${BANNED_TOPIC_WE_SRC}|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_AUX_FRAMING_SRC}${BANNED_TOPIC_ACTION_FILLER_SRC}insulates?\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w'’-]+\\s+){0,2}?(?:attics?|homes?|houses?|crawl\\s?spaces?|walls?|ceilings?|garages?|properties|property)\\b`,
   // NOUN-FIRST and dispatch forms (Codex PR r17): "we make door-to-door
   // sales", "Waves sends salespeople door to door", "our team goes door to
   // door". The sales noun follows the topic here, so the sell/market/canvass
   // verb above never fires. The verb set stays EXPLICIT rather than matching
   // any first-person sentence containing the topic, so third-party prose
   // ("we refer you to companies that go door to door") is not swept in.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|reps?|salespeople))\\s+${NON_NEGATED_FILLER_SRC}(?:makes?|made|do(?:es)?|did|runs?|ran|uses?|used|sends?|sent|goes|go|went|knocks?)\\s+${BANNED_TOPIC_GAP_SRC}door[-\\s]?to[-\\s]?door\\b`,
+  `\\b(?:${BANNED_TOPIC_WE_SRC}|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|reps?|salespeople))\\s+${NON_NEGATED_FILLER_SRC}(?:makes?|made|do(?:es)?|did|runs?|ran|uses?|used|sends?|sent|goes|go|went|knocks?)\\s+${BANNED_TOPIC_GAP_SRC}door[-\\s]?to[-\\s]?door\\b`,
   // Direct banned-service verbs: "we fumigate homes", "our technicians
   // tent homes across Sarasota" — ownership expressed as the action itself.
   // The trailing guard keeps noun usage reached through the filler out
   // ("we offer fumigation REFERRALS" — Codex PR r11 audit); the \b stops
   // \w+ backtracking around the lookahead.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:fumigat\\w+|tents?\\b)\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))`,
+  `\\b(?:${BANNED_TOPIC_WE_SRC}|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:fumigat\\w+|tents?\\b)\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))`,
   // "schedule/book (your) fumigation …" — on OUR pages a bare CTA presents
   // the topic as our service even without "with us" (Codex audit). A
   // THIRD-PARTY referral stays legal via the negative lookahead: "schedule
@@ -3524,7 +3591,15 @@ const BANNED_TOPIC_SRCS = [
   // A denial immediately after the attribution keeps educational copy
   // legal (Codex PR r14: "Wildlife removal by Waves Pest Control is not
   // available").
-  `(?<!\\b(?:tips?|advice|guides?|information|articles?|posts?|reports?|research|questions?)\\s+(?:on|about|regarding|for)\\s+)\\b${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))(?:\\s+(?:services?|solutions?|programs?|options?|work))?\\s*(?:\\||[-–—:]|\\bby\\b|\\bfrom\\b|\\bwith\\b)\\s*(?:waves(?:\\s+pest\\s+control)?|us)\\b(?!(?:[^.!?\\n]){0,40}?\\b(?:not|never|isn['’]?t|aren['’]?t|unavailable|no\\s+longer)\\b)`,
+  // An affirmative PASSIVE predicate may sit between the topic and the
+  // attribution (Codex PR r22): "Wildlife removal is offered by Waves",
+  // "Structural fumigation can be booked through Waves". The matcher wanted
+  // the connector immediately after the topic, so the most natural passive
+  // phrasing of an offer slipped through. The predicate slot is
+  // negation-guarded and `through` joins the connectors, so denials
+  // ("is not offered by Waves") still fail the predicate and then fail the
+  // bare-connector reading too.
+  `(?<!\\b(?:tips?|advice|guides?|information|articles?|posts?|reports?|research|questions?)\\s+(?:on|about|regarding|for)\\s+)\\b${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))(?:\\s+(?:services?|solutions?|programs?|options?|work))?${BANNED_TOPIC_PASSIVE_PREDICATE_SRC}\\s*(?:\\||[-–—:]|\\bby\\b|\\bfrom\\b|\\bwith\\b|\\bthrough\\b)\\s*(?:waves(?:\\s+pest\\s+control)?|us)\\b(?!(?:[^.!?\\n]){0,40}?\\b(?:not|never|isn['’]?t|aren['’]?t|unavailable|no\\s+longer)\\b)`,
   // Standalone transactional service LISTINGS on our surfaces present
   // the banned topic as ours even without we/Waves (Codex PR r16:
   // "Professional raccoon removal services in Sarasota. Schedule
