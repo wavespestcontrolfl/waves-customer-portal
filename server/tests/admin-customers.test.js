@@ -75,6 +75,14 @@ describe('stageLifecycleStamps', () => {
     expect(s).not.toHaveProperty('member_since');
   });
 
+  test('lateral archive moves preserve churn history (past_customer → dormant/lost)', () => {
+    const toDormant = stageLifecycleStamps('past_customer', 'dormant', { churned_at: '2026-03-01' }, { today: TODAY });
+    expect(toDormant).not.toHaveProperty('churned_at');
+    expect(toDormant).not.toHaveProperty('churn_reason');
+    const toLost = stageLifecycleStamps('past_customer', 'lost', { churned_at: '2026-03-01' }, { today: TODAY });
+    expect(toLost).not.toHaveProperty('churned_at');
+  });
+
   test('reactivating OUT of past_customer still clears a preserved churn stamp', () => {
     const s = stageLifecycleStamps('past_customer', 'active_customer', { member_since: '2025-01-01', churned_at: '2026-03-01' }, { today: TODAY });
     expect(s.churned_at).toBeNull();

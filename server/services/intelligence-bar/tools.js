@@ -1248,10 +1248,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
         "CASE WHEN pipeline_stage = 'churned' THEN churned_at ELSE ? END", [etDateString()]);
       stageStamp.churn_reason = db.raw(
         "CASE WHEN pipeline_stage = 'churned' THEN churn_reason ELSE NULL END");
-    } else if (clean.pipeline_stage !== 'past_customer') {
-      stageStamp.churned_at = null;
-      stageStamp.churn_reason = null;
     }
+    // Any other non-live target (past_customer/dormant/lost/lead stages):
+    // archival/lateral move — churn history preserved until a REAL
+    // reactivation into a live stage (codex #3282 r3, mirrors
+    // stageLifecycleStamps).
   }
 
   // notes maps to free-text crm_notes — redact from logs (see updateCustomer).
