@@ -8131,8 +8131,21 @@ const CallRecordingProcessor = {
                 }
                 currentStampedLeadId = null;
               }
-              const { prior, written } = snapshotStampedLeadStates(current, leadUpdates);
               enriched = await db.transaction(async (trx) => {
+                // Snapshot under a ROW LOCK inside the same transaction that
+                // stamps and updates (codex P2 r16): two concurrent
+                // phone-less calls reusing one lead could both derive their
+                // baseline from the pre-both row, and the later call's
+                // rejection would then restore a snapshot that erases the
+                // earlier call's committed enrichment. The locked read
+                // serializes stampers so each baseline reflects committed
+                // state; the loop's `current` stays the fill-only decision
+                // basis (identity races are the guarded write's job).
+                const lockedLead = await trx('leads')
+                  .where({ id: leadId })
+                  .forUpdate()
+                  .first();
+                const { prior, written } = snapshotStampedLeadStates(lockedLead || current, leadUpdates);
                 const stamped = await trx('call_log')
                   .where({ id: call.id })
                   .where('processing_token', procToken)

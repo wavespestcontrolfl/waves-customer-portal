@@ -232,6 +232,10 @@ function shapeCallLog(row) {
     customerId: row.customer_id || null,
     customerName: [row.customer_first_name, row.customer_last_name].filter(Boolean).join(' ') || null,
     leadId: row.lead_id || null,
+    // The joined lead's owner: a phone-less reused lead converted/assigned
+    // after the call leaves call_log.customer_id null while the lead knows
+    // its customer — attribution needs it (codex P2, PR #3275).
+    leadCustomerId: row.lead_customer_id || null,
     leadSourceName: row.lead_source_name || null,
     googleAdsCallResourceName: row.google_ads_call_resource_name || null,
     googleAdsBridgedAt: row.google_ads_bridged_at || null,
@@ -350,8 +354,13 @@ async function fetchCrmCalls(days = 30) {
     // an equal-score second candidate → false ambiguity; dedupeCrmCallRows
     // below collapses to one row per call, sid-linked lead winning.
     .leftJoin('leads as l', function joinLeadForCall() {
-      this.on('c.twilio_call_sid', 'l.twilio_call_sid')
-        .orOn(db.raw("c.metadata->>'lead_id' = l.id::text"));
+      this.on(function linkageArms() {
+        this.on('c.twilio_call_sid', 'l.twilio_call_sid')
+          .orOn(db.raw("c.metadata->>'lead_id' = l.id::text"));
+      // A soft-deleted lead must never ride the join into attribution —
+      // findLeadForCall enforces whereNull(deleted_at), and the joined
+      // shortcut must match its eligibility (codex P2, PR #3275).
+      }).andOn(db.raw('l.deleted_at IS NULL'));
     })
     .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
     .where('c.direction', 'inbound')
@@ -362,6 +371,7 @@ async function fetchCrmCalls(days = 30) {
       'cu.first_name as customer_first_name',
       'cu.last_name as customer_last_name',
       'l.id as lead_id',
+      'l.customer_id as lead_customer_id',
       'l.twilio_call_sid as lead_call_sid',
       'ls.name as lead_source_name',
     )
@@ -430,6 +440,27 @@ async function ensureBridgeLeadSource() {
       .returning('*');
     return source;
   });
+}
+
+// The JOINED lead (sid- or metadata-stamp-linked in fetchCrmCalls) is
+// authoritative when present — findLeadForCall's plan needs a customer link
+// or a usable caller phone and returns null for exactly the phone-less
+// reused-lead calls the stamp join exists for, so the confirmed Google call
+// never repointed its lead and the unclaimed sweep later recorded that paid
+// lead as organic (codex P1 ×2, PR #3275 — the first fix covered only the
+// already-bridged retry path; the primary ready path is the one that marks
+// the call Google Ads). The joined lead's own customer rides along so
+// writeCallPpcAttribution can create the funnel row for a lead claimed
+// after the call.
+async function joinedOrPlannedLeadMatch(callLog) {
+  if (callLog?.leadId) {
+    return {
+      strategy: 'joined_lead',
+      leadId: callLog.leadId,
+      customerId: callLog.customerId || callLog.leadCustomerId || null,
+    };
+  }
+  return findLeadForCall(callLog);
 }
 
 async function findLeadForCall(callLog) {
@@ -563,7 +594,7 @@ async function applyBridge(options = {}) {
           // lead-matched by phone/customer (recorded in metadata) has it null, so
           // resolve the lead in that case before attributing.
           let backfillLeadId = match.callLog?.leadId || null;
-          let backfillCustomerId = match.callLog?.customerId || null;
+          let backfillCustomerId = match.callLog?.customerId || match.callLog?.leadCustomerId || null;
           if (!backfillLeadId) {
             const lm = await findLeadForCall(match.callLog).catch(() => null);
             if (lm?.leadId) { backfillLeadId = lm.leadId; backfillCustomerId = lm.customerId || backfillCustomerId; }
@@ -582,9 +613,7 @@ async function applyBridge(options = {}) {
         // for; skipping them confirmed the Google call but never repointed
         // its lead, and the unclaimed sweep later recorded that paid lead
         // as organic (codex P1, PR #3275).
-        const leadMatch = match.callLog?.leadId
-          ? { strategy: 'joined_lead', leadId: match.callLog.leadId, customerId: match.callLog.customerId || null }
-          : await findLeadForCall(match.callLog);
+        const leadMatch = await joinedOrPlannedLeadMatch(match.callLog);
         if (!leadMatch?.leadId) {
           skipped.push({ ...match, skipReason: 'lead_not_found' });
           continue;
@@ -628,7 +657,7 @@ async function applyBridge(options = {}) {
         reasons: match.reasons,
         bridgedAt: now.toISOString(),
       };
-      const leadMatch = await findLeadForCall(match.callLog);
+      const leadMatch = await joinedOrPlannedLeadMatch(match.callLog);
       if (leadMatch) {
         await updateLeadAttribution(leadMatch, bridgeSource, now);
         bridgePayload.leadMatch = redactedLeadMatch(leadMatch);
