@@ -1,6 +1,11 @@
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/invoice', () => ({ create: jest.fn() }));
-jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-06-20' }));
+jest.mock('../utils/datetime-et', () => ({
+  // No-arg calls resolve the mocked "today"; date-arg calls format the date,
+  // so Net-N due-date tests can assert actual offsets from mocked today.
+  etDateString: (date) => (date ? date.toISOString().slice(0, 10) : '2026-06-20'),
+  addETDays: (_date, days) => new Date(Date.UTC(2026, 5, 20 + (days || 0))),
+}));
 jest.mock('../routes/admin-customers', () => ({
   ensureCustomerAccount: jest.fn(),
   createDefaultCustomerRows: jest.fn().mockResolvedValue(),
@@ -198,7 +203,21 @@ describe('createProposalAcceptanceInvoice', () => {
     expect(args.lineItems).toHaveLength(3);
     expect(Math.round(2210 * args.taxRate * 100) / 100).toBe(49.7);
     expect(invoice.invoice_number).toBe('WPC-2026-0007');
+    // No authored payment terms → due on receipt (mocked today).
+    expect(args.dueDate).toBe('2026-06-20');
     expect(ops.updates).toHaveLength(0); // already commercial → no re-flag
+  });
+
+  test('authored Net-15 terms push the invoice due date 15 ET days out (codex 1A-i r4 P0)', async () => {
+    InvoiceService.create.mockResolvedValue({ id: 8, invoice_number: 'WPC-2026-0008', total: 1 });
+    const { trx } = makeInvoiceTrx({ propertyType: 'commercial' });
+    await createProposalAcceptanceInvoice({
+      trx,
+      estimate: { id: 42 },
+      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'Net-15 to the management company' } },
+      customerId: 'cust-1',
+    });
+    expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-07-05');
   });
 
   test('flags a non-commercial customer commercial when the proposal is taxable', async () => {

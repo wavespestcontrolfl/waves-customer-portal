@@ -32,7 +32,7 @@
 
 const InvoiceService = require('./invoice');
 const { computeProposalTotals } = require('./estimate-proposal');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const logger = require('./logger');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -334,12 +334,9 @@ async function createProposalAcceptanceInvoice({ trx, estimate, proposal, custom
     notes: `Generated from accepted commercial proposal (estimate #${estimate.id}). `
       + 'Covers one-time items plus the first period of each recurring service; '
       + 'ongoing recurring visits are billed as completed.',
-    // Honor authored Net-N terms. Calendar arithmetic on today's ET date
-    // string — adding 24h blocks to an instant drifts a day across DST.
-    dueDate: (() => {
-      const [y, m, d] = etDateString().split('-').map(Number);
-      return new Date(Date.UTC(y, m - 1, d + proposalNetTermDays(proposal))).toISOString().slice(0, 10);
-    })(),
+    // Honor authored Net-N terms — the shared ET calendar-day helper owns
+    // DST-safe day addition (codex #3297 r1).
+    dueDate: etDateString(addETDays(new Date(), proposalNetTermDays(proposal))),
   });
   logger.info(`[proposal-win] invoice ${invoice.invoice_number} ($${built.total}) from won proposal estimate ${estimate.id}`);
   return invoice;

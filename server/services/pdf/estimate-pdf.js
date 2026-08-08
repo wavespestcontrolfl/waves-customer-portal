@@ -254,12 +254,19 @@ function propertyScopeBlock(ctx, propertyScope, y) {
   y = sectionLabel(doc, 'Property scope', L, y);
   doc.fontSize(10).font('Helvetica');
   for (const item of items) {
+    const labelW = 120;
     const valueW = W - 130;
-    const valueH = doc.heightOfString(item.value, { width: valueW });
-    y = ensureSpace(ctx, y, valueH + 4);
-    doc.font('Helvetica').fillColor(MUTED).text(item.label, L, y, { width: 120 });
+    // An 80-char label wraps in its column — advance by the TALLER column or
+    // the next row paints over the wrapped label (codex #3297 r1).
+    const rowH = Math.max(
+      doc.heightOfString(item.label, { width: labelW }),
+      doc.heightOfString(item.value, { width: valueW }),
+      12,
+    );
+    y = ensureSpace(ctx, y, rowH + 4);
+    doc.font('Helvetica').fillColor(MUTED).text(item.label, L, y, { width: labelW });
     doc.fillColor(INK).text(item.value, L + 130, y, { width: valueW });
-    y += Math.max(valueH, 12) + 2;
+    y += rowH + 2;
   }
   return y + 6;
 }

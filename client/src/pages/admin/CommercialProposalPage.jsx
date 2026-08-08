@@ -93,7 +93,10 @@ function computeTotals(buildings, taxRate, correctiveWork = []) {
   // Structured corrective-work lines fold into the one-time side, exactly
   // like the server's computeProposalTotals — amounts cent-rounded like
   // normalizeCorrectiveWorkItem so the preview shows what will save.
-  for (const w of correctiveWork) {
+  // Same nonblank-label predicate as structuredSectionsPayload: a row typed
+  // amount-first is dropped by the save, so it must not inflate the sidebar
+  // (codex #3297 r1).
+  for (const w of correctiveWork.filter((item) => String(item.label || '').trim())) {
     const amount = roundMoney(w.amount);
     oneTime += amount;
     if (w.taxable) taxableOneTime += amount;

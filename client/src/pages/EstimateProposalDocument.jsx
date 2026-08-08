@@ -517,8 +517,14 @@ export default function EstimateProposalDocument({ data, token }) {
               we&rsquo;ll refresh the numbers with you.
             </p>
           ) : authoredProposal ? (
+            // The stored proposal.accountManager is deliberately NOT rendered
+            // yet: the live page's terminal card and the SSR banner still use
+            // this constant, so an override here would name a different
+            // contact on the PDF than on the link it points to (codex #3297
+            // r1). The per-proposal field ships storage-first; every surface
+            // switches together in the slice that gives it an authoring path.
             <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
-              {proposal?.accountManager || WAVES_ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, will follow up to answer
+              {WAVES_ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, will follow up to answer
               questions and finalize this proposal — or call {WAVES_SUPPORT_PHONE_DISPLAY} any time.
               Your live estimate stays available at{' '}
               <a href={estimateUrl} style={{ color: NAVY }}>{estimateUrl}</a>.
