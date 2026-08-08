@@ -54,6 +54,29 @@ describe('programFamilyForService', () => {
     expect(programFamilyForService('lawn_care')).toBe('lawn');
     expect(programFamilyForService('dethatching')).toBe('lawn');
     expect(programFamilyForService('mystery_service')).toBe('other');
+    // Foam is recurring spot-foam TERMITE work — the truth-scope classifier
+    // treats it as non-pest, and pest inclusions must never attach to it.
+    expect(programFamilyForService('foam_recurring')).toBe('termite');
+    expect(programFamilyForService('foam_drill')).toBe('termite');
+  });
+});
+
+describe('cadence aliases', () => {
+  test('recognizes persisted cadence aliases via the canonical resolver (appsPerYear etc.)', () => {
+    const draft = deriveProposalDraft({
+      estimate_data: {
+        result: {
+          recurring: {
+            services: [
+              { service: 'commercial_tree_shrub', name: 'Tree & Shrub', appsPerYear: 6, annualAfterDiscount: 540 },
+            ],
+          },
+        },
+      },
+    });
+    expect(draft.programs).toHaveLength(1);
+    expect(draft.programs[0]).toMatchObject({ service: 'tree_shrub', frequencyPerYear: 6, pricePerApplication: 90 });
+    expect(draft.warnings).toEqual([]);
   });
 });
 

@@ -189,6 +189,11 @@ export default function CommercialProposalPage() {
   const [markingWon, setMarkingWon] = useState(false);
   const [error, setError] = useState(null);
   const [savedOnce, setSavedOnce] = useState(false);
+  // True when the LOADED proposal was operator-authored (enabled, not the
+  // synthesized fallback) — the fallback's building lines are the server's
+  // own generated rows, and generation must not treat them as authored
+  // content it refuses to replace (codex 1A-ii r1).
+  const [loadedAuthored, setLoadedAuthored] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
 
@@ -284,6 +289,7 @@ export default function CommercialProposalPage() {
     setProspectBrief(data.prospectBrief || null);
     // An already-authored proposal means download/send are meaningful now.
     setSavedOnce(p.enabled === true);
+    setLoadedAuthored(p.enabled === true && p.synthesized !== true);
     setDirty(false);
   }, []);
 
@@ -337,9 +343,12 @@ export default function CommercialProposalPage() {
       // NEVER install programs over an authored building itemization —
       // programs mode omits buildings from the save, so generating here
       // would silently erase the prior lines and rewrite the totals
-      // (pre-push codex P0). The operator clears the building lines first
-      // to switch modes.
-      const hasAuthoredBuildingLines = live.buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim()));
+      // (pre-push codex P0). Lines count as authored only when the loaded
+      // proposal was actually operator-authored or the operator edited this
+      // session — a never-saved draft shows the server's SYNTHESIZED
+      // fallback lines, which generation may freely replace (codex 1A-ii r1).
+      const hasAuthoredBuildingLines = (live.loadedAuthored || live.dirty)
+        && live.buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim()));
       if (draft?.programs?.length && !live.programsState.some((p) => p.label.trim()) && !hasAuthoredBuildingLines) {
         setProgramsState(draft.programs.map((program) => ({
           service: program.service,
@@ -414,6 +423,7 @@ export default function CommercialProposalPage() {
   formRef.current = {
     title, preparedFor, propertyAddress, taxRate, terms,
     buildings, scopeItems, programsState, correctiveWork, responsibilitiesText, commercialTerms,
+    loadedAuthored, dirty,
   };
 
   // Structured sections serialize only when actually authored — an empty
@@ -428,7 +438,10 @@ export default function CommercialProposalPage() {
       .map((p) => ({
         service: p.service,
         label: p.label.trim(),
-        frequencyPerYear: Math.round(Number(p.frequencyPerYear)),
+        // UNROUNDED — a fractional entry (4.5) must reach the server's
+        // whole-number validation and 400, never silently round to a
+        // different promised cadence (codex 1A-ii r1).
+        frequencyPerYear: Number(p.frequencyPerYear),
         pricePerApplication: Number(p.pricePerApplication) || 0,
         taxable: p.taxable === true,
         note: p.note.trim() || null,

@@ -22,16 +22,24 @@
 // "quoted separately", which promises nothing.
 // ============================================================
 
+// Canonical cadence resolver — recognizes the persisted aliases
+// (visitsPerYear/appsPerYear/visits/apps/treatmentsPerYear) so palm/T&S
+// rows aren't misreported as cadence-less (codex 1A-ii r1).
+const { visitsPerYearForRecurringService } = require('./estimate-converter');
+
 // Engine service key → proposal program family. Prefix/substring match on
 // the pricing-engine vocabulary (pest_control, commercial_pest,
-// german_roach_initial, commercial_termite_bait, …).
+// german_roach_initial, commercial_termite_bait, …). Foam is TERMITE work
+// (recurring spot-foam program) — the truth-scope classifier in
+// estimate-public.js treats it as non-pest for the same reason (codex
+// 1A-ii r1: pest inclusions must never attach to a foam program).
 const FAMILY_MATCHERS = [
-  ['termite', /termite|preslab|bora_care|wdo/],
+  ['termite', /termite|preslab|bora_care|wdo|foam/],
   ['rodent', /rodent|exclusion/],
   ['mosquito', /mosquito/],
   ['tree_shrub', /tree_shrub|palm|ornamental/],
   ['lawn', /lawn|turf|dethatch|aerat/],
-  ['pest', /pest|roach|flea|bed_bug|wasp|ant|spider|foam/],
+  ['pest', /pest|roach|flea|bed_bug|wasp|ant|spider/],
 ];
 
 function programFamilyForService(serviceKey) {
@@ -194,12 +202,12 @@ function derivePrograms(estimateData, estimate = {}) {
     ? engineResult.recurring.services
     : (Array.isArray(engineResult.lineItems)
       ? engineResult.lineItems.map((line) => ({
+        // Spread first so the canonical cadence resolver sees every
+        // persisted alias (appsPerYear/visits/apps/treatmentsPerYear).
+        ...line,
         service: line.service ?? line.name,
         name: line.displayName ?? line.name ?? line.service,
-        visitsPerYear: line.visitsPerYear,
         annualAfterDiscount: line.annualAfterDiscount ?? line.annual,
-        manualFinalAnnual: line.manualFinalAnnual,
-        taxable: line.taxable,
       }))
       : []);
   const programs = [];
@@ -209,7 +217,7 @@ function derivePrograms(estimateData, estimate = {}) {
     warning: `Programs were not generated: ${reason} Author the programs manually so every priced service is represented.`,
   });
   for (const row of rows) {
-    const visits = Math.round(num(row.visitsPerYear) || 0);
+    const visits = Math.round(visitsPerYearForRecurringService(row) || 0);
     // The engine's discounted annual is the PRICING AUTHORITY (manual
     // discounts included) — normalizeProgram derives annual as price ×
     // frequency, so the per-application price MUST come from that annual
