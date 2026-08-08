@@ -658,3 +658,30 @@ describe('reaffirmedFilledLeadFields — successor ownership of restated fills',
     expect(reaffirmedFilledLeadFields({ email: 'a@b.com' }, null)).toEqual({});
   });
 });
+
+describe('reaffirmedFilledLeadFields — sequential restatement (raw extraction contract)', () => {
+  const { reaffirmedFilledLeadFields } = CallRecordingProcessor._test;
+
+  test('claims a field the fill-only payload never contained (predecessor filled it on an earlier call)', () => {
+    // The call site passes RAW extracted identity values — leadUpdates
+    // would have omitted email entirely because `current` already carried
+    // it, which is the normal sequential restatement the claim exists for.
+    const rawExtractionShaped = {
+      phone: null, first_name: 'jeff', last_name: 'brooks',
+      email: 'jbrooks00005@gmail.com', address: undefined, city: undefined, zip: undefined,
+    };
+    const out = reaffirmedFilledLeadFields(rawExtractionShaped, {
+      email: 'JBrooks00005@gmail.com', first_name: 'Jeff', last_name: 'Brooks',
+      phone: '+19415550134', address: '6903 Winners Cir',
+    });
+    expect(out).toEqual({
+      email: 'JBrooks00005@gmail.com',
+      first_name: 'Jeff',
+      last_name: 'Brooks',
+    });
+    // null/undefined supplied values (phone, address) claim nothing even
+    // though the lead carries values there.
+    expect(out).not.toHaveProperty('phone');
+    expect(out).not.toHaveProperty('address');
+  });
+});

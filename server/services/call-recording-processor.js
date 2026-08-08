@@ -2404,19 +2404,23 @@ function dropFilledLeadColumns(leadUpdates, lockedLead) {
   return out;
 }
 
-// Fill-only fields this pass's extraction SUPPLIED that were dropped because
-// the lead already carries the SAME value — the caller REAFFIRMED it on this
-// call (codex P1 r4). These must enter this call's lead_written_state (as
-// the lead's current value, prior = the same, so this call's own rejection
-// no-ops the field): without the claim, a PREDECESSOR call later reprocessed
-// as spam/voicemail/vetoed sees no successor ownership and restores the
-// field to its old baseline — often null — erasing a value an ACCEPTED
-// later call independently stated. A supplied value that DIFFERS from the
-// lead's is not a reaffirmation and claims nothing. Phone compares on the
-// last 10 digits; other identity fields case-insensitively.
-function reaffirmedFilledLeadFields(leadUpdates, lockedLead) {
+// Fill-only fields this pass's extraction SUPPLIED whose value the lead
+// ALREADY carries — the caller REAFFIRMED them on this call (codex P1
+// r4/r5). Called with the RAW extracted identity values, never the
+// fill-only payload: a field the predecessor filled on an EARLIER call is
+// omitted from leadUpdates at construction (the normal sequential
+// restatement), not just dropped under the lock (the concurrent fill).
+// Reaffirmed fields must enter this call's lead_written_state (as the
+// lead's current value, prior = the same, so this call's own rejection
+// no-ops the field): without the claim, a PREDECESSOR call later
+// reprocessed as spam/voicemail/vetoed sees no successor ownership and
+// restores the field to its old baseline — often null — erasing a value
+// an ACCEPTED later call independently stated. A supplied value that
+// DIFFERS from the lead's is not a reaffirmation and claims nothing.
+// Phone compares on the last 10 digits; other fields case-insensitively.
+function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
   const out = {};
-  if (!lockedLead || !leadUpdates) return out;
+  if (!lockedLead || !suppliedValues) return out;
   const norm = (f, v) => {
     const s = String(v == null ? '' : v).trim().toLowerCase();
     if (f === 'phone') {
@@ -2426,10 +2430,10 @@ function reaffirmedFilledLeadFields(leadUpdates, lockedLead) {
     return s;
   };
   for (const f of FILL_ONLY_LEAD_FIELDS) {
-    if (!Object.prototype.hasOwnProperty.call(leadUpdates, f)) continue;
+    if (!Object.prototype.hasOwnProperty.call(suppliedValues, f)) continue;
     const lockedVal = lockedLead[f];
     if (lockedVal === null || lockedVal === undefined || lockedVal === '') continue;
-    const supplied = norm(f, leadUpdates[f]);
+    const supplied = norm(f, suppliedValues[f]);
     if (supplied && supplied === norm(f, lockedVal)) out[f] = lockedVal;
   }
   return out;
@@ -8508,7 +8512,23 @@ const CallRecordingProcessor = {
                 // CURRENT value with prior = the same — its own rejection
                 // no-ops the field, but a predecessor's rejection now sees
                 // a live successor owner and leaves the value alone.
-                for (const [f, v] of Object.entries(reaffirmedFilledLeadFields(leadUpdates, lockedLead))) {
+                // Supplied values come from THIS call's RAW extraction, not
+                // from leadUpdates (codex P1 r5): the fill-only
+                // construction above already omitted every field the lead
+                // carried at the pre-lock read — which is exactly the
+                // normal sequential restatement (predecessor filled it on
+                // an earlier call) the claim exists for. leadUpdates only
+                // ever catches the concurrent fill between read and lock.
+                const suppliedIdentity = {
+                  phone,
+                  first_name: extracted.first_name,
+                  last_name: extracted.last_name,
+                  email: extracted.email,
+                  address: extracted.address_line1,
+                  city: extracted.city,
+                  zip: extracted.zip,
+                };
+                for (const [f, v] of Object.entries(reaffirmedFilledLeadFields(suppliedIdentity, lockedLead))) {
                   const sv = serializeStampedLeadValue(f, v);
                   written[f] = sv;
                   prior[f] = sv;
