@@ -3114,9 +3114,11 @@ function normalizeHardCopyText(text) {
     // the values stay in the scanned text.
     .replace(/<\/?[a-zA-Z][^>\n]*>/g, (tag) => {
       const vals = [];
-      const attrRe = /=\s*"([^"]*)"|=\s*'([^']*)'/g;
+      // Bare quoted attrs AND MDX expression-string forms (Codex PR r13
+      // audit b: `verdict={"…is safe for pets."}` renders the same copy).
+      const attrRe = /=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\}|\{\s*`([^`]*)`\s*\})/g;
       let m;
-      while ((m = attrRe.exec(tag)) !== null) vals.push(m[1] ?? m[2]);
+      while ((m = attrRe.exec(tag)) !== null) vals.push(m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5]);
       return vals.length ? ` ${vals.join(' ')} ` : '';
     })
     .replace(/(\*\*|__|~~|[*_`])/g, '');
