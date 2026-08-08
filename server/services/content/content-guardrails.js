@@ -3028,6 +3028,12 @@ const REENTRY_SAFETY_SRCS = [
   // Treatment-context-gated like every other bare drying form, so "After 30
   // minutes, the paint will be dry" stays maintenance advice.
   { src: `\\b(?:after|in|within|once)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,40}?\\bdr(?:y|ies|ied)\\b`, needsTreatmentContext: true },
+  // COMPLETION-style drying figures (Codex PR r20): the claim is phrased as
+  // finishing rather than as a dries-predicate — "will finish drying in 30
+  // minutes", "drying will be complete in 30 minutes". Same fixed figure,
+  // same treatment-context gate.
+  { src: `\\bfinish\\w*\\s+dry\\w*\\b[^.!?\\n]{0,20}?\\b(?:in|within|after|by)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  { src: `\\bdry(?:ing)?\\b[^.!?\\n]{0,30}?\\b(?:complete|completed|finished|done)\\b[^.!?\\n]{0,20}?\\b(?:in|within|after|by)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   // A bounded qualifier may sit between the drying verb and the
   // preposition (Codex PR r8: "dries completely within 45 minutes").
   { src: `\\bdr(?:y|ies|ied)\\s+(?:\\w+\\s+){0,2}?(?:in|within|after|for)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
@@ -3148,6 +3154,42 @@ const TECH_CONFIRMS_RE = new RegExp(
 // this linear, and the alternation branches are disjoint on their first
 // character, so there is no catastrophic backtracking.
 const MDX_EXPR_SRC = '\\{(?:[^{}]|\\{(?:[^{}]|\\{[^{}]{0,400}\\}){0,400}\\}){0,2000}\\}';
+// JS block comments inside an expression prop are NOT rendered, but the
+// shape-agnostic literal scan would happily extract quoted example text out
+// of one (Codex PR r20: `items={[/* Don't say "pet-safe" */ …]}`). The later
+// comment pass can't help — the tag is already consumed. Stripped with a
+// scanner rather than a regex because the delimiters must be honored ONLY
+// outside string literals: a `/*` inside a quoted value is rendered copy and
+// is copied through verbatim, escapes included.
+function stripExpressionComments(s) {
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      out += ch;
+      i += 1;
+      while (i < s.length) {
+        if (s[i] === '\\') { out += s.slice(i, i + 2); i += 2; continue; }
+        out += s[i];
+        i += 1;
+        if (s[i - 1] === ch) break;
+      }
+      continue;
+    }
+    if (ch === '/' && s[i + 1] === '*') {
+      i += 2;
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i += 1;
+      i += 2;
+      out += ' ';
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 const MDX_TAG_RE = new RegExp(
   `<\\/?[a-zA-Z](?:"(?:[^"\\\\\\n]|\\\\.)*"|'(?:[^'\\\\\\n]|\\\\.)*'|${MDX_EXPR_SRC}|[^>"'{\\n])*>`,
   'g',
@@ -3166,7 +3208,7 @@ function normalizeHardCopyText(text) {
     // the values stay in the scanned text.
     // Quote-aware tag scan (Codex PR r14): a `>` inside a quoted prop
     // must not terminate the tag early or the value's prefix is dropped.
-    .replace(MDX_TAG_RE, (tag) => {
+    .replace(MDX_TAG_RE, (rawTag) => {
       // The two tag families differ in what actually RENDERS, so they get
       // different extraction (Codex PR r18).
       //
@@ -3182,7 +3224,8 @@ function normalizeHardCopyText(text) {
       // `href` never reach the reader, so scanning them rejects compliant
       // drafts over a CSS class ("pet-safe-layout"). Only genuinely visible
       // attributes count there.
-      const name = /^<\/?\s*([a-zA-Z][\w.-]*)/.exec(tag)?.[1] || '';
+      const name = /^<\/?\s*([a-zA-Z][\w.-]*)/.exec(rawTag)?.[1] || '';
+      const tag = stripExpressionComments(rawTag);
       const vals = [];
       // Escape-aware in EVERY arm: quotes since Codex PR r15
       // (`{'Waves\' treatment…'}`), backticks since r18 — a `\`` inside a
@@ -3231,6 +3274,12 @@ function normalizeHardCopyText(text) {
     .replace(/&(amp|lt|gt|quot|apos|nbsp|ndash|mdash|hyphen|dash|minus);/g, (m, name) => ({
       amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', hyphen: '-', dash: '-', minus: '-',
     }[name] || m))
+    // Unicode hyphen/dash variants render as the same compound the ASCII
+    // patterns look for (Codex PR r20: `pet‑safe` U+2011, `pet–safe`,
+    // `EPA‑approved`, `door‑to‑door`) and survive pasted or model-generated
+    // copy routinely. Folded to ASCII `-` AFTER the entity decode, since
+    // `&ndash;`/`&mdash;` land here as the literal characters.
+    .replace(/[‐-―⁃−﹘﹣－]/g, '-')
     // CommonMark backslash escapes render as the bare punctuation (Codex
     // PR r17: `pet\-safe` and `EPA\-approved` render as the prohibited
     // claims), so unescape before the classifiers tokenize. AFTER the

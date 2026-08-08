@@ -3253,6 +3253,35 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     }
   });
 
+  test('completion-style drying and Unicode dashes block; expression comments do not (Codex PR r20)', () => {
+    for (const body of [
+      // The figure phrased as finishing rather than a dries-predicate.
+      'The treatment will finish drying in 30 minutes.',
+      'The treatment finishes drying after 30 minutes.',
+      'Treatment drying will be complete in 30 minutes.',
+      // Unicode hyphen/dash variants render as the same compounds.
+      'The treatment is pet‑safe.',
+      'The treatment is pet–safe.',
+      'The treatment is pet—safe.',
+      'The pesticide is EPA‑approved.',
+      // Comment delimiters INSIDE a rendered string are still copy.
+      '<BottomLineBox verdict={"/* The treatment is pet-safe. */"} />',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    // The banned-topic compound folds the same way.
+    const d2d = guardrails.evaluate({ body: 'We sell door‑to‑door across Bradenton.' }, {});
+    expect(d2d.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    // A JS block comment inside an expression prop is not rendered — its
+    // quoted example text must not be extracted as copy.
+    const exprComment = guardrails.evaluate({ body: '<PestEvidenceGrid items={[/* Don\'t say "pet-safe" */ { label: "Ordinary copy" }]} />' }, {});
+    expect(exprComment.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    // Drying completion stays treatment-context-gated.
+    const paint = guardrails.evaluate({ body: 'The paint will finish drying in 30 minutes.' }, {});
+    expect(paint.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
   test('escaped quotes inside MDX expression props survive extraction (Codex PR r15)', () => {
     const r = guardrails.evaluate({ body: "<BottomLineBox verdict={'Waves\\' treatment is safe for pets > ordinary products.'} />" }, {});
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
