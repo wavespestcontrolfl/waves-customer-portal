@@ -111,16 +111,22 @@ async function refreshCardReviewTarget(card, customer) {
     if (!loc?.googleReviewUrl || (loc.id === card.location_id && loc.googleReviewUrl === card.review_target_url)) {
       return card;
     }
-    await db('customer_cards').where({ id: card.id }).update({
-      location_id: loc.id,
-      review_target_url: loc.googleReviewUrl,
-      updated_at: new Date(),
+    // ONE transaction: if the card row updated but the short-code row failed,
+    // the early return above would treat the card as healed on every later
+    // access and the printed QR would stay pointed at the old office forever
+    // (pre-push audit r2).
+    await db.transaction(async (trx) => {
+      await trx('customer_cards').where({ id: card.id }).update({
+        location_id: loc.id,
+        review_target_url: loc.googleReviewUrl,
+        updated_at: new Date(),
+      });
+      if (card.review_short_code) {
+        await trx('short_codes')
+          .where({ code: card.review_short_code })
+          .update({ target_url: loc.googleReviewUrl });
+      }
     });
-    if (card.review_short_code) {
-      await db('short_codes')
-        .where({ code: card.review_short_code })
-        .update({ target_url: loc.googleReviewUrl });
-    }
     logger.info(`[customer-card] Healed card review target (cardId=${card.id} ${card.location_id}→${loc.id})`);
     return { ...card, location_id: loc.id, review_target_url: loc.googleReviewUrl };
   } catch (err) {
