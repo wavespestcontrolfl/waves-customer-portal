@@ -237,7 +237,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       const { openBalanceSummary } = require('./open-balance');
       const prev = await openBalanceSummary(invoice.customer_id, { excludeInvoiceId: invoice.id });
       if (prev.total > 0) {
-        previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(prev.total)} from ${prev.count === 1 ? 'an earlier invoice' : `${prev.count} earlier invoices`}. You can review and pay ${prev.count === 1 ? 'it' : 'them'} from the payment page below.`;
+        previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(prev.total)} from ${prev.count === 1 ? 'an earlier invoice' : `${prev.count} earlier invoices`}. The payment page below shows the full breakdown; each earlier invoice has its own payment link in the email it arrived with.`;
       }
     } catch (prevErr) {
       logger.warn(`[invoice-email] previous-balance lookup failed for ${invoice.invoice_number}: ${prevErr.message}`);

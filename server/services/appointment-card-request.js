@@ -2335,6 +2335,26 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
       });
     } catch (e) { logger.warn(`[appt-card-request] autopay audit write failed: ${e.message}`); }
     logger.info(`[appt-card-request] recap completion charged invoice ${invoice.id} for visit ${scheduledServiceId}`);
+    // Full-balance sweep (owner ruling 2026-08-08) — same post-success hook
+    // as the dispatch completion rail, so which closeout path ran never
+    // decides whether old balances get collected (pre-push P1). Detached;
+    // durability model documented in completion-balance-sweep.js. Dark
+    // behind GATE_COMPLETION_BALANCE_SWEEP (re-checked inside).
+    {
+      const sweepArgs = {
+        customerId: svc.customer_id,
+        excludeInvoiceId: invoice.id,
+        paymentMethodId: freshPm.id,
+        triggerScheduledServiceId: scheduledServiceId,
+      };
+      // Resolved BEFORE the tick is scheduled — a deferred require would run
+      // outside the request (and after teardown in tests).
+      const { runCompletionBalanceSweep } = require('./completion-balance-sweep');
+      setImmediate(() => {
+        runCompletionBalanceSweep(sweepArgs)
+          .catch((sweepErr) => logger.error(`[appt-card-request] balance sweep crashed for customer ${sweepArgs.customerId}: ${sweepErr.message}`));
+      });
+    }
     return { charged: true, invoiceId: invoice.id };
   } catch (err) {
     // An unexpected dependency failure past the lane check leaves a

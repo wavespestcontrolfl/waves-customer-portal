@@ -9533,9 +9533,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               paymentMethodId: autopayPm.id,
               triggerScheduledServiceId: svc.id,
             };
+            // Resolved BEFORE the tick is scheduled — a deferred require
+            // would run outside the request (and after teardown in tests).
+            const { runCompletionBalanceSweep } = require('../services/completion-balance-sweep');
             setImmediate(() => {
-              require('../services/completion-balance-sweep')
-                .runCompletionBalanceSweep(sweepArgs)
+              runCompletionBalanceSweep(sweepArgs)
                 .catch((sweepErr) => logger.error(`[dispatch] balance sweep crashed for customer ${sweepArgs.customerId}: ${sweepErr.message}`));
             });
           }

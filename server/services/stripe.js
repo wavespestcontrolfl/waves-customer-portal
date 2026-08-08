@@ -2235,7 +2235,7 @@ const StripeService = {
   // deactivated), the deferred job sends the classic receipt when it comes
   // due. The email leg rides the same job — a few minutes late, unchanged
   // otherwise.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, refuseWhenDunningStopped = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2339,6 +2339,26 @@ const StripeService = {
           const lockedDiscountCents = Math.max(0, Math.round(Number(lockedInvoice.discount_amount || 0) * 100));
           if (lockedSubtotalCents - lockedDiscountCents > Math.round(Number(maxAuthorizedSubtotal) * 100)) {
             throw new Error('Invoice exceeds the customer-accepted amount. Review before charging.');
+          }
+        }
+        // Stopped-dunning SERIALIZED with the charge (balance-sweep pre-push
+        // P0): "stop dunning" is an explicit admin "stop collecting this
+        // invoice" instruction (customer mailing a check, disputed bill) —
+        // an unlocked caller preflight leaves a window where the stop
+        // commits after the check but before the charge. FOR UPDATE on the
+        // sequence row orders this transaction against the stop writer's own
+        // UPDATE of that same row: the stop either blocks until this charge
+        // commits or commits first and is seen here. Opt-in (false =
+        // unchanged behavior for every existing caller — admin charge-card
+        // is an explicit operator decision that may override a stop); a
+        // throw rolls the whole transaction back with nothing consumed.
+        if (refuseWhenDunningStopped) {
+          const seq = await trx('invoice_followup_sequences')
+            .where({ invoice_id: invoiceId })
+            .forUpdate()
+            .first('status');
+          if (seq && String(seq.status || '').toLowerCase() === 'stopped') {
+            throw new Error('Collection is stopped for this invoice. Review before charging.');
           }
         }
         // Auto Pay SERIALIZED with the charge (Codex #3153 r13 P1): the

@@ -97,14 +97,15 @@ describe('GET /pay/:token previousBalance (GATE_BALANCE_VISIBILITY)', () => {
     openBalanceSummary.mockResolvedValue({ total: 0, count: 0, invoices: [] });
   });
 
-  test('gate on: other open invoices ride previousBalance with their own pay links', async () => {
+  test('gate on: other open invoices ride previousBalance — informational only, NEVER sibling tokens or pay paths', async () => {
     isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
     openBalanceSummary.mockResolvedValue({
       total: 450,
-      count: 2,
+      count: 3,
+      moreCount: 1,
       invoices: [
-        { invoice_number: 'INV-1', service_type: 'Rodent Trapping', service_date: '2026-06-02', due_date: '2026-06-16', total: '250.00', credit_applied: 0, token: 'tok-old-1' },
-        { invoice_number: 'INV-2', service_type: null, service_date: null, due_date: null, total: '200.00', credit_applied: 0, token: 'tok-old-2' },
+        { invoice_number: 'INV-1', service_type: 'Rodent Trapping', service_date: '2026-06-02', due_date: '2026-06-16', total: '250.00', credit_applied: 0 },
+        { invoice_number: 'INV-2', service_type: null, service_date: null, due_date: null, total: '200.00', credit_applied: 0 },
       ],
     });
 
@@ -113,6 +114,8 @@ describe('GET /pay/:token previousBalance (GATE_BALANCE_VISIBILITY)', () => {
     expect(openBalanceSummary).toHaveBeenCalledWith('cust-1', { excludeInvoiceId: 'inv-1' });
     expect(body.previousBalance).toEqual({
       total: 450,
+      count: 3,
+      moreCount: 1,
       invoices: [
         {
           invoiceNumber: 'INV-1',
@@ -120,7 +123,6 @@ describe('GET /pay/:token previousBalance (GATE_BALANCE_VISIBILITY)', () => {
           serviceDate: '2026-06-02',
           dueDate: '2026-06-16',
           amountDue: 250,
-          payPath: '/pay/tok-old-1',
         },
         {
           invoiceNumber: 'INV-2',
@@ -128,10 +130,14 @@ describe('GET /pay/:token previousBalance (GATE_BALANCE_VISIBILITY)', () => {
           serviceDate: null,
           dueDate: null,
           amountDue: 200,
-          payPath: '/pay/tok-old-2',
         },
       ],
     });
+    // One leaked invoice link must never fan out into bearer credentials for
+    // the account's other invoices (pre-push P0).
+    const serialized = JSON.stringify(body.previousBalance);
+    expect(serialized).not.toMatch(/token/i);
+    expect(serialized).not.toMatch(/payPath|\/pay\//);
   });
 
   test('gate off: field absent, no lookup', async () => {
@@ -142,7 +148,7 @@ describe('GET /pay/:token previousBalance (GATE_BALANCE_VISIBILITY)', () => {
 
   test('payer-billed page never lists the homeowner balance', async () => {
     isEnabled.mockImplementation((gate) => gate === 'balanceVisibility');
-    openBalanceSummary.mockResolvedValue({ total: 450, count: 1, invoices: [{ invoice_number: 'INV-1', total: '450.00', credit_applied: 0, token: 't' }] });
+    openBalanceSummary.mockResolvedValue({ total: 450, count: 1, moreCount: 0, invoices: [{ invoice_number: 'INV-1', total: '450.00', credit_applied: 0 }] });
 
     const { body } = await getPayPage(invoiceData({ payer_id: 'payer-1' }));
 

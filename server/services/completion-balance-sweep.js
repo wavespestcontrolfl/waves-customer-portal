@@ -33,7 +33,21 @@
  * Invoices whose follow-up sequence an admin explicitly STOPPED are skipped:
  * "stop dunning" (customer mailing a check, disputed bill) must also mean
  * "don't silently collect it off-session" — same signal previsit-balance
- * honors.
+ * honors. The preflight here is only a cheap skip; the binding check runs
+ * INSIDE the charge transaction (refuseWhenDunningStopped: FOR UPDATE on the
+ * sequence row, serialized with the stop writer — pre-push P0), so a stop
+ * committing mid-sweep refuses instead of colliding.
+ *
+ * Durability model — deliberately an OPPORTUNISTIC ACCELERATOR, not a
+ * durable job: the sweep is detached (completion latency must not carry N
+ * Stripe round-trips) and a crash/deploy between completion and sweep loses
+ * nothing durable, because collection of these invoices never depended on
+ * it — each stays open on its own pay link and its own dunning/late-payment
+ * ladder exactly as today, and the customer's NEXT completion auto-charge
+ * re-runs the sweep over whatever is still open. A durable replay queue
+ * would also be the wrong shape for money movement here: a deferred replay
+ * would charge off a stale eligibility snapshot, while re-running from a
+ * fresh completion re-verifies everything live.
  *
  * Dark behind GATE_COMPLETION_BALANCE_SWEEP (fail-closed in every
  * environment); every outcome lands in autopay_log under
@@ -103,6 +117,9 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
         maxAuthorizedSubtotal,
         requireAutopayForCustomerId: customerId,
         requireSelfPayScheduledServiceId: inv.scheduled_service_id || null,
+        // Binding stopped-dunning check under the charge locks — the
+        // preflight above is only a cheap skip (pre-push P0).
+        refuseWhenDunningStopped: true,
       });
       summary.charged += 1;
       try {

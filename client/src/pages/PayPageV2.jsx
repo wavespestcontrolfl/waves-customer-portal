@@ -2403,17 +2403,18 @@ export default function PayPageV2() {
                 <div style={{ ...eyebrow, color: '#065A8C', marginBottom: SP.xxs }}>Previous balance</div>
                 <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.body, marginBottom: SP.sm }}>
                   You also have {fmtCurrency(previousBalance.total)} outstanding from
-                  {' '}{previousBalance.invoices.length === 1 ? 'an earlier invoice' : `${previousBalance.invoices.length} earlier invoices`}.
-                  The payment below covers this invoice only — each earlier invoice can be
-                  paid from its own link here.
+                  {' '}{(previousBalance.count || previousBalance.invoices.length) === 1 ? 'an earlier invoice' : `${previousBalance.count || previousBalance.invoices.length} earlier invoices`}.
+                  The payment below covers this invoice only — each earlier invoice has its
+                  own payment link in the email it arrived with.
                 </div>
+                {/* Informational rows only — deliberately NOT links: this page is
+                    reached by a bearer token for THIS invoice, and it must not
+                    hand out entry points to the account's other invoices. */}
                 <div style={{ display: 'grid', gap: SP.xs }}>
                   {previousBalance.invoices.map((prev) => (
-                    <a
+                    <div
                       key={prev.invoiceNumber}
-                      href={prev.payPath}
                       style={{
-                        minHeight: 44,
                         display: 'grid',
                         gridTemplateColumns: 'minmax(0, 1fr) auto',
                         alignItems: 'center',
@@ -2423,7 +2424,6 @@ export default function PayPageV2() {
                         border: `1px solid ${DOC.border}`,
                         background: DOC.surface,
                         color: DOC.ink,
-                        textDecoration: 'none',
                       }}
                     >
                       <span style={{ minWidth: 0 }}>
@@ -2447,8 +2447,13 @@ export default function PayPageV2() {
                       <span style={{ fontFamily: DOC_FONT, fontWeight: FW.semibold }}>
                         {fmtCurrency(prev.amountDue)}
                       </span>
-                    </a>
+                    </div>
                   ))}
+                  {previousBalance.moreCount > 0 && (
+                    <div style={{ fontSize: FS.caption, color: DOC.muted, padding: '2px 12px' }}>
+                      + {previousBalance.moreCount} more earlier invoice{previousBalance.moreCount === 1 ? '' : 's'} — included in the total above.
+                    </div>
+                  )}
                 </div>
               </div>
             )}

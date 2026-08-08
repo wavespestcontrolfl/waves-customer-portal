@@ -87,12 +87,14 @@ describe('completion balance sweep', () => {
       maxAuthorizedSubtotal: 100,
       requireAutopayForCustomerId: 'cust-1',
       requireSelfPayScheduledServiceId: 'svc-old-1',
+      refuseWhenDunningStopped: true,
     });
     expect(mockCharge).toHaveBeenNthCalledWith(2, 'old-2', 'pm-1', {
       // No subtotal column value → cap falls back to the total.
       maxAuthorizedSubtotal: 62.1,
       requireAutopayForCustomerId: 'cust-1',
       requireSelfPayScheduledServiceId: null,
+      refuseWhenDunningStopped: true,
     });
     expect(logAutopay).toHaveBeenCalledTimes(2);
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'charge_success', expect.objectContaining({

@@ -306,12 +306,15 @@ router.get('/:token', async (req, res, next) => {
     // state (round-7 P1 — coverage now applies only after capture).
     // Previous balance (owner ruling 2026-08-08, dark behind
     // GATE_BALANCE_VISIBILITY): the customer's OTHER open self-pay invoices,
-    // each payable via its own existing tokenized pay link, so one page
-    // surfaces everything owed. Self-pay pages only — an AP contact opening a
-    // payer-billed invoice must never see the homeowner's unrelated balance.
-    // Sibling tokens are same-customer disclosure: every listed invoice was
-    // already delivered to this same customer with its own link. Lookup
-    // failure is display-only — never blocks the pay page.
+    // so one page surfaces everything owed. Self-pay pages only — an AP
+    // contact opening a payer-billed invoice must never see the homeowner's
+    // unrelated balance. INFORMATIONAL ONLY, deliberately WITHOUT sibling
+    // pay tokens (pre-push P0): this is an unauthenticated by-token surface,
+    // and one forwarded/leaked invoice link must not fan out into bearer
+    // credentials for the account's other invoices — each earlier invoice is
+    // paid from its own delivered link (or the authenticated portal), and
+    // rows here are live-payer-verified by open-balance. Lookup failure is
+    // display-only — never blocks the pay page.
     let previousBalance = null;
     if (isEnabled('balanceVisibility') && data.customer_id && !data.payer_id) {
       try {
@@ -320,13 +323,14 @@ router.get('/:token', async (req, res, next) => {
         if (summary.total > 0) {
           previousBalance = {
             total: summary.total,
+            count: summary.count,
+            moreCount: summary.moreCount,
             invoices: summary.invoices.map((inv) => ({
               invoiceNumber: inv.invoice_number,
               serviceType: inv.service_type || null,
               serviceDate: inv.service_date || null,
               dueDate: inv.due_date || null,
               amountDue: invoiceAmountDue(inv),
-              payPath: `/pay/${inv.token}`,
             })),
           };
         }
