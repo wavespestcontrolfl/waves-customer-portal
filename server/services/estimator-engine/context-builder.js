@@ -462,6 +462,35 @@ async function buildCallContext(callLogId) {
   if (!customerMatch.customer && !resolvedLoadFailed) {
     customerMatch = await loadCustomerByPhone(phone, extraction);
   }
+  // Email-only identity guard (codex P1, PR #3275): an ACTIVE customer
+  // calling with blocked caller ID and stating the email on their account
+  // has no phone for loadCustomerByPhone to match — the context would set
+  // isExistingCustomer=false and the engine would prospect-price a member
+  // (dropping membership discounts/fee waivers), exactly what the
+  // fail-closed rule forbids. When the extraction's email belongs to a REAL
+  // customer (pipeline_stage active_customer/won/at_risk — the canonical
+  // whereRealCustomer stages; lead-stage rows are NOT members and stay
+  // draft-eligible), fail closed into the red-lane identity review. Lookup
+  // failure fails closed the same way as the phone path.
+  if (!customerMatch.customer && !phone) {
+    const extractionEmailLc = String(extraction?.email || '').trim().toLowerCase();
+    if (extractionEmailLc) {
+      try {
+        const emailOwner = await db('customers')
+          .whereNull('deleted_at')
+          .whereRaw('LOWER(TRIM(email)) = ?', [extractionEmailLc])
+          .whereIn('pipeline_stage', ['active_customer', 'won', 'at_risk'])
+          .first('id');
+        if (emailOwner) {
+          logger.warn('[estimator-engine] email-only call matches an active customer — failing closed to identity review');
+          return { error: 'email_matches_existing_customer', call };
+        }
+      } catch (emailErr) {
+        logger.warn(`[estimator-engine] email-owner check failed — failing closed: ${emailErr.code || emailErr.name || 'db_error'}`);
+        return { error: 'customer_lookup_unavailable', call };
+      }
+    }
+  }
   // Fail CLOSED on lookup failure, exactly like the SMS-origin path: a
   // failed query is not a no-match — an existing member could be hiding
   // behind the error, and continuing would quote them as a new prospect

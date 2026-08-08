@@ -2313,53 +2313,96 @@ function parseStampedLeadId(call) {
   } catch { return null; }
 }
 
-// Clear the call's lead stamp AND put the stamped lead's summary back in
-// ONE transaction, fenced on the processing token (audit P1 r19: the old
-// two-step best-effort could clear the stamp then fail the summary fix,
-// leaving the rejected call's summary attached indefinitely — and it
-// reverted to NULL, destroying the reused lead's prior valid summary; the
-// stamp write now preserves the pre-enrichment value in
-// metadata.lead_prior_summary, and this restores it). Only when the lead
-// still carries the rejected extraction's summary (exact match — anything
-// else means someone/something else wrote it since, and it must stand).
-// The reused lead itself is never retired here — it predates the call.
+// The lead columns the phone-less reuse enrichment can mutate — snapshotted
+// into call_log.metadata.lead_prior_state at stamp time and restored when a
+// later attempt rejects the call. One list so the stamp and the restore can
+// never drift.
+const STAMPED_LEAD_RESTORE_FIELDS = [
+  'first_name', 'last_name', 'email', 'phone', 'address', 'city', 'zip',
+  'service_interest', 'urgency', 'transcript_summary', 'extracted_data',
+  'is_qualified', 'status', 'next_follow_up_at', 'customer_id',
+];
+
+function serializeStampedLeadValue(field, v) {
+  if (v instanceof Date) return v.toISOString();
+  if (field === 'extracted_data' && v != null && typeof v !== 'string') return JSON.stringify(v);
+  return v ?? null;
+}
+
+// Snapshot ONLY the fields this call's enrichment is about to write — the
+// prior values (from the pre-enrichment row) and the written values (from
+// the actual update payload). Restore compares written vs current per
+// field, so a staff edit after enrichment survives rejection untouched.
+function snapshotStampedLeadStates(leadRow, leadUpdates) {
+  const prior = {};
+  const written = {};
+  for (const f of STAMPED_LEAD_RESTORE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(leadUpdates || {}, f)) continue;
+    prior[f] = serializeStampedLeadValue(f, leadRow?.[f]);
+    written[f] = serializeStampedLeadValue(f, leadUpdates[f]);
+  }
+  return { prior, written };
+}
+
+// Postgres casts for the per-field compare-and-swap — parameters arrive as
+// text; non-text columns need explicit casts for IS NOT DISTINCT FROM.
+const STAMPED_LEAD_FIELD_CASTS = {
+  extracted_data: '::jsonb',
+  next_follow_up_at: '::timestamptz',
+  is_qualified: '::boolean',
+  customer_id: '::uuid',
+};
+
+// Clear the call's lead stamp AND put the stamped lead's prior state back in
+// ONE transaction, fenced on the processing token. The stamp row is
+// RE-READ inside the transaction (never the in-memory call object — an
+// in-flight attempt may have stamped after the row was loaded), and the
+// restore is a per-field COMPARE-AND-SWAP: each field goes back to its
+// pre-enrichment value ONLY while it still equals what this call wrote —
+// a staff edit made after the enrichment survives rejection untouched
+// (pre-push P0 r20: a row-level sentinel silently deleted admin edits to
+// fields the editor changes without touching the summary). The reused lead
+// itself is never retired here — it predates the call.
 // Returns false when the fence lost (peer owns the call); THROWS on
 // transient DB failure so callers escalate to the extraction_failed retry
 // instead of finalizing half-reconciled.
-async function clearStampAndRestoreSummary(call, procToken, callSid) {
-  const stampedLeadId = parseStampedLeadId(call);
-  if (!stampedLeadId) return true;
-  let md = {};
-  try {
-    md = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
-  } catch { md = {}; }
-  // Stamps written before the preservation key existed restore to null —
-  // the old (lossy) behavior, graceful for in-flight rows.
-  const priorSummary = Object.prototype.hasOwnProperty.call(md, 'lead_prior_summary')
-    ? (md.lead_prior_summary ?? null)
-    : null;
-  const rejectedSummary = (() => {
-    try {
-      const ex = typeof call.ai_extraction === 'string' ? JSON.parse(call.ai_extraction) : (call.ai_extraction || {});
-      return ex?.call_summary || null;
-    } catch { return null; }
-  })();
+async function clearStampAndRestoreLead(call, procToken, callSid) {
   return db.transaction(async (trx) => {
+    const fresh = await trx('call_log').where({ id: call.id }).first('metadata');
+    let md = {};
+    try {
+      md = typeof fresh?.metadata === 'string' ? JSON.parse(fresh.metadata) : (fresh?.metadata || {});
+    } catch { md = {}; }
+    const stampedLeadId = md?.lead_id ? String(md.lead_id) : null;
+    if (!stampedLeadId) return true;
+    const priorState = md.lead_prior_state && typeof md.lead_prior_state === 'object' ? md.lead_prior_state : null;
+    const writtenState = md.lead_written_state && typeof md.lead_written_state === 'object' ? md.lead_written_state : null;
     const cleared = await trx('call_log')
       .where({ id: call.id })
       .where('processing_token', procToken)
       .update({
-        metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_summary'"),
+        metadata: db.raw("((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state'"),
         updated_at: new Date(),
       });
     if (!cleared) return false;
-    if (rejectedSummary) {
-      const restored = await trx('leads')
-        .where({ id: stampedLeadId })
-        .whereNull('deleted_at')
-        .where('transcript_summary', rejectedSummary)
-        .update({ transcript_summary: priorSummary, updated_at: new Date() });
-      if (restored > 0) logger.info(`[call-proc] Restored the stamped lead's prior summary for ${maskSid(callSid)}`);
+    if (priorState && writtenState) {
+      const frags = [];
+      const binds = [];
+      for (const f of STAMPED_LEAD_RESTORE_FIELDS) {
+        if (!Object.prototype.hasOwnProperty.call(writtenState, f)) continue;
+        const cast = STAMPED_LEAD_FIELD_CASTS[f] || '';
+        frags.push(`${f} = CASE WHEN ${f} IS NOT DISTINCT FROM ?${cast} THEN ?${cast} ELSE ${f} END`);
+        binds.push(writtenState[f] ?? null, (Object.prototype.hasOwnProperty.call(priorState, f) ? priorState[f] : null) ?? null);
+      }
+      if (frags.length) {
+        frags.push('updated_at = ?');
+        binds.push(new Date());
+        await trx.raw(
+          `UPDATE leads SET ${frags.join(', ')} WHERE id = ? AND deleted_at IS NULL`,
+          [...binds, stampedLeadId],
+        );
+        logger.info(`[call-proc] Reconciled the stamped lead's state after rejection for ${maskSid(callSid)}`);
+      }
     }
     return true;
   });
@@ -5400,7 +5443,7 @@ const CallRecordingProcessor = {
       // kept presenting the rejected call — and its hallucinated summary —
       // as lead evidence). Fence-lost bails exactly like the rejection
       // write's own 0-row path below.
-      const rejectionStampSettled = await clearStampAndRestoreSummary(call, procToken, callSid);
+      const rejectionStampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
       if (!rejectionStampSettled) {
         logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
         return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
@@ -5428,7 +5471,7 @@ const CallRecordingProcessor = {
           // linked this empty voicemail to a phantom customer; the unified
           // voice sync attaches messages whenever customer_id is set, so
           // unlink. (Lead-stamp cleanup ran above in
-          // clearStampAndRestoreSummary.)
+          // clearStampAndRestoreLead.)
           customer_id: null,
           processing_token: null,
           processing_started_at: null,
@@ -5745,7 +5788,7 @@ const CallRecordingProcessor = {
       // — atomically, fenced (codex P1 r15 / audit P1 r17/r19). A transient
       // failure here throws to the outer extraction_failed guard rather
       // than finalizing with the rejected linkage in place.
-      const stampSettled = await clearStampAndRestoreSummary(call, procToken, callSid);
+      const stampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
       if (!stampSettled) {
         logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
@@ -5761,7 +5804,7 @@ const CallRecordingProcessor = {
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
         processing_token: null,
         processing_started_at: null,
-        // (Lead-stamp cleanup ran above in clearStampAndRestoreSummary.)
+        // (Lead-stamp cleanup ran above in clearStampAndRestoreLead.)
         updated_at: new Date(),
       };
       if (extracted.is_voicemail) {
@@ -6642,7 +6685,7 @@ const CallRecordingProcessor = {
       // earlier attempt's lead stamp and restore that lead's prior summary,
       // atomically and fenced (codex P1 r15 / audit P1 r17/r19); a
       // transient failure throws to the outer extraction_failed guard.
-      const vetoStampSettled = await clearStampAndRestoreSummary(call, procToken, callSid);
+      const vetoStampSettled = await clearStampAndRestoreLead(call, procToken, callSid);
       if (!vetoStampSettled) {
         logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
@@ -7540,6 +7583,10 @@ const CallRecordingProcessor = {
         // own sid at insert time — phone-less REUSE puts linkage state in
         // play (a leftover stamp already armed the flag at declaration).
         if (!phone && existingLead) phoneLessLinkagePending = true;
+        // The stamp as it stands NOW — updated when the in-loop stamp+write
+        // transaction runs, so the post-loop maintenance reconciles the
+        // ACTUAL stamp, not the one from processing start.
+        let currentStampedLeadId = priorStampedLeadId;
 
         // Resolve the dialed number's marketing source ONCE — used by both the
         // existing-lead and new-lead paths, and for PPC attribution of paid calls.
@@ -8003,7 +8050,42 @@ const CallRecordingProcessor = {
                 );
               }
             }
-            enriched = await enrichmentWrite.update(leadUpdates);
+            // Phone-less reuse of a different-sid lead: the rollback
+            // snapshot (prior + written values) must be DURABLE BEFORE the
+            // lead mutation commits — the stamp and the enrichment write
+            // run in ONE transaction (audit P1 r20: a crash between them
+            // left the lead mutated with no rollback state, and a retry
+            // then snapshotted the mutated row as its baseline). When
+            // re-stamping the SAME lead on a retry, the existing
+            // lead_prior_state is preserved so the ORIGINAL baseline
+            // survives re-enrichment; lead_written_state always refreshes
+            // to THIS pass's payload.
+            const stampThisPass = !phone && existingLead && !raceRecovered
+              && !(call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid);
+            if (stampThisPass) {
+              const { prior, written } = snapshotStampedLeadStates(current, leadUpdates);
+              enriched = await db.transaction(async (trx) => {
+                const stamped = await trx('call_log')
+                  .where({ id: call.id })
+                  .where('processing_token', procToken)
+                  .update({
+                    metadata: db.raw(
+                      "jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true), '{lead_prior_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN COALESCE(metadata->'lead_prior_state', ?::jsonb) ELSE ?::jsonb END, true), '{lead_written_state}', ?::jsonb, true)",
+                      [JSON.stringify(String(leadId)), String(leadId), JSON.stringify(prior), JSON.stringify(prior), JSON.stringify(written)],
+                    ),
+                    updated_at: new Date(),
+                  });
+                if (!stamped) {
+                  const lost = new Error('processing claim lost during call→lead link stamp');
+                  lost.abortProcessing = true;
+                  throw lost;
+                }
+                return enrichmentWrite.transacting(trx).update(leadUpdates);
+              });
+              currentStampedLeadId = String(leadId);
+            } else {
+              enriched = await enrichmentWrite.update(leadUpdates);
+            }
             if (!enriched && existingLead && !sameCallLeadReuse && !phone && !raceRecovered) {
               // sameCallLeadReuse is EXCLUDED from the remint (codex P2
               // r16): a same-call row claimed between lookup and the
@@ -8118,31 +8200,25 @@ const CallRecordingProcessor = {
           // P1 r19 ×2). Writes are fenced on the processing token; a lost
           // fence or write failure aborts into the extraction_failed retry
           // path via abortProcessing (the lead-section catch rethrows it).
-          if (!phone || priorStampedLeadId) {
+          if (!phone || currentStampedLeadId) {
             const finalLeadCarriesSid = raceRecovered || !existingLead
               || (!!call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid);
-            const requireLinkWrite = async (label, updatePayload) => {
-              let written = 0;
+            // Clearing a stamp ALSO restores that lead's prior state via the
+            // per-field compare-and-swap — one transaction, fenced (audit P1
+            // r18/r19/r20). Fence-lost maps to the same abortProcessing the
+            // direct writes use. The STAMP itself is written in-loop,
+            // atomically with the enrichment write — maintenance only ever
+            // clears.
+            const settleClear = async () => {
+              let ok;
               try {
-                written = await db('call_log').where({ id: call.id })
-                  .where('processing_token', procToken)
-                  .update(updatePayload);
-              } catch (stampErr) {
-                const wrapped = new Error(`call→lead link ${label} failed: ${stampErr.code || stampErr.name || 'db_error'}`);
+                ok = await clearStampAndRestoreLead(call, procToken, callSid);
+              } catch (clearErr) {
+                if (clearErr.abortProcessing) throw clearErr;
+                const wrapped = new Error(`call→lead link clear failed: ${clearErr.code || clearErr.name || 'db_error'}`);
                 wrapped.abortProcessing = true;
                 throw wrapped;
               }
-              if (!written) {
-                const lost = new Error(`processing claim lost during call→lead link ${label}`);
-                lost.abortProcessing = true;
-                throw lost;
-              }
-            };
-            // Clearing a prior stamp ALSO restores that lead's prior summary
-            // — one transaction, fenced (audit P1 r18/r19). Fence-lost maps
-            // to the same abortProcessing the direct writes use.
-            const settleClear = async () => {
-              const ok = await clearStampAndRestoreSummary(call, procToken, callSid);
               if (!ok) {
                 const lost = new Error('processing claim lost during call→lead link clear');
                 lost.abortProcessing = true;
@@ -8153,31 +8229,17 @@ const CallRecordingProcessor = {
               // Mint failure dropped the lead — a leftover stamp would leave
               // the OR-join consumers associating this call with a lead that
               // is now foreign (it lost the claim race). Unlink.
-              if (priorStampedLeadId) await settleClear();
+              if (currentStampedLeadId) await settleClear();
             } else if (finalLeadCarriesSid) {
               // The final lead is linked by its own sid — a leftover stamp
               // pointing at a different lead must not survive.
-              if (priorStampedLeadId && priorStampedLeadId !== String(leadId)) await settleClear();
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear();
             } else if (phone) {
               // Retry GAINED a phone and selected a phone-linked lead: its
               // linkage is the phone, not the stamp — a stale stamp pointing
               // at a different lead must not survive (audit P1 r22); a stamp
               // already pointing at this lead stays accurate.
-              if (priorStampedLeadId && priorStampedLeadId !== String(leadId)) await settleClear();
-            } else if (priorStampedLeadId !== String(leadId)) {
-              // Reuse of a different-sid lead: re-pointing first settles the
-              // OLD stamp (restoring that lead's summary), then the stamp
-              // write preserves THIS lead's pre-enrichment summary in
-              // metadata.lead_prior_summary so a later rejection can restore
-              // it instead of nulling (audit P1 r19).
-              if (priorStampedLeadId) await settleClear();
-              await requireLinkWrite('stamp', {
-                metadata: db.raw(
-                  "jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true), '{lead_prior_summary}', ?::jsonb, true)",
-                  [JSON.stringify(String(leadId)), JSON.stringify(existingLead?.transcript_summary ?? null)],
-                ),
-                updated_at: new Date(),
-              });
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) await settleClear();
             }
             phoneLessLinkagePending = false;
           }
@@ -8456,7 +8518,7 @@ const CallRecordingProcessor = {
       // P1 r22/r18/r19). abortProcessing reaches the outer
       // extraction_failed guard directly.
       try {
-        const settled = await clearStampAndRestoreSummary(call, procToken, callSid);
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid);
         if (!settled) {
           const lost = new Error('processing claim lost during call→lead link clear (non-lead path)');
           lost.abortProcessing = true;

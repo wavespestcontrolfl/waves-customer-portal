@@ -343,9 +343,12 @@ async function fetchCrmCalls(days = 30) {
     .leftJoin('customers as cu', 'c.customer_id', 'cu.id')
     // The sid join misses a phone-less reused-lead call: the lead keeps its
     // ORIGINAL call's sid and the later call links via the durable
-    // call_log.metadata.lead_id stamp instead (codex P1, PR #3275). The two
-    // arms are mutually exclusive by construction — the stamp is written
-    // exactly when no lead carries this call's sid.
+    // call_log.metadata.lead_id stamp instead (codex P1, PR #3275). A stale
+    // stamp CAN transiently coexist with a different sid-linked lead (a
+    // retry that minted before its cleanup ran), which would duplicate the
+    // call row through this OR join and make buildMatches read the twin as
+    // an equal-score second candidate → false ambiguity; dedupeCrmCallRows
+    // below collapses to one row per call, sid-linked lead winning.
     .leftJoin('leads as l', function joinLeadForCall() {
       this.on('c.twilio_call_sid', 'l.twilio_call_sid')
         .orOn(db.raw("c.metadata->>'lead_id' = l.id::text"));
@@ -359,10 +362,31 @@ async function fetchCrmCalls(days = 30) {
       'cu.first_name as customer_first_name',
       'cu.last_name as customer_last_name',
       'l.id as lead_id',
+      'l.twilio_call_sid as lead_call_sid',
       'ls.name as lead_source_name',
     )
     .orderBy('c.created_at', 'desc')
-    .limit(500);
+    .limit(500)
+    .then(dedupeCrmCallRows);
+}
+
+// One row per call: the OR join above can transiently return a call twice
+// (stale stamp + a different sid-linked lead). The sid-linked lead is
+// authoritative — same precedence findReusableCallLead uses (codex P2, PR
+// #3275).
+function dedupeCrmCallRows(rows) {
+  const byId = new Map();
+  for (const row of rows) {
+    const prev = byId.get(row.id);
+    if (!prev) {
+      byId.set(row.id, row);
+    } else if (row.lead_call_sid && row.twilio_call_sid
+      && row.lead_call_sid === row.twilio_call_sid
+      && !(prev.lead_call_sid && prev.lead_call_sid === prev.twilio_call_sid)) {
+      byId.set(row.id, row);
+    }
+  }
+  return [...byId.values()];
 }
 
 async function ensureBridgeLeadSource() {
