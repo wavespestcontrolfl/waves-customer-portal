@@ -161,7 +161,11 @@ router.post('/', async (req, res, next) => {
           customerId: customer.id,
           customer,
           channel: 'sms',
-          templateId: 'friendly_ask',
+          // NO templateId: a null-template ask renders the CANONICAL
+          // 'review_request' sms_template — the same body (incl. the
+          // {reservice_line} clause #3288 wired) the pre-fold path sent.
+          // 'friendly_ask' had silently dropped that clause (codex #3285 r5b).
+          templateId: null,
           serviceRecordId,
           triggeredBy: 'portal_satisfaction',
           manageRetryVia: 'cron',

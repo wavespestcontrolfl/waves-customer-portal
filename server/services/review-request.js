@@ -2661,11 +2661,29 @@ const ReviewService = {
 
   async _sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia }) {
     const tpl = templateId ? OUTREACH.getOutreachTemplate(templateId) : null;
-    const rawBody =
+    let rawBody =
       typeof customBody === "string" && customBody.trim() ? customBody : tpl ? tpl.body : null;
+    let prerendered = null;
     if (!rawBody) {
-      await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
-      return { ok: false, reason: "no_template", terminal: true, requestId: request.id };
+      // No outreach template and no custom body = the CANONICAL ask. Render
+      // the same 'review_request' sms_template ReviewService.sendSMS falls
+      // back to — including the {reservice_line} supply #3288 wired into
+      // that template's render sites. This is how the gated satisfaction ask
+      // keeps the free re-service clause the pre-fold path carried
+      // (codex #3285 r5b); template lookup failure stays terminal.
+      try {
+        const smsTpl = require("../routes/admin-sms-templates");
+        prerendered = await smsTpl.getTemplate("review_request", {
+          first_name: vars.first || "",
+          review_url: vars.review_url,
+          tech_name: vars.tech || null,
+          reservice_line: await require("./reservice-link").reserviceLineForCustomer(customer.id),
+        });
+      } catch { /* template lookup failed → terminal below */ }
+      if (!prerendered) {
+        await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+        return { ok: false, reason: "no_template", terminal: true, requestId: request.id };
+      }
     }
     // Whether a /rate link is required is determined by the SELECTED TEMPLATE,
     // not the (possibly edited) body — so an operator who edits {review_url} out
@@ -2678,7 +2696,11 @@ const ReviewService = {
     // operator left/added in the edited body renders to nothing — send-request
     // skipped cap/cooldown for this template, so it must never carry a review link.
     const renderVars = isNoLink ? { ...vars, review_url: "" } : vars;
-    const body = OUTREACH.renderOutreachBody(rawBody, renderVars, { requireLink: requiresLink });
+    // The canonical fallback arrives fully rendered by getTemplate (its own
+    // placeholder set incl. reservice_line) — never re-run the outreach
+    // renderer over it.
+    const body = prerendered
+      ?? OUTREACH.renderOutreachBody(rawBody, renderVars, { requireLink: requiresLink });
 
     // Segment observability (codex #3235 r3): the one-segment contract is
     // enforced on template copy and drafter output against the SHORT link;
