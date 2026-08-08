@@ -279,6 +279,27 @@ describe('deferred-replay registry', () => {
     expect(sendCancellationReceived).not.toHaveBeenCalled();
   });
 
+  test('prep terminal (pre-push P1): releases the held-variant dedupe marker, never a delivered one', async () => {
+    // The booking-time marker is a PERMANENT per-customer+pest guard —
+    // a terminally-dead replay must release it or prep is suppressed for
+    // every later valid booking. Scoped to the held-variant body.
+    const del = { where: jest.fn(() => del), del: jest.fn(async () => 1) };
+    db.mockReturnValueOnce(del);
+    await onTerminalDeferredReplay('appointment_tagger_prep_deferred', {
+      waves_customer_id: 'cust-1', pest_type: 'cockroach', scheduled_service_id: 'ss-1',
+    });
+    expect(del.where).toHaveBeenCalledWith(expect.objectContaining({
+      customer_id: 'cust-1',
+      subject: 'cockroach prep info sent',
+    }));
+    expect(del.where).toHaveBeenCalledWith('body', 'like', 'Prep SMS held outside the 8AM-8PM ET send window%');
+    expect(del.del).toHaveBeenCalled();
+
+    // Legacy rows without the customer linkage: inert, no blind delete.
+    await onTerminalDeferredReplay('appointment_tagger_prep_deferred', { pest_type: 'cockroach' });
+    expect(del.del).toHaveBeenCalledTimes(1);
+  });
+
   test('lead-menu finalize stamps real sids and releases sentinel outcomes', async () => {
     const stamp = firstChain(null);
     stamp.update = jest.fn(async () => 1);

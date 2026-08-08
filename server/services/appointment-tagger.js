@@ -369,6 +369,11 @@ class AppointmentTagger {
               pest_type: pestType,
               prep_variant: smsVariant,
               scheduled_service_id: service.id,
+              // Terminal-cleanup linkage: the registry onTerminal removes
+              // the held-variant dedupe marker for this customer+pest when
+              // the replay dies, so a text that never left can't suppress
+              // prep for a later valid booking forever.
+              waves_customer_id: service.customer_id,
               original_block_code: prepResult.code,
               refresh_customer_phone: true,
               // from_phone above is a NOT-NULL placeholder — the executor

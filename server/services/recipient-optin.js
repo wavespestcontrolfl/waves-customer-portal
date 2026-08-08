@@ -276,29 +276,39 @@ async function dispatchRecipientOptins(claims = [], customer = null) {
         && result.nextAllowedAt) {
         try {
           const TWILIO_NUMBERS = require('../config/twilio-numbers');
-          await db('sms_log').insert({
-            customer_id: customer?.id || null,
-            direction: 'outbound',
-            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-            to_phone: claim.phone,
-            message_body: claim.body,
-            status: 'scheduled',
-            scheduled_for: new Date(result.nextAllowedAt),
-            message_type: 'recipient_optin_request',
-            metadata: JSON.stringify({
-              entry_point: 'recipient_optin_deferred',
-              original_block_code: result.code,
-              replay_purpose: 'appointment',
-              // Replay-time staleness recheck keys (deferred-replay
-              // registry): the ask only sends if this row is still pending.
-              optin_phone_key: claim.key,
-              optin_customer_id: claim.customerId || null,
-            }),
+          // Queue row + dispatch marker commit ATOMICALLY: a committed
+          // queue row with a failed dispatched_at write leaves the ask
+          // pending-undispatched, and the 10-minute stale-pending recovery
+          // (sweep + save-time reclaim) would re-ask while the queued row
+          // still delivers at 8:00 AM — duplicate asks. Exactly one marked
+          // row or the whole enqueue rolls back to the ask_failed release.
+          await db.transaction(async (trx) => {
+            await trx('sms_log').insert({
+              customer_id: customer?.id || null,
+              direction: 'outbound',
+              from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+              to_phone: claim.phone,
+              message_body: claim.body,
+              status: 'scheduled',
+              scheduled_for: new Date(result.nextAllowedAt),
+              message_type: 'recipient_optin_request',
+              metadata: JSON.stringify({
+                entry_point: 'recipient_optin_deferred',
+                original_block_code: result.code,
+                replay_purpose: 'appointment',
+                // Replay-time staleness recheck keys (deferred-replay
+                // registry): the ask only sends if this row is still pending.
+                optin_phone_key: claim.key,
+                optin_customer_id: claim.customerId || null,
+              }),
+            });
+            const marked = await trx('recipient_optin')
+              .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
+              .update({ dispatched_at: new Date(), updated_at: new Date() });
+            if (marked !== 1) {
+              throw new Error(`dispatch marker update touched ${marked} rows (expected 1)`);
+            }
           });
-          await db('recipient_optin')
-            .where({ phone_key: claim.key, customer_id: claim.customerId, status: 'pending' })
-            .update({ dispatched_at: new Date(), updated_at: new Date() })
-            .catch(() => {});
           requested += 1;
           logger.info(`[recipient-optin] ask for ***${claim.key.slice(-4)} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt}`);
           continue;

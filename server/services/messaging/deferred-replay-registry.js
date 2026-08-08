@@ -582,6 +582,27 @@ const REGISTRY = {
         return failClosed('prep', meta.scheduled_service_id, err);
       }
     },
+    async onTerminal(meta) {
+      // The queued prep text never delivered (stale-suppressed or
+      // terminally failed) — remove the booking-time dedupe marker, or
+      // hasSentPrepSms (a PERMANENT per-customer+pest guard, not
+      // per-visit) suppresses prep for every later valid booking of the
+      // same pest. Scoped to the held-variant body written at enqueue so
+      // a marker from an actually-delivered send (inline or the manual
+      // Communications sender) is never removed.
+      if (!meta.waves_customer_id || !meta.pest_type) return;
+      const removed = await db('customer_interactions')
+        .where({
+          customer_id: meta.waves_customer_id,
+          interaction_type: 'sms_outbound',
+          subject: `${meta.pest_type} prep info sent`,
+        })
+        .where('body', 'like', 'Prep SMS held outside the 8AM-8PM ET send window%')
+        .del();
+      if (removed) {
+        logger.info(`[deferred-replay] queued ${meta.pest_type} prep for customer ${meta.waves_customer_id} terminally blocked — dedupe marker released`);
+      }
+    },
   },
 
   referral_engine_invite_deferred: {
