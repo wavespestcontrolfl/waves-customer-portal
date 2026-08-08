@@ -236,9 +236,9 @@ describe('pausedBuckets — confirmed-regression gating', () => {
     expect(out).toEqual([{ bucket: 'thin_content', regressions: 3 }]);
   });
 
-  // A query failure is indistinguishable from "nothing is paused" by default.
-  // That is fine for the runner (it has downstream gates and must not stall on
-  // a blip) and NOT fine for a caller whose safety depends on the answer.
+  // A query failure is otherwise indistinguishable from "nothing is paused".
+  // Fine for the runner (it has downstream gates and must not stall on a
+  // blip); NOT fine for a caller that would act on the empty result.
   describe('lookup failure', () => {
     const explodingDb = () => {
       const builder = {
@@ -252,7 +252,7 @@ describe('pausedBuckets — confirmed-regression gating', () => {
       await expect(tracker.pausedBuckets({ db: explodingDb() })).resolves.toEqual([]);
     });
 
-    test('strict:true propagates it so a safety-critical caller can stand down', async () => {
+    test('strict:true propagates it so a caller that would act on [] can stand down', async () => {
       await expect(tracker.pausedBuckets({ db: explodingDb(), strict: true }))
         .rejects.toThrow('connection terminated');
     });

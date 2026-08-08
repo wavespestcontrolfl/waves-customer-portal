@@ -599,9 +599,11 @@ async function pausedBuckets({ db: database = db, strict = false } = {}) {
     // Default stays lenient: the runner already treats an unreadable pause
     // list as "not paused" and has its own downstream gates, and failing its
     // claim loop closed would stall drafting on any transient DB blip.
-    // A caller whose SAFETY depends on knowing the pause state — the
-    // regression re-queue lane, which would otherwise launder work out of a
-    // paused bucket into an unpaused one — opts into strict and stands down.
+    // A caller that cannot tell an empty result apart from a failure opts into
+    // strict and stands down instead. Two do: the digest's marker re-arm would
+    // read "no buckets paused" as "every paused lane recovered" and delete all
+    // of their dedupe markers, and the regression re-queue lane would launder
+    // work out of a paused bucket into an unpaused one.
     if (strict) throw err;
     return [];
   }

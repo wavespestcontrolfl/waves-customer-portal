@@ -7,6 +7,7 @@
  *   node server/scripts/impact-tracker.js sweep      # baseline new + measure pending
  *   node server/scripts/impact-tracker.js verdicts   # show recorded verdicts
  *   node server/scripts/impact-tracker.js paused      # buckets at regression threshold
+ *   node server/scripts/impact-tracker.js digest      # PREVIEW the ops emails (never sends)
  *
  * For prod data:
  *   railway run -s Postgres -- bash -c '
@@ -47,8 +48,35 @@ async function main() {
       for (const p of paused) console.log(`  PAUSED: ${p.bucket} — ${p.regressions} regressions`);
       break;
     }
+    // Preview only — composes the exact subjects/bodies the daily leg would
+    // send, without the gate, the markers, or the mailer. Lets the digest be
+    // eyeballed before GATE_IMPACT_DIGEST is flipped on.
+    case 'digest': {
+      const digest = require('../services/seo/impact-verdict-digest');
+      const { BLIND_LOOP_DAYS, ROLLUP_WINDOW_DAYS } = digest.THRESHOLDS;
+      const { checkedSince } = digest._internals;
+      const { addETDays } = require('../utils/datetime-et');
+
+      const paused = await tracker.pausedBuckets({ db });
+      const blindRows = await checkedSince(db, addETDays(new Date(), -BLIND_LOOP_DAYS));
+      const blindCounts = digest._internals.tallyVerdicts(blindRows);
+      const rollupRows = await checkedSince(db, addETDays(new Date(), -ROLLUP_WINDOW_DAYS));
+
+      const composed = [
+        ['paused-lane', digest.composePausedAlert(paused)],
+        ['blind-loop', ['improved', 'neutral', 'regressed'].some((k) => blindCounts[k] > 0)
+          ? null
+          : digest.composeBlindLoopAlert({ ungraded: blindCounts.insufficient_data })],
+        ['weekly-rollup', digest.composeVerdictRollup(rollupRows)],
+      ];
+      for (const [name, email] of composed) {
+        if (!email) { console.log(`\n[${name}] nothing to send (quiet — this is the normal case)`); continue; }
+        console.log(`\n[${name}] SUBJECT: ${email.subject}\n${email.text}`);
+      }
+      break;
+    }
     default:
-      console.log('commands: sweep | verdicts | paused');
+      console.log('commands: sweep | verdicts | paused | digest');
   }
 }
 

@@ -41,6 +41,20 @@ describe('reply training capture', () => {
       authorType: 'admin',
       body: 'Email reply',
     })).toBe(false);
+
+    // Rain-out Quick Moves stamp adminUserId for sms_log audit attribution,
+    // but the body is a rendered TEMPLATE (proactive notice), not a human
+    // reply to the customer's last inbound — all three rungs excluded.
+    for (const messageType of ['rain_out_moved', 'rain_out_moved_v2', 'rain_out_moved_v3']) {
+      expect(shouldCaptureReply({
+        channel: 'sms',
+        direction: 'outbound',
+        authorType: 'admin',
+        adminUserId: 'admin-7',
+        messageType,
+        body: 'Quick update - we moved your appointment to Friday.',
+      })).toBe(false);
+    }
   });
 
   test('classifies common Waves customer reply scenarios', () => {

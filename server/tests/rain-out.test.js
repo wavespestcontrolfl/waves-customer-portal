@@ -1398,6 +1398,306 @@ describe('rain-out service', () => {
     });
   });
 
+  describe('dispatcher note (customerNote)', () => {
+    const sanitize = () => RainOut._test.sanitizeCustomerNote;
+
+    test('sanitizer: absent/blank notes are null, text is collapsed+trimmed', () => {
+      expect(sanitize()(undefined)).toEqual({ note: null });
+      expect(sanitize()(null)).toEqual({ note: null });
+      expect(sanitize()('   ')).toEqual({ note: null });
+      expect(sanitize()('  Gate code\n still  works!  ')).toEqual({ note: 'Gate code still works!' });
+    });
+
+    test('sanitizer: rejects over-long, shortener, and non-string notes', () => {
+      expect(sanitize()('x'.repeat(201))).toEqual({ error: 'note_too_long' });
+      expect(sanitize()('details here bit.ly/abc')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('see t.co/xyz')).toEqual({ error: 'note_link_blocked' });
+      // Trailing root dot is a valid FQDN spelling of the same host —
+      // must not slip the guard (codex pre-push P1).
+      expect(sanitize()('go to https://bit.ly./abc now')).toEqual({ error: 'note_link_blocked' });
+      // Punctuation-wrapped naked links are still valid links (codex P1).
+      expect(sanitize()('details (bit.ly/abc)')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('see [t.co/xyz] for info')).toEqual({ error: 'note_link_blocked' });
+      // Encoded/unicode forms that canonicalize back to a shortener host
+      // must not slip the textual regex (codex PR P1): percent-encoded dot,
+      // ideographic full stop, fullwidth chars, zero-width joins.
+      expect(sanitize()('go https://bit%2ely/abc')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('go https://bit。ly/abc')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('go ｂｉｔ．ｌｙ/abc')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('go bit\u200B.ly/abc')).toEqual({ error: 'note_link_blocked' });
+      // A shortener blocklist can never be complete \u2014 ANY URL is banned in
+      // a note (codex r2 P1): unlisted shorteners, scheme'd URLs, www.
+      // forms, bare host/path tokens.
+      expect(sanitize()('go tiny.one/x now')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('go https://v.gd/x')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('see www.example.com for details')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('pay at waves.com/pay please')).toEqual({ error: 'note_link_blocked' });
+      // No-path clickable forms (codex r3 P1): bare common-TLD host,
+      // query-only, non-HTTP scheme, IPv4.
+      expect(sanitize()('go to tiny.one now')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('example.com?x=1 has it')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('grab ftp://files.example.io/x')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('open 192.168.4.20/pay')).toEqual({ error: 'note_link_blocked' });
+      // Bare hosts are validated against the REAL public-suffix list (psl),
+      // not a hand-kept TLD subset (codex r3 P1) — new gTLDs included, and
+      // real ccTLD prose-typos ("late.Be" = late.be, Belgium) block too.
+      expect(sanitize()('try example.xyz today')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('ask example.ai about it')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('Running late.Be there at 3')).toEqual({ error: 'note_link_blocked' });
+      // Bare IDNs never matched the ASCII candidate regex — punycoded via
+      // domainToASCII and checked against the same suffix list (codex r4 P1).
+      expect(sanitize()('перейти на пример.рф сейчас')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('访问 例子.中国 了解')).toEqual({ error: 'note_link_blocked' });
+      // Unicode word pairs with no real suffix stay prose.
+      expect(sanitize()('ask for café.Bueno at the door')).toEqual({ note: 'ask for café.Bueno at the door' });
+      // Plain prose with dots/times must NOT false-positive.
+      expect(sanitize()('Arriving 12:30. See you at 2 p.m. sharp')).toEqual({ note: 'Arriving 12:30. See you at 2 p.m. sharp' });
+      expect(sanitize()('Back gate. Code 4482 works. Thanks')).toEqual({ note: 'Back gate. Code 4482 works. Thanks' });
+      expect(sanitize()('Ask for Mr.Smith at the door')).toEqual({ note: 'Ask for Mr.Smith at the door' });
+    });
+
+    test('sanitizer: mirrors the outbound sms-guard so the note fails BEFORE the move, not the send after', () => {
+      // sms-guard.js rejects assembled bodies containing these \u2014 a note
+      // that trips it would strand a committed move with no SMS (codex r2 P2).
+      expect(sanitize()('Gate code 1970 still works')).toEqual({ error: 'note_guard_blocked', guardReason: 'broken-render:1970' });
+      expect(sanitize()('{gate_code} is 4482')).toEqual({ error: 'note_guard_blocked', guardReason: 'unsubstituted-variable:{gate_code}' });
+      expect(sanitize()('the code is null for now')).toEqual({ error: 'note_guard_blocked', guardReason: 'broken-render:null' });
+      // Words merely CONTAINING guard tokens pass, same as the guard itself.
+      expect(sanitize()('we will annull nothing, promise')).toEqual({ note: 'we will annull nothing, promise' });
+      // The check runs on the GSM-NORMALIZED note — the send path deletes
+      // zero-width chars before ITS guard, so "19​70" fuses into
+      // "1970" after a raw-text check would have passed (codex r4 P2).
+      expect(sanitize()('code 19\u200B70 works')).toEqual({ error: 'note_guard_blocked', guardReason: 'broken-render:1970' });
+      expect(sanitize()('value un\u2060defined here')).toEqual({ error: 'note_guard_blocked', guardReason: 'broken-render:undefined' });
+    });
+
+    test('sanitizer: compliance hard rules via the CANONICAL social-media checker', () => {
+      // complianceLanguageIssues (social-media.js) \u2014 same clause logic and
+      // regression matrix as validateContent, not a parallel weaker copy
+      // (codex r5/r6). Free-form notes are customer copy like any other.
+      const blocked = (s) => expect(sanitize()(s)).toMatchObject({ error: 'note_compliance_blocked' });
+      blocked('our treatment is pet-safe');
+      blocked('products are totally safe for kids');
+      blocked('EPA-approved products only');
+      blocked('re-enter after 30 minutes');
+      blocked('keep pets off treated areas for 30 minutes');
+      // Bare dry-idiom WITHOUT technician-confirmed timing blocks too \u2014
+      // the canonical rule, stricter than a naive idiom allowlist.
+      blocked('treatment is safe once dry');
+      // A confirmation about APPOINTMENT logistics is not a drying
+      // confirmation and must not exempt the idiom (codex r7).
+      blocked('Treatment is safe once dry. Your technician confirms arrival timing.');
+      // A confirmation about any NON-drying subject doesn't exempt either —
+      // the exemption requires a drying/timing object (r9), and "ready"/
+      // "will let you know" can't smuggle an unrelated object in (r11).
+      blocked('Treatment is safe once dry. Your technician confirms the gate code.');
+      blocked('Treatment is safe once dry. Your technician confirms the gate code is ready.');
+      blocked('Treatment is safe once dry. Your technician will let you know the gate code.');
+      // The confirmation must come from the TECHNICIAN — office/dispatch
+      // can't stand in (r16).
+      blocked('Treatment is safe once dry. The office confirms timing.');
+      blocked('Treatment is safe once dry. Timing will be confirmed by dispatch.');
+      // Plain enter directives are fixed re-entry timing too (r16).
+      blocked('Wait 30 minutes before entering');
+      blocked("Don't enter for 30 minutes");
+      // Protective weather advice is NOT a product claim — no product
+      // word in the sentence, so it stays sendable (r16).
+      expect(sanitize()('Keep your pets safe indoors during the storm'))
+        .toEqual({ note: 'Keep your pets safe indoors during the storm' });
+      // ...but a well-wish phrasing wrapped around the PRODUCT is still a
+      // claim (r17).
+      blocked('Treatment will be safe');
+      blocked('Our pesticide will be safe');
+      // Nor can an arbitrary noun qualify the time object — only filler
+      // words (articles/possessives) may sit between the confirm verb and
+      // its timing object (r15).
+      blocked('Treatment is safe once dry. Your technician confirms the invoice time.');
+      blocked('Treatment is safe once dry. The invoice timing will be confirmed by your technician.');
+      // Stripping an unrelated confirmation must not recombine the
+      // technician with ANOTHER party's confirmation across the deleted
+      // span or a clause boundary (r20).
+      blocked('Treatment is safe once dry. Your technician confirms arrival timing; the office confirms timing.');
+      blocked('Treatment is safe once dry. Your technician confirms arrival timing and the office confirms timing.');
+      // ...nor across a conjunction to another subject's verb (r21).
+      blocked('Treatment is safe once dry. Your technician checks the gate and the office confirms timing.');
+      // Passive order can't smuggle logistics past the strip either (r12).
+      blocked('Treatment is safe once dry. Appointment timing will be confirmed by your technician.');
+      expect(sanitize()('Treatment is safe once dry. Timing will be confirmed by your technician.'))
+        .toEqual({ note: 'Treatment is safe once dry. Timing will be confirmed by your technician.' });
+      // ...while the object-less and drying-tied forms still exempt.
+      expect(sanitize()('Treatment is safe once dry. Your technician will let you know.'))
+        .toEqual({ note: 'Treatment is safe once dry. Your technician will let you know.' });
+      expect(sanitize()("Treatment is safe once dry. Your tech will tell you when it's dry."))
+        .toEqual({ note: "Treatment is safe once dry. Your tech will tell you when it's dry." });
+      // ...but a DRYING confirmation located at the appointment IS one (r8).
+      expect(sanitize()('Treatment is safe once dry. Your technician confirms drying time at the appointment.'))
+        .toEqual({ note: 'Treatment is safe once dry. Your technician confirms drying time at the appointment.' });
+      // Spelled-out durations are the same banned class as digits.
+      blocked('Keep pets off treated areas for two hours');
+      // Compact/decimal durations and dotted EPA (pre-push r13): the
+      // sentence splitter must not treat a decimal point as a boundary,
+      // and "30m" / "1.5 hours" / "E.P.A." are the same banned classes.
+      blocked('Stay off for 30m');
+      blocked('Re-enter in 1.5 hours');
+      // Seconds are the same banned class (r18).
+      blocked('Keep pets off treated areas for 30 seconds');
+      blocked('Re-enter in 90 sec');
+      // Weather/premises durations are advice about THAT, not implicit
+      // re-entry (r19) — the treated-area route still blocks.
+      expect(sanitize()('Stay inside for 30 minutes because of lightning'))
+        .toEqual({ note: 'Stay inside for 30 minutes because of lightning' });
+      expect(sanitize()('Avoid the flooded entrance for 30 minutes'))
+        .toEqual({ note: 'Avoid the flooded entrance for 30 minutes' });
+      // ...but explicit treatment context in the clause overrides the
+      // premises exemption — an incidental logistics word can't launder a
+      // fixed re-entry time (r22).
+      blocked('Stay inside for 30 minutes after treatment because the gate is open');
+      // A split instruction is one instruction — the directive may sit in
+      // the adjacent clause or sentence (r23).
+      blocked('Stay off and wait 30 minutes');
+      blocked('Stay off. Wait 30 minutes.');
+      blocked('Wait 30 minutes, then go back on the lawn');
+      // ...but a bare duration next to a well-wish stays sendable.
+      expect(sanitize()('Stay dry! See you at 2:30.'))
+        .toEqual({ note: 'Stay dry! See you at 2:30.' });
+      // Invisible joiners can't split a banned word past the compliance
+      // regexes — validation runs on a folded copy (r24).
+      blocked('Our treatment is sa\u200Dfe');
+      // Treatment context in the PRIOR clause defeats the premises
+      // exemption (r24).
+      blocked('We treated the lawn. Stay inside near the gate for 30 minutes before going outside.');
+      // An arrival clock next to a stay directive is not a re-entry time —
+      // adjacency propagation needs a duration figure (r24).
+      expect(sanitize()('Please wait inside. We will arrive at 2:30.'))
+        .toEqual({ note: 'Please wait inside. We will arrive at 2:30.' });
+      blocked('This is E.P.A. approved');
+      // ...but only APPROVED-status EPA claims block — label-direction
+      // references are compliant (r14 client-parity case).
+      expect(sanitize()('Following EPA label directions as always'))
+        .toEqual({ note: 'Following EPA label directions as always' });
+      // Cross-sentence context (pre-push r10): the note ALWAYS rides a
+      // treatment SMS, so the claim and its product/area context need not
+      // share a sentence — impliedTreatmentContext closes the split.
+      blocked('Treatment today. Totally safe.');
+      blocked('We treated the lawn. Stay off for 30 minutes.');
+      // ...while courtesy well-wishes and plain rescheduling times pass.
+      expect(sanitize()('Rain rolled in - stay safe out there! New window is 2:30 pm.'))
+        .toEqual({ note: 'Rain rolled in - stay safe out there! New window is 2:30 pm.' });
+      expect(sanitize()("We'll be back tomorrow at 9:00 to re-treat the lawn."))
+        .toEqual({ note: "We'll be back tomorrow at 9:00 to re-treat the lawn." });
+      // The implied-context strictness is the NOTE path only — the social
+      // checker keeps its same-sentence co-occurrence rule.
+      const { complianceLanguageIssues } = require('../services/social-media');
+      expect(complianceLanguageIssues('Treatment today. Totally safe.')).toEqual([]);
+      expect(complianceLanguageIssues('We treated the lawn. Stay off for 30 minutes.')).toEqual([]);
+      // Approved framings and unrelated durations pass.
+      expect(sanitize()('Safe once dry - your technician confirms timing')).toEqual({ note: 'Safe once dry - your technician confirms timing' });
+      expect(sanitize()('keeping your home safe from termites')).toEqual({ note: 'keeping your home safe from termites' });
+      expect(sanitize()('EPA-registered product, same as always')).toEqual({ note: 'EPA-registered product, same as always' });
+      expect(sanitize()('visit takes about 45 minutes')).toEqual({ note: 'visit takes about 45 minutes' });
+      expect(sanitize()('avoid watering for 24 hours')).toEqual({ note: 'avoid watering for 24 hours' });
+    });
+
+    test('sanitizer: rejects emoji BEFORE the move (send layer would block the SMS after)', () => {
+      // sendCustomerMessage's EMOJI_FOR_CUSTOMER validator would otherwise
+      // fire after the reschedule committed — move done, customer silent.
+      expect(sanitize()('See you Friday 👍')).toEqual({ error: 'note_emoji_blocked' });
+      expect(sanitize()('Rain check ☔ sorry!')).toEqual({ error: 'note_emoji_blocked' });
+      // Flags (regional indicators) and keycaps are emoji too — neither is
+      // Extended_Pictographic, both now covered by the shared validator
+      // (codex r3 P1).
+      expect(sanitize()('See you 🇺🇸')).toEqual({ error: 'note_emoji_blocked' });
+      expect(sanitize()('Press 1️⃣ to confirm')).toEqual({ error: 'note_emoji_blocked' });
+      // Smart punctuation is NOT emoji — same line the voice validator draws.
+      expect(sanitize()('Friday — we’ll be there')).toEqual({ note: 'Friday — we’ll be there' });
+      expect(sanitize()(42)).toEqual({ error: 'note_invalid' });
+      // "habit.ly" is a REAL registrable .ly host, so the no-URL rule now
+      // correctly blocks it; dot-joined words off the TLD set still pass.
+      expect(sanitize()('a habit.ly no wait')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('an orbit.lyric moment, truly')).toEqual({ note: 'an orbit.lyric moment, truly' });
+    });
+
+    test('commit appends the note after the rendered template body', async () => {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+      });
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+        customerNote: '  Sorry for the shuffle — see you Friday!  ',
+        actorUserId: 'admin-7',
+      });
+
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body)
+        .toBe('rendered body\n\nNote from our team: Sorry for the shuffle — see you Friday!');
+      // Operator attribution: adminUserId → sms_log.admin_user_id, so the
+      // durable record shows who authored the customer-visible note
+      // (codex r2 P2). Absent actor → key absent (system-initiated shape).
+      expect(sendCustomerMessage.mock.calls[0][0].metadata.adminUserId).toBe('admin-7');
+    });
+
+    test('route scope: the note rides the ANCHOR SMS only — siblings get the standard text', async () => {
+      // Same wiring as the route-scope suite: anchor + one phone-having
+      // sibling; a stop-specific note (gate code) must never fan out.
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ rows: [{ id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-11', window_start: '11:30', window_end: '13:30', customer_id: 'cust-2', service_type: 'Lawn Care' }] }),
+        ],
+        customers: [
+          chain({ first: jest.fn().mockResolvedValue({ id: 'cust-2', phone: '+19415550002', first_name: 'Sam', zip: '34203' }) }),
+        ],
+        reschedule_log: [chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) }), chain()],
+      });
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '11:00' } },
+        notifyCustomer: true,
+        customerNote: 'Gate code 4482 still works.',
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.movedCount).toBe(2);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      const bodies = sendCustomerMessage.mock.calls.map((c) => c[0].body);
+      expect(bodies[0]).toBe('rendered body\n\nNote from our team: Gate code 4482 still works.');
+      expect(bodies[1]).toBe('rendered body');
+    });
+
+    test('commit rejects a shortener note BEFORE moving anything', async () => {
+      // No db queues wired past the service load — a rejected note must
+      // never reach the rebooker or the send.
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+      });
+
+      const result = await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'job',
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+        notifyCustomer: true,
+        customerNote: 'reschedule at bit.ly/waves',
+      });
+
+      expect(result).toEqual({ ok: false, reason: 'note_link_blocked' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getOptions', () => {
     test('attaches NWS rain chances to day options and counts the remaining route', async () => {
       SmartRebooker.findRescheduleOptions.mockResolvedValue([
