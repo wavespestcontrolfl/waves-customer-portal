@@ -838,7 +838,16 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
         return res.status(409).json({
           error: `Review request was not sent (${result.code || result.reason || 'blocked'}). Check the customer's messaging consent / suppression.`,
         });
+      case 'error':
+        // NON-durable failure (lock never ran, or no scheduled_for was
+        // persisted) — processScheduled has nothing to retry, so reporting
+        // "queued" here would record a phantom retry in the UI (codex r7).
+        return res.status(502).json({
+          error: `Review request failed and was NOT queued (${result.code || result.reason || 'error'}). Retry the send.`,
+        });
       default:
+        // Durable transient failure only — send_failed guarantees a
+        // persisted scheduled_for row processScheduled will pick up.
         return res.status(202).json({
           success: false, queued: true,
           message: 'Send failed transiently and was queued for automatic retry.',
