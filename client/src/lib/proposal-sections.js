@@ -5,12 +5,10 @@
 // pattern as the commercial inclusions bullets) — change them together.
 
 // commercialTerms → ordered [label, value] rows, omitting absent fields.
-// validDays deliberately does NOT render: the send flow stamps the enforced
-// expiry (estimates.expires_at, printed as "Valid through") from the fixed
-// ESTIMATE_SEND_EXPIRY_DAYS, so an authored validity period would contradict
-// the date acceptance actually enforces (codex 1A-i r1). The field stays in
-// the normalizer, reserved for the adjustable-expiry lane that will wire
-// enforcement and rendering together.
+// There is deliberately NO validity-period row: the send flow stamps the
+// enforced expiry (estimates.expires_at, printed as "Valid through") from
+// the fixed ESTIMATE_SEND_EXPIRY_DAYS — the adjustable-expiry lane adds an
+// authored validity together with enforcement (codex 1A-i r1/r2).
 // Canonical payment-terms tokens → customer-facing labels. The tokens are
 // the payer system's vocabulary (server payer.js PAYMENT_TERMS), normalized
 // by the server; anything unrecognized renders nothing rather than raw data.

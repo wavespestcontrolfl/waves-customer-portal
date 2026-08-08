@@ -123,6 +123,31 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(extractPdfText(untouched)).toContain('callback guarantee between scheduled visits');
   });
 
+  test('an oversized corrective row (12 long bullets) paginates instead of overflowing (codex #3297 r2)', async () => {
+    const oversized = {
+      ...STRUCTURED_ESTIMATE,
+      estimate_data: {
+        proposal: {
+          ...STRUCTURED_ESTIMATE.estimate_data.proposal,
+          correctiveWork: [{
+            label: 'Full-building corrective program',
+            amount: 2500,
+            taxable: false,
+            includes: Array.from({ length: 12 }, (_, i) => `Step ${i + 1}: ${'detailed remediation work described at length '.repeat(4).trim()}`),
+          }],
+        },
+      },
+    };
+    const buffer = await buildEstimateProposalPDFBuffer(oversized, { billsPerApplication: false });
+    expect(buffer.slice(0, 5).toString('latin1')).toBe('%PDF-');
+    const text = extractPdfText(buffer);
+    expect(text).toContain('Full-building corrective program');
+    expect(text).toContain('Step 12:');
+    // Multi-page output — the bullets flow across pages via the continuation
+    // header instead of one indivisible over-page row.
+    expect((buffer.toString('latin1').match(/\/Type \/Page[^s]/g) || []).length).toBeGreaterThanOrEqual(2);
+  });
+
   test('legacy proposal renders no structured section labels', async () => {
     const legacy = {
       ...STRUCTURED_ESTIMATE,

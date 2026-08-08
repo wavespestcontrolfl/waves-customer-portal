@@ -191,12 +191,11 @@ export default function CommercialProposalPage() {
     paymentTerms: '', initialTermMonths: '', renewal: '',
     priceAdjustment: '', cancellation: '', accessRequirements: '',
   });
-  // Normalized fields with no authoring surface here yet (validDays is
-  // reserved for the adjustable-expiry lane; accountManager is set by the
-  // API/engine and shown on the document). PUT persists exactly what the
+  // Normalized fields with no authoring surface here yet (accountManager is
+  // set by the API/engine, storage-first). PUT persists exactly what the
   // normalizer returns from this payload, so anything loaded but not echoed
   // back would be DELETED on save — carry them through untouched.
-  const [passThrough, setPassThrough] = useState({ validDays: null, accountManager: null });
+  const [passThrough, setPassThrough] = useState({ accountManager: null });
   const [sendMethod, setSendMethod] = useState('email');
   // Engine-composed prospect research (commercial proposal lane). Read-only
   // context for pricing the walkthrough — never sent to the customer.
@@ -239,10 +238,7 @@ export default function CommercialProposalPage() {
       includesText: (w.includes || []).join('\n'),
     })));
     setResponsibilitiesText((p.customerResponsibilities || []).join('\n'));
-    setPassThrough({
-      validDays: p.commercialTerms?.validDays ?? null,
-      accountManager: p.accountManager ?? null,
-    });
+    setPassThrough({ accountManager: p.accountManager ?? null });
     setCommercialTerms({
       paymentTerms: p.commercialTerms?.paymentTerms || '',
       initialTermMonths: p.commercialTerms?.initialTermMonths != null ? String(p.commercialTerms.initialTermMonths) : '',
@@ -330,11 +326,6 @@ export default function CommercialProposalPage() {
       .filter((w) => w.label);
     const responsibilities = responsibilitiesText.split('\n').map((s) => s.trim()).filter(Boolean);
     const ct = {
-      // validDays has no input here (reserved for the adjustable-expiry
-      // lane: rendering an authored validity period would contradict the
-      // enforced expires_at the send flow stamps — codex 1A-i r1), but a
-      // stored value must survive the save round-trip.
-      validDays: passThrough.validDays,
       paymentTerms: commercialTerms.paymentTerms.trim() || null,
       initialTermMonths: commercialTerms.initialTermMonths.trim() === '' ? null : Number(commercialTerms.initialTermMonths),
       renewal: commercialTerms.renewal.trim() || null,
@@ -390,6 +381,11 @@ export default function CommercialProposalPage() {
         method: 'PUT',
         body: JSON.stringify(payload),
       });
+      // Swap in the NORMALIZED state before download/send can proceed — the
+      // operator must see exactly what persisted (the server clamps string
+      // lengths as a safety net; approving un-normalized local state could
+      // send a document that differs from the screen — codex #3297 r2).
+      await reload();
       setSavedOnce(true);
       setDirty(false);
       return true;
@@ -715,12 +711,12 @@ export default function CommercialProposalPage() {
               {scopeItems.map((item, idx) => (
                 <div key={idx} className="flex gap-2 items-center">
                   <Input
-                    size="sm" className="w-48 shrink-0" placeholder="Label (e.g. Units)"
+                    size="sm" className="w-48 shrink-0" placeholder="Label (e.g. Units)" maxLength={80}
                     value={item.label} disabled={!!locked}
                     onChange={(e) => { setDirty(true); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
                   />
                   <Input
-                    size="sm" className="flex-1" placeholder="Value (e.g. 4 residential units, tenant-occupied)"
+                    size="sm" className="flex-1" placeholder="Value (e.g. 4 residential units, tenant-occupied)" maxLength={160}
                     value={item.value} disabled={!!locked}
                     onChange={(e) => { setDirty(true); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, value: e.target.value } : it))); }}
                   />
@@ -870,7 +866,7 @@ export default function CommercialProposalPage() {
                 <div key={idx} className="space-y-2 border-b border-hairline border-zinc-100 pb-3 last:border-0 last:pb-0">
                   <div className="flex gap-2 items-center">
                     <Input
-                      size="sm" className="flex-1" placeholder="Work description (e.g. Initial German roach cleanout — Units 2 & 4)"
+                      size="sm" className="flex-1" placeholder="Work description (e.g. Initial German roach cleanout — Units 2 & 4)" maxLength={160}
                       value={w.label} disabled={!!locked}
                       onChange={(e) => { setDirty(true); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
                     />
@@ -944,18 +940,22 @@ export default function CommercialProposalPage() {
                     <option value="net30">Net-30</option>
                   </Select>
                 </label>
+                {/* maxLength mirrors normalizeCommercialTerms' clamps so a
+                    contractual sentence can never silently truncate on save
+                    (codex #3297 r2). */}
                 {[
-                  ['initialTermMonths', 'Initial term (months, 0 = month-to-month)', 'number', 'e.g. 12'],
-                  ['renewal', 'Renewal', 'text', 'e.g. Renews month-to-month after the initial term'],
-                  ['priceAdjustment', 'Price adjustment', 'text', 'e.g. Rates reviewed annually with 30-day notice'],
-                  ['cancellation', 'Cancellation', 'text', 'e.g. 30-day written notice, no cancellation fee'],
-                ].map(([key, label, type, placeholder]) => (
+                  ['initialTermMonths', 'Initial term (months, 0 = month-to-month)', 'number', 'e.g. 12', undefined],
+                  ['renewal', 'Renewal', 'text', 'e.g. Renews month-to-month after the initial term', 120],
+                  ['priceAdjustment', 'Price adjustment', 'text', 'e.g. Rates reviewed annually with 30-day notice', 160],
+                  ['cancellation', 'Cancellation', 'text', 'e.g. 30-day written notice, no cancellation fee', 160],
+                ].map(([key, label, type, placeholder, maxLength]) => (
                   <label key={key} className="block">
                     <span className={LABEL}>{label}</span>
                     <Input
                       size="sm" className="mt-1" type={type}
                       min={type === 'number' ? '0' : undefined} step={type === 'number' ? '1' : undefined}
                       max={key === 'initialTermMonths' ? '60' : undefined}
+                      maxLength={maxLength}
                       value={commercialTerms[key]} disabled={!!locked} placeholder={placeholder}
                       onChange={(e) => { setDirty(true); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
                     />
@@ -964,7 +964,7 @@ export default function CommercialProposalPage() {
                 <label className="block sm:col-span-2">
                   <span className={LABEL}>Property access</span>
                   <Input
-                    size="sm" className="mt-1" value={commercialTerms.accessRequirements} disabled={!!locked}
+                    size="sm" className="mt-1" maxLength={200} value={commercialTerms.accessRequirements} disabled={!!locked}
                     placeholder="e.g. Office provides keys for common areas; tenants notified by property manager"
                     onChange={(e) => { setDirty(true); setCommercialTerms((prev) => ({ ...prev, accessRequirements: e.target.value })); }}
                   />

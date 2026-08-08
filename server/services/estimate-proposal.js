@@ -187,16 +187,14 @@ function cleanBoundedInt(value, { min, max }) {
 
 // §10 Commercial terms — the structured agreement block. Free-text `terms`
 // demotes to an "Additional terms" override rendered beneath these.
-// validDays is normalized and stored but rendered NOWHERE and offered by no
-// editor yet: the send flow stamps the enforced expiry (expires_at) from the
-// fixed ESTIMATE_SEND_EXPIRY_DAYS, and printing an authored validity period
-// beside it would contradict the date acceptance actually enforces (codex
-// 1A-i r1). Reserved for the adjustable-expiry lane, which wires enforcement
-// and rendering together.
+// NO validity-period field here on purpose: the send flow stamps the
+// enforced expiry (expires_at) from the fixed ESTIMATE_SEND_EXPIRY_DAYS, so
+// an authored validity option would persist a promise nothing enforces or
+// renders (codex #3297 r2). The adjustable-expiry lane adds it together
+// with enforcement and rendering.
 function normalizeCommercialTerms(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const terms = {
-    validDays: cleanBoundedInt(raw.validDays, { min: 1, max: 365 }),
     paymentTerms: normalizePaymentTerms(raw.paymentTerms),
     initialTermMonths: cleanBoundedInt(raw.initialTermMonths, { min: 0, max: 60 }),
     renewal: cleanString(raw.renewal, 120),

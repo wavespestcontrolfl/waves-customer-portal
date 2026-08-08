@@ -20438,7 +20438,6 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
             ? { customerResponsibilities: proposalForView.customerResponsibilities } : {}),
           ...(proposalForView.commercialTerms ? {
             commercialTerms: {
-              validDays: proposalForView.commercialTerms.validDays,
               paymentTerms: proposalForView.commercialTerms.paymentTerms,
               initialTermMonths: proposalForView.commercialTerms.initialTermMonths,
               renewal: proposalForView.commercialTerms.renewal,

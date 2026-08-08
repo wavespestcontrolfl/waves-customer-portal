@@ -189,8 +189,9 @@ describe('structured proposal sections (slice 1A-i)', () => {
       label: 'Cleanout', amount: 450.01, taxable: true, includes: ['Kitchens', 'Follow-up at 2 weeks'],
     }]);
     expect(p.customerResponsibilities).toEqual(['Provide unit access with 24-hour tenant notice']);
+    // validDays in the input is IGNORED — no validity field exists until the
+    // adjustable-expiry lane wires enforcement + rendering together.
     expect(p.commercialTerms).toEqual({
-      validDays: 30,
       paymentTerms: 'net30',
       initialTermMonths: 0,
       renewal: null,

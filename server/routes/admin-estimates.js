@@ -1970,9 +1970,6 @@ router.put('/:id/proposal', async (req, res, next) => {
       if (badBoundedInt(incoming.commercialTerms.initialTermMonths, 0, 60)) {
         return res.status(400).json({ error: 'Initial term must be a whole number of months between 0 and 60.' });
       }
-      if (badBoundedInt(incoming.commercialTerms.validDays, 1, 365)) {
-        return res.status(400).json({ error: 'Proposal validity must be a whole number of days between 1 and 365.' });
-      }
       // Payment terms speak the canonical payer vocabulary only — free text
       // here would silently normalize to null (codex #3297 r2).
       const rawPaymentTerms = incoming.commercialTerms.paymentTerms;

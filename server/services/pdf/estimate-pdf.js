@@ -300,21 +300,29 @@ function correctiveWorkBlock(ctx, correctiveWork, y) {
   y = ensureSpace(ctx, y, 40);
   y = sectionLabel(doc, 'Corrective work (one-time)', L, y);
   for (const work of correctiveWork) {
-    const includeLines = (work.includes || []).map((inc) => `• ${inc}`).join('\n');
+    // Label + cadence + amount are one indivisible row; the include bullets
+    // paginate LINE BY LINE below it. Twelve 200-char bullets can exceed a
+    // full page, and handing ensureSpace an over-page indivisible row lets
+    // pdfkit auto-flow the description while the amount stays painted at the
+    // original y (codex #3297 r2).
     doc.fontSize(10);
     const labelH = doc.heightOfString(work.label, { width: COL_W.desc });
-    doc.fontSize(9);
-    const includesH = includeLines ? doc.heightOfString(includeLines, { width: COL_W.desc }) + 2 : 0;
-    const rowH = Math.max(labelH + includesH + 6, 18);
-    y = ensureSpace(ctx, y, rowH + 4);
+    const headH = Math.max(labelH + 6, 18);
+    y = ensureSpace(ctx, y, headH + 4);
     doc.fontSize(10).font('Helvetica').fillColor(INK).text(work.label, COL.desc, y, { width: COL_W.desc });
-    if (includeLines) {
-      doc.fontSize(9).fillColor(MUTED).text(includeLines, COL.desc, y + labelH + 2, { width: COL_W.desc });
-    }
     doc.fontSize(9).fillColor(BODY).text('One-time', COL.freq, y + 1, { width: COL_W.freq });
     doc.fontSize(10).fillColor(INK)
       .text(currency(work.amount) + (work.taxable ? ' *' : ''), COL.amount, y, { width: COL_W.amount, align: 'right' });
-    y += rowH;
+    y += headH;
+    for (const inc of (work.includes || [])) {
+      const line = `• ${inc}`;
+      doc.fontSize(9).font('Helvetica');
+      const lineH = doc.heightOfString(line, { width: COL_W.desc });
+      y = ensureSpace(ctx, y, lineH + 3);
+      doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(line, COL.desc, y, { width: COL_W.desc });
+      y += lineH + 2;
+    }
+    y += 4;
   }
   return y + 6;
 }
