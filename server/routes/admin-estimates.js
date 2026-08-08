@@ -2670,6 +2670,15 @@ router.patch('/:id', async (req, res, next) => {
         estimateData: estimate.estimate_data,
       }) : null;
       if (deliveryError) return res.status(400).json({ error: deliveryError });
+      // Structured payment terms exist only where invoice billing consumes
+      // them — turning invoice mode OFF while the authored proposal still
+      // promises a term would strand a promise no billing path enforces
+      // (and Mark won would then 409). Same invariant as the proposal PUT
+      // guard, enforced on the other side (codex #3297 r4b).
+      if (!nextBillByInvoice && estimate.bill_by_invoice
+        && parseEstimateData(estimate.estimate_data)?.proposal?.commercialTerms?.paymentTerms) {
+        return res.status(400).json({ error: 'This proposal has structured payment terms, which require invoice billing. Clear the payment terms in the proposal editor first.' });
+      }
       updates.bill_by_invoice = nextBillByInvoice;
     }
     if (req.body.status !== undefined) {

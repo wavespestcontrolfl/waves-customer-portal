@@ -927,9 +927,12 @@ export default function CommercialProposalPage() {
                   {/* Canonical payer vocabulary only (server rejects free
                       text) — billing derives due dates from these tokens,
                       which only exists for invoice-mode proposals. */}
+                  {/* Stays ENABLED when a stored term exists on a
+                      non-invoice proposal so the operator can CLEAR the
+                      stale term (the PUT rejects setting a new one). */}
                   <Select
                     size="sm" className="mt-1" value={commercialTerms.paymentTerms}
-                    disabled={!!locked || !estimate?.billByInvoice}
+                    disabled={!!locked || (!estimate?.billByInvoice && !commercialTerms.paymentTerms)}
                     onChange={(e) => { setDirty(true); setCommercialTerms((prev) => ({ ...prev, paymentTerms: e.target.value })); }}
                   >
                     <option value="">Not set</option>

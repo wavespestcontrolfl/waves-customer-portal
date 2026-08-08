@@ -224,9 +224,14 @@ describe('createProposalAcceptanceInvoice', () => {
 
   test('payer-term resolution: match proceeds on payer terms, mismatch REJECTS acceptance, self-pay uses the proposal term (codex #3297 r2d)', async () => {
     const { resolveForInvoice } = require('../services/payer');
+    // Payer resolution runs TWICE per win (lock-then-re-resolve, codex
+    // #3297 r4b) — queue each payer scenario's value for both reads.
+    const queuePayer = (value) => {
+      resolveForInvoice.mockResolvedValueOnce(value).mockResolvedValueOnce(value);
+    };
     // Active payer whose terms MATCH the authored term → invoices on it.
     InvoiceService.create.mockResolvedValue({ id: 10, invoice_number: 'WPC-2026-0010', total: 1 });
-    resolveForInvoice.mockResolvedValueOnce({ payerId: 77, paymentTerms: 'net30' });
+    queuePayer({ payerId: 77, paymentTerms: 'net30' });
     await createProposalAcceptanceInvoice({
       trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
       estimate: { id: 42 },
@@ -237,7 +242,7 @@ describe('createProposalAcceptanceInvoice', () => {
 
     // Active payer CONTRADICTING the rendered agreement → 409, no invoice —
     // acceptance must never silently bill a term the customer didn't see.
-    resolveForInvoice.mockResolvedValueOnce({ payerId: 77, paymentTerms: 'net30' });
+    queuePayer({ payerId: 77, paymentTerms: 'net30' });
     await expect(createProposalAcceptanceInvoice({
       trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
       estimate: { id: 43 },
@@ -247,7 +252,7 @@ describe('createProposalAcceptanceInvoice', () => {
     expect(InvoiceService.create).toHaveBeenCalledTimes(1);
 
     // Payer with terms but NO authored term → payer terms, no conflict.
-    resolveForInvoice.mockResolvedValueOnce({ payerId: 77, paymentTerms: 'net15' });
+    queuePayer({ payerId: 77, paymentTerms: 'net15' });
     await createProposalAcceptanceInvoice({
       trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
       estimate: { id: 44 },

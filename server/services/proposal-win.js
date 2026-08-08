@@ -321,19 +321,22 @@ function proposalNetTermDays(proposal) {
 // never saw. The operator re-authors or clears the term (codex #3297 r2d).
 async function resolveAcceptanceTermDays({ trx, customerId, proposal }) {
   const { resolveForInvoice } = require('./payer');
-  // throwOnError: a transient lookup failure must ABORT the win, not
-  // fail-soft to self-pay — that would bypass the mismatch guard below and
-  // invoice a due date the standing payer relationship contradicts (codex
-  // 1A-i r3 P0). Same-trx resolution as InvoiceService.create's own
-  // payer snapshot keeps the two reads consistent.
-  const resolved = await resolveForInvoice({ database: trx, customerId, throwOnError: true });
+  // Lock-then-read (codex #3297 r4b): freeze the customer's payer LINK
+  // first, then resolve, then freeze the payer's TERMS and re-resolve under
+  // both locks. Locks held to commit mean InvoiceService.create's own payer
+  // re-resolution inside this trx reads the same link and terms — under
+  // READ COMMITTED, a lock taken after the read would leave a window where
+  // the due date comes from stale terms while the invoice snapshot gets the
+  // new ones. throwOnError: a transient lookup failure must ABORT the win,
+  // not fail-soft to self-pay past the mismatch guard (codex 1A-i r3 P0).
+  await trx('customers').where({ id: customerId }).forShare().first('id');
+  let resolved = await resolveForInvoice({ database: trx, customerId, throwOnError: true });
+  if (resolved?.payerId != null) {
+    await trx('payers').where({ id: resolved.payerId }).forShare().first('id');
+    resolved = await resolveForInvoice({ database: trx, customerId, throwOnError: true });
+  }
   const authoredTerm = proposal?.commercialTerms?.paymentTerms || null;
   if (resolved?.payerId != null && resolved.paymentTerms) {
-    // Hold a share lock on the payer row until commit: InvoiceService.create
-    // resolves the payer AGAIN for its snapshot, and under READ COMMITTED a
-    // concurrent payer edit between the two reads could split the due date
-    // from the snapshot/statement terms (codex #3297 r4).
-    await trx('payers').where({ id: resolved.payerId }).forShare().first('id');
     if (authoredTerm && authoredTerm !== resolved.paymentTerms) {
       throw winError(
         `This proposal promises ${authoredTerm} payment terms but the customer bills through a payer on ${resolved.paymentTerms} terms. `
