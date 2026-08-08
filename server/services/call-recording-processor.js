@@ -2478,8 +2478,12 @@ const STAMPED_LEAD_FIELD_CASTS = {
 // Returns false when the fence lost (peer owns the call); THROWS on
 // transient DB failure so callers escalate to the extraction_failed retry
 // instead of finalizing half-reconciled.
-async function clearStampAndRestoreLead(call, procToken, callSid) {
-  return db.transaction(async (trx) => {
+// `existingTrx` lets the stamp+enrich transaction settle a chronological
+// restamp's old epoch inside ITSELF (it already holds the lead lock this
+// body takes — same-transaction re-locks are no-ops); every other caller
+// omits it and gets the standalone transaction.
+async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = null) {
+  const run = async (trx) => {
     const readOwnMd = async () => {
       const fresh = await trx('call_log').where({ id: call.id }).first('metadata');
       try {
@@ -2614,7 +2618,8 @@ async function clearStampAndRestoreLead(call, procToken, callSid) {
       }
     }
     return true;
-  });
+  };
+  return existingTrx ? run(existingTrx) : db.transaction(run);
 }
 
 // New-lead admin surfacing for a lead minted by call processing — the fresh
@@ -5373,6 +5378,17 @@ const CallRecordingProcessor = {
     // the lock to a recoverable terminal state so manual retry works
     // immediately and the real error reaches the caller.
     try {
+    // `call` was loaded BEFORE the atomic claim above, and a stale worker
+    // can commit a lead stamp (fenced on ITS token, still valid then) in
+    // that window — Step 4b's priorStampedLeadId would then read the
+    // pre-stamp metadata, leave the peer's stamp unreconciled at exit, or
+    // overwrite its ledgers with a fresh-mode stamp (pre-push P1 r2). One
+    // authoritative re-read now that ownership is ours; from here on no
+    // peer can write linkage state (every stamp/clear is token-fenced).
+    // Inside the outer guard: a transient failure releases the claim to
+    // the retry path instead of wedging the row at 'processing'.
+    const claimedRow = await db('call_log').where({ id: call.id }).first('metadata');
+    if (claimedRow) call.metadata = claimedRow.metadata;
     const contactPhone = resolveCallContactPhone(call);
     // Forwarding-masked call: the inbound leg recorded one of our own internal
     // numbers (a tracking number, or the staff cell it forwarded to) as the caller,
@@ -6000,12 +6016,6 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
-      await writeLegacyShadowRouteDecision({
-        call,
-        extracted,
-        customerId: call.customer_id || null,
-        finalStatus: extracted.is_spam ? 'spam' : 'voicemail',
-      });
       const terminalUpdate = {
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
@@ -6017,7 +6027,26 @@ const CallRecordingProcessor = {
         terminalUpdate.answered_by = 'voicemail';
         terminalUpdate.call_outcome = 'voicemail';
       }
-      await db('call_log').where({ id: call.id }).update(terminalUpdate);
+      // Fenced like the finalization write, and BEFORE the shadow/triage
+      // side effects (pre-push P1 r2): the settle above is not an
+      // ownership guarantee — it returns true with nothing to clear, and
+      // the claim can be reclaimed between its commit and this write. A
+      // stale worker must not null a peer's token, overwrite its terminal
+      // status, or run this path's downstream effects.
+      const terminalWrote = await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update(terminalUpdate);
+      if (!terminalWrote) {
+        logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
+        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
+      }
+      await writeLegacyShadowRouteDecision({
+        call,
+        extracted,
+        customerId: call.customer_id || null,
+        finalStatus: extracted.is_spam ? 'spam' : 'voicemail',
+      });
       await updateUnifiedVoiceMessage(
         {
           ...call,
@@ -6885,17 +6914,28 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
-      await db('call_log').where({ id: call.id }).update({
-        ai_extraction: JSON.stringify(extracted),
-        call_summary: extracted.call_summary || null,
-        sentiment: extracted.sentiment || null,
-        lead_quality: extracted.lead_quality || null,
-        processing_status: extracted.is_spam ? 'spam' : 'processed',
-        review_status: 'open',
-        processing_token: null,
-        processing_started_at: null,
-        updated_at: new Date(),
-      });
+      // Fenced like the finalization write (pre-push P1 r2): the settle
+      // above is not an ownership guarantee — it returns true with nothing
+      // to clear, and the claim can be reclaimed between its commit and
+      // this write.
+      const vetoWrote = await db('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          ai_extraction: JSON.stringify(extracted),
+          call_summary: extracted.call_summary || null,
+          sentiment: extracted.sentiment || null,
+          lead_quality: extracted.lead_quality || null,
+          processing_status: extracted.is_spam ? 'spam' : 'processed',
+          review_status: 'open',
+          processing_token: null,
+          processing_started_at: null,
+          updated_at: new Date(),
+        });
+      if (!vetoWrote) {
+        logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
+        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
+      }
       await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
       logger.info(`[call-proc] V2 hard veto for ${callSid}; skipped canonical writes (customer/lead/appointment)`);
       return { success: true, skipped: true, reason: 'v2_canonical_write_blocked' };
@@ -8314,17 +8354,59 @@ const CallRecordingProcessor = {
                 // serializes stampers so each baseline reflects committed
                 // state — and, since r17, so does the fill-only decision
                 // below (identity races stay the guarded write's job).
-                const lockedLead = await trx('leads')
+                const lockLeadRow = () => trx('leads')
                   .where({ id: leadId })
                   .forUpdate()
                   .first();
+                let lockedLead = await lockLeadRow();
+                // Is this a CHRONOLOGICAL restamp — a force-reprocess of an
+                // older call after a DIFFERENT call enriched the same reused
+                // lead (codex P2 r17)? Its old stamp belongs to a finished
+                // epoch: merging that ledger into the new stamp mixed
+                // mutations from two epochs, and because the intervening
+                // call's stamp stays chronologically EARLIER than this
+                // restamp, its rejection was never re-parented — it could
+                // restore this call's original, already-settled values
+                // straight over accepted state (pre-push P1 r2; supersedes
+                // the r18 merge). SETTLE the old epoch first — the full
+                // clear + CAS-restore + successor re-parent, inside THIS
+                // transaction (the lead lock is already ours) — then stamp
+                // a fresh epoch: with the old stamp gone the SQL below
+                // starts both ledgers and the ordering marker fresh, and
+                // the payload is re-decided against the POST-SETTLE row.
+                const freshCall = await trx('call_log').where({ id: call.id }).first('metadata');
+                let freshMd = {};
+                try {
+                  freshMd = typeof freshCall?.metadata === 'string' ? JSON.parse(freshCall.metadata) : (freshCall?.metadata || {});
+                } catch { freshMd = {}; }
+                const ownStampedAt = (freshMd?.lead_id && String(freshMd.lead_id) === String(leadId)
+                  && typeof freshMd.lead_stamped_at === 'string') ? freshMd.lead_stamped_at : null;
+                if (ownStampedAt) {
+                  const interveningStamp = await trx('call_log')
+                    .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
+                    .whereNot('id', call.id)
+                    .whereRaw("metadata->>'lead_stamped_at' > ?", [ownStampedAt])
+                    .first('id');
+                  if (interveningStamp) {
+                    const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx);
+                    if (!settled) {
+                      const lost = new Error('processing claim lost during call→lead restamp settle');
+                      lost.abortProcessing = true;
+                      throw lost;
+                    }
+                    lockedLead = await lockLeadRow();
+                  }
+                }
                 // Fill-only columns are re-decided against the LOCKED row
-                // (codex P2 r17): `current` was read before the lock, so a
-                // name/email/address an admin or another call entered in
-                // that gap would otherwise be overwritten by this pass's
-                // stale fill. Dropping the key here also keeps it out of
-                // the rollback ledgers below — a field this call never
-                // wrote must never be restored by its rejection.
+                // (codex P2 r17) — post-settle on a restamp, so a value the
+                // settle just rolled back is fillable again: `current` was
+                // read before the lock, and a name/email/address an admin
+                // or another call entered in that gap would otherwise be
+                // overwritten by this pass's stale fill. Dropping the key
+                // here also keeps it out of the rollback ledgers below — a
+                // field this call never wrote must never be restored by its
+                // rejection. The conditional (non-identity) decisions are
+                // re-made the same way (pre-push P1 r22).
                 const reconciled = reconcileConditionalLeadFieldsUnderLock(
                   dropFilledLeadColumns(leadUpdates, lockedLead),
                   lockedLead,
@@ -8336,78 +8418,40 @@ const CallRecordingProcessor = {
                 }
                 if (reconciled.contact) contact = reconciled.contact;
                 const effectiveUpdates = reconciled.updates;
-                // Is this a CHRONOLOGICAL restamp — a force-reprocess of an
-                // older call after a DIFFERENT call enriched the same reused
-                // lead (codex P2 r17)? Merging ledgers would keep this
-                // call's original pre-first-run baseline, so a later
-                // rejection would restore straight over the intervening
-                // accepted state, and successor re-parenting could not
-                // recover it either (the other call's stamp is EARLIER than
-                // this one's, so the re-parent loop skips it by design).
-                // Rebase instead: fresh prior from the locked row — which
-                // already carries the intervening writes — fresh written,
-                // and a fresh lead_stamped_at that makes this restamp the
-                // newest ordered mutation on the lead.
-                const freshCall = await trx('call_log').where({ id: call.id }).first('metadata');
-                let freshMd = {};
-                try {
-                  freshMd = typeof freshCall?.metadata === 'string' ? JSON.parse(freshCall.metadata) : (freshCall?.metadata || {});
-                } catch { freshMd = {}; }
-                const ownStampedAt = (freshMd?.lead_id && String(freshMd.lead_id) === String(leadId)
-                  && typeof freshMd.lead_stamped_at === 'string') ? freshMd.lead_stamped_at : null;
-                let rebaseStamp = false;
-                if (ownStampedAt) {
-                  const interveningStamp = await trx('call_log')
-                    .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
-                    .whereNot('id', call.id)
-                    .whereRaw("metadata->>'lead_stamped_at' > ?", [ownStampedAt])
-                    .first('id');
-                  rebaseStamp = !!interveningStamp;
-                }
                 const { prior, written } = snapshotStampedLeadStates(lockedLead || current, effectiveUpdates);
-                // Ledger composition has THREE modes, not two (codex P2 r18).
-                // A rebase must NOT discard the restamp's original-only
-                // entries: when call A first filled `email` and this
-                // reprocess drops that column as already-filled, A is still
-                // the call that wrote it, and losing the entry would strand
-                // A's value on the lead through both rejection orders. So a
-                // rebase rewrites only the fields it actually re-wrote and
-                // KEEPS the rest:
-                //   different lead → fresh prior + fresh written
-                //   same lead, rebase → merged, THIS pass wins shared keys
-                //   same lead, retry → merged, the ORIGINAL baseline wins
-                // `written` merges the same way in both same-lead modes —
-                // fill-once fields absent from a later payload must survive
-                // so rejection can still restore them.
+                // Ledger composition has two live modes — a chronological
+                // restamp was settled above and lands here stamp-less, so
+                // it takes the fresh branch:
+                //   different lead (or settled restamp) → fresh prior +
+                //     fresh written + fresh ordering marker
+                //   same lead, retry → merged: prior keeps the ORIGINAL
+                //     baseline for shared keys and only ADDS keys first
+                //     written this pass; written keeps fill-once fields
+                //     from earlier passes (absent from later payloads —
+                //     replacing wholesale made rejection unable to restore
+                //     them) with this pass's values winning shared keys;
+                //     the ordering marker is preserved.
                 const sameLead = "COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ?";
-                const priorExpr = `CASE WHEN ${sameLead} THEN (CASE WHEN ?::boolean`
-                  + " THEN COALESCE(metadata->'lead_prior_state', '{}'::jsonb) || ?::jsonb"
-                  + " ELSE ?::jsonb || COALESCE(metadata->'lead_prior_state', '{}'::jsonb) END)"
+                const priorExpr = `CASE WHEN ${sameLead}`
+                  + " THEN ?::jsonb || COALESCE(metadata->'lead_prior_state', '{}'::jsonb)"
                   + ' ELSE ?::jsonb END';
                 const writtenExpr = `CASE WHEN ${sameLead}`
                   + " THEN COALESCE(metadata->'lead_written_state', '{}'::jsonb) || ?::jsonb"
                   + ' ELSE ?::jsonb END';
-                const stampedAtExpr = `CASE WHEN ${sameLead} AND NOT ?::boolean`
+                const stampedAtExpr = `CASE WHEN ${sameLead}`
                   + " THEN COALESCE(metadata->'lead_stamped_at', ?::jsonb) ELSE ?::jsonb END";
                 const nowIso = JSON.stringify(new Date().toISOString());
                 const stamped = await trx('call_log')
                   .where({ id: call.id })
                   .where('processing_token', procToken)
                   .update({
-                    // Same-lead re-stamp MERGES both ledgers (audit P1 r21):
-                    // prior keeps the ORIGINAL baseline for shared keys and
-                    // only ADDS keys first written this pass; written keeps
-                    // fill-once fields from earlier passes (absent from later
-                    // payloads — replacing wholesale made rejection unable to
-                    // restore them) with this pass's values winning shared
-                    // keys. A different-lead stamp starts both fresh.
                     // lead_stamped_at is the ORDERING marker for rejection
                     // re-parenting (only snapshots stamped AFTER this call's
                     // may be re-parented — a predecessor's baseline must
                     // never be rewritten; codex P2 r13). Preserved on a
-                    // same-lead RETRY; a different-lead stamp and a
-                    // chronological rebase both take a fresh marker, which
-                    // is what makes the rebase the newest mutation.
+                    // same-lead RETRY; a different-lead stamp and a settled
+                    // restamp both take a fresh marker, which is what makes
+                    // the restamp the newest mutation on the lead.
                     metadata: db.raw(
                       "jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)"
                       + `, '{lead_prior_state}', ${priorExpr}, true)`
@@ -8415,9 +8459,9 @@ const CallRecordingProcessor = {
                       + `, '{lead_stamped_at}', ${stampedAtExpr}, true)`,
                       [
                         JSON.stringify(String(leadId)),
-                        String(leadId), rebaseStamp, JSON.stringify(prior), JSON.stringify(prior), JSON.stringify(prior),
+                        String(leadId), JSON.stringify(prior), JSON.stringify(prior),
                         String(leadId), JSON.stringify(written), JSON.stringify(written),
-                        String(leadId), rebaseStamp, nowIso, nowIso,
+                        String(leadId), nowIso, nowIso,
                       ],
                     ),
                     updated_at: new Date(),
