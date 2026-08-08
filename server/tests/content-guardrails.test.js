@@ -3074,6 +3074,34 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(movie.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
+  test('the confirmation must be an AFFIRMATIVE technician statement (Codex PR r14)', () => {
+    const label = guardrails.evaluate({ body: 'The treatment is safe once dry. The label confirms the timing.' }, {});
+    expect(label.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const negated = guardrails.evaluate({ body: 'The treatment is safe once dry. The technician does not confirm timing.' }, {});
+    expect(negated.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // The affirmative idiom still passes.
+    const affirmative = guardrails.evaluate({ body: 'The treatment is safe once dry, and your technician confirms the timing.' }, {});
+    expect(affirmative.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
+  test('dries-for durations and hazard-negation predicates block (Codex PR r14)', () => {
+    const driesFor = guardrails.evaluate({ body: 'The product dries for 30 minutes.' }, {});
+    expect(driesFor.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    for (const body of [
+      'The treatment poses no risk to pets.',
+      'The pesticide presents no risk to children.',
+      'The application is without risk to your family.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+  });
+
+  test('greater-than inside MDX string props survives the tag scan (Codex PR r14)', () => {
+    const r = guardrails.evaluate({ body: '<BottomLineBox verdict="Our treatment is safe for pets > ordinary products." />' }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('spelled hundreds are figures too (Codex PR r13)', () => {
     const hundred = guardrails.evaluate({ body: 'Wait one hundred minutes before re-entering the treated room.' }, {});
     expect(hundred.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3725,6 +3753,17 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(clears.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
     const rid = guardrails.evaluate({ body: 'Let Waves rid your attic of raccoons.' }, {});
     expect(rid.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('eliminate/eradicate wildlife forms block; denied reverse attribution stays legal (Codex PR r14)', () => {
+    const eliminate = guardrails.evaluate({ body: 'We eliminate wildlife from homes.' }, {});
+    expect(eliminate.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const eradicate = guardrails.evaluate({ body: 'Let Waves Pest Control eradicate bats from your property.' }, {});
+    expect(eradicate.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const denied = guardrails.evaluate({ body: 'Wildlife removal by Waves Pest Control is not available — we refer you to licensed specialists.' }, {});
+    expect(denied.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    const notOffered = guardrails.evaluate({ body: 'Wildlife removal from Waves is not offered.' }, {});
+    expect(notOffered.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
   });
 
   test('extraction phrasing is the same wildlife service (Codex PR r12 audit)', () => {

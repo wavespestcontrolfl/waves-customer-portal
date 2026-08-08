@@ -2955,6 +2955,11 @@ const REENTRY_SAFETY_SRCS = [
   // "our pest-control program is safe" stays caught by the direct
   // subjects above).
   { src: `\\b(?:services?|programs?|plans?)(?:,\\s*[^,.!?\\n]{0,40},)?\\s+(?:\\w+\\s+){0,2}?${REENTRY_LINKING_VERB_SRC}\\s+(?:(?!${NEGATION_WORD_SRC}\\b)[\\w-]+\\s+){0,2}?(?:safe|harmless|risk[-\\s]?free)\\b(?!\\s+from\\b)`, needsTreatmentContext: true },
+  // Hazard-negation predicates are the same unconditional claim (Codex
+  // PR r14): "poses no risk to pets", "is without risk to your family" —
+  // like harmless/risk-free these never earn the conditional idiom.
+  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)\\b[^.!?\\n]{0,30}?\\b(?:poses?|presents?|carries|creates?)\\s+(?:no|zero)\\s+(?:risks?|threats?|dangers?|hazards?)\\b`,
+  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)\\b[^.!?\\n]{0,20}?\\b(?:is|are|remains?)\\s+without\\s+(?:risks?|dangers?)\\b`,
   // Pronoun subjects with a treatment ANTECEDENT (Codex PR r5): "We apply
   // a granular treatment. It is safe once dry." is the same claim with the
   // noun one sentence back. Only it/they — never that/this, which appear as
@@ -3008,7 +3013,7 @@ const REENTRY_SAFETY_SRCS = [
   { src: `\\bkeep\\s+(?:the\\s+|your\\s+)?(?:pets?|kids?|children|dogs?|cats?|everyone|people|famil(?:y|ies))\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside|indoors|outdoors|outside)\\b[^.!?\\n]{0,10}?\\b${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\s+(?:after|following)\\b`, needsTreatmentContext: true },
   // A bounded qualifier may sit between the drying verb and the
   // preposition (Codex PR r8: "dries completely within 45 minutes").
-  { src: `\\bdr(?:y|ies|ied)\\s+(?:\\w+\\s+){0,2}?(?:in|within|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  { src: `\\bdr(?:y|ies|ied)\\s+(?:\\w+\\s+){0,2}?(?:in|within|after|for)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   // "avoid the treated area for 30 minutes"
   `\\bavoid\\s+(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawns?|yards?|rooms?|surfaces?)\\b[^.!?\\n]{0,30}?\\b(?:for|until)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // Duration-then-action: the intrinsically-re-entry tails (re-enter,
@@ -3099,8 +3104,18 @@ const DRY_CONDITION_RE = /\b(?:once|when|after|until)\b(?:(?!\bwet\b)[^.!?\n]){0
 // neither is "confirms the appointment TIME" (Codex PR r6): bare
 // time/when are scheduling words, so only "timing", explicit
 // re-entry/dry/safe objects, or a when-clause that itself concerns
-// safety/re-entry count.
-const TECH_CONFIRMS_RE = /\b(?:technicians?|techs?|applicators?|pros?)\b[^.!?\n]{0,60}?\b(?:confirms?|will\s+confirm|advises?(?:\s+on)?|verif(?:y|ies)|lets?\s+you\s+know)\b[^.!?\n]{0,30}?\b(?:timing|re-?entry|dry\w*|safe\b|all[-\s]clear|when\s+[^.!?\n]{0,25}?\b(?:safe|re-?ent\w+|dry\w*|return\w*|go\s+back)\b)|\b(?:technicians?|techs?|applicators?|pros?)\b[^.!?\n]{0,60}?\bgives?\s+you\s+the\s+all[-\s]clear\b|\bconfirms?\s+(?:the\s+)?(?:timing|re-?entry)\b/i;
+// safety/re-entry count. The confirmation must be AFFIRMATIVE and bound
+// to the technician subject (Codex PR r14): "the label confirms the
+// timing" has no technician, and "the technician does NOT confirm
+// timing" is the opposite of the idiom — the subject→verb and
+// verb→object gaps refuse negation, and there is no subjectless
+// alternative.
+const TECH_CONFIRMS_NEG_SRC = "(?:not|never|no|doesn['’]?t|don['’]?t|won['’]?t|cannot|can['’]?t|isn['’]?t|wasn['’]?t)";
+const TECH_CONFIRMS_RE = new RegExp(
+  `\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\b(?:confirms?|will\\s+confirm|advises?(?:\\s+on)?|verif(?:y|ies)|lets?\\s+you\\s+know)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,30}?\\b(?:timing|re-?entry|dry\\w*|safe\\b|all[-\\s]clear|when\\s+[^.!?\\n]{0,25}?\\b(?:safe|re-?ent\\w+|dry\\w*|return\\w*|go\\s+back)\\b)`
+  + `|\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\bgives?\\s+you\\s+the\\s+all[-\\s]clear\\b`,
+  'i',
+);
 
 // The two hard-copy classifiers scan RENDERED text (Codex PR r12):
 // "We offer **wildlife removal**" and "[wildlife removal](/x/)" carry
@@ -3112,7 +3127,9 @@ function normalizeHardCopyText(text) {
     // but their quoted STRING PROPS are customer-visible copy (Codex PR
     // r13 audit: `<BottomLineBox verdict="…is safe for pets." />`), so
     // the values stay in the scanned text.
-    .replace(/<\/?[a-zA-Z][^>\n]*>/g, (tag) => {
+    // Quote-aware tag scan (Codex PR r14): a `>` inside a quoted prop
+    // must not terminate the tag early or the value's prefix is dropped.
+    .replace(/<\/?[a-zA-Z](?:"[^"\n]*"|'[^'\n]*'|\{[^}\n]*\}|[^>"'{\n])*>/g, (tag) => {
       const vals = [];
       // Bare quoted attrs AND MDX expression-string forms (Codex PR r13
       // audit b: `verdict={"…is safe for pets."}` renders the same copy).
@@ -3278,7 +3295,7 @@ const BANNED_TOPIC_SRCS = [
   // door-to-door" — ownership expressed through the ACTION verb rather
   // than offer/provide.
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}installs?\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?|extracts?|extracting|clears?|clearing|rids?|ridding)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?|extracts?|extracting|clears?|clearing|rids?|ridding|eliminat\\w+|eradicat\\w+)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
   // EXCLUDE also means "omit" (Codex PR r6): only a physical
   // location/entry-point tail makes it the wildlife-exclusion service —
   // "we exclude wildlife examples from this comparison" stays legal.
@@ -3303,7 +3320,10 @@ const BANNED_TOPIC_SRCS = [
   // insulation services from Waves" present the service as ours without a
   // leading we/our. Referral objects and informational framing ("tips on
   // wildlife removal from Waves…") stay legal via the lookarounds.
-  `(?<!\\b(?:tips?|advice|guides?|information|articles?|posts?|reports?|research|questions?)\\s+(?:on|about|regarding|for)\\s+)\\b${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))(?:\\s+(?:services?|solutions?|programs?|options?|work))?\\s*(?:\\||[-–—:]|\\bby\\b|\\bfrom\\b|\\bwith\\b)\\s*(?:waves(?:\\s+pest\\s+control)?|us)\\b`,
+  // A denial immediately after the attribution keeps educational copy
+  // legal (Codex PR r14: "Wildlife removal by Waves Pest Control is not
+  // available").
+  `(?<!\\b(?:tips?|advice|guides?|information|articles?|posts?|reports?|research|questions?)\\s+(?:on|about|regarding|for)\\s+)\\b${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))(?:\\s+(?:services?|solutions?|programs?|options?|work))?\\s*(?:\\||[-–—:]|\\bby\\b|\\bfrom\\b|\\bwith\\b)\\s*(?:waves(?:\\s+pest\\s+control)?|us)\\b(?!(?:[^.!?\\n]){0,40}?\\b(?:not|never|isn['’]?t|aren['’]?t|unavailable|no\\s+longer)\\b)`,
   // Referral framing is exempt on either side of the topic here too
   // (Codex PR r12 audit: "call Waves for a wildlife removal referral" is
   // the wanted copy). The \b before the lookahead stops \w+ backtracking.
