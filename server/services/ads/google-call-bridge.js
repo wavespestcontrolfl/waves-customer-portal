@@ -484,20 +484,30 @@ function whereCallStillLinked(builder, callLogId) {
       .where('call_log.id', callLogId)
       .andWhere(function linkageArms() {
         this.whereRaw('call_log.twilio_call_sid = leads.twilio_call_sid')
-          .orWhereRaw("call_log.metadata->>'lead_id' = leads.id::text");
+          .orWhere(function settledStampArm() {
+            // Only a SETTLED call's stamp is authoritative (pre-push P1
+            // r2): every stamp mutation is fenced on processing_token, so
+            // a non-null token means a pass is mid-flight and its
+            // maintenance may still clear or repoint this stamp — skip,
+            // and the retry lane re-evaluates on the next cron pass. The
+            // sid arm is stable linkage and carries no such condition.
+            this.whereRaw("call_log.metadata->>'lead_id' = leads.id::text")
+              .whereNull('call_log.processing_token');
+          });
       });
   });
 }
 
 // Read-side revalidation for paths that only write the FUNNEL row (no lead
-// mutation): is the joined lead still live and still linked to this call?
-async function joinedLeadStillLive(callLog) {
-  if (!callLog?.leadId || !callLog?.id) return false;
+// mutation): the joined lead's live row — with its CURRENT owner — while it
+// is still linked to this call; null otherwise.
+async function joinedLeadLiveRow(callLog) {
+  if (!callLog?.leadId || !callLog?.id) return null;
   const row = await whereCallStillLinked(
     db('leads').where({ id: callLog.leadId }).whereNull('deleted_at'),
     callLog.id,
-  ).first('id');
-  return !!row;
+  ).first('id', 'customer_id');
+  return row || null;
 }
 
 // The JOINED lead (sid- or metadata-stamp-linked in fetchCrmCalls) is
@@ -511,22 +521,36 @@ async function joinedLeadStillLive(callLog) {
 // writeCallPpcAttribution can create the funnel row for a lead claimed
 // after the call.
 //
-// Resolution and ATTRIBUTION are one step: the joined arm's UPDATE carries
-// the linkage EXISTS, so a stamp cleared or repointed after the fetch
-// writes zero rows — then the plan fallback gets its chance, and only a
-// match whose live-lead update actually landed is ever returned (pre-push
-// P1 r1). Returns { match } on success; { match: null, reason } for the
-// caller's skip bookkeeping.
-async function attributeResolvedLead(callLog, bridgeSource, now) {
+// Resolution and ATTRIBUTION are one step, inside the CALLER'S transaction
+// (`trx` is required): the joined arm first takes the lead's row lock — the
+// same lock every stamp writer and the rejection reconciliation take — so
+// the linkage check, the lead update, and the caller's durable call_log
+// write commit as one unit that reconciliation cannot interleave (pre-push
+// P1 r1/r2: the single-statement EXISTS left the later call_log and funnel
+// writes attributing a lead whose stamp had just been cleared). The joined
+// lead's CURRENT owner — read under the lock — wins over the call's own
+// customer link, so a reused lead claimed by a different customer never
+// produces a mismatched funnel pair. A stale joined arm falls back to the
+// plan; only a match whose live-lead update actually landed is returned.
+// Returns { match } on success; { match: null, reason } for skip
+// bookkeeping.
+async function attributeResolvedLead(callLog, bridgeSource, now, trx) {
   let joinedWentStale = false;
   if (callLog?.leadId) {
-    const joined = {
-      strategy: 'joined_lead',
-      leadId: callLog.leadId,
-      customerId: callLog.customerId || callLog.leadCustomerId || null,
-    };
-    if (await updateLeadAttribution(joined, bridgeSource, now, { linkageCallId: callLog.id })) {
-      return { match: joined };
+    const lockedLead = await trx('leads')
+      .where({ id: callLog.leadId })
+      .whereNull('deleted_at')
+      .forUpdate()
+      .first('id', 'customer_id');
+    if (lockedLead) {
+      const joined = {
+        strategy: 'joined_lead',
+        leadId: callLog.leadId,
+        customerId: lockedLead.customer_id || callLog.customerId || null,
+      };
+      if (await updateLeadAttribution(joined, bridgeSource, now, { linkageCallId: callLog.id, dbc: trx })) {
+        return { match: joined };
+      }
     }
     joinedWentStale = true;
   }
@@ -534,7 +558,7 @@ async function attributeResolvedLead(callLog, bridgeSource, now) {
   if (!planned?.leadId) {
     return { match: null, reason: joinedWentStale ? 'lead_not_live' : 'lead_not_found' };
   }
-  if (!await updateLeadAttribution(planned, bridgeSource, now)) {
+  if (!await updateLeadAttribution(planned, bridgeSource, now, { dbc: trx })) {
     return { match: null, reason: 'lead_not_live' };
   }
   return { match: planned };
@@ -565,7 +589,7 @@ async function findLeadForCall(callLog) {
   return lead?.id ? { ...plan, leadId: lead.id, customerId: plan.customerId || lead.customer_id || null } : null;
 }
 
-async function updateLeadAttribution(leadMatch, bridgeSource, now, { linkageCallId = null } = {}) {
+async function updateLeadAttribution(leadMatch, bridgeSource, now, { linkageCallId = null, dbc = db } = {}) {
   if (!leadMatch?.leadId) return false;
   // Live-lead check happens HERE, at write time, not only in the fetch join
   // (codex P2, PR #3275): previewBridge awaits the Google Ads scan between
@@ -577,7 +601,7 @@ async function updateLeadAttribution(leadMatch, bridgeSource, now, { linkageCall
   // With `linkageCallId` (the joined-lead arm), the sid/stamp linkage is
   // revalidated ATOMICALLY with the write via the correlated EXISTS —
   // never from the pre-scan snapshot (pre-push P1 r1).
-  let query = db('leads')
+  let query = dbc('leads')
     .where({ id: leadMatch.leadId })
     .whereNull('deleted_at');
   if (linkageCallId) query = whereCallStillLinked(query, linkageCallId);
@@ -683,14 +707,20 @@ async function applyBridge(options = {}) {
           // lead-matched by phone/customer (recorded in metadata) has it null, so
           // resolve the lead in that case before attributing.
           let backfillLeadId = match.callLog?.leadId || null;
-          let backfillCustomerId = match.callLog?.customerId || match.callLog?.leadCustomerId || null;
+          let backfillCustomerId = match.callLog?.customerId || null;
           // Same snapshot-staleness rule as the attribution paths (pre-push
-          // P1 r1): the joined lead only feeds the funnel row while it is
-          // still live AND still linked to this call; otherwise drop to the
-          // plan (and to the call's own customer link).
-          if (backfillLeadId && !(await joinedLeadStillLive(match.callLog))) {
-            backfillLeadId = null;
-            backfillCustomerId = match.callLog?.customerId || null;
+          // P1 r1/r2): the joined lead only feeds the funnel row while it
+          // is still live AND still linked to this call — and its CURRENT
+          // owner wins over the call's own customer link, so a lead
+          // claimed by a different customer never produces a mismatched
+          // funnel pair. Otherwise drop to the plan.
+          if (backfillLeadId) {
+            const liveJoined = await joinedLeadLiveRow(match.callLog);
+            if (liveJoined) {
+              backfillCustomerId = liveJoined.customer_id || backfillCustomerId;
+            } else {
+              backfillLeadId = null;
+            }
           }
           if (!backfillLeadId) {
             const lm = await findLeadForCall(match.callLog).catch(() => null);
@@ -703,25 +733,31 @@ async function applyBridge(options = {}) {
       }
 
       try {
-        // Resolution + attribution in one guarded step: the joined lead is
-        // authoritative but revalidated atomically with its write; a stale
-        // or soft-deleted lead falls back to the plan, and only a landed
-        // update proceeds (codex P1/P2, PR #3275; pre-push P1 r1). Not a
+        // Resolution + attribution + the durable call_log record commit as
+        // ONE transaction under the lead's row lock (pre-push P1 r1/r2): a
+        // stale or soft-deleted joined lead falls back to the plan, only a
+        // landed update proceeds, and stamp reconciliation cannot
+        // interleave between the lead write and the call record. Not a
         // write_failed on skip: the retry lane re-evaluates next pass.
-        const { match: leadMatch, reason: leadSkipReason } = await attributeResolvedLead(match.callLog, bridgeSource, now);
+        const attribution = await db.transaction(async (trx) => {
+          const res = await attributeResolvedLead(match.callLog, bridgeSource, now, trx);
+          if (!res.match) return res;
+          await trx('call_log')
+            .where({ id: match.callLog.id })
+            .update({
+              metadata: bridgeMetadataPatch({
+                leadMatch: redactedLeadMatch(res.match),
+                leadAttributedAt: now.toISOString(),
+              }),
+              updated_at: now,
+            });
+          return res;
+        });
+        const leadMatch = attribution.match;
         if (!leadMatch) {
-          skipped.push({ ...match, skipReason: leadSkipReason });
+          skipped.push({ ...match, skipReason: attribution.reason });
           continue;
         }
-        await db('call_log')
-          .where({ id: match.callLog.id })
-          .update({
-            metadata: bridgeMetadataPatch({
-              leadMatch: redactedLeadMatch(leadMatch),
-              leadAttributedAt: now.toISOString(),
-            }),
-            updated_at: now,
-          });
 
         if (bridgedToThisCall) {
           await writeCallPpcAttribution(match, leadMatch.customerId || match.callLog?.customerId || null, leadMatch.leadId);
@@ -751,29 +787,32 @@ async function applyBridge(options = {}) {
         bridgedAt: now.toISOString(),
       };
       // The google call is confirmed either way; only the LEAD attribution
-      // is conditional. Resolution + attribution are one guarded step —
-      // a lead soft-deleted or unlinked between fetch and apply writes
-      // zero rows and is NEVER recorded (recording it would block a later
-      // retry from finding the live replacement; codex P2, PR #3275).
-      const { match: leadMatch } = await attributeResolvedLead(match.callLog, bridgeSource, now);
-      if (leadMatch) {
-        bridgePayload.leadMatch = redactedLeadMatch(leadMatch);
-        bridgePayload.leadAttributedAt = now.toISOString();
-      }
-
-      await db('call_log')
-        .where({ id: match.callLog.id })
-        .update({
-          source: 'google_ads',
-          google_ads_call_resource_name: match.googleCall.resourceName,
-          google_ads_call_started_at: match.googleCall.startAt,
-          google_ads_call_duration_seconds: match.googleCall.durationSeconds,
-          google_ads_call_status: match.googleCall.callStatus,
-          google_ads_bridge_confidence: match.confidence,
-          google_ads_bridged_at: now,
-          metadata: bridgeMetadataPatch(bridgePayload),
-          updated_at: now,
-        });
+      // is conditional. Resolution + attribution + the bridge confirm
+      // commit as ONE transaction under the lead's row lock (pre-push P1
+      // r1/r2) — a lead soft-deleted or unlinked between fetch and apply
+      // writes zero rows and is NEVER recorded, and stamp reconciliation
+      // cannot interleave between the lead write and the call record.
+      const leadMatch = await db.transaction(async (trx) => {
+        const { match: attributed } = await attributeResolvedLead(match.callLog, bridgeSource, now, trx);
+        if (attributed) {
+          bridgePayload.leadMatch = redactedLeadMatch(attributed);
+          bridgePayload.leadAttributedAt = now.toISOString();
+        }
+        await trx('call_log')
+          .where({ id: match.callLog.id })
+          .update({
+            source: 'google_ads',
+            google_ads_call_resource_name: match.googleCall.resourceName,
+            google_ads_call_started_at: match.googleCall.startAt,
+            google_ads_call_duration_seconds: match.googleCall.durationSeconds,
+            google_ads_call_status: match.googleCall.callStatus,
+            google_ads_bridge_confidence: match.confidence,
+            google_ads_bridged_at: now,
+            metadata: bridgeMetadataPatch(bridgePayload),
+            updated_at: now,
+          });
+        return attributed;
+      });
 
       // Surface this confirmed Google Ads call in the PPC funnel
       // (ad_service_attribution), tagged with the campaign Google reported, so
