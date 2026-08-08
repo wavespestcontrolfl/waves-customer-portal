@@ -2324,6 +2324,11 @@ const ReviewService = {
     expiresAt,
     manageRetryVia = "cron",
     skipLegacyFollowup = false,
+    // Render the CANONICAL 'review_request' sms_template (recorded with a
+    // NULL template_key, like create()-minted asks) instead of defaulting a
+    // template-less send to friendly_ask — the satisfaction fold needs the
+    // canonical body incl. its {reservice_line} clause (codex #3285 r5b).
+    canonicalTemplate = false,
   }) {
     if (!customer || !customer.id) return { ok: false, reason: "no_customer", terminal: true };
     if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
@@ -2488,8 +2493,14 @@ const ReviewService = {
     // THAT for honest per-template attribution. An edited SMS body is persisted
     // (custom_body) so a provider retry re-sends the operator's copy
     // rather than reverting to the template.
-    const smsTemplateId = templateId || (customBody && customBody.trim() ? null : "friendly_ask");
-    let recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
+    const smsTemplateId = canonicalTemplate
+      ? null
+      : templateId || (customBody && customBody.trim() ? null : "friendly_ask");
+    let recordedTemplateKey = actualChannel === "email"
+      ? "review_request_email"
+      // Canonical asks record a NULL template_key (ASK_TOUCH_SQL's canonical
+      // shape, matching create()-minted rows) — never 'custom'.
+      : canonicalTemplate ? null : smsTemplateId || "custom";
     let persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
 
     // Personalized ask body (GATE_REVIEW_ASK_PERSONALIZED): CADENCE SMS ask
@@ -2983,6 +2994,7 @@ const ReviewService = {
     triggeredBy = "admin",
     manageRetryVia = "cron",
     skipLegacyFollowup = false,
+    canonicalTemplate = false,
   }) {
     const customer = customerArg
       || (customerId ? await db("customers").where({ id: customerId }).first() : null);
@@ -3057,6 +3069,7 @@ const ReviewService = {
         triggeredBy,
         manageRetryVia,
         skipLegacyFollowup,
+        canonicalTemplate,
       });
 
       if (touch.ok && touch.sent) {

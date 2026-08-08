@@ -13,6 +13,16 @@ const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, auditLogId: '
 jest.mock('../models/db', () => jest.fn());
 const mockGates = { reviewSequences: true, reviewDirectLink: true };
 jest.mock('../config/feature-gates', () => ({ isEnabled: (g) => !!mockGates[g], gates: mockGates }));
+jest.mock('../routes/admin-sms-templates', () => ({
+  // Canonical 'review_request' sms_template render — carries the
+  // {reservice_line} clause #3288 wired into this template's render sites.
+  getTemplate: async (key, vars) => (key === 'review_request'
+    ? `Hi ${vars.first_name}! Review: ${vars.review_url}${vars.reservice_line || ''}\n\nReply STOP to opt out.`
+    : null),
+}));
+jest.mock('../services/reservice-link', () => ({
+  reserviceLineForCustomer: async () => ' Free re-service: portal.test/rs/x',
+}));
 jest.mock('../services/review-ask-drafter', () => ({
   draftAskBody: async () => null,
   draftEmailIntro: async () => null,
@@ -276,6 +286,25 @@ describe('sendGatedAsk — a clean send', () => {
     const body = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(body).toContain(`https://portal.test/api/rate/${row.token}/go`);
     expect(body).not.toContain('g.page');
+  });
+
+  test('canonicalTemplate renders the review_request sms_template with the reservice clause', async () => {
+    // The satisfaction fold's mode (codex #3285 r5b): a bare null templateId
+    // defaults to friendly_ask, which has no {reservice_line} variable —
+    // canonicalTemplate forces the canonical template and records a NULL
+    // template_key like create()-minted asks.
+    const state = installMock({ customers: [CUSTOMER] });
+    const r = await ReviewService.sendGatedAsk({
+      customerId: 'cust-1', templateId: null, canonicalTemplate: true,
+      triggeredBy: 'portal_satisfaction', skipLegacyFollowup: true,
+    });
+
+    expect(r.outcome).toBe('sent');
+    const row = state.rows.review_requests[0];
+    expect(row.template_key ?? null).toBeNull();
+    const body = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(body).toContain(`https://portal.test/api/rate/${row.token}/go`);
+    expect(body).toContain('Free re-service: portal.test/rs/x');
   });
 
   test('skipLegacyFollowup keeps the fold from adding a Day-3 touch', async () => {
