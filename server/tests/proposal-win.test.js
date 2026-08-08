@@ -7,6 +7,8 @@ jest.mock('../utils/datetime-et', () => ({
   addETDays: (_date, days) => new Date(Date.UTC(2026, 5, 20 + (days || 0))),
 }));
 jest.mock('../services/payer', () => ({
+  PAYMENT_TERMS: ['due_on_receipt', 'net15', 'net30'],
+  PAYMENT_TERM_NET_DAYS: { net15: 15, net30: 30 },
   resolveForInvoice: jest.fn().mockResolvedValue({ payerId: null, paymentTerms: null }),
 }));
 jest.mock('../routes/admin-customers', () => ({

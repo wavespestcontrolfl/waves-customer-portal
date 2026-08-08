@@ -1995,6 +1995,9 @@ router.put('/:id/proposal', async (req, res, next) => {
     // saved proposal says "2 months" or omits the term (codex 1A-i r4).
     const badBoundedInt = (value, min, max) => value != null && String(value).trim() !== ''
       && (!Number.isInteger(Number(value)) || Number(value) < min || Number(value) > max);
+    // Hoisted for the atomic UPDATE below: saving a canonical payment term
+    // must be predicated on bill_by_invoice STILL being true at write time.
+    let savingPaymentTerm = false;
     if (incoming.commercialTerms && typeof incoming.commercialTerms === 'object') {
       if (badBoundedInt(incoming.commercialTerms.initialTermMonths, 0, 60)) {
         return res.status(400).json({ error: 'Initial term must be a whole number of months between 0 and 60.' });
@@ -2016,6 +2019,7 @@ router.put('/:id/proposal', async (req, res, next) => {
       if (canonicalPaymentTerms && !estimate.bill_by_invoice) {
         return res.status(400).json({ error: 'Structured payment terms require Bill by invoice. Put payment language in Additional terms, or turn on invoice billing for this proposal.' });
       }
+      savingPaymentTerm = Boolean(canonicalPaymentTerms);
       // A linked ACTIVE payer's terms are the standing billing relationship
       // (they drive statement accrual and the acceptance invoice via
       // resolveAcceptanceTermDays). Authoring a CONTRADICTING term here
@@ -2089,20 +2093,29 @@ router.put('/:id/proposal', async (req, res, next) => {
     // pre-read; scope the UPDATE to the same editable conditions so a customer
     // accept or another admin's Mark accepted landing between SELECT and UPDATE
     // can't overwrite the locked accepted price/proposal. 409 when it loses.
-    const updatedCount = await db('estimates')
+    const updateQuery = db('estimates')
       .where({ id: estimate.id })
       .whereNull('price_locked_at')
-      .whereNotIn('status', ['accepted', 'declined', 'expired', 'sending'])
-      .update({
-        estimate_data: JSON.stringify(nextData),
-        category: 'COMMERCIAL',
-        monthly_total: totals.monthlyEquivalent,
-        annual_total: totals.annualRecurring,
-        onetime_total: totals.oneTime,
-        updated_at: db.fn.now(),
-      });
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'sending']);
+    // Payment terms are predicated on bill_by_invoice AT WRITE TIME too — a
+    // concurrent PATCH turning invoice mode off between the pre-read guard
+    // and this UPDATE must not persist a term no billing path enforces
+    // (codex #3297 r4c).
+    if (savingPaymentTerm) updateQuery.where({ bill_by_invoice: true });
+    const updatedCount = await updateQuery.update({
+      estimate_data: JSON.stringify(nextData),
+      category: 'COMMERCIAL',
+      monthly_total: totals.monthlyEquivalent,
+      annual_total: totals.annualRecurring,
+      onetime_total: totals.oneTime,
+      updated_at: db.fn.now(),
+    });
     if (!updatedCount) {
-      return res.status(409).json({ error: 'Estimate was accepted or locked while you were editing. Refresh and retry.' });
+      return res.status(409).json({
+        error: savingPaymentTerm
+          ? 'Estimate was accepted, locked, or switched off invoice billing while you were editing. Refresh and retry.'
+          : 'Estimate was accepted or locked while you were editing. Refresh and retry.',
+      });
     }
 
     logger.info(`[estimates] Saved commercial proposal for estimate ${estimate.id} (${normalized.buildings.length} buildings, first-year ${totals.firstYearTotal})`);

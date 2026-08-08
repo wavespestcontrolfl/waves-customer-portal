@@ -301,12 +301,12 @@ async function flagProposalCustomerCommercialIfTaxable({ trx, customerId, propos
 }
 
 // Net-terms from the structured commercial terms (slice 1A-i). paymentTerms
-// is the CANONICAL payer vocabulary (estimate-proposal.js normalizes to
-// payer.js's PAYMENT_TERMS tokens), so this is a lookup, never a parse —
-// the same term language payer statements read (codex #3297 r2). Without
-// it, a proposal accepted on authored Net-30 terms invoiced as due
-// immediately (codex 1A-i r4 P0).
-const NET_TERM_DAYS = { net15: 15, net30: 30 };
+// is the CANONICAL payer vocabulary, and the token→days map is payer.js's
+// shared PAYMENT_TERM_NET_DAYS (the same map payer statements use) — a
+// lookup, never a parse or a local copy (codex #3297 r2/r4c). Without it,
+// a proposal accepted on authored Net-30 terms invoiced as due immediately
+// (codex 1A-i r4 P0).
+const { PAYMENT_TERM_NET_DAYS: NET_TERM_DAYS } = require('./payer');
 
 function proposalNetTermDays(proposal) {
   return NET_TERM_DAYS[proposal?.commercialTerms?.paymentTerms] || 0;

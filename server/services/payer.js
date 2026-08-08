@@ -17,6 +17,12 @@ const logger = require('./logger');
 
 const PAYMENT_TERMS = ['due_on_receipt', 'net15', 'net30'];
 
+// Canonical NET-terms day counts — the ONE place term tokens map to days.
+// Consumed by payer statements (statement due dates) and commercial-proposal
+// acceptance invoicing (proposal-win.js); anything else that turns a term
+// into a date must read this map, never a local copy (codex #3297 r4c).
+const PAYMENT_TERM_NET_DAYS = { net15: 15, net30: 30 };
+
 // An invoice's AP delivery email is "frozen" to the snapshot once the invoice has
 // been issued/delivered (or reached a terminal state). Before that — while it's
 // still draft/scheduled/sending — the live active payer's current AP email wins
@@ -423,6 +429,7 @@ function payerRecipient(payer) {
 
 module.exports = {
   PAYMENT_TERMS,
+  PAYMENT_TERM_NET_DAYS,
   buildPayerWrite,
   listPayers,
   getPayer,

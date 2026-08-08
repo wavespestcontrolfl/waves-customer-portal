@@ -157,21 +157,19 @@ function normalizeCustomerResponsibilities(raw) {
   return cleaned.length ? cleaned : null;
 }
 
-// Canonical payment-terms vocabulary — the SAME tokens the payer system
-// stores and the payer statements render (payer.js PAYMENT_TERMS). Proposals
-// speak this vocabulary so acceptance invoicing and any later payer wiring
-// read one term language, never a parsed display string (codex #3297 r2:
-// free text driving billing = a parallel mechanism). Common human spellings
-// canonicalize; anything else is null (and the PUT route 400s it).
-const PROPOSAL_PAYMENT_TERMS = ['due_on_receipt', 'net15', 'net30'];
+// Canonical payment-terms vocabulary — CONSUMED from the payer mechanism
+// (payer.js PAYMENT_TERMS), never a local copy: proposals, payer statements,
+// and acceptance invoicing must speak one term language (codex #3297
+// r2/r4c: free text or a sibling vocabulary driving billing = a parallel
+// mechanism). Common human spellings canonicalize; anything not in the
+// canonical list is null (and the PUT route 400s it).
+const { PAYMENT_TERMS: PROPOSAL_PAYMENT_TERMS } = require('./payer');
 
 function normalizePaymentTerms(value) {
   const t = String(value ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
   if (!t) return null;
-  if (t === 'dueonreceipt') return 'due_on_receipt';
-  if (t === 'net15') return 'net15';
-  if (t === 'net30') return 'net30';
-  return null;
+  const candidate = t === 'dueonreceipt' ? 'due_on_receipt' : t;
+  return PROPOSAL_PAYMENT_TERMS.includes(candidate) ? candidate : null;
 }
 
 function cleanBoundedInt(value, { min, max }) {

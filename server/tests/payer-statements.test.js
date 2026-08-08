@@ -23,6 +23,8 @@ const mockGetPayer = jest.fn(async () => ({ id: 7, active: true, company_name: '
 jest.mock('../services/payer', () => ({
   getPayer: (...a) => mockGetPayer(...a),
   payerSnapshot: (p) => ({ company_name: p.company_name, ap_email: p.ap_email }),
+  // Canonical NET-terms map (payer-statements consumes it from payer.js).
+  PAYMENT_TERM_NET_DAYS: { net15: 15, net30: 30 },
 }));
 
 const db = require('../models/db');
