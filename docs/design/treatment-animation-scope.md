@@ -2,6 +2,10 @@
 
 **Date:** 2026-08-08 · **Status:** scope for owner sign-off. No code changes in this doc.
 
+**Visual mock:** https://claude.ai/code/artifact/f8082d1d-2044-4c32-94cd-20a10cabddc6 — live
+animations for both foam options beside the two that already ship, rendered with the real
+engine algorithms over a synthetic aerial.
+
 The ask: what do we do today with the traced spray and the lawn on service reports,
 and what would an animation look like for termite foam, flea, and cockroach.
 
