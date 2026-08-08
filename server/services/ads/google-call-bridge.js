@@ -366,8 +366,14 @@ async function fetchCrmCalls(days = 30) {
       'ls.name as lead_source_name',
     )
     .orderBy('c.created_at', 'desc')
-    .limit(500)
-    .then(dedupeCrmCallRows);
+    // No SQL LIMIT: the OR join can emit two rows for one call (stale stamp
+    // + sid-linked lead), and a pre-dedup cap could drop older DISTINCT
+    // calls from a full scan — an omitted paid call stays unbridged and
+    // falls to the organic sweep (codex P2, PR #3275). Row count is bounded
+    // by the window's inbound calls on the main line (≤2 rows each); the
+    // 500-call cap applies to deduped calls below.
+    .then(dedupeCrmCallRows)
+    .then((rows) => rows.slice(0, 500));
 }
 
 // One row per call: the OR join above can transiently return a call twice
@@ -569,7 +575,16 @@ async function applyBridge(options = {}) {
       }
 
       try {
-        const leadMatch = await findLeadForCall(match.callLog);
+        // The JOINED lead (sid- or metadata-stamp-linked in fetchCrmCalls)
+        // is authoritative when present — findLeadForCall's plan needs a
+        // customer link or a usable caller phone and returns null for
+        // exactly the phone-less reused-lead calls the stamp join exists
+        // for; skipping them confirmed the Google call but never repointed
+        // its lead, and the unclaimed sweep later recorded that paid lead
+        // as organic (codex P1, PR #3275).
+        const leadMatch = match.callLog?.leadId
+          ? { strategy: 'joined_lead', leadId: match.callLog.leadId, customerId: match.callLog.customerId || null }
+          : await findLeadForCall(match.callLog);
         if (!leadMatch?.leadId) {
           skipped.push({ ...match, skipReason: 'lead_not_found' });
           continue;

@@ -473,7 +473,10 @@ async function buildCallContext(callLogId) {
   // draft-eligible), fail closed into the red-lane identity review. Lookup
   // failure fails closed the same way as the phone path.
   if (!customerMatch.customer && !phone) {
-    const extractionEmailLc = String(extraction?.email || '').trim().toLowerCase();
+    // Enriched (V2) payloads carry the email at caller.email; the top-level
+    // field is the V1 fallback shape — reading only the top level made this
+    // guard a no-op for every valid V2 extraction (codex P1, PR #3275).
+    const extractionEmailLc = String(extraction?.caller?.email || extraction?.email || '').trim().toLowerCase();
     if (extractionEmailLc) {
       try {
         const emailOwner = await db('customers')

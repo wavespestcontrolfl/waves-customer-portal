@@ -2377,11 +2377,12 @@ async function clearStampAndRestoreLead(call, procToken, callSid) {
     if (!stampedLeadId) return true;
     const priorState = md.lead_prior_state && typeof md.lead_prior_state === 'object' ? md.lead_prior_state : null;
     const writtenState = md.lead_written_state && typeof md.lead_written_state === 'object' ? md.lead_written_state : null;
+    const ownStampedAt = typeof md.lead_stamped_at === 'string' ? md.lead_stamped_at : null;
     const cleared = await trx('call_log')
       .where({ id: call.id })
       .where('processing_token', procToken)
       .update({
-        metadata: db.raw("((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state'"),
+        metadata: db.raw("(((COALESCE(metadata, '{}'::jsonb) - 'lead_id') - 'lead_prior_state') - 'lead_written_state') - 'lead_stamped_at'"),
         updated_at: new Date(),
       });
     if (!cleared) return false;
@@ -2422,6 +2423,13 @@ async function clearStampAndRestoreLead(call, procToken, callSid) {
         try { sm = typeof s.metadata === 'string' ? JSON.parse(s.metadata) : (s.metadata || {}); } catch { sm = null; }
         const sPrior = sm?.lead_prior_state;
         if (!sPrior || typeof sPrior !== 'object') continue;
+        // Only snapshots stamped AFTER this call's may be re-parented — a
+        // PREDECESSOR whose prior value coincidentally equals this call's
+        // written value (an is_qualified flip-flop is the classic cycle)
+        // must keep its own baseline, or rejecting it later restores the
+        // wrong value (codex P2 r13). Missing markers skip conservatively.
+        const sStampedAt = typeof sm.lead_stamped_at === 'string' ? sm.lead_stamped_at : null;
+        if (!ownStampedAt || !sStampedAt || sStampedAt <= ownStampedAt) continue;
         let changed = false;
         for (const f of Object.keys(writtenState)) {
           if (Object.prototype.hasOwnProperty.call(sPrior, f) && eq(sPrior[f], writtenState[f])) {
@@ -8112,9 +8120,14 @@ const CallRecordingProcessor = {
                     // payloads — replacing wholesale made rejection unable to
                     // restore them) with this pass's values winning shared
                     // keys. A different-lead stamp starts both fresh.
+                    // lead_stamped_at is the ORDERING marker for rejection
+                    // re-parenting (only snapshots stamped AFTER this call's
+                    // may be re-parented — a predecessor's baseline must
+                    // never be rewritten; codex P2 r13). Preserved on
+                    // same-lead re-stamp like the prior ledger.
                     metadata: db.raw(
-                      "jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true), '{lead_prior_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN ?::jsonb || COALESCE(metadata->'lead_prior_state', '{}'::jsonb) ELSE ?::jsonb END, true), '{lead_written_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN COALESCE(metadata->'lead_written_state', '{}'::jsonb) || ?::jsonb ELSE ?::jsonb END, true)",
-                      [JSON.stringify(String(leadId)), String(leadId), JSON.stringify(prior), JSON.stringify(prior), String(leadId), JSON.stringify(written), JSON.stringify(written)],
+                      "jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true), '{lead_prior_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN ?::jsonb || COALESCE(metadata->'lead_prior_state', '{}'::jsonb) ELSE ?::jsonb END, true), '{lead_written_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN COALESCE(metadata->'lead_written_state', '{}'::jsonb) || ?::jsonb ELSE ?::jsonb END, true), '{lead_stamped_at}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN COALESCE(metadata->'lead_stamped_at', ?::jsonb) ELSE ?::jsonb END, true)",
+                      [JSON.stringify(String(leadId)), String(leadId), JSON.stringify(prior), JSON.stringify(prior), String(leadId), JSON.stringify(written), JSON.stringify(written), String(leadId), JSON.stringify(new Date().toISOString()), JSON.stringify(new Date().toISOString())],
                     ),
                     updated_at: new Date(),
                   });

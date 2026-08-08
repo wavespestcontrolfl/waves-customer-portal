@@ -338,8 +338,20 @@ async function buildAgentEstimateContext(leadId) {
   // null here, a multi-customer phone stayed ambiguous and tier/dup-service
   // context was skipped even though the stamped extraction could resolve
   // it). Phone-matched rows never carry the marker, so a shared-line call
-  // still cannot steer the match. rawCalls is sorted newest-first.
-  const leadCall = rawCalls.find((call) => call.for_this_lead && !String(call.id).startsWith('lead-summary:')) || null;
+  // still cannot steer the match. Among owned calls (newest first), prefer
+  // one whose extraction actually CARRIES caller identity — the newest
+  // owned call can be identity-less (V2 caller block omitted the name /
+  // V1 fallback shape) while an older owned call still holds the
+  // corroborating name; passing the empty one made loadCustomerByPhone
+  // ambiguous and suppressed tier/current-service context despite usable
+  // owned evidence (codex P2 r13).
+  const ownedCalls = rawCalls.filter((call) => call.for_this_lead && !String(call.id).startsWith('lead-summary:'));
+  const carriesCallerIdentity = (call) => {
+    const ex = call.extraction || {};
+    const who = ex.caller || ex;
+    return !!(String(who.first_name || '').trim() || String(who.last_name || '').trim());
+  };
+  const leadCall = ownedCalls.find(carriesCallerIdentity) || ownedCalls[0] || null;
   const {
     customer,
     ambiguous: customerAmbiguous,
