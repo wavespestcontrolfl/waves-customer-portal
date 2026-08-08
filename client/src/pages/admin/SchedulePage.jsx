@@ -457,9 +457,10 @@ function detectServiceCategory(serviceType) {
     s.includes("bora") ||
     s.includes("trelona") ||
     s.includes("termidor") ||
-    // Drill-and-foam services ("Foam Drill", "Recurring Foam Treatment
-    // (Quarterly)") carry no termite token of their own.
-    s.includes("foam") ||
+    // Drill-and-foam termite forms only ("Foam Drill", "Drill-and-Foam",
+    // "Recurring Foam Treatment (Quarterly)") — NOT a bare 'foam' token,
+    // which would steal rodent-exclusion foam-sealing visits.
+    /foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*foam|foam[\s_-]*recurring/.test(s) ||
     /\badvance\b/.test(s)
   )
     return "termite";

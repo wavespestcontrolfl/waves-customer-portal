@@ -3071,8 +3071,13 @@ const EstimateConverter = {
           // renames; name-based resolution still works without it, so a
           // missing catalog row (env not yet migrated) degrades safely.
           try {
+            // Active rows only (codex 2026-08-08 P1): linking an
+            // admin-deactivated catalog row would resurrect its typed
+            // completion flow — a deactivated service degrades to the
+            // name-only path like an absent row. NULL is_active reads as
+            // inactive, matching every other catalog filter.
             const catalogRow = await database('services')
-              .where({ service_key: unit.catalogServiceKey })
+              .where({ service_key: unit.catalogServiceKey, is_active: true })
               .first('id', 'default_duration_minutes');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;

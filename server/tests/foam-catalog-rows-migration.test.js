@@ -83,6 +83,8 @@ describe('20260808070000 foam catalog rows', () => {
         booking_enabled: false,
         customer_visible: true,
         is_waveguard: false,
+        is_active: true,
+        is_archived: false,
       });
       expect(profileRow(db, key)).toMatchObject({
         completion_mode: 'service_report',
@@ -146,6 +148,18 @@ describe('20260808070000 foam catalog rows', () => {
       services: ['foam_recurring'],
       profiles: ['foam_drill', 'foam_recurring'],
     });
+  });
+
+  test('up() never attaches a profile to an admin-deactivated or archived row', async () => {
+    const db = emptyDb();
+    db.services.push({ id: 'inactive-foam', service_key: 'foam_drill', name: 'Foam Drill', is_active: false });
+    db.services.push({ id: 'archived-foam', service_key: 'foam_recurring', name: 'Recurring Foam', is_archived: true });
+    await migration.up(fakeKnex(db));
+
+    // Rows untouched, and neither gets an active auto_send profile that
+    // would resurrect typed sends the admin turned off.
+    expect(db.service_completion_profiles).toHaveLength(0);
+    expect(stateValue(db)).toEqual({ services: [], profiles: [] });
   });
 
   test('up() leaves an existing completion profile untouched', async () => {

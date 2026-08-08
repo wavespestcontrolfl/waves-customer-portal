@@ -24,9 +24,21 @@ describe('foam names route termite', () => {
     ['Recurring Foam Treatment (Bimonthly)'],
     ['Recurring Foam Treatment (Monthly)'],
     ['Drill-and-Foam Termite Treatment'],
+    ['Drill-and-Foam Termite Treatment Service'],
+    ['foam_drill'],
+    ['foam_recurring'],
   ])('%s → termite category and termite report line', (name) => {
     expect(detectServiceCategory(name)).toBe('termite');
     expect(detectServiceLine(name)).toBe('termite');
+  });
+
+  test('bare foam is NOT a termite token — rodent foam-sealing stays rodent (codex 2026-08-08 P1)', () => {
+    // Foam sealant is rodent-exclusion material; only the drill-and-foam
+    // termite FORMS route termite, never the substring.
+    for (const name of ['Rodent Exclusion – Foam Sealing', 'Foam Sealing Follow-Up (Rodent)']) {
+      expect(detectServiceCategory(name)).toBe('rodent');
+      expect(detectServiceLine(name)).toBe('rodent');
+    }
   });
 
   test('normalization leaves the cadence on the label', () => {

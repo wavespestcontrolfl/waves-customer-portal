@@ -65,6 +65,8 @@ const SERVICES = [
     min_tech_skill_level: 2,
     customer_visible: true,
     booking_enabled: false,
+    is_active: true,
+    is_archived: false,
     icon: '🪵',
     color: '#dc2626',
     sort_order: 39,
@@ -100,6 +102,8 @@ const SERVICES = [
     min_tech_skill_level: 2,
     customer_visible: true,
     booking_enabled: false,
+    is_active: true,
+    is_archived: false,
     icon: '🪵',
     color: '#dc2626',
     sort_order: 39,
@@ -157,6 +161,14 @@ exports.up = async function up(knex) {
     const service = await knex('services').where({ service_key: svc.service_key }).first();
     if (!service) {
       console.warn(`[foam-catalog] ${svc.service_key}: services row absent after insert pass — skipping profile`);
+      continue;
+    }
+    // An admin-deactivated/archived row keeps its posture: attaching an
+    // active auto_send profile would re-enable typed sends the admin
+    // turned off (codex 2026-08-08 P1 — same rule as the termite cutover's
+    // inactive-row loud skip).
+    if (service.is_active === false || service.is_archived === true) {
+      console.warn(`[foam-catalog] ${svc.service_key}: services row is INACTIVE/ARCHIVED — skipping profile (admin decision preserved)`);
       continue;
     }
     const existing = await knex('service_completion_profiles')
