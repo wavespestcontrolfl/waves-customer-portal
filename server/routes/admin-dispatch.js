@@ -9519,14 +9519,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             } catch (e) { /* log-only */ }
           }
           // Full-balance sweep (owner ruling 2026-08-08): the visit's own
-          // charge just SUCCEEDED on this method — collect the customer's
+          // charge just SETTLED on this method — collect the customer's
           // other open DELIVERED self-pay invoices through the same
           // chargeInvoiceWithSavedCard rail, one capped charge per invoice,
-          // oldest first, stop on first failure. Detached so the tech's
-          // completion response never waits on N Stripe round-trips; every
-          // outcome lands in autopay_log. Dark behind
-          // GATE_COMPLETION_BALANCE_SWEEP (re-checked inside the service).
-          if (['paid', 'processing'].includes(freshStatus)) {
+          // oldest first, stop on first failure. 'paid' ONLY (pre-push r2
+          // P0): an ACH debit in 'processing' is money in flight, not proof
+          // the tender is good — sweeping behind it would stack debits that
+          // can all still fail. Detached so the tech's completion response
+          // never waits on N Stripe round-trips; every outcome lands in
+          // autopay_log. Dark behind GATE_COMPLETION_BALANCE_SWEEP
+          // (re-checked inside the service).
+          if (freshStatus === 'paid') {
             const sweepArgs = {
               customerId: svc.customer_id,
               excludeInvoiceId: invoice.id,

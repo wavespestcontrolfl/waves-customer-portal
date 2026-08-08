@@ -112,7 +112,7 @@ describe('sendInvoiceEmail previous-balance note', () => {
     expect(openBalanceSummary).toHaveBeenCalledWith('cust-1', { excludeInvoiceId: 'inv-1' });
     const args = EmailTemplates.sendTemplate.mock.calls[0][0];
     expect(args.payload.invoice_message).toBe(
-      'Thanks for having us out!\n\nReminder: your account also has a previous balance of $450.00 from 2 earlier invoices. The payment page below shows the full breakdown; each earlier invoice has its own payment link in the email it arrived with.',
+      'Thanks for having us out!\n\nReminder: your account also has a previous balance of $450.00 from 2 earlier invoices, separate from this invoice. Each earlier invoice has its own payment link in the email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.',
     );
     // Nothing is folded into this bill — the CTA amount stays this invoice's own.
     expect(args.payload.amount_due).toBe('$150.00');

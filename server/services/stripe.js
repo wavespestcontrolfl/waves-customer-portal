@@ -2235,7 +2235,7 @@ const StripeService = {
   // deactivated), the deferred job sends the classic receipt when it comes
   // due. The email leg rides the same job — a few minutes late, unchanged
   // otherwise.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, refuseWhenDunningStopped = false } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, refuseWhenDunningStopped = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2341,6 +2341,21 @@ const StripeService = {
             throw new Error('Invoice exceeds the customer-accepted amount. Review before charging.');
           }
         }
+        // Full charge-base ceiling against the LOCKED row (balance-sweep
+        // pre-push r2 P0): the subtotal cap above cannot see a retotal that
+        // rides tax or a raw total edit, and a reversed account credit also
+        // raises what would be collected. Cents-integer, conservative: any
+        // INCREASE of the locked amount due over the caller's snapshot
+        // refuses (a decrease — more credit applied, a downward edit — is
+        // always fine). Opt-in (null = unchanged behavior).
+        if (maxAuthorizedChargeCents != null) {
+          const lockedTotalCents = Math.round(Number(lockedInvoice.total || 0) * 100);
+          const lockedCreditCents = Math.round(Number(lockedInvoice.credit_applied || 0) * 100);
+          const lockedDueCents = Math.max(0, lockedTotalCents - lockedCreditCents);
+          if (lockedDueCents > Math.round(Number(maxAuthorizedChargeCents))) {
+            throw new Error('Invoice amount changed since it was reviewed. Review before charging.');
+          }
+        }
         // Stopped-dunning SERIALIZED with the charge (balance-sweep pre-push
         // P0): "stop dunning" is an explicit admin "stop collecting this
         // invoice" instruction (customer mailing a check, disputed bill) —
@@ -2433,6 +2448,24 @@ const StripeService = {
           });
           if (resolvedPayer?.payerId) {
             throw new Error('This appointment is payer-billed. The saved card must not be charged.');
+          }
+        }
+        // Customer-DEFAULT payer serialized with the charge (balance-sweep
+        // pre-push r2 P0): an ad-hoc invoice with NO scheduled service can
+        // still become third-party-billed via the customer's default payer
+        // after the caller's snapshot — and the visit-keyed check above has
+        // nothing to key on. Re-resolve on the transaction connection; a
+        // payer hit or a resolve failure throws and rolls back with nothing
+        // consumed. Skipped when a visit id was supplied — resolveForInvoice's
+        // visit path already folds the default payer in. Opt-in.
+        if (requireSelfPayCustomerId != null && requireSelfPayScheduledServiceId == null) {
+          const resolvedDefaultPayer = await require('./payer').resolveForInvoice({
+            database: trx,
+            customerId: String(requireSelfPayCustomerId),
+            throwOnError: true,
+          });
+          if (resolvedDefaultPayer?.payerId) {
+            throw new Error('This bill routes to a third-party payer. The saved card must not be charged.');
           }
         }
         // The pre-lock invoice read is only an early eligibility snapshot. Use

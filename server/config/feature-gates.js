@@ -100,14 +100,17 @@ const gates = {
   apptCardCompletionCharge: process.env.GATE_APPT_CARD_COMPLETION_CHARGE === 'true',
 
   // Overdue-balance visibility (owner ruling 2026-08-08, Donovan case): the
-  // invoice email carries a "previous balance" note when the customer has
-  // OTHER open self-pay invoices, and the public pay page lists those
-  // invoices (each via its own existing tokenized pay link) so one email
-  // surfaces everything owed. Display-only — no money moves under this gate
-  // and every underlying invoice stays intact (dunning still ages off each
-  // invoice's own due date, so the oldest debt keeps escalating — ruling #2).
-  // Customer-facing copy change, so fail-closed ==='true' in EVERY
-  // environment. Gate off: email + pay payload byte-identical to today.
+  // invoice EMAIL carries a "previous balance" note when the customer has
+  // other open, live-payer-verified self-pay invoices, so one email surfaces
+  // everything owed. EMAIL ONLY by design — the public /pay page is an
+  // unauthenticated per-invoice bearer surface and must never disclose
+  // sibling-invoice data (pre-push P0 ×2); the authenticated portal Billing
+  // tab (portalPayNow) is the in-app counterpart. Display-only — no money
+  // moves under this gate and every underlying invoice stays intact
+  // (dunning still ages off each invoice's own due date, so the oldest debt
+  // keeps escalating — ruling #2). Customer-facing copy change, so
+  // fail-closed ==='true' in EVERY environment. Gate off: emails
+  // byte-identical to today.
   balanceVisibility: process.env.GATE_BALANCE_VISIBILITY === 'true',
 
   // Completion full-balance Auto Pay pull (owner ruling 2026-08-08: "when

@@ -237,7 +237,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
       const { openBalanceSummary } = require('./open-balance');
       const prev = await openBalanceSummary(invoice.customer_id, { excludeInvoiceId: invoice.id });
       if (prev.total > 0) {
-        previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(prev.total)} from ${prev.count === 1 ? 'an earlier invoice' : `${prev.count} earlier invoices`}. The payment page below shows the full breakdown; each earlier invoice has its own payment link in the email it arrived with.`;
+        previousBalanceNote = `Reminder: your account also has a previous balance of ${currency(prev.total)} from ${prev.count === 1 ? 'an earlier invoice' : `${prev.count} earlier invoices`}, separate from this invoice. Each earlier invoice has its own payment link in the email it arrived with, and you can always see your full balance in your customer portal at portal.wavespestcontrol.com.`;
       }
     } catch (prevErr) {
       logger.warn(`[invoice-email] previous-balance lookup failed for ${invoice.invoice_number}: ${prevErr.message}`);

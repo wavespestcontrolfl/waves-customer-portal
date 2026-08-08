@@ -85,15 +85,22 @@ describe('completion balance sweep', () => {
     expect(mockCharge).toHaveBeenNthCalledWith(1, 'old-1', 'pm-1', {
       // 107.10 − 7.10 in integer cents → exactly 100.
       maxAuthorizedSubtotal: 100,
+      // Full charge-base ceiling = the snapshot's amount due, in cents.
+      maxAuthorizedChargeCents: 10000,
       requireAutopayForCustomerId: 'cust-1',
       requireSelfPayScheduledServiceId: 'svc-old-1',
+      requireSelfPayCustomerId: 'cust-1',
       refuseWhenDunningStopped: true,
     });
     expect(mockCharge).toHaveBeenNthCalledWith(2, 'old-2', 'pm-1', {
       // No subtotal column value → cap falls back to the total.
       maxAuthorizedSubtotal: 62.1,
+      maxAuthorizedChargeCents: 6210,
       requireAutopayForCustomerId: 'cust-1',
+      // No visit on the invoice → the customer-default payer check inside
+      // the charge transaction is the binding self-pay guard.
       requireSelfPayScheduledServiceId: null,
+      requireSelfPayCustomerId: 'cust-1',
       refuseWhenDunningStopped: true,
     });
     expect(logAutopay).toHaveBeenCalledTimes(2);

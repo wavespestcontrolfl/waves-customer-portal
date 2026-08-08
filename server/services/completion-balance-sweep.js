@@ -3,8 +3,14 @@
  * visit's auto-charge, "take everything they owe").
  *
  * Runs ONLY after the completion rail's own auto-charge on the visit's
- * invoice SUCCEEDED (paid, or an ACH debit in flight) — the freshest possible
- * proof the method is live and Auto Pay is active. It then collects the
+ * invoice SETTLED to 'paid' — the freshest possible proof the method is live
+ * and Auto Pay is active. An ACH debit still 'processing' is money merely in
+ * flight, NOT proof (pre-push r2 P0): it can still fail, and fanning out
+ * further debits behind it would stack unauthorized attempts stop-on-failure
+ * can't see — so ACH-tender completions never trigger the sweep (their old
+ * invoices stay on the ordinary dunning rails; a webhook-triggered
+ * post-settlement sweep is a possible follow-up, deliberately out of scope).
+ * It then collects the
  * customer's OTHER open, already-DELIVERED self-pay invoices (open-balance.js
  * selection: sent/viewed/overdue, payer-free, statement-free, positive
  * remainder), oldest first, one chargeInvoiceWithSavedCard call per invoice.
@@ -58,6 +64,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { openBalanceInvoices } = require('./open-balance');
+const { invoiceAmountDue } = require('./invoice-helpers');
 const { logAutopay } = require('./autopay-log');
 
 const SWEEP_SOURCE = 'completion_balance_sweep';
@@ -115,8 +122,15 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
     try {
       await StripeService.chargeInvoiceWithSavedCard(inv.id, paymentMethodId, {
         maxAuthorizedSubtotal,
+        // Full charge-base ceiling in cents (pre-push r2 P0): the subtotal
+        // cap can't see tax/total retotals or a reversed credit — the locked
+        // amount due must not exceed this snapshot's.
+        maxAuthorizedChargeCents: Math.round(invoiceAmountDue(inv) * 100),
         requireAutopayForCustomerId: customerId,
         requireSelfPayScheduledServiceId: inv.scheduled_service_id || null,
+        // Binding default-payer check for ad-hoc invoices with no visit —
+        // the visit-keyed guard has nothing to key on there (pre-push r2 P0).
+        requireSelfPayCustomerId: customerId,
         // Binding stopped-dunning check under the charge locks — the
         // preflight above is only a cheap skip (pre-push P0).
         refuseWhenDunningStopped: true,
