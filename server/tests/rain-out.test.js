@@ -1495,6 +1495,21 @@ describe('rain-out service', () => {
         .toEqual({ note: 'Treatment is safe once dry. Your technician confirms drying time at the appointment.' });
       // Spelled-out durations are the same banned class as digits.
       blocked('Keep pets off treated areas for two hours');
+      // Cross-sentence context (pre-push r10): the note ALWAYS rides a
+      // treatment SMS, so the claim and its product/area context need not
+      // share a sentence — impliedTreatmentContext closes the split.
+      blocked('Treatment today. Totally safe.');
+      blocked('We treated the lawn. Stay off for 30 minutes.');
+      // ...while courtesy well-wishes and plain rescheduling times pass.
+      expect(sanitize()('Rain rolled in - stay safe out there! New window is 2:30 pm.'))
+        .toEqual({ note: 'Rain rolled in - stay safe out there! New window is 2:30 pm.' });
+      expect(sanitize()("We'll be back tomorrow at 9:00 to re-treat the lawn."))
+        .toEqual({ note: "We'll be back tomorrow at 9:00 to re-treat the lawn." });
+      // The implied-context strictness is the NOTE path only — the social
+      // checker keeps its same-sentence co-occurrence rule.
+      const { complianceLanguageIssues } = require('../services/social-media');
+      expect(complianceLanguageIssues('Treatment today. Totally safe.')).toEqual([]);
+      expect(complianceLanguageIssues('We treated the lawn. Stay off for 30 minutes.')).toEqual([]);
       // Approved framings and unrelated durations pass.
       expect(sanitize()('Safe once dry - your technician confirms timing')).toEqual({ note: 'Safe once dry - your technician confirms timing' });
       expect(sanitize()('keeping your home safe from termites')).toEqual({ note: 'keeping your home safe from termites' });

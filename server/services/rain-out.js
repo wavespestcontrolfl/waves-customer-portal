@@ -190,8 +190,13 @@ function sanitizeCustomerNote(raw) {
   // clause-level checker from social-media.js (same regression matrix as
   // validateContent), not a parallel weaker copy: bare "safe once dry"
   // without technician-confirmed timing blocks here too.
+  // impliedTreatmentContext: the note rides an SMS that is ALWAYS about a
+  // treatment visit, so "Treatment today. Totally safe." and "We treated
+  // the lawn. Stay off for 30 minutes." must block even though the claim
+  // and its context sit in different sentences (codex pre-push r10) —
+  // the social surfaces keep the same-sentence co-occurrence rule.
   const { complianceLanguageIssues } = require('./social-media');
-  const complianceIssues = complianceLanguageIssues(gsm);
+  const complianceIssues = complianceLanguageIssues(gsm, { impliedTreatmentContext: true });
   if (complianceIssues.length) return { error: 'note_compliance_blocked', complianceIssues };
   return { note };
 }

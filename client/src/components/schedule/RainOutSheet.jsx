@@ -114,12 +114,18 @@ const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let
 // is not a drying confirmation — stripped before the confirm test. Gap is
 // tempered so "confirms DRYING time at the appointment" survives.
 const NOTE_UNRELATED_CONFIRM_RE = /\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))(?:(?!\b(?:dr(?:y|ies|ying)|re-?ent))[^.!?\n]){0,25}\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b(?:[^.!?\n]{0,15}\btim(?:es?|ing)?\b)?/gi;
-const NOTE_SAFE_DRY_IDIOM_RE = /\bsafe\s+(?:once|when|after)\b[^.!?]*/gi;
-const NOTE_SAFE_OTHER_STRIP_RE = /\bsafe\s+from\b|\bstay\s+safe\b|\bsafety\s+data\s+sheet\b/gi;
-// "safe" only counts as a violation in a pesticide/product context — the
-// same co-occurrence the canonical server checker requires, so ordinary
-// wording like "please drive safely" never blocks the move.
-const NOTE_PRODUCT_CTX_RE = /\b(?:pesticides?|products?|treatments?|sprays?(?:ing)?|chemicals?|applications?|pest\s+control|exterminat\w*)\b/i;
+// Verbatim mirrors of the canonical strips (social-media.js
+// SAFE_DRY_IDIOM_RE / SAFE_FROM_PEST_RE / WORKER_SAFETY_RE /
+// WELL_WISH_SAFE_RE — keep in sync). The server checks the note with
+// impliedTreatmentContext (the note always rides a treatment SMS), so any
+// remaining "safe"/"safety" blocks WITHOUT needing a product word in the
+// same sentence — the strips are what keep well-wishes ("stay safe out
+// there!") and protective idioms from tripping it.
+const NOTE_SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|when)\s+(?:completely\s+|fully\s+)?dry\b/gi;
+const NOTE_SAFE_FROM_RE = /\bsafe(?:ly|ty)?\s+from\s+[\w'-]+(?:\s+(?:and|or)\s+[\w'-]+)?/gi;
+const NOTE_WORKER_SAFETY_RE = /\b(?:technicians?|applicators?|staff|crew|team)\b[^.!?\n]*\b(?:stay(?:ing)?|keep(?:ing)?|remain(?:ing)?|be)\s+safe(?:ly)?\b/gi;
+const NOTE_WELL_WISH_SAFE_RE = /\b(?:stay|be|drive|travel|get\s+home)\s+safe(?:ly)?\b/gi;
+const NOTE_SAFETY_WORD_RE = /\bsafe(?:ly|ty)?\b/i;
 // Verbatim copies of the canonical clause-level timing rules
 // (social-media.js TIMING_DURATION_RE / REENTRY_CONTEXT_RE /
 // AGRONOMIC_EXEMPT_RE — keep in sync) so the inline advisor recognizes
@@ -128,13 +134,19 @@ const NOTE_PRODUCT_CTX_RE = /\b(?:pesticides?|products?|treatments?|sprays?(?:in
 const NOTE_TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b|\d{1,2}:\d{2}\b)/i;
 const NOTE_REENTRY_CONTEXT_RE = /\bre-?ent\w*|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\benter(?:ing)?\b[^.!?\n]{0,30}\b(?:treated|areas?|lawn|yard|home|house)\b|\b(?:treated|areas?|lawn|yard|home|house)\b[^.!?\n]{0,30}\benter(?:ing)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family|residents?|occupants?|everyone)\b[^.!?\n]{0,20}\breturn\w*\b|^\s*return(?:ing)?\b/i;
 const NOTE_AGRONOMIC_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|overseed\w*|aerat\w*|rain)\b/i;
+// Mirror of the server's IMPLIED_REENTRY_DIRECTIVE_RE: a keep-away
+// directive whose object may be implicit ("Stay off for 30 minutes" after
+// "We treated the lawn.") — the treated-area noun can live in another
+// sentence, so the directive alone counts under implied context.
+const NOTE_IMPLIED_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b/i;
 // Same clause walk as the canonical checker (sentence → clause on
 // commas/semicolons/conjunctions; agronomic clauses exempt).
 function noteTimingTrips(note) {
   for (const sentence of note.split(/[.!?\n]+/)) {
     for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
       if (!clause.trim()) continue;
-      if (NOTE_TIMING_DURATION_RE.test(clause) && NOTE_REENTRY_CONTEXT_RE.test(clause)
+      if (NOTE_TIMING_DURATION_RE.test(clause)
+        && (NOTE_REENTRY_CONTEXT_RE.test(clause) || NOTE_IMPLIED_DIRECTIVE_RE.test(clause))
         && !NOTE_AGRONOMIC_RE.test(clause)) return true;
     }
   }
@@ -142,9 +154,14 @@ function noteTimingTrips(note) {
 }
 function noteComplianceTrips(note) {
   const idiomAllowed = NOTE_TECH_CONFIRM_RE.test(note.replace(NOTE_UNRELATED_CONFIRM_RE, ''));
+  // The server walks sentences; testing the whole post-strip note is
+  // equivalent for a yes/no verdict because every strip regex is bounded
+  // by [^.!?\n] and cannot span a sentence itself.
   const scope = (idiomAllowed ? note.replace(NOTE_SAFE_DRY_IDIOM_RE, '') : note)
-    .replace(NOTE_SAFE_OTHER_STRIP_RE, '');
-  if (/\bsafe(?:ly)?\b/i.test(scope) && NOTE_PRODUCT_CTX_RE.test(scope)) return true;
+    .replace(NOTE_SAFE_FROM_RE, '')
+    .replace(NOTE_WORKER_SAFETY_RE, '')
+    .replace(NOTE_WELL_WISH_SAFE_RE, '');
+  if (NOTE_SAFETY_WORD_RE.test(scope)) return true;
   if (/\bepa\b(?![-\s](?:registered|exempt))/i.test(note)) return true;
   return noteTimingTrips(note);
 }

@@ -507,7 +507,17 @@ const SAFE_FROM_PEST_RE = /\bsafe(?:ly|ty)?\s+from\s+[\w'-]+(?:\s+(?:and|or)\s+[
 const WORKER_SAFETY_RE = /\b(?:technicians?|applicators?|staff|crew|team)\b[^.!?\n]*\b(?:stay(?:ing)?|keep(?:ing)?|remain(?:ing)?|be)\s+safe(?:ly)?\b/gi;
 
 // Clause-level compliance check — returns the violated-rule messages.
-function complianceOverclaims(text) {
+// Safety well-wish, not a product claim ("stay safe out there!" on a
+// rain-out note). Only consulted under impliedTreatmentContext — social
+// copy keeps the product-co-occurrence rule instead.
+const WELL_WISH_SAFE_RE = /\b(?:stay|be|drive|travel|get\s+home)\s+safe(?:ly)?\b/gi;
+// Keep-away directive whose OBJECT may be implicit ("Stay off for 30
+// minutes" after "We treated the lawn."). REENTRY_CONTEXT_RE needs the
+// treated-area noun in the same clause, so cross-sentence notes slip it;
+// under impliedTreatmentContext the directive alone carries the meaning.
+const IMPLIED_REENTRY_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b/i;
+
+function complianceOverclaims(text, { impliedTreatmentContext = false } = {}) {
   const issues = [];
   const sentences = String(text || '').split(/[.!?\n]+/);
   // The technician-confirms framing may legitimately sit in an ADJACENT
@@ -518,12 +528,18 @@ function complianceOverclaims(text) {
   const idiomAllowed = TECH_CONFIRM_CONTEXT_RE.test(String(text || '').replace(UNRELATED_CONFIRM_RE, ''));
   for (const sentence of sentences) {
     if (!sentence.trim()) continue;
-    const safetyScope = (idiomAllowed
+    let safetyScope = (idiomAllowed
       ? sentence.replace(SAFE_DRY_IDIOM_RE, '')
       : sentence)
       .replace(SAFE_FROM_PEST_RE, '')
       .replace(WORKER_SAFETY_RE, '');
-    if (SAFETY_WORD_RE.test(safetyScope) && PRODUCT_CONTEXT_RE.test(safetyScope)) {
+    if (impliedTreatmentContext) safetyScope = safetyScope.replace(WELL_WISH_SAFE_RE, '');
+    // Copy that ALWAYS accompanies a treatment message (rain-out dispatcher
+    // notes) carries product context implicitly — "Treatment today. Totally
+    // safe." must block even though the sentences never co-occur (codex
+    // pre-push #3278 r10). Social copy keeps the same-sentence requirement.
+    if (SAFETY_WORD_RE.test(safetyScope)
+      && (impliedTreatmentContext || PRODUCT_CONTEXT_RE.test(safetyScope))) {
       issues.push('Contains a product-safety claim — never call a pesticide/treatment "safe" (idiom: "safe once dry")');
     }
     // The agronomic exemption applies per CLAUSE, not per sentence — "keep
@@ -532,7 +548,9 @@ function complianceOverclaims(text) {
     // Coordinating conjunctions split clauses too — "… for 30 minutes and
     // avoid watering …" must not let the aftercare half exempt the first.
     for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
-      if (TIMING_DURATION_RE.test(clause) && REENTRY_CONTEXT_RE.test(clause)
+      if (TIMING_DURATION_RE.test(clause)
+        && (REENTRY_CONTEXT_RE.test(clause)
+          || (impliedTreatmentContext && IMPLIED_REENTRY_DIRECTIVE_RE.test(clause)))
         && !agronomicExemptionApplies(clause)) {
         issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
         break;
@@ -607,12 +625,16 @@ const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000,
 
 // The compliance-language subset of validateContent, callable on its own
 // (exported below for non-social customer copy like Quick Move notes).
-function complianceLanguageIssues(text) {
+// opts.impliedTreatmentContext: the copy ALWAYS accompanies a treatment
+// message (rain-out dispatcher notes), so product/re-entry context is
+// implicit — same-sentence co-occurrence is not required. Social surfaces
+// omit the flag and keep the co-occurrence rule.
+function complianceLanguageIssues(text, opts = {}) {
   const issues = [];
   if (SAFETY_OVERCLAIMS.test(String(text || ''))) {
     issues.push('Contains safety overclaim (guaranteed, 100% effective, etc.)');
   }
-  for (const issue of new Set(complianceOverclaims(text))) {
+  for (const issue of new Set(complianceOverclaims(text, opts))) {
     issues.push(issue);
   }
   return issues;
