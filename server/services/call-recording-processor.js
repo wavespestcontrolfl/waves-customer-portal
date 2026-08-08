@@ -2410,10 +2410,43 @@ async function clearStampAndRestoreLead(call, procToken, callSid) {
       });
     if (!cleared) return false;
     if (priorState && writtenState) {
+      // Successors are read BEFORE the restore because they gate it (codex
+      // P2 r19). Two calls can write the SAME value to a field — both
+      // setting urgency='urgent' or is_qualified=true is the common case —
+      // and the per-field CAS cannot tell whose value is live: it sees
+      // current == this call's written and restores the pre-THIS baseline,
+      // silently erasing a LATER accepted call's evidence. Re-parenting
+      // runs after the restore and only rewrites baselines, so it never
+      // puts that value back. A field any later snapshot also wrote is
+      // therefore left alone — it is that call's evidence too, and its own
+      // rejection will reconcile it.
+      const eq = (a, b) => (a ?? null) === (b ?? null);
+      const successors = (await trx('call_log')
+        .whereRaw("metadata->>'lead_id' = ?", [stampedLeadId])
+        .whereNot('id', call.id)
+        .select('id', 'metadata'))
+        .map((s) => {
+          let sm = null;
+          try { sm = typeof s.metadata === 'string' ? JSON.parse(s.metadata) : (s.metadata || {}); } catch { sm = null; }
+          return { id: s.id, md: sm };
+        });
+      // "Later" uses the same lead_stamped_at ordering the re-parent loop
+      // does; a missing marker on either side skips conservatively.
+      const laterSnapshots = successors.filter((s) => {
+        const sStampedAt = typeof s.md?.lead_stamped_at === 'string' ? s.md.lead_stamped_at : null;
+        return ownStampedAt && sStampedAt && sStampedAt > ownStampedAt;
+      });
+      const ownedByLater = new Set();
+      for (const s of laterSnapshots) {
+        const sWritten = s.md?.lead_written_state;
+        if (!sWritten || typeof sWritten !== 'object') continue;
+        for (const f of Object.keys(sWritten)) ownedByLater.add(f);
+      }
       const frags = [];
       const binds = [];
       for (const f of STAMPED_LEAD_RESTORE_FIELDS) {
         if (!Object.prototype.hasOwnProperty.call(writtenState, f)) continue;
+        if (ownedByLater.has(f)) continue;
         const cast = STAMPED_LEAD_FIELD_CASTS[f] || '';
         frags.push(`${f} = CASE WHEN ${f} IS NOT DISTINCT FROM ?${cast} THEN ?${cast} ELSE ${f} END`);
         binds.push(writtenState[f] ?? null, (Object.prototype.hasOwnProperty.call(priorState, f) ? priorState[f] : null) ?? null);
@@ -2435,24 +2468,16 @@ async function clearStampAndRestoreLead(call, procToken, callSid) {
       // entries at this call's own prior values instead. (The reverse order
       // needs nothing: the successor's restore re-materializes this call's
       // written values first, and this call's CAS then matches and restores
-      // its own prior.) Successor lookup rides the metadata lead_id index.
-      const eq = (a, b) => (a ?? null) === (b ?? null);
-      const successors = await trx('call_log')
-        .whereRaw("metadata->>'lead_id' = ?", [stampedLeadId])
-        .whereNot('id', call.id)
-        .select('id', 'metadata');
-      for (const s of successors) {
-        let sm = null;
-        try { sm = typeof s.metadata === 'string' ? JSON.parse(s.metadata) : (s.metadata || {}); } catch { sm = null; }
-        const sPrior = sm?.lead_prior_state;
+      // its own prior.) Only snapshots stamped AFTER this call's are
+      // eligible — a PREDECESSOR whose prior value coincidentally equals
+      // this call's written value (an is_qualified flip-flop is the classic
+      // cycle) must keep its own baseline, or rejecting it later restores
+      // the wrong value (codex P2 r13) — which is exactly the
+      // laterSnapshots filter computed above. Successor lookup rides the
+      // metadata lead_id index.
+      for (const s of laterSnapshots) {
+        const sPrior = s.md?.lead_prior_state;
         if (!sPrior || typeof sPrior !== 'object') continue;
-        // Only snapshots stamped AFTER this call's may be re-parented — a
-        // PREDECESSOR whose prior value coincidentally equals this call's
-        // written value (an is_qualified flip-flop is the classic cycle)
-        // must keep its own baseline, or rejecting it later restores the
-        // wrong value (codex P2 r13). Missing markers skip conservatively.
-        const sStampedAt = typeof sm.lead_stamped_at === 'string' ? sm.lead_stamped_at : null;
-        if (!ownStampedAt || !sStampedAt || sStampedAt <= ownStampedAt) continue;
         let changed = false;
         for (const f of Object.keys(writtenState)) {
           if (Object.prototype.hasOwnProperty.call(sPrior, f) && eq(sPrior[f], writtenState[f])) {

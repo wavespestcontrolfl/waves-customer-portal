@@ -18,7 +18,12 @@ jest.mock('../models/db', () => {
       _whereRaw: false,
       leftJoin() { this._leftJoin = true; return this; },
       select() { return this; },
-      where() { return this; },
+      // Invoke callback predicates so a grouped where(function(){...whereRaw...})
+      // still records which query shape this builder is.
+      where(arg) { if (typeof arg === 'function') arg.call(this); return this; },
+      orWhere() { return this; },
+      orWhereNot() { return this; },
+      orWhereRaw() { return this; },
       whereNull() { return this; },
       whereNot() { return this; },
       whereRaw(sql) {
@@ -542,5 +547,74 @@ describe('owned-call extraction shape handling (PR #3275)', () => {
 
     const [, extractionPassed] = mockLoadCustomerByPhone.mock.calls[0];
     expect(extractionPassed).toEqual({ first_name: 'Pat', last_name: 'Prospect' });
+  });
+});
+
+describe('identity probe reaches past the evidence cap (PR #3275)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockExtractionByCallId = {};
+    mockContextLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      first_name: 'Pat', last_name: 'Prospect', phone: '9415550100',
+      email: null, address: '1 St', city: 'Bradenton', zip: '34208',
+      twilio_call_sid: null, transcript_summary: null, extracted_data: null,
+      status: 'new',
+    };
+    mockContextCallRows = [];
+    mockContextStampedCallRows = [];
+    mockContextOtherLeads = [];
+    mockLinkedCustomerRow = null;
+    mockOtherCustomerOnPhone = null;
+    mockLoadCustomerByPhone.mockResolvedValue({ customer: null, ambiguous: false });
+  });
+
+  afterAll(() => {
+    mockExtractionByCallId = {};
+    mockContextStampedCallRows = [];
+  });
+
+  test('an enriched identity older than the three-call cap still disambiguates', async () => {
+    // The pack caps owned rows at three. When those three carry no enriched
+    // caller block, the identity the matcher needs can sit on a FOURTH,
+    // older stamped call that loadCalls never fetched — leaving a
+    // shared-phone customer ambiguous for want of a row we already have.
+    mockContextStampedCallRows = [
+      { id: 'c1', twilio_call_sid: 'CA1', direction: 'inbound', duration_seconds: 30, transcription: 'a', created_at: '2026-07-05' },
+      { id: 'c2', twilio_call_sid: 'CA2', direction: 'inbound', duration_seconds: 30, transcription: 'b', created_at: '2026-07-04' },
+      { id: 'c3', twilio_call_sid: 'CA3', direction: 'inbound', duration_seconds: 30, transcription: 'c', created_at: '2026-07-03' },
+      { id: 'c4-old', twilio_call_sid: 'CA4', direction: 'inbound', duration_seconds: 30, transcription: 'd', created_at: '2026-07-01' },
+    ];
+    // The three capped rows are V1 — no enriched caller anywhere in the pack.
+    for (const id of ['c1', 'c2', 'c3']) {
+      mockExtractionByCallId[id] = { source: 'v1', extraction: { first_name: 'Pat' } };
+    }
+    mockExtractionByCallId['c4-old'] = {
+      source: 'enriched',
+      extraction: { property: {}, caller: { first_name: 'Pat', last_name: 'Prospect' } },
+    };
+
+    const context = await buildAgentEstimateContext('lead-1');
+
+    const [, extractionPassed] = mockLoadCustomerByPhone.mock.calls[0];
+    expect(extractionPassed?.caller).toEqual({ first_name: 'Pat', last_name: 'Prospect' });
+    // Identity-only: the probe must not widen the evidence pack past its cap.
+    expect(context.calls.length).toBeLessThanOrEqual(3);
+  });
+
+  test('the probe is skipped when the pack already carries enriched identity', async () => {
+    mockContextStampedCallRows = [{
+      id: 'c1', twilio_call_sid: 'CA1', direction: 'inbound',
+      duration_seconds: 30, transcription: 'a', created_at: '2026-07-05',
+    }];
+    mockExtractionByCallId['c1'] = {
+      source: 'enriched',
+      extraction: { property: {}, caller: { first_name: 'Dana', last_name: 'InPack' } },
+    };
+
+    await buildAgentEstimateContext('lead-1');
+
+    const [, extractionPassed] = mockLoadCustomerByPhone.mock.calls[0];
+    expect(extractionPassed?.caller).toEqual({ first_name: 'Dana', last_name: 'InPack' });
   });
 });

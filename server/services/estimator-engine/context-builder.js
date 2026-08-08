@@ -496,13 +496,15 @@ async function buildCallContext(callLogId) {
         // or property manager stating one of them is an existing customer's
         // caller — matching on `email` alone let that call draft a
         // prospect-priced estimate for a live account.
-        // ALL owners, not .first(): one email can legitimately sit on
-        // several accounts (a property manager in the service-contact slots
-        // of every building they run). Picking one arbitrarily would raise a
-        // phantom identity conflict against a phone match that IS one of
-        // them. The conflict is real only when the phone match is not among
-        // the owners at all.
-        const emailOwners = await db('customers')
+        // Two EXACT questions instead of a capped owner list (codex P2, PR
+        // #3275): "does anyone own this email" and, separately, "does the
+        // phone match own it". One email legitimately sits on many accounts
+        // (a property manager in the service-contact slots of every building
+        // they run), so a bounded, unordered fetch could omit the very owner
+        // the phone matched and raise a phantom conflict against a
+        // legitimate draft. Scoping the second query by id keeps both cheap
+        // however many accounts share the address.
+        const emailOwnerQuery = () => db('customers')
           .whereNull('deleted_at')
           .where('active', true)
           .whereRaw(
@@ -510,17 +512,20 @@ async function buildCallContext(callLogId) {
             + ' OR LOWER(TRIM(service_contact2_email)) = ? OR LOWER(TRIM(service_contact3_email)) = ?)',
             [extractionEmailLc, extractionEmailLc, extractionEmailLc, extractionEmailLc],
           )
-          .whereIn('pipeline_stage', ['active_customer', 'won', 'at_risk'])
-          .limit(25)
-          .select('id');
-        if (emailOwners.length && !customerMatch.customer) {
+          .whereIn('pipeline_stage', ['active_customer', 'won', 'at_risk']);
+        const anyEmailOwner = await emailOwnerQuery().first('id');
+        if (anyEmailOwner && !customerMatch.customer) {
           logger.warn('[estimator-engine] unidentified call states an active customer\'s email — failing closed to identity review');
           return { error: 'email_matches_existing_customer', call };
         }
-        if (emailOwners.length && customerMatch.customer
-          && !emailOwners.some((o) => String(o.id) === String(customerMatch.customer.id))) {
-          logger.warn('[estimator-engine] stated email belongs to a DIFFERENT active customer than the phone match — failing closed to identity review');
-          return { error: 'email_identity_conflict', call };
+        if (anyEmailOwner && customerMatch.customer) {
+          const matchOwnsEmail = await emailOwnerQuery()
+            .where('id', customerMatch.customer.id)
+            .first('id');
+          if (!matchOwnsEmail) {
+            logger.warn('[estimator-engine] stated email belongs to a DIFFERENT active customer than the phone match — failing closed to identity review');
+            return { error: 'email_identity_conflict', call };
+          }
         }
       } catch (emailErr) {
         logger.warn(`[estimator-engine] email-owner check failed — failing closed: ${emailErr.code || emailErr.name || 'db_error'}`);

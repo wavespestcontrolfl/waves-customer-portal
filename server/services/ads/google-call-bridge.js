@@ -519,13 +519,21 @@ async function findLeadForCall(callLog) {
 
 async function updateLeadAttribution(leadMatch, bridgeSource, now) {
   if (!leadMatch?.leadId) return false;
-  await db('leads')
+  // Live-lead check happens HERE, at write time, not only in the fetch join
+  // (codex P2, PR #3275): previewBridge awaits the Google Ads scan between
+  // fetchCrmCalls and apply, and a lead soft-deleted in that gap would
+  // otherwise be updated and stamped as this call's match — blocking later
+  // retries from resolving a live replacement. findLeadForCall enforces the
+  // same predicate; the joined shortcut now matches it. A zero-row update
+  // reports false so the caller does not record a bridge match.
+  const updated = await db('leads')
     .where({ id: leadMatch.leadId })
+    .whereNull('deleted_at')
     .update({
       lead_source_id: bridgeSource.id,
       updated_at: now,
     });
-  return true;
+  return !!updated;
 }
 
 function summarize(matches, crmCalls) {
@@ -648,7 +656,14 @@ async function applyBridge(options = {}) {
           continue;
         }
 
-        await updateLeadAttribution(leadMatch, bridgeSource, now);
+        // A joined lead soft-deleted between fetch and apply writes zero
+        // rows — do NOT stamp it as this call's match, or a later retry can
+        // never resolve a live replacement (codex P2, PR #3275). Not a
+        // write_failed: the retry lane re-evaluates it on the next pass.
+        if (!await updateLeadAttribution(leadMatch, bridgeSource, now)) {
+          skipped.push({ ...match, skipReason: 'lead_not_live' });
+          continue;
+        }
         await db('call_log')
           .where({ id: match.callLog.id })
           .update({
@@ -687,8 +702,11 @@ async function applyBridge(options = {}) {
         bridgedAt: now.toISOString(),
       };
       const leadMatch = await joinedOrPlannedLeadMatch(match.callLog);
-      if (leadMatch) {
-        await updateLeadAttribution(leadMatch, bridgeSource, now);
+      // The google call is confirmed either way; only the LEAD attribution
+      // is conditional. A lead soft-deleted between fetch and apply writes
+      // zero rows, and recording it would block a later retry from finding
+      // the live replacement (codex P2, PR #3275).
+      if (leadMatch && await updateLeadAttribution(leadMatch, bridgeSource, now)) {
         bridgePayload.leadMatch = redactedLeadMatch(leadMatch);
         bridgePayload.leadAttributedAt = now.toISOString();
       }

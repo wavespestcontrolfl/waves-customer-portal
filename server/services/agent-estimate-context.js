@@ -255,6 +255,43 @@ async function loadCalls(lead, phoneKey) {
   }
 }
 
+// How far back the identity probe looks. Bounded so a lead with a long call
+// history can't turn customer disambiguation into an unbounded scan; well
+// past the three-call evidence cap it exists to see around.
+const IDENTITY_PROBE_LIMIT = 10;
+
+// Customer disambiguation must not be bounded by the three-call EVIDENCE cap
+// (codex P2, PR #3275): when the newest owned rows carry no enriched caller
+// block, an OLDER stamp- or sid-linked call can still hold the name that
+// resolves a shared-phone customer — and loadCalls would never have loaded
+// it, so `ownedCalls.find(carriesCallerIdentity)` had nothing to select.
+// Identity-only by construction: the returned extraction never enters the
+// evidence pack, so the pack's cap and shared-number suppression are
+// unchanged. Best-effort — a failed probe just leaves disambiguation where
+// it was.
+async function loadIdentityCandidate(lead) {
+  try {
+    const rows = await db('call_log')
+      .where(function ownedByLead() {
+        this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)]);
+        if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
+      })
+      .orderBy('created_at', 'desc')
+      .limit(IDENTITY_PROBE_LIMIT)
+      .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched',
+        'v2_extraction_status', 'created_at');
+    for (const row of rows) {
+      const { extraction, source } = extractionFromCall(row);
+      if (source !== 'enriched') continue;
+      const who = extraction?.caller || {};
+      if (String(who.first_name || '').trim() || String(who.last_name || '').trim()) return extraction;
+    }
+  } catch (err) {
+    logger.warn(`[agent-estimate] identity probe failed: ${err.message}`);
+  }
+  return null;
+}
+
 async function resolveCustomer(lead, extraction, phoneKey) {
   if (lead.customer_id) {
     try {
@@ -372,13 +409,19 @@ async function buildAgentEstimateContext(leadId) {
     const who = call.extraction?.caller || {};
     return !!(String(who.first_name || '').trim() || String(who.last_name || '').trim());
   };
-  const leadCall = ownedCalls.find(carriesCallerIdentity) || ownedCalls[0] || null;
+  const identityCall = ownedCalls.find(carriesCallerIdentity) || null;
+  const leadCall = identityCall || ownedCalls[0] || null;
+  // Nothing in the capped pack carries enriched identity — look past the cap
+  // before settling for an identity-less row (codex P2 r19).
+  const identityExtraction = identityCall
+    ? identityCall.extraction
+    : ((await loadIdentityCandidate(lead)) || leadCall?.extraction || null);
   const {
     customer,
     ambiguous: customerAmbiguous,
     unavailable: customerLookupUnavailable,
     phoneSharedWithOtherCustomer = false,
-  } = await resolveCustomer(lead, leadCall?.extraction || null, phoneKey);
+  } = await resolveCustomer(lead, identityExtraction, phoneKey);
   // Phone-scoped history fails closed on EVERY suppression signal: another
   // lead on the number (sharedPhone), multiple customer rows on the number
   // (customerAmbiguous), or a linked customer whose number another customer
