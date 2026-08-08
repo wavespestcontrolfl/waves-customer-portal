@@ -256,6 +256,15 @@ describe('rollup leg — quiet windows do not stamp the weekly marker', () => {
     expect(rollupQuery.op).toBe('>=');
   });
 
+  test('the due threshold separates day 6 from day 7 with DST slack on both sides', () => {
+    const H = 60 * 60 * 1000;
+    const { ROLLUP_DUE_MS } = digest.THRESHOLDS;
+    // Worst-case day 6 (fall-back long day) must still read as not due, and
+    // worst-case day 7 (spring-forward short week) must still read as due.
+    expect(ROLLUP_DUE_MS).toBeGreaterThan(145 * H);
+    expect(ROLLUP_DUE_MS).toBeLessThan(167 * H);
+  });
+
   test('is NOT due at six days — the alert markers\' re-nag interval must not shorten the week', async () => {
     const sixDaysAgo = new Date(Date.now() - 6 * 86400000);
     const fakeDb = makeDb({

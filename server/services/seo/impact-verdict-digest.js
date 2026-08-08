@@ -57,13 +57,19 @@ const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wa
 const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
 const ROLLUP_WINDOW_DAYS = 7;
 // The two ALERT markers use the six-day re-nag interval above. The rollup
-// needs its own, because six days would let a daily tick send it on day six
-// and turn the "weekly" rollup into a drifting six-day one. A flat seven days
-// has the opposite hazard: the marker is stamped at the tick's own cutoff, so
-// day seven's tick is a few milliseconds SHORT of 7d and would slip to day
-// eight, then nine. An hour of slack makes day seven reliably due and day six
-// reliably not.
-const ROLLUP_DUE_MS = 7 * 24 * 60 * 60 * 1000 - 60 * 60 * 1000;
+// needs its own: six days would let a daily tick send on day six, turning the
+// "weekly" rollup into a drifting six-day one, while a flat seven days lands
+// exactly ON the boundary and slips to day eight on any jitter.
+//
+// The threshold only has to SEPARATE two well-known elapsed times, since the
+// cron fires once a day at 08:00 ET and the marker is stamped at that tick's
+// own cutoff:
+//   day 6 → ~144h (143h or 145h across a DST change)
+//   day 7 → ~168h (167h across spring-forward, 169h across fall-back)
+// Sitting at the midpoint leaves ~11h of slack on both sides, which absorbs
+// the DST hour and any cron jitter — where 167h would be defeated by a
+// spring-forward week plus a few milliseconds of early start.
+const ROLLUP_DUE_MS = 6.5 * 24 * 60 * 60 * 1000;
 const BLIND_LOOP_DAYS = 21;
 // Below this many measured-but-ungraded optimizations the silence is just a
 // quiet engine, not a blind grader. Keeps the alert off a young/low-volume lane.

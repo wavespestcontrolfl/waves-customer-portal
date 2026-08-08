@@ -1482,7 +1482,15 @@ function initScheduledJobs() {
           logger.warn(`[impact-digest] sweep incomplete — skipping digests this tick (${live?.error || checked?.error})`);
           return;
         }
-        await require('./seo/impact-verdict-digest').sendImpactDigestsIfDue({});
+        // The digest keeps its own lease (it is also reachable from the CLI
+        // preview and any future ad-hoc run). runExclusive RETURNS
+        // { skipped: true, reason } instead of throwing, so an unignored pool
+        // exhaustion would let reporting never run while this outer job still
+        // recorded success — the precise blindness this leg exists to remove.
+        const digested = await require('./seo/impact-verdict-digest').sendImpactDigestsIfDue({});
+        if (digested?.skipped === true) {
+          throw new Error(`impact digest did not run (${digested.reason || 'lease'})`);
+        }
       });
     } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
