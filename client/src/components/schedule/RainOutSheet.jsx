@@ -108,8 +108,10 @@ function noteGuardTrips(note) {
 // (social-media.js complianceLanguageIssues) enforces, so the mirror never
 // green-lights wording the server then rejects.
 // Mirror of the canonical exemption: the confirmation's OBJECT must be
-// drying/re-entry timing ("confirms the gate code" does not exempt).
-const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know\b|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)[^.!?\n]{0,30}\b(?:dr(?:y|ies|ying)|re-?ent\w*|tim(?:e|es|ing)|when|ready)\b)|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
+// drying/re-entry timing ("confirms the gate code" does not exempt;
+// "when"/"ready" only count tied to drying/safety so "gate code is
+// ready" doesn't either — keep in sync with TECH_CONFIRM_CONTEXT_RE).
+const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)[^.!?\n]{0,30}\b(?:dr(?:y|ies|ying)|re-?ent\w*|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
 // A confirmation about appointment logistics ("confirms arrival timing")
 // is not a drying confirmation — stripped before the confirm test. Gap is
 // tempered so "confirms DRYING time at the appointment" survives.
