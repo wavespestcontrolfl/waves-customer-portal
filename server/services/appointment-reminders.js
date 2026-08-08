@@ -24,6 +24,10 @@ const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { buildAppointmentLink } = require('./appointment-link');
+// Canonical service_type normalization — the estimate-backed label recovery
+// compares stored fall-through values against this exact transform; reusing
+// the writer's implementation keeps the two from drifting.
+const { cappedServiceType } = require('./slot-reservation');
 
 // Service states for which a reminder must never fire. A reminder row can be
 // armed (cancelled=false) while its underlying scheduled_service moved into one
@@ -579,15 +583,6 @@ function acceptedMixServiceName(notes) {
   return cleaned;
 }
 
-// Mirror of slot-reservation's cappedServiceType (whitespace collapse, trim,
-// 100-char cap with a '...' tail): the stored fall-through value is that
-// transform of estimates.service_interest, so the signature comparison must
-// apply the same transform or long/odd-whitespace interests never match.
-function cappedInterestForm(value) {
-  const label = String(value || '').replace(/\s+/g, ' ').trim();
-  if (!label || label.length <= 100) return label;
-  return `${label.slice(0, 97).trimEnd()}...`;
-}
 
 // Returns the accepted-estimate service name when the stored parent label is
 // just the estimate's raw category (the canonical-mapping fall-through
@@ -603,7 +598,7 @@ async function estimateBackedServiceName(scheduledServiceId, parentName, conn = 
       .where('s.id', scheduledServiceId)
       .first('s.notes', 'e.service_interest');
     if (!svc) return parentName;
-    const interest = cappedInterestForm(svc.service_interest);
+    const interest = cappedServiceType(svc.service_interest, '');
     if (stored !== interest && stored !== 'Estimate service') return parentName;
     const mixName = acceptedMixServiceName(svc.notes);
     if (!mixName || mixName === stored) return parentName;
