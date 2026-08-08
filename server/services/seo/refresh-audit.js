@@ -412,6 +412,22 @@ class RefreshAudit {
       throw err;
     }
 
+    // Built BEFORE the in-flight checks, not just before the insert: those
+    // checks return early, and a caller retrying after its own stamp failed
+    // will find the very row IT created sitting there as pending/claimed.
+    // Comparing dedupe keys is what lets it tell its own work apart from a
+    // foreign page edit — without this the retry reads its own refresh as
+    // someone else's and eventually retires the regression as a no-op.
+    //
+    // The cycle suffix must SURVIVE truncation: slicing after appending would,
+    // on a long domain/slug, cut the suffix off and collide distinct cycles
+    // with each other (or with the stable key), silently restoring the
+    // "refreshed once, ever" behaviour the suffix exists to fix. Reserve its
+    // length from the base instead.
+    const cycleSuffix = cycleKey ? `:${String(cycleKey).replace(/[^a-zA-Z0-9._-]/g, '')}` : '';
+    const dedupeBase = `refresh-audit:${targetDomain}:${post.slug || post.id}`;
+    const dedupeKey = `${dedupeBase.slice(0, 200 - cycleSuffix.length)}${cycleSuffix}`;
+
     // Don't double-queue: an in-flight refresh for this page may already exist
     // under ANOTHER bucket's dedupe_key (e.g. the GSC miner's decay_refresh), and
     // our refresh-audit key won't collide with it. claimNext only acts on one
@@ -436,7 +452,7 @@ class RefreshAudit {
       .first();
     const inflight = await inflightRefreshFor(db);
     if (inflight) {
-      return { queued: false, own: false, status: inflight.status, url: inflight.page_url, dedupeKey: inflight.dedupe_key };
+      return { queued: false, own: inflight.dedupe_key === dedupeKey, status: inflight.status, url: inflight.page_url, dedupeKey: inflight.dedupe_key };
     }
 
     const qa = await db('seo_content_qa_scores')
@@ -501,16 +517,8 @@ class RefreshAudit {
     const ageDays = ageDaysFrom(post, Date.now());
     const { priority, reasons } = scorePriority({ ageDays, qa: qa || null, decay: decay || null });
     const score = Math.max(ENQUEUE_FLOOR, priority);
-    // Domain in the key: hub + spoke pages can share a slug/path, and a
-    // domain-less key would conflate them under ON CONFLICT.
-    // The cycle suffix must SURVIVE truncation: slicing after appending would,
-    // on a long domain/slug, cut the suffix off and collide distinct cycles
-    // with each other (or with the stable key), silently restoring the
-    // "refreshed once, ever" behaviour the suffix exists to fix. Reserve its
-    // length from the base instead.
-    const cycleSuffix = cycleKey ? `:${String(cycleKey).replace(/[^a-zA-Z0-9._-]/g, '')}` : '';
-    const dedupeBase = `refresh-audit:${targetDomain}:${post.slug || post.id}`;
-    const dedupeKey = `${dedupeBase.slice(0, 200 - cycleSuffix.length)}${cycleSuffix}`;
+    // dedupeKey is built above, before the in-flight checks — they return
+    // early and need it to tell this caller's own row from a foreign edit.
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
     // Mirror intercept-brief-seeder's upsert: never reset a claimed/done/in-review
@@ -593,7 +601,7 @@ class RefreshAudit {
       );
     });
     if (result.__inflight) {
-      return { queued: false, own: false, status: result.__inflight.status, url: result.__inflight.page_url, dedupeKey: result.__inflight.dedupe_key };
+      return { queued: false, own: result.__inflight.dedupe_key === dedupeKey, status: result.__inflight.status, url: result.__inflight.page_url, dedupeKey: result.__inflight.dedupe_key };
     }
 
     const row = result.rows && result.rows[0];

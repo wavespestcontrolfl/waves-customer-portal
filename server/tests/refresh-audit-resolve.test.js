@@ -29,6 +29,52 @@ function scriptDb(resultsPerCall) {
 
 beforeEach(() => { db.mockReset(); });
 
+// enqueueRefresh returns early on the in-flight check, so this only needs
+// blog_posts + opportunity_queue. Exercises the REAL key construction rather
+// than a mocked enqueue — the gap codex flagged on the previous round.
+function enqueueDbWithInflight(inflightRow) {
+  db.mockImplementation((table) => {
+    if (table === 'blog_posts') {
+      return { where: () => ({ first: async () => ({
+        id: 42, slug: 'bed-bugs-bradenton', status: 'published', tag: 'Bed Bugs',
+        astro_live_url: 'https://www.wavespestcontrol.com/bed-bugs-bradenton/',
+      }) }) };
+    }
+    const q = {
+      whereIn: () => q, where: () => q, whereRaw: () => q,
+      first: async () => inflightRow,
+    };
+    return q;
+  });
+}
+
+describe('enqueueRefresh — recognising its own queue row', () => {
+  test('an in-flight row under THIS cycle key reports own:true', async () => {
+    const expectedKey = 'refresh-audit:wavespestcontrol.com:bed-bugs-bradenton:reg-imp-1';
+    enqueueDbWithInflight({ status: 'claimed', page_url: 'https://x/', dedupe_key: expectedKey });
+
+    const out = await RefreshAudit.enqueueRefresh({ blogPostId: 42, cycleKey: 'reg-imp-1' });
+    expect(out).toMatchObject({ queued: false, own: true, status: 'claimed' });
+  });
+
+  test('a FOREIGN page edit under another key reports own:false', async () => {
+    enqueueDbWithInflight({ status: 'claimed', page_url: 'https://x/', dedupe_key: 'gsc-miner:something-else' });
+
+    const out = await RefreshAudit.enqueueRefresh({ blogPostId: 42, cycleKey: 'reg-imp-1' });
+    expect(out).toMatchObject({ queued: false, own: false });
+  });
+
+  test('a different cycle of the same page is NOT own', async () => {
+    enqueueDbWithInflight({
+      status: 'done', page_url: 'https://x/',
+      dedupe_key: 'refresh-audit:wavespestcontrol.com:bed-bugs-bradenton:reg-imp-OTHER',
+    });
+
+    const out = await RefreshAudit.enqueueRefresh({ blogPostId: 42, cycleKey: 'reg-imp-1' });
+    expect(out.own).toBe(false);
+  });
+});
+
 describe('resolvePublishedPostByUrl', () => {
   test('returns the single published post whose LIVE URL matches path + domain', async () => {
     const calls = scriptDb([[{ id: 7, slug: 'bed-bugs-bradenton' }]]);
