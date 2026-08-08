@@ -571,7 +571,7 @@ function CompleteCard({ data }) {
               textAlign: 'center', borderRadius: 8, fontWeight: 600, fontSize: 16,
               textDecoration: 'none',
             }}
-          >Leave a 5-star review</a>
+          >Leave us a Google review</a>
         ) : null}
         {summary.invoiceToken ? (
           <a

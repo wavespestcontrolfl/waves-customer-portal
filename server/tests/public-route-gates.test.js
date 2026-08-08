@@ -152,6 +152,102 @@ describe('review-gate token gate (url-safe 32-64)', () => {
   });
 });
 
+describe('review-gate /go expired-link handling (review audit 2026-08-07)', () => {
+  const { isEnabled } = require('../config/feature-gates');
+  // Fallbacks are ABSOLUTE portal-origin (split-origin safe — codex #3285 r5).
+  const { publicPortalUrl } = require('../utils/portal-url');
+  const { WAVES_LOCATIONS } = require('../config/locations');
+
+  afterEach(() => {
+    isEnabled.mockImplementation(() => false);
+  });
+
+  test('legacy 32-char url-safe token reaches the /go lookup (codex #3287 r1)', async () => {
+    isEnabled.mockImplementation((key) => key === 'reviewDirectLink');
+    // Unknown token → rate-page fallback, but the review_requests lookup
+    // RAN — a 64-hex-only shape check used to bounce legacy tokens here.
+    const res = await get(`/api/rate/${'Zz-_'.repeat(8)}/go`);
+    expect(res.status).toBe(302);
+    expect(db).toHaveBeenCalledWith('review_requests');
+  });
+
+  test('expired request 302s to the location GBP with NO stamping', async () => {
+    isEnabled.mockImplementation((key) => key === 'reviewDirectLink');
+    const loc = WAVES_LOCATIONS[0];
+    const updateSpy = jest.fn();
+    db.mockImplementation((table) => {
+      const q = {};
+      for (const m of ['where', 'whereNull', 'orderBy', 'limit', 'select']) q[m] = jest.fn(() => q);
+      q.update = updateSpy;
+      q.first = jest.fn(async () => {
+        if (table === 'review_requests') {
+          return {
+            id: 'rr-expired',
+            customer_id: 'cust-1',
+            location_id: loc.id,
+            expires_at: '2020-01-01T00:00:00.000Z',
+          };
+        }
+        return null; // customers: no geocode → location_id fallback resolves
+      });
+      return q;
+    });
+
+    const res = await get(`/api/rate/${'ab'.repeat(32)}/go`);
+    expect(res.status).toBe(302);
+    // A willing reviewer on an old text still reaches the review form...
+    expect(res.headers.get('location')).toBe(loc.googleReviewUrl);
+    // ...but an out-of-window token records nothing: no click stamp, no
+    // cadence stop, no owner bell.
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  const installGoDb = ({ request, customer = null }) => {
+    const updateSpy = jest.fn();
+    db.mockImplementation((table) => {
+      const q = {};
+      for (const m of ['where', 'whereNull', 'orderBy', 'limit', 'select']) q[m] = jest.fn(() => q);
+      q.update = updateSpy;
+      q.first = jest.fn(async () => (table === 'review_requests' ? request : customer));
+      return q;
+    });
+    return updateSpy;
+  };
+
+  test('finalized requests never redirect to Google — expired or live (audit P1)', async () => {
+    isEnabled.mockImplementation((key) => key === 'reviewDirectLink');
+    const token = 'ab'.repeat(32);
+    // Expired AND already rated → rate-page fallback, not a revived ask.
+    let updateSpy = installGoDb({
+      request: { id: 'rr-1', customer_id: 'c1', rated_at: '2026-05-01T00:00:00Z', expires_at: '2020-01-01T00:00:00.000Z' },
+    });
+    let res = await get(`/api/rate/${token}/go`);
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${token}`);
+    expect(updateSpy).not.toHaveBeenCalled();
+    // Live but submitted (a detractor's feedback) → rate page's
+    // alreadySubmitted state, never Google.
+    updateSpy = installGoDb({
+      request: { id: 'rr-2', customer_id: 'c1', status: 'submitted' },
+    });
+    res = await get(`/api/rate/${token}/go`);
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${token}`);
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  test('customers marked has_left_google_review are not re-solicited via /go', async () => {
+    isEnabled.mockImplementation((key) => key === 'reviewDirectLink');
+    const token = 'ab'.repeat(32);
+    const { WAVES_LOCATIONS: locs } = require('../config/locations');
+    const updateSpy = installGoDb({
+      request: { id: 'rr-3', customer_id: 'c1', location_id: locs[0].id },
+      customer: { id: 'c1', has_left_google_review: true },
+    });
+    const res = await get(`/api/rate/${token}/go`);
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${token}`);
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('/l shortlink limiter + code entropy', () => {
   test('resolver carries a rate limiter', async () => {
     const res = await get('/l/abc12');

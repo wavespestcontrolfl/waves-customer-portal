@@ -107,10 +107,11 @@ router.post('/tech-trigger', async (req, res, next) => {
 
     res.json({
       sent: true,
-      // The gate-respecting tokenized link (/go behind GATE_REVIEW_DIRECT_LINK)
-      // — this used to hand back a raw /rate/<token> URL, the last send-path
-      // surface still emitting the rate page after the direct-link flip
-      // (2026-08-07 audit, item 3).
+      // The gate-respecting tokenized link — same helper the SMS paths use
+      // (/go behind GATE_REVIEW_DIRECT_LINK; with the gate off /go is a rate-
+      // page alias, so main's hardcoded /go form and this resolve identically
+      // when on). Kept over main's literal so the kill switch governs every
+      // emitted link through ONE helper.
       reviewUrl: ReviewService.unshortenedReviewUrl(request.token),
     });
   } catch (err) {

@@ -1,4 +1,5 @@
 import { quoteRequiredReasonText } from '../../lib/quoteDisplay';
+import { WAVES_ACCOUNT_MANAGER_FIRST_NAME } from '../../constants/business';
 import { estimateCard, estimateInnerBox } from './cardStyles';
 import { W } from './tokens';
 
@@ -93,7 +94,11 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
       <div style={{ ...estimateCard(), borderTop: '4px solid #F97316' }}>
         <div style={{ fontSize: 20, lineHeight: 1.35, fontWeight: 600, color: W.navy, marginBottom: 8 }}>
           {isProposal
-            ? 'Your formal proposal is ready.'
+            // The proposal card renders directly under the hero, which already
+            // announces "your formal proposal is ready" — repeating it here
+            // read as a duplicate (owner 2026-08-08). This card answers the
+            // next question instead.
+            ? 'What happens next'
             : isAccountManagerFinalize
             ? 'Your account manager will finalize this.'
             : 'This treatment needs an inspection.'}
@@ -103,8 +108,8 @@ export default function TerminalStateCard({ state, customerFirstName, address, q
             <>
               Hi {who} — {proposalPdfEmailed
                 ? 'your formal proposal is attached as a PDF to the email we sent.'
-                : 'your Waves account manager has your formal proposal and will share the PDF with you directly.'}{' '}
-              There's no online checkout for a commercial bid — your account manager will follow up to finalize.
+                : `${WAVES_ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, has your formal proposal and will share the PDF with you directly.`}{' '}
+              There's no online checkout for a commercial bid — {WAVES_ACCOUNT_MANAGER_FIRST_NAME} will follow up to finalize.
               Questions? Call <a href={`tel:${WAVES_TEL}`} style={{ color: W.blue }}>{WAVES_PHONE}</a>.
             </>
           ) : isLowConfidence ? (

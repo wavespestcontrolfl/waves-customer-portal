@@ -1017,6 +1017,25 @@ const gates = {
   // Enable with GATE_ESTIMATE_EXTENSION_REQUEST=true.
   estimateExtensionRequest: isProd ? process.env.GATE_ESTIMATE_EXTENSION_REQUEST === 'true' : true,
 
+  // Commercial estimate glass parity — the customer estimate page renders an
+  // authored commercial proposal's line items INSIDE the glass layout (plus
+  // the commercial copy pack + inclusions) instead of the bare "formal
+  // proposal is ready" card, and auto-priced commercial estimates swap their
+  // residential inclusions/CTA-micro for the commercial stack. Carried to the
+  // client via cta.commercialGlass on /data (fail-closed: absent → today's
+  // rendering). Off in prod until verified on a live proposal.
+  // Kill switch: unset GATE_ESTIMATE_COMMERCIAL_GLASS.
+  estimateCommercialGlass: isProd ? process.env.GATE_ESTIMATE_COMMERCIAL_GLASS === 'true' : true,
+
+  // Browser-rendered estimate PDF — GET /api/estimates/:token/pdf, the admin
+  // proposal.pdf download, and the proposal email attachment render the React
+  // EstimateProposalDocument (service-report-style document) through the
+  // headless-browser pipeline instead of the legacy pdfkit proposal. Every
+  // failure path falls back to the pdfkit document so estimate delivery never
+  // blocks on a browser. Off in prod until the rendered document is verified.
+  // Kill switch: unset GATE_ESTIMATE_DOC_PDF.
+  estimateDocPdf: isProd ? process.env.GATE_ESTIMATE_DOC_PDF === 'true' : true,
+
   // The liquid-glass theme gates (GATE_ESTIMATE_GLASS / GATE_EMAIL_GLASS /
   // GATE_REPORT_GLASS / GATE_PORTAL_GLASS) were retired once glass shipped to
   // 100% of customers. Glass is now the unconditional theme on every customer

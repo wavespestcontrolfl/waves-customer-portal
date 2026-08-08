@@ -1279,12 +1279,10 @@ router.get('/qr/:locationId', async (req, res, next) => {
 
     const reviewUrl = loc.googleReviewUrl;
 
-    // QR image via the QR Server API — no library dependency. This used to
-    // point at chart.googleapis.com Image Charts, which Google retired, so the
-    // primary URL had been serving 404s (2026-08-07 audit, item 4). qrserver
-    // was already the working fallback; it is now the only URL. qrImageUrlAlt
-    // kept as an alias so any direct-URL consumer of the old JSON shape still
-    // gets a working image.
+    // QR via the QR Server API — avoids adding a QR library dependency.
+    // (Google Image Charts, the previous primary, was retired and returned
+    // 404s — review audit 2026-08-07. qrImageUrlAlt used to carry this same
+    // qrserver URL; collapsed since the primary now IS the working one.)
     const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(reviewUrl)}`;
 
     const { format } = req.query;
@@ -1299,7 +1297,6 @@ router.get('/qr/:locationId', async (req, res, next) => {
       locationName: loc.name,
       reviewUrl,
       qrImageUrl: qrApiUrl,
-      qrImageUrlAlt: qrApiUrl,
     });
   } catch (err) { next(err); }
 });

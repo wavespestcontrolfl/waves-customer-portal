@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from 'react';
 import { estimateCard, estimateInnerBox } from './cardStyles';
 import { glassCopyActive, GLASS_COPY } from '../../lib/estimate-glass-copy';
 import { fiveStarReviews, GlassReviewMarquee, GlassSectionCta } from './glass/GlassEstimateExtras';
+import { GbpProfilesRow } from './GoogleProfilesCard';
 import { W } from './tokens';
 
 
@@ -176,6 +177,18 @@ export default function CustomerReviews({ onJoinNeighbors = null }) {
       {glassCopyActive() && onJoinNeighbors ? (
         <GlassSectionCta label="Join your neighbors →" onClick={onJoinNeighbors} style={{ margin: '16px 0 0', justifyContent: 'center' }} />
       ) : null}
+      {/* GBP profile tiles live INSIDE this section (owner 2026-08-08) — the
+          standalone "Find us on Google" card stacked under this one read as a
+          duplicate review section. Suppressed in fallback mode: the fallback
+          review cards ARE the GBP profile links, so the row would repeat them. */}
+      {reviews.some((r) => r.fallback) ? null : (
+        <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${W.warmBorder}` }}>
+          <p style={{ fontSize: 14, color: W.textCaption, margin: '0 0 12px', lineHeight: 1.5 }}>
+            Read them yourself — four offices, every one of them 5 stars on Google:
+          </p>
+          <GbpProfilesRow />
+        </div>
+      )}
       {pageCount > 1 && !glassMarquee ? (
         <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 16 }}>
           {Array.from({ length: pageCount }, (_, i) => (

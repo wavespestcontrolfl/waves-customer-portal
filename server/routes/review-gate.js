@@ -110,40 +110,55 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     // links sitting in old texts.
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('reviewDirectLink')) return res.redirect(302, ratePageFallback);
-    if (!/^[a-f0-9]{64}$/.test(token)) return res.redirect(302, ratePageFallback);
+    // Shared review-token shape, NOT 64-hex-only (codex #3287 r1): live
+    // tokens are 32-64 url-safe (prod-verified incl. one legacy 32-char
+    // row), and the Track CTA + tech-trigger now emit /go for those rows
+    // too — a 64-hex-only check bounced exactly them back to the raw rate
+    // page. router.param already enforces this shape; kept here as
+    // defense-in-depth for the same range.
+    if (!REVIEW_TOKEN_RE.test(token)) return res.redirect(302, ratePageFallback);
     const request = await db('review_requests').where({ token }).first();
     if (!request) return res.redirect(302, ratePageFallback);
-
-    // FINALITY re-check (codex #3286 r3): a stale rendered surface (the track
-    // page, an old text) can carry a /go link the customer taps AFTER
-    // submitting feedback elsewhere or being marked as having reviewed. The
-    // rate page enforces finality; /go must too, or the stale CTA re-solicits
-    // a finalized customer straight to Google. Same predicate submitRating
-    // enforces; the rate-page fallback renders the thank-you/submitted state.
-    if (request.rated_at
-      || ['submitted', 'reviewed', 'rated'].includes(String(request.status || '').toLowerCase())) {
+    // Finality first (pre-push audit P1): a request whose feedback was
+    // already submitted — including a detractor's — must never redirect to
+    // Google again, expired or not. The rate page renders its
+    // alreadySubmitted state for exactly these rows, so the fallback IS the
+    // right destination. This also covers the stale-CTA race: a track page
+    // rendered while the ask was live, tapped after the customer finalized
+    // through another link.
+    const requestFinalized = Boolean(request.rated_at)
+      || ['submitted', 'reviewed', 'rated'].includes(request.status);
+    if (requestFinalized) return res.redirect(302, ratePageFallback);
+    if (request.expires_at && new Date(request.expires_at) < new Date()) {
+      // Expired-but-real UNANSWERED link (review audit 2026-08-07): a
+      // willing reviewer clicking a weeks-old text used to dead-end on the
+      // rate page's "link expired" state. Send them on to the location's
+      // Google review form anyway — but stamp NOTHING (no click credit, no
+      // cadence stop, no owner bell): the request is past its attribution
+      // window, and an expired token must not keep working as a tracked
+      // link. Customers already marked as reviewers stay on the fallback.
+      try {
+        const expiredCustomer = await db('customers').where({ id: request.customer_id }).first();
+        if (expiredCustomer?.has_left_google_review === true) {
+          return res.redirect(302, ratePageFallback);
+        }
+        const expiredLoc = resolveReviewLocation(request, expiredCustomer);
+        if (expiredLoc?.googleReviewUrl) return res.redirect(302, expiredLoc.googleReviewUrl);
+      } catch (err) {
+        logger.warn(`[review-gate] expired-link GBP resolve failed — rate-page fallback: ${err.message}`);
+      }
       return res.redirect(302, ratePageFallback);
     }
-    const expired = !!(request.expires_at && new Date(request.expires_at) < new Date());
 
     const customer = await db('customers').where({ id: request.customer_id }).first();
-    if (customer && customer.has_left_google_review) {
-      // Already reviewed on Google — never re-solicit; the rate page shows
-      // the finalized state instead.
+    // Same finality rule for the customer-level flag: once Adam marks
+    // "Left Google review", no live /go link re-solicits — the rate page's
+    // states handle the visit instead.
+    if (customer?.has_left_google_review === true) {
       return res.redirect(302, ratePageFallback);
     }
     const loc = resolveReviewLocation(request, customer);
     if (!loc || !loc.googleReviewUrl) return res.redirect(302, ratePageFallback);
-
-    // An EXPIRED token still 302s to the review form, but records NOTHING —
-    // no click stamp, no cadence stop, no owner bell. Tokens expire after 14
-    // days; a customer who finally taps a three-week-old text is a willing
-    // reviewer, and the old behavior dead-ended them on a rate page reading
-    // "link expired". The write path stays closed because the ask it belonged
-    // to is long over and a stamp that late would corrupt the funnel.
-    if (expired) {
-      return res.redirect(302, loc.googleReviewUrl);
-    }
 
     // Scanner/preview fetches (iMessage unfurlers, carrier link scanners,
     // Slack/WhatsApp previews) follow SMS links without a human tap. Issue

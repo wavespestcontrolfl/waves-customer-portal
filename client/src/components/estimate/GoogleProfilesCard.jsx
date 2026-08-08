@@ -1,12 +1,13 @@
 /**
- * Google Business Profiles showcase — GBP proof section for the estimate
- * page. Four office tiles (Lakewood Ranch / Parrish / Sarasota / Venice),
- * each with the Google "G" mark, a 5-star row, and a link straight to that
- * office's Google Business Profile. Sits right after CustomerReviews so the
- * anonymous review quotes are immediately backed by the real, checkable
- * profiles. URLs mirror BrandFooter's GBP_LOCATION_LINKS exactly.
+ * Google Business Profiles row — GBP proof tiles for the estimate page.
+ * Four office tiles (Lakewood Ranch / Parrish / Sarasota / Venice), each
+ * with the Google "G" mark, a 5-star row, and a link straight to that
+ * office's Google Business Profile. Rendered INSIDE CustomerReviews (owner
+ * 2026-08-08 — the standalone "Find us on Google" section stacked under the
+ * Reviews card read as a duplicate review section, so the two combined).
+ * URLs mirror BrandFooter's GBP_LOCATION_LINKS exactly.
  */
-import { estimateCard, estimateInnerBox } from './cardStyles';
+import { estimateInnerBox } from './cardStyles';
 import { W } from './tokens';
 
 
@@ -60,33 +61,19 @@ function ProfileTile({ profile }) {
   );
 }
 
-export default function GoogleProfilesCard() {
+// Chrome-less tile grid for embedding inside another section. The estimate
+// page renders this INSIDE CustomerReviews (owner 2026-08-08: the standalone
+// "Find us on Google" card stacked directly under the Reviews card read as a
+// duplicate review section — one combined section now carries both).
+export function GbpProfilesRow() {
   return (
-    <section style={estimateCard()}>
-      <div style={{
-        fontSize: 12, fontWeight: 700, color: W.textCaption,
-        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
-      }}>
-        Find us on Google
-      </div>
-      <h2 style={{
-        fontSize: 24, fontWeight: 500, lineHeight: 1.2,
-        color: W.blueDeeper, margin: '0 0 8px',
-      }}>
-        Rated 5 stars in every city we serve
-      </h2>
-      <p style={{ fontSize: 14, color: W.textCaption, margin: '0 0 16px', lineHeight: 1.5 }}>
-        Four offices, four Google Business Profiles — every one of them 5 stars.
-        Tap your city and read the reviews yourself.
-      </p>
-      <div style={{
-        display: 'grid', gap: 12,
-        gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
-      }}>
-        {GBP_PROFILES.map((profile) => (
-          <ProfileTile key={profile.label} profile={profile} />
-        ))}
-      </div>
-    </section>
+    <div style={{
+      display: 'grid', gap: 12,
+      gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+    }}>
+      {GBP_PROFILES.map((profile) => (
+        <ProfileTile key={profile.label} profile={profile} />
+      ))}
+    </div>
   );
 }
