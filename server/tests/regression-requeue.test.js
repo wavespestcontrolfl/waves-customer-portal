@@ -14,15 +14,23 @@ const { requeueRegressedPages, requeueStatusFor } = requeue;
 // is recorded with the id it was keyed on, and every whereRaw bind is captured
 // so the cooldown's page-identity predicate can be asserted.
 function makeDb({ pending = [], cooldownHit = false } = {}) {
-  const state = { updates: [], rawBinds: [], excluded: [] };
+  const state = { updates: [], rawBinds: [], excluded: [], evidence: [] };
   const fakeDb = () => {
     const q = {
       _id: null,
       _limit: null,
       where: (col, val) => {
-        // The paused-bucket exclusion is a callback predicate.
+        // Both the paused-bucket exclusion and the cooldown-evidence filter
+        // are callback predicates; record what each one asked for.
         if (typeof col === 'function') {
-          col({ whereRaw: () => {}, whereNull: () => ({ orWhereNotIn: (_c, vals) => state.excluded.push(...vals) }) });
+          const sub = {
+            whereRaw: () => sub,
+            whereNull: () => sub,
+            orWhereNotIn: (_c, vals) => { state.excluded.push(...vals); return sub; },
+            whereIn: (_c, vals) => { state.evidence.push(...vals); return sub; },
+            orWhere: (_c, _op, v) => { state.evidence.push(v); return sub; },
+          };
+          col(sub);
           return q;
         }
         if (col === 'id') q._id = val;
@@ -215,6 +223,25 @@ describe('requeueRegressedPages', () => {
     expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
     expect(db.state.updates).toHaveLength(0);
     expect(out).toMatchObject({ scanned: 0, queued: 0 });
+  });
+
+  test('asks pausedBuckets in STRICT mode — the default swallows its own error and returns []', async () => {
+    const t = tracker();
+    await requeueRegressedPages({ db: makeDb({ pending: [] }), refreshAudit: audit(), tracker: t });
+    expect(t.pausedBuckets).toHaveBeenCalledWith(expect.objectContaining({ strict: true }));
+  });
+
+  test('cooldown evidence is only real refresh work, never a refusal stamp', async () => {
+    const db = makeDb({ pending: [row()], cooldownHit: true });
+    await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() });
+
+    // 'queued' + 'inflight:%' count. A page stamped unresolved_page /
+    // no_gsc_signal / cooldown was never refreshed and must not suppress its
+    // own next valid regression, nor roll the window forward forever.
+    expect(db.state.evidence).toContain('queued');
+    expect(db.state.evidence).toContain('inflight:%');
+    expect(db.state.evidence).not.toContain('unresolved_page');
+    expect(db.state.evidence).not.toContain('cooldown');
   });
 
   test('the sweep runs inside the distributed cron lock', async () => {

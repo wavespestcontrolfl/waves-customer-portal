@@ -111,7 +111,7 @@ function pendingRegressions(database, { limit = MAX_PER_RUN, excludeBuckets = []
 }
 
 /**
- * Has this page been re-queued inside the cooldown?
+ * Has this page actually been RE-QUEUED inside the cooldown?
  *
  * Keyed on (registrable domain, canonical path) — NOT on the raw page_url
  * string. GSC reports www/non-www and ?utm variants, the hub and spokes share
@@ -119,7 +119,16 @@ function pendingRegressions(database, { limit = MAX_PER_RUN, excludeBuckets = []
  * page; an exact-string match would let those variants slip past the loop
  * breaker and re-queue the same page again. Uses refresh-audit's identity
  * helpers so this lane and the refresh lane agree on what "same page" means.
+ *
+ * Evidence is restricted to statuses that mean real refresh work exists —
+ * 'queued' and 'inflight:*'. requeued_at is stamped on REFUSALS too
+ * (unresolved_page, no_gsc_signal, cooldown, …), and counting those would let
+ * a page that was never refreshed suppress its own next valid regression, with
+ * each successive 'cooldown' stamp rolling the window forward indefinitely.
  */
+const COOLDOWN_EVIDENCE_PREFIX = 'inflight:';
+const COOLDOWN_EVIDENCE_STATUSES = ['queued'];
+
 async function inCooldown(database, refreshAudit, pageUrl, since) {
   const { canonPathSql, hostRegistrableSql, urlToPath, registrableDomain } = refreshAudit._identity;
   const path = urlToPath(pageUrl);
@@ -129,6 +138,9 @@ async function inCooldown(database, refreshAudit, pageUrl, since) {
   const row = await database('content_optimization_impact')
     .whereNotNull('requeued_at')
     .where('requeued_at', '>=', since)
+    .where((b) => b
+      .whereIn('requeue_status', COOLDOWN_EVIDENCE_STATUSES)
+      .orWhere('requeue_status', 'like', `${COOLDOWN_EVIDENCE_PREFIX}%`))
     .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
     .whereRaw(`${hostRegistrableSql('page_url')} = ?`, [domain])
     .first('id');
@@ -189,7 +201,10 @@ async function requeueRegressedPagesLocked(opts = {}) {
   // that was stopped for repeated losses — the whole point of the pause.
   let excludeBuckets;
   try {
-    excludeBuckets = ((await tracker.pausedBuckets({ db: database })) || []).map((p) => p.bucket).filter(Boolean);
+    // strict: pausedBuckets swallows its own query error and returns [] by
+    // default, which would read here as "nothing is paused" — the one wrong
+    // answer this lane cannot act on.
+    excludeBuckets = ((await tracker.pausedBuckets({ db: database, strict: true })) || []).map((p) => p.bucket).filter(Boolean);
   } catch (err) {
     logger.error(`[regression-requeue] pausedBuckets unavailable, standing down this tick: ${err.message}`);
     return { scanned: 0, queued: 0, skipped: 0, results: [] };
