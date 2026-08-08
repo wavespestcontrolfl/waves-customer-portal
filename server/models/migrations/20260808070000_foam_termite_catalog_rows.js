@@ -75,7 +75,7 @@ const SERVICES = [
     service_key: 'foam_recurring',
     name: 'Recurring Foam Termite Treatment Service',
     short_name: 'Recurring Foam',
-    description: 'Recurring spot-foam termite program at a per-visit discount vs one-time treatment. Quarterly, bi-monthly, or monthly cadence; up to 20 drill points per visit (larger jobs are one-time foam or custom).',
+    description: 'Recurring spot-foam termite program at a per-application discount vs one-time treatment. Quarterly, bi-monthly, or monthly cadence; up to 20 drill points per application (larger jobs are one-time foam or custom).',
     category: 'termite',
     billing_type: 'recurring',
     frequency: 'quarterly',
