@@ -86,7 +86,12 @@ const reviewPageLimiter = rateLimit({
 // page, which already renders not-found/expired states.
 router.get('/:token/go', directLinkLimiter, async (req, res) => {
   const token = String(req.params.token || '');
-  const ratePageFallback = `/rate/${encodeURIComponent(token)}`;
+  // Absolute portal-origin fallback: /rate is an SPA route, and in a
+  // split-origin deploy (SPA built with a full VITE_API_URL) a root-relative
+  // redirect would resolve on the API origin and 404 (codex #3286 pre-push
+  // audit). publicPortalUrl() is the canonical public origin serving the SPA.
+  const { publicPortalUrl } = require('../utils/portal-url');
+  const ratePageFallback = `${publicPortalUrl()}/rate/${encodeURIComponent(token)}`;
   try {
     // Kill switch must govern ALREADY-DELIVERED links too (Codex P1, r2):
     // with the gate off, /go behaves as a plain alias of the rate page — no
