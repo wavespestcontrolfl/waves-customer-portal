@@ -3136,6 +3136,24 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     // maximal digit run (Codex PR r16).
     const noSemi = guardrails.evaluate({ body: 'The treatment is pet&#45safe.' }, {});
     expect(noSemi.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // HEX references take the optional semicolon too (Codex PR r16 named
+    // only the decimal form; the hex path was untested).
+    for (const body of [
+      'The pesticide is EPA&#x2D;approved.',
+      'The treatment is pet&#x2Dsafe.',
+      'The treatment is pet&#x2dsafe.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    // …and the maximal-run rule is BROWSER PARITY, not a gap: Chromium
+    // renders `EPA&#x2Dapproved` as "EPA˚pproved" (the `a` of "approved"
+    // is itself an ASCII hex digit, so the reference consumes `2Da` =
+    // U+02DA), so no reader ever sees the banned "EPA-approved" wording.
+    // Matching the browser is the contract for a what-the-customer-sees
+    // scan — over-decoding here would invent a violation that cannot render.
+    const maximalRun = guardrails.evaluate({ body: 'The pesticide is EPA&#x2Dapproved.' }, {});
+    expect(maximalRun.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
   test('reference-style links and label-style durations block; completed confirmations pass (Codex PR r16)', () => {
