@@ -111,10 +111,21 @@ const NOTE_URL_RE = new RegExp([
 // Dot-joined tokens that could be a hostname; each candidate is confirmed
 // against the public-suffix list before it counts as a link.
 const HOST_TOKEN_RE = /(?:^|[^a-z0-9.-])([a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+)(?=$|[^a-z0-9-])/gi;
+// Unicode-label candidates for bare IDNs ("пример.рф", "例子.中国") — the
+// ASCII regex above never sees them (codex r4 P1). Each is punycoded via
+// WHATWG domainToASCII and checked against the same suffix list, so prose
+// like "café.Bueno" (no real suffix) still passes.
+const UNICODE_HOST_TOKEN_RE = /([\p{L}\p{N}][\p{L}\p{N}-]*(?:\.[\p{L}\p{N}-]+)+)/gu;
 function containsBareHost(text) {
   const psl = require('psl');
   for (const m of String(text).matchAll(HOST_TOKEN_RE)) {
     if (psl.isValid(m[1].toLowerCase())) return true;
+  }
+  const { domainToASCII } = require('url');
+  for (const m of String(text).matchAll(UNICODE_HOST_TOKEN_RE)) {
+    if (/^[\x20-\x7F]+$/.test(m[1])) continue; // ASCII handled above
+    const ascii = domainToASCII(m[1].toLowerCase());
+    if (ascii && psl.isValid(ascii)) return true;
   }
   return false;
 }
@@ -144,10 +155,18 @@ function sanitizeCustomerNote(raw) {
   const note = raw.replace(/\s+/g, ' ').trim();
   if (!note) return { note: null };
   if (note.length > CUSTOMER_NOTE_MAX_CHARS) return { error: 'note_too_long' };
-  const canonical = normalizeForLinkCheck(note);
-  if (NOTE_SHORTENER_RE.test(note) || NOTE_SHORTENER_RE.test(canonical)
-    || NOTE_URL_RE.test(note) || NOTE_URL_RE.test(canonical)
-    || containsBareHost(note) || containsBareHost(canonical)) {
+  // Validate what the PROVIDER will see, not just what was typed: the send
+  // path runs normalizeGsmPunctuation before its own guard, and that pass
+  // deletes zero-width chars — "19​70" fuses into "1970" AFTER a raw-text
+  // check would have passed (codex r4 P2). All content checks below run on
+  // the GSM-normalized form (idempotent; ZWJ is preserved so emoji
+  // detection is unaffected).
+  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+  const gsm = normalizeGsmPunctuation(note);
+  const canonical = normalizeForLinkCheck(gsm);
+  if (NOTE_SHORTENER_RE.test(gsm) || NOTE_SHORTENER_RE.test(canonical)
+    || NOTE_URL_RE.test(gsm) || NOTE_URL_RE.test(canonical)
+    || containsBareHost(gsm) || containsBareHost(canonical)) {
     return { error: 'note_link_blocked' };
   }
   // Same emoji rule sendCustomerMessage enforces (validators/voice.js) —
@@ -155,15 +174,15 @@ function sanitizeCustomerNote(raw) {
   // of committing the reschedule and then silently blocking the SMS with
   // EMOJI_FOR_CUSTOMER (codex PR P2).
   const { _internals: { findEmoji } } = require('./messaging/validators/voice');
-  if (findEmoji(note).found) return { error: 'note_emoji_blocked' };
+  if (findEmoji(gsm).found) return { error: 'note_emoji_blocked' };
   // The outbound sms-guard rejects bodies containing unsubstituted {vars},
   // "undefined"/"null"/"1970" etc. AFTER assembly — a note like "Gate code
   // 1970 still works" would commit the move and then lose the SMS (codex
-  // r2 P2). Run the same guard on the note pre-move so it fails loudly in
-  // the sheet instead. (empty-body/too-long can't trip here: the note is
-  // non-blank and ≤200 chars.)
+  // r2 P2). Run the same guard on the GSM-normalized note pre-move so it
+  // fails loudly in the sheet instead. (empty-body/too-long can't trip
+  // here: the note is non-blank and ≤200 chars.)
   const { validateOutbound } = require('./sms-guard');
-  const guard = validateOutbound(note);
+  const guard = validateOutbound(gsm);
   if (!guard.ok) return { error: 'note_guard_blocked', guardReason: guard.reason };
   return { note };
 }

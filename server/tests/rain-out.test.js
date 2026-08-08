@@ -1444,6 +1444,12 @@ describe('rain-out service', () => {
       expect(sanitize()('try example.xyz today')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()('ask example.ai about it')).toEqual({ error: 'note_link_blocked' });
       expect(sanitize()('Running late.Be there at 3')).toEqual({ error: 'note_link_blocked' });
+      // Bare IDNs never matched the ASCII candidate regex — punycoded via
+      // domainToASCII and checked against the same suffix list (codex r4 P1).
+      expect(sanitize()('перейти на пример.рф сейчас')).toEqual({ error: 'note_link_blocked' });
+      expect(sanitize()('访问 例子.中国 了解')).toEqual({ error: 'note_link_blocked' });
+      // Unicode word pairs with no real suffix stay prose.
+      expect(sanitize()('ask for café.Bueno at the door')).toEqual({ note: 'ask for café.Bueno at the door' });
       // Plain prose with dots/times must NOT false-positive.
       expect(sanitize()('Arriving 12:30. See you at 2 p.m. sharp')).toEqual({ note: 'Arriving 12:30. See you at 2 p.m. sharp' });
       expect(sanitize()('Back gate. Code 4482 works. Thanks')).toEqual({ note: 'Back gate. Code 4482 works. Thanks' });
@@ -1458,6 +1464,11 @@ describe('rain-out service', () => {
       expect(sanitize()('the code is null for now')).toEqual({ error: 'note_guard_blocked', guardReason: 'broken-render:null' });
       // Words merely CONTAINING guard tokens pass, same as the guard itself.
       expect(sanitize()('we will annull nothing, promise')).toEqual({ note: 'we will annull nothing, promise' });
+      // The check runs on the GSM-NORMALIZED note — the send path deletes
+      // zero-width chars before ITS guard, so "19​70" fuses into
+      // "1970" after a raw-text check would have passed (codex r4 P2).
+      expect(sanitize()('code 19\u200B70 works')).toEqual({ error: 'note_guard_blocked', guardReason: 'broken-render:1970' });
+      expect(sanitize()('value un\u2060defined here')).toEqual({ error: 'note_guard_blocked', guardReason: 'broken-render:undefined' });
     });
 
     test('sanitizer: rejects emoji BEFORE the move (send layer would block the SMS after)', () => {
