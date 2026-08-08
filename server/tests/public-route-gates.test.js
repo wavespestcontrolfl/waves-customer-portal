@@ -157,6 +157,15 @@ describe('review-gate /go expired-link handling (review audit 2026-08-07)', () =
     isEnabled.mockImplementation(() => false);
   });
 
+  test('legacy 32-char url-safe token reaches the /go lookup (codex #3287 r1)', async () => {
+    isEnabled.mockImplementation((key) => key === 'reviewDirectLink');
+    // Unknown token → rate-page fallback, but the review_requests lookup
+    // RAN — a 64-hex-only shape check used to bounce legacy tokens here.
+    const res = await get(`/api/rate/${'Zz-_'.repeat(8)}/go`);
+    expect(res.status).toBe(302);
+    expect(db).toHaveBeenCalledWith('review_requests');
+  });
+
   test('expired request 302s to the location GBP with NO stamping', async () => {
     isEnabled.mockImplementation((key) => key === 'reviewDirectLink');
     const loc = WAVES_LOCATIONS[0];

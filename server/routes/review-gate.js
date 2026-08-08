@@ -97,7 +97,13 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     // links sitting in old texts.
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('reviewDirectLink')) return res.redirect(302, ratePageFallback);
-    if (!/^[a-f0-9]{64}$/.test(token)) return res.redirect(302, ratePageFallback);
+    // Shared review-token shape, NOT 64-hex-only (codex #3287 r1): live
+    // tokens are 32-64 url-safe (prod-verified incl. one legacy 32-char
+    // row), and the Track CTA + tech-trigger now emit /go for those rows
+    // too — a 64-hex-only check bounced exactly them back to the raw rate
+    // page. router.param already enforces this shape; kept here as
+    // defense-in-depth for the same range.
+    if (!REVIEW_TOKEN_RE.test(token)) return res.redirect(302, ratePageFallback);
     const request = await db('review_requests').where({ token }).first();
     if (!request) return res.redirect(302, ratePageFallback);
     if (request.expires_at && new Date(request.expires_at) < new Date()) {
