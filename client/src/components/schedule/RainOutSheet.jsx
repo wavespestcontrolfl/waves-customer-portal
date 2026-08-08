@@ -90,16 +90,23 @@ function noteGuardTrips(note) {
 // (social-media.js complianceLanguageIssues) enforces, so the mirror never
 // green-lights wording the server then rejects.
 const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
+// A confirmation about appointment logistics ("confirms arrival timing")
+// is not a drying confirmation — stripped before the confirm test.
+const NOTE_UNRELATED_CONFIRM_RE = /\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))[^.!?\n]{0,25}\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b(?:[^.!?\n]{0,15}\btim(?:es?|ing)?\b)?/gi;
 const NOTE_SAFE_DRY_IDIOM_RE = /\bsafe\s+(?:once|when|after)\b[^.!?]*/gi;
 const NOTE_SAFE_OTHER_STRIP_RE = /\bsafe\s+from\b|\bstay\s+safe\b|\bsafety\s+data\s+sheet\b/gi;
+// "safe" only counts as a violation in a pesticide/product context — the
+// same co-occurrence the canonical server checker requires, so ordinary
+// wording like "please drive safely" never blocks the move.
+const NOTE_PRODUCT_CTX_RE = /\b(?:pesticides?|products?|treatments?|sprays?(?:ing)?|chemicals?|applications?|pest\s+control|exterminat\w*)\b/i;
 const NOTE_REENTRY_CTX = '(?:re-?ent(?:er|ry)|back\\s+(?:inside|in)|(?:pets?|dogs?|cats?|kids?|children)\\s+(?:out|outside|inside|back)|dr(?:y|ies|ying))';
 const NOTE_TIME_AMT = '(?:\\d+\\s*(?:min(?:ute)?|hour|hr)s?|an?\\s+hour|half\\s+an?\\s+hour)';
 const NOTE_FIXED_TIMING_RE = new RegExp(`${NOTE_REENTRY_CTX}[^.!?]{0,40}${NOTE_TIME_AMT}|${NOTE_TIME_AMT}[^.!?]{0,40}${NOTE_REENTRY_CTX}`, 'i');
 function noteComplianceTrips(note) {
-  const idiomAllowed = NOTE_TECH_CONFIRM_RE.test(note);
+  const idiomAllowed = NOTE_TECH_CONFIRM_RE.test(note.replace(NOTE_UNRELATED_CONFIRM_RE, ''));
   const scope = (idiomAllowed ? note.replace(NOTE_SAFE_DRY_IDIOM_RE, '') : note)
     .replace(NOTE_SAFE_OTHER_STRIP_RE, '');
-  if (/\bsafe(?:ly)?\b/i.test(scope)) return true;
+  if (/\bsafe(?:ly)?\b/i.test(scope) && NOTE_PRODUCT_CTX_RE.test(scope)) return true;
   if (/\bepa\b(?![-\s](?:registered|exempt))/i.test(note)) return true;
   return NOTE_FIXED_TIMING_RE.test(note);
 }

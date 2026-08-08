@@ -37,6 +37,10 @@ const FLAGGED_PRODUCT_SAFETY = [
   'Our treatments are safe, once dry',
   // r3: a technician MENTION without a confirmation verb is not framing.
   'Our technician applied treatments that are safe once dry',
+  // #3278: a confirmation about APPOINTMENT logistics is not a drying
+  // confirmation — it must not exempt the dry idiom.
+  'Our treatment is safe once dry. Your technician confirms arrival timing.',
+  'Treatments are safe once dry — your tech will confirm the appointment time',
   // r6: "safe UNTIL dry" claims wet-safety — the opposite of the idiom.
   'Our treatments are safe until dry; your technician confirms timing',
   'safe pesticide treatments',

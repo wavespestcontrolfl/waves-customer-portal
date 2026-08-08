@@ -486,6 +486,12 @@ const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|when)\s+(?:completely\
 // the sentence needs an actual confirmation ("technician confirms/will let
 // you know", "confirms timing").
 const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
+// A confirmation ABOUT something other than drying/re-entry ("technician
+// confirms ARRIVAL timing", "confirms the appointment") defers appointment
+// logistics, not the drying claim — it must not exempt "safe once dry"
+// (codex #3278). Stripped before the TECH_CONFIRM test so bare
+// "confirms timing" (the documented idiom) keeps working.
+const UNRELATED_CONFIRM_RE = /\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))[^.!?\n]{0,25}\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b(?:[^.!?\n]{0,15}\btim(?:es?|ing)?\b)?/gi;
 const SAFE_FROM_PEST_RE = /\bsafe(?:ly|ty)?\s+from\s+[\w'-]+(?:\s+(?:and|or)\s+[\w'-]+)?/gi;
 // Worker-safety mentions ("technicians ... stay safe while applying") are
 // about the crew's PPE, not a product claim — stripped before testing.
@@ -498,7 +504,9 @@ function complianceOverclaims(text) {
   // The technician-confirms framing may legitimately sit in an ADJACENT
   // sentence ("… safe once dry. Your technician confirms timing.") — test
   // the whole copy once; the idiom strip itself stays per-sentence.
-  const idiomAllowed = TECH_CONFIRM_CONTEXT_RE.test(String(text || ''));
+  // Unrelated confirmations (arrival/appointment timing) are stripped
+  // first so they can't stand in for a drying confirmation.
+  const idiomAllowed = TECH_CONFIRM_CONTEXT_RE.test(String(text || '').replace(UNRELATED_CONFIRM_RE, ''));
   for (const sentence of sentences) {
     if (!sentence.trim()) continue;
     const safetyScope = (idiomAllowed

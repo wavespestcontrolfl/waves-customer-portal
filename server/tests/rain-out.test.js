@@ -1484,6 +1484,9 @@ describe('rain-out service', () => {
       // Bare dry-idiom WITHOUT technician-confirmed timing blocks too \u2014
       // the canonical rule, stricter than a naive idiom allowlist.
       blocked('treatment is safe once dry');
+      // A confirmation about APPOINTMENT logistics is not a drying
+      // confirmation and must not exempt the idiom (codex r7).
+      blocked('Treatment is safe once dry. Your technician confirms arrival timing.');
       // Approved framings and unrelated durations pass.
       expect(sanitize()('Safe once dry - your technician confirms timing')).toEqual({ note: 'Safe once dry - your technician confirms timing' });
       expect(sanitize()('keeping your home safe from termites')).toEqual({ note: 'keeping your home safe from termites' });
