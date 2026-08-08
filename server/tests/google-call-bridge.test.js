@@ -309,3 +309,27 @@ describe('dedupeCrmCallRows (PR #3275)', () => {
     expect(deduped.map((r) => r.id)).toEqual(['c1', 'c2']);
   });
 });
+
+describe('callStillAttributable — settled terminal verdicts only (PR #3303)', () => {
+  const { callStillAttributable } = GoogleCallBridge._private;
+  const trxFor = (row) => () => ({
+    where() { return this; },
+    forUpdate() { return this; },
+    async first() { return row; },
+  });
+
+  test('a MID-FLIGHT call (processing_token set) is never attributable — its cleared stamp is not a settled unlink', async () => {
+    expect(await callStillAttributable(trxFor({ processing_status: 'processing', processing_token: 'tok', metadata: {} }), 'c1')).toBe(false);
+    // Even a nominally processed status with a live token is a reclaim in
+    // progress — refuse until it settles.
+    expect(await callStillAttributable(trxFor({ processing_status: 'processed', processing_token: 'tok', metadata: {} }), 'c1')).toBe(false);
+  });
+
+  test('settled rejections and the durable marker refuse; a settled clean call passes', async () => {
+    expect(await callStillAttributable(trxFor({ processing_status: 'spam', processing_token: null, metadata: {} }), 'c1')).toBe(false);
+    expect(await callStillAttributable(trxFor({ processing_status: 'voicemail', processing_token: null, metadata: {} }), 'c1')).toBe(false);
+    expect(await callStillAttributable(trxFor({ processing_status: 'processed', processing_token: null, metadata: { no_attribution: true } }), 'c1')).toBe(false);
+    expect(await callStillAttributable(trxFor(undefined), 'c1')).toBe(false);
+    expect(await callStillAttributable(trxFor({ processing_status: 'processed', processing_token: null, metadata: {} }), 'c1')).toBe(true);
+  });
+});

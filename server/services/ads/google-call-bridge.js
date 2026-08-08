@@ -268,8 +268,14 @@ async function callStillAttributable(trx, callLogId) {
   const row = await trx('call_log')
     .where({ id: callLogId })
     .forUpdate()
-    .first('processing_status', 'metadata');
+    .first('processing_status', 'processing_token', 'metadata');
   if (!row) return false;
+  // SETTLED calls only (pre-push P0 r18): a non-null processing_token
+  // means a pass is mid-flight — the non-lead path clears its stamp
+  // before its verdict becomes durable, and reconciling in that window
+  // deleted booked/completed attribution that a failed pass could never
+  // restore. The retry lane re-evaluates once the pass settles.
+  if (row.processing_token != null) return false;
   if (['spam', 'voicemail'].includes(String(row.processing_status || '').toLowerCase())) return false;
   return parseCallMetadata(row.metadata)?.no_attribution !== true;
 }
@@ -1166,6 +1172,7 @@ module.exports = {
   _private: {
     areaCode,
     buildMatches,
+    callStillAttributable,
     dedupeCrmCallRows,
     findLeadForCall,
     googleAdsBridgeMetadata,
