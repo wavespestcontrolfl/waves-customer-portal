@@ -457,6 +457,9 @@ function detectServiceCategory(serviceType) {
     s.includes("bora") ||
     s.includes("trelona") ||
     s.includes("termidor") ||
+    // Drill-and-foam services ("Foam Drill", "Recurring Foam Treatment
+    // (Quarterly)") carry no termite token of their own.
+    s.includes("foam") ||
     /\badvance\b/.test(s)
   )
     return "termite";
