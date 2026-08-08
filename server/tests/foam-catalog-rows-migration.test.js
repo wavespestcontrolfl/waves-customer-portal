@@ -78,6 +78,8 @@ function emptyDb() {
     system_settings: [],
     service_records: [],
     scheduled_services: [],
+    service_addons: [],
+    service_package_items: [],
   };
 }
 
@@ -274,6 +276,25 @@ describe('20260808070000 foam catalog rows', () => {
     // The other key's recorded row still rolled back normally.
     expect(svcRow(db, 'foam_recurring')).toBeUndefined();
     expect(profileRow(db, 'foam_recurring')).toBeUndefined();
+  });
+
+  test('down() retains a service (row AND profile) that an admin wired into an add-on or package — CASCADE guard', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    // Admin pairs foam_drill as an add-on and packages foam_recurring;
+    // services deletion would CASCADE through both tables (codex r5 P0).
+    db.service_addons.push({ id: 'pair-1', parent_service_id: 'other-svc', addon_service_id: svcRow(db, 'foam_drill').id });
+    db.service_package_items.push({ id: 'pkg-1', service_id: svcRow(db, 'foam_recurring').id });
+
+    await migration.down(fakeKnex(db));
+
+    // Both wired services survive with their profiles and FK links intact.
+    expect(svcRow(db, 'foam_drill')).toBeDefined();
+    expect(svcRow(db, 'foam_recurring')).toBeDefined();
+    expect(profileRow(db, 'foam_drill')).toBeDefined();
+    expect(profileRow(db, 'foam_recurring')).toBeDefined();
+    expect(db.service_addons).toHaveLength(1);
+    expect(db.service_package_items).toHaveLength(1);
   });
 
   test('down() with no state row removes nothing — admin rows using the same keys survive', async () => {

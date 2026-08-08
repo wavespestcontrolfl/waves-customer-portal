@@ -254,8 +254,37 @@ exports.down = async function down(knex) {
     }
   }
 
+  // Deleting a services row CASCADES through service_addons and
+  // service_package_items (ON DELETE CASCADE) — if an admin wired a foam
+  // service into an add-on pairing or package after deploy, rollback must
+  // not silently destroy that configuration (codex r5 P0, mirrors the
+  // service-library getServiceReferences guard). A referenced service is
+  // retained wholesale: row, FK links, and its typed profile — deleting
+  // only the profile would flip a still-wired service to the generic
+  // completion flow.
+  const retainedKeys = new Set();
+  const removableIds = [];
+  for (const entry of state.services) {
+    if (!entry || !entry.id) continue;
+    let refs = 0;
+    if (await knex.schema.hasTable('service_addons')) {
+      refs += (await knex('service_addons').where({ parent_service_id: entry.id }).pluck('parent_service_id')).length;
+      refs += (await knex('service_addons').where({ addon_service_id: entry.id }).pluck('addon_service_id')).length;
+    }
+    if (await knex.schema.hasTable('service_package_items')) {
+      refs += (await knex('service_package_items').where({ service_id: entry.id }).pluck('service_id')).length;
+    }
+    if (refs > 0) {
+      retainedKeys.add(entry.key);
+      console.warn(`[foam-catalog] down: ${entry.key} (${entry.id}) is referenced by ${refs} add-on/package row(s) — retaining row and profile (admin configuration preserved)`);
+    } else {
+      removableIds.push(entry.id);
+    }
+  }
+
   if (state.profiles.length > 0 && (await knex.schema.hasTable('service_completion_profiles'))) {
     for (const key of state.profiles) {
+      if (retainedKeys.has(key)) continue;
       const profile = await knex('service_completion_profiles').where({ service_key: key }).first();
       if (!profile) continue;
       if (!String(profile.notes || '').includes(PROFILE_MARKER)) {
@@ -266,15 +295,14 @@ exports.down = async function down(knex) {
     }
   }
 
-  const ids = state.services.map((entry) => entry && entry.id).filter(Boolean);
-  if (ids.length > 0 && (await knex.schema.hasTable('services'))) {
+  if (removableIds.length > 0 && (await knex.schema.hasTable('services'))) {
     if (await knex.schema.hasColumn('service_records', 'service_id')) {
-      await knex('service_records').whereIn('service_id', ids).update({ service_id: null });
+      await knex('service_records').whereIn('service_id', removableIds).update({ service_id: null });
     }
     if (await knex.schema.hasColumn('scheduled_services', 'service_id')) {
-      await knex('scheduled_services').whereIn('service_id', ids).update({ service_id: null });
+      await knex('scheduled_services').whereIn('service_id', removableIds).update({ service_id: null });
     }
-    await knex('services').whereIn('id', ids).del();
+    await knex('services').whereIn('id', removableIds).del();
   }
 
   if (await knex.schema.hasTable('system_settings')) {
