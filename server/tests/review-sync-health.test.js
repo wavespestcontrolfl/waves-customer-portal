@@ -191,6 +191,17 @@ describe('_assessReviewSyncHealth (escalation)', () => {
     expect(mockEmailSend).not.toHaveBeenCalled();
   });
 
+  test('a partial cycle (concurrent_skip anywhere) defers the whole assessment', async () => {
+    // Two overlapping runners each hold some location locks — each would see
+    // a different partial fleet, build a different signature, and both would
+    // email. A split cycle waits for the next complete one instead.
+    installDb({ aggregates: [], stats: [] });
+    const out = await gbp._assessReviewSyncHealth({ bradenton: 'gbp', venice: 'concurrent_skip' }, { bradenton: 0 });
+    expect(out).toEqual({ skipped: 'partial_cycle' });
+    expect(mockEmailSend).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('kill switch REVIEW_SYNC_HEALTH_EMAIL=off disables the whole check', async () => {
     process.env.REVIEW_SYNC_HEALTH_EMAIL = 'off';
     const out = await gbp._assessReviewSyncHealth({ venice: 'none' });

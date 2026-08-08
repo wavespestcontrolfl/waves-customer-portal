@@ -1074,6 +1074,12 @@ class GoogleBusinessService {
    */
   async _assessReviewSyncHealth(sources = {}, pulledCounts = {}) {
     if (String(process.env.REVIEW_SYNC_HEALTH_EMAIL || '').toLowerCase() === 'off') return { skipped: 'disabled' };
+    // A cycle split across overlapping runners (per-location locks) gives
+    // each runner a PARTIAL fleet view — two different signatures would both
+    // pass the signature-keyed dedupe and double-email in the same hour
+    // (pre-push audit r2). Defer to the next complete cycle instead; the
+    // hourly cadence makes that at most an hour of delay.
+    if (Object.values(sources).includes('concurrent_skip')) return { skipped: 'partial_cycle' };
 
     const rows = await db('google_reviews')
       .select('location_id')
