@@ -3299,6 +3299,32 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(whenSafe.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
+  test('Markdown emphasis renders away before the hard-copy scans (Codex PR r12)', () => {
+    const bold = guardrails.evaluate({ body: 'The treatment is **safe** for pets.' }, {});
+    expect(bold.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const linked = guardrails.evaluate({ body: 'The [treatment](/pest-control/) is safe for pets.' }, {});
+    expect(linked.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('comparative duration qualifiers and reoccupy forms block (Codex PR r12)', () => {
+    const under = guardrails.evaluate({ body: 'The pesticide dries in under 30 minutes.' }, {});
+    expect(under.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const lessThan = guardrails.evaluate({ body: 'You can re-enter in less than 30 minutes.' }, {});
+    expect(lessThan.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const reoccupied = guardrails.evaluate({ body: 'The treated room can be reoccupied after 30 minutes.' }, {});
+    expect(reoccupied.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
+  test('keep-duration instructions need treatment context outside lawn keep-off (Codex PR r12 false positives)', () => {
+    const storm = guardrails.evaluate({ body: 'Keep the family indoors for 30 minutes during a thunderstorm.' }, {});
+    expect(storm.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    const couch = guardrails.evaluate({ body: 'Keep pets off the couch for 30 minutes.' }, {});
+    expect(couch.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    // Lawn keep-off stays intrinsic.
+    const lawn = guardrails.evaluate({ body: 'Keep pets off the lawn for 30 minutes.' }, {});
+    expect(lawn.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('treated-surface subjects reach the idiom check — incomplete idiom blocks (Codex PR r4)', () => {
     const surfaces = guardrails.evaluate({ body: 'Treated surfaces are safe once dry.' }, {});
     expect(surfaces.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3610,6 +3636,13 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
   test('take-out phrasing is wildlife removal too (Codex PR r9)', () => {
     const takeOut = guardrails.evaluate({ body: 'We can take raccoons out of attics.' }, {});
     expect(takeOut.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('let-us imperatives and Markdown-emphasized topics are offerings too (Codex PR r12)', () => {
+    const letUs = guardrails.evaluate({ body: 'Let us remove raccoons from your attic.' }, {});
+    expect(letUs.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const bold = guardrails.evaluate({ body: 'We offer **wildlife removal** services.' }, {});
+    expect(bold.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('conduct/manage fulfillment verbs are offerings too (Codex PR r10)', () => {
