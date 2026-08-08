@@ -191,11 +191,6 @@ export default function CommercialProposalPage() {
     paymentTerms: '', initialTermMonths: '', renewal: '',
     priceAdjustment: '', cancellation: '', accessRequirements: '',
   });
-  // Normalized fields with no authoring surface here yet (accountManager is
-  // set by the API/engine, storage-first). PUT persists exactly what the
-  // normalizer returns from this payload, so anything loaded but not echoed
-  // back would be DELETED on save — carry them through untouched.
-  const [passThrough, setPassThrough] = useState({ accountManager: null });
   const [sendMethod, setSendMethod] = useState('email');
   // Engine-composed prospect research (commercial proposal lane). Read-only
   // context for pricing the walkthrough — never sent to the customer.
@@ -238,7 +233,6 @@ export default function CommercialProposalPage() {
       includesText: (w.includes || []).join('\n'),
     })));
     setResponsibilitiesText((p.customerResponsibilities || []).join('\n'));
-    setPassThrough({ accountManager: p.accountManager ?? null });
     setCommercialTerms({
       paymentTerms: p.commercialTerms?.paymentTerms || '',
       initialTermMonths: p.commercialTerms?.initialTermMonths != null ? String(p.commercialTerms.initialTermMonths) : '',
@@ -339,7 +333,6 @@ export default function CommercialProposalPage() {
       ...(work.length ? { correctiveWork: work } : {}),
       ...(responsibilities.length ? { customerResponsibilities: responsibilities } : {}),
       ...(hasTerms ? { commercialTerms: ct } : {}),
-      ...(passThrough.accountManager ? { accountManager: passThrough.accountManager } : {}),
     };
   };
 

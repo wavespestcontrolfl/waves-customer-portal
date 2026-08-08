@@ -265,7 +265,6 @@ describe('EstimateProposalDocument', () => {
           validDays: 30, paymentTerms: 'net30', initialTermMonths: 12,
           renewal: null, priceAdjustment: null, cancellation: '30-day written notice', accessRequirements: null,
         },
-        accountManager: 'Adam',
       },
     }} token="tok-123" />);
     const text = container.textContent;

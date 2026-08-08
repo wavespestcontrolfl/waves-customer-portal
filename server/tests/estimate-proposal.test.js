@@ -181,7 +181,6 @@ describe('structured proposal sections (slice 1A-i)', () => {
       correctiveWork: [{ label: 'Cleanout', amount: 450.005, taxable: true, includes: ['Kitchens', '', 'Follow-up at 2 weeks'] }],
       customerResponsibilities: ['Provide unit access with 24-hour tenant notice', '  '],
       commercialTerms: { validDays: 30, paymentTerms: 'Net-30', initialTermMonths: 0, renewal: null, priceAdjustment: '', cancellation: '30-day written notice', accessRequirements: null },
-      accountManager: 'Adam',
     }));
     // paymentTerms canonicalizes to the payer vocabulary ('Net-30' → net30).
     expect(p.propertyScope).toEqual({ items: [{ label: 'Units', value: '4 residential units' }] });
@@ -199,7 +198,9 @@ describe('structured proposal sections (slice 1A-i)', () => {
       cancellation: '30-day written notice',
       accessRequirements: null,
     });
-    expect(p.accountManager).toBe('Adam');
+    // No accountManager (or validity) field — storage-only fields are
+    // omitted until their authoring + rendering slices land.
+    expect(p.accountManager).toBeUndefined();
   });
 
   it('normalizes every absent section to null so legacy proposals render exactly as before', () => {
@@ -208,7 +209,7 @@ describe('structured proposal sections (slice 1A-i)', () => {
     expect(p.correctiveWork).toBeNull();
     expect(p.customerResponsibilities).toBeNull();
     expect(p.commercialTerms).toBeNull();
-    expect(p.accountManager).toBeNull();
+    expect(p.accountManager).toBeUndefined();
   });
 
   it('keeps a BLANK initial term unset — Number(null)/Number("") must never coerce to the month-to-month claim', () => {

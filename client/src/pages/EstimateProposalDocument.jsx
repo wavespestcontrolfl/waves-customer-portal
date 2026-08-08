@@ -517,12 +517,11 @@ export default function EstimateProposalDocument({ data, token }) {
               we&rsquo;ll refresh the numbers with you.
             </p>
           ) : authoredProposal ? (
-            // The stored proposal.accountManager is deliberately NOT rendered
-            // yet: the live page's terminal card and the SSR banner still use
-            // this constant, so an override here would name a different
-            // contact on the PDF than on the link it points to (codex #3297
-            // r1). The per-proposal field ships storage-first; every surface
-            // switches together in the slice that gives it an authoring path.
+            // Every customer surface (this document, the terminal card, the
+            // SSR banner) names the shared account-manager constant — a
+            // per-proposal override lands as one slice with its authoring
+            // path so the PDF can never name a different contact than the
+            // page it links to (codex #3297 r1/r3).
             <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
               {WAVES_ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, will follow up to answer
               questions and finalize this proposal — or call {WAVES_SUPPORT_PHONE_DISPLAY} any time.

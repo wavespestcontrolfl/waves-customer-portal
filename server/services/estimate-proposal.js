@@ -563,11 +563,14 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
     // Structured sections (slice 1A-i) — null when absent, so legacy
     // proposals round-trip and render exactly as before. Read from the
     // STORED proposal only: the synthesized fallback never authors these.
+    // Deliberately NO accountManager field yet — every customer surface
+    // uses the shared constant, and a storage-only field would just force
+    // saves to preserve dead state; it lands with its authoring + rendering
+    // slice (codex #3297 r3, same rule as validDays).
     propertyScope: normalizePropertyScope(base.propertyScope),
     correctiveWork: normalizeCorrectiveWork(base.correctiveWork),
     customerResponsibilities: normalizeCustomerResponsibilities(base.customerResponsibilities),
     commercialTerms: normalizeCommercialTerms(base.commercialTerms),
-    accountManager: cleanString(base.accountManager, 80),
   };
 }
 

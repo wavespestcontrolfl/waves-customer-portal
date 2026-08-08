@@ -563,7 +563,6 @@ function proposalStructuredScenario() {
         cancellation: '30-day written notice, no cancellation fee',
         accessRequirements: 'Office provides common-area keys',
       },
-      accountManager: 'Adam',
       terms: 'Interior service visits beyond the quarterly schedule are billed per visit.',
       totals: {
         annualRecurring: 480.00,

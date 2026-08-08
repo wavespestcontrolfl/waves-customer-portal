@@ -1960,6 +1960,35 @@ router.put('/:id/proposal', async (req, res, next) => {
       && incoming.correctiveWork.some((w) => Number(w?.amount ?? w?.price) < 0)) {
       return res.status(400).json({ error: 'Corrective work amounts cannot be negative.' });
     }
+    // Oversized structured-section lists get a 400, not a silent clamp —
+    // normalizeProposal truncates lines and drops over-limit entries as a
+    // safety net, but an operator's contractual bullet must never vanish or
+    // cut mid-sentence without explanation (codex #3297 r3).
+    const overLimit = (arr, maxItems, maxLen, pick) => Array.isArray(arr)
+      && (arr.length > maxItems || arr.some((entry) => String(pick(entry) ?? '').length > maxLen));
+    if (Array.isArray(incoming.correctiveWork)) {
+      if (incoming.correctiveWork.length > 24) {
+        return res.status(400).json({ error: 'Corrective work is limited to 24 items.' });
+      }
+      for (const work of incoming.correctiveWork) {
+        if (String(work?.label ?? '').length > 160) {
+          return res.status(400).json({ error: 'Corrective work descriptions are limited to 160 characters.' });
+        }
+        if (overLimit(work?.includes, 12, 200, (line) => line)) {
+          return res.status(400).json({ error: 'Each corrective work item is limited to 12 include lines of 200 characters.' });
+        }
+      }
+    }
+    if (overLimit(incoming.customerResponsibilities, 16, 200, (line) => line)) {
+      return res.status(400).json({ error: 'Customer responsibilities are limited to 16 lines of 200 characters.' });
+    }
+    {
+      const scopeItems = incoming.propertyScope?.items ?? (Array.isArray(incoming.propertyScope) ? incoming.propertyScope : null);
+      if (Array.isArray(scopeItems)
+        && (scopeItems.length > 24 || scopeItems.some((item) => String(item?.label ?? '').length > 80 || String(item?.value ?? '').length > 160))) {
+        return res.status(400).json({ error: 'Property scope is limited to 24 rows (labels 80 chars, values 160 chars).' });
+      }
+    }
     // Present-but-invalid term numbers get a 400, not a silent normalize:
     // cleanBoundedInt rounds fractions and drops out-of-range values, so
     // without this the operator could see "1.5" or "61" months while the

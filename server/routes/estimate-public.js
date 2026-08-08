@@ -20446,10 +20446,6 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
               accessRequirements: proposalForView.commercialTerms.accessRequirements,
             },
           } : {}),
-          // accountManager is stored/normalized but NOT projected: no public
-          // surface renders the override yet (the document, terminal card,
-          // and SSR banner all use the shared constant), and an unconsumed
-          // projection is just token-holder-readable surface (codex #3297 r1).
         };
         // On-page renders only itemize truly AUTHORED proposals — a raw
         // enabled flag with no buildings normalizes to the synthesized
