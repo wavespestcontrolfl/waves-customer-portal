@@ -172,12 +172,19 @@ router.post('/', async (req, res, next) => {
       // so a customer who taps here instead of in their messages is still
       // attributed. When the ask was gated (at cap, in cooldown, already in a
       // cadence) there is no fresh token — reuse the customer's most recent
-      // live one, and only fall back to the bare profile URL if there is none.
+      // live DELIVERED one, and only fall back to the bare profile URL if
+      // there is none. Exception: while an ask is QUEUED (deferred /
+      // already_queued / transient-retry / concurrent in-flight) there is a
+      // pending row processScheduled will send later — a bare link now could
+      // not consume it, so the customer would review AND still get the SMS
+      // (codex #3285 r3). No actionable fallback in that window; the queued
+      // text carries the link.
+      const askQueued = ['deferred', 'already_queued', 'send_failed', 'concurrent'].includes(asked.outcome);
       let reviewLink = asked.reviewUrl || null;
       if (!reviewLink) {
         reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
       }
-      if (!reviewLink) reviewLink = office.googleReviewUrl;
+      if (!reviewLink && !askQueued) reviewLink = office.googleReviewUrl;
 
       return res.json({
         success: true,

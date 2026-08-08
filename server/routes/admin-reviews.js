@@ -5,7 +5,7 @@ const gbp = require('../services/google-business');
 const ReviewService = require('../services/review-request');
 const ReviewIncentives = require('../services/review-incentives');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { WAVES_LOCATIONS } = require('../config/locations');
+const { WAVES_LOCATIONS, resolveReviewLocationId } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
@@ -612,6 +612,10 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         'customers.zip',
         'customers.waveguard_tier',
         'customers.nearest_location_id',
+        // lat/lng feed the canonical review resolver's geo fallback for the
+        // payload's locationId (see below).
+        'customers.latitude',
+        'customers.longitude',
         // Payments-derived net — customers.lifetime_revenue has no production
         // writer and reads $0/stale for every real customer.
         db.raw("(SELECT COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0) FROM payments WHERE payments.customer_id = customers.id AND payments.status = 'paid') as lifetime_revenue")
@@ -740,7 +744,12 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
           city: c.city,
           zip: c.zip,
           tier: c.waveguard_tier,
-          locationId: c.nearest_location_id,
+          // The CANONICAL review office (city → zip → geo → stored id), not
+          // raw nearest_location_id — the admin table/drawer/grouping must
+          // show the same office the send path resolves, or downtown Sarasota
+          // reads Bradenton in the UI while the SMS targets Sarasota
+          // (codex #3285 r3).
+          locationId: resolveReviewLocationId(c, { storedLocationId: c.nearest_location_id || null }),
           lifetimeRevenue: Number(c.lifetime_revenue) || 0,
           lastService: ls?.service_type || null,
           lastServiceDate: ls?.scheduled_date || null,

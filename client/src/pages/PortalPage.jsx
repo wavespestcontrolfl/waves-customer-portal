@@ -2013,13 +2013,20 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
             <div style={{ textAlign: 'center' }}>
               <div style={{ fontSize: 18, fontWeight: 800, color: B.glassNavy }}>Thanks for the {satRating}/10.</div>
               <div style={{ marginTop: 6, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-                A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team.
+                {satReviewLink
+                  ? <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team.</>
+                  // No link means the review ask is queued to text later — a
+                  // bare Google link here couldn't be attributed and the
+                  // queued text would still send afterward.
+                  : <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team — keep an eye on your texts for our review link.</>}
               </div>
               <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
-                <a href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
-                  ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
-                  boxShadow: 'none', borderRadius: 8,
-                }}>Open Google</a>
+                {satReviewLink ? (
+                  <a href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
+                    ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
+                    boxShadow: 'none', borderRadius: 8,
+                  }}>Open Google</a>
+                ) : null}
                 <button type="button" onClick={() => setSatDismissed(true)} style={{
                   ...PORTAL_BUTTON_BASE, background: '#fff', color: B.glassNavy, padding: '10px 18px',
                   boxShadow: 'none', border: '1px solid #E7E2D7', borderRadius: 8,
