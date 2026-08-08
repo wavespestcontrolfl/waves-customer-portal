@@ -3071,13 +3071,18 @@ const EstimateConverter = {
           // renames; name-based resolution still works without it, so a
           // missing catalog row (env not yet migrated) degrades safely.
           try {
-            // Active rows only (codex 2026-08-08 P1): linking an
-            // admin-deactivated catalog row would resurrect its typed
-            // completion flow — a deactivated service degrades to the
-            // name-only path like an absent row. NULL is_active reads as
-            // inactive, matching every other catalog filter.
+            // Deliberately NOT filtered on is_active/is_archived (codex
+            // 2026-08-08 r5): this link is identity durability, not
+            // activation policy. An accepted estimate must schedule, and
+            // completion's name fallback resolves the SAME row (inactive
+            // or not — cf. termite_inspection, inactive in prod with
+            // name-resolved typed completions), so skipping the id here
+            // would only sever rename-safety while changing nothing else.
+            // Deactivation posture is governed where it's enforceable:
+            // the completion profile's own active flag and delivery_mode
+            // kill switches, and the booking/picker catalog filters.
             const catalogRow = await database('services')
-              .where({ service_key: unit.catalogServiceKey, is_active: true })
+              .where({ service_key: unit.catalogServiceKey })
               .first('id', 'default_duration_minutes');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;
