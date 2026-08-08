@@ -310,14 +310,26 @@ export default function CommercialProposalPage() {
   };
   const removeBuilding = (bi) => { markEdit(); setBuildings((prev) => prev.filter((_, i) => i !== bi)); };
 
+  // Render-assigned mirror of the current form state: save()'s retry loop
+  // runs inside ONE async closure, whose captured state variables freeze at
+  // the render that started it — a retry building from those would re-save
+  // the stale payload and then overwrite the newer edits on reload (codex
+  // #3297 r5b P0). The ref is reassigned every render, so each retry builds
+  // from what is actually on screen.
+  const formRef = React.useRef(null);
+  formRef.current = {
+    title, preparedFor, propertyAddress, taxRate, terms,
+    buildings, scopeItems, correctiveWork, responsibilitiesText, commercialTerms,
+  };
+
   // Structured sections serialize only when actually authored — an empty
   // card omits its key so the server normalizes it to null and the customer
   // surfaces render exactly as before.
-  const structuredSectionsPayload = () => {
-    const items = scopeItems
+  const structuredSectionsPayload = (f) => {
+    const items = f.scopeItems
       .map((item) => ({ label: item.label.trim(), value: item.value.trim() }))
       .filter((item) => item.label && item.value);
-    const work = correctiveWork
+    const work = f.correctiveWork
       .map((w) => ({
         label: w.label.trim(),
         amount: Number(w.amount) || 0,
@@ -325,14 +337,14 @@ export default function CommercialProposalPage() {
         includes: w.includesText.split('\n').map((s) => s.trim()).filter(Boolean),
       }))
       .filter((w) => w.label);
-    const responsibilities = responsibilitiesText.split('\n').map((s) => s.trim()).filter(Boolean);
+    const responsibilities = f.responsibilitiesText.split('\n').map((s) => s.trim()).filter(Boolean);
     const ct = {
-      paymentTerms: commercialTerms.paymentTerms.trim() || null,
-      initialTermMonths: commercialTerms.initialTermMonths.trim() === '' ? null : Number(commercialTerms.initialTermMonths),
-      renewal: commercialTerms.renewal.trim() || null,
-      priceAdjustment: commercialTerms.priceAdjustment.trim() || null,
-      cancellation: commercialTerms.cancellation.trim() || null,
-      accessRequirements: commercialTerms.accessRequirements.trim() || null,
+      paymentTerms: f.commercialTerms.paymentTerms.trim() || null,
+      initialTermMonths: f.commercialTerms.initialTermMonths.trim() === '' ? null : Number(f.commercialTerms.initialTermMonths),
+      renewal: f.commercialTerms.renewal.trim() || null,
+      priceAdjustment: f.commercialTerms.priceAdjustment.trim() || null,
+      cancellation: f.commercialTerms.cancellation.trim() || null,
+      accessRequirements: f.commercialTerms.accessRequirements.trim() || null,
     };
     const hasTerms = Object.values(ct).some((v) => v !== null);
     return {
@@ -343,15 +355,15 @@ export default function CommercialProposalPage() {
     };
   };
 
-  const buildPayload = () => ({
+  const buildPayload = (f = formRef.current) => ({
     proposal: {
-      title: title.trim() || 'Commercial Service Proposal',
-      preparedFor: preparedFor.trim(),
-      propertyAddress: propertyAddress.trim(),
-      taxRate,
-      terms: terms.trim() || null,
-      ...structuredSectionsPayload(),
-      buildings: buildings.map((b) => ({
+      title: f.title.trim() || 'Commercial Service Proposal',
+      preparedFor: f.preparedFor.trim(),
+      propertyAddress: f.propertyAddress.trim(),
+      taxRate: f.taxRate,
+      terms: f.terms.trim() || null,
+      ...structuredSectionsPayload(f),
+      buildings: f.buildings.map((b) => ({
         name: b.name.trim() || 'Building',
         note: b.note.trim() || null,
         lineItems: b.lineItems
@@ -376,15 +388,20 @@ export default function CommercialProposalPage() {
     setError(null);
     try {
       for (let attempt = 0; attempt < 5; attempt++) {
+        // Applying the normalized reload below is only safe if no keystroke
+        // lands while the round-trip is in flight — otherwise it would
+        // silently discard those edits (codex #3297 r5). Generation is
+        // captured BEFORE the payload builds: an edit interleaving here
+        // makes the end-check fail toward a retry, never toward treating a
+        // stale payload as current. (React flushes discrete input events
+        // synchronously, so formRef is committed before this continuation
+        // runs.)
+        const genAtSave = editGenRef.current;
         const payload = buildPayload();
         if (payload.proposal.buildings.length === 0) {
           setError('Add at least one building with a described line item.');
           return false;
         }
-        // Applying the normalized reload below is only safe if no keystroke
-        // lands while the round-trip is in flight — otherwise it would
-        // silently discard those edits (codex #3297 r5).
-        const genAtSave = editGenRef.current;
         await adminFetch(`/admin/estimates/${estimateId}/proposal`, {
           method: 'PUT',
           body: JSON.stringify(payload),
