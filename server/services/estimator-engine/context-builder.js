@@ -231,14 +231,16 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         return md?.lead_id || null;
       } catch { return null; }
     })();
-    // SETTLED stamps only — same rule as the bridge and the admin card
-    // (#3303): stamp mutations are token-fenced, so a non-null
-    // processing_token means a pass is mid-flight and may still clear or
-    // repoint this stamp; grounding a draft on it could link the wrong
-    // lead. buildCallContext loads the full row, so the token is present
-    // here; a caller passing a trimmed row without the column keeps
-    // today's behavior.
-    if (stampedLeadId && !call?.processing_token) {
+    // NO settled-stamp (processing_token) condition here, deliberately —
+    // unlike the out-of-band consumers (admin card, bridge, agent pack).
+    // The estimator draft runs IN-PIPELINE from the call processor while
+    // this call's own token is still set: its Step 4b just wrote this
+    // stamp, and gating on token-null would skip it for exactly the
+    // phone-less reused-lead case the stamp exists for — the draft would
+    // lose the lead link entirely, since a phone-less call has no
+    // last-10 fallback (codex P1, PR #3304). A stamp later cleared or
+    // repointed by a retry re-runs the draft with the corrected linkage.
+    if (stampedLeadId) {
       const byStamp = await db('leads')
         .select(LEAD_COLS)
         .where({ id: stampedLeadId })
@@ -483,18 +485,25 @@ async function buildCallContext(callLogId) {
   // account's caller (codex P1 r18). This guard only ever fails CLOSED to
   // identity review; it never links a customer, so the call path's
   // phone-slot exclusion is untouched.
-  // "Real, active" = pipeline_stage active_customer/won/at_risk (the
-  // canonical whereRealCustomer stages) AND active=true — the two are
-  // independently editable, and a deactivated former customer calling as a
-  // new prospect must stay draft-eligible, matching the grounded-customer
-  // loader's own active===true requirement (codex P2). Lead-stage rows are
-  // NOT members and stay draft-eligible. Lookup failure fails closed like
-  // the phone path.
+  // "Real, active" = the canonical whereLiveCustomer predicate
+  // (customer-stages.js) — stage and active are independently editable,
+  // and a deactivated former customer calling as a new prospect must stay
+  // draft-eligible, matching the grounded-customer loader's own
+  // active===true requirement (codex P2). Lead-stage rows are NOT members
+  // and stay draft-eligible. Lookup failure fails closed like the phone
+  // path.
   {
-    // Enriched (V2) payloads carry the email at caller.email; the top-level
-    // field is the V1 fallback shape — reading only the top level made this
-    // guard a no-op for every valid V2 extraction (codex P1, PR #3275).
-    const extractionEmailLc = String(extraction?.caller?.email || extraction?.email || '').trim().toLowerCase();
+    // ENRICHED (V2 valid) extractions only (codex P1, PR #3304): the V1
+    // fallback blob is unvalidated — a stale or hallucinated V1 email that
+    // happens to match an active customer's contact would red-lane an
+    // otherwise draftable call. A V1-only call keeps its normal review
+    // path; the transcript still carries the address for a human read.
+    // (Within V2, caller.email is the shape — reading only the top level
+    // made this guard a no-op for every valid extraction; codex P1, PR
+    // #3275.)
+    const extractionEmailLc = extractionSource === 'enriched'
+      ? String(extraction?.caller?.email || '').trim().toLowerCase()
+      : '';
     if (extractionEmailLc) {
       try {
         // EVERY customer email slot, not just the primary (codex P1 r18):
@@ -511,15 +520,18 @@ async function buildCallContext(callLogId) {
         // the phone matched and raise a phantom conflict against a
         // legitimate draft. Scoping the second query by id keeps both cheap
         // however many accounts share the address.
-        const emailOwnerQuery = () => db('customers')
-          .whereNull('deleted_at')
-          .where('active', true)
+        // The CANONICAL live-customer predicate (codex P1, PR #3304) —
+        // active=true + not-deleted + the canonical stage list, one
+        // definition with every other estimator guard, so a lifecycle
+        // change can never make this veto classify a different
+        // population than its siblings.
+        const { whereLiveCustomer } = require('../customer-stages');
+        const emailOwnerQuery = () => whereLiveCustomer(db('customers'))
           .whereRaw(
             '(LOWER(TRIM(email)) = ? OR LOWER(TRIM(service_contact_email)) = ?'
             + ' OR LOWER(TRIM(service_contact2_email)) = ? OR LOWER(TRIM(service_contact3_email)) = ?)',
             [extractionEmailLc, extractionEmailLc, extractionEmailLc, extractionEmailLc],
-          )
-          .whereIn('pipeline_stage', ['active_customer', 'won', 'at_risk']);
+          );
         const anyEmailOwner = await emailOwnerQuery().first('id');
         if (anyEmailOwner && !customerMatch.customer) {
           logger.warn('[estimator-engine] unidentified call states an active customer\'s email — failing closed to identity review');

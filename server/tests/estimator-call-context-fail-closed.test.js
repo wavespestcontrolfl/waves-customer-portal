@@ -924,10 +924,14 @@ describe('email-owner guard covers every customer email slot (PR #3275)', () => 
   // service_contact{,2,3}_email is an existing account's caller. Matching
   // the primary `email` column alone let that call reach the estimator and
   // draft a PROSPECT-priced estimate for a live customer.
-  const ANON_CALL = (extraction) => CALL({
+  // ENRICHED (V2 valid) shape — the guard deliberately ignores the
+  // unvalidated V1 fallback (codex P1, PR #3304), so the fixtures must
+  // carry the email at caller.email under a valid enriched payload.
+  const ANON_CALL = (caller) => CALL({
     from_phone: 'Anonymous',            // suppressed caller ID → no phone key
     to_phone: '+19413187612',           // a Waves line, so it is never the caller
-    ai_extraction: JSON.stringify(extraction),
+    v2_extraction_status: 'valid',
+    ai_extraction_enriched: JSON.stringify({ property: {}, caller }),
   });
 
   test('the guard queries all four email columns', async () => {
@@ -970,6 +974,25 @@ describe('email-owner guard covers every customer email slot (PR #3275)', () => 
 
     const context = await buildCallContext('call-1');
 
+    expect(context.error).not.toBe('email_identity_conflict');
+  });
+});
+
+describe('email-owner guard ignores the unvalidated V1 shape (PR #3304)', () => {
+  test('a V1-only email never triggers the veto', async () => {
+    // The V1 blob is a raw text-parse fallback — a stale or hallucinated
+    // email matching an active customer must not red-lane an otherwise
+    // draftable call; V1 calls keep their normal review path.
+    mockCallRow = CALL({
+      from_phone: 'Anonymous',
+      to_phone: '+19413187612',
+      ai_extraction: JSON.stringify({ email: 'spouse@example.com' }),
+    });
+    mockCustomerRows = [{ id: 'cust-7' }];
+
+    const context = await buildCallContext('call-1');
+
+    expect(context.error).not.toBe('email_matches_existing_customer');
     expect(context.error).not.toBe('email_identity_conflict');
   });
 });

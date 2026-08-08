@@ -248,23 +248,32 @@ async function loadCalls(lead, phoneKey) {
     // the OLDEST (the quote call that created the lead, with newer unrelated
     // calls on the same number since), and it is the whole point of the
     // pack. Owned = sid- or stamp-linked (for_this_lead).
-    const capped = calls.slice(0, 3);
-    // The ORIGINAL sid-linked call is THE anchor — stamped rows and the
-    // synthetic summary row are owned evidence too, but they must not
-    // SUBSTITUTE for its transcript (pre-push P1 r1: two newer stamped
-    // calls plus a non-provenance-matched summary row silently dropped
-    // the original transcript and its service/identity evidence).
-    // Restored first, so the general owned-evidence guarantee below is
-    // then already satisfied by it and cannot overwrite the restore.
-    const sidRow = lead.twilio_call_sid
-      ? calls.find((call) => call.call_sid === lead.twilio_call_sid && !String(call.id).startsWith('lead-summary:'))
-      : null;
-    if (sidRow && !capped.includes(sidRow)) capped[capped.length - 1] = sidRow;
-    if (!capped.some((call) => call.for_this_lead)) {
-      const anchor = calls.find((call) => call.for_this_lead);
-      if (anchor) capped[capped.length - 1] = anchor;
+    // Cap by PRIORITY CLASS, preserving presentation order (pre-push P1 r1
+    // + codex P2, PR #3304). Slot priority: REAL owned transcripts (sid- or
+    // stamp-linked — never more than three exist by construction, so the
+    // sid anchor is always kept and neither a stamped row nor the synthetic
+    // summary can substitute for it), then the synthetic summary row, then
+    // phone history. A naive slice let the synthetic row — unshifted to the
+    // front — evict the OLDEST real owned transcript whenever three owned
+    // rows loaded and the rolling summary provenance-matched none of them,
+    // silently dropping the lead's own service/identity evidence. Selection
+    // is by priority; ORDER stays exactly as assembled (summary row first,
+    // then newest-first), so the pack reads the same.
+    const isSyntheticRow = (call) => String(call.id).startsWith('lead-summary:');
+    const keep = new Set();
+    for (const call of calls) {
+      if (keep.size >= 3) break;
+      if (call.for_this_lead && !isSyntheticRow(call)) keep.add(call);
     }
-    return capped;
+    for (const call of calls) {
+      if (keep.size >= 3) break;
+      if (isSyntheticRow(call)) keep.add(call);
+    }
+    for (const call of calls) {
+      if (keep.size >= 3) break;
+      keep.add(call);
+    }
+    return calls.filter((call) => keep.has(call));
   } catch (err) {
     logger.warn(`[agent-estimate] call load failed: ${err.message}`);
     return [];
