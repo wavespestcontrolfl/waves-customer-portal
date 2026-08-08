@@ -126,4 +126,7 @@ module.exports = {
   launchBrowser,
   renderReportPdfWithBrowser,
   serviceReportViewerUrl,
+  // Shared by the estimate-document renderer (pdf/estimate-doc-pdf.js) so
+  // both artifact pipelines resolve the page origin identically.
+  serviceReportPublicBase,
 };

@@ -40,6 +40,10 @@ const EXCLUDED_FILES = new Set([
   // like the industry WO formats it mirrors; the 16px screen floor doesn't
   // apply to paper (owner direction 2026-08-03).
   'ServiceReportDocument.jsx',
+  // Same exemption, same rationale: the estimate document is the ?mode=pdf
+  // print artifact (GATE_ESTIMATE_DOC_PDF), modeled on the service-report
+  // work-order format above — never an on-screen surface.
+  'EstimateProposalDocument.jsx',
 ]);
 // Filename prefixes that belong to the admin/tech surfaces — separate design
 // system (D palette + DM Sans + density-first, per admin brief), NOT subject
