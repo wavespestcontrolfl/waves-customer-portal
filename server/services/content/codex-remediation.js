@@ -59,6 +59,7 @@ const contentGuardrails = require('./content-guardrails');
 const { refineFootprintFindings } = require('./footprint-claim-classifier');
 const comparisonTableGate = require('./comparison-table-gate');
 const factCheckGate = require('./fact-check-gate');
+const complianceGate = require('./compliance-gate');
 const { etDateString } = require('../../utils/datetime-et');
 
 const MAX_ROUNDS = Math.max(1, parseInt(process.env.CODEX_REMEDIATION_MAX_ROUNDS || '3', 10) || 3);
@@ -708,6 +709,30 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
   if (factResult && !factResult.pass) {
     const p0 = (factResult.findings || []).filter((f) => f.severity === 'P0');
     if (p0.length) return { ok: false, reason: `factcheck ${p0.map((f) => f.message).slice(0, 2).join('; ')}` };
+  }
+  // Semantic compliance (LLM) — same P0-blocking policy as
+  // astro-publisher.assertComplianceClear. Remediation REWRITES body and meta
+  // after the publisher's gate already ran, so a fix can introduce exactly the
+  // semantic-only violation the deterministic guard above cannot express, and
+  // the new head commits on a clean Codex follow-up (Codex PR #3295 r4).
+  // Publishable text mirrors the publisher: body plus the editable meta the
+  // remediated file actually carries.
+  const complianceEvaluate = deps.complianceEvaluate || complianceGate.evaluate;
+  const metaText = [data.metaTitle, data.meta_description, data.metaDescription, data.hero_image_alt, data.hero_image?.alt]
+    .filter(Boolean)
+    .map((v) => String(v).replace(/\{\{\s*cityPhone\s*\}\}/g, '').trim())
+    .filter(Boolean)
+    .join('\n\n');
+  const complianceResult = await complianceEvaluate({
+    title: fc.title || data.title || '',
+    body: metaText ? `${body}\n\n${metaText}` : body,
+    city: fc.city || (Array.isArray(data.service_areas_tag) ? data.service_areas_tag[0] : '') || '',
+    keyword: fc.keyword || data.primary_keyword || '',
+    tag: fc.tag || data.tag || data.category || '',
+  });
+  if (complianceResult && !complianceResult.pass) {
+    const p0 = (complianceResult.findings || []).filter((f) => f.severity === 'P0');
+    if (p0.length) return { ok: false, reason: `compliance ${p0.map((f) => `${f.code} ${f.message}`).slice(0, 2).join('; ')}` };
   }
   // A PASSING comparison gate can still demand a human: a fix that introduces
   // a (valid, sourced) named-competitor comparison sets requiresHumanReview.

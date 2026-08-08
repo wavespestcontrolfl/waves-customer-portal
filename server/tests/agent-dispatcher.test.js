@@ -148,6 +148,12 @@ describe('buildInputPayload', () => {
     expect(p.brief_summary.city).toBe('Bradenton');
     expect(p.brief_summary.service).toBe('pest');
   });
+
+  test('every session input carries the self-lint retry permission — stale registered prompts must not strand rejected emits (Codex PR r9)', () => {
+    const p = buildInputPayload(brief());
+    expect(p.instruction).toMatch(/draft_rejected or metadata_rejected/);
+    expect(p.instruction).toMatch(/call the SAME emit tool again/);
+  });
   test('handles missing optional fields', () => {
     const p = buildInputPayload(brief({ target_url: undefined, city: undefined }));
     expect(p.brief_summary.target_url).toBeNull();
@@ -208,6 +214,184 @@ describe('emit_draft tool sink', () => {
     const r = await executeBriefTool('emit_draft', { frontmatter: {} }, { sessionId: 'sess-B' });
     expect(r.error).toMatch(/required/);
     clearDraft('sess-B');
+  });
+});
+
+describe('deriveSyncGuardrailOptions service derivation', () => {
+  const { deriveSyncGuardrailOptions } = require('../services/content/guardrail-options');
+
+  test('gsc_signal.specialty_topic folds into service — family rows keep their blocked topic (Codex #3258 r25, restored PR r11 audit)', () => {
+    const specialty = deriveSyncGuardrailOptions({ service: 'pest' }, { gsc_signal: { specialty_topic: 'bed-bug' } });
+    expect(specialty.service).toEqual(['pest', 'bed-bug']);
+    const both = deriveSyncGuardrailOptions(
+      { service: 'pest' },
+      { gsc_signal: { specialty_topic: 'bed-bug' }, voice_constraints: { operator_brief: { faq_blocked_topic: 'german-roach' } } },
+    );
+    expect(both.service).toEqual(['pest', 'german-roach', 'bed-bug']);
+    const plain = deriveSyncGuardrailOptions({ service: 'pest' }, {});
+    expect(plain.service).toBe('pest');
+  });
+});
+
+describe('emit_draft in-loop self-lint (W1)', () => {
+  const { registerSessionLint } = tools;
+  const CLEAN_BODY = 'Ant trails around Sarasota patios usually start with moisture. Follow the label re-entry directions after any professional application.';
+  const PRICED_BODY = 'A quarterly plan runs about $250 per visit in Sarasota, which beats most competitors.';
+
+  afterEach(() => {
+    clearDraft('lint-1'); clearDraft('lint-2'); clearDraft('lint-3'); clearDraft('lint-4'); clearDraft('lint-5');
+  });
+
+  test('a violating draft is REJECTED with canonical directives and NOT captured', async () => {
+    registerSessionLint('lint-1', {});
+    const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-1' });
+    expect(r.ok).toBe(false);
+    expect(r.draft_rejected).toBe(true);
+    expect(r.redrafts_remaining).toBe(1);
+    expect(r.directives.join(' ')).toMatch(/dollar amount/i);
+    expect(getDraft('lint-1')).toBeNull();
+  });
+
+  test('the redraft cap captures the still-violating draft for the authoritative run-level gates', async () => {
+    registerSessionLint('lint-2', {});
+    const first = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-2' });
+    expect(first.draft_rejected).toBe(true);
+    const second = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-2' });
+    expect(second.draft_rejected).toBe(true);
+    expect(second.redrafts_remaining).toBe(0);
+    const third = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-2' });
+    expect(third.ok).toBe(true);
+    const captured = getDraft('lint-2');
+    expect(captured.self_lint).toEqual({ redrafts: 2, cap_reached: true });
+  });
+
+  test('a clean draft captures with the lint audit riding the payload', async () => {
+    registerSessionLint('lint-3', {});
+    const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: CLEAN_BODY }, { sessionId: 'lint-3' });
+    expect(r.ok).toBe(true);
+    expect(getDraft('lint-3').self_lint).toEqual({ redrafts: 0, pass: true });
+  });
+
+  test('W2 codes flow through the loop — a banned-topic draft is rejected with its directive', async () => {
+    registerSessionLint('lint-4', {});
+    const r = await executeBriefTool('emit_draft', {
+      frontmatter: { title: 'T' },
+      body: 'For drywood termites, we offer whole-structure fumigation across Sarasota.',
+    }, { sessionId: 'lint-4' });
+    expect(r.ok).toBe(false);
+    expect(r.directives.join(' ')).toMatch(/does NOT offer door-to-door/);
+  });
+
+  test('a route the session VERIFIED via check_existing_content passes the in-loop lint (parity with gate 3c)', async () => {
+    const VERIFIED_BODY = 'Related reading: [our earlier post](/some-verified-post/). Follow the label re-entry directions.';
+    // Without the verified route the same body blocks (P0 UNKNOWN_INTERNAL_ROUTE)…
+    registerSessionLint('lint-7a', {});
+    const blocked = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: VERIFIED_BODY }, { sessionId: 'lint-7a' });
+    expect(blocked.draft_rejected).toBe(true);
+    clearDraft('lint-7a');
+    // …with it, the lint sees the route the same way gate 3c does.
+    registerSessionLint('lint-7b', {});
+    tools._internals.sessionCheckedRoutes.set('lint-7b', new Set(['/some-verified-post/']));
+    const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: VERIFIED_BODY }, { sessionId: 'lint-7b' });
+    expect(r.ok).toBe(true);
+    clearDraft('lint-7b');
+  });
+
+  test('an evaluator failure records an explicit fail-open audit — never indistinguishable from lint-disabled (Codex PR r11)', async () => {
+    // Options whose property access throws force evaluate() to throw.
+    const poison = new Proxy({}, { get() { throw new Error('boom'); }, has() { throw new Error('boom'); } });
+    registerSessionLint('lint-8', poison);
+    const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: CLEAN_BODY }, { sessionId: 'lint-8' });
+    expect(r.ok).toBe(true); // fail OPEN — gate 3c stays authoritative
+    expect(getDraft('lint-8').self_lint).toEqual({ redrafts: 0, fail_open: 'evaluator_error' });
+    clearDraft('lint-8');
+  });
+
+  test('OFF_FOOTPRINT_CITY_CLAIM never blocks in-loop — the run-level LLM classifier owns its false positives', async () => {
+    registerSessionLint('lint-6', {});
+    const r = await executeBriefTool('emit_draft', {
+      frontmatter: { title: 'T' },
+      body: 'We proudly serve Tampa homeowners with quarterly visits.',
+    }, { sessionId: 'lint-6' });
+    expect(r.ok).toBe(true); // captured — gate 3c refines and parks if real
+    expect(getDraft('lint-6').self_lint).toEqual({ redrafts: 0, pass: true });
+    clearDraft('lint-6');
+  });
+
+  test('emit_metadata_only self-lints the DESCRIPTION only — protected titles are discarded at the publisher and only the run-level gate knows which', async () => {
+    registerSessionLint('lint-8', {});
+    // Violation lives in the description → rejected. (A violation ONLY in
+    // the title would pass here and be caught by the authoritative
+    // metadata-handler gate, which has the protected-title context.)
+    const bad = await executeBriefTool('emit_metadata_only', {
+      title: 'Lawn Treatments in Sarasota',
+      meta_description: 'Our EPA-approved treatments keep your family protected across Sarasota and Bradenton, with free estimates in under two minutes.',
+    }, { sessionId: 'lint-8' });
+    expect(bad.ok).toBe(false);
+    expect(bad.metadata_rejected).toBe(true);
+    expect(getDraft('lint-8')).toBeNull();
+    const clean = await executeBriefTool('emit_metadata_only', {
+      title: 'Lawn Treatments in Sarasota — What to Expect',
+      meta_description: 'What a Sarasota lawn treatment visit covers, how the label re-entry directions work, and when to expect results on St. Augustine turf.',
+    }, { sessionId: 'lint-8' });
+    expect(clean.ok).toBe(true);
+    const capturedMeta = getDraft('lint-8');
+    expect(capturedMeta.type).toBe('metadata');
+    // The audit trail records the retried session (Codex PR r2): one
+    // rejection above, then this pass.
+    expect(capturedMeta.self_lint).toEqual({ redrafts: 1, pass: true });
+    clearDraft('lint-8');
+    // The contract-REQUIRED {{cityPhone}} token must not trip the .mdx-body
+    // expression P0 — page metas carry it by rule.
+    registerSessionLint('lint-9', {});
+    const tokenMeta = await executeBriefTool('emit_metadata_only', {
+      title: 'Pest Control in Lakewood Ranch, FL | Waves',
+      meta_description: 'Need pest control in Lakewood Ranch? Waves treats common Southwest Florida pest problems. Call {{cityPhone}} for an estimate.',
+    }, { sessionId: 'lint-9' });
+    expect(tokenMeta.ok).toBe(true);
+    clearDraft('lint-9');
+  });
+
+  test('a FULL draft whose meta carries the required {{cityPhone}} token passes — evaluate() scrubs sanctioned meta tokens itself', async () => {
+    registerSessionLint('lint-10', {});
+    const r = await executeBriefTool('emit_draft', {
+      frontmatter: {
+        title: 'Pest Control in Lakewood Ranch, FL | Waves',
+        meta_description: 'Need pest control in Lakewood Ranch? Waves treats common Southwest Florida pest problems. Call {{cityPhone}} for an estimate.',
+      },
+      body: CLEAN_BODY,
+    }, { sessionId: 'lint-10' });
+    expect(r.ok).toBe(true);
+    clearDraft('lint-10');
+    // The scrub is DESCRIPTION-only: a {{cityPhone}} in the TITLE has no
+    // sanctioned use and still trips validation.
+    registerSessionLint('lint-11', {});
+    const badTitle = await executeBriefTool('emit_draft', {
+      frontmatter: {
+        title: 'Pest Control {{cityPhone}} | Waves',
+        meta_description: 'Need pest control in Lakewood Ranch? Waves treats common Southwest Florida pest problems.',
+      },
+      body: CLEAN_BODY,
+    }, { sessionId: 'lint-11' });
+    expect(badTitle.ok).toBe(false);
+    clearDraft('lint-11');
+  });
+
+  test('the agent prompts PERMIT a second sink call after a rejection — the call-once rule must not strand the redraft', () => {
+    const { WRITER_AGENT_CONFIG } = require('../services/content/agents/writer-agent-config');
+    const { META_REWRITER_CONFIG } = require('../services/content/agents/meta-rewriter-config');
+    const writerText = JSON.stringify(WRITER_AGENT_CONFIG);
+    const metaText = JSON.stringify(META_REWRITER_CONFIG);
+    expect(writerText).toMatch(/draft_rejected/);
+    expect(writerText).toMatch(/call emit_draft(\(\))? again/);
+    expect(metaText).toMatch(/metadata_rejected/);
+    expect(metaText).toMatch(/call emit_metadata_only(\(\))? again/);
+  });
+
+  test('sessions without registered lint options capture exactly as before', async () => {
+    const r = await executeBriefTool('emit_draft', { frontmatter: { title: 'T' }, body: PRICED_BODY }, { sessionId: 'lint-5' });
+    expect(r.ok).toBe(true);
+    expect(getDraft('lint-5').self_lint).toBeNull();
   });
 });
 

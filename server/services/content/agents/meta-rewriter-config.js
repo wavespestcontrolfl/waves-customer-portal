@@ -68,7 +68,9 @@ DON'T:
   - Stuff keywords. The primary keyword once in title + ~once in meta
     is enough.
 
-OUTPUT — call emit_metadata_only() once with the new title + meta.`,
+OUTPUT — call emit_metadata_only() with the new title + meta. If the result
+carries metadata_rejected, it was NOT captured — revise per its directives
+and call emit_metadata_only() again; otherwise call it only once.`,
 
   tools: [
     {
@@ -125,7 +127,7 @@ OUTPUT — call emit_metadata_only() once with the new title + meta.`,
     {
       type: 'custom',
       name: 'emit_metadata_only',
-      description: 'Submit the new title + meta_description. Call exactly ONCE. No body, no schema, no slug.',
+      description: 'Submit the new title + meta_description. Call ONCE — UNLESS the result comes back with metadata_rejected: the metadata was NOT captured; revise it per the returned `directives` and call emit_metadata_only again. No body, no schema, no slug.',
       input_schema: {
         type: 'object',
         required: ['title', 'meta_description'],

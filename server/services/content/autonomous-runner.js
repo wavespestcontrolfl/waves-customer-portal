@@ -83,10 +83,11 @@ const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
 
-// Bucket for operator-authored intercept briefs (intercept-brief-seeder).
-// Kept as a local constant (matching the seeder's export) so the runner's
-// claim path doesn't depend on the seeder module loading.
-const OPERATOR_INTERCEPT_BUCKET = 'operator_intercept';
+// Bucket for operator-authored intercept briefs (intercept-brief-seeder),
+// single-sourced with the sync guardrail-option derivation (the writer's
+// in-loop self-lint shares it) — a light module, so the runner's claim path
+// still doesn't depend on the seeder loading.
+const { OPERATOR_INTERCEPT_BUCKET, deriveSyncGuardrailOptions } = require('./guardrail-options');
 
 // The operator-authored text of an intercept brief (title/keywords/thesis/
 // outline/sourcing), for the comparison gate's operator-authorized-
@@ -170,24 +171,9 @@ const FACTS_GATED_ACTIONS = new Set([
   'new_supporting_blog',
 ]);
 
-// A brief may forbid dollar amounts even though it IS a competitor intercept.
-// Scans every string in the brief payload for that instruction; anything
-// unreadable is treated as forbidding (fail closed).
-// Tight on purpose: "no" must directly negate the noun. A looser window
-// matched "no-cost retreatments; large price" in an unrelated brief, which
-// would have silently withheld a permission that brief never forbade.
-const BRIEF_PRICE_PROHIBITION_RE = /\bno\s+(?:[\w-]+\s+){0,3}(?:dollar amounts?|prices|pricing)\b/i;
-function briefForbidsCompetitorPrices(...sources) {
-  let forbids = false;
-  const walk = (v) => {
-    if (forbids) return;
-    if (typeof v === 'string') { if (BRIEF_PRICE_PROHIBITION_RE.test(v)) forbids = true; return; }
-    if (Array.isArray(v)) { v.forEach(walk); return; }
-    if (v && typeof v === 'object') Object.values(v).forEach(walk);
-  };
-  try { sources.forEach(walk); } catch { return true; }
-  return forbids;
-}
+// briefForbidsCompetitorPrices moved to ./guardrail-options — the writer's
+// in-loop self-lint derives the same options, so the price-prohibition scan
+// must have exactly one definition.
 
 class AutonomousRunner {
   /**
@@ -461,6 +447,18 @@ class AutonomousRunner {
     const dispatchResult = await dispatcher.runWithBrief(brief, {
       dryRun,
       sessionTimeoutMs: agentSessionTimeoutMs(run.action_type, brief),
+      // W1 in-loop self-lint options — the SAME sync derivation gate 3c
+      // builds on (guardrail-options.js), so the writer's lint and the
+      // authoritative gate can never diverge. Refresh briefs are excluded:
+      // their guard options need the async live-page hydration (prior body,
+      // live meta) the in-loop lint deliberately skips; gate 3c covers them
+      // unchanged.
+      // Kill switch (house rule: every lane keeps one): default ON; set
+      // AUTONOMOUS_WRITER_SELF_LINT=false to disarm the in-loop lint — the
+      // authoritative run-level gates are untouched either way.
+      selfLintOptions: (brief.action_type === 'refresh_existing_page' || !envBool('AUTONOMOUS_WRITER_SELF_LINT', true))
+        ? null
+        : deriveSyncGuardrailOptions(opp, brief),
     }).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
     }));
@@ -542,7 +540,7 @@ class AutonomousRunner {
     if (brief.action_type === 'rewrite_title_meta') {
       let result;
       try {
-        result = await this._handleMetadataRewriteAction(brief, draft, run);
+        result = await this._handleMetadataRewriteAction(opp, brief, draft, run);
       } catch (err) {
         if (isDeterministicPublishError(err)) {
           const finalized = await finalize(run, t0, {
@@ -1822,7 +1820,7 @@ class AutonomousRunner {
     } catch { return 0; }
   }
 
-  async _handleMetadataRewriteAction(brief, draft, run) {
+  async _handleMetadataRewriteAction(opp, brief, draft, run) {
     const spamGate = getTitleMetaSpamGate();
     if (!spamGate?.evaluateTitleMetaSpam) {
       return {
@@ -1850,11 +1848,17 @@ class AutonomousRunner {
     // merely defaulted to the blog contract and continued.
     let targetPageType = null;
     let protectedTitle = false;
+    let liveDomains = null;
     try {
       const publisher = getAstroPublisher();
       const liveFm = publisher?.getLiveFrontmatter
         ? await publisher.getLiveFrontmatter(brief.target_url || brief.page_url || draft.page_url)
         : null;
+      // The live page's domains arm the brand-token guard below — metadata
+      // briefs may lack target_sites, and a spoke page with domains:null
+      // would let a literal hub brand in the title/description bypass the
+      // BRAND_TOKEN_LEAK P0.
+      liveDomains = Array.isArray(liveFm?.domains) ? liveFm.domains : null;
       const srcPath = typeof liveFm?._astro_source_path === 'string' ? liveFm._astro_source_path : null;
       if (srcPath) {
         if (srcPath.startsWith('src/content/blog/')) {
@@ -1875,7 +1879,6 @@ class AutonomousRunner {
         },
       };
     }
-
     const gateResult = spamGate.evaluateTitleMetaSpam({
       // Protected target: blank title makes inspectTitle skip (the proposal
       // is discarded by the publisher); the meta half still runs in full.
@@ -1899,6 +1902,102 @@ class AutonomousRunner {
           outcome: 'completed_pending_review',
           skip_reason: 'metadata_gate_fail',
           reviewer_notes: `Title/meta spam gate blocked PR creation: ${(gateResult.hard_failures || []).map((f) => f.code || f.reason).join(', ') || 'failed'}.`,
+        },
+      };
+    }
+
+    // Content guardrails on the metadata TEXT (fail closed, same posture as
+    // gate 3c): meta descriptions ship on every customer surface, so the
+    // compliance codes (REENTRY_SAFETY_CLAIM, BANNED_TOPIC) and the other
+    // publishable-text rules (price, product claims, prevention promises,
+    // tenure) apply here exactly as on full drafts — this lane returned
+    // before gate 3c and previously skipped them entirely. A protected
+    // title is discarded by the publisher, so only the shipping
+    // description-side text is evaluated (same posture as the spam gate).
+    const metadataGuardrails = getContentGuardrails();
+    if (!metadataGuardrails?.evaluate) {
+      return {
+        notes: 'metadata_guardrails_unavailable',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'content_guardrails_unavailable',
+          reviewer_notes: 'Content-guardrails module failed to load — failing closed; metadata rewrite routed to review instead of publishing without the compliance/price checks.',
+        },
+      };
+    }
+    // A missing domains array does NOT mean hub-only (Codex PR r5 audit):
+    // a blog post with null/empty domains renders on ALL sites (the Astro
+    // collection filter's fallback — the same resolution publishAstro's
+    // guardrails use), and a page served from a spoke host ships on that
+    // spoke regardless of its frontmatter. Resolve the effective domains
+    // so the brand-token guard arms, or park when the surface genuinely
+    // cannot be determined — never default a possibly-multi-domain
+    // rewrite to the hub-only brand rules. A page with a PRESENT empty
+    // array is explicit hub-only data and stays as-is.
+    if (targetPageType === 'supporting-blog') {
+      if (liveDomains == null || liveDomains.length === 0) liveDomains = FLEET_SPOKE_SITE_KEYS;
+    } else if (liveDomains == null || liveDomains.length === 0) {
+      // Host resolution runs for PRESENT-EMPTY arrays too (Codex PR r13
+      // audit): a page served from a spoke host ships on that spoke no
+      // matter what its frontmatter says — [] must not unarm the brand
+      // guard there. A hub-host (or host-unresolvable present-empty)
+      // page keeps explicit hub-only; only a fully-unresolvable NULL
+      // parks.
+      let targetHost = null;
+      try {
+        targetHost = new URL(String(brief.target_url || brief.page_url || draft.page_url || '')).hostname.toLowerCase().replace(/^www\./, '');
+      } catch (_) { targetHost = null; }
+      if (targetHost && FLEET_HUB_SITE_KEYS.includes(targetHost)) {
+        liveDomains = [];
+      } else if (targetHost) {
+        liveDomains = [targetHost];
+      } else if (liveDomains == null) {
+        return {
+          notes: 'metadata_domains_unresolved',
+          patch: {
+            outcome: 'completed_pending_review',
+            skip_reason: 'metadata_domains_unresolved',
+            reviewer_notes: 'The live page carries no domains array and the target reference has no resolvable host — parked instead of assuming hub-only brand rules for a rewrite that may ship on spoke domains.',
+          },
+        };
+      }
+    }
+    const metaGuardResult = metadataGuardrails.evaluate({
+      frontmatter: {
+        title: protectedTitle ? '' : draft.title,
+        // The REQUIRED {{cityPhone}} token is scrubbed from META fields
+        // inside evaluate() itself — no caller pre-scrub.
+        meta_description: draft.meta_description,
+      },
+      body: '',
+    }, {
+      ...deriveSyncGuardrailOptions(opp, brief),
+      // Live-page hydration, mirroring gate 3c's refresh posture: the
+      // resolved target's domains and page type override the brief-derived
+      // defaults.
+      ...(liveDomains != null ? { domains: liveDomains } : {}),
+      targetIsBlog: targetPageType === 'supporting-blog',
+    });
+    // Same footprint refinement gate 3c applies: an LLM-dismissible
+    // OFF_FOOTPRINT_CITY_CLAIM false positive must not park the rewrite;
+    // classifier/module failure keeps the deterministic findings (fail
+    // closed).
+    if (!metaGuardResult.pass) {
+      const metaClassifier = getFootprintClassifier();
+      if (metaClassifier) {
+        metaGuardResult.findings = await metaClassifier.refineFootprintFindings(metaGuardResult.findings);
+        metaGuardResult.pass = !metaGuardResult.findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
+      }
+    }
+    run.content_guardrails_result = metaGuardResult;
+    const metaBlocking = (metaGuardResult.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1');
+    if (metaBlocking.length) {
+      return {
+        notes: 'metadata_guardrails_fail',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'content_guardrails_failed',
+          reviewer_notes: `Content guardrails blocked the metadata rewrite: ${metaBlocking.map((f) => `${f.severity} ${f.code}`).join('; ')} — review before publishing.`,
         },
       };
     }
@@ -2946,88 +3045,55 @@ class AutonomousRunner {
    *   opportunities can never set these.
    */
   async _deriveGuardrailOptions(opp, brief) {
-    let liveDomains = null;
-    let liveMetaTitle = null;
-    let liveMetaDescription = null;
-    let targetIsBlog = false;
-    if (brief.action_type === 'refresh_existing_page') {
-      const publisher = getAstroPublisher();
-      if (publisher?.getLiveFrontmatter) {
-        let liveFm;
-        try {
-          liveFm = await publisher.getLiveFrontmatter(brief.target_url || opp.page_url);
-        } catch (err) {
-          logger.warn(`[autonomous-runner] live frontmatter load for guardrails failed: ${err.message}`);
-          liveFm = null;
-        }
-        if (liveFm == null) {
-          const e = new Error(`Could not read live page frontmatter for ${brief.target_url || opp.page_url} — cannot enforce the brand-token guard (fail closed)`);
-          e.code = 'REFRESH_DOMAINS_LOAD_FAILED';
-          e.statusCode = 422;
-          throw e;
-        }
-        liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
-        // Owner hard rule (2026-07-16): service/location metaTitles are never
-        // edited — hand the live value to the guardrails so a rewriting draft
-        // parks (PROTECTED_META_TITLE_REWRITE) instead of publishing. Rides
-        // the same fail-closed liveFm load as the brand-token guard above.
-        // Blog targets are exempt (legacy v1 posts may carry a legitimately
-        // editable metaTitle, and publishRefresh only freezes non-blog
-        // targets); an unresolvable source path falls back to PROTECTED —
-        // wrongly parking a rare legacy-blog title edit is recoverable in
-        // review, silently shipping a service metaTitle rewrite is not.
-        const liveIsBlog = typeof publisher.isBlogTarget === 'function'
-          && typeof liveFm._astro_source_path === 'string'
-          && publisher.isBlogTarget(liveFm._astro_source_path);
-        targetIsBlog = liveIsBlog;
-        liveMetaTitle = !liveIsBlog && liveFm.metaTitle != null && String(liveFm.metaTitle).trim()
-          ? String(liveFm.metaTitle)
-          : null;
-        // Owner rule 2026-07-29 meta contract: non-blog changed metas must
-        // carry {{cityPhone}}; blog changed metas carry NO phone and nothing
-        // salesy; all cap at 160 rendered. The guardrail compares against the
-        // live value so an unchanged carried-over meta is grandfathered.
-        const liveMeta = liveFm.metaDescription ?? liveFm.meta_description;
-        liveMetaDescription = liveMeta != null ? String(liveMeta) : null;
+    // The synchronous, brief-only core is SHARED with the writer's in-loop
+    // self-lint (guardrail-options.deriveSyncGuardrailOptions) — one
+    // derivation, two call sites. This method layers the ASYNC refresh
+    // hydration on top: live domains (brand-token guard), the protected
+    // live metaTitle, the live meta description, and the prior body the
+    // structure gates grandfather.
+    const options = deriveSyncGuardrailOptions(opp, brief);
+    if (brief.action_type !== 'refresh_existing_page') return options;
+
+    const publisher = getAstroPublisher();
+    let liveFm = null;
+    if (publisher?.getLiveFrontmatter) {
+      try {
+        liveFm = await publisher.getLiveFrontmatter(brief.target_url || opp.page_url);
+      } catch (err) {
+        logger.warn(`[autonomous-runner] live frontmatter load for guardrails failed: ${err.message}`);
+        liveFm = null;
       }
     }
-    const operatorBrief = opp.bucket === OPERATOR_INTERCEPT_BUCKET
-      ? (brief?.voice_constraints?.operator_brief || null)
+    if (liveFm == null) {
+      const e = new Error(`Could not read live page frontmatter for ${brief.target_url || opp.page_url} — cannot enforce the brand-token guard (fail closed)`);
+      e.code = 'REFRESH_DOMAINS_LOAD_FAILED';
+      e.statusCode = 422;
+      throw e;
+    }
+    options.domains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
+    // Owner hard rule (2026-07-16): service/location metaTitles are never
+    // edited — hand the live value to the guardrails so a rewriting draft
+    // parks (PROTECTED_META_TITLE_REWRITE) instead of publishing. Rides
+    // the same fail-closed liveFm load as the brand-token guard above.
+    // Blog targets are exempt (legacy v1 posts may carry a legitimately
+    // editable metaTitle, and publishRefresh only freezes non-blog
+    // targets); an unresolvable source path falls back to PROTECTED —
+    // wrongly parking a rare legacy-blog title edit is recoverable in
+    // review, silently shipping a service metaTitle rewrite is not.
+    const liveIsBlog = typeof publisher.isBlogTarget === 'function'
+      && typeof liveFm._astro_source_path === 'string'
+      && publisher.isBlogTarget(liveFm._astro_source_path);
+    options.targetIsBlog = liveIsBlog;
+    options.liveMetaTitle = !liveIsBlog && liveFm.metaTitle != null && String(liveFm.metaTitle).trim()
+      ? String(liveFm.metaTitle)
       : null;
-    // Narrow operator-FAQ exception (owner directive 2026-06-11: FAQPage on
-    // every intercept post) — manifest-derived, never from generated content.
-    const operatorFaqException = operatorBrief?.faq_required === true;
-    const spokeDomains = Array.isArray(brief.target_sites) ? brief.target_sites.filter(Boolean) : [];
-    const guardDomains = liveDomains != null
-      ? liveDomains
-      : (spokeDomains.length ? spokeDomains : null);
-    // A spoke seed keeps the coarse 'pest' service for the link gates but
-    // tags a FAQ-blocked pest topic on operator_brief.faq_blocked_topic —
-    // fold it in so a writer-added FAQ on a blocked topic still P0s.
-    // Deliberately NOT bucket-gated (unlike the exceptions above): this
-    // TIGHTENS the guard, and spoke seeds carry it outside the intercept
-    // bucket.
-    const faqBlockedTopic = brief?.voice_constraints?.operator_brief?.faq_blocked_topic || null;
-    // Same rationale for family rows: specialty→pest canonicalization
-    // hides the specific blocked topic in gsc_signal (Codex r25).
-    const specialtyTopic = brief?.gsc_signal?.specialty_topic || null;
-    const baseService = opp.service || brief.service || null;
-    // Brief-mandated internal links are binding writer instructions (the
-    // prompt calls internal_links_to_add a checklist), so they are allowed on
-    // top of the guardrails' static internal-route allowlist — same posture
-    // as requiredSourceUrls on the external-link gate. The curated operator
-    // hub_link (a city page outside the static set) is part of that contract.
-    let briefLinks = brief?.internal_links_to_add;
-    if (typeof briefLinks === 'string') { try { briefLinks = JSON.parse(briefLinks); } catch (_) { briefLinks = []; } }
-    // hub_link is read un-bucket-gated (like faqBlockedTopic above): spoke
-    // seeds carry it outside the intercept bucket and the quality gate's
-    // hub_link_present check REQUIRES the draft to contain it.
-    const curatedHubLink = brief?.voice_constraints?.operator_brief?.hub_link || null;
-    const allowedInternalLinks = [
-      ...(Array.isArray(briefLinks) ? briefLinks : []),
-      ...(curatedHubLink ? [curatedHubLink] : []),
-    ];
-    const isRefresh = brief.action_type === 'refresh_existing_page';
+    // Owner rule 2026-07-29 meta contract: non-blog changed metas must
+    // carry {{cityPhone}}; blog changed metas carry NO phone and nothing
+    // salesy; all cap at 160 rendered. The guardrail compares against the
+    // live value so an unchanged carried-over meta is grandfathered.
+    const liveMeta = liveFm.metaDescription ?? liveFm.meta_description;
+    options.liveMetaDescription = liveMeta != null ? String(liveMeta) : null;
+
     // Refresh drafts rewrite an EXISTING live body. The structure gates
     // grandfather what that prior body already carried but police writer
     // ADDITIONS — so the prior body itself is part of the guard options.
@@ -3037,68 +3103,21 @@ class AutonomousRunner {
     // guardrails' P1 REFRESH_PRIOR_BODY_UNAVAILABLE stays as the backstop
     // for callers that pass isRefresh without this derivation.)
     let priorBody = null;
-    if (isRefresh) {
-      const publisher = getAstroPublisher();
-      if (publisher?.loadExistingPageBody) {
-        try {
-          priorBody = (await publisher.loadExistingPageBody(brief.target_url || opp.page_url))?.body || null;
-        } catch (err) {
-          logger.warn(`[autonomous-runner] prior-body load for refresh guardrails failed: ${err.message}`);
-        }
-      }
-      if (!priorBody) {
-        const e = new Error(`Could not read the live prior body for ${brief.target_url || opp.page_url} — the refresh structure gates cannot grandfather preserved content (fail closed)`);
-        e.code = 'REFRESH_PRIOR_BODY_LOAD_FAILED';
-        e.statusCode = 422;
-        throw e;
+    if (publisher?.loadExistingPageBody) {
+      try {
+        priorBody = (await publisher.loadExistingPageBody(brief.target_url || opp.page_url))?.body || null;
+      } catch (err) {
+        logger.warn(`[autonomous-runner] prior-body load for refresh guardrails failed: ${err.message}`);
       }
     }
-    return {
-      service: (faqBlockedTopic || specialtyTopic)
-        ? [baseService, faqBlockedTopic, specialtyTopic].filter(Boolean)
-        : baseService,
-      primaryKeyword: brief.target_keyword || null,
-      domains: guardDomains,
-      operatorFaqException,
-      // The brief's NAMED sources are the citation allowance now that the
-      // broad .gov/.edu TLD rule is gone (owner ruling 2026-08-01, third).
-      // Both shapes count: `required_sources` (must-link instructions) and
-      // the manifest's own `sources` list. Non-URL entries — the briefs
-      // carry prose instructions in there too — are skipped downstream.
-      requiredSourceUrls: [
-        ...(Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : []),
-        ...(Array.isArray(operatorBrief?.sources) ? operatorBrief.sources : []),
-        ...(Array.isArray(opp?.signal_metadata?.intercept_brief?.sources) ? opp.signal_metadata.intercept_brief.sources : []),
-      ],
-      // Operator provenance is the OPERATOR BRIEF itself (it only exists for
-      // operator_intercept rows). The old source_notes-only test missed
-      // briefs that mandate sourcing via verify_notes/required_sources —
-      // the B1 cancellation brief cites the Florida statute through
-      // verify_notes and got no citation allowance (Codex P1, 2026-08-01).
-      operatorCitations: Boolean(operatorBrief),
-      // Competitor-price citations are STRICTER: category/spoke seeds share
-      // the operator_intercept bucket (and get citation hosts above) but
-      // auto-publish informational posts — only a true competitor-intercept
-      // brief (signal_metadata.intercept_brief) may cite competitor prices
-      // (Codex P0, 2026-08-01).
-      // …and the brief must not FORBID them. B2/B4 carry "GATE RULE … NO
-      // TruGreen dollar amounts anywhere in the post", so treating every
-      // intercept as price-authorized overrode the brief's own instruction
-      // (Codex). Fail closed: an unreadable brief keeps the full guard.
-      competitorPriceCitations: Boolean(opp?.signal_metadata?.intercept_brief)
-        && !briefForbidsCompetitorPrices(opp?.signal_metadata?.intercept_brief, operatorBrief),
-      // A ban is stronger than "no permission": it must also outrank the
-      // generic calculator/quote/"pricing varies" framing exemption, which
-      // the seeder's own writer instruction steers drafts straight into
-      // (Codex).
-      forbidAllPrices: briefForbidsCompetitorPrices(opp?.signal_metadata?.intercept_brief, operatorBrief),
-      allowedInternalLinks,
-      isRefresh,
-      priorBody,
-      liveMetaTitle,
-      liveMetaDescription,
-      targetIsBlog,
-    };
+    if (!priorBody) {
+      const e = new Error(`Could not read the live prior body for ${brief.target_url || opp.page_url} — the refresh structure gates cannot grandfather preserved content (fail closed)`);
+      e.code = 'REFRESH_PRIOR_BODY_LOAD_FAILED';
+      e.statusCode = 422;
+      throw e;
+    }
+    options.priorBody = priorBody;
+    return options;
   }
 
   // Load + JSONB-parse the brief the reviewed run was generated against
@@ -3390,7 +3409,7 @@ const PINNED_SLUG_PATTERN = /^\/[a-z0-9-]+(\/[a-z0-9-]+)*\/$/;
 const { POST_CATEGORIES: BLOG_POST_CATEGORIES, slugLeafOf: blogSlugLeafOf } = require('../content-astro/blog-categories');
 // Spoke fleet keys shared with the publisher's isFleetCanonicalHost — also a
 // dependency-free module (content-guardrails already requires it).
-const { SPOKE_SITE_KEYS: FLEET_SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
+const { SPOKE_SITE_KEYS: FLEET_SPOKE_SITE_KEYS, HUB_SITE_KEYS: FLEET_HUB_SITE_KEYS } = require('../content-astro/spoke-sites');
 // The SAME publish-origin routing decision the publisher makes (single-spoke
 // resolution + kill switch + origin mapping) — shared module, not a mirror,
 // so repaired draft.url values and self-links can never point at a different
@@ -3730,6 +3749,11 @@ function isDeterministicPublishError(err) {
   // draft. (Guardrails don't run on the autonomous publish path, so the
   // fact-check is the first edit-required gate to reach this publisher.)
   if (err?.code === 'BLOG_FACTCHECK_FAILED') return true;
+  // Compliance P0 is edit-required for the same reason: the copy states an
+  // unconditional safety claim or offers a service Waves does not provide, and
+  // re-running the identical draft through the identical gate cannot change
+  // that. Park it for review instead of releasing the claim.
+  if (err?.code === 'BLOG_COMPLIANCE_FAILED') return true;
   // Hero generation/compression failure is fail-closed: the post cannot ship
   // without committed hero bytes (the schema requires hero_image and the live
   // hero is the LCP element), so park the run for review instead of
