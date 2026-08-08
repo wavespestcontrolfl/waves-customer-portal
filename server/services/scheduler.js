@@ -121,8 +121,9 @@ function scheduledSmsAttemptSql() {
 async function recoverStaleScheduledSmsClaims(now) {
   const staleBefore = new Date(now.getTime() - SCHEDULED_SMS_STALE_CLAIM_MS);
   const attemptsSql = scheduledSmsAttemptSql();
-  const { DURABLE_FINALIZE_ENTRY_POINTS } = require('./messaging/deferred-replay-registry');
+  const { DURABLE_FINALIZE_ENTRY_POINTS, TERMINAL_HOOK_ENTRY_POINTS } = require('./messaging/deferred-replay-registry');
   const DURABLE_FINALIZE_PLACEHOLDERS = DURABLE_FINALIZE_ENTRY_POINTS.map(() => '?').join(', ') || "''";
+  const TERMINAL_HOOK_PLACEHOLDERS = TERMINAL_HOOK_ENTRY_POINTS.map(() => '?').join(', ') || "''";
 
   // Settle stale claims whose send PROVABLY happened first: the provider
   // path writes a sibling sms_log row tagged with scheduled_sms_log_id when
@@ -210,12 +211,22 @@ async function recoverStaleScheduledSmsClaims(now) {
         metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
           'scheduled_sms_recovered_at', ?::timestamptz
         )
+        -- terminal_pending rides the failed flip ATOMICALLY (same contract
+        -- as finalize_pending above): the terminal hook runs right after
+        -- this recovery, and a crash/throwing hook must leave a durable
+        -- obligation the terminal-hook sweep can find. Entry-point list =
+        -- registry entries with an onTerminal hook.
+        || CASE
+          WHEN ${attemptsSql} >= ? AND COALESCE(metadata->>'entry_point', '') IN (${TERMINAL_HOOK_PLACEHOLDERS})
+            THEN jsonb_build_object('terminal_pending', true)
+          ELSE '{}'::jsonb
+        END
     WHERE status = 'sending'
       AND scheduled_for IS NOT NULL
       AND scheduled_for <= ?
       AND updated_at <= ?
     RETURNING id, status, metadata
-  `, [SCHEDULED_SMS_MAX_ATTEMPTS, now, now, now, staleBefore]);
+  `, [SCHEDULED_SMS_MAX_ATTEMPTS, now, now, SCHEDULED_SMS_MAX_ATTEMPTS, ...TERMINAL_HOOK_ENTRY_POINTS, now, staleBefore]);
 
   const recovered = result.rows || [];
   if (recovered.length > 0) {
@@ -2600,7 +2611,7 @@ function initScheduledJobs() {
           // a read failure is retryable-ineligible (fail closed on both
           // sides of the attempt cap — never send unverified state).
           {
-            const { recheckDeferredReplay, runTerminalHookDurably } = require('./messaging/deferred-replay-registry');
+            const { recheckDeferredReplay, runTerminalHookDurably, requiresTerminalHook } = require('./messaging/deferred-replay-registry');
             // Same enrichment the finalize call gets below: several
             // enqueue sites store the customer only on sms_log.customer_id
             // (not in metadata), and a recheck that keys on customer state
@@ -2645,10 +2656,14 @@ function initScheduledJobs() {
                 });
                 logger.warn(`[scheduled-sms] deferred replay ${msg.id} (${claimMeta.entry_point}) state unverifiable — held for retry`);
               } else {
+                // terminal_pending stamped ATOMICALLY with the flip (same
+                // contract as finalize_pending): a crash or throwing hook
+                // after this write must leave a durable obligation the
+                // terminal-hook sweep can find.
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'blocked',
                   updated_at: new Date(),
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?)", [`stale_replay:${recheck.reason || 'unknown'}`]),
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?, 'terminal_pending', ?::boolean)", [`stale_replay:${recheck.reason || 'unknown'}`, requiresTerminalHook(claimMeta.entry_point)]),
                 });
                 logger.info(`[scheduled-sms] deferred replay ${msg.id} (${claimMeta.entry_point}) suppressed: ${recheck.reason || 'recheck-exhausted'}`);
                 // A suppressed replay will never deliver — same obligation
@@ -2820,12 +2835,18 @@ function initScheduledJobs() {
               });
               logger.warn(`[scheduled-sms] Could not verify current customer phone for ${msg.id}; retrying (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
             } else {
-              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
+              // terminal_pending rides the flip atomically (finalize_pending
+              // contract) so a crash/throwing hook can't lose the handoff.
+              const { runTerminalHookDurably, requiresTerminalHook } = require('./messaging/deferred-replay-registry');
+              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                status: 'blocked',
+                updated_at: completedAt,
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
+              });
               logger.warn(`[scheduled-sms] Blocked scheduled SMS ${msg.id}: customer phone unverifiable after ${SCHEDULED_SMS_MAX_ATTEMPTS} attempts`);
               // Terminal for this row's obligation too — same registry
               // handoff as a terminal provider block (release once-ever
               // claims, arm fallbacks, flip state into the admin lane).
-              const { runTerminalHookDurably } = require('./messaging/deferred-replay-registry');
               await runTerminalHookDurably(msg.id, claimMeta.entry_point, claimMeta);
             }
             continue;
@@ -3108,16 +3129,22 @@ function initScheduledJobs() {
               });
               logger.warn(`[scheduled-sms] Deposit receipt ${msg.id} email handoff transient failure — rescheduled (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
             } else {
-              await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'blocked', updated_at: completedAt });
-              logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-              // Terminal block on a deferred replay: the message provably
-              // never delivered — hand the obligation off per the entry
-              // point's registry hook (release once-ever claims, arm the
-              // standalone review fallback, flip referral/report state into
-              // the admin retry lane). Armed ONLY here, never on timers,
-              // so fallbacks can't race a still-retryable replay.
+              // terminal_pending rides the flip atomically (finalize_pending
+              // contract) so a crash/throwing hook can't lose the handoff.
               {
-                const { runTerminalHookDurably } = require('./messaging/deferred-replay-registry');
+                const { runTerminalHookDurably, requiresTerminalHook } = require('./messaging/deferred-replay-registry');
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'blocked',
+                  updated_at: completedAt,
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
+                });
+                logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+                // Terminal block on a deferred replay: the message provably
+                // never delivered — hand the obligation off per the entry
+                // point's registry hook (release once-ever claims, arm the
+                // standalone review fallback, flip referral/report state into
+                // the admin retry lane). Armed ONLY here, never on timers,
+                // so fallbacks can't race a still-retryable replay.
                 await runTerminalHookDurably(msg.id, claimMeta.entry_point, claimMeta);
               }
               // The customer was never answered — used + parked cards return.
@@ -3207,9 +3234,15 @@ function initScheduledJobs() {
                 });
                 logger.warn(`[scheduled-sms] Pre-accept exception on ${msg.id} — rescheduled for retry`);
               } else {
-                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({ status: 'failed', updated_at: failedAt });
+                // terminal_pending rides the flip atomically (finalize_pending
+                // contract) so a crash/throwing hook can't lose the handoff.
+                const { runTerminalHookDurably, requiresTerminalHook } = require('./messaging/deferred-replay-registry');
+                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+                  status: 'failed',
+                  updated_at: failedAt,
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(failedMeta.entry_point)]),
+                });
                 if (failedMeta.entry_point) {
-                  const { runTerminalHookDurably } = require('./messaging/deferred-replay-registry');
                   await runTerminalHookDurably(msg.id, failedMeta.entry_point, failedMeta);
                 }
                 await require('./sms-suggest-mode').reopenScheduledSuggestions({

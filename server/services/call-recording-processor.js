@@ -11120,16 +11120,25 @@ const CallRecordingProcessor = {
                     // same handoff as the estimate-accept flow.
                     if (sendResult.code === 'QUIET_HOURS_HOLD' && sendResult.deferred && scheduledServiceId) {
                       try {
-                        await db('appointment_reminders')
+                        const rearmed = await db('appointment_reminders')
                           .where({ scheduled_service_id: scheduledServiceId })
                           .where({ cancelled: false })
                           .update({ confirmation_sent: false, confirmation_sent_at: null, updated_at: new Date() });
-                        // The sweep's canonical confirmation fans out to
-                        // EVERY appointment contact — the secondary loop
-                        // below must not also queue held copies, or those
-                        // contacts get both at 8:00 AM.
-                        confirmationRearmed = true;
-                        logger.info(`[call-proc] Confirmation for ${scheduledServiceId} held (send window) — re-armed for the stranded-confirmation sweep`);
+                        if (rearmed > 0) {
+                          // The sweep's canonical confirmation fans out to
+                          // EVERY appointment contact — the secondary loop
+                          // below must not also queue held copies, or those
+                          // contacts get both at 8:00 AM. ONLY when a row
+                          // actually re-armed: reminder registration is
+                          // best-effort (registerScheduleSideEffects
+                          // swallows its failure), so a 0-row update means
+                          // NO sweep row owns delivery and the secondary
+                          // rail must stay active.
+                          confirmationRearmed = true;
+                          logger.info(`[call-proc] Confirmation for ${scheduledServiceId} held (send window) — re-armed for the stranded-confirmation sweep`);
+                        } else {
+                          logger.warn(`[call-proc] Confirmation for ${scheduledServiceId} held (send window) but NO reminder row to re-arm — held secondaries will queue individually`);
+                        }
                       } catch (rearmErr) {
                         logger.error(`[call-proc] confirmation re-arm failed for ${scheduledServiceId}: ${rearmErr.message}`);
                       }

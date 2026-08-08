@@ -327,7 +327,19 @@ describe('deferred-replay registry', () => {
   });
 
   test('terminal hooks are durable (r16): obligation stamped first, cleared only on success', async () => {
-    const { runTerminalHookDurably } = require('../services/messaging/deferred-replay-registry');
+    const { runTerminalHookDurably, requiresTerminalHook, TERMINAL_HOOK_ENTRY_POINTS } = require('../services/messaging/deferred-replay-registry');
+    // The executor's terminal flips stamp terminal_pending atomically for
+    // exactly the hooked entry points (r18) — derived from the registry.
+    expect(TERMINAL_HOOK_ENTRY_POINTS).toEqual(expect.arrayContaining([
+      'dispatch_completion_deferred',
+      'voicemail_lead_sms_deferred',
+      'customer_service_request_deferred',
+      'appointment_tagger_prep_deferred',
+    ]));
+    for (const ep of TERMINAL_HOOK_ENTRY_POINTS) {
+      expect(requiresTerminalHook(ep)).toBe(true);
+    }
+    expect(requiresTerminalHook('estimate_follow_up_deferred')).toBe(false);
     const upd = { where: jest.fn(() => upd), update: jest.fn(async () => 1) };
     db.mockReturnValue(upd);
 

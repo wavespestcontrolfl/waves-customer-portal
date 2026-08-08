@@ -771,8 +771,11 @@ async function runTerminalHookDurably(msgId, entryPoint, claimMeta = {}) {
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', true, 'terminal_attempts', COALESCE((metadata->>'terminal_attempts')::int, 0) + 1)"),
       updated_at: new Date(),
     }).catch((err) => {
-      // Stamp failure → still run the hook now (today's behavior); only
-      // the crash/throw recovery is lost for this one row.
+      // Best-effort attempt counting only: the DURABLE obligation was
+      // already stamped atomically with the terminal status flip at the
+      // executor's call site (requiresTerminalHook), so a failure here
+      // costs nothing but this run's attempt increment — the sweep still
+      // finds the row.
       logger.warn(`[deferred-replay] terminal_pending stamp failed for ${msgId}: ${err.message}`);
     });
   }
@@ -833,6 +836,22 @@ function requiresDurableFinalize(entryPoint) {
   return !!(entry && entry.durableFinalize === true && typeof entry.finalize === 'function');
 }
 
+// True when the entry point registers an onTerminal hook — the executor's
+// terminal-status writes stamp `terminal_pending` ATOMICALLY with the flip
+// for these (same contract as finalize_pending: the obligation must be
+// durable BEFORE the hook runs, or a crash/throw between the flip and the
+// hook loses it where no sweep can see it).
+function requiresTerminalHook(entryPoint) {
+  const entry = entryFor(entryPoint);
+  return !!(entry && typeof entry.onTerminal === 'function');
+}
+
+// Concrete list for the stale-claim recovery SQL's WHERE IN (same pattern
+// as DURABLE_FINALIZE_ENTRY_POINTS below).
+const TERMINAL_HOOK_ENTRY_POINTS = Object.entries(REGISTRY)
+  .filter(([, entry]) => typeof entry.onTerminal === 'function')
+  .map(([key]) => key);
+
 // Entry points whose finalize rides the finalize_pending durability rail —
 // consumed by the executor's settlement sites and the stranded-finalization
 // recovery query (which needs the concrete list for its WHERE IN).
@@ -847,6 +866,8 @@ module.exports = {
   runTerminalHookDurably,
   sweepPendingTerminalHooks,
   requiresDurableFinalize,
+  requiresTerminalHook,
   DURABLE_FINALIZE_ENTRY_POINTS,
+  TERMINAL_HOOK_ENTRY_POINTS,
   _registry: REGISTRY,
 };
