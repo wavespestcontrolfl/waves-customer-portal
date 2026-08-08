@@ -224,6 +224,7 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
           const sub = {
             whereRaw: (...a) => { recorded.push(['orWhere>whereRaw', ...a]); return sub; },
             whereNull: (...a) => { recorded.push(['orWhere>whereNull', ...a]); return sub; },
+            where: (...a) => { recorded.push(['orWhere>where', ...a]); return sub; },
           };
           args[0].call(sub);
           return group;
@@ -268,6 +269,7 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     // mid-flight pass's provisional stamp never surfaces another caller's
     // transcript on the wrong card (pre-push P1).
     expect(recorded).toContainEqual(['orWhere>whereNull', 'processing_token']);
+    expect(recorded).toContainEqual(['orWhere>where', 'processing_status', 'processed']);
     expect(recorded.filter((c) => c[0] === 'orWhere')).toEqual([]);
     expect(recorded.filter((c) => c[0] === 'orWhereRaw' && String(c[2]) === '2155848892')).toEqual([]);
   });
@@ -292,6 +294,7 @@ describe('GET /admin/leads/:id — call reference (recording + transcript)', () 
     const recorded = recordedCallLogPredicates();
     expect(recorded).toContainEqual(['orWhere>whereRaw', "metadata->>'lead_id' = ?", ['lead-2']]);
     expect(recorded).toContainEqual(['orWhere>whereNull', 'processing_token']);
+    expect(recorded).toContainEqual(['orWhere>where', 'processing_status', 'processed']);
     expect(recorded.filter((c) => c[0] === 'orWhere')).toEqual([]);
   });
 
