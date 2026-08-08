@@ -3227,6 +3227,32 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(ambiguous.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
+  test('comment blanking respects rendered props; duration-first drying blocks (Codex PR r19)', () => {
+    for (const body of [
+      // Comment DELIMITERS inside a rendered string prop are literal copy —
+      // blanking them must not take the claim with them.
+      '<BottomLineBox verdict={"<!-- The treatment is pet-safe. -->"} />',
+      // A fixed drying figure is the same prohibited claim as a re-entry one.
+      'After 30 minutes, the treatment will be dry.',
+      'Within 30 minutes, the pesticide should be dry.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      // Real comments still drop — including a commented-OUT component, whose
+      // props are extracted in place and blanked along with the delimiters.
+      '<!-- The treatment is pet-safe. -->',
+      '{/* The pesticide is EPA-approved. */}',
+      '<!-- <BottomLineBox verdict="The treatment is pet-safe." /> -->',
+      // Drying stays treatment-context-gated.
+      'After 30 minutes, the paint will be dry.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    }
+  });
+
   test('escaped quotes inside MDX expression props survive extraction (Codex PR r15)', () => {
     const r = guardrails.evaluate({ body: "<BottomLineBox verdict={'Waves\\' treatment is safe for pets > ordinary products.'} />" }, {});
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);

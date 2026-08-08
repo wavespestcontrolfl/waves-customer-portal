@@ -3022,6 +3022,12 @@ const REENTRY_SAFETY_SRCS = [
   // treatment-context gate so ordinary timing prose stays legal.
   `\\b(?:after|in|within|once)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,40}?\\b(?:re-?enter\\w*|re-?entry|re-?occup\\w+)\\b`,
   { src: `\\b(?:after|in|within|once)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,40}?\\b(?:enter\\w*|return\\w*|walk\\w*|play\\w*|go\\s+(?:back|inside|into|in)\\b)`, needsTreatmentContext: true },
+  // Duration-first DRYING predicates (Codex PR r19): "After 30 minutes, the
+  // treatment will be dry." The r18 duration-first branches stopped at entry
+  // actions, but a fixed drying figure is the same prohibited claim.
+  // Treatment-context-gated like every other bare drying form, so "After 30
+  // minutes, the paint will be dry" stays maintenance advice.
+  { src: `\\b(?:after|in|within|once)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,40}?\\bdr(?:y|ies|ied)\\b`, needsTreatmentContext: true },
   // A bounded qualifier may sit between the drying verb and the
   // preposition (Codex PR r8: "dries completely within 45 minutes").
   { src: `\\bdr(?:y|ies|ied)\\s+(?:\\w+\\s+){0,2}?(?:in|within|after|for)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
@@ -3149,12 +3155,6 @@ const MDX_TAG_RE = new RegExp(
 
 function normalizeHardCopyText(text) {
   return String(text || '')
-    // HTML and MDX comments are dropped ENTIRELY by the renderer, so their
-    // bodies are never customer-visible (Codex PR r18). Blanked FIRST, before
-    // any other pass, so an author's note ("<!-- is pet-safe ok here? -->")
-    // cannot burn a writer retry or park a refresh over text no reader sees.
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, ' ')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     // Reference-style and collapsed/shortcut links render as their
     // anchor text too (Codex PR r16: "[safe][policy]").
@@ -3187,7 +3187,13 @@ function normalizeHardCopyText(text) {
       // Escape-aware in EVERY arm: quotes since Codex PR r15
       // (`{'Waves\' treatment…'}`), backticks since r18 — a `\`` inside a
       // template literal must not end extraction and drop the visible tail.
-      const push = (raw) => vals.push(String(raw).replace(/\\(['"`\\])/g, '$1'));
+      // Comment DELIMITERS inside an extracted value are neutralized, never
+      // the text around them (Codex PR r19): `verdict={"<!-- …pet-safe. -->"}`
+      // is a literal string the component RENDERS, so the claim is visible and
+      // must survive the comment pass that runs after this one.
+      const push = (raw) => vals.push(
+        String(raw).replace(/\\(['"`\\])/g, '$1').replace(/<!--|-->|\{\s*\/\*|\*\/\s*\}/g, ' '),
+      );
       let m;
       if (/^[A-Z]/.test(name)) {
         const strRe = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\]|\\.)*)`/g;
@@ -3198,6 +3204,15 @@ function normalizeHardCopyText(text) {
       }
       return vals.length ? ` ${vals.join(' ')} ` : '';
     })
+    // HTML and MDX comments are dropped ENTIRELY by the renderer, so their
+    // bodies are never customer-visible (Codex PR r18) — an author's note
+    // must not burn a writer retry or park a refresh over text no reader
+    // sees. Runs AFTER the tag pass (Codex PR r19): blanking first also ate
+    // comment-delimited text inside RENDERED string props. In this order a
+    // commented-OUT component is still dropped correctly — its props are
+    // extracted in place, between the delimiters, and blanked with them.
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, ' ')
     // HTML character references render as their characters (Codex PR
     // r15: `pet&#45;safe` renders as pet-safe). Decoded AFTER the tag
     // scan — an ENCODED `&lt;em&gt;` renders as literal text in the
