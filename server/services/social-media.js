@@ -383,7 +383,7 @@ const PRICING_PATTERNS = /\$\d+(?:\.\d{2})?(?:\s*\/\s*(?:mo(?:nth)?|yr|year|visi
 // Includes the compliance-language class (AGENTS.md): no pesticide is ever
 // blanket-"safe" (pet-safe / family-safe / safe for kids), and it's
 // "EPA-registered", never "EPA-approved".
-const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects|(?:pet|kid|child|family)[\s-]*(?:and[\s-]*(?:pet|kid|child|family)[\s-]*)?safe|safe\s+(?:for|around)\s+(?:your\s+|the\s+|our\s+)?(?:pets?|kids?|children|famil(?:y|ies))|EPA[\s-]*approved|approved\s+by\s+(?:the\s+)?EPA)\b/i;
+const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects|(?:pet|kid|child|family)[\s-]*(?:and[\s-]*(?:pet|kid|child|family)[\s-]*)?safe|safe\s+(?:for|around)\s+(?:your\s+|the\s+|our\s+)?(?:pets?|kids?|children|famil(?:y|ies))|E\.?\s*P\.?\s*A\b\.?[\s-]*approved|approved\s+by\s+(?:the\s+)?E\.?\s*P\.?\s*A\b)\b/i;
 // Word-order enumeration of banned claims proved unbounded across review
 // rounds (#3059 r2-r9), so the timing and product-safety classes are caught
 // by CLAUSE-LEVEL CO-OCCURRENCE instead. These constants are the vocabulary.
@@ -397,7 +397,11 @@ const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|sa
 // fixed re-entry moment a duration does (codex P1 #3176 r20) — the clause
 // still needs the re-entry context AND no agronomic exemption, so business
 // hours and appointment windows in ordinary copy stay legal.
-const TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b|\d{1,2}:\d{2}\b)/i;
+const TIMING_DURATION_RE = /\b(?:\d+(?:\.\d+)?\s*(?:[-–]\s*(?:\d+(?:\.\d+)?\s*)?)?(?:minutes?|mins?|seconds?|secs?|hours?|hrs?|m|h|s)\b|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|seconds?|secs?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b|\d{1,2}:\d{2}\b)/i;
+// Duration figures ONLY (no clock times) — adjacency propagation must not
+// bind an arrival clock in the next clause to a prior stay directive
+// ("Please wait inside. We will arrive at 2:30." — codex #3278 r24).
+const TIMING_STRICT_DURATION_RE = /\b(?:\d+(?:\.\d+)?\s*(?:[-–]\s*(?:\d+(?:\.\d+)?\s*)?)?(?:minutes?|mins?|seconds?|secs?|hours?|hrs?|m|h|s)\b|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|seconds?|secs?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour)/i;
 const REENTRY_CONTEXT_RE = /\bre-?ent\w*|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\benter(?:ing)?\b[^.!?\n]{0,30}\b(?:treated|areas?|lawn|yard|home|house)\b|\b(?:treated|areas?|lawn|yard|home|house)\b[^.!?\n]{0,30}\benter(?:ing)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family|residents?|occupants?|everyone)\b[^.!?\n]{0,20}\breturn\w*\b|^\s*return(?:ing)?\b/i;
 // Agronomic aftercare timing (mowing/watering windows) is legitimate copy,
 // and cadence copy uses days — only minute/hour figures are the banned class.
@@ -485,41 +489,150 @@ const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|when)\s+(?:completely\
 // and a mere technician MENTION ("our technician applied…") doesn't count:
 // the sentence needs an actual confirmation ("technician confirms/will let
 // you know", "confirms timing").
-const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
+// The exemption needs a confirmation ABOUT drying/re-entry timing — a
+// POSITIVE object (dry/drying/re-entry/timing/time) after the
+// confirmation verb, not an enumeration of unrelated subjects ("confirms
+// the gate code" must not exempt; codex #3278 r9). "when"/"ready" only
+// count tied to drying/safety ("when it's dry", "ready for re-entry") —
+// bare they'd leak "confirms the gate code is ready" (pre-push r11).
+// "will let you know" carries the when by itself only when it takes no
+// other object (end of clause or followed by "when"). Every alternative
+// requires the TECHNICIAN — "The office confirms timing"/"confirmed by
+// dispatch" defers to nobody qualified to judge drying (codex r16); the
+// passive tail is prefix-anchored (no lookbehind — Safari <16.4 parse).
+const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b(?:(?!\s(?:and|but|or|nor|so|yet|while|then)\s)[^.!?,;\n]){0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+(?:dr(?:y|ies|ying)(?:[\s-]+tim(?:e|es|ing))?|re-?ent\w*(?:[\s-]+tim(?:e|es|ing))?|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|(?:^|[.!?\n,;:—–-]\s*|\b(?:the|your|our|exact|drying|dry|re-?entry)[\s-]+)timing\b(?:(?!\s(?:and|but|or|nor|so|yet|while|then)\s)[^.!?,;\n]){0,30}\bconfirm\w*\s+by\s+(?:your\s+|our\s+|the\s+)?tech(?:nician)?s?\b/i;
+// A confirmation ABOUT something other than drying/re-entry ("technician
+// confirms ARRIVAL timing", "confirms the appointment") defers appointment
+// logistics, not the drying claim — it must not exempt "safe once dry"
+// (codex #3278). Stripped before the TECH_CONFIRM test so bare
+// "confirms timing" (the documented idiom) keeps working. The gap between
+// the verb and the logistics noun is TEMPERED to stop at a drying/re-entry
+// object — "confirms DRYING time at the appointment" is a drying
+// confirmation whose location happens to be the appointment, not an
+// unrelated one (codex #3278 r8). Covers BOTH orders: verb-first
+// ("confirms arrival timing") and passive noun-first ("appointment
+// timing will be confirmed") — the passive form otherwise satisfies
+// the timing…confirm alternative (pre-push r12).
+const UNRELATED_CONFIRM_RE = /\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))(?:(?!\b(?:dr(?:y|ies|ying)|re-?ent))[^.!?\n]){0,25}\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b(?:[^.!?\n]{0,15}\btim(?:es?|ing)?\b)?|\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b[^.!?\n]{0,15}\btim(?:es?|ing)?\b(?:(?!\b(?:dr(?:y|ies|ying)|re-?ent))[^.!?\n]){0,30}\b(?:confirm\w*|advise\w*)/gi;
 const SAFE_FROM_PEST_RE = /\bsafe(?:ly|ty)?\s+from\s+[\w'-]+(?:\s+(?:and|or)\s+[\w'-]+)?/gi;
 // Worker-safety mentions ("technicians ... stay safe while applying") are
 // about the crew's PPE, not a product claim — stripped before testing.
 const WORKER_SAFETY_RE = /\b(?:technicians?|applicators?|staff|crew|team)\b[^.!?\n]*\b(?:stay(?:ing)?|keep(?:ing)?|remain(?:ing)?|be)\s+safe(?:ly)?\b/gi;
 
 // Clause-level compliance check — returns the violated-rule messages.
-function complianceOverclaims(text) {
+// Safety well-wish, not a product claim ("stay safe out there!" on a
+// rain-out note). Only consulted under impliedTreatmentContext — social
+// copy keeps the product-co-occurrence rule instead.
+const WELL_WISH_SAFE_RE = /\b(?:stay|be|drive|travel|get\s+home)\s+safe(?:ly)?\b/gi;
+// Keep-away directive whose OBJECT may be implicit ("Stay off for 30
+// minutes" after "We treated the lawn."). REENTRY_CONTEXT_RE needs the
+// treated-area noun in the same clause, so cross-sentence notes slip it;
+// under impliedTreatmentContext the directive alone carries the meaning.
+// Plain enter/entry directives count too — "Wait 30 minutes before
+// entering", "Don't enter for 30 minutes" (codex #3278 r16). Bare
+// "enter" stays out so "enter through the side gate" remains prose.
+const IMPLIED_REENTRY_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b|\bbefore\s+(?:re-?)?enter\w*\b|\b(?:don['’]t|do\s+not|cannot|can['’]t|never|no)\s+(?:re-?)?enter\w*\b|\benter\w*\s+(?:for|in|until|after)\b|\b(?:go(?:ing)?|head(?:ing)?)\s+back\b/i;
+// A clause that names weather or premises logistics is advice about THAT
+// ("Stay inside for 30 minutes because of lightning", "Avoid the flooded
+// entrance for 30 minutes"), not implicit pesticide re-entry — it exempts
+// the implied-directive route only; a clause naming the treated area
+// still blocks through REENTRY_CONTEXT_RE (codex #3278 r19).
+const IMPLIED_NONTREATMENT_RE = /\b(?:lightning|storms?|rain\w*|wind\w*|hail|thunder\w*|flood\w*|weather|heat|traffic|entrance|driveway|road|street|parking|office|gate)\b/i;
+// ...but explicit treatment context in the clause OVERRIDES the premises
+// exemption — "Stay inside for 30 minutes after treatment because the
+// gate is open" is re-entry timing no matter what logistics word tags
+// along (codex #3278 r22).
+const IMPLIED_TREATMENT_WORD_RE = /\btreat\w*\b/i;
+// Protective ADVICE ("keep your pets safe indoors during the storm") is
+// not a product-safety claim — stripped under impliedTreatmentContext
+// ONLY when the sentence carries no product word, so "our treatment
+// keeps your pets safe" still blocks (codex #3278 r16).
+const PROTECTIVE_ADVICE_SAFE_RE = /\b(?:keep(?:s|ing)?|stay(?:s|ing)?|remain(?:s|ing)?|be)\b[^.!?\n]{0,25}\bsafe(?:ly)?\b/gi;
+
+function complianceOverclaims(text, { impliedTreatmentContext = false } = {}) {
   const issues = [];
-  const sentences = String(text || '').split(/[.!?\n]+/);
+  // Split on sentence enders, but a period BETWEEN digits is a decimal
+  // ("1.5 hours"), not a boundary — splitting there hid the duration
+  // from the re-entry check (codex pre-push #3278 r13). Decimals are
+  // masked before the split instead of a lookbehind so the client can
+  // mirror this verbatim (lookbehind parses fatally on Safari <16.4 —
+  // codex #3278 r16).
+  const sentences = String(text || '')
+    .replace(/(\d)\.(?=\d)/g, '$1\u0001')
+    .split(/[.!?\n]+/)
+    .map((s) => s.replace(/\u0001/g, '.'));
   // The technician-confirms framing may legitimately sit in an ADJACENT
   // sentence ("… safe once dry. Your technician confirms timing.") — test
   // the whole copy once; the idiom strip itself stays per-sentence.
-  const idiomAllowed = TECH_CONFIRM_CONTEXT_RE.test(String(text || ''));
+  // Unrelated confirmations (arrival/appointment timing) are stripped
+  // first so they can't stand in for a drying confirmation.
+  const idiomAllowed = TECH_CONFIRM_CONTEXT_RE.test(String(text || '').replace(UNRELATED_CONFIRM_RE, '.'));
   for (const sentence of sentences) {
     if (!sentence.trim()) continue;
-    const safetyScope = (idiomAllowed
+    let safetyScope = (idiomAllowed
       ? sentence.replace(SAFE_DRY_IDIOM_RE, '')
       : sentence)
       .replace(SAFE_FROM_PEST_RE, '')
       .replace(WORKER_SAFETY_RE, '');
-    if (SAFETY_WORD_RE.test(safetyScope) && PRODUCT_CONTEXT_RE.test(safetyScope)) {
+    if (impliedTreatmentContext) {
+      // Well-wishes and protective advice only read as claims when the
+      // sentence names the product — "stay safe out there" and "keep
+      // your pets safe indoors" are weather advice, but "Treatment will
+      // be safe" is a product claim and must keep its "safe" (r16/r17).
+      if (!PRODUCT_CONTEXT_RE.test(sentence)) {
+        safetyScope = safetyScope
+          .replace(WELL_WISH_SAFE_RE, '')
+          .replace(PROTECTIVE_ADVICE_SAFE_RE, '');
+      }
+    }
+    // Copy that ALWAYS accompanies a treatment message (rain-out dispatcher
+    // notes) carries product context implicitly — "Treatment today. Totally
+    // safe." must block even though the sentences never co-occur (codex
+    // pre-push #3278 r10). Social copy keeps the same-sentence requirement.
+    if (SAFETY_WORD_RE.test(safetyScope)
+      && (impliedTreatmentContext || PRODUCT_CONTEXT_RE.test(safetyScope))) {
       issues.push('Contains a product-safety claim — never call a pesticide/treatment "safe" (idiom: "safe once dry")');
     }
-    // The agronomic exemption applies per CLAUSE, not per sentence — "keep
-    // pets off treated areas for 30 minutes, and avoid watering for 24
-    // hours" must still flag on its first clause.
-    // Coordinating conjunctions split clauses too — "… for 30 minutes and
-    // avoid watering …" must not let the aftercare half exempt the first.
-    for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
-      if (TIMING_DURATION_RE.test(clause) && REENTRY_CONTEXT_RE.test(clause)
-        && !agronomicExemptionApplies(clause)) {
-        issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
-        break;
-      }
+  }
+  // The agronomic exemption applies per CLAUSE, not per sentence — "keep
+  // pets off treated areas for 30 minutes, and avoid watering for 24
+  // hours" must still flag on its first clause.
+  // Coordinating conjunctions split clauses too — "… for 30 minutes and
+  // avoid watering …" must not let the aftercare half exempt the first.
+  // Under implied context a split instruction ("Stay off. Wait 30
+  // minutes.", "Wait 30 minutes, then go back on the lawn") is one
+  // instruction: a qualifying keep-away directive in the ADJACENT clause
+  // governs a bare duration too (codex #3278 r23). Directive-only on
+  // purpose — the standalone dry/safe words of REENTRY_CONTEXT_RE would
+  // make "Stay dry! See you at 2:30." false-positive.
+  const clauses = sentences
+    .flatMap((s) => s.split(/[,;]+|\s+(?:and|but|while|then)\s+/i))
+    .filter((c) => c.trim());
+  // Treatment context established in an ADJACENT clause carries into the
+  // premises exemption ("We treated the lawn. Stay inside near the gate
+  // for 30 minutes…" — the gate can't launder it; codex r24).
+  const treatmentNear = (i) => [clauses[i], clauses[i - 1], clauses[i + 1]]
+    .some((c) => c && (IMPLIED_TREATMENT_WORD_RE.test(c) || PRODUCT_CONTEXT_RE.test(c)));
+  const impliedDirectiveQualifies = (i) => {
+    const cl = clauses[i];
+    return IMPLIED_REENTRY_DIRECTIVE_RE.test(cl)
+      && (!IMPLIED_NONTREATMENT_RE.test(cl) || treatmentNear(i));
+  };
+  for (let i = 0; i < clauses.length; i++) {
+    const clause = clauses[i];
+    if (!TIMING_DURATION_RE.test(clause)) continue;
+    // Adjacency propagation requires a DURATION figure — an arrival clock
+    // next to a stay directive ("Please wait inside. We will arrive at
+    // 2:30.") is not a re-entry time (codex r24).
+    const governed = REENTRY_CONTEXT_RE.test(clause)
+      || (impliedTreatmentContext
+        && (impliedDirectiveQualifies(i)
+          || (TIMING_STRICT_DURATION_RE.test(clause)
+            && ((i > 0 && impliedDirectiveQualifies(i - 1))
+              || (i + 1 < clauses.length && impliedDirectiveQualifies(i + 1))))));
+    if (governed && !agronomicExemptionApplies(clause)) {
+      issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
+      break;
     }
   }
   return issues;
@@ -588,18 +701,30 @@ try {
 
 const PLATFORM_LENGTH_LIMITS = { facebook: 500, instagram: 2200, linkedin: 3000, gbp: 1500, tiktok: 2200, twitter: 250 };
 
+// The compliance-language subset of validateContent, callable on its own
+// (exported below for non-social customer copy like Quick Move notes).
+// opts.impliedTreatmentContext: the copy ALWAYS accompanies a treatment
+// message (rain-out dispatcher notes), so product/re-entry context is
+// implicit — same-sentence co-occurrence is not required. Social surfaces
+// omit the flag and keep the co-occurrence rule.
+function complianceLanguageIssues(text, opts = {}) {
+  const issues = [];
+  if (SAFETY_OVERCLAIMS.test(String(text || ''))) {
+    issues.push('Contains safety overclaim (guaranteed, 100% effective, etc.)');
+  }
+  for (const issue of new Set(complianceOverclaims(text, opts))) {
+    issues.push(issue);
+  }
+  return issues;
+}
+
 function validateContent(text, platform) {
   const issues = [];
 
   if (PRICING_PATTERNS.test(text)) {
     issues.push('Contains pricing claim — link to /pest-control-calculator/ instead');
   }
-  if (SAFETY_OVERCLAIMS.test(text)) {
-    issues.push('Contains safety overclaim (guaranteed, 100% effective, etc.)');
-  }
-  for (const issue of new Set(complianceOverclaims(text))) {
-    issues.push(issue);
-  }
+  issues.push(...complianceLanguageIssues(text));
 
   const phones = text.match(PHONE_PATTERN) || [];
   for (const phone of phones) {
@@ -2562,6 +2687,12 @@ module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
 // `module.exports = SocialMediaService` reassignment on the line above, which
 // discards any property set earlier in the file.
 module.exports.stripFixedReentryTiming = stripFixedReentryTiming;
+// Compliance-language check ONLY (no pricing/phone/platform-length rules) —
+// for short customer-facing operator copy such as dispatch Quick Move
+// notes. Same regexes, clause logic, and regression matrix as
+// validateContent — one definition per rule, never a second weaker copy
+// per surface.
+module.exports.complianceLanguageIssues = complianceLanguageIssues;
 module.exports.sanitizeProductTargets = sanitizeProductTargets;
 module.exports.isPausedByAdmin = isPausedByAdmin;
 module.exports.assertSocialPublishingReady = assertSocialPublishingReady;
