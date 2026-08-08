@@ -54,6 +54,9 @@ function installMock(initial = {}) {
     },
   };
   const cmp = (l, op, v) => {
+    // NOT IN follows SQL three-valued semantics loosely: a NULL column passes
+    // (matches Postgres only when the list has no NULLs, which ours don't).
+    if (op === 'notIn') return l == null || !v.includes(l);
     if (l == null) return false;
     return op === '>' ? l > v : op === '<' ? l < v : op === '>=' ? l >= v : op === '<=' ? l <= v : l === v;
   };
@@ -106,7 +109,7 @@ function installMock(initial = {}) {
       orWhere() { return this; },
       whereRaw() { return this; },
       whereIn() { return this; },
-      whereNotIn() { return this; },
+      whereNotIn(c, vals) { this.ops.push([c, 'notIn', vals]); return this; },
       whereNotNull(c) { this.notNull.push(c); return this; },
       whereNull(c) { this.nulls.push(c); return this; },
       leftJoin() { return this; },
@@ -317,6 +320,21 @@ describe('livePortalReviewUrlFor', () => {
         sentAsk({ token: 'c'.repeat(64), expires_at: daysAgo(1) }),
         sentAsk({ token: 'd'.repeat(64), expires_at: new Date(Date.now() + 86400000), redirected_at: daysAgo(2) }),
         sentAsk({ token: 'e'.repeat(64), expires_at: new Date(Date.now() + 86400000), submitted_at: daysAgo(2) }),
+      ],
+    });
+    expect(await ReviewService.livePortalReviewUrlFor('cust-1')).toBeNull();
+  });
+
+  test('skips legacy finalized rows (rated_at / status=rated, both redeemed fields null)', async () => {
+    // A delivered legacy non-promoter ask can be finalized via rated_at or
+    // status='rated' with redirected_at AND submitted_at both null — handing
+    // that token out would bounce the customer to the already-submitted rate
+    // page instead of Google (pre-push audit r4b).
+    installMock({
+      customers: [CUSTOMER],
+      review_requests: [
+        sentAsk({ token: 'f'.repeat(64), expires_at: new Date(Date.now() + 86400000), rated_at: daysAgo(2) }),
+        sentAsk({ token: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000), status: 'rated', created_at: daysAgo(3) }),
       ],
     });
     expect(await ReviewService.livePortalReviewUrlFor('cust-1')).toBeNull();

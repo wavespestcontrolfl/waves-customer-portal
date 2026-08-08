@@ -3087,6 +3087,12 @@ const ReviewService = {
       .where((b) => b.whereNull("expires_at").orWhere("expires_at", ">", new Date()))
       .whereNull("redirected_at")
       .whereNull("submitted_at")
+      // Legacy finalized rows carry rated_at / status='rated' with BOTH
+      // fields above null — handing that token out sends the customer to
+      // /go's finality bounce (already-submitted rate page) instead of
+      // Google (pre-push audit r4b). Same finality predicate as everywhere.
+      .whereNull("rated_at")
+      .whereNotIn("status", ["submitted", "reviewed", "rated"])
       .orderBy("created_at", "desc")
       .first()
       .catch(() => null);
