@@ -6,6 +6,7 @@ const LeadScorer = require('../services/lead-scorer');
 const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
 const { etDateString } = require('../utils/datetime-et');
 const { formatAddress, normalizeLeadAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 const { recordAuditEvent } = require('../services/audit-log');
@@ -199,7 +200,7 @@ function adminMembershipStartIdempotencyKey(customerId, before = {}, after = {},
 
 const CUSTOMER_STAGES = [
   'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up',
-  'negotiating', 'won', 'active_customer', 'at_risk', 'churned', 'lost', 'dormant',
+  'negotiating', 'won', 'active_customer', 'at_risk', 'churned', 'past_customer', 'lost', 'dormant',
 ];
 const CUSTOMER_STAGE_SET = new Set(CUSTOMER_STAGES);
 
@@ -754,7 +755,7 @@ const REAL_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
 // is their real start and must be preserved. Anything else (new_lead, contacted,
 // estimate_*, follow_up, negotiating, lost) is a pre-sale lead: a member_since
 // there is just a lead-intake date and should be overwritten on conversion.
-const FORMER_OR_CURRENT_CUSTOMER_STAGES = new Set([...REAL_CUSTOMER_STAGES, 'churned', 'dormant']);
+const FORMER_OR_CURRENT_CUSTOMER_STAGES = new Set([...REAL_CUSTOMER_STAGES, ...FORMER_CUSTOMER_STAGES]);
 
 // Lifecycle field stamps to apply when a customer's pipeline_stage CHANGES,
 // shared by PUT /:id/stage and the general PUT /:id edit so both keep

@@ -87,6 +87,7 @@ const STAGES = [
   { key: "active_customer", label: "Active" },
   { key: "at_risk", label: "At Risk" },
   { key: "churned", label: "Churned" },
+  { key: "past_customer", label: "Past Customer" },
   { key: "lost", label: "Lost" },
 ];
 

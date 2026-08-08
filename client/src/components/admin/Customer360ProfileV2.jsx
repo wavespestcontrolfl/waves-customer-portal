@@ -455,6 +455,7 @@ const STAGE_LABELS = {
   active_customer: "Active",
   at_risk: "At Risk",
   churned: "Churned",
+  past_customer: "Past Customer",
   lost: "Lost",
   dormant: "Dormant",
 };

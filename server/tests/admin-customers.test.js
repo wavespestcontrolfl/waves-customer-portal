@@ -46,6 +46,16 @@ describe('stageLifecycleStamps', () => {
     expect(s.member_since).toBeUndefined();
   });
 
+  test('reactivating a past customer keeps its member_since', () => {
+    const s = stageLifecycleStamps('past_customer', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s.member_since).toBeUndefined();
+  });
+
+  test('reactivating a past customer with no recorded start stamps today (best effort)', () => {
+    const s = stageLifecycleStamps('past_customer', 'won', { member_since: null }, { today: TODAY });
+    expect(s.member_since).toBe(TODAY);
+  });
+
   test('always stamps churned_at (ET date) on churn; reason set to value or null', () => {
     const withReason = stageLifecycleStamps('active_customer', 'churned', { member_since: '2025-01-01' }, { today: TODAY, churnReason: 'moved' });
     expect(withReason.churned_at).toBe(TODAY);

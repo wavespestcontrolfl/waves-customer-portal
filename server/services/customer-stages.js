@@ -10,6 +10,18 @@
 // (promote stage on booking + backfill + persist customer_since).
 const CUSTOMER_STAGES = ['active_customer', 'won', 'at_risk'];
 
+// Stages meaning the row WAS a customer, so an existing member_since is their
+// real start and every reactivation path must PRESERVE it (a member_since on a
+// pre-sale lead stage is just an intake date and gets overwritten on
+// conversion). Shared so booking promotion, proposal wins, estimate
+// conversion, lead booking, IB edits, and the stage routes can't drift.
+// ⚠️ Deliberately NOT used by churn analytics (retention cohort, churn
+// pareto, MRR bridge churn attribution): `past_customer` is an archival
+// label for stale/one-time relationships (owner ruling 2026-08-07), NOT a
+// churn event — those surfaces stay keyed on churned/dormant + churned_at so
+// bulk re-stages can never fake a churn spike.
+const FORMER_CUSTOMER_STAGES = ['churned', 'past_customer', 'dormant'];
+
 // customers.created_via — PROVENANCE of a machine-minted row, stamped by the
 // creating path itself. Row SHAPE cannot carry this: several lead-creation
 // paths write an address-less, ZIP-less, active new_lead row (the Twilio
@@ -63,7 +75,7 @@ async function promoteCustomerOnBooking(database, customerId) {
   if (!inCustomerStage) {
     updates.pipeline_stage = 'won';
     updates.pipeline_stage_changed_at = new Date();
-    updates.member_since = ['churned', 'dormant'].includes(customer.pipeline_stage)
+    updates.member_since = FORMER_CUSTOMER_STAGES.includes(customer.pipeline_stage)
       ? (customer.member_since || etDateString())
       : etDateString();
   }
@@ -79,5 +91,5 @@ async function promoteCustomerOnBooking(database, customerId) {
 }
 
 module.exports = {
-  CUSTOMER_STAGES, CREATED_VIA, whereLiveCustomer, CONVERSION_DATE_SQL, promoteCustomerOnBooking,
+  CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES, CREATED_VIA, whereLiveCustomer, CONVERSION_DATE_SQL, promoteCustomerOnBooking,
 };

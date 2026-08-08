@@ -14,6 +14,7 @@ const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
   windowDurationMinutes, deriveWindowEnd,
 } = require('../../utils/datetime-et');
+const { FORMER_CUSTOMER_STAGES } = require('../customer-stages');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
@@ -1007,7 +1008,7 @@ async function updateCustomer(customerId, updates) {
   // (overwriting its intake date); a current/former customer keeps its real
   // start but is filled if missing (e.g. a churned/dormant reactivation).
   if (clean.pipeline_stage && ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)) {
-    const wasCustomer = ['active_customer', 'won', 'at_risk', 'churned', 'dormant'].includes(before.pipeline_stage);
+    const wasCustomer = ['active_customer', 'won', 'at_risk', ...FORMER_CUSTOMER_STAGES].includes(before.pipeline_stage);
     clean.member_since = wasCustomer ? (before.member_since || etDateString()) : etDateString();
   }
 
