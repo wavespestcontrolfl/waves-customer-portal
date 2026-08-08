@@ -3060,6 +3060,13 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(plainEnter.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('spelled hundreds are figures too (Codex PR r13)', () => {
+    const hundred = guardrails.evaluate({ body: 'Wait one hundred minutes before re-entering the treated room.' }, {});
+    expect(hundred.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const compound = guardrails.evaluate({ body: 'Keep pets off the lawn for one hundred and twenty minutes.' }, {});
+    expect(compound.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('compound spelled range endpoints are figures too (Codex PR r5)', () => {
     for (const body of [
       'You can re-enter after twenty-one to twenty-four hours.',
@@ -3666,6 +3673,13 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     // Direct service CTAs still block.
     const direct = guardrails.evaluate({ body: 'Contact Waves for wildlife trapping in Manatee County.' }, {});
     expect(direct.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('clear/rid wildlife forms and Let-Waves anchors block (Codex PR r13)', () => {
+    const clears = guardrails.evaluate({ body: 'Our team clears wildlife from homes.' }, {});
+    expect(clears.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const rid = guardrails.evaluate({ body: 'Let Waves rid your attic of raccoons.' }, {});
+    expect(rid.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('extraction phrasing is the same wildlife service (Codex PR r12 audit)', () => {
