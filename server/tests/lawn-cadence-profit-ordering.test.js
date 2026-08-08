@@ -11,20 +11,22 @@ const { priceLawnCare } = require('../services/pricing-engine');
 // and silently measured St. Augustine four times):
 //
 // - The discount ADDS sag (9x earning under 6x) nowhere at any bracket
-//   cell, on any track. Its only added sag is off-cell: the 18k–20k
-//   interpolation tail (independent per-column rounding) and the >20k
-//   extrapolation region, on st_augustine and zoysia only. Bermuda and
-//   bahia gain ZERO sag anywhere 500–30,000 sqft.
+//   cell, on any track. Its only added sag is the 18k–20k interpolation
+//   tail (independent per-column rounding) on st_augustine and zoysia.
+//   Bermuda and bahia gain ZERO sag anywhere 500–30,000 sqft.
 // - The bermuda 5,500–5,745 and zoysia 5,500–5,577 inversions PRE-DATE the
 //   discount: identical profits on origin/main (bermuda 5,500: 9x $207.34
 //   vs 6x $219.71 both sides — the caps do not bind those cells, so the
 //   migration never touches them). They are the ≥5,500 continuation of the
 //   long-standing small-lawn shape the migration header scopes out.
-// - Above LAWN_TABLE_MAX_SQFT (20k) the ordering structurally fails on
-//   st_augustine and zoysia at any flat -4% (incremental visit cost grows
-//   ~$28/1,000 sqft against ~$18 of capped incremental revenue; ≈-$33/yr
-//   at 30k). Discount policy for >20k sqft lawns is an owner ruling,
-//   tracked on PR #3274.
+// - Above LAWN_TABLE_MAX_SQFT (20k) the discount does not apply at all
+//   (owner ruling 2026-08-07 on #3274: custom-quote territory, matching
+//   industry practice). Extrapolated 9x/12x lookups carry a per-app
+//   PARITY FLOOR against the extrapolated 6x anchor (skipping the caps
+//   alone would leak the discount through the slope, which derives from
+//   the discounted 15k/20k anchor cells), restoring 12x > 9x > 6x profit
+//   ordering everywhere above the table — the extrapolated envelopes
+//   below are pinned at ZERO sag.
 //
 // This suite PINS those envelopes per track. If a grid or cost-model change
 // widens one, the numbers here must be re-measured and re-accepted
@@ -46,9 +48,9 @@ const PRE_EXISTING_CELL_INVERSIONS = { bermuda: [5500], zoysia: [5500] };
 // grid + DENSE default cost model (bounds carry small headroom over the
 // sampled maxima; ranges are where sag is ALLOWED, not where it must occur).
 const SAG_ENVELOPE = {
-  st_augustine: { table: { max: 4.75, ranges: [[18000, TABLE_MAX_SQFT]] }, extrapolatedMax: 35 },
+  st_augustine: { table: { max: 4.75, ranges: [[18000, TABLE_MAX_SQFT]] }, extrapolatedMax: 0 },
   bermuda: { table: { max: 15, ranges: [[5500, 5750]] }, extrapolatedMax: 0 }, // pre-existing region only
-  zoysia: { table: { max: 5.25, ranges: [[5500, 5750], [18000, TABLE_MAX_SQFT]] }, extrapolatedMax: 35 },
+  zoysia: { table: { max: 5.25, ranges: [[5500, 5750], [18000, TABLE_MAX_SQFT]] }, extrapolatedMax: 0 },
   bahia: { table: { max: 0, ranges: [] }, extrapolatedMax: 0 },
 };
 const TRACKS = Object.keys(SAG_ENVELOPE);

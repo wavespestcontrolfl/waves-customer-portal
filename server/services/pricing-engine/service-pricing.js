@@ -1838,37 +1838,79 @@ function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
   // these runtime caps instead of re-clamping restored cells — codex #3274
   // r3 P1). The 2026-07-29 12x-never-above-9x bound is NOT gated: it
   // pre-dates the discount and must survive its rollback.
-  const discountArmed = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false;
-  const standard = discountArmed
+  //
+  // The discount also ends at the table edge (owner ruling 2026-08-07 on
+  // #3274): above LAWN_TABLE_MAX_SQFT every quote is custom-quote-flagged
+  // and priced on site — industry practice (TruGreen/Lawn Doctor) publishes
+  // no pricing at all past ~a half acre — and a flat -4% there makes the
+  // 9x cadence LESS profitable than 6x (incremental visit cost outgrows the
+  // capped revenue, ≈-$33/yr at 30k). Merely skipping the caps is NOT
+  // enough up there: the extrapolation slope itself derives from the
+  // DISCOUNTED 15k/20k anchor cells, so the discount would leak past the
+  // table edge through the slope. Above the table the discount is removed
+  // by a per-application PARITY FLOOR against the extrapolated 6x anchor —
+  // 9x/12x per-app never lands BELOW the 6x per-app (m9 ≥ ceil(m6·9/6),
+  // m12 ≥ ceil(m6·12/6)) — which is literally "no frequency discount" and
+  // restores 12x > 9x > 6x profit ordering (per-app parity ⇒ profit scales
+  // with visits). Uses only the live extrapolated anchor — no shadow grid.
+  const discountLive = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false;
+  // inTable ALSO covers a rolled-back edge-parity schedule (migrate:down of
+  // 20260808000000 writes edgeParityFloorArmed=false): >20k then falls back
+  // to the _FREQ_DISCOUNT semantics — caps applied at every size — so the
+  // restored version label and the runtime behavior revert together.
+  const inTable = lawnSqFt <= LAWN_TABLE_MAX_SQFT
+    || LAWN_PRICING_V2.edgeParityFloorArmed === false;
+  const standard = discountLive
     ? lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.standard.index, track)
     : null;
   if (tierIndex === LAWN_TIERS.enhanced.index) {
     if (standard && standard.monthly > 0) {
-      result.monthly = Math.min(
-        result.monthly,
-        Math.floor(standard.monthly * LAWN_ENHANCED_MONTHLY_CAP_RATIO),
-      );
+      result.monthly = inTable
+        ? Math.min(result.monthly, Math.floor(standard.monthly * LAWN_ENHANCED_MONTHLY_CAP_RATIO))
+        : Math.max(result.monthly, Math.ceil(standard.monthly * (LAWN_TIERS.enhanced.freq / LAWN_TIERS.standard.freq)));
     }
     return result;
   }
   if (tierIndex === LAWN_TIERS.premium.index) {
     const enhancedUncapped = lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.enhanced.index, track).monthly;
-    const bounds = [];
     if (standard && standard.monthly > 0) {
-      bounds.push(Math.floor(standard.monthly * LAWN_PREMIUM_MONTHLY_CAP_RATIO));
-      const enhancedCapped = Math.min(
-        enhancedUncapped,
-        Math.floor(standard.monthly * LAWN_ENHANCED_MONTHLY_CAP_RATIO),
-      );
-      if (enhancedCapped > 0) {
-        bounds.push(Math.floor(enhancedCapped * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq)));
+      if (inTable) {
+        const bounds = [Math.floor(standard.monthly * LAWN_PREMIUM_MONTHLY_CAP_RATIO)];
+        const enhancedCapped = Math.min(
+          enhancedUncapped,
+          Math.floor(standard.monthly * LAWN_ENHANCED_MONTHLY_CAP_RATIO),
+        );
+        if (enhancedCapped > 0) {
+          bounds.push(Math.floor(enhancedCapped * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq)));
+        }
+        result.monthly = Math.min(result.monthly, ...bounds);
+      } else {
+        // Parity floor first, then the 2026-07-29 12x-never-above-9x bound
+        // measured against the parity-floored enhanced value (the floored
+        // enhanced is ≥ std·1.5, so the bound can never undo the floor).
+        const enhancedFloored = Math.max(
+          enhancedUncapped,
+          Math.ceil(standard.monthly * (LAWN_TIERS.enhanced.freq / LAWN_TIERS.standard.freq)),
+        );
+        result.monthly = Math.max(
+          result.monthly,
+          Math.ceil(standard.monthly * (LAWN_TIERS.premium.freq / LAWN_TIERS.standard.freq)),
+        );
+        if (enhancedFloored > 0) {
+          result.monthly = Math.min(
+            result.monthly,
+            Math.floor(enhancedFloored * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq)),
+          );
+        }
       }
     } else if (enhancedUncapped > 0) {
       // Disarmed: the pre-discount premium bound measured against the
       // as-stored enhanced cell, exactly the 2026-07-29 behavior.
-      bounds.push(Math.floor(enhancedUncapped * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq)));
+      result.monthly = Math.min(
+        result.monthly,
+        Math.floor(enhancedUncapped * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq)),
+      );
     }
-    if (bounds.length) result.monthly = Math.min(result.monthly, ...bounds);
   }
   return result;
 }
@@ -2111,7 +2153,14 @@ function priceLawnCare(property, options = {}) {
     }
     bermudaSuppressionPerApp = adder;
   }
-  const cadenceDiscountArmed = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false;
+  // Discount scope mirrors lookupLawnBracket: armed AND inside the table —
+  // above LAWN_TABLE_MAX_SQFT the discount (and therefore its floor-lift
+  // resolution) does not apply (owner ruling 2026-08-07 on #3274), unless
+  // the edge-parity schedule is rolled back, which restores the
+  // _FREQ_DISCOUNT everywhere-semantics the lift shipped with.
+  const cadenceDiscountArmed = LAWN_PRICING_V2.cadenceFreqDiscountArmed !== false
+    && (lawnSqFt <= LAWN_TABLE_MAX_SQFT
+      || LAWN_PRICING_V2.edgeParityFloorArmed === false);
   const tierCalcs = TIER_LIST.map((t) => {
     const tc = LAWN_TIERS[t];
     if (!tc) return null;

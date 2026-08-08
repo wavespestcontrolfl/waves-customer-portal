@@ -54,7 +54,7 @@ describe('lawn pricing golden master', () => {
     // Anchor prices are unchanged by the 2026-08-07 frequency discount: at
     // 4,250 sqft the 9x cell ($48) already sits under its -4% cap ($54), so
     // only the version token moves here.
-    expect(r.pricingVersion).toBe('LAWN_PRICING_V2_FREQ_DISCOUNT');
+    expect(r.pricingVersion).toBe('LAWN_PRICING_V2_EDGE_PARITY');
     // Annual is source-of-truth; monthly is derived and must reconcile within ¢.
     expect(Math.abs(r.monthly * 12 - r.annual)).toBeLessThanOrEqual(0.5);
   });
@@ -65,7 +65,7 @@ describe('lawn pricing golden master', () => {
         .toContain(c.out.pricingBasis);
       expect(['MARKET_TABLE', 'EXTRAPOLATED_TABLE', 'COST_FLOOR', 'PROGRAM_MINIMUM'])
         .toContain(c.out.pricingSource);
-      expect(c.out.pricingVersion).toBe('LAWN_PRICING_V2_FREQ_DISCOUNT');
+      expect(c.out.pricingVersion).toBe('LAWN_PRICING_V2_EDGE_PARITY');
     }
   });
 

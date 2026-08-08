@@ -269,6 +269,15 @@ const LAWN_PRICING_V2 = {
   // 12x-never-above-9x bound (2026-07-29, pre-dates the discount) is NOT
   // governed by this switch.
   cadenceFreqDiscountArmed: true,
+  // Edge-parity arm switch (pre-push audit P1 on the 20k-cutoff change):
+  // default ON — >20k extrapolated 9x/12x carry the per-app parity floor
+  // against the 6x anchor. migrate:down of 20260808000000 writes false so
+  // ROLLING BACK the edge-parity schedule also reverts runtime behavior
+  // (>20k falls back to the _FREQ_DISCOUNT semantics: the -4%/-8% caps
+  // applied at every size) in the same step that restores the version
+  // label — never a label/behavior mismatch. Only consulted while
+  // cadenceFreqDiscountArmed is on.
+  edgeParityFloorArmed: true,
   targetListMargin: null,
   useTargetListMargin: false,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
@@ -282,7 +291,12 @@ const LAWN_PRICING_V2 = {
   // cadences within ~1.5% per application at large lawns, so the cards read
   // as identical. Cadence now carries a real frequency discount off the 6x
   // per-application anchor — see LAWN_CADENCE_DISCOUNT below.
-  pricingVersion: 'LAWN_PRICING_V2_FREQ_DISCOUNT',
+  // _EDGE_PARITY (2026-08-07, owner ruling on #3274): the discount ends at
+  // the table edge — >20k sqft extrapolated 9x/12x lookups carry a per-app
+  // parity floor against the 6x anchor, raising them off the discounted
+  // slope. Estimates stamped _FREQ_DISCOUNT priced >20k lawns ~4% lower
+  // per application than this schedule.
+  pricingVersion: 'LAWN_PRICING_V2_EDGE_PARITY',
   laborRateLoaded: 35,
   equipmentIncludedInLabor: true,
   equipmentReservePerVisit: 0,
@@ -340,14 +354,20 @@ const LAWN_TABLE_MAX_SQFT = 20000;
 //   the caps do not bind those cells. Accepted: same class as the
 //   long-standing small-lawn shape, and lawn floors are report-only
 //   (owner 2026-07-17).
-// - ABOVE LAWN_TABLE_MAX_SQFT the ordering claim does NOT hold on
-//   st_augustine/zoysia and cannot be made to hold at these rates:
-//   incremental visit cost grows ~$28 per 1,000 sqft while capped
-//   incremental 9x revenue grows ~$18, so 9x falls behind 6x past the
-//   crossover (≈-$33/yr at 30,000 sqft). Discount policy for >20k sqft
-//   lawns is an owner ruling, tracked on PR #3274. All envelopes are
-//   pinned per track by lawn-cadence-profit-ordering.test.js — widening
-//   one should fail loudly.
+// - ABOVE LAWN_TABLE_MAX_SQFT the discount does NOT apply (owner ruling
+//   2026-08-07 on #3274). A flat -4% there made 9x LESS profitable than 6x
+//   on st_augustine/zoysia (incremental visit cost grows ~$28 per 1,000
+//   sqft against ~$18 of capped incremental revenue, ≈-$33/yr at 30k), and
+//   the industry (TruGreen/Lawn Doctor) publishes no pricing at all past
+//   ~a half acre — every >20k quote is already custom-quote-flagged and
+//   priced on site. Because the extrapolation slope derives from the
+//   DISCOUNTED 15k/20k anchor cells, skipping the caps alone would leak
+//   the discount past the table edge — so extrapolated 9x/12x lookups
+//   carry a per-application PARITY FLOOR against the extrapolated 6x
+//   anchor instead (no discount, profit ordering restored everywhere;
+//   extrapolated sag pinned at ZERO). All envelopes are pinned per track
+//   by lawn-cadence-profit-ordering.test.js — widening one should fail
+//   loudly.
 //
 // Applied to the MONTHLY bracket cell, since pa(v) = monthly * 12 / v:
 //   m9  <= m6 * (1 - 0.04) * 9/6  = m6 * 1.44
