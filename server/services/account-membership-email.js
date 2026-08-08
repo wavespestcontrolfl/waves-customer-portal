@@ -88,6 +88,9 @@ async function loadCustomer(customerId) {
       // with a lingering tier+rate would be told their monthly rate changed —
       // the exact audience the gate exists for.
       'billing_mode',
+      // sendMembershipStarted's per-application fallback fee — the
+      // acceptance-stamped per-visit charge, never monthly_rate.
+      'per_application_fee',
       'pipeline_stage',
       'member_since',
       'active',
@@ -477,25 +480,89 @@ async function sendMembershipStarted({
   monthlyRate,
   billingCadence,
   includedServices,
+  // Lane gate (#3140 resolution): only a monthly_membership lane is billed
+  // the stored monthly_rate — per-application/prepaid customers were being
+  // welcomed with a monthly figure they are never charged ("$30.33 /
+  // quarter" for a real $91-per-application plan). The estimate converter
+  // passes the lane EXPLICITLY because this send is fire-and-forget and can
+  // race the still-uncommitted accept transaction — loadCustomer reads
+  // through the global pool and may see the PRE-accept row, so resolving
+  // from the row alone would gate on stale state. Callers that fire after
+  // commit may omit both and ride the resolveBillingLane fallback.
+  billingLane = null,
+  perApplicationAmount,
   idempotencyKey,
 } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  const { BILLING_MODES, resolveBillingLane } = require('./billing-lane');
+  const lane = (billingLane && BILLING_MODES.includes(billingLane))
+    ? billingLane
+    : resolveBillingLane(customer).mode;
+  // A one_time lane means NO recurring billing relationship — "your Waves
+  // membership is active" is false no matter what tier value rides the row
+  // (codex #3271 r2: an admin create with billingMode 'one_time' plus a real
+  // tier passed the tier-only hasMembership check and welcomed the customer
+  // to a membership that doesn't exist). Suppress HERE, in the lane gate all
+  // callers already flow through, so the create route, the profile editor,
+  // and any future caller inherit one decision. per_visit deliberately still
+  // sends: a real tier + invoice-on-complete billing IS an ongoing plan.
+  if (lane === 'one_time') {
+    await logLifecycleEmailAttempt({
+      customerId: customer.id,
+      templateKey: 'membership.started',
+      eventType: 'membership.started',
+      status: 'skipped',
+      failureReason: 'one_time_lane',
+      metadata: { source_id: sourceId, billing_lane: lane },
+    });
+    return { ok: false, skipped: true, reason: 'one_time_lane' };
+  }
+  const payload = membershipPayload(customer, {
+    membershipTier,
+    monthlyRate,
+    billingCadence,
+    includedServices,
+    effectiveDate,
+    membershipStatus: 'Active',
+  });
+  // Non-monthly lanes override the rate/cadence rows. Blank values ride the
+  // details renderer's empty-row dropping — the same mechanism the
+  // sendMembershipUpdated gate uses (codex #3128 r2); the migration
+  // 20260807220000 contract change makes a blank rate legal for this
+  // template.
+  if (lane === 'per_application') {
+    // The acceptance-stamped per-visit charge. A multi-service accept
+    // intentionally carries NO customer-level fee (whole-plan fee on every
+    // row's completion = overbill) — the converter passes an EXPLICIT null,
+    // which must stay blank: this fire-and-forget send can race the accept
+    // transaction, so falling back to customer.per_application_fee could
+    // resurrect a stale pre-accept fee the conversion is clearing. Only a
+    // genuinely OMITTED argument (undefined — the admin-route callers)
+    // rides the row fallback.
+    const fee = perApplicationAmount === undefined
+      ? customer.per_application_fee
+      : perApplicationAmount;
+    payload.monthly_rate = money(fee);
+    // HARD RULE: "per application", never "per visit".
+    payload.billing_cadence = 'per application';
+  } else if (lane === 'annual_prepay') {
+    payload.monthly_rate = '';
+    payload.billing_cadence = '12 months prepaid';
+  } else if (lane === 'per_visit') {
+    // Invoice-on-complete lane: the stored monthly_rate is not a charge.
+    // (one_time never reaches here — suppressed at the lane gate above.)
+    payload.monthly_rate = '';
+    payload.billing_cadence = 'billed after each service';
+  }
   return sendTemplate({
     customerId,
     templateKey: 'membership.started',
     eventType: 'membership.started',
-    payload: membershipPayload(customer, {
-      membershipTier,
-      monthlyRate,
-      billingCadence,
-      includedServices,
-      effectiveDate,
-      membershipStatus: 'Active',
-    }),
+    payload,
     idempotencyKey: idempotencyKey || `membership.started:${customerId}:${sourceId || stableEventKey(effectiveDate)}`,
     categories: ['membership_started'],
-    metadata: { source_id: sourceId },
+    metadata: { source_id: sourceId, billing_lane: lane },
   });
 }
 

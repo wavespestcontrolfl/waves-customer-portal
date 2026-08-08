@@ -505,12 +505,25 @@ describe('PriceCard — applications-per-year line under the price (owner 2026-0
 
   it('glass single-row card shows the count under the price and drops it from the sub-label', () => {
     setGlassDefault(true);
-    render(<PriceCard frequency={lawnRowFrequency()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
+    const { container } = render(<PriceCard frequency={lawnRowFrequency()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
 
-    expect(screen.getByText('9 applications per year')).toBeInTheDocument();
+    expect(container.textContent).toMatch(/9 applications per year/);
     expect(screen.queryByText(/9 applications\/year/)).toBeNull();
     // The tier tag survives alone in the row sub-label.
     expect(screen.getByText('WaveGuard Silver')).toBeInTheDocument();
+  });
+
+  // Customer-facing estimate surfaces never show combined plan totals
+  // ("$X/mo" / "$X/yr") — owner rule 2026-07-23, AGENTS.md. An annual figure
+  // briefly rode this line during the 2026-08-07 cadence-discount work and was
+  // removed on review (codex #3274 P1); this guard keeps it out.
+  it('never renders a combined annual dollar total on the cadence line', () => {
+    setGlassDefault(true);
+    const { container } = render(<PriceCard frequency={lawnRowFrequency()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
+
+    expect(container.textContent).toMatch(/9 applications per year/);
+    expect(container.textContent).not.toMatch(/\$[\d,.]+\s*per year/);
+    expect(container.textContent).not.toMatch(/\$[\d,.]+\s*\/\s*yr/);
   });
 
   it('non-glass card keeps the count in the row sub-label (no header line)', () => {

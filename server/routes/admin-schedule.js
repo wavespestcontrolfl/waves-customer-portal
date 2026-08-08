@@ -3041,6 +3041,24 @@ router.post('/', requireAdmin, async (req, res, next) => {
       if (linkedEstimate.status !== 'accepted' && linkedEstimate.expires_at && new Date(linkedEstimate.expires_at) < new Date()) {
         return res.status(400).json({ error: 'This estimate has expired. Revive it on the Estimates page before booking from it.' });
       }
+      // A suppression-carrying estimate cannot be BOOKED while
+      // GATE_BERMUDA_SUPPRESSION is off. This must run in the preflight,
+      // BEFORE the appointment transaction: the accept-on-book failure
+      // handler below deliberately KEEPS the booking when acceptance fails,
+      // so the manual-acceptance gate alone would still schedule (and
+      // possibly prepay-stamp) the disabled add-on (codex #3272 r6).
+      // Applies to the already-accepted link path too — scheduling the
+      // program is exactly what the kill switch must stop.
+      {
+        const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
+        if (estimateDataCarriesBermudaSuppression(linkedEstimate.estimate_data)
+          && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+          return res.status(409).json({
+            error: 'This estimate includes the bermudagrass-suppression add-on, which is currently disabled (GATE_BERMUDA_SUPPRESSION). Re-enable the gate or rebuild the estimate without the add-on before booking from it.',
+            code: 'BERMUDA_SUPPRESSION_GATED',
+          });
+        }
+      }
     }
     // Booking from a phone "yes": a sent/viewed quote the customer accepted
     // verbally gets its win recorded AFTER the appointment commits (below), so

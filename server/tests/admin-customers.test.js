@@ -46,6 +46,50 @@ describe('stageLifecycleStamps', () => {
     expect(s.member_since).toBeUndefined();
   });
 
+  test('reactivating a past customer keeps its member_since', () => {
+    const s = stageLifecycleStamps('past_customer', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s.member_since).toBeUndefined();
+  });
+
+  test('reactivating a past customer with no recorded start stamps today (best effort)', () => {
+    const s = stageLifecycleStamps('past_customer', 'won', { member_since: null }, { today: TODAY });
+    expect(s.member_since).toBe(TODAY);
+  });
+
+  test('entering a live stage re-activates the row (active: true)', () => {
+    const s = stageLifecycleStamps('past_customer', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s.active).toBe(true);
+    const s2 = stageLifecycleStamps('churned', 'won', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s2.active).toBe(true);
+  });
+
+  test('archival move to past_customer does NOT touch the active flag', () => {
+    const s = stageLifecycleStamps('churned', 'past_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s).not.toHaveProperty('active');
+  });
+
+  test('archiving a churned customer as past_customer PRESERVES churn history', () => {
+    const s = stageLifecycleStamps('churned', 'past_customer', { member_since: '2025-01-01', churned_at: '2026-03-01' }, { today: TODAY });
+    expect(s).not.toHaveProperty('churned_at');
+    expect(s).not.toHaveProperty('churn_reason');
+    expect(s).not.toHaveProperty('member_since');
+  });
+
+  test('lateral archive moves preserve churn history (past_customer → dormant/lost)', () => {
+    const toDormant = stageLifecycleStamps('past_customer', 'dormant', { churned_at: '2026-03-01' }, { today: TODAY });
+    expect(toDormant).not.toHaveProperty('churned_at');
+    expect(toDormant).not.toHaveProperty('churn_reason');
+    const toLost = stageLifecycleStamps('past_customer', 'lost', { churned_at: '2026-03-01' }, { today: TODAY });
+    expect(toLost).not.toHaveProperty('churned_at');
+  });
+
+  test('reactivating OUT of past_customer still clears a preserved churn stamp', () => {
+    const s = stageLifecycleStamps('past_customer', 'active_customer', { member_since: '2025-01-01', churned_at: '2026-03-01' }, { today: TODAY });
+    expect(s.churned_at).toBeNull();
+    expect(s.churn_reason).toBeNull();
+    expect(s).not.toHaveProperty('member_since');
+  });
+
   test('always stamps churned_at (ET date) on churn; reason set to value or null', () => {
     const withReason = stageLifecycleStamps('active_customer', 'churned', { member_since: '2025-01-01' }, { today: TODAY, churnReason: 'moved' });
     expect(withReason.churned_at).toBe(TODAY);
@@ -978,4 +1022,38 @@ describe('admin customers route helpers', () => {
 
   });
 
+});
+
+// #3140 resolution: the inferred-monthly vector — admin creates/edits that
+// leave (NULL lane + real tier + positive rate) — is closed by stamping the
+// inference explicitly. These are source pins on the route wiring; the stamp
+// decision itself is unit-tested in billing-lane.test.js
+// (impliedMonthlyStampForWrite).
+describe('admin customer writes stamp the implied monthly lane (source pins)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-customers.js'), 'utf8');
+
+  test('the create path inserts an explicit-or-stamped billing_mode', () => {
+    expect(src).toContain('billing_mode: billingModeForCreate');
+    expect(src).toMatch(/const billingModeForCreate = explicitBillingMode \|\| impliedLaneStamp;/);
+  });
+
+  test('the update path stamps only lane-less saves, decided UNDER the row lock', () => {
+    // Never restamp over an operator's own lane decision in the same save…
+    expect(src).toContain('const laneStampEligible = req.body.billingMode === undefined && updates.billing_mode === undefined;');
+    // …and the decision reads the LOCKED row (pre-push codex P0): a
+    // concurrent explicit-lane save that commits before our lock must not
+    // be overwritten by the stamp.
+    expect(src).toContain('impliedLaneStamp = impliedMonthlyStampForWrite(lockedBefore, { ...lockedBefore, ...updates });');
+    expect(src).toContain('if (impliedLaneStamp) updates.billing_mode = impliedLaneStamp;');
+    // The stamp lands after changed/after were snapshotted — both are
+    // patched post-commit so the sensitive audit records the lane write.
+    expect(src).toContain("changed.push('billing_mode');");
+  });
+
+  test('both stamp sites surface an owner review notification', () => {
+    const sites = src.match(/'billing_lane_review'/g) || [];
+    expect(sites.length).toBe(2);
+  });
 });

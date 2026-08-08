@@ -1,9 +1,45 @@
 const {
   BILLING_MODES,
   resolveBillingLane,
+  impliedMonthlyStampForWrite,
   membershipDuesCoverVisit,
   predictCompletionBilling,
 } = require('../services/billing-lane');
+
+// #3140 resolution: admin/IB writes that TRANSITION a row into the
+// inferred-monthly shape (NULL lane + real tier + positive rate) stamp the
+// inference explicitly, so no new invisible NULL-mode member rows are minted.
+describe('impliedMonthlyStampForWrite', () => {
+  const inferred = { billing_mode: null, waveguard_tier: 'Bronze', monthly_rate: 36.33 };
+
+  test('stamps monthly_membership when a write creates the inferred-monthly shape', () => {
+    expect(impliedMonthlyStampForWrite({ billing_mode: null, waveguard_tier: null, monthly_rate: 0 }, inferred))
+      .toBe('monthly_membership');
+    // Create path: no before-state at all.
+    expect(impliedMonthlyStampForWrite({}, inferred)).toBe('monthly_membership');
+  });
+
+  test('never stamps when the resulting row carries an explicit lane', () => {
+    expect(impliedMonthlyStampForWrite({}, { ...inferred, billing_mode: 'per_application' })).toBeNull();
+    expect(impliedMonthlyStampForWrite({}, { ...inferred, billing_mode: 'monthly_membership' })).toBeNull();
+  });
+
+  test('never stamps a row that was ALREADY inferred-monthly (no restamp on unrelated edits)', () => {
+    expect(impliedMonthlyStampForWrite(inferred, { ...inferred, phone: '941-555-0100' })).toBeNull();
+  });
+
+  test('sentinel tiers and rate-less rows never stamp (same taxonomy as the resolver)', () => {
+    expect(impliedMonthlyStampForWrite({}, { ...inferred, waveguard_tier: 'Commercial' })).toBeNull();
+    expect(impliedMonthlyStampForWrite({}, { ...inferred, waveguard_tier: 'One-Time' })).toBeNull();
+    expect(impliedMonthlyStampForWrite({}, { ...inferred, waveguard_tier: null })).toBeNull();
+    expect(impliedMonthlyStampForWrite({}, { ...inferred, monthly_rate: 0 })).toBeNull();
+  });
+
+  test('the stamp equals what the resolver already inferred — zero billing change', () => {
+    const stamped = impliedMonthlyStampForWrite({}, inferred);
+    expect(stamped).toBe(resolveBillingLane(inferred).mode);
+  });
+});
 
 describe('resolveBillingLane', () => {
   test('explicit billing_mode always wins, whatever the legacy fields say', () => {

@@ -21,6 +21,10 @@ const { buildSeoRequirements } = require('./blog-seo-contract');
 const {
   isFaqBlockedService, PAGE_CITY_SLUGS, ALLOWED_INTERNAL_LINKS, isKnownGoodInternalRoute,
 } = require('./content-guardrails');
+// "List-shaped" detection is shared with the miner's listicle_family bucket
+// (single grammar — a mined listicle opportunity must actually receive the
+// overlay). Never fork a private copy of the regexes here.
+const { isListicleQuery } = require('./listicle-query');
 const { isEnabled } = require('../../config/feature-gates');
 
 const queue = require('./opportunity-queue');
@@ -217,22 +221,6 @@ function applyAeoTreatment({ isAeoGap, pageType, requiredSections, schemaTypes, 
 // overlay, and the voice notes forbid ranking companies outright.
 const LISTICLE_ELIGIBLE_PAGE_TYPES = new Set(['supporting-blog']);
 
-// Query shapes that map naturally to an enumerable list: a leading count
-// ("10 natural mosquito repellents") or an enumerable-noun keyword. Kept
-// narrow on purpose — a miss just produces a normal supporting-blog, and a
-// borderline match still yields a valid post, just list-formatted. A leading
-// digit followed by a time/cadence unit ("24 hour pest control", "7 day
-// treatment plan") is service phrasing, not an item count — excluded.
-const LISTICLE_TIME_UNIT_RE = /^(hour|hr|day|week|month|year|minute|min|am|pm)s?\b/i;
-const LISTICLE_LEADING_COUNT_RE = /^\s*\d{1,2}\s+(\S+)/;
-const LISTICLE_NOUN_RE = /\b(signs?|symptoms|ways|tips|ideas|mistakes|myths|types|kinds|reasons|steps|plants|checklist)\b/i;
-// Vendor/roundup intent ("10 best pest control companies", "top exterminators")
-// must never receive the overlay: the voice notes forbid ranking companies, so
-// the brief would be self-contradictory — leave those SERPs to the existing
-// buyer-guide/comparison handling. Conservative by design: excluding e.g.
-// "best plants for shade" only costs the list formatting, never the post.
-const LISTICLE_VENDOR_RE = /\b(best|top|cheapest|company|companies|providers?|services?|exterminators?|reviews?|vs)\b/i;
-
 // Question-shaped list queries ("what are the signs of termites") get a
 // question-header variant: each numbered H2 is phrased as the exact
 // sub-question that item answers, so the heading itself matches how the
@@ -240,16 +228,7 @@ const LISTICLE_VENDOR_RE = /\b(best|top|cheapest|company|companies|providers?|se
 // termites") keeps declarative headings.
 const LISTICLE_QUESTION_RE = /^\s*(what|why|which|how|when|where|is|are|can|do|does|should)\b/i;
 
-function isListicleQuery(query) {
-  const q = String(query || '').trim();
-  if (!q) return false;
-  if (LISTICLE_VENDOR_RE.test(q)) return false;
-  const count = q.match(LISTICLE_LEADING_COUNT_RE);
-  if (count && !LISTICLE_TIME_UNIT_RE.test(count[1])) return true;
-  return LISTICLE_NOUN_RE.test(q);
-}
-
-function applyListicleTreatment({ enabled, actionType, pageType, query, operatorPinned = false, requiredSections, schemaTypes, voiceConstraints }) {
+function applyListicleTreatment({ enabled, actionType, pageType, query, operatorPinned = false, factsAvailable = true, requiredSections, schemaTypes, voiceConstraints }) {
   // New MINED drafts only:
   // - a refresh whose SERP type normalizes to supporting-blog must never
   //   receive restructure-the-title/H2 mandates (preserve slug + structure);
@@ -272,7 +251,14 @@ function applyListicleTreatment({ enabled, actionType, pageType, query, operator
     'quick-answer summary inside the first 60 words that names every list item in one scannable sentence or tight list',
     'visible "Last updated: [Month Year]" line under the title — use the current month and year (the publisher stamps frontmatter `updated` to the PR-open date, so month+year granularity stays consistent with it; never an older or invented date)',
     ...requiredSections,
-    '"how we put this list together" note (2–3 sentences grounded in the brief\'s facts pack, naming sources in PLAIN TEXT only — no external links (off-fleet links are rejected by the publish guardrail), and never an invented methodology)',
+    // Cityless family rows have NO facts pack (facts are city×service) and
+    // no other verified evidence rides the brief — ANY methodology mandate
+    // there forces the writer to invent a first-party claim (Codex
+    // r26/r34), so the note is simply OMITTED without facts; the per-item
+    // figure rule already says 'where one exists / NEVER invent'.
+    ...(factsAvailable
+      ? ['"how we put this list together" note (2–3 sentences grounded in the brief\'s facts pack, naming sources in PLAIN TEXT only — no external links (off-fleet links are rejected by the publish guardrail), and never an invented methodology)']
+      : []),
   ];
   const voice = {
     ...voiceConstraints,
@@ -655,7 +641,16 @@ class ContentBriefBuilder {
     // Overlay the citable-listicle architecture on list-shaped supporting-blog
     // queries (gated; applied on top of the AEO overlay so both can coexist).
     const layered = applyListicleTreatment({
-      enabled: isEnabled('listicleBriefs'),
+      factsAvailable: !!factsPack,
+      // listicle_family rows exist ONLY to produce listicle-shaped posts,
+      // and the queue's claim fence (listicleFamilyLaneOpen in
+      // opportunity-queue.js) means one can only be claimed while BOTH lane
+      // gates are on — turning either gate off makes queued rows
+      // unclaimable until they expire. The bucket key here covers the one
+      // remaining window: a row claimed while the gates were on whose brief
+      // composes after a mid-flight gate flip still keeps the listicle
+      // architecture instead of leaking through as an ordinary blog.
+      enabled: isEnabled('listicleBriefs') || opportunity.bucket === 'listicle_family',
       actionType: decision.action_type,
       pageType,
       query: opportunity.query,
@@ -671,12 +666,42 @@ class ContentBriefBuilder {
     // on customer_signal — e.g. 'rodent'/'termite').
     const faqBlocked = isFaqBlockedService([
       opportunity.service,
+      // The specific topic behind specialty→pest canonicalization — 'wasp'
+      // is individually FAQ-blocked while broad 'pest' is not, so the
+      // collapsed service alone would let a blocked topic keep its FAQ
+      // mandate (Codex r24).
+      opportunity.signal_metadata?.specialty_topic,
       signals.customer_signal?.service,
       signals.customer_signal?.topic,
     ]);
-    const { requiredSections, schemaTypes } = faqBlocked
+    let { requiredSections, schemaTypes } = faqBlocked
       ? stripFaqRequirements({ requiredSections: layered.requiredSections, schemaTypes: layered.schemaTypes })
       : { requiredSections: layered.requiredSections, schemaTypes: layered.schemaTypes };
+
+    // Family-refresh actionability (Codex r21): merged families ride in
+    // gsc_signal, but the refresh agent's contract has no family mode —
+    // without a BINDING section per retained variant, secondary families
+    // would be silently dropped while the frozen page-key blocks them from
+    // ever queueing separately. Mirrors the answer-gap pattern: the data
+    // in gsc_signal, the requirement in required_sections.
+    const familyQueries = Array.isArray(opportunity.signal_metadata?.family_queries)
+      ? opportunity.signal_metadata.family_queries
+      : (opportunity.signal_metadata?.family_variants || []).map((v) => v.query).filter(Boolean);
+    if (decision.action_type === 'refresh_existing_page'
+      && opportunity.signal_metadata?.source === 'listicle_family'
+      && familyQueries.length) {
+      // FAQ phrasing is conditional: the refresh agent never sees the
+      // blocked-service list, so on FAQ-blocked topics the section must
+      // steer AWAY from the format the publish guard would reject
+      // (FAQ_BLOCKED_SERVICE) instead of offering it (Codex r22).
+      const coverageHow = faqBlocked
+        ? 'extend an existing section or add a NON-FAQ section (this topic forbids FAQ formats)'
+        : 'extend an existing section or add one (FAQ acceptable)';
+      requiredSections = [
+        ...requiredSections,
+        `family coverage: the refreshed page must directly address EVERY fragmented phrasing of this intent — ${familyQueries.map((q) => `"${q}"`).join(', ')} — ${coverageHow} for any phrasing the page does not already answer`,
+      ];
+    }
 
     // Operator-authored intercept brief: the seeded payload is injected
     // VERBATIM — the operator's outline becomes the content plan, sources
@@ -767,6 +792,15 @@ class ContentBriefBuilder {
         // so the refresh agent writes self-contained answer blocks without
         // re-deriving the gaps (refresh-agent-config ANSWER-GAP MODE).
         unanswered_queries: opportunity.signal_metadata?.unanswered_queries || null,
+        // listicle_family rows: `impressions` above is the FAMILY SUM, not
+        // the representative query's own volume — carry the provenance so
+        // the writer and reviewers see the aggregation instead of reading
+        // 450 impressions as a single-query metric.
+        family_size: opportunity.signal_metadata?.family_size ?? null,
+        family_variants: opportunity.signal_metadata?.family_variants || null,
+        family_queries: opportunity.signal_metadata?.family_queries || null,
+        specialty_topic: opportunity.signal_metadata?.specialty_topic || null,
+        family_avg_position: opportunity.signal_metadata?.family_avg_position ?? null,
       },
       customer_signal: signals.customer_signal
         ? {

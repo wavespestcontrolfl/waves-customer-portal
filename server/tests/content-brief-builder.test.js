@@ -659,6 +659,129 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
   });
 });
 
+describe('_composeBrief family-refresh coverage section (Codex r21 on #3255)', () => {
+  test('a family refresh gains a BINDING section enumerating every retained variant', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-fam-refresh',
+        bucket: 'listicle_family',
+        query: 'drought tolerant plants florida',
+        page_url: 'https://wavespestcontrol.com/blog/florida-native-plants/',
+        service: 'tree-shrub',
+        city: null,
+        signal_metadata: {
+          source: 'listicle_family',
+          impressions: 166,
+          family_variants: [
+            { query: 'drought tolerant plants florida', impressions: 48 },
+            { query: 'types of native plants florida', impressions: 40 },
+          ],
+          // The COMPLETE set — the binding section must include queries
+          // beyond the capped family_variants (audit r21).
+          family_queries: [
+            'drought tolerant plants florida',
+            'types of native plants florida',
+            'deep sixth variant phrasing',
+          ],
+        },
+      },
+      signals: {},
+      decision: { page_type: 'refresh', action_type: 'refresh_existing_page', final_score: 60, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    // The refresh agent has no family mode — without a binding section the
+    // secondary families' demand dies with the frozen page-key.
+    const familySection = brief.required_sections.find((sec) => /family coverage/i.test(sec));
+    expect(familySection).toBeTruthy();
+    expect(familySection).toContain('drought tolerant plants florida');
+    expect(familySection).toContain('types of native plants florida');
+    expect(familySection).toContain('deep sixth variant phrasing');
+    // tree-shrub is itself FAQ-blocked → the NON-FAQ steering applies.
+    expect(familySection).toContain('NON-FAQ');
+    expect(brief.gsc_signal.family_queries).toContain('deep sixth variant phrasing');
+  });
+
+  test('FAQ-blocked service steers the coverage section AWAY from FAQ formats (Codex r22)', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-fam-refresh-faqblocked',
+        bucket: 'listicle_family',
+        query: 'signs of rodents florida',
+        page_url: 'https://wavespestcontrol.com/blog/rodent-signs/',
+        service: 'rodent',
+        city: null,
+        signal_metadata: {
+          source: 'listicle_family',
+          impressions: 120,
+          family_queries: ['signs of rodents florida', 'florida rodent signs'],
+        },
+      },
+      signals: {},
+      decision: { page_type: 'refresh', action_type: 'refresh_existing_page', final_score: 60, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    const familySection = brief.required_sections.find((sec) => /family coverage/i.test(sec));
+    expect(familySection).toBeTruthy();
+    expect(familySection).toContain('NON-FAQ');
+    expect(familySection).not.toContain('FAQ acceptable');
+  });
+
+  test('a non-blocked service keeps the FAQ-acceptable wording', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-fam-refresh-pest',
+        bucket: 'listicle_family',
+        query: 'kinds of ants in florida',
+        page_url: 'https://wavespestcontrol.com/blog/ant-types/',
+        service: 'pest',
+        city: null,
+        signal_metadata: {
+          source: 'listicle_family',
+          impressions: 120,
+          family_queries: ['kinds of ants in florida', 'florida ant kinds'],
+        },
+      },
+      signals: {},
+      decision: { page_type: 'refresh', action_type: 'refresh_existing_page', final_score: 60, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    const familySection = brief.required_sections.find((sec) => /family coverage/i.test(sec));
+    expect(familySection).toContain('FAQ acceptable');
+  });
+
+  test('a family BLOG (no page) gets no family-coverage section', () => {
+    const builder = new ContentBriefBuilder();
+    const brief = builder._composeBrief({
+      opportunity: {
+        id: 'opp-fam-blog',
+        bucket: 'listicle_family',
+        query: 'drought tolerant plants sarasota',
+        page_url: null,
+        service: 'tree-shrub',
+        city: 'Sarasota',
+        signal_metadata: {
+          source: 'listicle_family',
+          impressions: 102,
+          family_variants: [{ query: 'drought tolerant plants sarasota', impressions: 48 }],
+        },
+      },
+      signals: {},
+      decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 60, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    expect(brief.required_sections.some((sec) => /family coverage/i.test(sec))).toBe(false);
+    // Cityless family blog composes WITHOUT a facts pack → the listicle
+    // methodology note must ground in field experience, never demand
+    // facts-pack figures the writer cannot source (Codex r26).
+    // r34: with no facts pack there is NO methodology note at all — any
+    // mandate would force an invented first-party claim.
+    expect(brief.required_sections.some((sec) => /how we put this list together/i.test(sec))).toBe(false);
+  });
+});
+
 describe('_composeBrief gsc_signal impressions fallback (seasonal_rising fix 2026-08-01)', () => {
   // seasonal_rising was the ONE bucket that never wrote the canonical
   // `impressions` key, so every draft from it hard-failed the quality gate's
@@ -702,5 +825,81 @@ describe('_composeBrief gsc_signal impressions fallback (seasonal_rising fix 202
     expect(compose({ impressions: 0, impressions_recent_14d: 0 }).gsc_signal.impressions).toBeNull();
     // A real signal under either key still resolves.
     expect(compose({ impressions: 0, impressions_recent_14d: 240 }).gsc_signal.impressions).toBe(240);
+  });
+});
+
+// ── listicle_family gate-off leak guard (Codex r3 on #3255) ──────────
+
+describe('_composeBrief listicle_family rows keep the overlay even with listicleBriefs off', () => {
+  test('bucket keys the overlay when the gate is disabled (no plain-blog leak)', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false }));
+      const { ContentBriefBuilder: Builder } = require('../services/content/content-brief-builder');
+      const brief = new Builder()._composeBrief({
+        opportunity: {
+          id: 'opp-fam',
+          page_url: null,
+          query: 'drought tolerant plants florida',
+          city: null,
+          service: 'tree-shrub',
+          bucket: 'listicle_family',
+          signal_metadata: { impressions: 300, family_size: 5 },
+        },
+        signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+        decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 60, score_breakdown: {} },
+        existingBriefVersions: 0,
+      });
+      expect(brief.required_sections.some((s) => /numbered H2 per item/i.test(s))).toBe(true);
+    });
+  });
+
+  test('a NON-family row with the gate disabled stays a plain supporting blog', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false }));
+      const { ContentBriefBuilder: Builder } = require('../services/content/content-brief-builder');
+      const brief = new Builder()._composeBrief({
+        opportunity: {
+          id: 'opp-mined',
+          page_url: null,
+          query: 'signs of termite damage in florida',
+          city: null,
+          service: 'termite',
+          bucket: 'no_content_yet',
+          signal_metadata: { impressions: 300 },
+        },
+        signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+        decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 60, score_breakdown: {} },
+        existingBriefVersions: 0,
+      });
+      expect(brief.required_sections.some((s) => /numbered H2 per item/i.test(s))).toBe(false);
+    });
+  });
+});
+
+describe('_composeBrief listicle_family provenance rides gsc_signal (Codex r5 on #3255)', () => {
+  test('family_size / family_variants / family_avg_position carried; sum labeled by presence', () => {
+    const brief = new ContentBriefBuilder()._composeBrief({
+      opportunity: {
+        id: 'opp-fam-prov',
+        page_url: null,
+        query: 'drought tolerant plants florida',
+        city: null,
+        service: 'tree-shrub',
+        bucket: 'listicle_family',
+        signal_metadata: {
+          impressions: 450,
+          family_size: 12,
+          family_avg_position: 18.3,
+          family_variants: [{ query: 'drought tolerant plants florida', impressions: 48 }],
+        },
+      },
+      signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+      decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog', final_score: 60, score_breakdown: {} },
+      existingBriefVersions: 0,
+    });
+    expect(brief.gsc_signal.impressions).toBe(450);
+    expect(brief.gsc_signal.family_size).toBe(12);
+    expect(brief.gsc_signal.family_avg_position).toBe(18.3);
+    expect(brief.gsc_signal.family_variants[0].impressions).toBe(48);
   });
 });

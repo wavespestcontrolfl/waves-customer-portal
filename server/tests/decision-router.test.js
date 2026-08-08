@@ -355,3 +355,33 @@ describe('page-anchored bucket pinning (answer_gap)', () => {
     expect(r.action_type).toBe('create_or_refresh_city_service_page');
   });
 });
+
+// ── listicle_family action anchoring (Codex r3 on #3255) ─────────────
+
+describe('listicle_family keeps its listicle-shaped blog action', () => {
+  test('profiler recommendation cannot reroute a family row off supporting-blog', () => {
+    const r = route(
+      opp({
+        bucket: 'listicle_family',
+        action_type: 'new_supporting_blog',
+        query: 'signs of chinch bugs in st augustine grass',
+        service: 'lawn',
+      }),
+      { serp_profile: serp({ dominant_intent: 'informational', recommended_asset_type: 'create_customer_question_page', local_pack_present: false }) }
+    );
+    expect(r.action_type).toBe('new_supporting_blog');
+  });
+
+  test('pre-sale customer demand cannot reroute a family row to customer-question', () => {
+    const r = route(
+      opp({
+        bucket: 'listicle_family',
+        action_type: 'new_supporting_blog',
+        query: 'signs of chinch bugs in st augustine grass',
+        service: 'lawn',
+      }),
+      { customer_signal: { funnel_stage: 'pre-sale', total_count: THRESHOLDS.customerClusterMinSize * 2 } }
+    );
+    expect(r.action_type).toBe('new_supporting_blog');
+  });
+});

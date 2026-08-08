@@ -485,6 +485,10 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
 
       {showCadenceLine ? (
         <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8 }}>
+          {/* Count only — no combined annual dollar total. Customer-facing
+              estimate surfaces never show "$X/yr" plan totals (owner rule
+              2026-07-23, AGENTS.md); the cadences are distinguished by the
+              per-application discount itself plus this count. */}
           {visitsPerYear} {perApplicationNoun}{visitsPerYear === 1 ? '' : 's'} per year
         </div>
       ) : null}

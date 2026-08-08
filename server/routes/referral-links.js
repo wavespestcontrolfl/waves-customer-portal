@@ -4,16 +4,38 @@
  */
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const crypto = require('crypto');
 const logger = require('../services/logger');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+
+// /r mounts OUTSIDE the global /api/ limiter and every hit below writes a
+// referral_clicks row — without a limiter this is an unauthenticated,
+// attacker-paced DB write. Humans click these from SMS/social; 30/min per
+// IP is generous.
+const referralClickLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  // A rate-limited human still lands on the site — never a JSON error page.
+  handler: (req, res) => res.redirect('https://wavespestcontrol.com'),
+});
+
+// Live referral codes are 10-14 char url-safe (prod-verified 2026-08-07,
+// all 120 rows). Gate before the first query; a malformed code behaves
+// exactly like an unknown one (redirect home, no DB touch).
+const CODE_RE = /^[A-Za-z0-9_-]{4,32}$/;
 
 // =========================================================================
 // GET /r/:code — track click and redirect
 // =========================================================================
-router.get('/:code', async (req, res) => {
+router.get('/:code', referralClickLimiter, async (req, res) => {
   try {
     const { code } = req.params;
+    if (!CODE_RE.test(String(code))) return res.redirect('https://wavespestcontrol.com');
     const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
     const ua = req.headers['user-agent'] || '';
     const referer = req.headers['referer'] || '';

@@ -241,3 +241,53 @@ describe('slot endpoints privacy/cache headers (parity with /:token/data)', () =
     expect(await res.json()).toEqual(expect.objectContaining({ scheduledServiceId: 'scheduled-1' }));
   });
 });
+
+// The money/slot mirror of the accept/send/manual-accept suppression gates
+// (codex #3272 r5 P0): while GATE_BERMUDA_SUPPRESSION is off, a persisted
+// suppression estimate exposes no availability, takes no reservation, and —
+// critically — mints/finalizes no money.
+describe('bermuda-suppression money/slot gate', () => {
+  const SUPPRESSION_ESTIMATE = {
+    id: 'est-supp',
+    status: 'sent',
+    expires_at: null,
+    archived_at: null,
+    estimate_data: JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }),
+  };
+  const prevGate = process.env.GATE_BERMUDA_SUPPRESSION;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_BERMUDA_SUPPRESSION;
+    else process.env.GATE_BERMUDA_SUPPRESSION = prevGate;
+  });
+
+  test('gate off: slots AND deposit boundaries 409 before availability or money is touched', async () => {
+    delete process.env.GATE_BERMUDA_SUPPRESSION;
+    currentEstimate = SUPPRESSION_ESTIMATE;
+    const slots = await fetch(`${base}/${TOKEN}/available-slots`);
+    expect(slots.status).toBe(409);
+    expect((await slots.json()).code).toBe('BERMUDA_SUPPRESSION_GATED');
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+
+    const deposit = await fetch(`${base}/${TOKEN}/deposit-intent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(deposit.status).toBe(409);
+    expect((await deposit.json()).code).toBe('BERMUDA_SUPPRESSION_GATED');
+
+    // deposit-quote/-finalize/-reset, card-hold-intent, and
+    // recurring-card-intent carry the SAME guard inserted immediately after
+    // the same estimate load (single replace-all site); deposit-intent above
+    // exercises it. Finalize's earlier param validation makes a full valid
+    // request impractical in this harness.
+  });
+
+  test('gate on: the suppression gate does not fire on the slot path', async () => {
+    process.env.GATE_BERMUDA_SUPPRESSION = 'true';
+    currentEstimate = SUPPRESSION_ESTIMATE;
+    getAvailableSlots.mockResolvedValue([]);
+    const slots = await fetch(`${base}/${TOKEN}/available-slots`);
+    expect(slots.status).not.toBe(409);
+  });
+});

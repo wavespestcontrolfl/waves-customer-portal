@@ -105,10 +105,46 @@ describe('runUnworkedCommsWatcher', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
-  test('one lane failing is query_failed, never a partial send', async () => {
+  test('one lane failing still sends the surviving lanes and NAMES the failed lane', async () => {
+    const stamp = jest.fn(async () => {});
     const result = await runUnworkedCommsWatcher(loaders({
-      loadDroppedFollowUps: async () => { throw new Error('boom'); },
+      loadDroppedFollowUps: async () => { throw new Error('syntax error at or near "ORDER"'); },
       loadCallbackCalls: async () => [callback()],
+      stampSendMarker: stamp,
+    }));
+    expect(result.sent).toBe(true);
+    expect(result.failedLanes).toEqual(['follow-ups']);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    const mail = sendgrid.sendOne.mock.calls[0][0];
+    expect(mail.subject).toMatch(/^FIX: /);
+    expect(mail.subject).toContain('follow-ups');
+    expect(mail.subject).toContain('1 unworked comm in surviving lanes');
+    expect(mail.text).toContain('LANE FAILURE');
+    expect(mail.text).toContain('follow-ups: syntax error at or near "ORDER"');
+    // Surviving lane content still rides along.
+    expect(mail.text).toContain('Callbacks requested');
+    expect(stamp).toHaveBeenCalledTimes(1);
+  });
+
+  test('one lane failing with quiet surviving lanes still sends — a crashed lane must not look like a worked day', async () => {
+    const result = await runUnworkedCommsWatcher(loaders({
+      loadUnansweredThreads: async () => { throw new Error('boom'); },
+    }));
+    expect(result.sent).toBe(true);
+    expect(result.failedLanes).toEqual(['unanswered texts']);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    const mail = sendgrid.sendOne.mock.calls[0][0];
+    expect(mail.subject).toMatch(/^FIX: /);
+    expect(mail.subject).toContain('unanswered texts');
+    expect(mail.subject).toContain('surviving lanes clear');
+  });
+
+  test('all lanes failing is query_failed (job_health must record the failed run), no send', async () => {
+    const boom = async () => { throw new Error('boom'); };
+    const result = await runUnworkedCommsWatcher(loaders({
+      loadCallbackCalls: boom,
+      loadDroppedFollowUps: boom,
+      loadUnansweredThreads: boom,
     }));
     expect(result).toEqual({ skipped: 'query_failed' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();

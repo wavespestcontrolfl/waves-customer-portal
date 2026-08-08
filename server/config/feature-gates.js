@@ -36,6 +36,7 @@
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
+ *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -905,12 +906,39 @@ const gates = {
   // dev; page_type stays 'supporting-blog' so every existing quality/SEO gate
   // and the Codex publish review apply untouched. Kill switch: unset.
   listicleBriefs: isProd ? process.env.GATE_LISTICLE_BRIEFS === 'true' : true,
+
+  // listicle_family opportunity mining — clusters fragmented list-shaped GSC
+  // queries ("drought tolerant plants florida" and its word-order variants)
+  // into families whose SUMMED impressions clear the scoring floor, then
+  // emits a new_supporting_blog opportunity on the family's top real query.
+  // Feeds the listicle brief overlay (same list-shape grammar via
+  // listicle-query.js) and REQUIRES listicleBriefs to also be on — the
+  // miner returns [] unless both gates are true, because mining without
+  // the overlay would persist rows whose briefs come out as ordinary
+  // supporting blogs (lane looks enabled, produces no listicles).
+  // Default OFF in prod: ships dormant so the first mined batch can be
+  // eyeballed before the blog lane starts consuming it
+  // (GATE_LISTICLE_FAMILY_MINING=true to enable).
+  listicleFamilyMining: isProd ? process.env.GATE_LISTICLE_FAMILY_MINING === 'true' : true,
   // Email-reply approval loop for parked autonomous content runs (owner
   // directive 2026-07-28). Explicit opt-in in EVERY environment — a dev
   // server with real SMTP/IMAP creds must never email the real owner inbox
   // or poll the shared mailbox (same posture as the auto-send policy
   // above). Kill switch = unset.
   contentEmailApprovals: process.env.GATE_CONTENT_EMAIL_APPROVALS === 'true',
+  // Parked-content digest (owner-authorized lane 2026-08-07): a daily ACT:
+  // rollup email of autonomous runs parked completed_pending_review on the
+  // admin review queue — the NON-approvable kinds (gate_fail,
+  // publish_validation_failed, operator_slug_mismatch, canary caps, …) that
+  // the email-approval flow above never covers and that otherwise park
+  // silently. Visibility only: reads runs/opportunities, writes nothing but
+  // its own ops_email_send_state watermark — no approvals, no tokens, no
+  // reply parsing. Exception-based: sends only on NEW parks since the last
+  // sent digest, plus a Sunday full digest while the backlog is non-empty.
+  // Explicit opt-in in EVERY environment (same posture as
+  // contentEmailApprovals — a dev server must never email the real owner
+  // inbox). Kill switch = unset.
+  parkedRunDigest: process.env.GATE_PARKED_RUN_DIGEST === 'true',
 
   // Data Hygiene Agent — split into sub-gates so each phase ships
   // independently. All default OFF in prod, ON in dev — except auto-apply,
@@ -1178,7 +1206,27 @@ const gates = {
   // promises and pauses redemption. Kill switch: unset or any non-'true'
   // value.
   inspectionCredit: process.env.GATE_INSPECTION_CREDIT === 'true',
+
+  // Completion-path comms guard (2026-08-07): when a dispatch /complete
+  // lands while the customer has a pending reschedule/away flag (#3232's
+  // comms_guards agent_decisions rows) or an unanswered inbound text, the
+  // post-commit hook surfaces one admin exception — bell notification +
+  // dispatch_alerts card, deduped per visit. Detection/surface ONLY: it
+  // NEVER blocks completion or invoicing and sends no customer
+  // communications. Opt-in in EVERY environment (payerStatements pattern):
+  // dark until the owner flips it after eyeballing the first flagged
+  // completion. Kill switch: unset or any non-'true' value — completions
+  // behave byte-identically to today.
+  completionCommsGuard: process.env.GATE_COMPLETION_COMMS_GUARD === 'true',
 };
+
+// Parse a gate env var at CALL time (for request-time availability checks
+// and gates enforced inside the pricing engine, where a flip must not need
+// a client redeploy and tests mutate the env at runtime). One parser, one
+// truth: '1' / 'true' / 'on', case-insensitive.
+function gateEnvValue(envName) {
+  return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
+}
 
 function isEnabled(gate) {
   const enabled = gates[gate];
@@ -1196,5 +1244,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue };
 // gates 1775330914

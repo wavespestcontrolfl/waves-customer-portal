@@ -171,7 +171,13 @@ async function executeReviewTool(toolName, input) {
 // ─── IMPLEMENTATIONS ────────────────────────────────────────────
 
 async function getReviewStats() {
-  const reviews = db('google_reviews').where('reviewer_name', '!=', '_stats');
+  // Live rows only, across EVERY aggregate: this tool answers "what's our
+  // Google rating / review count right now", and rows Google has removed
+  // (missing_since stamped) are retained history, not current state — they
+  // stay visible in the Reviews page's dedicated Removed view instead.
+  const reviews = db('google_reviews')
+    .where('reviewer_name', '!=', '_stats')
+    .whereNull('missing_since');
 
   const [totals, unresponded, thisMonth, perLocation, breakdown] = await Promise.all([
     reviews.clone().select(db.raw('COUNT(*) as total'), db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating')).first(),
@@ -211,6 +217,9 @@ async function getUnrespondedReviews(input) {
   let query = db('google_reviews')
     .where('reviewer_name', '!=', '_stats')
     .modify(whereNeedsRealReply)
+    // A review Google has removed (missing_since stamped) has no live GBP
+    // resource — it is evidence, not an actionable reply target.
+    .whereNull('google_reviews.missing_since')
     .whereNotNull('review_text')
     .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
     .select('google_reviews.*', 'customers.first_name as cust_first', 'customers.last_name as cust_last', 'customers.waveguard_tier')
@@ -242,6 +251,9 @@ async function getUnrespondedReviews(input) {
 async function draftReviewReply(reviewId) {
   const review = await db('google_reviews').where('id', reviewId).first();
   if (!review) return { error: 'Review not found' };
+  if (review.missing_since) {
+    return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
+  }
 
   // Get location name
   let locationName = 'Southwest Florida';
@@ -302,11 +314,25 @@ Rules:
 async function submitReviewReply(reviewId, replyText) {
   const review = await db('google_reviews').where('id', reviewId).first();
   if (!review) return { error: 'Review not found' };
+  // Same lockout as POST /api/admin/reviews/:id/reply: a stamped review has
+  // no live GBP resource, so recording a local reply here would falsely
+  // report it as "visible on Google once synced".
+  if (review.missing_since) {
+    return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
+  }
 
-  await db('google_reviews').where('id', reviewId).update({
-    review_reply: replyText,
-    reply_updated_at: new Date(),
-  });
+  // Guards the read-then-write race: the hourly sync can stamp the row
+  // between the check above and this update.
+  const updated = await db('google_reviews')
+    .where('id', reviewId)
+    .whereNull('missing_since')
+    .update({
+      review_reply: replyText,
+      reply_updated_at: new Date(),
+    });
+  if ((Array.isArray(updated) ? updated.length : updated) === 0) {
+    return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
+  }
 
   logger.info(`[intelligence-bar:reviews] Posted reply to review ${reviewId} by ${review.reviewer_name}`);
 

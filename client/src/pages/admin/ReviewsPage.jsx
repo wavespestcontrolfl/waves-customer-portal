@@ -447,6 +447,22 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
               >
                 {LOCATION_LABELS[review.locationId] || review.locationId}
               </span>{" "}
+              {review.missingSince && (
+                <span
+                  title={`No longer returned by Google as of ${new Date(review.missingSince).toLocaleDateString("en-US", { timeZone: "America/New_York" })}. The full text is retained here as evidence for a missing-reviews support case.`}
+                  style={{
+                    fontSize: 11,
+                    fontFamily: "Roboto, Arial, sans-serif",
+                    fontWeight: 600,
+                    color: D.white,
+                    background: D.amber,
+                    padding: "2px 8px",
+                    borderRadius: 99,
+                  }}
+                >
+                  Removed from Google
+                </span>
+              )}{" "}
             </div>{" "}
           </div>{" "}
         </div>{" "}
@@ -497,7 +513,20 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
           marginTop: 8,
         }}
       >
-        {review.draftReply && !review.reply && !editing && (
+        {review.missingSince && (
+          <div
+            style={{
+              fontSize: 13,
+              fontFamily: "Roboto, Arial, sans-serif",
+              color: D.muted,
+              marginBottom: 8,
+            }}
+          >
+            Removed from Google — replying is disabled. The review is retained
+            here as evidence for a missing-reviews support case.
+          </div>
+        )}
+        {!review.missingSince && review.draftReply && !review.reply && !editing && (
           <div
             style={{
               padding: 10,
@@ -591,6 +620,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
             >
               {review.reply}
             </div>{" "}
+            {!review.missingSince && (
             <div style={{ display: "flex", gap: 8 }}>
               {" "}
               <button
@@ -629,9 +659,10 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
               >
                 {aiLoading ? "Generating..." : "AI Reply"}
               </button>{" "}
-            </div>{" "}
+            </div>
+            )}{" "}
           </div>
-        ) : editing || !review.reply ? (
+        ) : !review.missingSince && (editing || !review.reply) ? (
           <div>
             {" "}
             <textarea
@@ -739,8 +770,10 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
           </div>
         ) : null}
       </div>
-      {/* Dismiss */}
-      {onDismiss && (
+      {/* Dismiss — hidden on removed rows: they are retained evidence, the
+          Removed filter ignores the flag, and a dismissed+reinstated review
+          would vanish from every live view (server 409s stale pages). */}
+      {onDismiss && !review.missingSince && (
         <div style={{ textAlign: "right", marginTop: 8 }}>
           {" "}
           <button
@@ -1743,22 +1776,48 @@ export default function ReviewsPage() {
   const [filterResponded, setFilterResponded] = useState("needs-reply");
   const [search, setSearch] = useState("");
   const loadSeqRef = useRef(0);
+  // Server pages at 200 rows; without a pager a large profile wipe would
+  // leave older stamped reviews unreachable from the Removed filter (only
+  // notification metadata would name them). pageRef tracks the last page
+  // appended; hasMore = the last fetch returned a full page.
+  const PAGE_SIZE = 200;
+  const pageRef = useRef(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // Append failures stay OUT of the page-level `error`: replacing the whole
+  // page with the failed state would discard the evidence already loaded and
+  // restart pagination from page 1 on retry.
+  const [loadMoreError, setLoadMoreError] = useState(null);
+
+  const buildParams = useCallback((pageNum) => {
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
+    if (pageNum > 1) params.set("page", String(pageNum));
+    if (filterLocation !== "all") params.set("location", filterLocation);
+    if (filterRating !== "all") params.set("rating", filterRating);
+    if (filterResponded === "responded") params.set("responded", "true");
+    if (filterResponded === "needs-reply") params.set("responded", "false");
+    if (filterResponded === "removed") params.set("missing", "true");
+    if (search.trim()) params.set("search", search.trim());
+    return params;
+  }, [filterLocation, filterRating, filterResponded, search]);
 
   const loadData = useCallback(() => {
     const loadSeq = loadSeqRef.current + 1;
     loadSeqRef.current = loadSeq;
     setLoading(true);
     setError(null);
-    const params = new URLSearchParams({ limit: "200" });
-    if (filterLocation !== "all") params.set("location", filterLocation);
-    if (filterRating !== "all") params.set("rating", filterRating);
-    if (filterResponded === "responded") params.set("responded", "true");
-    if (filterResponded === "needs-reply") params.set("responded", "false");
-    if (search.trim()) params.set("search", search.trim());
-    adminFetch(`/admin/reviews?${params.toString()}`)
+    pageRef.current = 1;
+    setHasMore(false);
+    // A base load supersedes any in-flight append (its response is discarded
+    // by the sequence check without ever clearing this flag) — reset it so
+    // the new result's Load More button isn't permanently disabled.
+    setLoadingMore(false);
+    setLoadMoreError(null);
+    adminFetch(`/admin/reviews?${buildParams(1).toString()}`)
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
         setData(d);
+        setHasMore((d.reviews || []).length === PAGE_SIZE);
         setLoading(false);
       })
       .catch((e) => {
@@ -1766,7 +1825,37 @@ export default function ReviewsPage() {
         setError(e.message);
         setLoading(false);
       });
-  }, [filterLocation, filterRating, filterResponded, search]);
+  }, [buildParams]);
+
+  const loadMore = useCallback(() => {
+    // Capture the sequence so a filter change mid-flight discards this append.
+    const loadSeq = loadSeqRef.current;
+    const nextPage = pageRef.current + 1;
+    setLoadingMore(true);
+    setLoadMoreError(null);
+    adminFetch(`/admin/reviews?${buildParams(nextPage).toString()}`)
+      .then((d) => {
+        if (loadSeq !== loadSeqRef.current) return;
+        pageRef.current = nextPage;
+        setHasMore((d.reviews || []).length === PAGE_SIZE);
+        setLoadingMore(false);
+        setData((prev) => {
+          if (!prev) return d;
+          // Rows can shift between pages as the hourly sync inserts — dedupe
+          // by id so a shifted row isn't rendered twice.
+          const seen = new Set(prev.reviews.map((r) => r.id));
+          return {
+            ...prev,
+            reviews: [...prev.reviews, ...(d.reviews || []).filter((r) => !seen.has(r.id))],
+          };
+        });
+      })
+      .catch((e) => {
+        if (loadSeq !== loadSeqRef.current) return;
+        setLoadingMore(false);
+        setLoadMoreError(e.message);
+      });
+  }, [buildParams]);
 
   useEffect(() => {
     const t = setTimeout(loadData, search.trim() ? 250 : 0);
@@ -1778,6 +1867,15 @@ export default function ReviewsPage() {
       method: "POST",
       body: JSON.stringify({ replyText }),
     });
+    // A reply removes the row from the server-side "needs reply" result set.
+    // With more pages still on the server, keeping the mutable page offset
+    // would skip one never-loaded row per reply (the set shrank underneath
+    // the offset) — restart from page 1 instead. When everything is already
+    // loaded (the common case), the cheap local update stands.
+    if (filterResponded === "needs-reply" && hasMore) {
+      loadData();
+      return;
+    }
     // Update local state
     setData((prev) => ({
       ...prev,
@@ -1791,6 +1889,12 @@ export default function ReviewsPage() {
 
   const handleDismiss = async (reviewId) => {
     await adminFetch(`/admin/reviews/${reviewId}/dismiss`, { method: "POST" });
+    // Dismissed rows are excluded from every view except Removed, so the same
+    // shrinking-result-set offset skew as handleReply applies here.
+    if (filterResponded !== "removed" && hasMore) {
+      loadData();
+      return;
+    }
     setData((prev) => ({
       ...prev,
       reviews: prev.reviews.filter((r) => r.id !== reviewId),
@@ -1843,7 +1947,10 @@ export default function ReviewsPage() {
     if (filterRating !== "all" && r.starRating !== Number(filterRating))
       return false;
     if (filterResponded === "responded" && !r.reply) return false;
-    if (filterResponded === "needs-reply" && r.reply) return false;
+    // Needs Reply keeps stamped (removed-from-Google) rows visible even when
+    // replied — mirrors the server-side inclusion; the removal alert links here.
+    if (filterResponded === "needs-reply" && r.reply && !r.missingSince) return false;
+    if (filterResponded === "removed" && !r.missingSince) return false;
     if (search.trim()) {
       const q = search.toLowerCase();
       const matches =
@@ -1888,12 +1995,18 @@ export default function ReviewsPage() {
     { value: "all", label: "All Reviews" },
     { value: "responded", label: "Responded" },
     { value: "needs-reply", label: "Needs Reply" },
+    { value: "removed", label: "Removed from Google" },
   ];
   const activeGroup =
     REVIEWS_TAB_GROUPS.find((g) => g.tabs.includes(activeTab)) ||
     REVIEWS_TAB_GROUPS[0];
   const fallbackLocations = locations.filter(
-    (l) => l.reviewsSource && l.reviewsSource !== "gbp",
+    (l) => l.reviewsSource === "places_fallback",
+  );
+  // 'none' = no GBP access AND no Places key — review tracking is fully
+  // offline for these locations; saying "fallback" would overstate it.
+  const offlineLocations = locations.filter(
+    (l) => l.reviewsSource === "none",
   );
 
   return (
@@ -2028,6 +2141,24 @@ export default function ReviewsPage() {
                   {fallbackLocations.map((l) => l.name).join(", ")} currently
                   use Places review fallback until GBP Reviews API access is
                   available.
+                </div>
+              )}
+              {offlineLocations.length > 0 && (
+                <div
+                  style={{
+                    border: `1px solid ${D.red}`,
+                    background: "#FEF2F2",
+                    color: D.red,
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    marginBottom: 14,
+                    fontSize: 13,
+                  }}
+                >
+                  Review tracking is offline for{" "}
+                  {offlineLocations.map((l) => l.name).join(", ")} — no GBP
+                  Reviews API access and no Places API key, so new reviews and
+                  removals are not being detected.
                 </div>
               )}
               {/* Page header + Sync Reviews button removed: the page tab
@@ -2206,6 +2337,41 @@ export default function ReviewsPage() {
                     onDismiss={handleDismiss}
                   />
                 ))
+              )}
+              {hasMore && (
+                <div style={{ textAlign: "center", marginTop: 12 }}>
+                  {loadMoreError && (
+                    <div
+                      style={{
+                        color: D.red,
+                        fontSize: 13,
+                        fontFamily: "Roboto, Arial, sans-serif",
+                        marginBottom: 8,
+                      }}
+                    >
+                      Couldn&apos;t load more reviews ({loadMoreError}) — the
+                      reviews above are still loaded; retry below.
+                    </div>
+                  )}
+                  <button
+                    onClick={loadMore}
+                    disabled={loadingMore}
+                    style={{
+                      padding: "10px 24px",
+                      background: "transparent",
+                      border: `1px solid ${D.border}`,
+                      color: D.text,
+                      borderRadius: 8,
+                      fontSize: 13,
+                      fontFamily: "Roboto, Arial, sans-serif",
+                      cursor: loadingMore ? "default" : "pointer",
+                      opacity: loadingMore ? 0.5 : 1,
+                      minHeight: 44,
+                    }}
+                  >
+                    {loadingMore ? "Loading..." : "Load more reviews"}
+                  </button>
+                </div>
               )}
             </>
           )}

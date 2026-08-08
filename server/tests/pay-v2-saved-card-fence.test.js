@@ -48,7 +48,7 @@ describe('POST /api/pay/:token/setup saved-card reconciliation fence', () => {
       if (table === 'invoices') {
         return invoiceQuery({
           id: 'inv-1',
-          token: 'public-token',
+          token: 'public-token-0123456789',
           customer_id: 'cust-1',
           status: 'sent',
           total: 100,
@@ -73,7 +73,7 @@ describe('POST /api/pay/:token/setup saved-card reconciliation fence', () => {
     StripeService.savedCardChargeNeedsReconciliation.mockReturnValue(reconciliationRequired);
 
     await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/pay/public-token/setup`, {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/setup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -109,7 +109,7 @@ describe('POST /api/pay/:token/setup saved-card reconciliation fence', () => {
     StripeService.savedCardChargeNeedsReconciliation.mockReturnValue(false);
 
     await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/pay/public-token/${route}`, {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/${route}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -139,7 +139,7 @@ describe('POST /api/pay/:token/setup saved-card reconciliation fence', () => {
     ));
 
     await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/pay/public-token/finalize`, {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/finalize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ quoteToken: 'quote-token' }),
@@ -169,7 +169,7 @@ describe('POST /api/pay/:token/setup stale-render (invoiceVersion) fence', () =>
       if (table === 'invoices') {
         return invoiceQuery({
           id: 'inv-1',
-          token: 'public-token',
+          token: 'public-token-0123456789',
           customer_id: 'cust-1',
           status: 'sent',
           total: 100,
@@ -187,7 +187,7 @@ describe('POST /api/pay/:token/setup stale-render (invoiceVersion) fence', () =>
 
   test('refuses to mint a PaymentIntent when the page rendered an older invoice version', async () => {
     await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/pay/public-token/setup`, {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/setup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ invoiceVersion: new Date(UPDATED_AT).getTime() - 5000 }),
@@ -205,7 +205,7 @@ describe('POST /api/pay/:token/setup stale-render (invoiceVersion) fence', () =>
     );
     StripeService.savedCardChargeNeedsReconciliation.mockReturnValue(false);
     await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/pay/public-token/setup`, {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/setup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ invoiceVersion: new Date(UPDATED_AT).getTime() }),
@@ -227,7 +227,7 @@ describe('POST /api/pay/:token/setup stale-render (invoiceVersion) fence', () =>
       { statusCode: 409, inProgress: false, staleInvoice: true },
     ));
     await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/pay/public-token/setup`, {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/setup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ invoiceVersion: new Date(UPDATED_AT).getTime() }),
@@ -249,7 +249,7 @@ describe('POST /api/pay/:token/setup stale-render (invoiceVersion) fence', () =>
     );
     StripeService.savedCardChargeNeedsReconciliation.mockReturnValue(false);
     await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/api/pay/public-token/setup`, {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/setup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),

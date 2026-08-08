@@ -14,6 +14,7 @@ const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
   windowDurationMinutes, deriveWindowEnd,
 } = require('../../utils/datetime-et');
+const { FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, stageLifecycleStamps } = require('../customer-stages');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
@@ -192,6 +193,7 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
     name: 'update_customer',
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
 Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise ${CONTACT_FANOUT_DISCLOSURE}. Mention the ripple when proposing an email, name, or phone change.
+Billing-lane side effect: if the update gives the customer a WaveGuard membership tier plus a positive monthly_rate while no billing lane is set, billing_mode is stamped 'monthly_membership' in the same write (that is the lane such rows already bill under) and the owner is notified to verify it — mention this when proposing a tier or monthly_rate change.
 IMPORTANT: Always confirm with the operator before updating. Return what you plan to change and ask for approval.`,
     input_schema: {
       type: 'object',
@@ -207,7 +209,8 @@ IMPORTANT: Always confirm with the operator before updating. Return what you pla
   },
   {
     name: 'bulk_update_customers',
-    description: `Update a field across multiple customers at once. 
+    description: `Update a field across multiple customers at once.
+Billing-lane side effect: any row the update leaves with a WaveGuard membership tier plus a positive monthly_rate and no billing lane gets billing_mode stamped 'monthly_membership' in the same write (the lane such rows already bill under); the stamped rows are listed in the result and the owner is notified — mention this when proposing a tier or monthly_rate change.
 IMPORTANT: Always show the list of affected customers and ask for confirmation before executing.`,
     input_schema: {
       type: 'object',
@@ -1000,13 +1003,20 @@ async function updateCustomer(customerId, updates) {
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
   clearLineTypeOnPhoneChange(clean, before);
 
-  // Moving into a customer stage → stamp member_since so the metrics count them.
-  // Matches the route lifecycle: a pre-sale lead gets the conversion date
-  // (overwriting its intake date); a current/former customer keeps its real
-  // start but is filled if missing (e.g. a churned/dormant reactivation).
-  if (clean.pipeline_stage && ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)) {
-    const wasCustomer = ['active_customer', 'won', 'at_risk', 'churned', 'dormant'].includes(before.pipeline_stage);
-    clean.member_since = wasCustomer ? (before.member_since || etDateString()) : etDateString();
+  // Stage change → the FULL canonical lifecycle stamps, identical to the
+  // admin route (codex #3282 audit P1 — the old member_since-only handling
+  // left a reactivated archived row with active=false and a stale
+  // churned_at, so whereLiveCustomer never saw it): activation, churn
+  // clearing/stamping, stage timestamp, and member date, in the same write.
+  // Validate FIRST — a typo'd/model-invented stage must not run lifecycle
+  // mutations while persisting an unsupported value.
+  if (clean.pipeline_stage && !ALL_PIPELINE_STAGES.includes(clean.pipeline_stage)) {
+    return { error: `Invalid pipeline stage: ${clean.pipeline_stage}` };
+  }
+  if (clean.pipeline_stage) {
+    Object.assign(clean, stageLifecycleStamps(
+      before.pipeline_stage, clean.pipeline_stage, before, { today: etDateString() },
+    ));
   }
 
   // An address edit must stay consistent with the Customers route (PUT /:id):
@@ -1027,6 +1037,7 @@ async function updateCustomer(customerId, updates) {
   const addressSubmitted = ['address_line1', 'address_line2', 'city', 'state', 'zip']
     .some((f) => clean[f] !== undefined);
   let emailSync = null;
+  let impliedLaneStamp = null;
   try {
     await db.transaction(async (trx) => {
       // Row lock serializes overlapping address edits (see the Customers
@@ -1034,6 +1045,15 @@ async function updateCustomer(customerId, updates) {
       // concurrent editor still matches the snapshots the winner moved.
       const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
       const lockedMerged = { ...lockedBefore, ...clean };
+      // Close the inferred-monthly vector (#3140 resolution): billing_mode
+      // is not an IB-updatable field, so a tier/rate write that leaves the
+      // row (NULL lane + real membership tier + positive rate) mints an
+      // IMPLICIT monthly member the lane audits can't see. Stamp the
+      // inference explicitly in the same write — identical billing behavior
+      // (the resolver already infers monthly_membership) — and disclose it
+      // in the result + an owner review notification below.
+      impliedLaneStamp = require('../billing-lane').impliedMonthlyStampForWrite(lockedBefore, lockedMerged);
+      if (impliedLaneStamp) clean.billing_mode = impliedLaneStamp;
       // Assigning an email serializes against a customer-merge UNDO
       // checking whether that address is claimed (customer-dedupe.js
       // revertMerge — customers.email has NO unique constraint, so only
@@ -1147,11 +1167,34 @@ async function updateCustomer(customerId, updates) {
   const logChanges = changes.notes ? { ...changes, notes: '[redacted]' } : changes;
   logger.info(`[intelligence-bar] Updated customer ${customerId}:`, logChanges);
 
+  if (impliedLaneStamp) {
+    // Post-commit review card for the auto-stamped lane — the shape a
+    // mis-keyed duplicate takes, so the owner eyeballs it before the next
+    // dues run. Fire-and-forget; never blocks the tool result.
+    try {
+      const NotificationService = require('../notification-service');
+      void NotificationService.notifyAdmin(
+        'billing_lane_review',
+        `Billing lane stamped: ${after.first_name || ''} ${after.last_name || ''}`.trim(),
+        'An Intelligence Bar edit left this customer with a WaveGuard tier and a positive monthly rate but no explicit billing lane — stamped monthly_membership (the lane this combination already inferred). Verify before the next dues run; if they actually bill per application, change the lane in the profile.',
+        { icon: '\u{1F4B3}', link: `/admin/customers?customerId=${customerId}`, bell: true, metadata: { customerId, stamped: impliedLaneStamp, source: 'ib_update_customer' } },
+      ).catch((err) => logger.warn(`[intelligence-bar] billing-lane review notify failed for ${customerId}: ${err.message}`));
+    } catch (err) {
+      logger.warn(`[intelligence-bar] billing-lane review notify setup failed for ${customerId}: ${err.message}`);
+    }
+  }
+
   return {
     success: true,
     customer_id: customerId,
     customer_name: `${after.first_name} ${after.last_name}`,
     changes,
+    // Disclosed commit effect (#3140): this write made the customer an
+    // implied monthly member, so the lane inference was stamped explicitly.
+    ...(impliedLaneStamp ? {
+      billing_lane_stamped: impliedLaneStamp,
+      billing_lane_note: 'This edit gave the customer a membership tier and monthly rate with no billing lane set — billing_mode was stamped monthly_membership (matching the existing inference) and the owner was notified to verify the lane.',
+    } : {}),
     // Operator-visible ripple of an email change (zeros/absent = no ripple):
     // how many open lead/estimate/newsletter copies were synced and how many
     // email review cards the correction resolved.
@@ -1171,16 +1214,46 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // when phone is part of the update).
   if (clean.phone !== undefined) clean.line_type = null;
 
-  // Moving rows into a customer stage in bulk → set member_since per row from
-  // the OLD pipeline_stage (a CASE, since there's no per-row before-state),
-  // mirroring the route lifecycle: a pre-sale lead gets the conversion date
-  // (overwriting any intake date), a current/former customer keeps its real
-  // start (COALESCE fills only the missing).
-  const stageStamp = ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)
-    ? { member_since: db.raw(
-        `CASE WHEN pipeline_stage IN ('active_customer','won','at_risk','churned','dormant') THEN COALESCE(member_since, ?) ELSE ? END`,
-        [etDateString(), etDateString()]) }
-    : {};
+  // Bulk stage moves mirror the canonical stageLifecycleStamps in SQL (CASE
+  // per row, since there's no per-row before-state) — codex #3282 audit P1:
+  // member_since alone left bulk-reactivated archived rows with active=false
+  // and stale churn stamps, invisible to whereLiveCustomer.
+  //  - into a live stage: activate, clear churn stamps, member_since per the
+  //    old stage (former keeps its real start, lead gets conversion date)
+  //  - into past_customer: archival relabel — churn history PRESERVED
+  //  - into churned: stamp churned_at only for rows not already churned
+  //    (never restamp an existing churn)
+  //  - other lead-stage targets: clear stale churn stamps, like the route
+  //  - pipeline_stage_changed_at only bumps on rows actually changing stage
+  const formerOrCurrent = ['active_customer', 'won', 'at_risk', ...FORMER_CUSTOMER_STAGES];
+  let stageStamp = {};
+  if (clean.pipeline_stage && !ALL_PIPELINE_STAGES.includes(clean.pipeline_stage)) {
+    return { error: `Invalid pipeline stage: ${clean.pipeline_stage}` };
+  }
+  if (clean.pipeline_stage) {
+    // IS DISTINCT FROM, not <>: legacy NULL-stage rows must still get the
+    // audit stamp (NULL <> x is NULL in Postgres, silently skipping them).
+    stageStamp.pipeline_stage_changed_at = db.raw(
+      'CASE WHEN pipeline_stage IS DISTINCT FROM ? THEN now() ELSE pipeline_stage_changed_at END',
+      [clean.pipeline_stage]);
+    if (['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)) {
+      stageStamp.member_since = db.raw(
+        `CASE WHEN pipeline_stage IN (${formerOrCurrent.map(() => '?').join(',')}) THEN COALESCE(member_since, ?) ELSE ? END`,
+        [...formerOrCurrent, etDateString(), etDateString()]);
+      stageStamp.active = true;
+      stageStamp.churned_at = null;
+      stageStamp.churn_reason = null;
+    } else if (clean.pipeline_stage === 'churned') {
+      stageStamp.churned_at = db.raw(
+        "CASE WHEN pipeline_stage = 'churned' THEN churned_at ELSE ? END", [etDateString()]);
+      stageStamp.churn_reason = db.raw(
+        "CASE WHEN pipeline_stage = 'churned' THEN churn_reason ELSE NULL END");
+    }
+    // Any other non-live target (past_customer/dormant/lost/lead stages):
+    // archival/lateral move — churn history preserved until a REAL
+    // reactivation into a live stage (codex #3282 r3, mirrors
+    // stageLifecycleStamps).
+  }
 
   // notes maps to free-text crm_notes — redact from logs (see updateCustomer).
   const logUpdates = updates.notes !== undefined ? { ...updates, notes: '[redacted]' } : updates;
@@ -1196,32 +1269,49 @@ async function bulkUpdateCustomers(customerIds, updates) {
     // rate ACTUALLY changes reset (codex r6): setting the same value a
     // customer already has must not replace their family components with
     // an unattributed blob.
-    const count = await db.transaction(async (trx) => {
+    // Tier/rate writes can transition rows into the implied-monthly shape
+    // (#3140 — see updateCustomer): stamp those rows' billing_mode
+    // explicitly in the same transaction. Per-row decision, since each
+    // row's before-state differs under one shared update payload.
+    const laneStampRelevant = clean.monthly_rate !== undefined || clean.waveguard_tier !== undefined;
+    const { count, laneStampIds } = await db.transaction(async (trx) => {
       let rateChangedIds = [];
-      if (clean.monthly_rate !== undefined) {
+      let stampIds = [];
+      if (laneStampRelevant) {
         const beforeRows = await trx('customers')
           .whereIn('id', customerIds)
           .forUpdate()
-          .select('id', 'monthly_rate');
-        const newCents = Math.round((Number(clean.monthly_rate) || 0) * 100);
-        rateChangedIds = beforeRows
-          .filter((row) => Math.round((Number(row.monthly_rate) || 0) * 100) !== newCents)
+          .select('id', 'monthly_rate', 'billing_mode', 'waveguard_tier');
+        if (clean.monthly_rate !== undefined) {
+          const newCents = Math.round((Number(clean.monthly_rate) || 0) * 100);
+          rateChangedIds = beforeRows
+            .filter((row) => Math.round((Number(row.monthly_rate) || 0) * 100) !== newCents)
+            .map((row) => row.id);
+        }
+        const { impliedMonthlyStampForWrite } = require('../billing-lane');
+        stampIds = beforeRows
+          .filter((row) => impliedMonthlyStampForWrite(row, { ...row, ...clean }))
           .map((row) => row.id);
       }
       const updated = await trx('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
+      if (stampIds.length) {
+        await trx('customers').whereIn('id', stampIds).update({ billing_mode: 'monthly_membership' });
+      }
       if (rateChangedIds.length) {
         const PlanRateLedger = require('../plan-rate-ledger');
         for (const cid of rateChangedIds) {
           await PlanRateLedger.syncScalarWriteToLedger(trx, cid, clean.monthly_rate, { source: 'ib_bulk_update' });
         }
       }
-      return updated;
+      return { count: updated, laneStampIds: stampIds };
     });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
+    notifyBulkLaneStamps(laneStampIds);
     return {
       success: true,
       updated_count: count,
       fields_updated: Object.keys(updates),
+      ...bulkLaneStampResult(laneStampIds),
     };
   }
 
@@ -1240,6 +1330,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // and leave subscriber tokens/queued copies on the old mailbox.
   let count = 0;
   const errors = [];
+  const perRowLaneStampIds = [];
   for (const customerId of customerIds) {
     const before = await db('customers').where('id', customerId).first();
     if (!before) {
@@ -1247,6 +1338,7 @@ async function bulkUpdateCustomers(customerIds, updates) {
       continue;
     }
     let emailSync = null;
+    let rowLaneStamp = null;
     try {
       await db.transaction(async (trx) => {
         // Same row-lock serialization as the single-edit path.
@@ -1262,7 +1354,14 @@ async function bulkUpdateCustomers(customerIds, updates) {
           // household addresses are supported (20260417000010); see
           // updateCustomer.
         }
-        await trx('customers').where('id', customerId).update({ ...clean, ...stageStamp });
+        // Implied-monthly stamp (#3140) — same rule as updateCustomer, but
+        // decided per row against a NEW update object: `clean` is shared
+        // across the loop, so mutating it would leak one row's stamp onto
+        // every later row.
+        rowLaneStamp = require('../billing-lane').impliedMonthlyStampForWrite(lockedBefore, lockedMerged);
+        await trx('customers').where('id', customerId).update(
+          rowLaneStamp ? { ...clean, ...stageStamp, billing_mode: rowLaneStamp } : { ...clean, ...stageStamp },
+        );
         if (clean.monthly_rate !== undefined
           && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
             !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
@@ -1308,16 +1407,46 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
         .catch(() => {});
     }
+    if (rowLaneStamp) perRowLaneStampIds.push(customerId);
     count += 1;
   }
   logger.info(`[intelligence-bar] Bulk updated ${count} customers (address path):`, logUpdates);
+  notifyBulkLaneStamps(perRowLaneStampIds);
 
   return {
     success: true,
     updated_count: count,
     fields_updated: Object.keys(updates),
+    ...bulkLaneStampResult(perRowLaneStampIds),
     ...(errors.length ? { errors } : {}),
   };
+}
+
+// Shared disclosure/notification for the bulk implied-monthly stamps
+// (#3140): the result names every stamped row (commit effects are never
+// hidden from the operator), and the owner gets one review card per bulk
+// write summarizing how many rows were stamped.
+function bulkLaneStampResult(stampedIds = []) {
+  if (!stampedIds.length) return {};
+  return {
+    billing_lane_stamped_customer_ids: stampedIds,
+    billing_lane_note: `${stampedIds.length} customer${stampedIds.length === 1 ? '' : 's'} gained a membership tier and monthly rate with no billing lane set — billing_mode was stamped monthly_membership (matching the existing inference) and the owner was notified to verify the lanes.`,
+  };
+}
+
+function notifyBulkLaneStamps(stampedIds = []) {
+  if (!stampedIds.length) return;
+  try {
+    const NotificationService = require('../notification-service');
+    void NotificationService.notifyAdmin(
+      'billing_lane_review',
+      `Billing lane stamped on ${stampedIds.length} customer${stampedIds.length === 1 ? '' : 's'}`,
+      'An Intelligence Bar bulk edit left these customers with a WaveGuard tier and a positive monthly rate but no explicit billing lane — billing_mode was stamped monthly_membership (the lane the combination already inferred). Verify before the next dues run; any that actually bill per application need their lane changed in the profile.',
+      { icon: '\u{1F4B3}', link: '/admin/customers', bell: true, metadata: { customerIds: stampedIds, stamped: 'monthly_membership', source: 'ib_bulk_update_customers' } },
+    ).catch((err) => logger.warn(`[intelligence-bar] bulk billing-lane review notify failed: ${err.message}`));
+  } catch (err) {
+    logger.warn(`[intelligence-bar] bulk billing-lane review notify setup failed: ${err.message}`);
+  }
 }
 
 

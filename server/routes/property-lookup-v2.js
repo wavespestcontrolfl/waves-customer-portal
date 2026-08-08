@@ -3063,6 +3063,21 @@ function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
   return true;
 }
 
+// Bermuda suppression is dark until GATE_BERMUDA_SUPPRESSION is flipped.
+// Requested-while-dark fails CLOSED with a 400 the builder surfaces verbatim.
+function requireBermudaSuppressionGate() {
+  if (require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) return true;
+  const err = new Error('Bermudagrass suppression is not enabled on this environment (GATE_BERMUDA_SUPPRESSION) — uncheck the add-on or flip the gate.');
+  err.statusCode = 400;
+  err.code = 'BERMUDA_SUPPRESSION_GATED';
+  // Policy rejection, not engine breakage: the save-replay pipeline fails
+  // OPEN (CLIENT_FALLBACK) on engine errors by design, but a gated add-on
+  // must never ride that fallback into a persisted estimate — persistence
+  // rethrows errors carrying this marker (codex #3272 r1).
+  err.failClosed = true;
+  throw err;
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -3219,6 +3234,18 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       track,
       tier: lawnTier,
       lawnFreq: Number(o.lawnFreq) || 9,
+      // Bermuda-in-St.-Augustine suppression adder (dark behind
+      // GATE_BERMUDA_SUPPRESSION; kill switch = leave/flip the gate off).
+      // Operator-selected in the admin builder only — deliberately NOT in
+      // PUBLIC_QUOTE_SERVICE_KEYS passthrough or the estimator-MCP intent
+      // schema (eligibility is a manual call: cultivar, %-bermuda, season).
+      // FAIL CLOSED while dark: a requested-but-gated selection is REJECTED,
+      // never silently stripped — stripping would let the operator send an
+      // unchanged lawn price believing the adder was baked in (pre-push
+      // codex P0 on this branch).
+      ...(o.bermudaSuppression === true
+        ? { bermudaSuppression: requireBermudaSuppressionGate() }
+        : {}),
       useLawnCostFloor: o.useLawnCostFloor != null ? !!o.useLawnCostFloor : undefined,
       targetLawnGrossMargin: o.targetLawnGrossMargin,
       routeDriveMinutes: o.routeDriveMinutes,

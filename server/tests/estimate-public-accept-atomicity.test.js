@@ -259,7 +259,7 @@ afterAll((done) => {
 function recurringPestEstimate(overrides = {}) {
   return {
     id: overrides.id || 'est-atomic-1',
-    token: overrides.token || 'tok-atomic-1',
+    token: overrides.token || 'tok-atomic-1-x0123456789',
     status: 'sent',
     customer_id: null,
     customer_name: 'Pat Tester',
@@ -331,7 +331,7 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     resetStore(recurringPestEstimate());
     EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion boom'));
 
-    const failed = await putAccept('tok-atomic-1');
+    const failed = await putAccept('tok-atomic-1-x0123456789');
     expect(failed.status).toBeGreaterThanOrEqual(500);
     // Rolled back: NOT accepted, price NOT locked, no orphan customer, no invoice.
     expect(storedEstimate().status).toBe('sent');
@@ -352,7 +352,7 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
       membershipEmail: null,
       deferredFollowUpReminderRows: [],
     });
-    const retried = await putAccept('tok-atomic-1');
+    const retried = await putAccept('tok-atomic-1-x0123456789');
     expect(retried.status).toBe(200);
     expect(retried.data.success).toBe(true);
     expect(retried.data.nextStep).toBe('pay_invoice');
@@ -377,7 +377,7 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
   });
 
   test('in-transaction invoice mint failure also rolls the acceptance back', async () => {
-    resetStore(recurringPestEstimate({ id: 'est-atomic-2', token: 'tok-atomic-2' }));
+    resetStore(recurringPestEstimate({ id: 'est-atomic-2', token: 'tok-atomic-2-x0123456789' }));
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
       customerId: 'cust-1',
       firstScheduledServiceId: null,
@@ -388,7 +388,7 @@ describe('FIX 1 — standard recurring conversion is atomic with acceptance', ()
     });
     InvoiceService.create.mockRejectedValueOnce(new Error('invoice boom'));
 
-    const failed = await putAccept('tok-atomic-2');
+    const failed = await putAccept('tok-atomic-2-x0123456789');
     expect(failed.status).toBeGreaterThanOrEqual(500);
     expect(storedEstimate().status).toBe('sent');
     expect(storedEstimate().price_locked_at == null).toBe(true);
@@ -400,7 +400,7 @@ describe('FIX 2 — already-accepted retry returns the full success payload', ()
   test('recurring accept retry rebuilds nextStep/invoice fields from persisted state with no side effects', async () => {
     const accepted = recurringPestEstimate({
       id: 'est-already-1',
-      token: 'tok-already-1',
+      token: 'tok-already-1-x0123456789',
       status: 'accepted',
       customer_id: 'cust-9',
       accepted_service_mode: 'recurring',
@@ -427,7 +427,7 @@ describe('FIX 2 — already-accepted retry returns the full success payload', ()
       scheduled_date: '2026-07-20',
     }];
 
-    const res = await putAccept('tok-already-1');
+    const res = await putAccept('tok-already-1-x0123456789');
     expect(res.status).toBe(200);
     expect(res.data.success).toBe(true);
     expect(res.data.alreadyAccepted).toBe(true);
@@ -454,7 +454,7 @@ describe('FIX 2 — already-accepted retry returns the full success payload', ()
   test('unbooked one-time accept retry returns book_one_time with a booking link', async () => {
     const accepted = recurringPestEstimate({
       id: 'est-already-2',
-      token: 'tok-already-2',
+      token: 'tok-already-2-x0123456789',
       status: 'accepted',
       accepted_service_mode: 'one_time',
       price_locked_at: new Date(),
@@ -468,7 +468,7 @@ describe('FIX 2 — already-accepted retry returns the full success payload', ()
     });
     resetStore(accepted);
 
-    const res = await putAccept('tok-already-2');
+    const res = await putAccept('tok-already-2-x0123456789');
     expect(res.status).toBe(200);
     expect(res.data.alreadyAccepted).toBe(true);
     expect(res.data.serviceMode).toBe('one_time');
@@ -487,7 +487,7 @@ describe('AUDIT P0 — archived accepted retry is rejected before the payload re
   test('archived accepted estimate gets 409 with no invoice amounts, no pay URL, no booking URL', async () => {
     const archived = recurringPestEstimate({
       id: 'est-archived-1',
-      token: 'tok-archived-1',
+      token: 'tok-archived-1-x0123456789',
       status: 'accepted',
       customer_id: 'cust-9',
       accepted_service_mode: 'recurring',
@@ -509,7 +509,7 @@ describe('AUDIT P0 — archived accepted retry is rejected before the payload re
       notes: 'Auto-generated from accepted estimate #est-archived-1. Setup + first application.',
     }];
 
-    const res = await putAccept('tok-archived-1');
+    const res = await putAccept('tok-archived-1-x0123456789');
     expect(res.status).toBe(409);
     expect(res.data.error).toMatch(/no longer active/i);
     // No secondary credentials or amounts anywhere in the response.
@@ -531,7 +531,7 @@ describe('AUDIT P0 — archived accepted retry is rejected before the payload re
 
 describe('AUDIT P1 — membership-started email suppressed for skipped conversions', () => {
   test('membershipEmail is NOT sent when recurringConversionSkipped is true', async () => {
-    resetStore(recurringPestEstimate({ id: 'est-skip-1', token: 'tok-skip-1' }));
+    resetStore(recurringPestEstimate({ id: 'est-skip-1', token: 'tok-skip-1-x0123456789' }));
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
       customerId: 'cust-1',
       firstScheduledServiceId: null,
@@ -541,7 +541,7 @@ describe('AUDIT P1 — membership-started email suppressed for skipped conversio
       deferredFollowUpReminderRows: [],
     });
 
-    const res = await putAccept('tok-skip-1');
+    const res = await putAccept('tok-skip-1-x0123456789');
     expect(res.status).toBe(200);
     expect(res.data.success).toBe(true);
     const AccountMembershipEmail = require('../services/account-membership-email');
@@ -549,7 +549,7 @@ describe('AUDIT P1 — membership-started email suppressed for skipped conversio
   });
 
   test('control: membershipEmail IS sent when the conversion actually ran', async () => {
-    resetStore(recurringPestEstimate({ id: 'est-noskip-1', token: 'tok-noskip-1' }));
+    resetStore(recurringPestEstimate({ id: 'est-noskip-1', token: 'tok-noskip-1-x0123456789' }));
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
       customerId: 'cust-1',
       firstScheduledServiceId: null,
@@ -559,7 +559,7 @@ describe('AUDIT P1 — membership-started email suppressed for skipped conversio
       deferredFollowUpReminderRows: [],
     });
 
-    const res = await putAccept('tok-noskip-1');
+    const res = await putAccept('tok-noskip-1-x0123456789');
     expect(res.status).toBe(200);
     const AccountMembershipEmail = require('../services/account-membership-email');
     expect(AccountMembershipEmail.sendMembershipStarted)
@@ -571,7 +571,7 @@ describe('AUDIT P1 — voided annual-prepay invoice is not surfaced on retry', (
   test('retry skips the voided prepay-term invoice and falls back to the live accept-mint invoice', async () => {
     const accepted = recurringPestEstimate({
       id: 'est-prepay-1',
-      token: 'tok-prepay-1',
+      token: 'tok-prepay-1-x0123456789',
       status: 'accepted',
       customer_id: 'cust-9',
       accepted_service_mode: 'recurring',
@@ -609,7 +609,7 @@ describe('AUDIT P1 — voided annual-prepay invoice is not surfaced on retry', (
       },
     ];
 
-    const res = await putAccept('tok-prepay-1');
+    const res = await putAccept('tok-prepay-1-x0123456789');
     expect(res.status).toBe(200);
     expect(res.data.alreadyAccepted).toBe(true);
     // The dead /pay token never appears; the live invoice does.
@@ -624,7 +624,7 @@ describe('AUDIT P1 — retry booking link uses canonical service selection', () 
   test('a lawn one-time estimate whose FIRST row is a discount line still routes to the lawn funnel', async () => {
     const accepted = recurringPestEstimate({
       id: 'est-lawnretry-1',
-      token: 'tok-lawnretry-1',
+      token: 'tok-lawnretry-1-x0123456789',
       status: 'accepted',
       accepted_service_mode: 'one_time',
       price_locked_at: new Date(),
@@ -649,7 +649,7 @@ describe('AUDIT P1 — retry booking link uses canonical service selection', () 
     });
     resetStore(accepted);
 
-    const res = await putAccept('tok-lawnretry-1');
+    const res = await putAccept('tok-lawnretry-1-x0123456789');
     expect(res.status).toBe(200);
     expect(res.data.alreadyAccepted).toBe(true);
     expect(res.data.nextStep).toBe('book_one_time');
@@ -664,7 +664,7 @@ describe('AUDIT R3 P1 — settled invoices never surface as payable on retry', (
     async (settledStatus) => {
       const accepted = recurringPestEstimate({
         id: 'est-settled-1',
-        token: 'tok-settled-1',
+        token: 'tok-settled-1-x0123456789',
         status: 'accepted',
         customer_id: 'cust-9',
         accepted_service_mode: 'recurring',
@@ -691,7 +691,7 @@ describe('AUDIT R3 P1 — settled invoices never surface as payable on retry', (
         scheduled_date: '2026-07-20',
       }];
 
-      const res = await putAccept('tok-settled-1');
+      const res = await putAccept('tok-settled-1-x0123456789');
       expect(res.status).toBe(200);
       expect(res.data.alreadyAccepted).toBe(true);
       expect(res.data.nextStep).toBe('confirmed');
@@ -706,7 +706,7 @@ describe('AUDIT R3 P1 — settled invoices never surface as payable on retry', (
   test('a prepaid annual-prepay term invoice yields confirmed, not prepay_invoice/pay_invoice', async () => {
     const accepted = recurringPestEstimate({
       id: 'est-prepaid-1',
-      token: 'tok-prepaid-1',
+      token: 'tok-prepaid-1-x0123456789',
       status: 'accepted',
       customer_id: 'cust-9',
       accepted_service_mode: 'recurring',
@@ -731,7 +731,7 @@ describe('AUDIT R3 P1 — settled invoices never surface as payable on retry', (
       notes: 'Auto-generated from accepted estimate #est-prepaid-1. Annual prepay.',
     }];
 
-    const res = await putAccept('tok-prepaid-1');
+    const res = await putAccept('tok-prepaid-1-x0123456789');
     expect(res.status).toBe(200);
     expect(res.data.alreadyAccepted).toBe(true);
     // Without the settled override, billingTerm='prepay_annual' would fall
@@ -746,7 +746,7 @@ describe('AUDIT R3 P1 — settled invoices never surface as payable on retry', (
   test('a re-billed estimate (settled + collectible stamped invoices) surfaces the collectible one', async () => {
     const accepted = recurringPestEstimate({
       id: 'est-rebill-1',
-      token: 'tok-rebill-1',
+      token: 'tok-rebill-1-x0123456789',
       status: 'accepted',
       customer_id: 'cust-9',
       accepted_service_mode: 'recurring',
@@ -778,7 +778,7 @@ describe('AUDIT R3 P1 — settled invoices never surface as payable on retry', (
       },
     ];
 
-    const res = await putAccept('tok-rebill-1');
+    const res = await putAccept('tok-rebill-1-x0123456789');
     expect(res.status).toBe(200);
     expect(res.data.nextStep).toBe('pay_invoice');
     expect(res.data.invoiceId).toBe('inv-rebilled');
@@ -791,7 +791,7 @@ describe('AUDIT R3 P1 — retry short links are idempotent and never SMS-attribu
   function unbookedOneTime(overrides = {}) {
     return recurringPestEstimate({
       id: 'est-shortlink-1',
-      token: 'tok-shortlink-1',
+      token: 'tok-shortlink-1-x0123456789',
       status: 'accepted',
       accepted_service_mode: 'one_time',
       price_locked_at: new Date(),
@@ -833,7 +833,7 @@ describe('AUDIT R3 P1 — retry short links are idempotent and never SMS-attribu
       return 'https://portal.wavespestcontrol.com/l/ret42';
     });
 
-    const first = await putAccept('tok-shortlink-1');
+    const first = await putAccept('tok-shortlink-1-x0123456789');
     expect(first.status).toBe(200);
     expect(first.data.nextStep).toBe('book_one_time');
     expect(first.data.bookingUrl).toBe('https://portal.wavespestcontrol.com/l/ret42');
@@ -841,7 +841,7 @@ describe('AUDIT R3 P1 — retry short links are idempotent and never SMS-attribu
     expect(shortUrlSvc.shortenOrPassthrough.mock.calls[0][1].channel).toBe('web');
     expect(shortUrlSvc.shortenOrPassthrough.mock.calls[0][0]).toContain('estimate_id=est-shortlink-1');
 
-    const second = await putAccept('tok-shortlink-1');
+    const second = await putAccept('tok-shortlink-1-x0123456789');
     expect(second.status).toBe(200);
     expect(second.data.bookingUrl).toBe('https://portal.wavespestcontrol.com/l/ret42');
     // No second mint: the row count is unchanged and the shortener never ran again.
@@ -853,7 +853,7 @@ describe('AUDIT R3 P1 — retry short links are idempotent and never SMS-attribu
   });
 
   test('an accept-time short code for the same target is reused — the retry mints nothing', async () => {
-    resetStore(unbookedOneTime({ id: 'est-shortlink-2', token: 'tok-shortlink-2' }));
+    resetStore(unbookedOneTime({ id: 'est-shortlink-2', token: 'tok-shortlink-2-x0123456789' }));
     // Exactly the URL the retry rebuilds (service derived canonically +
     // estimate correlation + the customers-only-gate accept token). The token
     // mint is quantized to the acceptance day — this fixture carries no
@@ -875,7 +875,7 @@ describe('AUDIT R3 P1 — retry short links are idempotent and never SMS-attribu
     }];
     const shortUrlSvc = require('../services/short-url');
 
-    const res = await putAccept('tok-shortlink-2');
+    const res = await putAccept('tok-shortlink-2-x0123456789');
     expect(res.status).toBe(200);
     expect(res.data.nextStep).toBe('book_one_time');
     expect(res.data.bookingUrl).toBe('https://portal.wavespestcontrol.com/l/acc99');
@@ -893,7 +893,7 @@ describe('AUDIT R3 P1 — commercial-schedule admin notification is post-commit 
   });
 
   test('dispatched exactly once after the accept transaction commits', async () => {
-    resetStore(recurringPestEstimate({ id: 'est-notify-1', token: 'tok-notify-1' }));
+    resetStore(recurringPestEstimate({ id: 'est-notify-1', token: 'tok-notify-1-x0123456789' }));
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
       customerId: 'cust-1',
       firstScheduledServiceId: null,
@@ -904,7 +904,7 @@ describe('AUDIT R3 P1 — commercial-schedule admin notification is post-commit 
       commercialScheduleNotification: commercialNotification('est-notify-1'),
     });
 
-    const res = await putAccept('tok-notify-1');
+    const res = await putAccept('tok-notify-1-x0123456789');
     expect(res.status).toBe(200);
     // The route asked the converter to DEFER (no in-transaction global-DB notify)…
     const opts = EstimateConverter.convertEstimate.mock.calls.at(-1)[1];
@@ -919,7 +919,7 @@ describe('AUDIT R3 P1 — commercial-schedule admin notification is post-commit 
   });
 
   test('NOT dispatched when the accept transaction rolls back after the conversion returned it', async () => {
-    resetStore(recurringPestEstimate({ id: 'est-notify-2', token: 'tok-notify-2' }));
+    resetStore(recurringPestEstimate({ id: 'est-notify-2', token: 'tok-notify-2-x0123456789' }));
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
       customerId: 'cust-1',
       firstScheduledServiceId: null,
@@ -933,7 +933,7 @@ describe('AUDIT R3 P1 — commercial-schedule admin notification is post-commit 
     // the whole acceptance rolls back.
     InvoiceService.create.mockRejectedValueOnce(new Error('invoice boom'));
 
-    const failed = await putAccept('tok-notify-2');
+    const failed = await putAccept('tok-notify-2-x0123456789');
     expect(failed.status).toBeGreaterThanOrEqual(500);
     expect(storedEstimate().status).toBe('sent');
     const NotificationService = require('../services/notification-service');
@@ -947,12 +947,12 @@ describe('FIX 3 — email-only (phoneless) standard accepts fail closed pre-comm
   test('phoneless recurring accept 400s before the transaction and commits nothing', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-phoneless-1',
-      token: 'tok-phoneless-1',
+      token: 'tok-phoneless-1-x0123456789',
       customer_phone: null,
       customer_email: 'emailonly@example.com',
     }));
 
-    const res = await putAccept('tok-phoneless-1');
+    const res = await putAccept('tok-phoneless-1-x0123456789');
     expect(res.status).toBe(400);
     expect(res.data.code).toBe('CUSTOMER_CONTACT_REQUIRED');
     expect(res.data.error).toMatch(/call the Waves office/i);
@@ -968,7 +968,7 @@ describe('FIX 3 — email-only (phoneless) standard accepts fail closed pre-comm
   test('a linked customer (no phone) still accepts — the guard keys on missing customer AND phone', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-linked-1',
-      token: 'tok-linked-1',
+      token: 'tok-linked-1-x0123456789',
       customer_phone: null,
       customer_id: 'cust-77',
     }));
@@ -982,7 +982,7 @@ describe('FIX 3 — email-only (phoneless) standard accepts fail closed pre-comm
       deferredFollowUpReminderRows: [],
     });
 
-    const res = await putAccept('tok-linked-1');
+    const res = await putAccept('tok-linked-1-x0123456789');
     expect(res.status).toBe(200);
     expect(res.data.success).toBe(true);
     expect(storedEstimate().status).toBe('accepted');
@@ -991,7 +991,7 @@ describe('FIX 3 — email-only (phoneless) standard accepts fail closed pre-comm
   test('a phoneless ONE-TIME accept with no appointment to bind still succeeds (needs no customer record)', async () => {
     resetStore(recurringPestEstimate({
       id: 'est-onetime-1',
-      token: 'tok-onetime-1',
+      token: 'tok-onetime-1-x0123456789',
       customer_phone: null,
       customer_email: 'emailonly@example.com',
       monthly_total: 0,
@@ -1005,7 +1005,7 @@ describe('FIX 3 — email-only (phoneless) standard accepts fail closed pre-comm
       }),
     }));
 
-    const res = await putAccept('tok-onetime-1');
+    const res = await putAccept('tok-onetime-1-x0123456789');
     expect(res.status).toBe(200);
     expect(res.data.success).toBe(true);
     expect(res.data.nextStep).toBe('book_one_time');
@@ -1043,7 +1043,7 @@ describe('P1 — accept txn lock order: rung 1 before every estimate row mutatio
     // waits on that same estimate row (rung 1 → estimate FOR UPDATE).
     // The fix pre-acquires the hold's date key as the txn's first
     // statements, so rung 1 precedes the estimates UPDATE here.
-    resetStore(recurringPestEstimate({ id: 'est-lock-1', token: 'tok-lock-1' }));
+    resetStore(recurringPestEstimate({ id: 'est-lock-1', token: 'tok-lock-1-x0123456789' }));
     db.__state.tables.scheduled_services = [holdFixture()];
     EstimateConverter.convertEstimate.mockResolvedValueOnce({
       customerId: 'cust-1',
@@ -1056,7 +1056,7 @@ describe('P1 — accept txn lock order: rung 1 before every estimate row mutatio
       deferredFollowUpReminderRows: [],
     });
 
-    const res = await putAccept('tok-lock-1', {
+    const res = await putAccept('tok-lock-1-x0123456789', {
       slotId: '2027-05-20_09-00_unassigned',
       paymentMethodPreference: 'pay_at_visit',
     });
@@ -1096,14 +1096,14 @@ describe('P1 — accept txn lock order: rung 1 before every estimate row mutatio
   });
 
   test('a deadlock-aborted accept txn (PG 40P01) maps to the retryable 409 conflict shape, fully rolled back', async () => {
-    resetStore(recurringPestEstimate({ id: 'est-dl-1', token: 'tok-dl-1' }));
+    resetStore(recurringPestEstimate({ id: 'est-dl-1', token: 'tok-dl-1-x0123456789' }));
     // Simulate Postgres aborting the txn to break a lock cycle mid-accept
     // (the conversion runs inside the transaction — FIX 1 above).
     EstimateConverter.convertEstimate.mockRejectedValueOnce(
       Object.assign(new Error('deadlock detected'), { code: '40P01' }),
     );
 
-    const res = await putAccept('tok-dl-1');
+    const res = await putAccept('tok-dl-1-x0123456789');
     // Same retryable-conflict shape as the RESERVATION_EXPIRED path (409 +
     // { error }), never an unmapped 500.
     expect(res.status).toBe(409);

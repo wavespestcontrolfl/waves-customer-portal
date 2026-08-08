@@ -1739,6 +1739,8 @@ const ReviewService = {
     try {
       const [{ count: googleCount }] = await db("google_reviews")
         .where("reviewer_name", "!=", "_stats")
+        // Reviews Google has removed are evidence, not current social proof.
+        .whereNull("missing_since")
         .count("* as count");
       techReviewCount += parseInt(googleCount);
     } catch {

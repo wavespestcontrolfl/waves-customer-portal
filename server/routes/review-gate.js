@@ -53,6 +53,32 @@ const directLinkLimiter = rateLimit({
 });
 const { isBotUserAgent } = require('../utils/bot-ua');
 
+// Live review_requests tokens are 32-64 char url-safe (prod-verified
+// 2026-08-07, all 68 rows incl. one legacy 32-char). Malformed tokens get
+// the same generic 404 as unknown ones, before any DB lookup. Applies to
+// every /:token route on this router.
+const REVIEW_TOKEN_RE = /^[A-Za-z0-9_-]{32,64}$/;
+router.param('token', (req, res, next, token) => {
+  if (REVIEW_TOKEN_RE.test(String(token))) return next();
+  // /go's contract is that EVERY failure path degrades to the rate page
+  // (which renders a friendly not-found state) — keep that for malformed
+  // tokens too; everything else gets the same generic 404 as unknown.
+  if (req.path.endsWith('/go')) return res.redirect(302, `/rate/${encodeURIComponent(String(token))}`);
+  return res.status(404).json({ error: 'Review link not found or expired' });
+});
+
+// The page GET and the score/submit writes had no per-route limiter
+// (security review 2026-08-07) — same probing exposure as /go, but these
+// DO touch the DB per hit. 30/min per IP matches directLinkLimiter.
+const reviewPageLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests — please slow down.' },
+});
+
 // GET /api/rate/:token/go — tracked redirect straight to the Google review
 // form (GATE_REVIEW_DIRECT_LINK rollout; the SMS/email {review_url} resolves
 // here via a /l/ short link). Stamps the open + click on the review_requests
@@ -187,7 +213,7 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
 });
 
 // GET /api/rate/:token — public page data for the review funnel
-router.get('/:token', async (req, res, next) => {
+router.get('/:token', reviewPageLimiter, async (req, res, next) => {
   try {
     const request = await db('review_requests')
       .where({ token: req.params.token })
@@ -274,7 +300,7 @@ router.get('/:token', async (req, res, next) => {
 // score before committing to feedback or the Google-review path. The request
 // status is intentionally left alone so reminder and low-score workflows still
 // run only from the final /submit path.
-router.post('/:token/score', async (req, res, next) => {
+router.post('/:token/score', reviewPageLimiter, async (req, res, next) => {
   try {
     const { score, highlights } = req.body;
 
@@ -313,7 +339,7 @@ router.post('/:token/score', async (req, res, next) => {
 });
 
 // POST /api/rate/:token/submit — submit NPS score + feedback
-router.post('/:token/submit', async (req, res, next) => {
+router.post('/:token/submit', reviewPageLimiter, async (req, res, next) => {
   try {
     const { score, feedback, highlights } = req.body;
 

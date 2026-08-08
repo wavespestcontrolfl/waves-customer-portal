@@ -15,6 +15,9 @@ router.get('/featured', async (req, res, next) => {
       // 5-star rating and a fresh synced review_created_at, so without this
       // they sort to the top and render raw JSON as the first "review".
       .whereRaw("coalesce(reviewer_name, '') <> '_stats'")
+      // A review Google removed/filtered must not keep appearing as a
+      // current testimonial (the row is retained for admin evidence only).
+      .whereNull('missing_since')
       .orderBy('review_created_at', 'desc');
 
     if (location) {

@@ -1184,6 +1184,10 @@ module.exports = {
   notifyParkedRun,
   pollReplies,
   isApprovalControlMessage,
+  // Shared classifier: the parked-run digest excludes these kinds (they get
+  // per-item approval emails from this module — two notifications for one
+  // decision would double-surface it).
+  isApprovableKind,
   _internals: {
     parseDecision,
     extractReplyText,
