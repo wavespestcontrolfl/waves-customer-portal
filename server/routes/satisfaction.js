@@ -114,7 +114,12 @@ router.post('/', async (req, res, next) => {
     }
 
     const customer = req.customer;
-    const office = resolveReviewLocation(customer);
+    // Same last-resort stored id the ask path uses (ReviewService
+    // resolveLocation) so the office shown here can never disagree with the
+    // office the gated ask resolves.
+    const office = resolveReviewLocation(customer, {
+      storedLocationId: customer.nearest_location_id || null,
+    });
     const isPromoter = rating >= 8;
     const isDetractor = rating <= 3;
 

@@ -72,21 +72,33 @@ describe('customer-card memberSinceYearET', () => {
 describe('customer-card location pick', () => {
   const { __private: { pickCardLocation } } = require('../services/customer-card');
 
-  test('geodata wins: routes to the nearest GBP office', () => {
-    // Venice office coordinates → venice.
+  test('mapped city beats geodata — the card matches the SMS and /go surfaces', () => {
+    // A mapped city is the service-area intent; geography alone is what
+    // pointed downtown-Sarasota cards at the Bradenton profile while the
+    // texts resolved Sarasota (codex #3285 r1 P1).
     const loc = pickCardLocation({ latitude: 27.0871, longitude: -82.4047, city: 'Bradenton' });
-    expect(loc.id).toBe('venice');
+    expect(loc.id).toBe('bradenton');
     expect(loc.googleReviewUrl).toMatch(/^https:\/\/g\.page\/r\//);
+    // With no city, geodata routes to the nearest office (Venice coords).
+    const geo = pickCardLocation({ latitude: 27.0871, longitude: -82.4047 });
+    expect(geo.id).toBe('venice');
   });
 
   test('no geodata: falls back to the review-routing city map (with overrides)', () => {
-    // Palmetto is a review-only override → bradenton GBP, not parrish.
+    // Palmetto routes to the PARRISH profile — the office that serves it.
+    // (It was a review-only override → bradenton until the 2026-08-07 audit
+    // unified the three routing tables; the tokenized /go link already
+    // resolved Palmetto to Parrish, so the card QR now matches it.)
     const loc = pickCardLocation({ city: 'Palmetto' });
-    expect(loc.id).toBe('bradenton');
+    expect(loc.id).toBe('parrish');
+    // Longboat Key keeps its deliberate review-only override → bradenton.
+    expect(pickCardLocation({ city: 'Longboat Key' }).id).toBe('bradenton');
+    // Rotonda West is a mapped Venice-area neighborhood, not an unknown city.
+    expect(pickCardLocation({ city: 'Rotonda West' }).id).toBe('venice');
   });
 
   test('unknown city and no geodata: defaults to bradenton', () => {
-    const loc = pickCardLocation({ city: 'Rotonda West' });
+    const loc = pickCardLocation({ city: 'Atlantis' });
     expect(loc.id).toBe('bradenton');
   });
 

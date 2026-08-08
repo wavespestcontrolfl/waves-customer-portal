@@ -215,7 +215,14 @@ const REVIEW_LINKS = Object.fromEntries(
 const { resolveReviewLocationId } = require("../config/locations");
 
 function resolveLocation(customer) {
-  return resolveReviewLocationId(customer || {});
+  // nearest_location_id rides along as the resolver's LAST-RESORT stored id:
+  // it only applies when city, ZIP, and coordinates all miss (the
+  // tracking-number-lead case — an area-label "city" with the true office
+  // stored on the row). It must never outrank the address signals; as pure
+  // straight-line geography it is exactly what mis-routed downtown Sarasota.
+  return resolveReviewLocationId(customer || {}, {
+    storedLocationId: (customer && customer.nearest_location_id) || null,
+  });
 }
 
 function generateToken() {
@@ -468,6 +475,35 @@ const ReviewService = {
           );
         }
         return existing;
+      }
+    }
+
+    // Manual triggers (/trigger, /tech-trigger, the intelligence-bar tool —
+    // anything not the auto enrollment machinery, which carries its own
+    // cadence/cap guards) go through the SAME gate stack as sendGatedAsk, so
+    // no unscheduled path can out-ask the caps (codex #3285 r1 P1). Runs
+    // AFTER the per-service-record dedupe above: dispatching an
+    // already-queued row is a resend, not a new ask. Throws a 409-shaped
+    // error the routes surface verbatim.
+    if (triggeredBy !== "auto") {
+      if (customer.has_left_google_review) {
+        throw Object.assign(
+          new Error("Customer is marked as already having left a Google review"),
+          { statusCode: 409, code: "already_reviewed" },
+        );
+      }
+      const gate = await this.checkUnscheduledAskGates(customerId);
+      if (!gate.allowed) {
+        const messages = {
+          in_cadence: "Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.",
+          at_cap: "Customer has already received 3 review requests in the last 6 months",
+          cooldown: "Customer received a review request in the last 30 days",
+          already_queued: "A review request to this customer is already queued and will send automatically.",
+        };
+        throw Object.assign(
+          new Error(messages[gate.outcome] || "Review request blocked"),
+          { statusCode: 409, code: gate.outcome, nextAllowedAt: gate.nextAllowedAt || null },
+        );
       }
     }
 
@@ -2765,6 +2801,61 @@ const ReviewService = {
   },
 
   /**
+   * The shared gate stack for an UNSCHEDULED review ask — used by
+   * sendGatedAsk (admin one-off + portal satisfaction) AND by create() for
+   * manual triggers (/trigger, /tech-trigger, the intelligence-bar tool), so
+   * no unscheduled path can out-ask the caps.
+   *
+   * Checks, in order (each fails CLOSED — a DB error throws rather than
+   * letting an at-cap / in-cooldown customer through):
+   *   - active-cadence block: an active cadence already owns this customer's
+   *     review ASKS (its touches can sit 'deferred' where the queued-row check
+   *     cannot see them). Only enforced while GATE_REVIEW_SEQUENCES is ON —
+   *     with the gate off the cadence cron is frozen, and a stranded 'active'
+   *     row must not lock the customer out forever (Codex P2, PR #3104 r4).
+   *   - lifetime 3-ask/180d cap and 30-day cooldown, channel-complete across
+   *     SMS + email (getDeliveredAskStats).
+   *   - queued-ask reuse: a pending row scheduled for processScheduled() with
+   *     no sent timestamp means a second attempt would queue ANOTHER row and
+   *     both would send. Only a queued ASK blocks (ASK_TOUCH_SQL) — a deferred
+   *     no-link check-in must not read as already queued.
+   *
+   * isAsk=false (private no-link check-ins) bypasses everything by design.
+   *
+   * @returns {{allowed: boolean, outcome?: string, nextAllowedAt?: *}}
+   */
+  async checkUnscheduledAskGates(customerId, { isAsk = true } = {}) {
+    if (!isAsk) return { allowed: true };
+    const { isEnabled } = require("../config/feature-gates");
+
+    if (isEnabled("reviewSequences")) {
+      const activeSeq = await db("review_sequences")
+        .where({ customer_id: customerId, status: "active" }).first().catch(() => null);
+      if (activeSeq) return { allowed: false, outcome: "in_cadence" };
+    }
+
+    const thirtyDaysAgo = Date.now() - 30 * 86400000;
+    // No .catch → a DB error throws instead of silently reading as zero asks.
+    const stats = await this.getDeliveredAskStats(customerId);
+    if (stats.count >= 3) return { allowed: false, outcome: "at_cap" };
+    if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
+      return { allowed: false, outcome: "cooldown" };
+    }
+
+    const queued = await db("review_requests")
+      .where({ customer_id: customerId, status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotNull("scheduled_for")
+      .whereRaw(OUTREACH.ASK_TOUCH_SQL)
+      .orderBy("scheduled_for", "asc")
+      .first();
+    if (queued) {
+      return { allowed: false, outcome: "already_queued", nextAllowedAt: queued.scheduled_for };
+    }
+    return { allowed: true };
+  },
+
+  /**
    * Send ONE unscheduled review ask through the full gate stack — the single
    * entry point for every ask that is NOT a cadence step.
    *
@@ -2821,7 +2912,6 @@ const ReviewService = {
     const contact = getServiceContactSmsRecipient(customer);
     if (channel === "sms" && !contact.phone) return { outcome: "no_contact" };
 
-    const { isEnabled } = require("../config/feature-gates");
     const cid = customer.id;
 
     // Non-blocking per-customer lock — a second in-flight send to the same
@@ -2833,43 +2923,9 @@ const ReviewService = {
       // reuse, and the active-cadence block. getDeliveredAskStats ignores them.
       const isAsk = OUTREACH.isAskTemplate(templateId);
 
-      // An active cadence already owns this customer's review ASKS (and its
-      // touches can sit 'deferred' where the queued-row check below cannot see
-      // them), so a one-off ask here would double-contact. Only enforced while
-      // GATE_REVIEW_SEQUENCES is ON — with the gate off the cadence cron is
-      // frozen, and a stranded 'active' row must not lock the customer out of
-      // one-off asks forever (Codex P2, PR #3104 r4).
-      if (isAsk && isEnabled("reviewSequences")) {
-        const activeSeq = await db("review_sequences")
-          .where({ customer_id: cid, status: "active" }).first().catch(() => null);
-        if (activeSeq) return { outcome: "in_cadence" };
-      }
-
-      if (isAsk) {
-        const thirtyDaysAgo = Date.now() - 30 * 86400000;
-        // Channel-complete across SMS + email. No .catch → a DB error throws
-        // instead of silently reading as zero asks.
-        const stats = await this.getDeliveredAskStats(cid);
-        if (stats.count >= 3) return { outcome: "at_cap" };
-        if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
-          return { outcome: "cooldown" };
-        }
-        // A previous send may have hit a transient failure, leaving a pending
-        // row scheduled for processScheduled() with no sent timestamp. The cap
-        // counts only DELIVERED asks, so a second attempt would queue ANOTHER
-        // pending row and processScheduled would send both. Reuse instead.
-        const queued = await db("review_requests")
-          .where({ customer_id: cid, status: "pending" })
-          .whereNull("sms_sent_at")
-          .whereNotNull("scheduled_for")
-          // Only a queued ASK blocks another ask — a deferred no-link check-in
-          // must not make a real review request report as already queued.
-          .whereRaw(OUTREACH.ASK_TOUCH_SQL)
-          .orderBy("scheduled_for", "asc")
-          .first();
-        if (queued) {
-          return { outcome: "already_queued", nextAllowedAt: queued.scheduled_for };
-        }
+      const gate = await this.checkUnscheduledAskGates(cid, { isAsk });
+      if (!gate.allowed) {
+        return { outcome: gate.outcome, nextAllowedAt: gate.nextAllowedAt };
       }
 
       const loc = locationId
@@ -3153,10 +3209,10 @@ const ReviewService = {
       svcType = svcType || lastSvc?.service_type || null;
       tName = tName || lastSvc?.tech_name || "Adam";
     }
-    // NOT customer.nearest_location_id: that column is pure straight-line
-    // geography, which is exactly the signal that mis-routes downtown Sarasota
-    // to the Bradenton profile. resolveLocation() consults it (as its geo
-    // fallback) only after city and ZIP have both missed.
+    // resolveLocation() routes city → zip → geo first — nearest_location_id
+    // (pure straight-line geography, the signal that mis-routed downtown
+    // Sarasota) is only its last resort, for rows with no usable address
+    // signals at all (tracking-number leads with an area-label "city").
     const locId = locationId || resolveLocation(customer);
 
     let sequence;
@@ -4401,12 +4457,6 @@ ReviewService.__private = {
   shiftToWeekdayMorning,
   buildReviewUrl,
 };
-
-// The digital-card mint (services/customer-card.js) routes its review QR
-// through the SAME canonical resolver as review asks — including the
-// review-only overrides (longboat key → bradenton) — instead of forking
-// another copy of the location list. Returns a location id ('bradenton' | …).
-ReviewService.resolveReviewLocationId = resolveLocation;
 
 // The tokenized review destination in its long form, honoring
 // GATE_REVIEW_DIRECT_LINK (/go vs the rate page). Route handlers that hand a

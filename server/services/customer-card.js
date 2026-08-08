@@ -20,7 +20,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { gates } = require('../config/feature-gates');
-const { WAVES_LOCATIONS, nearestLocation } = require('../config/locations');
+const { WAVES_LOCATIONS, resolveReviewLocation } = require('../config/locations');
 const { createTrackedShortLink } = require('./short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 
@@ -80,31 +80,19 @@ async function referralShareUrl(customer) {
 }
 
 /**
- * Office for a customer: geodata first (nearest GBP), then the review-routing
- * city map (review-request.js — includes its review-only overrides like
- * palmetto → bradenton), which itself defaults to Bradenton.
+ * Office for a customer's card QR — the canonical review-routing resolver
+ * (config/locations.js): city → zip → geo → stored nearest_location_id →
+ * default. This used to run geodata FIRST, which pointed a downtown-Sarasota
+ * card at the Bradenton profile while the SMS and /go paths resolved the same
+ * customer to Sarasota by city (codex #3285 r1 P1) — the card must never
+ * disagree with the other review surfaces. The resolver keeps the null/blank
+ * lat-lng guard (Codex P2 #2588) and the tracking-number-lead fallback to
+ * nearest_location_id (Codex P2 #2588 r4) internally.
  */
 function pickCardLocation(customer = {}) {
-  // Null/blank-guard BEFORE Number(): Number(null) === 0, which would route
-  // every un-geocoded customer to the office nearest (0,0) instead of falling
-  // back to city routing (Codex P2 on PR #2588).
-  const rawLat = customer.latitude;
-  const rawLng = customer.longitude;
-  const lat = rawLat == null || rawLat === '' ? NaN : Number(rawLat);
-  const lng = rawLng == null || rawLng === '' ? NaN : Number(rawLng);
-  if (Number.isFinite(lat) && Number.isFinite(lng)) {
-    const geo = nearestLocation(lat, lng);
-    if (geo) return geo;
-  }
-  // Stored office next: tracking-number leads store an AREA label in city
-  // ("North Port / Port Charlotte") with the true office in
-  // nearest_location_id — same precedence the review cadence uses
-  // (Codex P2 #2588 r4).
-  const stored = WAVES_LOCATIONS.find((l) => l.id === customer.nearest_location_id);
-  if (stored) return stored;
-  const ReviewService = require('./review-request');
-  const locationId = ReviewService.resolveReviewLocationId(customer);
-  return WAVES_LOCATIONS.find((l) => l.id === locationId) || WAVES_LOCATIONS[0];
+  return resolveReviewLocation(customer, {
+    storedLocationId: customer.nearest_location_id || null,
+  });
 }
 
 /**

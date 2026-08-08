@@ -421,7 +421,21 @@ describe('review request follow-up flow', () => {
           first: jest.fn().mockResolvedValue({ id: 'cust-1', city: 'Sarasota' }),
         });
       }
-      if (table === 'review_requests') return insert.query;
+      if (table === 'review_requests') {
+        // create() with a manual trigger now runs the shared unscheduled-ask
+        // gate stack first (codex #3285 r1 P1): getDeliveredAskStats reads
+        // this table (…select → rows) and the queued-ask check (…first). Both
+        // must come back empty so the gates pass and the insert proceeds.
+        return {
+          ...chain({
+            whereRaw: jest.fn(function () { return this; }),
+            orderByRaw: jest.fn(function () { return this; }),
+            limit: jest.fn().mockResolvedValue([]),
+            first: jest.fn().mockResolvedValue(null),
+          }),
+          insert: insert.query.insert,
+        };
+      }
       throw new Error(`Unexpected table query: ${table}`);
     });
 

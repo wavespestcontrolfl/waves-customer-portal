@@ -76,7 +76,12 @@ router.post('/trigger', async (req, res, next) => {
       ...serviceContext,
     });
     res.json(request);
-  } catch (err) { next(err); }
+  } catch (err) {
+    // Gate refusals from ReviewService.create (at cap / cooldown / active
+    // cadence / already queued / already reviewed) are 409s, not 500s.
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
+    next(err);
+  }
 });
 
 // POST /tech-trigger — tech triggers review from the field (simpler endpoint)
@@ -103,7 +108,11 @@ router.post('/tech-trigger', async (req, res, next) => {
       // (2026-08-07 audit, item 3).
       reviewUrl: ReviewService.unshortenedReviewUrl(request.token),
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // Same 409 mapping as /trigger — the tech app shows the message.
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
+    next(err);
+  }
 });
 
 module.exports = router;

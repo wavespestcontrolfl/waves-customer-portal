@@ -306,8 +306,14 @@ function resolveReviewLocation(customer = {}, { storedLocationId = null } = {}) 
     if (hit) return hit;
   }
 
-  if (customer.latitude != null && customer.longitude != null) {
-    const hit = nearestLocation(Number(customer.latitude), Number(customer.longitude));
+  // Null/blank-guard BEFORE Number(): Number(null) === 0 and Number('') === 0,
+  // which would route every un-geocoded customer to the office nearest (0,0)
+  // instead of falling through (Codex P2 on PR #2588, same guard as the
+  // customer-card picker this resolver absorbed).
+  const lat = customer.latitude == null || customer.latitude === '' ? NaN : Number(customer.latitude);
+  const lng = customer.longitude == null || customer.longitude === '' ? NaN : Number(customer.longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    const hit = nearestLocation(lat, lng);
     if (hit) return hit;
   }
 
