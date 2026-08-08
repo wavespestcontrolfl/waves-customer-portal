@@ -27,7 +27,16 @@
  *
  * ROLLBACK CONTRACT - down() restores each captured before-value only where
  * the cell STILL holds the value up() applied (a later admin edit wins),
- * under the same FOR UPDATE row locks; audit rows tagged :down.
+ * under the same FOR UPDATE row locks; audit rows tagged :down. down() also
+ * deletes the pricing_changelog row so the changelog never reports a
+ * rolled-back raise as active (repo convention), and a later reapply
+ * records a fresh entry.
+ *
+ * REAPPLY CONTRACT - a cell down() preserved as a post-raise admin edit is
+ * already in the post-raise regime; reapply must NOT put another +5% on it.
+ * up() skips exactly the cells the latest :down audit recorded as
+ * preserved (a cell edited AFTER the rollback is not in that list and gets
+ * raised, per derive-from-live).
  */
 
 const MIGRATION_TAG = 'migration:20260808010000';
@@ -74,7 +83,9 @@ function raisedValue(value) {
 }
 
 // Returns { next, changes } where changes = [{ path, before, after }].
-function applyRaise(configKey, data) {
+// skipPaths (Set|undefined): cells preserved by a prior down() as post-raise
+// admin edits — already raised, never re-raised on reapply.
+function applyRaise(configKey, data, skipPaths) {
   const shape = PRICE_SHAPES[configKey];
   const next = JSON.parse(JSON.stringify(data));
   const changes = [];
@@ -82,15 +93,18 @@ function applyRaise(configKey, data) {
     for (const [bucket, programs] of Object.entries(next)) {
       if (!programs || typeof programs !== 'object') continue;
       for (const program of shape.nestedPrograms) {
+        const path = bucket + '.' + program;
+        if (skipPaths && skipPaths.has(path)) continue;
         const after = raisedValue(programs[program]);
         if (after == null || after === programs[program]) continue;
-        changes.push({ path: bucket + '.' + program, before: programs[program], after });
+        changes.push({ path, before: programs[program], after });
         programs[program] = after;
       }
     }
   }
   if (shape.flatKeys) {
     for (const key of shape.flatKeys) {
+      if (skipPaths && skipPaths.has(key)) continue;
       const after = raisedValue(next[key]);
       if (after == null || after === next[key]) continue;
       changes.push({ path: key, before: next[key], after });
@@ -124,6 +138,7 @@ exports.up = async function up(knex) {
   // raise was still applied, so down() -> redeploy left DB prices rolled
   // back forever). Applied = the latest audit row for this migration is an
   // UP capture, not a :down restore.
+  let reapplyAfterDown = false;
   if (await knex.schema.hasTable('pricing_config_audit')) {
     const lastUp = await knex('pricing_config_audit')
       .where({ changed_by: MIGRATION_TAG })
@@ -134,6 +149,29 @@ exports.up = async function up(knex) {
       .orderBy('id', 'desc')
       .first('id');
     if (lastUp && (!lastDown || lastUp.id > lastDown.id)) return;
+    reapplyAfterDown = Boolean(lastDown);
+  }
+
+  // REAPPLY CONTRACT: cells the latest down() preserved as post-raise admin
+  // edits already carry the raise (e.g. 100 -> up 105 -> admin 110); putting
+  // another +5% on them here would compound to 116. Skip exactly the paths
+  // the :down audit recorded as preserved.
+  const reapplySkips = {};
+  if (reapplyAfterDown) {
+    for (const configKey of [...Object.keys(PRICE_SHAPES), 'services_mosquito_one_time']) {
+      const downAudit = await knex('pricing_config_audit')
+        .where({ config_key: configKey, changed_by: MIGRATION_TAG + ':down' })
+        .orderBy('id', 'desc')
+        .first('new_value');
+      if (!downAudit || !downAudit.new_value) continue;
+      try {
+        const parsed = JSON.parse(downAudit.new_value);
+        const preserved = (parsed.skippedAdminEditedCells || parsed.skippedAdminEditedFields || [])
+          .map((entry) => entry.path || entry.field)
+          .filter(Boolean);
+        if (preserved.length) reapplySkips[configKey] = new Set(preserved);
+      } catch { /* an unreadable audit row never blocks the raise */ }
+    }
   }
 
   const allChanges = {};
@@ -141,7 +179,8 @@ exports.up = async function up(knex) {
     const row = await knex('pricing_config').where({ config_key: configKey }).forUpdate().first();
     if (!row) continue; // fresh envs carry no row - constants (raised in this PR) rule there
     const data = parseData(row);
-    const { next, changes } = applyRaise(configKey, data);
+    const skips = reapplySkips[configKey];
+    const { next, changes } = applyRaise(configKey, data, skips);
     if (!changes.length) continue;
     await knex('pricing_config')
       .where({ config_key: configKey })
@@ -149,7 +188,8 @@ exports.up = async function up(knex) {
     await auditInsert(
       knex, configKey, data, next, MIGRATION_TAG,
       'Mosquito +5% across the board (owner directive 2026-08-08), rounded half-up, derived from live values: '
-        + changes.map((c) => c.path + ' ' + c.before + '->' + c.after).join(', ') + '.',
+        + changes.map((c) => c.path + ' ' + c.before + '->' + c.after).join(', ') + '.'
+        + (skips && skips.size ? ' Reapply-preserved (post-raise admin edits, not re-raised): ' + [...skips].join(', ') + '.' : ''),
     );
     allChanges[configKey] = changes;
   }
@@ -162,9 +202,11 @@ exports.up = async function up(knex) {
       .forUpdate()
       .first('base_price', 'price_range_min', 'price_range_max');
     if (svc) {
+      const svcSkips = reapplySkips.services_mosquito_one_time;
       const svcChanges = [];
       const svcNext = {};
       for (const field of ['base_price', 'price_range_min', 'price_range_max']) {
+        if (svcSkips && svcSkips.has(field)) continue;
         const after = raisedValue(svc[field]);
         if (after == null || after === Number(svc[field])) continue;
         svcChanges.push({ path: field, before: Number(svc[field]), after });
@@ -181,7 +223,8 @@ exports.up = async function up(knex) {
           Object.fromEntries(svcChanges.map((c) => [c.path, c.after])),
           MIGRATION_TAG,
           'Mosquito +5%: hand-scheduled one-time catalog fallback and Service Library range aligned to the raised lot ladder ('
-            + svcChanges.map((c) => c.path + ' ' + c.before + '->' + c.after).join(', ') + ').',
+            + svcChanges.map((c) => c.path + ' ' + c.before + '->' + c.after).join(', ') + ').'
+            + (svcSkips && svcSkips.size ? ' Reapply-preserved (post-raise admin edits, not re-raised): ' + [...svcSkips].join(', ') + '.' : ''),
         );
         allChanges.services_mosquito_one_time = svcChanges;
       }
@@ -203,6 +246,13 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
+  // The changelog must never report a rolled-back raise as active, and a
+  // later reapply must record its own fresh entry — delete before the
+  // table-existence early returns below can skip it (repo convention).
+  if (await knex.schema.hasTable('pricing_changelog')) {
+    await knex('pricing_changelog').where(CHANGELOG_IDENTITY).del();
+  }
+
   if (!(await knex.schema.hasTable('pricing_config'))) return;
   if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
 
@@ -266,6 +316,9 @@ exports.down = async function down(knex) {
     for (const change of changes) {
       const current = readPath(data, change.path);
       const applied = readPath(after, change.path);
+      // A reapply may have skipped this cell entirely (reapply-preserved
+      // admin edit) - the capture shows it unchanged; nothing to unwind.
+      if (Number(applied) === Number(change.before)) continue;
       // Only unwind cells still holding the value up() applied - a later
       // admin edit through the pricing panel wins.
       if (Number(current) !== Number(applied)) { skipped.push({ path: change.path, current }); continue; }
