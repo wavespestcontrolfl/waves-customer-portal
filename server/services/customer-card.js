@@ -101,9 +101,11 @@ function pickCardLocation(customer = {}) {
  * the tracked short_codes row the printed QR points at), so fixing the picker
  * alone only fixes newly minted cards — a downtown-Sarasota card minted under
  * the old geo-first logic would stay pointed at Bradenton forever
- * (codex #3285 r2). Runs on every card access; the short link's destination
- * is swappable by design, so the printed QR heals too. Best-effort — a
- * failed heal serves the stored target rather than blocking the card.
+ * (codex #3285 r2). Runs on the authenticated completion flow only — the
+ * public token read stays read-only (codex #3285 r4); dormant cards get a
+ * one-shot ops re-resolve. The short link's destination is swappable by
+ * design, so the printed QR heals too. Best-effort — a failed heal serves
+ * the stored target rather than blocking the card.
  */
 async function refreshCardReviewTarget(card, customer) {
   try {
@@ -344,19 +346,19 @@ async function maybeSendCardEmail(card, customer) {
  */
 async function getCardData(token) {
   if (!/^[a-f0-9]{64}$/.test(String(token || ''))) return null;
-  let card = await db('customer_cards').where({ share_token: token }).first();
+  const card = await db('customer_cards').where({ share_token: token }).first();
   if (!card) return null;
 
   const customer = await db('customers')
     .where({ id: card.customer_id })
-    // city/zip/lat-lng/nearest_location_id feed the review-target heal below.
-    .first('id', 'first_name', 'member_since', 'created_at', 'has_left_google_review', 'deleted_at', 'referral_code',
-      'city', 'zip', 'latitude', 'longitude', 'nearest_location_id');
+    .first('id', 'first_name', 'member_since', 'created_at', 'has_left_google_review', 'deleted_at', 'referral_code');
   if (!customer || customer.deleted_at) return null;
 
-  // Card views are the touchpoint dormant cards actually get — heal a stale
-  // persisted target here too, not just on completions.
-  card = await refreshCardReviewTarget(card, customer);
+  // NO heal here: this is the public unauthenticated token read and its
+  // contract is read-only — possession of a share token must never trigger
+  // state changes (codex #3285 r4). Stale persisted targets heal on the
+  // authenticated completion flow (ensureCardForCompletion) and via the
+  // one-shot ops re-resolve for dormant cards.
 
   const location = WAVES_LOCATIONS.find((l) => l.id === card.location_id) || WAVES_LOCATIONS[0];
 

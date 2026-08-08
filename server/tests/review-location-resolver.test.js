@@ -41,6 +41,15 @@ describe('review location resolver', () => {
       // 34221 used to map to the Bradenton/LWR profile in satisfaction.js.
       expect(resolveReviewLocationId({ zip: '34221' })).not.toBe('bradenton');
     });
+
+    test('34243 routes through the canonical University Park mapping → bradenton', () => {
+      // ZIP routing derives via utils/zip-to-city.js (34243 = University
+      // Park, Manatee) + the city map — a parallel ZIP table shipped this to
+      // the Sarasota profile (codex #3285 r4).
+      expect(resolveReviewLocationId({ zip: '34243' })).toBe('bradenton');
+      // ZIP-only rows inherit the review overrides too (34228 = Longboat Key).
+      expect(resolveReviewLocationId({ zip: '34228' })).toBe('bradenton');
+    });
   });
 
   describe('resolution order: city -> zip -> geo -> stored -> default', () => {

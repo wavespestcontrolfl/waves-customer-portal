@@ -3075,6 +3075,11 @@ const ReviewService = {
     const row = await db("review_requests")
       .where({ customer_id: customerId })
       .whereNotNull("token")
+      // Real review ASKS only (same predicate as getDeliveredAskStats): a
+      // private no-link check-in row also has a token + sent stamp, and
+      // exposing it as a CTA would attribute the click to a non-ask template
+      // and corrupt the funnel (codex #3285 r4).
+      .whereRaw(OUTREACH.ASK_TOUCH_SQL)
       // DELIVERED asks only: a pending scheduled row's token would hand the
       // portal a link whose ask processScheduled still sends afterward — the
       // customer clicks, then gets the SMS anyway (pre-push audit r2).

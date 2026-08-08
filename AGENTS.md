@@ -1091,7 +1091,11 @@ violations at the severity noted.
   the customer's active review cadence, and 302s to the location's GBP review
   URL — every failure path degrades to the /rate page, and the ONLY redirect
   targets are config/locations.js googleReviewUrl values (never
-  request-derived). No auth beyond the review-request token; picks nearest GBP
+  request-derived). ONE deliberate non-failure carve-out (owner ruling,
+  2026-08-07 review audit): an EXPIRED but otherwise-valid, non-finalized
+  token still 302s to the GBP review URL while recording NOTHING — a willing
+  reviewer tapping an old text is not a failure case; finalized asks and
+  already-reviewed customers still degrade to /rate. No auth beyond the review-request token; picks nearest GBP
   by geocoded address. The bare `/api/rate` mount is not itself a route — only
   the token-scoped family is public).
   `/api/reports/project/:token/fdacs-pdf` (read-only; streams the filled, signed

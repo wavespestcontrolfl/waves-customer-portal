@@ -181,10 +181,14 @@ router.post('/', async (req, res, next) => {
       // text carries the link.
       const askQueued = ['deferred', 'already_queued', 'send_failed', 'concurrent'].includes(asked.outcome);
       let reviewLink = asked.reviewUrl || null;
-      if (!reviewLink) {
+      if (!reviewLink && !askQueued) {
+        // BOTH fallbacks skip the queued window (codex #3285 r4): an older
+        // delivered token is just as actionable as the bare URL — the click
+        // couldn't consume the pending row and processScheduled would still
+        // send the queued ask afterward.
         reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
+        if (!reviewLink) reviewLink = office.googleReviewUrl;
       }
-      if (!reviewLink && !askQueued) reviewLink = office.googleReviewUrl;
 
       return res.json({
         success: true,

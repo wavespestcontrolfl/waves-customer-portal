@@ -188,41 +188,13 @@ function resolveLocation(city) {
   return WAVES_LOCATIONS.find(l => l.id === locId) || WAVES_LOCATIONS[0];
 }
 
-// ZIP → office. Absorbed from the private table routes/satisfaction.js used to
-// keep, so review routing has ONE source instead of three that disagreed.
-// Only consulted when the customer's city is missing or not in
-// CITY_TO_LOCATION — a mapped city is the stronger signal (it is the
-// service-area intent, where a ZIP can straddle two offices).
-//
-// Deliberate change from the satisfaction table: 34221 (Palmetto) now routes to
-// PARRISH, matching CITY_TO_LOCATION and the Parrish office's service area.
-// It previously sent Palmetto reviews to the Bradenton/LWR profile.
-const ZIP_TO_LOCATION = {
-  // Bradenton / Lakewood Ranch
-  '34202': 'bradenton', '34205': 'bradenton', '34207': 'bradenton',
-  '34208': 'bradenton', '34209': 'bradenton', '34210': 'bradenton',
-  '34211': 'bradenton', '34212': 'bradenton', '34217': 'bradenton',
-  '34218': 'bradenton',
-
-  // Sarasota
-  '34230': 'sarasota', '34231': 'sarasota', '34232': 'sarasota',
-  '34233': 'sarasota', '34234': 'sarasota', '34235': 'sarasota',
-  '34236': 'sarasota', '34237': 'sarasota', '34238': 'sarasota',
-  '34239': 'sarasota', '34240': 'sarasota', '34241': 'sarasota',
-  '34242': 'sarasota', '34243': 'sarasota',
-
-  // Venice / North Port / Charlotte County
-  '34223': 'venice', '34224': 'venice', '34275': 'venice', '34285': 'venice',
-  '34286': 'venice', '34287': 'venice', '34288': 'venice', '34289': 'venice',
-  '34291': 'venice', '34292': 'venice', '34293': 'venice',
-  '33948': 'venice', '33950': 'venice', '33952': 'venice', '33954': 'venice',
-  '33980': 'venice', '33982': 'venice', '33983': 'venice',
-
-  // Parrish / Palmetto / Ellenton + south Hillsborough
-  '34219': 'parrish', '34220': 'parrish', '34221': 'parrish', '34222': 'parrish',
-  '33534': 'parrish', '33569': 'parrish', '33570': 'parrish', '33572': 'parrish',
-  '33573': 'parrish', '33578': 'parrish', '33579': 'parrish', '33598': 'parrish',
-};
+// ZIP routing derives through the EXISTING canonical ZIP→city map
+// (utils/zip-to-city.js — the full county service-area sets, maintained for
+// lead recovery) and then the city map below, instead of a parallel ZIP→office
+// table (codex #3285 r4: a parallel table shipped 34243 → sarasota while
+// zip-to-city correctly classifies it University Park → bradenton). Only
+// consulted when the customer's city is missing or unmapped — a mapped city is
+// the stronger signal (service-area intent; a ZIP can straddle two offices).
 
 // Review-routing additions on top of CITY_TO_LOCATION, merged from the two
 // private city tables review-request.js and routes/satisfaction.js used to keep.
@@ -301,9 +273,17 @@ function resolveReviewLocation(customer = {}, { storedLocationId = null } = {}) 
   }
 
   const zip = String(customer.zip || '').trim().slice(0, 5);
-  if (zip && ZIP_TO_LOCATION[zip]) {
-    const hit = byId(ZIP_TO_LOCATION[zip]);
-    if (hit) return hit;
+  if (zip) {
+    // Canonical ZIP → city (utils/zip-to-city.js), then the same review city
+    // map as step 1 — so ZIP-only rows inherit the review overrides too
+    // (34228 → Longboat Key → bradenton). Unknown ZIPs return '' and fall
+    // through; require() here avoids a config↔utils import cycle at load.
+    const { zipToCity } = require('../utils/zip-to-city');
+    const zipCity = String(zipToCity(zip) || '').toLowerCase().trim();
+    if (zipCity && REVIEW_CITY_TO_LOCATION[zipCity]) {
+      const hit = byId(REVIEW_CITY_TO_LOCATION[zipCity]);
+      if (hit) return hit;
+    }
   }
 
   // Null/blank-guard BEFORE Number(): Number(null) === 0 and Number('') === 0,
@@ -354,7 +334,6 @@ function resolveLocationFromCandidates(candidates = []) {
 module.exports = {
   WAVES_LOCATIONS,
   CITY_TO_LOCATION,
-  ZIP_TO_LOCATION,
   REVIEW_CITY_EXTRAS,
   REVIEW_CITY_TO_LOCATION,
   resolveReviewLocation,
