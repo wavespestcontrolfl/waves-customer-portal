@@ -310,12 +310,15 @@ async function buildSummary(service) {
   try {
     if (!suppressCustomerArtifacts) {
       const reviewer = await db('customers')
-        .select('has_left_google_review')
         .where({ id: service.customer_id })
-        .first();
+        .first('has_left_google_review');
       if (!reviewer?.has_left_google_review) {
         const rr = await db('review_requests')
           .where({ customer_id: service.customer_id })
+          // /go only tracks 64-char lowercase-hex tokens — anything else
+          // (one legacy 32-char row exists) falls through to the raw rate
+          // page, exactly the unattributable surface this CTA is leaving.
+          .where('token', '~', '^[a-f0-9]{64}$')
           .where((b) => b.whereNull('expires_at').orWhere('expires_at', '>', new Date()))
           .orderBy('created_at', 'desc')
           .first('token');
