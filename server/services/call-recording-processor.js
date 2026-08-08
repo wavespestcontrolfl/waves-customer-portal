@@ -8046,7 +8046,24 @@ const CallRecordingProcessor = {
             const isBridgeTarget = leadSourceRow
               && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
             if (leadId && customerId && callAttr && !isBridgeTarget) {
-              const pending = require('./ads/call-attribution').recordCallPpcAttribution({
+              // Token-fenced under the call row lock (pre-push P0 r17):
+              // with sourceCallId in play, a STALE worker's provenance
+              // recovery could move the history-bearing row back — or
+              // conflict-retire it — before its own finalization writes
+              // zero rows; that loss is irreversible. Ownership is
+              // verified inside the transaction and every attribution
+              // statement rides it. Rare call_log → leads inversion vs
+              // stamp writers is PostgreSQL-deadlock-resolved; the outer
+              // catch treats it like any transient attribution failure
+              // (the bridge/backfill re-heals on a later pass).
+              const pending = db.transaction(async (trx) => {
+                const owned = await trx('call_log')
+                  .where({ id: call.id })
+                  .where('processing_token', procToken)
+                  .forUpdate()
+                  .first('id');
+                if (!owned) return;
+                await require('./ads/call-attribution').recordCallPpcAttribution({
                 customerId,
                 leadId,
                 leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
@@ -8069,6 +8086,8 @@ const CallRecordingProcessor = {
                 // its call id, so a later stamp repoint can transfer or
                 // retire exactly this row and never another call's.
                 sourceCallId: call.id || null,
+                dbc: trx,
+                });
               }).catch(() => {});
               await pending;
             }

@@ -18,8 +18,13 @@ exports.up = async function up(knex) {
   await knex.schema.alterTable('ad_service_attribution', (t) => {
     t.uuid('source_call_id').references('id').inTable('call_log').onDelete('SET NULL');
   });
+  // UNIQUE (pre-push P1 r17): source_call_id is documented and queried as
+  // identifying THE exact row a call created — concurrent attribution
+  // attempts targeting different leads must not insert two rows for one
+  // call (recovery reads .first() and the twin double-counts). A violation
+  // surfaces as an insert error recordCallPpcAttribution already catches.
   await knex.raw(
-    'CREATE INDEX IF NOT EXISTS ad_service_attribution_source_call_index ON ad_service_attribution (source_call_id) WHERE source_call_id IS NOT NULL',
+    'CREATE UNIQUE INDEX IF NOT EXISTS ad_service_attribution_source_call_index ON ad_service_attribution (source_call_id) WHERE source_call_id IS NOT NULL',
   );
 };
 
