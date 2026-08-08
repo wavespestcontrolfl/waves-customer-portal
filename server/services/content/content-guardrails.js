@@ -3001,6 +3001,11 @@ const REENTRY_SAFETY_SRCS = [
   // "once 30 minutes have passed" is the same fixed figure (Codex PR
   // r12 audit) — `once` joins the preposition set.
   `\\b(?:re-?enter|re-?entry|re-?occup\\w+|return\\w*|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after|once)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
+  // Preposition-less order with a trailing after/following clause (Codex
+  // PR r13 audit): "you can re-enter 30 minutes after treatment", "keep
+  // pets outside 30 minutes after treatment" — treatment-context-gated.
+  { src: `\\b(?:re-?enter\\w*|re-?entry|re-?occup\\w+|return\\w*|walk\\s+on|go\\s+back|enter\\w*)\\b[^.!?\\n]{0,30}?\\b${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\s+(?:after|following)\\b`, needsTreatmentContext: true },
+  { src: `\\bkeep\\s+(?:the\\s+|your\\s+)?(?:pets?|kids?|children|dogs?|cats?|everyone|people|famil(?:y|ies))\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside|indoors|outdoors|outside)\\b[^.!?\\n]{0,10}?\\b${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\s+(?:after|following)\\b`, needsTreatmentContext: true },
   // A bounded qualifier may sit between the drying verb and the
   // preposition (Codex PR r8: "dries completely within 45 minutes").
   { src: `\\bdr(?:y|ies|ied)\\s+(?:\\w+\\s+){0,2}?(?:in|within|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },

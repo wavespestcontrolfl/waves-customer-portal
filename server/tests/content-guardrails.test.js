@@ -3060,6 +3060,20 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(plainEnter.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('preposition-less duration-after-treatment orders block (Codex PR r13 audit)', () => {
+    for (const body of [
+      'You can re-enter 30 minutes after treatment.',
+      'Return to the treated area 30 minutes after application.',
+      'Keep pets outside 30 minutes after treatment.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    // No treatment context → not a re-entry figure.
+    const movie = guardrails.evaluate({ body: 'You can return 30 minutes after the show starts.' }, {});
+    expect(movie.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
   test('spelled hundreds are figures too (Codex PR r13)', () => {
     const hundred = guardrails.evaluate({ body: 'Wait one hundred minutes before re-entering the treated room.' }, {});
     expect(hundred.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
