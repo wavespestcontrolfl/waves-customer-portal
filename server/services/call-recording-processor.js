@@ -2551,7 +2551,23 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
     };
     let md = await readOwnMd();
     let stampedLeadId = md?.lead_id ? String(md.lead_id) : null;
-    if (!stampedLeadId) return true;
+    if (!stampedLeadId) {
+      // Definitive retirement is provenance-only, NOT stamp-gated
+      // (pre-push P1 r11): a sid-linked call carries source_call_id on its
+      // funnel row but never a metadata stamp, and a force-reprocess that
+      // reclassifies it spam/voicemail/implausible/non-lead must not leave
+      // that row reporting funnel stage and revenue for a rejected call.
+      // Fenced the same way the stamp-clear write is: only the claim
+      // holder may retire.
+      if (attribution.mode !== 'retire') return true;
+      const owned = await trx('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .first('id');
+      if (!owned) return false;
+      await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id);
+      return true;
+    }
     // Reconciliation is SERIALIZED on the stamped lead's row — the same
     // FOR UPDATE lock the stamp+enrich transaction takes, acquired BEFORE
     // the call_log clear so every stamp writer follows one lock order
@@ -2606,7 +2622,10 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
     //                chronological restamp) or the caller cannot rule a
     //                surviving linkage out: never destroy history.
     if (attribution.mode === 'retire') {
-      await require('./ads/call-attribution').retireCallAttributionRow(trx, call.id, stampedLeadId);
+      // Provenance-wide (every lead's row for this call), not just the
+      // stamped lead's — rejection means the call supports no lead at all
+      // (pre-push P1 r11).
+      await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id);
     } else if (attribution.mode === 'transfer' && attribution.transferToLeadId
       && String(attribution.transferToLeadId) !== String(stampedLeadId)) {
       await require('./ads/call-attribution').reconcileMovedCallAttributionRow(
@@ -12470,6 +12489,7 @@ CallRecordingProcessor._test = {
   convertCallLeadOnPhoneBooking,
   findReusableCallLead,
   applySameCallLeadEligibility,
+  clearStampAndRestoreLead,
   dropFilledLeadColumns,
   reaffirmedFilledLeadFields,
   reconcileConditionalLeadFieldsUnderLock,

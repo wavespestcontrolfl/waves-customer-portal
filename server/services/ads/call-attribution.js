@@ -428,6 +428,17 @@ async function retireCallAttributionRow(dbc, callLogId, leadId) {
     .del();
 }
 
+// Retire EVERY funnel row a call created, whichever lead they sit on —
+// definitive rejection (spam / voicemail / implausible / non-lead verdict)
+// means the call supports no lead at all. Provenance-only on purpose
+// (pre-push P1 r11): sid-linked calls carry source_call_id but no metadata
+// stamp, and stamp-gated retirement left their rows reporting funnel
+// stage/revenue for a rejected call.
+async function retireAllCallAttributionRows(dbc, callLogId) {
+  if (!callLogId) return 0;
+  return dbc('ad_service_attribution').where({ source_call_id: callLogId }).del();
+}
+
 // Move the funnel row a specific call created when its linkage moves to a
 // different lead — the ONE transfer/retire primitive shared by the google
 // bridge's repoint reconciliation and the call processor's stamp settles
@@ -472,6 +483,7 @@ module.exports = {
   backfillCallLeadAttribution,
   attributeUnclaimedBridgeLeads,
   retireCallAttributionRow,
+  retireAllCallAttributionRows,
   reconcileMovedCallAttributionRow,
   _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION },
 };
