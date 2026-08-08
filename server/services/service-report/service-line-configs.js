@@ -199,7 +199,9 @@ function detectServiceLine(serviceType) {
     && !/\b(lawn|turf|grass|sod|dethatch|aerat)\b/.test(text)) return 'tree_shrub';
   if (/\b(lawn|turf|grass|weed|fertil|dethatch|top\s*dress|aerat|sod)\b/.test(text)) return 'lawn';
   if (text.includes('mosquito')) return 'mosquito';
-  if (/\b(termite|wdo|bora|trelona)\b/.test(text)) return 'termite';
+  // Foam matches only the drill-and-foam termite forms — bare 'foam' would
+  // steal rodent-exclusion foam-sealing work from the rodent branch below.
+  if (/\b(termite|wdo|bora|trelona)\b|foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*foam|foam[\s_-]*recurring/.test(text)) return 'termite';
   if (/\b(rodent|rat|rats|mouse|mice|mole)\b/.test(text)) return 'rodent';
   if (/\b(tree|shrub|arborjet)\b/.test(text)) return 'tree_shrub';
   return 'pest';

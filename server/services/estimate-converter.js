@@ -1560,7 +1560,15 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
 // catalog — an absent key would only add lookup-warn noise.
 function remainingUnitCatalogKey(svc = {}) {
   const key = String(svc.serviceKey || svc.service_key || '').trim();
-  return /^tree_shrub(_program|_quarterly|_6week)$/.test(key) ? key : null;
+  if (/^tree_shrub(_program|_quarterly|_6week)$/.test(key)) return key;
+  // Recurring foam: key verified against the catalog 2026-08-08 — the
+  // foam_recurring row ships in the same PR (20260808070000). The seeder
+  // normalizer matches both the engine key (priceRecurringFoam returns
+  // service 'foam_recurring') and the "Recurring Foam Treatment" display
+  // name, so legacy name-only lines link too. Absent row (env not yet
+  // migrated) degrades to the existing name-only warn path.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'foam_recurring') return 'foam_recurring';
+  return null;
 }
 
 function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}) {
@@ -3063,6 +3071,16 @@ const EstimateConverter = {
           // renames; name-based resolution still works without it, so a
           // missing catalog row (env not yet migrated) degrades safely.
           try {
+            // Deliberately NOT filtered on is_active/is_archived (codex
+            // 2026-08-08 r5): this link is identity durability, not
+            // activation policy. An accepted estimate must schedule, and
+            // completion's name fallback resolves the SAME row (inactive
+            // or not — cf. termite_inspection, inactive in prod with
+            // name-resolved typed completions), so skipping the id here
+            // would only sever rename-safety while changing nothing else.
+            // Deactivation posture is governed where it's enforceable:
+            // the completion profile's own active flag and delivery_mode
+            // kill switches, and the booking/picker catalog filters.
             const catalogRow = await database('services')
               .where({ service_key: unit.catalogServiceKey })
               .first('id', 'default_duration_minutes');
