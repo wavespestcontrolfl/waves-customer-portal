@@ -313,29 +313,35 @@ async function buildSummary(service) {
         .where({ id: service.customer_id })
         .first('has_left_google_review');
       if (!reviewer?.has_left_google_review) {
+        // The customer's NEWEST review ASK governs (pre-push audit r3):
+        // filtering rows first and then taking the newest survivor would let
+        // an OLDER delivered token surface after the newest ask was
+        // submitted, suppressed, or failed — re-soliciting feedback or
+        // bypassing a policy block. ASK_TOUCH_SQL keeps private no-link
+        // check-ins out entirely (same predicate the cap/funnel use).
+        const { ASK_TOUCH_SQL } = require('../services/review-outreach-templates');
         const rr = await db('review_requests')
           .where({ customer_id: service.customer_id })
-          // /go only tracks 64-char lowercase-hex tokens — anything else
-          // (one legacy 32-char row exists) falls through to the raw rate
-          // page, exactly the unattributable surface this CTA is leaving.
-          .where('token', '~', '^[a-f0-9]{64}$')
-          // FINALIZED asks stay hidden (same predicate submitRating enforces):
-          // a passive/detractor who already submitted feedback isn't marked
-          // has_left_google_review, and /go checks only format + expiry — so
-          // surfacing their token here would re-solicit a Google review
-          // instead of the rate page's thank-you state (codex #3286 r2).
-          .whereNull('rated_at')
-          // …and DELIVERED asks only: pending/deferred rows are still owned by
-          // processScheduled, and failed/suppressed rows were blocked by
-          // policy or consent — surfacing their token would bypass that
-          // suppression entirely (pre-push audit r2). Same delivered
-          // predicate as livePortalReviewUrlFor / getDeliveredAskStats.
-          .whereRaw('(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)')
-          .whereNotIn('status', ['submitted', 'reviewed', 'rated', 'suppressed', 'failed', 'deferred'])
-          .where((b) => b.whereNull('expires_at').orWhere('expires_at', '>', new Date()))
+          .whereRaw(ASK_TOUCH_SQL)
           .orderBy('created_at', 'desc')
-          .first('token');
-        if (rr?.token) reviewUrl = `/api/rate/${rr.token}/go`;
+          .first();
+        const surfaceable = !!rr
+          // /go only tracks 64-char lowercase-hex tokens — anything else (one
+          // legacy 32-char row exists) falls through to the raw rate page,
+          // exactly the unattributable surface this CTA is leaving.
+          && /^[a-f0-9]{64}$/.test(String(rr.token || ''))
+          // DELIVERED only: pending/deferred rows are still owned by
+          // processScheduled; failed/suppressed were blocked by policy.
+          && (rr.sms_sent_at != null || rr.sent_at != null)
+          && !['pending', 'deferred', 'failed', 'suppressed'].includes(String(rr.status || '').toLowerCase())
+          // Not FINALIZED (same predicate submitRating enforces) and not
+          // already clicked through — the customer acted; no re-ask here.
+          && rr.rated_at == null
+          && !['submitted', 'reviewed', 'rated'].includes(String(rr.status || '').toLowerCase())
+          && rr.redirected_at == null
+          // Live token (14d expiry; null = non-expiring).
+          && (rr.expires_at == null || new Date(rr.expires_at) > new Date());
+        if (surfaceable) reviewUrl = `/api/rate/${rr.token}/go`;
       }
     }
   } catch (err) {

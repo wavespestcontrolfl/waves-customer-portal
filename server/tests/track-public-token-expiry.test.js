@@ -53,10 +53,10 @@ function makeReviewRequestsQuery(rows) {
   };
   const chain = {
     whereRaw: jest.fn((sql) => {
-      // Only the delivered predicate is used here; anything else must fail
-      // loud rather than silently pass unevaluated.
-      if (sql === '(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)') {
-        filtered = filtered.filter((r) => r.sms_sent_at != null || r.sent_at != null);
+      // Only ASK_TOUCH_SQL is used here (no-link check-ins excluded);
+      // anything else must fail loud rather than silently pass unevaluated.
+      if (/^\(template_key IS NULL OR template_key NOT IN/.test(sql)) {
+        filtered = filtered.filter((r) => r.template_key == null || !sql.includes(`'${r.template_key}'`));
         return chain;
       }
       throw new Error(`unhandled whereRaw in review_requests mock: ${sql}`);
@@ -408,6 +408,58 @@ describe('public track token expiry', () => {
     });
 
     expect(summary.reviewUrl).toBeNull();
+  });
+
+  test('a blocked NEWEST ask never revives an older delivered token', async () => {
+    // The newest ask governs eligibility: after the customer submits (or a
+    // newer ask is suppressed), an older delivered token must NOT surface —
+    // filtering-then-newest would re-solicit feedback or bypass the policy
+    // block (pre-push audit r3).
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      customer: { has_left_google_review: false },
+      reviewRequests: [
+        liveAsk({ token: STALE_TOKEN, status: 'submitted' }),
+        liveAsk({ created_at: new Date(Date.now() - 5 * 86400000).toISOString() }),
+      ],
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.reviewUrl).toBeNull();
+  });
+
+  test('a no-link check-in row is invisible — the newest real ASK governs', async () => {
+    // resolution_check is a private no-link check-in (ASK_TOUCH_SQL excludes
+    // it) — its row must neither surface nor shadow the newest real ask.
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      customer: { has_left_google_review: false },
+      reviewRequests: [
+        liveAsk({ token: STALE_TOKEN, template_key: 'resolution_check' }),
+        liveAsk({ created_at: new Date(Date.now() - 5 * 86400000).toISOString() }),
+      ],
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.reviewUrl).toBe(`/api/rate/${LIVE_TOKEN}/go`);
   });
 
   test('a null expires_at counts as live (whereNull arm of the expiry group)', async () => {
