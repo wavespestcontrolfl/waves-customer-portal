@@ -113,15 +113,18 @@ router.get('/', async (req, res, next) => {
     res.json({
       hasCancellableWork: cancellable,
       reservice,
-      // Streamline (GATE_RESERVICE_STREAMLINE, owner ruling 2026-08-08): when
-      // true, the Request Service overlay hands an eligible pest/lawn issue
-      // straight to the picker (reservice.url above) instead of filing a
-      // notify-only service_requests ticket, and schedule_change offers the
-      // per-visit /reschedule token pages below. Top-level — the reschedule
-      // half applies even when no re-service lane is granted. The client keys
-      // ONLY off this server-computed flag, so the overlay stays
-      // byte-identical until Adam flips the gate.
-      overlayHandoff: require('../config/feature-gates').isEnabled('reserviceStreamline'),
+      // Streamline (owner ruling 2026-08-08): when true, the Request Service
+      // overlay hands an eligible pest/lawn issue straight to the picker
+      // (reservice.url above) instead of filing a notify-only
+      // service_requests ticket, and schedule_change offers the per-visit
+      // /reschedule token pages below. Top-level — the reschedule half
+      // applies even when no re-service lane is granted. COMPOSITE
+      // fail-closed predicate: the streamline rides on top of the self-serve
+      // surface, so killing EITHER gate goes fully dark (feature-gates
+      // contract). The client keys ONLY off this server-computed flag, so
+      // the overlay stays byte-identical until Adam flips the gate.
+      overlayHandoff: require('../config/feature-gates').isEnabled('reserviceStreamline')
+        && require('../services/reservice-scheduler').reserviceSelfServeEnabled(),
       upcoming: upcoming.map(s => ({
         id: s.id,
         date: s.scheduled_date,
@@ -231,13 +234,16 @@ router.post('/:id/reschedule', async (req, res, next) => {
 
     const { preferredDate, notes } = await schema.validateAsync(req.body);
 
-    // Streamline (GATE_RESERVICE_STREAMLINE): stop flipping the visit to
-    // status='rescheduled'. That status removes the visit from dispatch and
-    // nothing ever re-books it — the request rides the service_requests row
-    // and the admin alert while the visit STAYS on the books at its current
-    // date until someone actually moves it. Gate off = legacy flip.
+    // Streamline: stop flipping the visit to status='rescheduled'. That
+    // status removes the visit from dispatch and nothing ever re-books it —
+    // the request rides the service_requests row and the admin alert while
+    // the visit STAYS on the books at its current date until someone
+    // actually moves it. COMPOSITE fail-closed predicate (same as the list
+    // payload's overlayHandoff): the streamline rides on top of the
+    // self-serve surface, so killing EITHER gate restores the legacy flip.
     const { isEnabled } = require('../config/feature-gates');
-    const keepOnBooks = isEnabled('reserviceStreamline');
+    const keepOnBooks = isEnabled('reserviceStreamline')
+      && require('../services/reservice-scheduler').reserviceSelfServeEnabled();
 
     // Lock the row before deriving the appended notes and changing status.
     // This preserves DB timestamp precision and makes an earlier staff edit
@@ -288,30 +294,56 @@ router.post('/:id/reschedule', async (req, res, next) => {
       // Keep the customer intent in the staff request queue as the durable,
       // append-only receipt. Appointment editors have independent write paths,
       // so status/notes alone cannot be the sole record of this request.
-      await trx('service_requests').insert({
-        customer_id: req.customerId,
-        category: 'schedule_change',
-        subject: `Reschedule request: ${normalizeServiceType(service.service_type)}`,
-        description: [
-          `Appointment ${service.id}: ${normalizeServiceType(service.service_type)} on ${service.scheduled_date}`,
-          preferredDate ? `Preferred date: ${preferredDate}` : null,
-          notes ? `Customer notes: ${notes}` : null,
-        ].filter(Boolean).join('\n'),
-        urgency: 'routine',
-        photos: JSON.stringify([]),
-        status: 'new',
-        source: 'customer_portal_reschedule',
-      });
+      // With keepOnBooks the visit stays 'pending'/'confirmed', so a
+      // lost-response retry or double-click passes the lookup again — an
+      // existing OPEN request for the SAME appointment absorbs the resubmit
+      // (notes above still captured the new text) instead of minting a
+      // duplicate row + duplicate admin alert. Legacy mode needs no guard:
+      // the status flip itself blocks the second pass.
+      let deduped = false;
+      if (keepOnBooks) {
+        const existingOpen = await trx('service_requests')
+          .where({ customer_id: req.customerId, category: 'schedule_change' })
+          .whereNotIn('status', ['resolved', 'closed', 'cancelled'])
+          .where('description', 'like', `Appointment ${service.id}:%`)
+          .first();
+        deduped = !!existingOpen;
+      }
+      if (!deduped) {
+        await trx('service_requests').insert({
+          customer_id: req.customerId,
+          category: 'schedule_change',
+          subject: `Reschedule request: ${normalizeServiceType(service.service_type)}`,
+          description: [
+            `Appointment ${service.id}: ${normalizeServiceType(service.service_type)} on ${service.scheduled_date}`,
+            preferredDate ? `Preferred date: ${preferredDate}` : null,
+            notes ? `Customer notes: ${notes}` : null,
+          ].filter(Boolean).join('\n'),
+          urgency: 'routine',
+          photos: JSON.stringify([]),
+          status: 'new',
+          source: 'customer_portal_reschedule',
+        });
+      }
 
-      return { service };
+      return { service, deduped };
     });
 
     if (outcome.error) {
       return res.status(outcome.statusCode).json({ error: outcome.error });
     }
-    const { service } = outcome;
+    const { service, deduped } = outcome;
 
-    logger.info(`Reschedule requested by customer: ${req.params.id}`);
+    logger.info(`Reschedule requested by customer: ${req.params.id}${deduped ? ' (absorbed into open request)' : ''}`);
+
+    // A resubmit absorbed by an existing open request already has its alert —
+    // answer success without a second notification.
+    if (deduped) {
+      return res.json({
+        success: true,
+        message: 'Reschedule request submitted. Our team will contact you to confirm a new date.',
+      });
+    }
 
     // The durable status/notes update is authoritative. Surface it in the
     // operator notification feed as a best-effort alert so the promised
