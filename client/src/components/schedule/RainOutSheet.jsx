@@ -148,6 +148,9 @@ const NOTE_AGRONOMIC_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|o
 // "We treated the lawn.") — the treated-area noun can live in another
 // sentence, so the directive alone counts under implied context.
 const NOTE_IMPLIED_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b|\bbefore\s+(?:re-?)?enter\w*\b|\b(?:don['’]t|do\s+not|cannot|can['’]t|never|no)\s+(?:re-?)?enter\w*\b|\benter\w*\s+(?:for|in|until|after)\b/i;
+// Mirror of IMPLIED_NONTREATMENT_RE: weather/premises clauses are advice
+// about the weather, not implicit re-entry — implied route only.
+const NOTE_IMPLIED_NONTREATMENT_RE = /\b(?:lightning|storms?|rain\w*|wind\w*|hail|thunder\w*|flood\w*|weather|heat|traffic|entrance|driveway|road|street|parking|office|gate)\b/i;
 // Protective ADVICE ("keep your pets safe indoors during the storm") is
 // not a product claim — stripped only when the sentence carries no
 // product word, same guard as the server (PRODUCT_CONTEXT_RE mirror).
@@ -169,7 +172,9 @@ function noteTimingTrips(note) {
     for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
       if (!clause.trim()) continue;
       if (NOTE_TIMING_DURATION_RE.test(clause)
-        && (NOTE_REENTRY_CONTEXT_RE.test(clause) || NOTE_IMPLIED_DIRECTIVE_RE.test(clause))
+        && (NOTE_REENTRY_CONTEXT_RE.test(clause)
+          || (NOTE_IMPLIED_DIRECTIVE_RE.test(clause)
+            && !NOTE_IMPLIED_NONTREATMENT_RE.test(clause)))
         && !NOTE_AGRONOMIC_RE.test(clause)) return true;
     }
   }

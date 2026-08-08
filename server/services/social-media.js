@@ -528,6 +528,12 @@ const WELL_WISH_SAFE_RE = /\b(?:stay|be|drive|travel|get\s+home)\s+safe(?:ly)?\b
 // entering", "Don't enter for 30 minutes" (codex #3278 r16). Bare
 // "enter" stays out so "enter through the side gate" remains prose.
 const IMPLIED_REENTRY_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b(?:off|out|inside|indoors|away)\b|\bavoid\w*\b|\bout\s+of\b|\baway\s+from\b|\bno\s+entry\b|\bre-?ent\w*\b|\bbefore\s+(?:re-?)?enter\w*\b|\b(?:don['’]t|do\s+not|cannot|can['’]t|never|no)\s+(?:re-?)?enter\w*\b|\benter\w*\s+(?:for|in|until|after)\b/i;
+// A clause that names weather or premises logistics is advice about THAT
+// ("Stay inside for 30 minutes because of lightning", "Avoid the flooded
+// entrance for 30 minutes"), not implicit pesticide re-entry — it exempts
+// the implied-directive route only; a clause naming the treated area
+// still blocks through REENTRY_CONTEXT_RE (codex #3278 r19).
+const IMPLIED_NONTREATMENT_RE = /\b(?:lightning|storms?|rain\w*|wind\w*|hail|thunder\w*|flood\w*|weather|heat|traffic|entrance|driveway|road|street|parking|office|gate)\b/i;
 // Protective ADVICE ("keep your pets safe indoors during the storm") is
 // not a product-safety claim — stripped under impliedTreatmentContext
 // ONLY when the sentence carries no product word, so "our treatment
@@ -586,7 +592,9 @@ function complianceOverclaims(text, { impliedTreatmentContext = false } = {}) {
     for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
       if (TIMING_DURATION_RE.test(clause)
         && (REENTRY_CONTEXT_RE.test(clause)
-          || (impliedTreatmentContext && IMPLIED_REENTRY_DIRECTIVE_RE.test(clause)))
+          || (impliedTreatmentContext
+            && IMPLIED_REENTRY_DIRECTIVE_RE.test(clause)
+            && !IMPLIED_NONTREATMENT_RE.test(clause)))
         && !agronomicExemptionApplies(clause)) {
         issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
         break;

@@ -1535,6 +1535,12 @@ describe('rain-out service', () => {
       // Seconds are the same banned class (r18).
       blocked('Keep pets off treated areas for 30 seconds');
       blocked('Re-enter in 90 sec');
+      // Weather/premises durations are advice about THAT, not implicit
+      // re-entry (r19) — the treated-area route still blocks.
+      expect(sanitize()('Stay inside for 30 minutes because of lightning'))
+        .toEqual({ note: 'Stay inside for 30 minutes because of lightning' });
+      expect(sanitize()('Avoid the flooded entrance for 30 minutes'))
+        .toEqual({ note: 'Avoid the flooded entrance for 30 minutes' });
       blocked('This is E.P.A. approved');
       // ...but only APPROVED-status EPA claims block — label-direction
       // references are compliant (r14 client-parity case).
