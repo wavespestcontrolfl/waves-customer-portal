@@ -312,6 +312,24 @@ function proposalNetTermDays(proposal) {
   return NET_TERM_DAYS[proposal?.commercialTerms?.paymentTerms] || 0;
 }
 
+// One resolved term for the acceptance invoice: a linked payer's canonical
+// payment_terms are the STANDING billing relationship (they also drive
+// statement accrual), so they take precedence; the proposal's authored term
+// applies only for self-pay customers. Precedence keeps the due date and the
+// accrual behavior reading the same term (codex #3297 r2b).
+async function resolveAcceptanceTermDays({ trx, customerId, proposal }) {
+  try {
+    const customer = await trx('customers').where({ id: customerId }).first('payer_id');
+    if (customer?.payer_id) {
+      const payer = await trx('payers').where({ id: customer.payer_id }).first('payment_terms');
+      if (payer) return NET_TERM_DAYS[payer.payment_terms] || 0;
+    }
+  } catch (err) {
+    logger.warn(`[proposal-win] payer term lookup failed for customer ${customerId}: ${err.message}`);
+  }
+  return proposalNetTermDays(proposal);
+}
+
 async function createProposalAcceptanceInvoice({ trx, estimate, proposal, customerId }) {
   if (!customerId) throw winError('A customer is required to invoice a proposal win.', 400);
   const built = buildProposalFirstInvoice(proposal);
@@ -333,9 +351,10 @@ async function createProposalAcceptanceInvoice({ trx, estimate, proposal, custom
     notes: `Generated from accepted commercial proposal (estimate #${estimate.id}). `
       + 'Covers one-time items plus the first period of each recurring service; '
       + 'ongoing recurring visits are billed as completed.',
-    // Honor authored Net-N terms — the shared ET calendar-day helper owns
-    // DST-safe day addition (codex #3297 r1).
-    dueDate: etDateString(addETDays(new Date(), proposalNetTermDays(proposal))),
+    // Honor the resolved term (payer precedence, else authored proposal
+    // term) — the shared ET calendar-day helper owns DST-safe day addition
+    // (codex #3297 r1).
+    dueDate: etDateString(addETDays(new Date(), await resolveAcceptanceTermDays({ trx, customerId, proposal }))),
   });
   logger.info(`[proposal-win] invoice ${invoice.invoice_number} ($${built.total}) from won proposal estimate ${estimate.id}`);
   return invoice;

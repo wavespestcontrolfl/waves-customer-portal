@@ -106,6 +106,23 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).toContain('Interior visits beyond the schedule are billed per visit.');
   });
 
+  test('authored terms suppress the canned callback-guarantee line (terms govern — parity with React/SSR)', async () => {
+    const structured = await buildEstimateProposalPDFBuffer(STRUCTURED_ESTIMATE, { billsPerApplication: false });
+    expect(extractPdfText(structured)).not.toContain('callback guarantee between scheduled visits');
+    const legacyNoTerms = {
+      ...STRUCTURED_ESTIMATE,
+      estimate_data: {
+        proposal: {
+          enabled: true,
+          title: 'Commercial Service Proposal',
+          buildings: STRUCTURED_ESTIMATE.estimate_data.proposal.buildings,
+        },
+      },
+    };
+    const untouched = await buildEstimateProposalPDFBuffer(legacyNoTerms, { billsPerApplication: false });
+    expect(extractPdfText(untouched)).toContain('callback guarantee between scheduled visits');
+  });
+
   test('legacy proposal renders no structured section labels', async () => {
     const legacy = {
       ...STRUCTURED_ESTIMATE,

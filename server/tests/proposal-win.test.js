@@ -170,12 +170,19 @@ const NONTAXABLE_PROPOSAL = {
 };
 
 // trx mock for the customers ensure-commercial query inside the invoice path.
-function makeInvoiceTrx({ propertyType } = {}) {
+function makeInvoiceTrx({ propertyType, payerId, payerTerms } = {}) {
   const ops = { updates: [] };
-  const trx = jest.fn(() => {
+  const trx = jest.fn((table) => {
     const builder = {
       where() { return builder; },
-      first: async () => (propertyType === undefined ? null : { property_type: propertyType }),
+      first: async () => {
+        if (table === 'payers') return payerTerms === undefined ? null : { payment_terms: payerTerms };
+        if (propertyType === undefined && payerId === undefined) return null;
+        return {
+          property_type: propertyType,
+          ...(payerId !== undefined ? { payer_id: payerId } : {}),
+        };
+      },
       update(patch) { ops.updates.push(patch); return Promise.resolve(1); },
     };
     return builder;
@@ -216,6 +223,20 @@ describe('createProposalAcceptanceInvoice', () => {
       customerId: 'cust-1',
     });
     expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-07-05');
+  });
+
+  test('a linked payer\'s canonical terms take precedence over the proposal term (codex #3297 r2b)', async () => {
+    InvoiceService.create.mockResolvedValue({ id: 10, invoice_number: 'WPC-2026-0010', total: 1 });
+    // Payer says net30; proposal says net15 — the standing billing
+    // relationship wins so due date and statement accrual read one term.
+    const { trx } = makeInvoiceTrx({ propertyType: 'commercial', payerId: 77, payerTerms: 'net30' });
+    await createProposalAcceptanceInvoice({
+      trx,
+      estimate: { id: 42 },
+      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net15' } },
+      customerId: 'cust-1',
+    });
+    expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-07-20');
   });
 
   test('flags a non-commercial customer commercial when the proposal is taxable', async () => {

@@ -410,8 +410,15 @@ function termsBlock(ctx, proposal, totals, y) {
     lines.push('* Taxable line. Tax applies only to lines marked taxable, at the Florida state rate plus the service county surtax. Residential pest control and residential lawn maintenance are tax-exempt in Florida; commercial services may be taxable.');
   }
   lines.push(`Licensed & insured — Florida FDACS #${WAVES_FDACS_LICENSE_NUMBER}. Certificate of Insurance available on request.`);
-  lines.push('Integrated Pest Management (IPM) program with documented service records and a callback guarantee between scheduled visits.');
-  lines.push(...commercialTermLines(proposal.commercialTerms));
+  // Authored terms govern (same rule as the React/SSR renderers, codex #3281
+  // r1 / #3297 r2b): the canned callback-guarantee claim must not sit beside
+  // operator terms that may state the opposite. The neutral licensed-line
+  // above stays — it makes no plan claims.
+  const structuredTermLines = commercialTermLines(proposal.commercialTerms);
+  if (!proposal.terms && structuredTermLines.length === 0) {
+    lines.push('Integrated Pest Management (IPM) program with documented service records and a callback guarantee between scheduled visits.');
+  }
+  lines.push(...structuredTermLines);
   if (proposal.terms) lines.push(proposal.terms);
 
   y = ensureSpace(ctx, y, 26);
