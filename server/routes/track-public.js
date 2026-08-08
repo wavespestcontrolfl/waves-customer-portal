@@ -291,18 +291,28 @@ async function buildSummary(service) {
     invoiceToken = null;
   }
 
-  // Review request — most recent for this customer; TrackPage uses the
-  // /rate/:token link, which routes to the closest-office GBP itself.
-  // Suppressed completion summaries (internal-only consultations / disabled
-  // delivery) must not surface a review CTA from an older request either.
+  // Review request — most recent for this customer. The CTA links the
+  // tracked direct-Google redirect (/api/rate/:token/go — the same target
+  // every cadence SMS uses since the DIRECT-GO flip), NOT the raw /rate
+  // page (review audit 2026-08-07: this CTA was the main rate-page leak).
+  // Suppressed for: internal-only completion summaries, customers who
+  // already left a Google review, and expired requests — the track link
+  // ships in nearly every visit SMS, so a stale ask here outlives the
+  // cadence's own hygiene.
   let reviewUrl = null;
   try {
     if (!suppressCustomerArtifacts) {
-      const rr = await db('review_requests')
-        .where({ customer_id: service.customer_id })
-        .orderBy('created_at', 'desc')
-        .first('token');
-      if (rr?.token) reviewUrl = `/rate/${rr.token}`;
+      const customerFlag = await db('customers')
+        .where({ id: service.customer_id })
+        .first('has_left_google_review');
+      if (customerFlag?.has_left_google_review !== true) {
+        const rr = await db('review_requests')
+          .where({ customer_id: service.customer_id })
+          .orderBy('created_at', 'desc')
+          .first('token', 'expires_at');
+        const expired = rr?.expires_at && new Date(rr.expires_at) < new Date();
+        if (rr?.token && !expired) reviewUrl = `/api/rate/${rr.token}/go`;
+      }
     }
   } catch (err) {
     logger.warn(`[track-public] review_request lookup failed: ${err.message}`);

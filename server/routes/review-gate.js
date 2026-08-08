@@ -101,6 +101,19 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     const request = await db('review_requests').where({ token }).first();
     if (!request) return res.redirect(302, ratePageFallback);
     if (request.expires_at && new Date(request.expires_at) < new Date()) {
+      // Expired-but-real link (review audit 2026-08-07): a willing reviewer
+      // clicking a weeks-old text used to dead-end on the rate page's
+      // "link expired" state. Send them on to the location's Google review
+      // form anyway — but stamp NOTHING (no click credit, no cadence stop,
+      // no owner bell): the request is past its attribution window, and an
+      // expired token must not keep working as a tracked link.
+      try {
+        const expiredCustomer = await db('customers').where({ id: request.customer_id }).first();
+        const expiredLoc = resolveReviewLocation(request, expiredCustomer);
+        if (expiredLoc?.googleReviewUrl) return res.redirect(302, expiredLoc.googleReviewUrl);
+      } catch (err) {
+        logger.warn(`[review-gate] expired-link GBP resolve failed — rate-page fallback: ${err.message}`);
+      }
       return res.redirect(302, ratePageFallback);
     }
 

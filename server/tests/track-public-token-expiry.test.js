@@ -22,7 +22,7 @@ function makeQuery({ firstResult = null, selectResult = [] } = {}) {
   return chain;
 }
 
-function installSummaryDb({ record = null, photos = [], reviewRequest = null, invoice = null } = {}) {
+function installSummaryDb({ record = null, photos = [], reviewRequest = null, invoice = null, customer = null } = {}) {
   mockDb.mockImplementation((table) => {
     if (table === 'invoices') {
       return makeQuery({ firstResult: invoice });
@@ -35,6 +35,9 @@ function installSummaryDb({ record = null, photos = [], reviewRequest = null, in
     }
     if (table === 'review_requests') {
       return makeQuery({ firstResult: reviewRequest });
+    }
+    if (table === 'customers') {
+      return makeQuery({ firstResult: customer });
     }
     return makeQuery();
   });
@@ -185,10 +188,53 @@ describe('public track token expiry', () => {
       'https://signed.example/after-1.jpg',
       'https://signed.example/after-2.jpg',
     ]);
-    expect(summary.reviewUrl).toBe('/rate/review-token');
+    // Tracked direct-Google redirect, not the raw rate page (review audit
+    // 2026-08-07).
+    expect(summary.reviewUrl).toBe('/api/rate/review-token/go');
     expect(mockDb.mock.calls.map(([table]) => table)).toContain('service_photos');
     expect(mockDb.mock.calls.map(([table]) => table)).toContain('review_requests');
     expect(mockGetViewUrl).toHaveBeenCalledTimes(2);
+  });
+
+  test('suppresses the review CTA for customers who already left a Google review', async () => {
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      reviewRequest: { token: 'review-token' },
+      customer: { has_left_google_review: true },
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.reviewUrl).toBeNull();
+    // The flag short-circuits before the request lookup.
+    expect(mockDb.mock.calls.map(([table]) => table)).not.toContain('review_requests');
+  });
+
+  test('suppresses the review CTA for an expired review request', async () => {
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      reviewRequest: { token: 'review-token', expires_at: '2026-05-01T00:00:00.000Z' },
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.reviewUrl).toBeNull();
   });
 
   // Backdated quiet closeout (PR #2897 fix round 9, Codex P1): the review

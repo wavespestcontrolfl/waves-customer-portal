@@ -93,7 +93,7 @@ const OUTREACH_TEMPLATES = [
     id: 'winback_ask',
     name: 'Win-Back Review Ask',
     sentiment: 'neutral',
-    body: "Hi {first}! We never asked - if you were happy with your Waves service, a quick review would mean a lot:\n\n{review_url}",
+    body: "Hi {first}! We never got to ask - if you were happy with your Waves service, a quick review would mean a lot:\n\n{review_url}",
   },
   {
     id: 'qr_followup',
@@ -110,7 +110,7 @@ const OUTREACH_TEMPLATES = [
     // waits for the FINAL visit. No "today": the smart send window can defer
     // past midnight. Cap/cooldown-exempt (CAP_EXEMPT_TEMPLATE_KEYS) so the
     // owner-spec'd 1-after-first + 3-after-final flow fits inside one series.
-    body: "Hi {first}! {tech} with Waves. Treatment 1 done - see you at the follow-up. A quick review helps:\n\n{review_url}",
+    body: "Hi {first}! {tech} with Waves. First treatment's done - see you at the follow-up. A quick review helps:\n\n{review_url}",
   },
 ];
 

@@ -149,6 +149,46 @@ describe('review-gate token gate (url-safe 32-64)', () => {
   });
 });
 
+describe('review-gate /go expired-link handling (review audit 2026-08-07)', () => {
+  const { isEnabled } = require('../config/feature-gates');
+  const { WAVES_LOCATIONS } = require('../config/locations');
+
+  afterEach(() => {
+    isEnabled.mockImplementation(() => false);
+  });
+
+  test('expired request 302s to the location GBP with NO stamping', async () => {
+    isEnabled.mockImplementation((key) => key === 'reviewDirectLink');
+    const loc = WAVES_LOCATIONS[0];
+    const updateSpy = jest.fn();
+    db.mockImplementation((table) => {
+      const q = {};
+      for (const m of ['where', 'whereNull', 'orderBy', 'limit', 'select']) q[m] = jest.fn(() => q);
+      q.update = updateSpy;
+      q.first = jest.fn(async () => {
+        if (table === 'review_requests') {
+          return {
+            id: 'rr-expired',
+            customer_id: 'cust-1',
+            location_id: loc.id,
+            expires_at: '2020-01-01T00:00:00.000Z',
+          };
+        }
+        return null; // customers: no geocode → location_id fallback resolves
+      });
+      return q;
+    });
+
+    const res = await get(`/api/rate/${'ab'.repeat(32)}/go`);
+    expect(res.status).toBe(302);
+    // A willing reviewer on an old text still reaches the review form...
+    expect(res.headers.get('location')).toBe(loc.googleReviewUrl);
+    // ...but an out-of-window token records nothing: no click stamp, no
+    // cadence stop, no owner bell.
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('/l shortlink limiter + code entropy', () => {
   test('resolver carries a rate limiter', async () => {
     const res = await get('/l/abc12');
