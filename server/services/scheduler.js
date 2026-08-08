@@ -1493,6 +1493,32 @@ function initScheduledJobs() {
         }
       });
     } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
+
+    // Reversal leg — hand pages we confirmed we made WORSE back to the
+    // existing refresh lane. Chained after the sweep so it reads the verdicts
+    // checkPending just wrote, but in its OWN try: checkPending has no per-row
+    // catch around measurement and persistence, so a single permanently
+    // failing impact row rejects the block above every single day. Sharing one
+    // try would let that one row starve the entire confirmed-regression
+    // backlog indefinitely. Already-written verdicts stay actionable even when
+    // the sweep that would have added more to them died.
+    //
+    // Outside the impact-tracker-daily lease on purpose, and safe there: this
+    // leg has its own runExclusive, and unlike the rollup it scans on
+    // `requeued_at IS NULL` rather than a time window — so a verdict written
+    // by an overlapping instance after this scan is simply picked up tomorrow,
+    // never skipped. Moving it inside the lease would restore the starvation
+    // above without buying anything.
+    try {
+      const requeued = await require('./seo/regression-requeue').requeueRegressedPages({});
+      // runExclusive RETURNS { skipped: true, reason } rather than throwing.
+      // 'lease_held' is benign — another instance is doing the work. Anything
+      // else (notably 'no_connection' under pool exhaustion) means the sweep
+      // never ran, and must not read as a healthy night.
+      if (requeued?.skipped === true && requeued.reason !== 'lease_held') {
+        throw new Error(`regression re-queue did not run (${requeued.reason || 'unknown'})`);
+      }
+    } catch (err) { logger.error(`Regression re-queue failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // DAILY 8:10AM ET — Parked-content digest (owner-authorized lane
