@@ -2589,6 +2589,16 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
         updated_at: new Date(),
       });
     if (!cleared) return false;
+    // The funnel row THIS call created for the stamped lead is retired with
+    // the stamp (codex P1, PR #3303): the processor path writes provenanced
+    // ad_service_attribution rows for organic/dedicated-number calls the
+    // google bridge never scans, and without this a cleared stamp left the
+    // old lead's row while a retry could insert another for the new lead —
+    // one call counted twice. Exact provenance (lead_id + source_call_id):
+    // NULL-provenance and other calls' rows never match. A retry that
+    // re-attributes (same or different lead) re-creates the row via
+    // runCallPpcAttribution; rides this transaction under the lead lock.
+    await require('./ads/call-attribution').retireCallAttributionRow(trx, call.id, stampedLeadId);
     if (priorState && writtenState) {
       // Successors are read BEFORE the restore because they gate it (codex
       // P2 r19). Two calls can write the SAME value to a field — both

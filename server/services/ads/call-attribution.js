@@ -393,10 +393,28 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
   return { candidates: leads.length, recorded, skipped };
 }
 
+// Retire the funnel row a specific call created for a specific lead —
+// EXACT provenance only (lead_id + source_call_id both match; NULL-
+// provenance rows never match, so another call's or a web path's row can
+// never be touched). The ONE definition shared by every stamp
+// reconciliation: the google bridge's repoint/clear paths and the call
+// processor's own stamp clear (codex P1, PR #3303 — the processor path
+// creates provenanced rows for organic/dedicated-number calls the bridge
+// never scans, and a cleared stamp there must retire its row the same
+// way). Runs on the caller's connection so it can ride a lead-locking
+// transaction.
+async function retireCallAttributionRow(dbc, callLogId, leadId) {
+  if (!callLogId || !leadId) return 0;
+  return dbc('ad_service_attribution')
+    .where({ lead_id: leadId, source_call_id: callLogId })
+    .del();
+}
+
 module.exports = {
   recordCallPpcAttribution,
   attributionForSourceType,
   backfillCallLeadAttribution,
   attributeUnclaimedBridgeLeads,
+  retireCallAttributionRow,
   _private: { resolveCampaignId, SOURCE_TYPE_ATTRIBUTION },
 };

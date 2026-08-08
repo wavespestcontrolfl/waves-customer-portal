@@ -695,10 +695,10 @@ async function reconcileMovedCallAttribution(trx, callLogId, recordedLeadId, new
         .update({ lead_id: newLeadId, customer_id: newCustomerId || null, updated_at: now });
       return 'transferred';
     }
-    await trx('ad_service_attribution').where({ id: oldRow.id }).del();
+    await require('./call-attribution').retireCallAttributionRow(trx, callLogId, recordedLeadId);
     return 'retired_conflict';
   }
-  await trx('ad_service_attribution').where({ id: oldRow.id }).del();
+  await require('./call-attribution').retireCallAttributionRow(trx, callLogId, recordedLeadId);
   return 'retired_cleared';
 }
 
