@@ -181,13 +181,18 @@ router.post('/', async (req, res, next) => {
       // text carries the link.
       const askQueued = ['deferred', 'already_queued', 'send_failed', 'concurrent'].includes(asked.outcome);
       let reviewLink = asked.reviewUrl || null;
-      if (!reviewLink && !askQueued) {
+      if (!reviewLink && !askQueued && asked.outcome !== 'already_reviewed') {
         // BOTH fallbacks skip the queued window (codex #3285 r4): an older
         // delivered token is just as actionable as the bare URL — the click
         // couldn't consume the pending row and processScheduled would still
-        // send the queued ask afterward.
+        // send the queued ask afterward. already_reviewed gets NO link at all
+        // (finality). in_cadence may reuse a live DELIVERED token — that is
+        // the cadence's own link, and clicking it stamps + STOPS the cadence
+        // via /go — but never the bare URL, which stops nothing and would let
+        // the cadence chase a customer who already reviewed (pre-push audit
+        // r4).
         reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
-        if (!reviewLink) reviewLink = office.googleReviewUrl;
+        if (!reviewLink && asked.outcome !== 'in_cadence') reviewLink = office.googleReviewUrl;
       }
 
       return res.json({
