@@ -14,7 +14,7 @@ const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
   windowDurationMinutes, deriveWindowEnd,
 } = require('../../utils/datetime-et');
-const { FORMER_CUSTOMER_STAGES, stageLifecycleStamps } = require('../customer-stages');
+const { FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, stageLifecycleStamps } = require('../customer-stages');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
@@ -1008,6 +1008,11 @@ async function updateCustomer(customerId, updates) {
   // left a reactivated archived row with active=false and a stale
   // churned_at, so whereLiveCustomer never saw it): activation, churn
   // clearing/stamping, stage timestamp, and member date, in the same write.
+  // Validate FIRST — a typo'd/model-invented stage must not run lifecycle
+  // mutations while persisting an unsupported value.
+  if (clean.pipeline_stage && !ALL_PIPELINE_STAGES.includes(clean.pipeline_stage)) {
+    return { error: `Invalid pipeline stage: ${clean.pipeline_stage}` };
+  }
   if (clean.pipeline_stage) {
     Object.assign(clean, stageLifecycleStamps(
       before.pipeline_stage, clean.pipeline_stage, before, { today: etDateString() },
@@ -1222,9 +1227,14 @@ async function bulkUpdateCustomers(customerIds, updates) {
   //  - pipeline_stage_changed_at only bumps on rows actually changing stage
   const formerOrCurrent = ['active_customer', 'won', 'at_risk', ...FORMER_CUSTOMER_STAGES];
   let stageStamp = {};
+  if (clean.pipeline_stage && !ALL_PIPELINE_STAGES.includes(clean.pipeline_stage)) {
+    return { error: `Invalid pipeline stage: ${clean.pipeline_stage}` };
+  }
   if (clean.pipeline_stage) {
+    // IS DISTINCT FROM, not <>: legacy NULL-stage rows must still get the
+    // audit stamp (NULL <> x is NULL in Postgres, silently skipping them).
     stageStamp.pipeline_stage_changed_at = db.raw(
-      'CASE WHEN pipeline_stage <> ? THEN now() ELSE pipeline_stage_changed_at END',
+      'CASE WHEN pipeline_stage IS DISTINCT FROM ? THEN now() ELSE pipeline_stage_changed_at END',
       [clean.pipeline_stage]);
     if (['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)) {
       stageStamp.member_since = db.raw(

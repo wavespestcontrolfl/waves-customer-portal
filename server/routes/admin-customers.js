@@ -198,10 +198,9 @@ function adminMembershipStartIdempotencyKey(customerId, before = {}, after = {},
   return `membership.started:${customerId}:admin:${etDateString(eventAt)}:${eventStamp}:${membershipChangeFingerprint(before, after)}`;
 }
 
-const CUSTOMER_STAGES = [
-  'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up',
-  'negotiating', 'won', 'active_customer', 'at_risk', 'churned', 'past_customer', 'lost', 'dormant',
-];
+// Full legal stage list lives in the canonical customer-stages service so
+// every writer (this route, IB single+bulk) validates the same set.
+const CUSTOMER_STAGES = require('../services/customer-stages').ALL_PIPELINE_STAGES;
 const CUSTOMER_STAGE_SET = new Set(CUSTOMER_STAGES);
 
 const SERVICE_KEY_ALIASES = {

@@ -2423,7 +2423,23 @@ async function createSelfBooking(payload = {}) {
           await promoteCustomerOnBooking(inner, custId);
         });
       } catch (e) {
+        // Durable repair marker, committed WITH the booking (codex #3282 r3
+        // P1: a swallowed savepoint failure would otherwise strand a live
+        // booking on an archived row with nothing to heal it): ring the
+        // admin bell in this same transaction — the existing stamp-and-
+        // notify mechanism — so the inconsistency surfaces even if the
+        // client never retries. Rolling the booking back instead was
+        // rejected: stage bookkeeping must never cost a customer a booking.
         logger.warn(`[booking:confirm] customer promotion failed (non-blocking) for customer=${custId}: ${e.message}`);
+        await trx('notifications').insert({
+          recipient_type: 'admin',
+          category: 'customer_promotion_review',
+          title: 'Self-booking committed without customer promotion',
+          body: `A booking was confirmed but the customer row could not be promoted to a live stage (it may still show churned/past customer/lead). Open the customer and set the stage manually.`,
+          icon: '\u{1F514}',
+          link: `/admin/customers?customerId=${custId}`,
+          metadata: JSON.stringify({ customerId: custId, scheduledServiceId: scheduledRow.id, error: String(e.message || e).slice(0, 200) }),
+        });
       }
 
       return { booking: bookingRow, serviceRow: scheduledRow };

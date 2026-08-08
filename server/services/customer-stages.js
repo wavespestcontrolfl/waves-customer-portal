@@ -22,6 +22,15 @@ const CUSTOMER_STAGES = ['active_customer', 'won', 'at_risk'];
 // bulk re-stages can never fake a churn spike.
 const FORMER_CUSTOMER_STAGES = ['churned', 'past_customer', 'dormant'];
 
+// Every legal pipeline_stage value — the validation set for ANY writer that
+// accepts a stage from outside (admin routes, Intelligence Bar single+bulk).
+// An invalid stage must be rejected BEFORE lifecycle stamps run, or a typo'd
+// stage could clear churn history while persisting an unsupported value.
+const ALL_PIPELINE_STAGES = [
+  'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up',
+  'negotiating', 'won', 'active_customer', 'at_risk', 'churned', 'past_customer', 'lost', 'dormant',
+];
+
 // customers.created_via — PROVENANCE of a machine-minted row, stamped by the
 // creating path itself. Row SHAPE cannot carry this: several lead-creation
 // paths write an address-less, ZIP-less, active new_lead row (the Twilio
@@ -144,6 +153,6 @@ async function promoteCustomerOnBooking(database, customerId) {
 }
 
 module.exports = {
-  CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES, CREATED_VIA, whereLiveCustomer, CONVERSION_DATE_SQL,
-  stageLifecycleStamps, promoteCustomerOnBooking,
+  CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, CREATED_VIA, whereLiveCustomer,
+  CONVERSION_DATE_SQL, stageLifecycleStamps, promoteCustomerOnBooking,
 };
