@@ -2189,6 +2189,34 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
 //   and the booking-conversion ownership guard would then (rightly) refuse to
 //   close it — stranding this caller's booked deal with no convertible lead.
 //   A foreign-owned lead is invisible here; the caller gets a fresh row.
+// The eligibility a SAME-CALL (sid-matched) lead row must satisfy, applied
+// IDENTICALLY at lookup time and at write time. It lives in one function
+// because hand-repeating a subset at the write is a bug factory: three
+// consecutive review rounds each named a different predicate the write had
+// missed — ownership for a phone-less retry, ownership for a phone-bearing
+// one, then the lifecycle trio — because the lookup builds eligibility here
+// and the guarded write rebuilt it ~400 lines away. One function means the
+// two can no longer drift, and a new predicate added here is automatically
+// enforced at both sites.
+function applySameCallLeadEligibility(query, { customerId, unclaimedOnly, workableUnnamedLead }) {
+  let out = query.whereNull('deleted_at');
+  if (workableUnnamedLead) {
+    out = out.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
+  }
+  if (unclaimedOnly || !customerId) {
+    // Anonymous retries require an UNCLAIMED row too, not just the
+    // shared-phone-ambiguity case: unclaimedOnly is derived from shared-phone
+    // candidates and is false for a customer-less caller, so without the
+    // `!customerId` arm a row claimed between attempts stayed eligible and
+    // an anonymous extraction could overwrite a customer-owned lead
+    // (audit P1 r15).
+    out = out.whereNull('customer_id');
+  } else {
+    out = out.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+  }
+  return out;
+}
+
 async function findReusableCallLead(database, { phone, email = null, firstName = null, lastName = null, customerId, workableUnnamedLead, unclaimedOnly, callSid = null }) {
   // Same-call retry FIRST, before any contact-based branch: a retry of this
   // call (extraction_failed reprocessing) must reuse the lead an earlier
@@ -2203,27 +2231,12 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // active-leads-only — an ineligible SID row falls through to contact
   // reuse or a fresh mint like any other rejected candidate.
   if (callSid) {
-    let ownQuery = database('leads')
-      .whereNull('deleted_at')
-      .where('twilio_call_sid', callSid);
-    if (workableUnnamedLead) {
-      ownQuery = ownQuery.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
-    }
-    if (unclaimedOnly || !customerId) {
-      // Anonymous retries require an UNCLAIMED row too, not just the
-      // shared-phone-ambiguity case: a phone-less customer-less retry
-      // derives unclaimedOnly=false from having no shared-phone candidates,
-      // so without the `!customerId` arm a sid lead assigned to a customer
-      // between attempts stayed eligible here — and the sameCallLeadReuse
-      // path skips email/ownership revalidation, so with customerId null
-      // its enrichment write is unguarded and would overwrite that
-      // customer-owned row (audit P1 r15). The rejected row falls through
-      // to contact reuse or a fresh mint like any other candidate.
-      ownQuery = ownQuery.whereNull('customer_id');
-    } else {
-      ownQuery = ownQuery.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
-    }
-    const own = await ownQuery.orderBy('created_at', 'desc').first();
+    // An ineligible sid row falls through to contact reuse or a fresh mint
+    // like any other rejected candidate.
+    const own = await applySameCallLeadEligibility(
+      database('leads').where('twilio_call_sid', callSid),
+      { customerId, unclaimedOnly, workableUnnamedLead },
+    ).orderBy('created_at', 'desc').first();
     if (own) return own;
   }
   // The email key must be a REAL email, validated here and not just at the
@@ -7377,15 +7390,20 @@ const CallRecordingProcessor = {
         // customer is never reused/overwritten; UNCLAIMED-only when the phone
         // is ambiguous across customers — this call must not enrich a lead
         // one of the candidates owns while the office adjudicates).
+        // Built ONCE and passed to both the lookup and the guarded same-call
+        // write, so the two can never enforce different eligibility.
+        const sameCallEligibility = {
+          customerId,
+          workableUnnamedLead,
+          unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
+        };
         const existingLead = await findReusableCallLead(db, {
           phone,
           email: phone ? null : (extracted.email || null),
           firstName: extracted.first_name || null,
           lastName: extracted.last_name || null,
-          customerId,
-          workableUnnamedLead,
-          unclaimedOnly: !!sharedPhoneAmbiguity.candidates,
           callSid: call.twilio_call_sid || null,
+          ...sameCallEligibility,
         });
         // Same-call reuse (retry reprocessing found the lead THIS call's
         // earlier attempt inserted) is strong identity — the weak-identity
@@ -7801,19 +7819,17 @@ const CallRecordingProcessor = {
             if (customerId) {
               enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
             }
-            if (sameCallLeadReuse && !customerId) {
-              // Same-call reuse skips the weak-identity revalidation, but a
-              // customer-LESS write still needs the unclaimed backstop — the
-              // lookup rejects customer-claimed rows whenever customerId is
-              // null (audit P1 r15) and this repeats that predicate against
-              // the claim race between lookup and write.
-              // NOT gated on `!phone` (codex P2): a retry can RECOVER a
-              // callback number and still resolve no customer, and the
-              // `if (customerId)` arm above never fires for it — so gating
-              // on phone left the phone-bearing customer-less retry writing
-              // with no ownership predicate at all, exactly the case the
-              // lookup already refuses to serve.
-              enrichmentWrite = enrichmentWrite.whereNull('customer_id');
+            if (sameCallLeadReuse) {
+              // Same-call reuse skips the weak-identity (email/name)
+              // revalidation, but it must still repeat the FULL same-call
+              // eligibility as the race backstop — ownership AND lifecycle.
+              // Reusing the lookup's own function instead of re-deriving a
+              // subset here is the point: each predicate this write used to
+              // omit was a separate review finding (a claimed row
+              // overwritten, then a soft-deleted or closed row enriched
+              // while the call finished clean). A 0-row outcome lands in the
+              // reconciliation below.
+              enrichmentWrite = applySameCallLeadEligibility(enrichmentWrite, sameCallEligibility);
             }
             if (!phone && existingLead && !sameCallLeadReuse) {
               // Email-matched REUSE revalidation (phone-less caller): weak
@@ -7872,23 +7888,27 @@ const CallRecordingProcessor = {
             // customer-attached rejection would otherwise finish silently as
             // 'processed' with no lead and no card (codex P2).
             if (!enriched && sameCallLeadReuse && leadId) {
-              let nowOwned = null;
-              let ownershipVerified = true;
+              // Re-run the SAME eligibility against the row rather than
+              // comparing one column: a 0-row write means it failed SOME
+              // predicate, and which one does not change the decision. An
+              // ineligible row — claimed by another customer, soft-deleted,
+              // closed or converted — is no longer this call's lead.
+              let stillEligible = null;
+              let verified = true;
               try {
-                nowOwned = await db('leads').where({ id: leadId }).first('customer_id');
-              } catch (ownerErr) {
-                // FAIL CLOSED: an unverifiable owner is treated as foreign
-                // (codex P2). Swallowing the error and keeping leadId left
-                // attribution, voicemail/dropped-call actions and booking
-                // consumers pointing at the very row the guarded write just
-                // refused — the outcome this re-read exists to prevent.
-                ownershipVerified = false;
-                logger.warn(`[call-proc] same-call ownership re-read failed: ${ownerErr.code || ownerErr.name || 'db_error'}`);
+                stillEligible = await applySameCallLeadEligibility(
+                  db('leads').where({ id: leadId }), sameCallEligibility,
+                ).first('id');
+              } catch (eligErr) {
+                // FAIL CLOSED (codex P2): swallowing this and keeping leadId
+                // left attribution, voicemail/dropped-call actions and
+                // booking consumers pointing at the very row the guarded
+                // write just refused.
+                verified = false;
+                logger.warn(`[call-proc] same-call eligibility re-read failed: ${eligErr.code || eligErr.name || 'db_error'}`);
               }
-              const ownerId = nowOwned?.customer_id ? String(nowOwned.customer_id) : null;
-              const foreign = ownerId && ownerId !== String(customerId || '');
-              if (!ownershipVerified || foreign) {
-                logger.warn(`[call-proc] same-call lead ${leadId} ${foreign ? 'is now owned by another customer' : 'ownership unverifiable'} — dropping the association for ${maskSid(callSid)}`);
+              if (!verified || !stillEligible) {
+                logger.warn(`[call-proc] same-call lead ${leadId} ${verified ? 'is no longer eligible' : 'eligibility unverifiable'} — dropping the association for ${maskSid(callSid)}`);
                 leadId = null;
                 sameCallOwnershipRejected = true;
               }
@@ -11536,6 +11556,7 @@ CallRecordingProcessor._test = {
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,
   findReusableCallLead,
+  applySameCallLeadEligibility,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
   resolveCallSecondaryContact,

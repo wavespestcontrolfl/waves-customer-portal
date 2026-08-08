@@ -403,3 +403,56 @@ describe('findReusableCallLead same-call SID branch applies ownership + lifecycl
     expect(pre.some(([m, a]) => m === 'where' && typeof a[0] === 'function')).toBe(true);
   });
 });
+
+describe('applySameCallLeadEligibility — one definition for lookup AND write (PR #3291)', () => {
+  const { applySameCallLeadEligibility } = CallRecordingProcessor._test;
+  // Three consecutive review rounds each named a DIFFERENT predicate the
+  // guarded same-call write had omitted, because the lookup built eligibility
+  // in findReusableCallLead and the write rebuilt a subset ~400 lines away.
+  // These pin the shared function so the two sites cannot drift again.
+  const spy = () => {
+    const calls = [];
+    const q = {};
+    for (const m of ['where', 'whereNull', 'whereNotIn', 'orderBy', 'first']) {
+      q[m] = (...a) => { calls.push([m, a]); return q; };
+    }
+    q.calls = calls;
+    return q;
+  };
+
+  test('always excludes soft-deleted rows', () => {
+    const q = spy();
+    applySameCallLeadEligibility(q, { customerId: 'c1', unclaimedOnly: false, workableUnnamedLead: false });
+    expect(q.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'deleted_at')).toBe(true);
+  });
+
+  test('workableUnnamedLead adds the lifecycle trio (terminal status + converted_at)', () => {
+    const q = spy();
+    applySameCallLeadEligibility(q, { customerId: null, unclaimedOnly: false, workableUnnamedLead: true });
+    expect(q.calls.some(([m, a]) => m === 'whereNotIn' && a[0] === 'status')).toBe(true);
+    expect(q.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'converted_at')).toBe(true);
+  });
+
+  test('a customer-LESS caller requires an unclaimed row even when unclaimedOnly is false', () => {
+    // unclaimedOnly is derived from shared-phone candidates, so it is false
+    // for an anonymous retry — the !customerId arm is what protects a lead
+    // claimed between attempts.
+    const q = spy();
+    applySameCallLeadEligibility(q, { customerId: null, unclaimedOnly: false, workableUnnamedLead: false });
+    expect(q.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(true);
+  });
+
+  test('shared-phone ambiguity requires unclaimed even with a resolved customer', () => {
+    const q = spy();
+    applySameCallLeadEligibility(q, { customerId: 'c1', unclaimedOnly: true, workableUnnamedLead: false });
+    expect(q.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(true);
+  });
+
+  test('a resolved customer scopes ownership to unclaimed-or-mine', () => {
+    const q = spy();
+    applySameCallLeadEligibility(q, { customerId: 'c1', unclaimedOnly: false, workableUnnamedLead: false });
+    // Grouped callback arm rather than a bare whereNull.
+    expect(q.calls.some(([m, a]) => m === 'where' && typeof a[0] === 'function')).toBe(true);
+    expect(q.calls.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(false);
+  });
+});
