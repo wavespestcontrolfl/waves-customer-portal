@@ -75,6 +75,36 @@ describe('buildProposalFirstInvoice', () => {
     expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
   });
 
+  test('rounds recurring and one-time tax buckets separately, matching computeProposalTotals (codex 1A-i r3 P0)', () => {
+    // Two $100.07 taxable amounts at 7%: each bucket's tax is $7.0049 →
+    // $7.00 rounded per bucket = $14.00 total. A merged bucket would round
+    // $14.0098 → $14.01 and invoice a cent more than the accepted proposal.
+    const built = buildProposalFirstInvoice({
+      taxRate: 0.07,
+      buildings: [{
+        name: 'B',
+        lineItems: [{ description: 'Annual program', quantity: 1, unitPrice: 100.07, frequency: 'annual', taxable: true, amount: 100.07 }],
+      }],
+      correctiveWork: [{ label: 'Cleanout', amount: 100.07, taxable: true }],
+    });
+    expect(built.taxAmount).toBe(14);
+    expect(built.total).toBe(214.14);
+    const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
+    const totals = computeProposalTotals(normalizeProposal({
+      estimate_data: {
+        proposal: {
+          enabled: true,
+          taxRate: 0.07,
+          buildings: [{ name: 'B', lineItems: [{ description: 'Annual program', unitPrice: 100.07, frequency: 'annual', taxable: true }] }],
+          correctiveWork: [{ label: 'Cleanout', amount: 100.07, taxable: true }],
+        },
+      },
+    }));
+    // The invoice's tax dollars equal the proposal's for coinciding amounts.
+    expect(built.taxAmount).toBe(totals.totalTax);
+    expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
+  });
+
   test('single building omits the building prefix', () => {
     const built = buildProposalFirstInvoice({
       taxRate: 0,

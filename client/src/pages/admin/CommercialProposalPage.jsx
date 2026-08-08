@@ -59,6 +59,8 @@ const emptyLine = () => ({
 });
 const emptyBuilding = (i) => ({ name: `Building ${i + 1}`, note: '', lineItems: [emptyLine()] });
 
+const roundMoney = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
 const lineAmount = (li) => (Number(li.quantity) || 0) * (Number(li.unitPrice) || 0);
 const lineAnnual = (li) =>
   li.frequency === 'one_time' ? 0 : lineAmount(li) * (PER_YEAR[li.frequency] || 0);
@@ -89,19 +91,25 @@ function computeTotals(buildings, taxRate, correctiveWork = []) {
     }
   }
   // Structured corrective-work lines fold into the one-time side, exactly
-  // like the server's computeProposalTotals.
+  // like the server's computeProposalTotals — amounts cent-rounded like
+  // normalizeCorrectiveWorkItem so the preview shows what will save.
   for (const w of correctiveWork) {
-    const amount = Number(w.amount) || 0;
+    const amount = roundMoney(w.amount);
     oneTime += amount;
     if (w.taxable) taxableOneTime += amount;
   }
-  const totalTax = (taxableAnnual + taxableOneTime) * (Number(taxRate) || 0);
+  // Per-bucket cent rounding, mirroring computeProposalTotals — a merged
+  // bucket can drift a cent from the saved proposal/PDF (codex 1A-i r3).
+  const rate = Number(taxRate) || 0;
+  const totalTax = roundMoney(roundMoney(taxableAnnual * rate) + roundMoney(taxableOneTime * rate));
+  annualRecurring = roundMoney(annualRecurring);
+  oneTime = roundMoney(oneTime);
   return {
     annualRecurring,
-    monthlyEquivalent: annualRecurring / 12,
+    monthlyEquivalent: roundMoney(annualRecurring / 12),
     oneTime,
     totalTax,
-    firstYearTotal: annualRecurring + oneTime + totalTax,
+    firstYearTotal: roundMoney(annualRecurring + oneTime + totalTax),
   };
 }
 
@@ -180,6 +188,12 @@ export default function CommercialProposalPage() {
     paymentTerms: '', initialTermMonths: '', renewal: '',
     priceAdjustment: '', cancellation: '', accessRequirements: '',
   });
+  // Normalized fields with no authoring surface here yet (validDays is
+  // reserved for the adjustable-expiry lane; accountManager is set by the
+  // API/engine and shown on the document). PUT persists exactly what the
+  // normalizer returns from this payload, so anything loaded but not echoed
+  // back would be DELETED on save — carry them through untouched.
+  const [passThrough, setPassThrough] = useState({ validDays: null, accountManager: null });
   const [sendMethod, setSendMethod] = useState('email');
   // Engine-composed prospect research (commercial proposal lane). Read-only
   // context for pricing the walkthrough — never sent to the customer.
@@ -222,6 +236,10 @@ export default function CommercialProposalPage() {
       includesText: (w.includes || []).join('\n'),
     })));
     setResponsibilitiesText((p.customerResponsibilities || []).join('\n'));
+    setPassThrough({
+      validDays: p.commercialTerms?.validDays ?? null,
+      accountManager: p.accountManager ?? null,
+    });
     setCommercialTerms({
       paymentTerms: p.commercialTerms?.paymentTerms || '',
       initialTermMonths: p.commercialTerms?.initialTermMonths != null ? String(p.commercialTerms.initialTermMonths) : '',
@@ -309,9 +327,11 @@ export default function CommercialProposalPage() {
       .filter((w) => w.label);
     const responsibilities = responsibilitiesText.split('\n').map((s) => s.trim()).filter(Boolean);
     const ct = {
-      // validDays is reserved for the adjustable-expiry lane: rendering an
-      // authored validity period would contradict the enforced expires_at
-      // the send flow stamps (codex 1A-i r1), so the builder doesn't offer it.
+      // validDays has no input here (reserved for the adjustable-expiry
+      // lane: rendering an authored validity period would contradict the
+      // enforced expires_at the send flow stamps — codex 1A-i r1), but a
+      // stored value must survive the save round-trip.
+      validDays: passThrough.validDays,
       paymentTerms: commercialTerms.paymentTerms.trim() || null,
       initialTermMonths: commercialTerms.initialTermMonths.trim() === '' ? null : Number(commercialTerms.initialTermMonths),
       renewal: commercialTerms.renewal.trim() || null,
@@ -325,6 +345,7 @@ export default function CommercialProposalPage() {
       ...(work.length ? { correctiveWork: work } : {}),
       ...(responsibilities.length ? { customerResponsibilities: responsibilities } : {}),
       ...(hasTerms ? { commercialTerms: ct } : {}),
+      ...(passThrough.accountManager ? { accountManager: passThrough.accountManager } : {}),
     };
   };
 

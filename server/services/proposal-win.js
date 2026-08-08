@@ -97,7 +97,12 @@ function buildProposalFirstInvoice(proposal) {
 
   const lineItems = [];
   let subtotal = 0;
-  let taxableSubtotal = 0;
+  // Two taxable buckets, taxed and cent-rounded SEPARATELY —
+  // computeProposalTotals rounds recurringTax and oneTimeTax each on their
+  // own, so a single merged bucket can drift a cent from the proposal the
+  // customer accepted (codex 1A-i r3 P0: two $100.07 taxable lines at 7%).
+  let taxableRecurringSubtotal = 0;
+  let taxableOneTimeSubtotal = 0;
 
   for (const building of buildings) {
     const buildingName = cleanStr(building?.name, 120);
@@ -117,7 +122,10 @@ function buildProposalFirstInvoice(proposal) {
         unit_price: roundMoney(item.unitPrice),
       });
       subtotal = roundMoney(subtotal + amount);
-      if (item.taxable === true) taxableSubtotal = roundMoney(taxableSubtotal + amount);
+      if (item.taxable === true) {
+        if (item.frequency === 'one_time') taxableOneTimeSubtotal = roundMoney(taxableOneTimeSubtotal + amount);
+        else taxableRecurringSubtotal = roundMoney(taxableRecurringSubtotal + amount);
+      }
     }
   }
 
@@ -134,10 +142,15 @@ function buildProposalFirstInvoice(proposal) {
       unit_price: amount,
     });
     subtotal = roundMoney(subtotal + amount);
-    if (work.taxable === true) taxableSubtotal = roundMoney(taxableSubtotal + amount);
+    if (work.taxable === true) taxableOneTimeSubtotal = roundMoney(taxableOneTimeSubtotal + amount);
   }
 
-  const taxAmount = roundMoney(taxableSubtotal * taxRate);
+  // Same cent-rounding policy as computeProposalTotals: each bucket's tax
+  // rounds on its own, then the two sum.
+  const taxableSubtotal = roundMoney(taxableRecurringSubtotal + taxableOneTimeSubtotal);
+  const taxAmount = roundMoney(
+    roundMoney(taxableRecurringSubtotal * taxRate) + roundMoney(taxableOneTimeSubtotal * taxRate),
+  );
   // Blended rate so InvoiceService (single-rate) reproduces the exact tax
   // dollars across mixed-taxability lines. round(subtotal * (taxAmount/subtotal))
   // === taxAmount, so the invoice total matches the proposal PDF to the cent.
