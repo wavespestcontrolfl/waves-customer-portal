@@ -995,6 +995,13 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true }, deps);
     expect(seenBody).toContain('Bait stations target the colony itself.');
     expect(seenBody).toContain(TERMITE_FM.meta_description);
+    // The meta strings are field VALUES: they must arrive AFTER the marker
+    // that withdraws the gate's body-markup comment exemption (Codex PR
+    // #3302 r1 — "<!-- pet-safe -->" in an alt text is rendered copy).
+    const { META_SECTION_MARKER } = require('../services/content/compliance-gate');
+    expect(seenBody).toContain(META_SECTION_MARKER);
+    expect(seenBody.indexOf(META_SECTION_MARKER)).toBeGreaterThan(seenBody.indexOf('Bait stations'));
+    expect(seenBody.indexOf(TERMITE_FM.meta_description)).toBeGreaterThan(seenBody.indexOf(META_SECTION_MARKER));
   });
 
   test('runRemediationForPr threads ctx.operatorFaqException into the content-gate re-run', async () => {
