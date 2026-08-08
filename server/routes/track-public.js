@@ -319,6 +319,13 @@ async function buildSummary(service) {
           // (one legacy 32-char row exists) falls through to the raw rate
           // page, exactly the unattributable surface this CTA is leaving.
           .where('token', '~', '^[a-f0-9]{64}$')
+          // FINALIZED asks stay hidden (same predicate submitRating enforces):
+          // a passive/detractor who already submitted feedback isn't marked
+          // has_left_google_review, and /go checks only format + expiry — so
+          // surfacing their token here would re-solicit a Google review
+          // instead of the rate page's thank-you state (codex #3286 r2).
+          .whereNull('rated_at')
+          .whereNotIn('status', ['submitted', 'reviewed', 'rated'])
           .where((b) => b.whereNull('expires_at').orWhere('expires_at', '>', new Date()))
           .orderBy('created_at', 'desc')
           .first('token');

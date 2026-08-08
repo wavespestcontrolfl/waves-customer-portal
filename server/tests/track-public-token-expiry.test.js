@@ -49,6 +49,14 @@ function makeReviewRequestsQuery(rows) {
     return row[col] === val;
   };
   const chain = {
+    whereNull: jest.fn((col) => {
+      filtered = filtered.filter((r) => r[col] == null);
+      return chain;
+    }),
+    whereNotIn: jest.fn((col, vals) => {
+      filtered = filtered.filter((r) => !vals.includes(r[col]));
+      return chain;
+    }),
     where: jest.fn((a, b, c) => {
       if (typeof a === 'function') {
         // Grouped OR: whereNull(col) / orWhere(col, op, val)
@@ -320,6 +328,34 @@ describe('public track token expiry', () => {
       },
       customer: { has_left_google_review: false },
       reviewRequests: [liveAsk({ token: LEGACY_32_TOKEN })],
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.reviewUrl).toBeNull();
+  });
+
+  test('a finalized ask never surfaces — no re-soliciting after feedback', async () => {
+    // A passive/detractor who already submitted through the rate page is NOT
+    // marked has_left_google_review, and /go checks only format + expiry — so
+    // an unfiltered lookup would send them to Google instead of the
+    // thank-you state (codex #3286 r2). Same finality predicate as
+    // submitRating: rated_at, or a submitted/reviewed/rated status.
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      customer: { has_left_google_review: false },
+      reviewRequests: [
+        liveAsk({ rated_at: new Date(Date.now() - 3600000).toISOString() }),
+        liveAsk({ token: STALE_TOKEN, status: 'submitted', created_at: new Date(Date.now() - 2 * 86400000).toISOString() }),
+      ],
     });
 
     const summary = await trackPublicRouter._test.buildSummary({
