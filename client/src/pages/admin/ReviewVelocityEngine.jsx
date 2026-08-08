@@ -246,7 +246,7 @@ const TEMPLATES = [
     id: "winback_ask",
     name: "Win-Back Review Ask",
     sentiment: "neutral",
-    body: "Hi {first}! We never asked - if you were happy with your Waves service, a quick review would mean a lot:\n\n{review_url}",
+    body: "Hi {first}! We never got to ask - if you were happy with your Waves service, a quick review would mean a lot:\n\n{review_url}",
   },
   {
     id: "qr_followup",

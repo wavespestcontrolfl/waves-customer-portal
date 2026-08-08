@@ -20,7 +20,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { gates } = require('../config/feature-gates');
-const { WAVES_LOCATIONS, nearestLocation } = require('../config/locations');
+const { WAVES_LOCATIONS, resolveReviewLocation } = require('../config/locations');
 const { createTrackedShortLink } = require('./short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 
@@ -80,31 +80,61 @@ async function referralShareUrl(customer) {
 }
 
 /**
- * Office for a customer: geodata first (nearest GBP), then the review-routing
- * city map (review-request.js — includes its review-only overrides like
- * palmetto → bradenton), which itself defaults to Bradenton.
+ * Office for a customer's card QR — the canonical review-routing resolver
+ * (config/locations.js): city → zip → geo → stored nearest_location_id →
+ * default. This used to run geodata FIRST, which pointed a downtown-Sarasota
+ * card at the Bradenton profile while the SMS and /go paths resolved the same
+ * customer to Sarasota by city (codex #3285 r1 P1) — the card must never
+ * disagree with the other review surfaces. The resolver keeps the null/blank
+ * lat-lng guard (Codex P2 #2588) and the tracking-number-lead fallback to
+ * nearest_location_id (Codex P2 #2588 r4) internally.
  */
 function pickCardLocation(customer = {}) {
-  // Null/blank-guard BEFORE Number(): Number(null) === 0, which would route
-  // every un-geocoded customer to the office nearest (0,0) instead of falling
-  // back to city routing (Codex P2 on PR #2588).
-  const rawLat = customer.latitude;
-  const rawLng = customer.longitude;
-  const lat = rawLat == null || rawLat === '' ? NaN : Number(rawLat);
-  const lng = rawLng == null || rawLng === '' ? NaN : Number(rawLng);
-  if (Number.isFinite(lat) && Number.isFinite(lng)) {
-    const geo = nearestLocation(lat, lng);
-    if (geo) return geo;
+  return resolveReviewLocation(customer, {
+    storedLocationId: customer.nearest_location_id || null,
+  });
+}
+
+/**
+ * Heal a persisted card whose review target predates the canonical resolver.
+ * Card destinations are PERSISTED at mint (customer_cards.review_target_url +
+ * the tracked short_codes row the printed QR points at), so fixing the picker
+ * alone only fixes newly minted cards — a downtown-Sarasota card minted under
+ * the old geo-first logic would stay pointed at Bradenton forever
+ * (codex #3285 r2). Runs on the authenticated completion flow only — the
+ * public token read stays read-only (codex #3285 r4); dormant cards get a
+ * one-shot ops re-resolve. The short link's destination is swappable by
+ * design, so the printed QR heals too. Best-effort — a failed heal serves
+ * the stored target rather than blocking the card.
+ */
+async function refreshCardReviewTarget(card, customer) {
+  try {
+    const loc = pickCardLocation(customer || {});
+    if (!loc?.googleReviewUrl || (loc.id === card.location_id && loc.googleReviewUrl === card.review_target_url)) {
+      return card;
+    }
+    // ONE transaction: if the card row updated but the short-code row failed,
+    // the early return above would treat the card as healed on every later
+    // access and the printed QR would stay pointed at the old office forever
+    // (pre-push audit r2).
+    await db.transaction(async (trx) => {
+      await trx('customer_cards').where({ id: card.id }).update({
+        location_id: loc.id,
+        review_target_url: loc.googleReviewUrl,
+        updated_at: new Date(),
+      });
+      if (card.review_short_code) {
+        await trx('short_codes')
+          .where({ code: card.review_short_code })
+          .update({ target_url: loc.googleReviewUrl });
+      }
+    });
+    logger.info(`[customer-card] Healed card review target (cardId=${card.id} ${card.location_id}→${loc.id})`);
+    return { ...card, location_id: loc.id, review_target_url: loc.googleReviewUrl };
+  } catch (err) {
+    logger.warn(`[customer-card] Card review-target heal failed (cardId=${card.id}): ${err.message}`);
+    return card;
   }
-  // Stored office next: tracking-number leads store an AREA label in city
-  // ("North Port / Port Charlotte") with the true office in
-  // nearest_location_id — same precedence the review cadence uses
-  // (Codex P2 #2588 r4).
-  const stored = WAVES_LOCATIONS.find((l) => l.id === customer.nearest_location_id);
-  if (stored) return stored;
-  const ReviewService = require('./review-request');
-  const locationId = ReviewService.resolveReviewLocationId(customer);
-  return WAVES_LOCATIONS.find((l) => l.id === locationId) || WAVES_LOCATIONS[0];
 }
 
 /**
@@ -205,6 +235,11 @@ async function ensureCardForCompletion({ customerId, serviceRecordId = null, sch
       card = { ...card, first_visit_completed_at: stamp };
     }
   }
+
+  // Re-resolve a stale persisted review target (old geo-first mints) — runs
+  // OUTSIDE the mint branch, before the short-code mint, so a healed target
+  // is what a missing short link gets minted against.
+  card = await refreshCardReviewTarget(card, customer);
 
   // Short-link the review target so QR scans are click-tracked and the
   // destination stays swappable. Runs OUTSIDE the mint branch so a card
@@ -318,6 +353,12 @@ async function getCardData(token) {
     .where({ id: card.customer_id })
     .first('id', 'first_name', 'member_since', 'created_at', 'has_left_google_review', 'deleted_at', 'referral_code');
   if (!customer || customer.deleted_at) return null;
+
+  // NO heal here: this is the public unauthenticated token read and its
+  // contract is read-only — possession of a share token must never trigger
+  // state changes (codex #3285 r4). Stale persisted targets heal on the
+  // authenticated completion flow (ensureCardForCompletion) and via the
+  // one-shot ops re-resolve for dormant cards.
 
   const location = WAVES_LOCATIONS.find((l) => l.id === card.location_id) || WAVES_LOCATIONS[0];
 

@@ -206,26 +206,23 @@ const REVIEW_LINKS = Object.fromEntries(
   WAVES_LOCATIONS.filter((l) => l.googleReviewUrl).map((l) => [l.id, l.googleReviewUrl]),
 );
 
-// City → location for review routing. Shares the canonical office map
-// (config/locations.js) so cities added there — including ZIP-recovered ones
-// (utils/zip-to-city.js) — route reviews to the right GBP automatically rather
-// than silently defaulting to Bradenton. The overrides are deliberate
-// review-only exceptions where reviews go to a different GBP than the lead
-// office (Palmetto/Longboat Key → Bradenton GBP) plus finer-grained
-// neighborhood keys not needed for lead routing.
-const { CITY_TO_LOCATION: CANONICAL_CITY_TO_LOCATION } = require("../config/locations");
-const CITY_TO_LOCATION = {
-  ...CANONICAL_CITY_TO_LOCATION,
-  palmetto: "bradenton",
-  "longboat key": "bradenton",
-  "braden river": "bradenton",
-  "bee ridge": "sarasota",
-  "gulf gate": "sarasota",
-};
+// Review routing goes through the ONE resolver in config/locations.js
+// (city → zip → nearest office → the id stored on the ask). This module used to
+// keep its own city table, routes/satisfaction.js kept a second one, and
+// routes/review-gate.js resolved by geography alone — three answers for the same
+// question, which is how a Palmetto customer could be sent to the Parrish
+// profile by the tokenized link and the Bradenton profile by the follow-up text.
+const { resolveReviewLocationId } = require("../config/locations");
 
 function resolveLocation(customer) {
-  const city = (customer.city || "").toLowerCase().trim();
-  return CITY_TO_LOCATION[city] || "bradenton";
+  // nearest_location_id rides along as the resolver's LAST-RESORT stored id:
+  // it only applies when city, ZIP, and coordinates all miss (the
+  // tracking-number-lead case — an area-label "city" with the true office
+  // stored on the row). It must never outrank the address signals; as pure
+  // straight-line geography it is exactly what mis-routed downtown Sarasota.
+  return resolveReviewLocationId(customer || {}, {
+    storedLocationId: (customer && customer.nearest_location_id) || null,
+  });
 }
 
 function generateToken() {
@@ -262,12 +259,16 @@ const GENERIC_EMAIL_INTRO = "We're a small, family-owned pest and lawn company h
  * the gate removes that friction. Gate off = the tokenized /rate/<token> page,
  * exactly the pre-rollout behavior.
  */
-async function buildReviewUrl(request, customerId) {
+function unshortenedReviewUrl(token) {
   const { isEnabled } = require("../config/feature-gates");
   const domain = publicPortalUrl();
-  const longUrl = isEnabled("reviewDirectLink")
-    ? `${domain}/api/rate/${request.token}/go`
-    : `${domain}/rate/${request.token}`;
+  return isEnabled("reviewDirectLink")
+    ? `${domain}/api/rate/${token}/go`
+    : `${domain}/rate/${token}`;
+}
+
+async function buildReviewUrl(request, customerId) {
+  const longUrl = unshortenedReviewUrl(request.token);
   return shortenOrPassthrough(longUrl, {
     kind: "review",
     entityType: "review_requests",
@@ -436,18 +437,8 @@ const ReviewService = {
    * @param {string} triggeredBy - 'auto' (post-payment), 'tech' (in-person), 'admin'
    * @param {number} delayMinutes - 0 for immediate (tech trigger), or 90-180 for auto
    */
-  async create({
-    customerId,
-    serviceRecordId,
-    triggeredBy = "auto",
-    delayMinutes,
-    locationId,
-    techName: overrideTechName,
-    serviceType: overrideServiceType,
-    serviceDate: overrideServiceDate,
-    technicianId: overrideTechnicianId,
-    expiresAt,
-  }) {
+  async create(args = {}) {
+    const { customerId, triggeredBy = "auto" } = args;
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     // Event-driven callers (paid-invoice webhook, completion flows,
@@ -458,24 +449,107 @@ const ReviewService = {
       throw new Error("Customer is archived — review outreach not created");
     }
 
-    // Don't create duplicate for same service
+    // Manual triggers run gate-check + insert + send under the SAME
+    // per-customer advisory lock sendGatedAsk uses — without it, concurrent
+    // trigger/tech/IB requests (or one racing sendGatedAsk) could all pass
+    // the gates before any row is visible and send past the cap (pre-push
+    // audit r1). Non-blocking: a second in-flight create is rejected. The
+    // auto path stays lock-free — webhook retries rely on the idempotent
+    // per-service-record dedupe, and a skipped lock would turn a retry that
+    // used to succeed idempotently into a failure.
+    if (triggeredBy !== "auto") {
+      const result = await runExclusive(
+        `review-send:${customerId}`,
+        () => this._createGated({ ...args, triggeredBy }, customer),
+        { recordHealth: false },
+      );
+      if (result && result.skipped) {
+        throw Object.assign(
+          new Error("A review request to this customer is already being sent."),
+          { statusCode: 409, code: "concurrent" },
+        );
+      }
+      return result;
+    }
+    return this._createGated({ ...args, triggeredBy }, customer);
+  },
+
+  // The body of create() — only ever called with the manual-path advisory
+  // lock held (or from the auto path, which needs no lock). Not for callers.
+  async _createGated({
+    customerId,
+    serviceRecordId,
+    triggeredBy = "auto",
+    delayMinutes,
+    locationId,
+    techName: overrideTechName,
+    serviceType: overrideServiceType,
+    serviceDate: overrideServiceDate,
+    technicianId: overrideTechnicianId,
+    expiresAt,
+  }, customer) {
+    // Manual triggers (/trigger, /tech-trigger, the intelligence-bar tool —
+    // anything not the auto enrollment machinery, which carries its own
+    // cadence/cap guards) go through the SAME gate stack as sendGatedAsk, so
+    // no unscheduled path can out-ask the caps (codex #3285 r1 P1). Evaluated
+    // BEFORE the per-service-record dedupe: an at-cap / in-cadence /
+    // already-reviewed customer must not receive a resend either (pre-push
+    // audit r2). Throws a 409-shaped error the routes surface verbatim.
+    const gateError = (gate) => {
+      const messages = {
+        in_cadence: "Customer is in an active review cadence — manage outreach from the cadence instead of a one-off send.",
+        at_cap: "Customer has already received 3 review requests in the last 6 months",
+        cooldown: "Customer received a review request in the last 30 days",
+        already_queued: "A review request to this customer is already queued and will send automatically.",
+      };
+      return Object.assign(
+        new Error(messages[gate.outcome] || "Review request blocked"),
+        { statusCode: 409, code: gate.outcome, nextAllowedAt: gate.nextAllowedAt || null },
+      );
+    };
+    // Same-service IDEMPOTENCY comes before every gate (codex #3285 r8): a
+    // retried /trigger or /tech-trigger whose first request already delivered
+    // must get the EXISTING row back (with its review URL) — nothing sends,
+    // so no gate applies. Only the resend of a pending unsent row is a real
+    // send and goes through the gate stack below.
+    let existing = null;
     if (serviceRecordId) {
-      const existing = await db("review_requests")
+      existing = await db("review_requests")
         .where({ service_record_id: serviceRecordId })
         .first();
-      if (existing) {
-        const manualTrigger = triggeredBy !== "auto";
-        const pending = String(existing.status || "").toLowerCase() === "pending";
-        if (manualTrigger && pending && !existing.sms_sent_at) {
-          await this.sendSMS(existing.id);
-          return (
-            (await db("review_requests").where({ id: existing.id }).first()) ||
-            existing
-          );
-        }
-        return existing;
-      }
+      const manualTrigger = triggeredBy !== "auto";
+      const pendingResend = existing && manualTrigger
+        && String(existing.status || "").toLowerCase() === "pending" && !existing.sms_sent_at;
+      if (existing && !pendingResend) return existing;
     }
+
+    let gate = { allowed: true };
+    if (triggeredBy !== "auto") {
+      if (customer.has_left_google_review) {
+        throw Object.assign(
+          new Error("Customer is marked as already having left a Google review"),
+          { statusCode: 409, code: "already_reviewed" },
+        );
+      }
+      gate = await this.checkUnscheduledAskGates(customerId);
+    }
+
+    if (existing) {
+      // Pending-unsent resend: the one gate outcome it may pass through is
+      // already_queued when the queued ask IS this row — dispatching it now
+      // is what the operator asked for. Any other blocker (cap, cooldown,
+      // cadence, a DIFFERENT queued ask) blocks the resend too.
+      if (!gate.allowed && !(gate.outcome === "already_queued" && gate.queuedId === existing.id)) {
+        throw gateError(gate);
+      }
+      await this.sendSMS(existing.id);
+      return (
+        (await db("review_requests").where({ id: existing.id }).first()) ||
+        existing
+      );
+    }
+
+    if (!gate.allowed) throw gateError(gate);
 
     // Pull service + tech context
     let techName = overrideTechName || null,
@@ -1704,8 +1778,10 @@ const ReviewService = {
     await db("review_requests").where({ id: request.id }).update(updates);
 
     const customer = await db("customers")
+      // lat/lng feed the review resolver's geo fallback for an address whose
+      // city and ZIP are both unmapped.
+      .select("first_name", "last_name", "city", "zip", "latitude", "longitude")
       .where({ id: request.customer_id })
-      .select("first_name", "last_name", "city", "zip")
       .first();
 
     // Tech photo. Mirrors the pattern in track-public.js (#344) and
@@ -1752,8 +1828,12 @@ const ReviewService = {
       /* table might not exist */
     }
 
-    // Resolve which Google review link to use
-    const location = resolveLocation(customer || {});
+    // Resolve which Google review link to use. Passing the ask's stored
+    // location_id keeps the rate page pointed at the SAME profile the token's
+    // /go link resolves to, even if the customer's address changed since.
+    const location = resolveReviewLocationId(customer || {}, {
+      storedLocationId: request.location_id || null,
+    });
     const googleReviewUrl =
       REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
 
@@ -1792,7 +1872,13 @@ const ReviewService = {
     const customer = await db("customers")
       .where({ id: request.customer_id })
       .first();
-    const location = resolveLocation(customer || {});
+    // The ask's stamped office is the last-resort stored id, same as the /go
+    // and getByToken paths — a Venice-stamped ask must not complete against
+    // Bradenton when the customer row has no usable address signals
+    // (codex #3285 r2).
+    const location = resolveReviewLocationId(customer || {}, {
+      storedLocationId: request.location_id || customer?.nearest_location_id || null,
+    });
     const isPromoter = rating >= 7; // 7+ goes to Google (per the case study discussion)
     const isDetractor = rating <= 4;
 
@@ -2127,8 +2213,13 @@ const ReviewService = {
       }
 
       // Followup points straight at the GBP review form — they ignored the
-      // tokenized rate page once, so reduce friction the second time.
-      const location = resolveLocation(customer || {});
+      // tokenized rate page once, so reduce friction the second time. The
+      // ask's stamped office rides along as the last-resort stored id so the
+      // Day-3 follow-up can never target a different profile than the ask it
+      // chases (codex #3285 r2).
+      const location = resolveReviewLocationId(customer || {}, {
+        storedLocationId: request.location_id || customer?.nearest_location_id || null,
+      });
       const googleReviewUrl =
         REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
 
@@ -2237,6 +2328,12 @@ const ReviewService = {
     triggeredBy = "admin",
     expiresAt,
     manageRetryVia = "cron",
+    skipLegacyFollowup = false,
+    // Render the CANONICAL 'review_request' sms_template (recorded with a
+    // NULL template_key, like create()-minted asks) instead of defaulting a
+    // template-less send to friendly_ask — the satisfaction fold needs the
+    // canonical body incl. its {reservice_line} clause (codex #3285 r5b).
+    canonicalTemplate = false,
   }) {
     if (!customer || !customer.id) return { ok: false, reason: "no_customer", terminal: true };
     if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
@@ -2401,8 +2498,14 @@ const ReviewService = {
     // THAT for honest per-template attribution. An edited SMS body is persisted
     // (custom_body) so a provider retry re-sends the operator's copy
     // rather than reverting to the template.
-    const smsTemplateId = templateId || (customBody && customBody.trim() ? null : "friendly_ask");
-    let recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
+    const smsTemplateId = canonicalTemplate
+      ? null
+      : templateId || (customBody && customBody.trim() ? null : "friendly_ask");
+    let recordedTemplateKey = actualChannel === "email"
+      ? "review_request_email"
+      // Canonical asks record a NULL template_key (ASK_TOUCH_SQL's canonical
+      // shape, matching create()-minted rows) — never 'custom'.
+      : canonicalTemplate ? null : smsTemplateId || "custom";
     let persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
 
     // Personalized ask body (GATE_REVIEW_ASK_PERSONALIZED): CADENCE SMS ask
@@ -2545,7 +2648,11 @@ const ReviewService = {
         // Sequence touches, no-link check-ins AND one-ask-by-design templates
         // (first_treatment_ask sent manually — codex #3235 r12 P1) skip the
         // legacy Day-3 followup.
-        followup_sent: sequenceId || isNoLinkSms || (templateId && OUTREACH.CAP_EXEMPT_TEMPLATE_KEYS.includes(templateId)) ? true : false,
+        // skipLegacyFollowup: the portal satisfaction ask opts out. Folding
+        // that path into the outreach machinery must not silently ADD a
+        // customer touch it never had — the Day-3 follow-up is a separate
+        // decision for the owner to make, not a side effect of the fold.
+        followup_sent: sequenceId || isNoLinkSms || skipLegacyFollowup || (templateId && OUTREACH.CAP_EXEMPT_TEMPLATE_KEYS.includes(templateId)) ? true : false,
         expires_at: expiresAt || new Date(Date.now() + 14 * 86400000).toISOString(),
       })
       .returning("*");
@@ -2570,11 +2677,29 @@ const ReviewService = {
 
   async _sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia }) {
     const tpl = templateId ? OUTREACH.getOutreachTemplate(templateId) : null;
-    const rawBody =
+    let rawBody =
       typeof customBody === "string" && customBody.trim() ? customBody : tpl ? tpl.body : null;
+    let prerendered = null;
     if (!rawBody) {
-      await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
-      return { ok: false, reason: "no_template", terminal: true, requestId: request.id };
+      // No outreach template and no custom body = the CANONICAL ask. Render
+      // the same 'review_request' sms_template ReviewService.sendSMS falls
+      // back to — including the {reservice_line} supply #3288 wired into
+      // that template's render sites. This is how the gated satisfaction ask
+      // keeps the free re-service clause the pre-fold path carried
+      // (codex #3285 r5b); template lookup failure stays terminal.
+      try {
+        const smsTpl = require("../routes/admin-sms-templates");
+        prerendered = await smsTpl.getTemplate("review_request", {
+          first_name: vars.first || "",
+          review_url: vars.review_url,
+          tech_name: vars.tech || null,
+          reservice_line: await require("./reservice-link").reserviceLineForCustomer(customer.id),
+        });
+      } catch { /* template lookup failed → terminal below */ }
+      if (!prerendered) {
+        await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+        return { ok: false, reason: "no_template", terminal: true, requestId: request.id };
+      }
     }
     // Whether a /rate link is required is determined by the SELECTED TEMPLATE,
     // not the (possibly edited) body — so an operator who edits {review_url} out
@@ -2587,7 +2712,11 @@ const ReviewService = {
     // operator left/added in the edited body renders to nothing — send-request
     // skipped cap/cooldown for this template, so it must never carry a review link.
     const renderVars = isNoLink ? { ...vars, review_url: "" } : vars;
-    const body = OUTREACH.renderOutreachBody(rawBody, renderVars, { requireLink: requiresLink });
+    // The canonical fallback arrives fully rendered by getTemplate (its own
+    // placeholder set incl. reservice_line) — never re-run the outreach
+    // renderer over it.
+    const body = prerendered
+      ?? OUTREACH.renderOutreachBody(rawBody, renderVars, { requireLink: requiresLink });
 
     // Segment observability (codex #3235 r3): the one-segment contract is
     // enforced on template copy and drafter output against the SHORT link;
@@ -2765,6 +2894,282 @@ const ReviewService = {
   },
 
   /**
+   * The shared gate stack for an UNSCHEDULED review ask — used by
+   * sendGatedAsk (admin one-off + portal satisfaction) AND by create() for
+   * manual triggers (/trigger, /tech-trigger, the intelligence-bar tool), so
+   * no unscheduled path can out-ask the caps.
+   *
+   * Checks, in order (each fails CLOSED — a DB error throws rather than
+   * letting an at-cap / in-cooldown customer through):
+   *   - active-cadence block: an active cadence already owns this customer's
+   *     review ASKS (its touches can sit 'deferred' where the queued-row check
+   *     cannot see them). Only enforced while GATE_REVIEW_SEQUENCES is ON —
+   *     with the gate off the cadence cron is frozen, and a stranded 'active'
+   *     row must not lock the customer out forever (Codex P2, PR #3104 r4).
+   *   - lifetime 3-ask/180d cap and 30-day cooldown, channel-complete across
+   *     SMS + email (getDeliveredAskStats).
+   *   - queued-ask reuse: a pending row scheduled for processScheduled() with
+   *     no sent timestamp means a second attempt would queue ANOTHER row and
+   *     both would send. Only a queued ASK blocks (ASK_TOUCH_SQL) — a deferred
+   *     no-link check-in must not read as already queued.
+   *
+   * isAsk=false (private no-link check-ins) bypasses everything by design.
+   *
+   * @returns {{allowed: boolean, outcome?: string, nextAllowedAt?: *}}
+   */
+  async checkUnscheduledAskGates(customerId, { isAsk = true } = {}) {
+    if (!isAsk) return { allowed: true };
+    const { isEnabled } = require("../config/feature-gates");
+
+    if (isEnabled("reviewSequences")) {
+      // No .catch — this helper's contract is fail-closed, and a swallowed DB
+      // error here would permit a one-off ask while a cadence may already own
+      // the customer (pre-push audit r1). Matches the cap and queued checks.
+      const activeSeq = await db("review_sequences")
+        .where({ customer_id: customerId, status: "active" }).first();
+      if (activeSeq) return { allowed: false, outcome: "in_cadence" };
+    }
+
+    const thirtyDaysAgo = Date.now() - 30 * 86400000;
+    // No .catch → a DB error throws instead of silently reading as zero asks.
+    const stats = await this.getDeliveredAskStats(customerId);
+    if (stats.count >= 3) return { allowed: false, outcome: "at_cap" };
+    if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
+      return { allowed: false, outcome: "cooldown" };
+    }
+
+    const queued = await db("review_requests")
+      .where({ customer_id: customerId, status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotNull("scheduled_for")
+      .whereRaw(OUTREACH.ASK_TOUCH_SQL)
+      .orderBy("scheduled_for", "asc")
+      .first();
+    if (queued) {
+      // queuedId lets create()'s resend path distinguish "THIS row is the
+      // queued one — dispatch it now" from "a different ask is queued".
+      return { allowed: false, outcome: "already_queued", nextAllowedAt: queued.scheduled_for, queuedId: queued.id };
+    }
+    return { allowed: true };
+  },
+
+  /**
+   * Send ONE unscheduled review ask through the full gate stack — the single
+   * entry point for every ask that is NOT a cadence step.
+   *
+   * Two callers: the admin one-off send (routes/admin-reviews.js) and the
+   * customer-portal satisfaction prompt (routes/satisfaction.js). The portal
+   * path used to text a BARE g.page link with no review_requests row at all, so
+   * those asks were invisible to the 3-ask cap, the 30-day cooldown, the
+   * already-reviewed flag, and the outreach funnel — a second review-ask
+   * mechanism running beside this one. Both now land here.
+   *
+   * Gates applied, in order (each one fails CLOSED — a DB error throws rather
+   * than letting an at-cap / in-cooldown customer through):
+   *   - customer exists, is not archived, is not already marked as reviewed
+   *   - has a consented SMS recipient
+   *   - per-customer advisory lock, so a double-tap can't slip two asks past
+   *     the cap
+   *   - not already owned by an active cadence (asks only; no-link check-ins
+   *     are deliberately exempt)
+   *   - lifetime 3-ask/180d cap and 30-day cooldown (asks only)
+   *   - an already-queued ask is reused rather than stacked
+   *
+   * Then delegates to sendOutreachTouch, which mints the token, writes the
+   * review_requests row, and sends — so the ask is attributable like every
+   * other touch.
+   *
+   * @returns {{ outcome: string, requestId?: string, reviewUrl?: string,
+   *   locationId?: string, nextAllowedAt?: *, code?: string, reason?: string }}
+   *   outcome ∈ sent | deferred | already_queued | in_cadence | at_cap |
+   *   cooldown | blocked | send_failed | concurrent | no_customer | archived |
+   *   already_reviewed | no_contact
+   */
+  async sendGatedAsk({
+    customerId,
+    customer: customerArg = null,
+    channel = "sms",
+    templateId = null,
+    body = null,
+    serviceType = null,
+    techName = null,
+    serviceDate = null,
+    serviceRecordId = null,
+    locationId = null,
+    triggeredBy = "admin",
+    manageRetryVia = "cron",
+    skipLegacyFollowup = false,
+    canonicalTemplate = false,
+  }) {
+    const customer = customerArg
+      || (customerId ? await db("customers").where({ id: customerId }).first() : null);
+    if (!customer) return { outcome: "no_customer" };
+    if (customer.deleted_at) return { outcome: "archived" };
+    if (customer.has_left_google_review) return { outcome: "already_reviewed" };
+
+    const { getServiceContactSmsRecipient } = require("./customer-contact");
+    const contact = getServiceContactSmsRecipient(customer);
+    if (channel === "sms" && !contact.phone) return { outcome: "no_contact" };
+
+    const cid = customer.id;
+
+    // Non-blocking per-customer lock — a second in-flight send to the same
+    // customer is rejected rather than queued (audit O7).
+    // recordHealth: false — per-customer lock, not a scheduled job.
+    const result = await runExclusive(`review-send:${cid}`, async () => {
+      // Private no-link check-ins (resolution_check / satisfaction_confirm) are
+      // NOT review asks: they bypass the cap, the cooldown, the queued-ask
+      // reuse, and the active-cadence block. getDeliveredAskStats ignores them.
+      const isAsk = OUTREACH.isAskTemplate(templateId);
+
+      const gate = await this.checkUnscheduledAskGates(cid, { isAsk });
+      if (!gate.allowed) {
+        return { outcome: gate.outcome, nextAllowedAt: gate.nextAllowedAt };
+      }
+
+      const loc = locationId
+        ? locationId
+        : resolveLocation(customer);
+
+      let svcType = serviceType;
+      let tName = techName;
+      let svcDate = serviceDate;
+      if (!svcType || !tName || !svcDate) {
+        if (serviceRecordId) {
+          // A record-scoped ask (the satisfaction route rates a SPECIFIC
+          // service) fills its context from THAT record — the latest-completed
+          // fallback below would stamp a newer service's type/date/tech onto a
+          // row linked to an older record (codex #3285 r2).
+          const sr = await db("service_records")
+            .where({ "service_records.id": serviceRecordId })
+            .leftJoin("technicians", "service_records.technician_id", "technicians.id")
+            .select("service_records.*", "technicians.name as tech_name")
+            .first()
+            .catch(() => null);
+          svcType = svcType || sr?.service_type || "pest control";
+          tName = tName || sr?.tech_name || null;
+          svcDate = svcDate || sr?.service_date || null;
+        } else {
+          const lastSvc = await db("scheduled_services")
+            .where({ customer_id: cid, status: "completed" })
+            .orderBy("scheduled_date", "desc")
+            .first()
+            .catch(() => null);
+          svcType = svcType || lastSvc?.service_type || "pest control";
+          tName = tName || lastSvc?.tech_name || null;
+          svcDate = svcDate || lastSvc?.scheduled_date || null;
+        }
+      }
+
+      const touch = await this.sendOutreachTouch({
+        customer,
+        channel,
+        templateId,
+        body: typeof body === "string" ? body : null,
+        locationId: loc,
+        techName: tName,
+        serviceType: svcType,
+        serviceDate: svcDate,
+        serviceRecordId,
+        triggeredBy,
+        manageRetryVia,
+        skipLegacyFollowup,
+        canonicalTemplate,
+      });
+
+      if (touch.ok && touch.sent) {
+        // The caller may want to show the SAME tokenized destination in-app
+        // (the portal's "Leave a review" button).
+        let reviewUrl = null;
+        try {
+          const row = await db("review_requests")
+            .select("token").where({ id: touch.requestId }).first();
+          if (row?.token) reviewUrl = unshortenedReviewUrl(row.token);
+        } catch { /* the in-app link is a nicety; the SMS already went */ }
+        return {
+          outcome: "sent",
+          requestId: touch.requestId,
+          reviewUrl,
+          locationId: loc,
+        };
+      }
+      if (touch.deferred) {
+        return { outcome: "deferred", nextAllowedAt: touch.nextAllowedAt, requestId: touch.requestId };
+      }
+      if (touch.blocked || touch.terminal) {
+        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null };
+      }
+      // 'send_failed' is a QUEUED outcome to callers (the satisfaction route
+      // hides its fallback link on it), so only report it when a durable
+      // retry actually exists — _applyOutreachSendResult can fail while
+      // writing scheduled_for, leaving a pending row processScheduled() will
+      // never select (codex #3285 r6). No persisted schedule = 'error', and
+      // the caller shows its fallback instead of promising a text.
+      if (touch.requestId) {
+        const retryRow = await db("review_requests")
+          .where({ id: touch.requestId })
+          .first("scheduled_for")
+          .catch(() => null);
+        if (retryRow?.scheduled_for) {
+          return { outcome: "send_failed", code: touch.code || null, reason: touch.reason || null };
+        }
+      }
+      return { outcome: "error", code: touch.code || null, reason: touch.reason || null };
+    }, { recordHealth: false });
+
+    if (result && result.skipped) {
+      // Reason-aware (codex #3285 r6): 'lease_held' means another send to
+      // this customer is genuinely in flight (concurrent — suppress the
+      // fallback; that send's text carries the link). 'no_connection' means
+      // the callback NEVER RAN and nothing was persisted — that is an error,
+      // not a queued ask.
+      return { outcome: result.reason === "lease_held" ? "concurrent" : "error" };
+    }
+    return result;
+  },
+
+  /**
+   * The customer's most recent still-live tokenized review link, or null.
+   *
+   * Used when an in-app "Leave a review" button needs a destination but no
+   * fresh ask was minted — the customer is at cap, in cooldown, or already in a
+   * cadence. Reusing their live token keeps the click attributable instead of
+   * dropping to an untracked g.page URL. Never returns an expired or already
+   * redeemed token, and never mints one (a button render is not an ask).
+   */
+  async livePortalReviewUrlFor(customerId) {
+    if (!customerId) return null;
+    const row = await db("review_requests")
+      .where({ customer_id: customerId })
+      .whereNotNull("token")
+      // Real review ASKS only (same predicate as getDeliveredAskStats): a
+      // private no-link check-in row also has a token + sent stamp, and
+      // exposing it as a CTA would attribute the click to a non-ask template
+      // and corrupt the funnel (codex #3285 r4).
+      .whereRaw(OUTREACH.ASK_TOUCH_SQL)
+      // DELIVERED asks only: a pending scheduled row's token would hand the
+      // portal a link whose ask processScheduled still sends afterward — the
+      // customer clicks, then gets the SMS anyway (pre-push audit r2).
+      .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .where((b) => b.whereNull("expires_at").orWhere("expires_at", ">", new Date()))
+      .whereNull("redirected_at")
+      .whereNull("submitted_at")
+      // Legacy finalized rows carry rated_at / status='rated' with BOTH
+      // fields above null — handing that token out sends the customer to
+      // /go's finality bounce (already-submitted rate page) instead of
+      // Google (pre-push audit r4b). Same finality predicate as everywhere.
+      // Grouped with whereNull: `NULL NOT IN (...)` is UNKNOWN in Postgres,
+      // so a bare whereNotIn would silently drop live legacy rows whose
+      // status is NULL (pre-push audit r5).
+      .whereNull("rated_at")
+      .where((b) => b.whereNull("status").orWhereNotIn("status", ["submitted", "reviewed", "rated"]))
+      .orderBy("created_at", "desc")
+      .first()
+      .catch(() => null);
+    return row?.token ? unshortenedReviewUrl(row.token) : null;
+  },
+
+  /**
    * Start a multi-touch review cadence for one customer. Idempotent: a customer
    * with an active sequence returns that one instead of starting a second
    * (also enforced by the partial unique index). Fires step 0 immediately.
@@ -2784,7 +3189,12 @@ const ReviewService = {
     if (existingPark) return;
     await db("review_sequences").insert({
       customer_id: customerId,
-      location_id: locationId || customer?.nearest_location_id || null,
+      // Canonical resolution at park time — the sweep later passes this back
+      // as an EXPLICIT locationId, so persisting raw nearest_location_id here
+      // would bypass the resolver and send the redeemed final cadence to the
+      // geographically-nearest profile (the downtown-Sarasota misroute) even
+      // though ordinary sequences resolve canonically (codex #3285 r5).
+      location_id: locationId || resolveLocation(customer || {}),
       status: "deferred",
       stop_reason: "opener_in_flight",
       plan: JSON.stringify(Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN),
@@ -2960,7 +3370,11 @@ const ReviewService = {
       svcType = svcType || lastSvc?.service_type || null;
       tName = tName || lastSvc?.tech_name || "Adam";
     }
-    const locId = locationId || customer.nearest_location_id || resolveLocation(customer);
+    // resolveLocation() routes city → zip → geo first — nearest_location_id
+    // (pure straight-line geography, the signal that mis-routed downtown
+    // Sarasota) is only its last resort, for rows with no usable address
+    // signals at all (tracking-number leads with an area-label "city").
+    const locId = locationId || resolveLocation(customer);
 
     let sequence;
     const insertReplacement = () => db.transaction(async (trx) => {
@@ -4205,10 +4619,10 @@ ReviewService.__private = {
   buildReviewUrl,
 };
 
-// The digital-card mint (services/customer-card.js) routes its review QR with
-// the SAME city→GBP map as review asks — including the review-only overrides
-// above (palmetto → bradenton etc.) — instead of forking another copy of the
-// location list. Returns a location id string ('bradenton' | ...).
-ReviewService.resolveReviewLocationId = resolveLocation;
+// The tokenized review destination in its long form, honoring
+// GATE_REVIEW_DIRECT_LINK (/go vs the rate page). Route handlers that hand a
+// review link back to a caller (tech-trigger) must use this — never build a
+// raw /rate/<token> URL, which bypasses the gate and the click stamp.
+ReviewService.unshortenedReviewUrl = unshortenedReviewUrl;
 
 module.exports = ReviewService;

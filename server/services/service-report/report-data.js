@@ -4251,6 +4251,23 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       && !!(service.technician_name || service.technician_first_name),
     reviewRequestEligible: !service.has_left_google_review,
     hasLeftGoogleReview: !!service.has_left_google_review,
+    // Canonical review office for the report CTA, resolved SERVER-side
+    // (config/locations.js resolveReviewLocation: city → zip → geo → stored
+    // id) — the client's own substring tables were incomplete (no Port
+    // Charlotte, no 33948) and routed those reports to the Bradenton profile
+    // while the SMS and /go surfaces resolved Venice (codex #3285 r5). The
+    // client keeps its table only as a fallback for cached old payloads.
+    reviewLocation: (() => {
+      const { resolveReviewLocation } = require('../../config/locations');
+      const loc = resolveReviewLocation({
+        city: service.city,
+        zip: service.zip,
+        latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+        longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+        nearest_location_id: service.nearest_location_id,
+      }, { storedLocationId: service.nearest_location_id || null });
+      return loc ? { id: loc.id, name: loc.name, reviewUrl: loc.googleReviewUrl } : null;
+    })(),
     customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
     // Owner directive 2026-07-05: the report mirrors the estimate document and
     // shows the customer's own email/phone with the service address. Like the

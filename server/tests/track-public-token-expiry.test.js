@@ -14,6 +14,7 @@ const trackPublicRouter = require('../routes/track-public');
 function makeQuery({ firstResult = null, selectResult = [] } = {}) {
   const chain = {
     where: jest.fn(() => chain),
+    whereRaw: jest.fn(() => chain),
     orderBy: jest.fn(() => chain),
     limit: jest.fn(() => chain),
     first: jest.fn(async () => firstResult),
@@ -171,7 +172,7 @@ describe('public track token expiry', () => {
         { s3_key: null },
         { s3_key: 'service-photos/record-1/after-2.jpg' },
       ],
-      reviewRequest: { token: 'review-token' },
+      reviewRequest: { token: 'review-token', sms_sent_at: '2026-05-04T12:00:00.000Z', status: 'sent' },
     });
     mockGetViewUrl
       .mockResolvedValueOnce('https://signed.example/after-1.jpg')
@@ -253,6 +254,47 @@ describe('public track token expiry', () => {
       completed_at: '2026-05-05T12:00:00.000Z',
     });
 
+    expect(summary.reviewUrl).toBeNull();
+  });
+
+  test('suppresses the review CTA for undelivered and policy-blocked asks (#3286 fold)', async () => {
+    // pending: the send still belongs to processScheduled — click, then the
+    // SMS sends anyway. suppressed: blocked by policy/consent.
+    for (const rr of [
+      { token: 'review-token', status: 'pending', sms_sent_at: null },
+      { token: 'review-token', status: 'suppressed', sms_sent_at: '2026-05-04T12:00:00.000Z' },
+    ]) {
+      installSummaryDb({
+        record: {
+          id: 'record-1',
+          report_view_token: 'report-token',
+          structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+        },
+        reviewRequest: rr,
+      });
+      const summary = await trackPublicRouter._test.buildSummary({
+        id: 'scheduled-1',
+        customer_id: 'customer-1',
+        completed_at: '2026-05-05T12:00:00.000Z',
+      });
+      expect(summary.reviewUrl).toBeNull();
+    }
+  });
+
+  test('suppresses the review CTA once the customer clicked through (#3286 fold)', async () => {
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      reviewRequest: { token: 'review-token', status: 'sent', sms_sent_at: '2026-05-04T12:00:00.000Z', redirected_at: '2026-05-04T13:00:00.000Z' },
+    });
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
     expect(summary.reviewUrl).toBeNull();
   });
 

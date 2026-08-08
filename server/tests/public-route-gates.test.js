@@ -133,7 +133,10 @@ describe('review-gate token gate (url-safe 32-64)', () => {
   test('malformed token on /go degrades to the rate page, never a bare 404', async () => {
     const res = await get('/api/rate/tooshort/go');
     expect(res.status).toBe(302);
-    expect(res.headers.get('location')).toBe('/rate/tooshort');
+    // ABSOLUTE portal origin — a root-relative /rate resolves on the API
+    // origin (404) in a split-origin deploy (codex #3285 r5).
+    const { publicPortalUrl } = require('../utils/portal-url');
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/tooshort`);
     expect(db).not.toHaveBeenCalled();
   });
 
@@ -151,6 +154,8 @@ describe('review-gate token gate (url-safe 32-64)', () => {
 
 describe('review-gate /go expired-link handling (review audit 2026-08-07)', () => {
   const { isEnabled } = require('../config/feature-gates');
+  // Fallbacks are ABSOLUTE portal-origin (split-origin safe — codex #3285 r5).
+  const { publicPortalUrl } = require('../utils/portal-url');
   const { WAVES_LOCATIONS } = require('../config/locations');
 
   afterEach(() => {
@@ -217,7 +222,7 @@ describe('review-gate /go expired-link handling (review audit 2026-08-07)', () =
       request: { id: 'rr-1', customer_id: 'c1', rated_at: '2026-05-01T00:00:00Z', expires_at: '2020-01-01T00:00:00.000Z' },
     });
     let res = await get(`/api/rate/${token}/go`);
-    expect(res.headers.get('location')).toBe(`/rate/${token}`);
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${token}`);
     expect(updateSpy).not.toHaveBeenCalled();
     // Live but submitted (a detractor's feedback) → rate page's
     // alreadySubmitted state, never Google.
@@ -225,7 +230,7 @@ describe('review-gate /go expired-link handling (review audit 2026-08-07)', () =
       request: { id: 'rr-2', customer_id: 'c1', status: 'submitted' },
     });
     res = await get(`/api/rate/${token}/go`);
-    expect(res.headers.get('location')).toBe(`/rate/${token}`);
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${token}`);
     expect(updateSpy).not.toHaveBeenCalled();
   });
 
@@ -238,7 +243,7 @@ describe('review-gate /go expired-link handling (review audit 2026-08-07)', () =
       customer: { id: 'c1', has_left_google_review: true },
     });
     const res = await get(`/api/rate/${token}/go`);
-    expect(res.headers.get('location')).toBe(`/rate/${token}`);
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${token}`);
     expect(updateSpy).not.toHaveBeenCalled();
   });
 });

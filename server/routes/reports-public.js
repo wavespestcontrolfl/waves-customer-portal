@@ -511,6 +511,9 @@ async function findProjectByReportSegment(segment) {
       'c.first_name', 'c.last_name', 'c.email as customer_email', 'c.phone as customer_phone',
       'c.has_left_google_review',
       'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
+      // Feed the canonical review resolver for the payload's reviewLocation.
+      'c.latitude as customer_latitude', 'c.longitude as customer_longitude',
+      'c.nearest_location_id',
       't.name as technician_name',
     );
   if (lookup.type === 'full') {
@@ -730,6 +733,21 @@ router.get('/project/:token/data', async (req, res, next) => {
       // gates the "How did today's visit go?" ask (owner 2026-07-16) — same
       // self-suppression as the service report once a review is recorded
       hasLeftGoogleReview: !!project.has_left_google_review,
+      // Canonical review office resolved SERVER-side — the client's own
+      // substring matcher was incomplete (no Port Charlotte / 33948) and fell
+      // through to Bradenton for addresses the resolver routes to Venice
+      // (codex #3285 r5). Client keeps its table only for cached payloads.
+      reviewLocation: (() => {
+        const { resolveReviewLocation } = require('../config/locations');
+        const loc = resolveReviewLocation({
+          city: project.city,
+          zip: project.zip,
+          latitude: project.customer_latitude,
+          longitude: project.customer_longitude,
+          nearest_location_id: project.nearest_location_id,
+        }, { storedLocationId: project.nearest_location_id || null });
+        return loc ? { id: loc.id, name: loc.name, reviewUrl: loc.googleReviewUrl } : null;
+      })(),
       cityState: `${project.city || ''}${project.state ? ', ' + project.state : ''}`.trim().replace(/^,\s*/, ''),
       // Full service address for the hero — the report page mirrors the
       // customer estimate, which shows the street address under the headline.
@@ -1179,6 +1197,10 @@ router.post('/:token/ask', async (req, res, next) => {
         db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
         db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
         db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+        // Stored office = the review resolver's last resort (tracking-number
+        // leads with an area-label city, no mapped ZIP, no coords) — without
+        // it the report CTA falls through to the default office (codex r6).
+        'customers.nearest_location_id',
         'customers.has_left_google_review',
         // Map center follows the treated parcel: stamped visit coords first,
         // the primary home only for non-divergent stamps (codex round-9 P2).
@@ -1306,6 +1328,10 @@ router.get('/:token', async (req, res, next) => {
         db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
         db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
         db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+        // Stored office = the review resolver's last resort (tracking-number
+        // leads with an area-label city, no mapped ZIP, no coords) — without
+        // it the report CTA falls through to the default office (codex r6).
+        'customers.nearest_location_id',
         'customers.has_left_google_review',
         // Map center follows the treated parcel: stamped visit coords first,
         // the primary home only for non-divergent stamps (codex round-9 P2).
@@ -1533,6 +1559,10 @@ router.get('/:token/map.svg', async (req, res, next) => {
         db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
         db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
         db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+        // Stored office = the review resolver's last resort (tracking-number
+        // leads with an area-label city, no mapped ZIP, no coords) — without
+        // it the report CTA falls through to the default office (codex r6).
+        'customers.nearest_location_id',
         'customers.has_left_google_review',
         // Map center follows the treated parcel: stamped visit coords first,
         // the primary home only for non-divergent stamps (codex round-9 P2).
@@ -1585,6 +1615,10 @@ router.get('/:token/data', async (req, res, next) => {
         db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
         db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
         db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+        // Stored office = the review resolver's last resort (tracking-number
+        // leads with an area-label city, no mapped ZIP, no coords) — without
+        // it the report CTA falls through to the default office (codex r6).
+        'customers.nearest_location_id',
         'customers.has_left_google_review',
         'customers.waveguard_tier',
         // Map center follows the treated parcel: stamped visit coords first,

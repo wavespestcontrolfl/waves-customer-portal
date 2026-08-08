@@ -4,95 +4,18 @@ const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
 const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+const ReviewService = require('../services/review-request');
 
 router.use(authenticate);
 
-// =========================================================================
-// OFFICE LOCATION MAPPING — routes customers to their nearest office
-// =========================================================================
-
-const REVIEW_LINKS = {
-  lakewood_ranch: 'https://g.page/r/CVRc_P5butTMEBM/review',
-  sarasota: 'https://g.page/r/CRkzS6M4EpncEBM/review',
-  venice: 'https://g.page/r/CURA5pQ1KatBEBM/review',
-  parrish: 'https://g.page/r/Ca-4KKoWwFacEBM/review',
-};
-
-// City/neighborhood → office mapping
-const CITY_MAP = {
-  // Lakewood Ranch area
-  'lakewood ranch': 'lakewood_ranch', 'bradenton': 'lakewood_ranch',
-  'university park': 'lakewood_ranch', 'braden river': 'lakewood_ranch',
-  'longboat key': 'lakewood_ranch', 'anna maria': 'lakewood_ranch',
-  'holmes beach': 'lakewood_ranch', 'palmetto': 'lakewood_ranch',
-  'cortez': 'lakewood_ranch', 'myakka city': 'lakewood_ranch',
-
-  // Sarasota area
-  'sarasota': 'sarasota', 'siesta key': 'sarasota', 'lido key': 'sarasota',
-  'bee ridge': 'sarasota', 'gulf gate': 'sarasota', 'southgate': 'sarasota',
-  'fruitville': 'sarasota', 'kensington park': 'sarasota',
-  'indian beach': 'sarasota', 'bird key': 'sarasota',
-
-  // Venice area
-  'venice': 'venice', 'north port': 'venice', 'englewood': 'venice',
-  'nokomis': 'venice', 'osprey': 'venice', 'casey key': 'venice',
-  'south venice': 'venice', 'laurel': 'venice', 'warm mineral springs': 'venice',
-  'port charlotte': 'venice', 'punta gorda': 'venice', 'rotonda west': 'venice',
-  'manasota key': 'venice',
-
-  // Parrish area
-  'parrish': 'parrish', 'ellenton': 'parrish', 'terra ceia': 'parrish',
-  'rubonia': 'parrish', 'gillette': 'parrish', 'duette': 'parrish',
-  'sun city center': 'parrish', 'ruskin': 'parrish', 'wimauma': 'parrish',
-  'apollo beach': 'parrish', 'riverview': 'parrish',
-};
-
-// ZIP → office mapping
-const ZIP_MAP = {
-  // Lakewood Ranch
-  '34202': 'lakewood_ranch', '34211': 'lakewood_ranch', '34212': 'lakewood_ranch',
-  '34205': 'lakewood_ranch', '34207': 'lakewood_ranch', '34208': 'lakewood_ranch',
-  '34209': 'lakewood_ranch', '34210': 'lakewood_ranch', '34217': 'lakewood_ranch',
-  // 34219 is Parrish (mapped below) — it was duplicated here too, and JS
-  // last-key-wins meant the Parrish entry already governed at runtime.
-  '34218': 'lakewood_ranch', '34221': 'lakewood_ranch',
-
-  // Sarasota
-  '34230': 'sarasota', '34231': 'sarasota', '34232': 'sarasota',
-  '34233': 'sarasota', '34234': 'sarasota', '34235': 'sarasota',
-  '34236': 'sarasota', '34237': 'sarasota', '34238': 'sarasota',
-  '34239': 'sarasota', '34240': 'sarasota', '34241': 'sarasota',
-  '34242': 'sarasota', '34243': 'sarasota',
-
-  // Venice
-  '34275': 'venice', '34285': 'venice', '34286': 'venice',
-  '34287': 'venice', '34288': 'venice', '34289': 'venice',
-  '34291': 'venice', '34292': 'venice', '34293': 'venice',
-  '33948': 'venice', '33950': 'venice', '33952': 'venice',
-  '33954': 'venice', '33980': 'venice', '33982': 'venice',
-  '33983': 'venice', '34223': 'venice', '34224': 'venice',
-
-  // Parrish
-  '34219': 'parrish', '34220': 'parrish', '34222': 'parrish',
-  '33570': 'parrish', '33572': 'parrish', '33573': 'parrish',
-  '33598': 'parrish', '33534': 'parrish', '33569': 'parrish',
-  '33578': 'parrish', '33579': 'parrish',
-};
-
-function resolveOffice(customer) {
-  // Try city first
-  const city = (customer.city || '').toLowerCase().trim();
-  if (CITY_MAP[city]) return CITY_MAP[city];
-
-  // Try zip
-  const zip = (customer.zip || '').trim();
-  if (ZIP_MAP[zip]) return ZIP_MAP[zip];
-
-  // Default
-  return 'lakewood_ranch';
-}
+// Office/GBP routing for the portal satisfaction prompt goes through the ONE
+// review-routing resolver in config/locations.js. This file used to carry its
+// own REVIEW_LINKS + CITY_MAP + ZIP_MAP — a third answer to "which profile does
+// this customer review?", which is how a Palmetto customer could be pointed at
+// the Parrish profile by their tokenized text and the Bradenton profile by this
+// page in the same week. The GBP URLs now come from WAVES_LOCATIONS, so a
+// profile-link change lands everywhere at once.
+const { resolveReviewLocation } = require('../config/locations');
 
 // Admin alert recipient — must be a real cell, never one of our own Twilio
 // numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
@@ -191,11 +114,19 @@ router.post('/', async (req, res, next) => {
     }
 
     const customer = req.customer;
-    const office = resolveOffice(customer);
+    // Same last-resort stored id the ask path uses (ReviewService
+    // resolveLocation) so the office shown here can never disagree with the
+    // office the gated ask resolves.
+    const office = resolveReviewLocation(customer, {
+      storedLocationId: customer.nearest_location_id || null,
+    });
     const isPromoter = rating >= 8;
     const isDetractor = rating <= 3;
 
-    // Insert the response
+    // Insert the response. office_location now stores the canonical location id
+    // ('bradenton') rather than this file's private 'lakewood_ranch' key —
+    // review-request.js already wrote canonical ids into the same column, and
+    // nothing reads it.
     await db('satisfaction_responses').insert({
       customer_id: req.customerId,
       service_record_id: serviceRecordId,
@@ -203,79 +134,108 @@ router.post('/', async (req, res, next) => {
       feedback_text: feedbackText || null,
       directed_to_review: isPromoter,
       flagged_for_followup: !isPromoter,
-      office_location: office,
+      office_location: office.id,
     });
 
     // Handle routing based on score
     if (isPromoter) {
-      // 8-10: Send Google review SMS to customer
-      const reviewLink = REVIEW_LINKS[office];
+      // 8-10: ask for the Google review through the SAME gated path as every
+      // other unscheduled ask. This used to text a BARE g.page link with no
+      // review_requests row, so the ask was invisible to the 3-ask cap, the
+      // 30-day cooldown, the already-reviewed flag, and the outreach funnel —
+      // and the click could never be attributed. sendGatedAsk mints the token,
+      // applies the gates, and records the row.
+      // 'error' (NOT 'send_failed'): a THROW here means nothing was
+      // persisted — sendGatedAsk's own send_failed outcome implies a row was
+      // queued for cron retry, but a fail-closed gate error leaves no row, so
+      // classifying it as queued would tell the customer to wait for a text
+      // that never comes (codex #3285 r5). 'error' falls through to the
+      // in-app fallback chain instead.
+      let asked = { outcome: 'error' };
       try {
-        const body = await renderRequiredSmsTemplate('review_request', {
-          first_name: customer.first_name || 'there',
-          review_url: reviewLink,
-          // {reservice_line} EXPAND half (reservice-link.js): '' unless both
-          // re-service gates are on and the plan grants a lane. Must be
-          // supplied before the token lands in the body — an unsupplied key
-          // suppresses the whole send.
-          reservice_line: await require('../services/reservice-link').reserviceLineForCustomer(customer.id),
-        }, {
-          workflow: 'satisfaction_review_request',
-          entity_type: 'customer',
-          entity_id: customer.id,
-        });
-        const smsResult = await sendCustomerMessage({
-          to: customer.phone,
-          body,
-          channel: 'sms',
-          audience: 'customer',
-          purpose: 'review_request',
+        // #3288's {reservice_line} contract holds through the fold: the
+        // gated path renders via ReviewService.sendSMS, whose render site
+        // supplies reservice_line (review-request.js) — this route no longer
+        // renders the template itself.
+        asked = await ReviewService.sendGatedAsk({
           customerId: customer.id,
-          identityTrustLevel: 'phone_matches_customer',
-          entryPoint: 'satisfaction_promoter_review',
-          metadata: {
-            original_message_type: 'review_request',
-            service_record_id: serviceRecordId,
-          },
+          customer,
+          channel: 'sms',
+          // CANONICAL template mode: renders the 'review_request'
+          // sms_template — the same body (incl. the {reservice_line} clause
+          // #3288 wired) the pre-fold path sent. 'friendly_ask' silently
+          // dropped that clause, and a bare null templateId defaults back to
+          // friendly_ask (codex #3285 r5b).
+          templateId: null,
+          canonicalTemplate: true,
+          serviceRecordId,
+          triggeredBy: 'portal_satisfaction',
+          manageRetryVia: 'cron',
+          // This path had no Day-3 follow-up before the fold, and adding one
+          // would be a new customer touch nobody asked for. Drop this flag to
+          // opt the portal ask into the same follow-up admin one-offs get.
+          skipLegacyFollowup: true,
         });
-        if (!smsResult.sent && smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.deferred && smsResult.nextAllowedAt) {
-          // Send-window hold: a portal/web action is not an SMS reply, so the
-          // text defers — queued on the scheduled-SMS rail for 8:00 AM.
-          try {
-            const TWILIO_NUMBERS = require('../config/twilio-numbers');
-            await db('sms_log').insert({
-              customer_id: customer.id,
-              direction: 'outbound',
-              from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-              to_phone: customer.phone,
-              message_body: body,
-              status: 'scheduled',
-              scheduled_for: new Date(smsResult.nextAllowedAt),
-              message_type: 'review_request',
-              metadata: JSON.stringify({
-                entry_point: 'satisfaction_promoter_review_deferred',
-                original_block_code: smsResult.code,
-                replay_purpose: 'review_request',
-                refresh_customer_phone: true,
-                resolve_from_by_customer: true,
-              }),
-            });
-            logger.info(`[satisfaction] promoter review SMS held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);
-          } catch (queueErr) {
-            logger.error(`[satisfaction] promoter review held-SMS requeue failed: ${queueErr.message}`);
-          }
-        } else if (!smsResult.sent) {
-          logger.warn(`Review SMS blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-        }
       } catch (smsErr) {
-        logger.error(`Failed to send review SMS: ${smsErr.message}`);
+        // Never fail the rating write because the ask could not go out.
+        logger.error(`[satisfaction] Gated review ask threw (customerId=${customer.id} errType=${smsErr?.name || 'Error'})`);
+      }
+      if (asked.outcome !== 'sent') {
+        logger.info(`[satisfaction] Review ask not sent (customerId=${customer.id} outcome=${asked.outcome})`);
+      }
+
+      // The in-app button points at the SAME tokenized link the text carries,
+      // so a customer who taps here instead of in their messages is still
+      // attributed. When the ask was gated (at cap, in cooldown, already in a
+      // cadence) there is no fresh token — reuse the customer's most recent
+      // live DELIVERED one, and only fall back to the bare profile URL if
+      // there is none. Exception: while an ask is QUEUED (deferred /
+      // already_queued / transient-retry / concurrent in-flight) there is a
+      // pending row processScheduled will send later — a bare link now could
+      // not consume it, so the customer would review AND still get the SMS
+      // (codex #3285 r3). No actionable fallback in that window; the queued
+      // text carries the link.
+      const askQueued = ['deferred', 'already_queued', 'send_failed'].includes(asked.outcome);
+      let reviewLink = asked.reviewUrl || null;
+      if (!reviewLink && !askQueued && asked.outcome !== 'already_reviewed') {
+        // BOTH fallbacks skip the queued window (codex #3285 r4): an older
+        // delivered token is just as actionable as the bare URL — the click
+        // couldn't consume the pending row and processScheduled would still
+        // send the queued ask afterward. already_reviewed gets NO link at all
+        // (finality). in_cadence may reuse a live DELIVERED token — that is
+        // the cadence's own link, and clicking it stamps + STOPS the cadence
+        // via /go — but never the bare URL, which stops nothing and would let
+        // the cadence chase a customer who already reviewed (pre-push audit
+        // r4).
+        reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
+        if (!reviewLink) {
+          let bareOk = asked.outcome !== 'in_cadence';
+          if (asked.outcome === 'concurrent') {
+            // Lock contention proves neither direction (codex #3285 r9 ×2):
+            // the competing holder may be a no-link check-in or fail without
+            // a retry (suppressing would promise a text that never comes),
+            // OR it may deliver an ask moments after we respond (a bare URL
+            // now = untracked review + another ask later). Settle the race:
+            // wait briefly for the in-flight send to land, then prefer its
+            // tokenized URL; a durably queued ask suppresses; only a window
+            // with NEITHER falls back to the bare link.
+            for (let attempt = 0; attempt < 3 && bareOk && !reviewLink; attempt++) {
+              await new Promise((r) => setTimeout(r, 700));
+              reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
+              if (reviewLink) break;
+              const gate = await ReviewService.checkUnscheduledAskGates(customer.id).catch(() => null);
+              if (gate && gate.outcome === 'already_queued') bareOk = false;
+            }
+          }
+          if (bareOk && !reviewLink) reviewLink = office.googleReviewUrl;
+        }
       }
 
       return res.json({
         success: true,
         action: 'review',
         reviewLink,
-        officeName: office.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+        officeName: office.name,
       });
     }
 
