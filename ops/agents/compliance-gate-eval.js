@@ -415,7 +415,18 @@ async function main() {
       console.error(`  ! ${err.message}`);
     }
     // The regex verdict is recorded for COMPARISON only — never as the label.
-    const regexBlocked = guardrails.evaluate({ body }, {}).findings.some((f) => f.code === c.code);
+    // It must see the SAME publishable surface production gives it. Document
+    // mode puts every third fixture in `payload.title` alone, and
+    // content-guardrails scans titles via `frontmatter` (it builds
+    // publishableText as body + the editable meta fields) — so passing
+    // `{ body }` scored a title such as "We offer wildlife removal" as a regex
+    // MISS on a rule the regex does enforce. That understated layered recall
+    // and inflated the "caught by NEITHER" count the activation decision reads
+    // (Codex PR #3295 r7). The meta block is already inside `body` here —
+    // buildDocument appends it the way assertComplianceClear does — so the
+    // title is the only field to add; passing meta again would double it.
+    const regexDraft = payload.title ? { body, frontmatter: { title: payload.title } } : { body };
+    const regexBlocked = guardrails.evaluate(regexDraft, {}).findings.some((f) => f.code === c.code);
     return { ...c, semanticBlocked, codeMatched, regexBlocked, checked, position };
   });
 
