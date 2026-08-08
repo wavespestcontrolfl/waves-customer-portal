@@ -462,17 +462,18 @@ async function buildCallContext(callLogId) {
   if (!customerMatch.customer && !resolvedLoadFailed) {
     customerMatch = await loadCustomerByPhone(phone, extraction);
   }
-  // Email-only identity guard (codex P1, PR #3275): an ACTIVE customer
-  // calling with blocked caller ID and stating the email on their account
-  // has no phone for loadCustomerByPhone to match — the context would set
-  // isExistingCustomer=false and the engine would prospect-price a member
+  // Email identity guard (codex P1 ×2, PR #3275): an ACTIVE customer whose
+  // phone resolution found nothing — blocked caller ID with NO number, or a
+  // stated NEW/spouse callback number that isn't on the account — would
+  // reach the engine as isExistingCustomer=false and get prospect-priced
   // (dropping membership discounts/fee waivers), exactly what the
-  // fail-closed rule forbids. When the extraction's email belongs to a REAL
-  // customer (pipeline_stage active_customer/won/at_risk — the canonical
+  // fail-closed rule forbids. Whenever no customer was identified and the
+  // extraction carries an email belonging to a REAL customer
+  // (pipeline_stage active_customer/won/at_risk — the canonical
   // whereRealCustomer stages; lead-stage rows are NOT members and stay
   // draft-eligible), fail closed into the red-lane identity review. Lookup
   // failure fails closed the same way as the phone path.
-  if (!customerMatch.customer && !phone) {
+  if (!customerMatch.customer) {
     // Enriched (V2) payloads carry the email at caller.email; the top-level
     // field is the V1 fallback shape — reading only the top level made this
     // guard a no-op for every valid V2 extraction (codex P1, PR #3275).

@@ -8107,6 +8107,30 @@ const CallRecordingProcessor = {
             const stampThisPass = !phone && existingLead && !raceRecovered
               && !(call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid);
             if (stampThisPass) {
+              // A prior stamp pointing at a DIFFERENT lead must be settled
+              // (cleared + its lead's state restored) BEFORE the
+              // replacement stamp overwrites the ledgers (codex P1 r14) —
+              // the CASE-merge in the stamp SQL only protects SAME-lead
+              // re-stamps; overwriting a different lead's ledger stranded
+              // the anonymous call's enrichment on a now-claimed lead
+              // permanently.
+              if (currentStampedLeadId && currentStampedLeadId !== String(leadId)) {
+                let priorSettled;
+                try {
+                  priorSettled = await clearStampAndRestoreLead(call, procToken, callSid);
+                } catch (settleErr) {
+                  if (settleErr.abortProcessing) throw settleErr;
+                  const wrapped = new Error(`call→lead link pre-stamp settle failed: ${settleErr.code || settleErr.name || 'db_error'}`);
+                  wrapped.abortProcessing = true;
+                  throw wrapped;
+                }
+                if (!priorSettled) {
+                  const lost = new Error('processing claim lost during call→lead link pre-stamp settle');
+                  lost.abortProcessing = true;
+                  throw lost;
+                }
+                currentStampedLeadId = null;
+              }
               const { prior, written } = snapshotStampedLeadStates(current, leadUpdates);
               enriched = await db.transaction(async (trx) => {
                 const stamped = await trx('call_log')

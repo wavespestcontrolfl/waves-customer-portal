@@ -199,11 +199,21 @@ async function loadCalls(lead, phoneKey) {
     });
     const leadSummary = clampText(lead.transcript_summary, 4000);
     if (leadSummary) {
-      // transcript_summary is a ROLLING snapshot of the lead's LATEST call —
-      // attach it to the newest owned call (sid- OR stamp-linked; calls are
-      // sorted desc), not pinned to the original sid row: a reused anonymous
-      // lead's summary reflects the newer stamped call (codex P1 r12).
-      const matchingCall = calls.find((call) => call.for_this_lead);
+      // transcript_summary is a ROLLING snapshot of the lead's LATEST
+      // summary-producing call — attach it to the owned call whose
+      // extraction actually SUPPLIED it (provenance match), not blindly to
+      // the newest owned row: a later stamped call that produced no
+      // call_summary leaves the lead's summary describing an OLDER call,
+      // and pinning it to the newest transcript would misrepresent what it
+      // summarizes (codex P2 r14). No provenance match → the summary rides
+      // the synthetic summary-only row below instead of claiming a
+      // transcript.
+      const suppliedSummary = (call) => {
+        const ex = call.extraction || {};
+        const s = String(ex.call_summary || ex.call_metadata?.call_summary || '').trim();
+        return s && clampText(s, 4000) === leadSummary;
+      };
+      const matchingCall = calls.find((call) => call.for_this_lead && suppliedSummary(call));
       if (matchingCall) {
         matchingCall.transcript_summary = leadSummary;
       } else {
