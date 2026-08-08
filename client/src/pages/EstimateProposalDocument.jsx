@@ -42,19 +42,36 @@ function portalBase(publicOrigin) {
   return PORTAL_FALLBACK;
 }
 
-// Instant values (created_at) format in ET like every customer surface.
-// UTC-midnight values are CALENDAR dates (the legacy PDF's
-// formatDisplayDate deliberately preserves them) — format those in UTC so
-// "valid through Sept 6" never renders as Sept 5 (AGENTS.md timezone
-// discipline; same rule as ServiceReportDocument's fmtServiceDate).
-function fmtDate(value) {
+// Two formatters, selected by FIELD — never by sniffing the value (codex
+// pre-push r4b: a created_at instant landing exactly on 00:00:00Z would
+// otherwise format in UTC and display a day off for ET evening sends).
+//
+// fmtInstant: real timestamps (created_at) format in ET like every
+// customer surface (AGENTS.md timezone discipline).
+function fmtInstant(value) {
   if (!value) return '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
-  const isUtcMidnight = /T00:00:00(\.000)?(Z|\+00:00)$/.test(String(value))
+  return date.toLocaleDateString('en-US', {
+    timeZone: 'America/New_York',
+    month: 'long', day: 'numeric', year: 'numeric',
+  });
+}
+
+// fmtValidThrough: expires_at is usually an instant (send stamp = now+7d,
+// formatted in ET), but date-ONLY values (legacy rows, operator-entered
+// dates — the legacy PDF's formatDisplayDate deliberately preserves them
+// as calendar dates) format in UTC so "valid through Sept 6" never renders
+// as Sept 5. The heuristic is confined to THIS field, where a bare date or
+// UTC-midnight value genuinely is a calendar date.
+function fmtValidThrough(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const isCalendarDate = /T00:00:00(\.000)?(Z|\+00:00)$/.test(String(value))
     || (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value));
   return date.toLocaleDateString('en-US', {
-    timeZone: isUtcMidnight ? 'UTC' : 'America/New_York',
+    timeZone: isCalendarDate ? 'UTC' : 'America/New_York',
     month: 'long', day: 'numeric', year: 'numeric',
   });
 }
@@ -258,7 +275,7 @@ export default function EstimateProposalDocument({ data, token }) {
         }}>
           <div style={{ color: NAVY, fontSize: 21, fontWeight: 800, letterSpacing: '0.02em', textTransform: 'uppercase' }}>{docTitle}</div>
           <div style={{ fontSize: 11, color: MUTED, whiteSpace: 'nowrap' }}>
-            {estimateNumber ? `Estimate ${estimateNumber} · ` : ''}{fmtDate(estimate.createdAt)}
+            {estimateNumber ? `Estimate ${estimateNumber} · ` : ''}{fmtInstant(estimate.createdAt)}
           </div>
         </div>
 
@@ -273,8 +290,8 @@ export default function EstimateProposalDocument({ data, token }) {
           </div>
           <div style={{ minWidth: 0 }}>
             <SectionHeader>Estimate details</SectionHeader>
-            <InfoRow label="Date">{fmtDate(estimate.createdAt)}</InfoRow>
-            <InfoRow label="Valid through">{fmtDate(estimate.expiresAt) || '30 days from issue'}</InfoRow>
+            <InfoRow label="Date">{fmtInstant(estimate.createdAt)}</InfoRow>
+            <InfoRow label="Valid through">{fmtValidThrough(estimate.expiresAt) || '30 days from issue'}</InfoRow>
             <InfoRow label="Prepared by">Waves Pest Control, LLC</InfoRow>
             {estimate.licenseNumber ? <InfoRow label="License">{estimate.licenseNumber}</InfoRow> : null}
           </div>

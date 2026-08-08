@@ -20378,7 +20378,16 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // official-looking document with no pricing). publicOrigin exists so
       // the headless browser's internal hostname never leaks into the
       // artifact's links (same rule as the service-report document).
-      ...(isPdfRenderPass && featureGates.isEnabled('estimateDocPdf') ? {
+      // documentRender additionally requires the proposal view to have BUILT
+      // with at least one priced line (codex pre-push r4b): a swallowed
+      // build error would otherwise let the headless renderer capture an
+      // official-looking document with no pricing table as a SUCCESS.
+      // Withholding the flag makes ?mode=pdf fall through to the normal
+      // page, which the render pipeline treats as a failed pass → pdfkit
+      // fallback.
+      ...(isPdfRenderPass && featureGates.isEnabled('estimateDocPdf')
+        && Array.isArray(proposalPublicView?.buildings)
+        && proposalPublicView.buildings.some((b) => (b.lineItems || []).length > 0) ? {
         documentRender: true,
         publicOrigin: require('../utils/portal-url').configuredPublicPortalOrigin(),
       } : {}),
