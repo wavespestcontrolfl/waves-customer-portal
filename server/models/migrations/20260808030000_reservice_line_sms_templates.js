@@ -21,10 +21,15 @@
  * byte-identical until Adam flips the gate, and ineligible customers never
  * see the line at all.
  *
- * service_complete_with_invoice is deliberately NOT tokened (an invoice ask
- * plus a free-re-service ask in one text was ruled out of scope), but its
- * render sites already supply the variable so tokening it later is a
- * data-only change.
+ * Key set = the owner-ruled delivery list (scope doc §6 ruling 3,
+ * 2026-08-08): the service_complete family, the service_report_v1 family —
+ * INCLUDING service_report_v1_with_invoice, which the ruling names — and
+ * review_request. service_complete_with_invoice is not tokened because it
+ * was never in the ruled list (it is the legacy fallback lane the report-v1
+ * family replaces, not a family member), NOT because it carries a pay link —
+ * service_report_v1_with_invoice carries one too. Its render sites already
+ * supply the variable, so adding it later is a data-only change if Adam
+ * extends the ruling.
  *
  * Idempotent both ways: up skips rows already carrying the placeholder; down
  * strips it. Owner-customized bodies are preserved — this only appends or

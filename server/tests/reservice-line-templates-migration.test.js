@@ -9,7 +9,7 @@
 const migration = require('../models/migrations/20260808030000_reservice_line_sms_templates');
 
 describe('reservice_line template migration', () => {
-  test('covers exactly the ruled key set — with_invoice deliberately excluded', () => {
+  test('covers exactly the owner-ruled key set — service_complete_with_invoice (legacy fallback lane, never in the ruling) excluded', () => {
     expect(migration.KEYS).toEqual([
       'service_complete',
       'service_complete_prepaid',
