@@ -22,8 +22,63 @@ function makeQuery({ firstResult = null, selectResult = [] } = {}) {
   return chain;
 }
 
+// 64-char lowercase-hex tokens — the only format /go tracks, and so the only
+// format buildSummary may surface (codex #3286 P2: fixtures must satisfy the
+// production predicates, not bypass them).
+const LIVE_TOKEN = 'ab'.repeat(32);
+const STALE_TOKEN = 'cd'.repeat(32);
+const LEGACY_32_TOKEN = 'ef'.repeat(16);
+const liveAsk = (over = {}) => ({
+  customer_id: 'customer-1',
+  token: LIVE_TOKEN,
+  expires_at: new Date(Date.now() + 7 * 86400000).toISOString(),
+  created_at: new Date(Date.now() - 86400000).toISOString(),
+  ...over,
+});
+
+// Predicate-EVALUATING fake for review_requests: buildSummary's token lookup
+// filters by customer, token format (regex '~'), and expiry (whereNull OR
+// '>' now, grouped). A mock that ignores predicates would stay green if a
+// production filter were deleted (codex #3286 P2), so this one applies them.
+function makeReviewRequestsQuery(rows) {
+  let filtered = [...rows];
+  const test = (row, col, op, val) => {
+    if (op === '~') return new RegExp(val).test(String(row[col] ?? ''));
+    if (op === '>') return row[col] != null && new Date(row[col]) > new Date(val);
+    if (op === '<') return row[col] != null && new Date(row[col]) < new Date(val);
+    return row[col] === val;
+  };
+  const chain = {
+    where: jest.fn((a, b, c) => {
+      if (typeof a === 'function') {
+        // Grouped OR: whereNull(col) / orWhere(col, op, val)
+        const arms = [];
+        const builder = {
+          whereNull: (col) => { arms.push((r) => r[col] == null); return builder; },
+          orWhere: (col, op, val) => { arms.push((r) => test(r, col, op, val)); return builder; },
+        };
+        a(builder);
+        filtered = filtered.filter((r) => arms.some((arm) => arm(r)));
+      } else if (typeof a === 'object' && a !== null) {
+        filtered = filtered.filter((r) => Object.entries(a).every(([k, v]) => r[k] === v));
+      } else {
+        filtered = filtered.filter((r) => test(r, a, b, c));
+      }
+      return chain;
+    }),
+    orderBy: jest.fn((col, dir) => {
+      filtered.sort((x, y) => (dir === 'desc'
+        ? new Date(y[col] || 0) - new Date(x[col] || 0)
+        : new Date(x[col] || 0) - new Date(y[col] || 0)));
+      return chain;
+    }),
+    first: jest.fn(async () => filtered[0] || null),
+  };
+  return chain;
+}
+
 function installSummaryDb({
-  record = null, photos = [], reviewRequest = null, invoice = null, customer = null,
+  record = null, photos = [], reviewRequests = [], invoice = null, customer = null,
 } = {}) {
   mockDb.mockImplementation((table) => {
     if (table === 'invoices') {
@@ -39,7 +94,7 @@ function installSummaryDb({
       return makeQuery({ firstResult: customer });
     }
     if (table === 'review_requests') {
-      return makeQuery({ firstResult: reviewRequest });
+      return makeReviewRequestsQuery(reviewRequests);
     }
     return makeQuery();
   });
@@ -144,7 +199,7 @@ describe('public track token expiry', () => {
         structured_notes: JSON.stringify({ typedReportDelivery: 'disabled' }),
       },
       photos: [{ s3_key: 'service-photos/record-1/internal.jpg' }],
-      reviewRequest: { token: 'old-review-token' },
+      reviewRequests: [liveAsk()],
     });
 
     const summary = await trackPublicRouter._test.buildSummary({
@@ -173,7 +228,13 @@ describe('public track token expiry', () => {
         { s3_key: null },
         { s3_key: 'service-photos/record-1/after-2.jpg' },
       ],
-      reviewRequest: { token: 'review-token' },
+      reviewRequests: [
+        // Newest ask is live 64-hex; an older stale ask and a legacy 32-char
+        // row must both lose to it through the real predicates.
+        liveAsk(),
+        liveAsk({ token: STALE_TOKEN, expires_at: new Date(Date.now() - 86400000).toISOString(), created_at: new Date(Date.now() - 20 * 86400000).toISOString() }),
+        liveAsk({ token: LEGACY_32_TOKEN, created_at: new Date(Date.now() - 30 * 86400000).toISOString() }),
+      ],
     });
     mockGetViewUrl
       .mockResolvedValueOnce('https://signed.example/after-1.jpg')
@@ -193,7 +254,7 @@ describe('public track token expiry', () => {
     // The tracked /go redirect, NOT the raw /rate page: the track link rides
     // along in nearly every visit SMS, so this was the most-seen review CTA and
     // the only one whose clicks were unattributable.
-    expect(summary.reviewUrl).toBe('/api/rate/review-token/go');
+    expect(summary.reviewUrl).toBe(`/api/rate/${LIVE_TOKEN}/go`);
     expect(mockDb.mock.calls.map(([table]) => table)).toContain('service_photos');
     expect(mockDb.mock.calls.map(([table]) => table)).toContain('review_requests');
     expect(mockGetViewUrl).toHaveBeenCalledTimes(2);
@@ -207,7 +268,7 @@ describe('public track token expiry', () => {
         structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
       },
       customer: { has_left_google_review: true },
-      reviewRequest: { token: 'review-token' },
+      reviewRequests: [liveAsk()],
     });
 
     const summary = await trackPublicRouter._test.buildSummary({
@@ -222,9 +283,10 @@ describe('public track token expiry', () => {
   });
 
   test('hides the review CTA when the customer has no live token left', async () => {
-    // Tokens expire after 14 days; the query filters expired rows out, so the
-    // lookup comes back empty rather than handing over a dead link that used to
-    // render "link expired".
+    // Tokens expire after 14 days; the expiry predicate filters the row out,
+    // so the lookup comes back empty rather than handing over a dead link
+    // that used to render "link expired". The fixture is a REAL expired row —
+    // the predicate does the excluding, not the mock (codex #3286 P2).
     installSummaryDb({
       record: {
         id: 'record-1',
@@ -232,7 +294,9 @@ describe('public track token expiry', () => {
         structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
       },
       customer: { has_left_google_review: false },
-      reviewRequest: null,
+      reviewRequests: [
+        liveAsk({ expires_at: new Date(Date.now() - 86400000).toISOString() }),
+      ],
     });
 
     const summary = await trackPublicRouter._test.buildSummary({
@@ -242,6 +306,49 @@ describe('public track token expiry', () => {
     });
 
     expect(summary.reviewUrl).toBeNull();
+  });
+
+  test('a token /go cannot track never surfaces — legacy 32-char rows are filtered', async () => {
+    // /go only tracks 64-char lowercase-hex tokens; anything else 302s to the
+    // raw rate page, which is exactly the unattributable surface this CTA is
+    // leaving. A customer whose only live row is legacy gets no CTA.
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      customer: { has_left_google_review: false },
+      reviewRequests: [liveAsk({ token: LEGACY_32_TOKEN })],
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.reviewUrl).toBeNull();
+  });
+
+  test('a null expires_at counts as live (whereNull arm of the expiry group)', async () => {
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      customer: { has_left_google_review: false },
+      reviewRequests: [liveAsk({ expires_at: null })],
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.reviewUrl).toBe(`/api/rate/${LIVE_TOKEN}/go`);
   });
 
   // Backdated quiet closeout (PR #2897 fix round 9, Codex P1): the review
