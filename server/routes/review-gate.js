@@ -8,24 +8,22 @@ const { noStore } = require('../middleware/no-store');
 // Token-keyed review pages carry the customer's name and service history —
 // keep them out of caches and search indexes.
 router.use(noStore);
-const { WAVES_LOCATIONS, nearestLocation } = require('../config/locations');
+const {
+  WAVES_LOCATIONS,
+  resolveReviewLocation: resolveReviewLocationCanonical,
+} = require('../config/locations');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 
-// Nearest GBP to the customer's geocoded address, with fallbacks. Prefers the
-// haversine winner when the customer has a lat/lng; otherwise falls back to
-// whatever location the review request was tagged with at creation time
-// (review-request.js already city-routes on create).
+// The GBP profile this ask points at. Delegates to the ONE review-routing
+// resolver in config/locations.js (city → zip → nearest office → the id stored
+// on the ask). This used to run nearest-office FIRST, which sent downtown
+// Sarasota (34236) to the Bradenton profile — the Sarasota office is in 34240,
+// farther from downtown than Bradenton is.
 function resolveReviewLocation(request, customer) {
-  if (customer && customer.latitude != null && customer.longitude != null) {
-    const hit = nearestLocation(customer.latitude, customer.longitude);
-    if (hit) return hit;
-  }
-  if (request && request.location_id) {
-    const byId = WAVES_LOCATIONS.find((l) => l.id === request.location_id);
-    if (byId) return byId;
-  }
-  return WAVES_LOCATIONS[0];
+  return resolveReviewLocationCanonical(customer || {}, {
+    storedLocationId: request?.location_id || null,
+  });
 }
 
 // Admin alert recipient — must be a real cell, never one of our own Twilio
@@ -49,7 +47,13 @@ const directLinkLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  handler: (req, res) => res.redirect(302, `/rate/${encodeURIComponent(String(req.params?.token || ''))}`),
+  // Absolute portal origin, same as the in-handler fallback — a root-relative
+  // /rate resolves on the API origin (404) in a split-origin deploy
+  // (codex #3285 r5).
+  handler: (req, res) => {
+    const { publicPortalUrl } = require('../utils/portal-url');
+    return res.redirect(302, `${publicPortalUrl()}/rate/${encodeURIComponent(String(req.params?.token || ''))}`);
+  },
 });
 const { isBotUserAgent } = require('../utils/bot-ua');
 
@@ -63,7 +67,11 @@ router.param('token', (req, res, next, token) => {
   // /go's contract is that EVERY failure path degrades to the rate page
   // (which renders a friendly not-found state) — keep that for malformed
   // tokens too; everything else gets the same generic 404 as unknown.
-  if (req.path.endsWith('/go')) return res.redirect(302, `/rate/${encodeURIComponent(String(token))}`);
+  if (req.path.endsWith('/go')) {
+    // Absolute portal origin (split-origin safe) — see the limiter handler.
+    const { publicPortalUrl } = require('../utils/portal-url');
+    return res.redirect(302, `${publicPortalUrl()}/rate/${encodeURIComponent(String(token))}`);
+  }
   return res.status(404).json({ error: 'Review link not found or expired' });
 });
 
@@ -88,7 +96,12 @@ const reviewPageLimiter = rateLimit({
 // page, which already renders not-found/expired states.
 router.get('/:token/go', directLinkLimiter, async (req, res) => {
   const token = String(req.params.token || '');
-  const ratePageFallback = `/rate/${encodeURIComponent(token)}`;
+  // Absolute portal-origin fallback: /rate is an SPA route, and in a
+  // split-origin deploy (SPA built with a full VITE_API_URL) a root-relative
+  // redirect would resolve on the API origin and 404 (codex #3286 pre-push
+  // audit). publicPortalUrl() is the canonical public origin serving the SPA.
+  const { publicPortalUrl } = require('../utils/portal-url');
+  const ratePageFallback = `${publicPortalUrl()}/rate/${encodeURIComponent(token)}`;
   try {
     // Kill switch must govern ALREADY-DELIVERED links too (Codex P1, r2):
     // with the gate off, /go behaves as a plain alias of the rate page — no
@@ -284,8 +297,11 @@ router.get('/:token', reviewPageLimiter, async (req, res, next) => {
     // submissions (review-public.js) that now land here via redirect — those
     // mark completion with rated_at + status rated/reviewed rather than
     // 'submitted', so honor them too or a finished customer would see a fresh,
-    // overwritable rating flow instead of the thank-you state.
-    if (request.status === 'submitted' || request.rated_at) {
+    // overwritable rating flow instead of the thank-you state. Same
+    // finality predicate as /go and submitRating — a status-only 'rated'
+    // legacy row must not reopen the form (pre-push audit r5b).
+    if (request.rated_at
+      || ['submitted', 'reviewed', 'rated'].includes(String(request.status || '').toLowerCase())) {
       return res.status(200).json({ alreadySubmitted: true, message: 'You already submitted feedback — thank you!' });
     }
 
@@ -359,14 +375,23 @@ router.post('/:token/score', reviewPageLimiter, async (req, res, next) => {
       return res.status(410).json({ error: 'This review link has expired' });
     }
 
-    if (['submitted', 'reviewed'].includes(request.status) || request.rated_at) {
+    // Same finality predicate as /go, the page GET, and submitRating —
+    // a status-only 'rated' legacy row must not accept score mutation
+    // (pre-push audit r5b).
+    if (request.rated_at
+      || ['submitted', 'reviewed', 'rated'].includes(String(request.status || '').toLowerCase())) {
       return res.status(409).json({ error: 'Feedback already submitted' });
     }
 
     const category = categorizeScore(score);
     await db('review_requests')
       .where({ id: request.id })
-      .whereNotIn('status', ['submitted', 'reviewed'])
+      // NULL-safe grouped guard (NULL NOT IN (...) is UNKNOWN in Postgres) —
+      // mirrors the conditional-update guard on the submit handler.
+      .where(function () {
+        this.whereNull('status').orWhereNotIn('status', ['submitted', 'reviewed', 'rated']);
+      })
+      .whereNull('rated_at')
       .update({
         score,
         highlights: highlights ? JSON.stringify(highlights) : null,

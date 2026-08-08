@@ -188,6 +188,146 @@ function resolveLocation(city) {
   return WAVES_LOCATIONS.find(l => l.id === locId) || WAVES_LOCATIONS[0];
 }
 
+// ZIP routing derives through the EXISTING canonical ZIP→city map
+// (utils/zip-to-city.js — the full county service-area sets, maintained for
+// lead recovery) and then the city map below, instead of a parallel ZIP→office
+// table (codex #3285 r4: a parallel table shipped 34243 → sarasota while
+// zip-to-city correctly classifies it University Park → bradenton). Only
+// consulted when the customer's city is missing or unmapped — a mapped city is
+// the stronger signal (service-area intent; a ZIP can straddle two offices).
+
+// Review-routing additions on top of CITY_TO_LOCATION, merged from the two
+// private city tables review-request.js and routes/satisfaction.js used to keep.
+// Two kinds of entry, and only two:
+//
+//   1. NEIGHBORHOODS that lead routing never needed a key for — they resolve to
+//      the same office their parent city does.
+//   2. One genuine OVERRIDE, `longboat key`: lead routing sends LBK to Sarasota,
+//      but the Bradenton office is ~14mi from the key versus ~18mi for Sarasota,
+//      and the Bradenton profile is the one LBK customers have always been asked
+//      to review. Keeping it preserves today's behavior.
+//
+// `palmetto` used to be overridden to Bradenton here. It is NOT any more —
+// Palmetto reviews now go to the Parrish profile, which is the office that
+// serves Palmetto and what the tokenized /go link already resolved to.
+const REVIEW_CITY_EXTRAS = {
+  'longboat key': 'bradenton',   // override — see note above
+  'braden river': 'bradenton',
+  'bee ridge': 'sarasota',
+  'gulf gate': 'sarasota',
+  'southgate': 'sarasota',
+  'fruitville': 'sarasota',
+  'kensington park': 'sarasota',
+  'indian beach': 'sarasota',
+  'bird key': 'sarasota',
+  'lake sarasota': 'sarasota',
+  'casey key': 'venice',
+  'south venice': 'venice',
+  'warm mineral springs': 'venice',
+  'rotonda west': 'venice',
+  'manasota key': 'venice',
+  'rubonia': 'parrish',
+  'gillette': 'parrish',
+  'duette': 'parrish',
+};
+
+const REVIEW_CITY_TO_LOCATION = { ...CITY_TO_LOCATION, ...REVIEW_CITY_EXTRAS };
+
+/**
+ * THE review-routing resolver. Every surface that asks a customer for a Google
+ * review — the tokenized /go redirect, the rate page, the follow-up SMS, the
+ * portal satisfaction prompt — must resolve the target profile through this
+ * function, so a customer can never be pointed at two different profiles by two
+ * different touches in the same conversation.
+ *
+ * Resolution order, most-authoritative first:
+ *   1. city  — the mapped service area, the strongest statement of which office
+ *              owns the address. This is what fixes downtown Sarasota: the
+ *              Sarasota office sits in 34240 (Fruitville), FARTHER from 34236
+ *              than the Bradenton office is, so pure nearest-office math sent
+ *              downtown-Sarasota reviews to the Bradenton profile.
+ *   2. zip   — fills in when the city is missing or unmapped.
+ *   3. geo   — nearest office by straight-line distance; covers addresses with
+ *              neither a mapped city nor a mapped ZIP.
+ *   4. the location_id already stored on the ask — a LAST-RESORT fallback, not
+ *      an override. Deliberate: rows stamped before this resolver existed
+ *      carry ids from the old geo-first logic (the downtown-Sarasota
+ *      misroute), so a stored id must not pin a sent link to the wrong
+ *      profile; re-resolving from the address heals those. The trade-off —
+ *      a customer whose ADDRESS changes after a send sees the link re-target
+ *      to their new office's profile — is the desired behavior (they review
+ *      the office that serves them now).
+ *   5. the default office.
+ *
+ * @param {object} customer  { city, zip, latitude, longitude }
+ * @param {object} [opts]    { storedLocationId } — review_requests.location_id
+ * @returns {object} a WAVES_LOCATIONS entry (never null)
+ */
+// ZIPs whose USPS/Places city label CONTRADICTS the canonical routing —
+// zip-to-city.js documents 34243: USPS says "Sarasota" but it is Manatee /
+// University Park and routes to Bradenton. For these ZIPs the ZIP wins over
+// the (known-mislabeled) city, or a Places-autocompleted "Sarasota, 34243"
+// record would hit the wrong profile through the city-first order
+// (codex #3285 r8). Keep this set to DOCUMENTED conflicts only — the general
+// order stays city-first.
+const ZIP_CITY_CONFLICTS = new Set(['34243']);
+
+function resolveReviewLocation(customer = {}, { storedLocationId = null } = {}) {
+  const byId = (id) => WAVES_LOCATIONS.find((l) => l.id === id) || null;
+
+  const zipRaw = String(customer.zip || '').trim().slice(0, 5);
+  if (zipRaw && ZIP_CITY_CONFLICTS.has(zipRaw)) {
+    const { zipToCity } = require('../utils/zip-to-city');
+    const conflictCity = String(zipToCity(zipRaw) || '').toLowerCase().trim();
+    const hit = conflictCity && REVIEW_CITY_TO_LOCATION[conflictCity]
+      ? byId(REVIEW_CITY_TO_LOCATION[conflictCity]) : null;
+    if (hit) return hit;
+  }
+
+  const city = String(customer.city || '').toLowerCase().trim();
+  if (city && REVIEW_CITY_TO_LOCATION[city]) {
+    const hit = byId(REVIEW_CITY_TO_LOCATION[city]);
+    if (hit) return hit;
+  }
+
+  const zip = zipRaw;
+  if (zip) {
+    // Canonical ZIP → city (utils/zip-to-city.js), then the same review city
+    // map as step 1 — so ZIP-only rows inherit the review overrides too
+    // (34228 → Longboat Key → bradenton). Unknown ZIPs return '' and fall
+    // through; require() here avoids a config↔utils import cycle at load.
+    const { zipToCity } = require('../utils/zip-to-city');
+    const zipCity = String(zipToCity(zip) || '').toLowerCase().trim();
+    if (zipCity && REVIEW_CITY_TO_LOCATION[zipCity]) {
+      const hit = byId(REVIEW_CITY_TO_LOCATION[zipCity]);
+      if (hit) return hit;
+    }
+  }
+
+  // Null/blank-guard BEFORE Number(): Number(null) === 0 and Number('') === 0,
+  // which would route every un-geocoded customer to the office nearest (0,0)
+  // instead of falling through (Codex P2 on PR #2588, same guard as the
+  // customer-card picker this resolver absorbed).
+  const lat = customer.latitude == null || customer.latitude === '' ? NaN : Number(customer.latitude);
+  const lng = customer.longitude == null || customer.longitude === '' ? NaN : Number(customer.longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    const hit = nearestLocation(lat, lng);
+    if (hit) return hit;
+  }
+
+  if (storedLocationId) {
+    const hit = byId(storedLocationId);
+    if (hit) return hit;
+  }
+
+  return WAVES_LOCATIONS[0];
+}
+
+/** resolveReviewLocation, but returning just the canonical location id. */
+function resolveReviewLocationId(customer = {}, opts = {}) {
+  return resolveReviewLocation(customer, opts).id;
+}
+
 // True when a string is a known office city in CITY_TO_LOCATION. Used to keep a
 // non-city source area (e.g. "SW Florida" for the brand-wide lawn domain, or
 // arbitrary Google Ads utm_content) from being stored as a customer's city.
@@ -212,6 +352,10 @@ function resolveLocationFromCandidates(candidates = []) {
 module.exports = {
   WAVES_LOCATIONS,
   CITY_TO_LOCATION,
+  REVIEW_CITY_EXTRAS,
+  REVIEW_CITY_TO_LOCATION,
+  resolveReviewLocation,
+  resolveReviewLocationId,
   GBP_UTM_PARAMS,
   normalizeGbpUtmContent,
   findGbpLocationByUtmContent,

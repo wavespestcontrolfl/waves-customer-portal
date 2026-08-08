@@ -564,7 +564,11 @@ function CompleteCard({ data }) {
         ) : null}
         {summary.reviewUrl ? (
           <a
-            href={summary.reviewUrl}
+            // The /go redirect exists only on Express — when the SPA is built
+            // with a full VITE_API_URL (split-origin, same config
+            // socketOrigin() honors), a root-relative /api href would 404 on
+            // the SPA origin instead of recording the click (#3286 fold).
+            href={summary.reviewUrl.startsWith('/api/') ? summary.reviewUrl.replace(/^\/api/, API_BASE) : summary.reviewUrl}
             data-glass-accent=""
             style={{
               display: 'block', padding: '16px 20px', background: COLORS.glassNavy, color: COLORS.white,

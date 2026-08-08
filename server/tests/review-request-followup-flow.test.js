@@ -18,6 +18,13 @@ jest.mock('../services/customer-contact', () => ({
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn((url) => Promise.resolve(url)),
 }));
+// Manual create() runs under the per-customer advisory lock; with the db mock
+// there is no pool so the real runExclusive would fail closed (skipped:
+// no_connection). The lock's own behavior is covered by its suite — here it
+// just runs the body.
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: async (_key, fn) => fn(),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -421,7 +428,21 @@ describe('review request follow-up flow', () => {
           first: jest.fn().mockResolvedValue({ id: 'cust-1', city: 'Sarasota' }),
         });
       }
-      if (table === 'review_requests') return insert.query;
+      if (table === 'review_requests') {
+        // create() with a manual trigger now runs the shared unscheduled-ask
+        // gate stack first (codex #3285 r1 P1): getDeliveredAskStats reads
+        // this table (…select → rows) and the queued-ask check (…first). Both
+        // must come back empty so the gates pass and the insert proceeds.
+        return {
+          ...chain({
+            whereRaw: jest.fn(function () { return this; }),
+            orderByRaw: jest.fn(function () { return this; }),
+            limit: jest.fn().mockResolvedValue([]),
+            first: jest.fn().mockResolvedValue(null),
+          }),
+          insert: insert.query.insert,
+        };
+      }
       throw new Error(`Unexpected table query: ${table}`);
     });
 
@@ -454,12 +475,30 @@ describe('review request follow-up flow', () => {
       }),
     });
     const reviewRequestQueries = [
+      // Same-service idempotency lookup runs FIRST (codex #3285 r8); the
+      // pending-unsent row makes this a RESEND, so the gate stack then runs.
+      // 1. per-service-record dedupe lookup.
       chain({
         first: jest.fn().mockResolvedValue({
           id: 'rr-existing',
           service_record_id: 'sr-1',
           status: 'pending',
           sms_sent_at: null,
+          scheduled_for: new Date('2026-06-03T16:00:00.000Z'),
+        }),
+      }),
+      // 2. getDeliveredAskStats — no delivered asks.
+      chain({
+        whereRaw: jest.fn(function () { return this; }),
+        orderByRaw: jest.fn(function () { return this; }),
+        limit: jest.fn().mockResolvedValue([]),
+      }),
+      // 3. queued-ask check — returns THIS pending row, so the resend is the
+      //    one already_queued outcome allowed through (queuedId match).
+      chain({
+        whereRaw: jest.fn(function () { return this; }),
+        first: jest.fn().mockResolvedValue({
+          id: 'rr-existing',
           scheduled_for: new Date('2026-06-03T16:00:00.000Z'),
         }),
       }),

@@ -2869,7 +2869,14 @@ export function reviewRequestCopy(placement = 'top') {
 function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   if (mode !== 'live') return null;
   if (data?.hasLeftGoogleReview || data?.reviewRequestEligible === false) return null;
-  const location = reviewLocationForReport(data);
+  // Server-resolved canonical office first (payload.reviewLocation — the ONE
+  // resolver in config/locations.js); the local substring table is only a
+  // fallback for cached pre-resolver payloads. The table is incomplete by
+  // construction (no Port Charlotte / 33948) — never extend it, extend the
+  // server resolver.
+  const location = data?.reviewLocation?.reviewUrl
+    ? { key: data.reviewLocation.id, reviewUrl: data.reviewLocation.reviewUrl }
+    : reviewLocationForReport(data);
   const copy = reviewRequestCopy(placement);
   return (
     <section data-glass="card" className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>

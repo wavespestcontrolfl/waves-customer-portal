@@ -306,10 +306,15 @@ async function buildSummary(service) {
         .where({ id: service.customer_id })
         .first('has_left_google_review');
       if (customerFlag?.has_left_google_review !== true) {
+        // The customer's newest review ASK governs — ASK_TOUCH_SQL (the same
+        // predicate the cap/funnel use) keeps private no-link check-ins from
+        // surfacing or shadowing the newest real ask (#3286 fold).
+        const { ASK_TOUCH_SQL } = require('../services/review-outreach-templates');
         const rr = await db('review_requests')
           .where({ customer_id: service.customer_id })
+          .whereRaw(ASK_TOUCH_SQL)
           .orderBy('created_at', 'desc')
-          .first('token', 'expires_at', 'rated_at', 'status');
+          .first('token', 'expires_at', 'rated_at', 'status', 'sms_sent_at', 'sent_at', 'redirected_at');
         const expired = rr?.expires_at && new Date(rr.expires_at) < new Date();
         // A finalized request (feedback submitted — including a detractor's)
         // must not resurface as a Google ask: the old /rate page showed the
@@ -317,7 +322,15 @@ async function buildSummary(service) {
         // finality (pre-push audit P1; same set review-gate.js enforces).
         const finalized = Boolean(rr?.rated_at)
           || ['submitted', 'reviewed', 'rated'].includes(rr?.status);
-        if (rr?.token && !expired && !finalized) reviewUrl = `/api/rate/${rr.token}/go`;
+        // DELIVERED only (#3286 fold): a pending/deferred row's send still
+        // belongs to processScheduled (click, then the SMS sends anyway) and
+        // a failed/suppressed row was blocked by policy or consent. A
+        // clicked-through row (redirected_at) means they already acted.
+        const delivered = (rr?.sms_sent_at != null || rr?.sent_at != null)
+          && !['pending', 'deferred', 'failed', 'suppressed'].includes(String(rr?.status || '').toLowerCase());
+        if (rr?.token && !expired && !finalized && delivered && rr.redirected_at == null) {
+          reviewUrl = `/api/rate/${rr.token}/go`;
+        }
       }
     }
   } catch (err) {

@@ -3,7 +3,6 @@ const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const ReviewService = require('../services/review-request');
 const db = require('../models/db');
-const { publicPortalUrl } = require('../utils/portal-url');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -32,7 +31,14 @@ router.get('/', async (req, res, next) => {
 // POST /trigger — manually trigger a review request for a customer
 router.post('/trigger', async (req, res, next) => {
   try {
-    const { customerId, serviceRecordId, scheduledServiceId, triggeredBy } = req.body;
+    const { customerId, serviceRecordId, scheduledServiceId } = req.body;
+    // Allowlisted manual provenance only — NEVER the caller's raw string. A
+    // request body claiming 'auto' would bypass the manual-trigger gate stack
+    // in ReviewService.create and leave a scheduled ask processScheduled()
+    // sends without rechecking (pre-push audit r1).
+    // 'tech' stays allowed — DispatchPageV2 posts it and the techTriggered
+    // metric + audit provenance count triggered_by='tech' (codex #3285 r8).
+    const triggeredBy = ['admin', 'csr', 'tech'].includes(req.body.triggeredBy) ? req.body.triggeredBy : 'admin';
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     let resolvedServiceRecordId = serviceRecordId || null;
     let serviceContext = {};
@@ -77,7 +83,12 @@ router.post('/trigger', async (req, res, next) => {
       ...serviceContext,
     });
     res.json(request);
-  } catch (err) { next(err); }
+  } catch (err) {
+    // Gate refusals from ReviewService.create (at cap / cooldown / active
+    // cadence / already queued / already reviewed) are 409s, not 500s.
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
+    next(err);
+  }
 });
 
 // POST /tech-trigger — tech triggers review from the field (simpler endpoint)
@@ -98,11 +109,18 @@ router.post('/tech-trigger', async (req, res, next) => {
 
     res.json({
       sent: true,
-      // Tracked direct-Google redirect, not the raw rate page (review audit
-      // 2026-08-07) — same target the cadence SMS links resolve to.
-      reviewUrl: `${publicPortalUrl()}/api/rate/${request.token}/go`,
+      // The gate-respecting tokenized link — same helper the SMS paths use
+      // (/go behind GATE_REVIEW_DIRECT_LINK; with the gate off /go is a rate-
+      // page alias, so main's hardcoded /go form and this resolve identically
+      // when on). Kept over main's literal so the kill switch governs every
+      // emitted link through ONE helper.
+      reviewUrl: ReviewService.unshortenedReviewUrl(request.token),
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // Same 409 mapping as /trigger — the tech app shows the message.
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
+    next(err);
+  }
 });
 
 module.exports = router;
