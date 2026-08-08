@@ -7343,6 +7343,11 @@ const CallRecordingProcessor = {
     // customer / spam / wrong-number calls never take this path.
     const workableUnnamedLead = !customerId && !nonLeadCall
       && hasWorkableLeadSignal({ extracted, phone, voicemail: extracted.is_voicemail === true });
+    // Set when a same-call row is dropped because it is no longer ours (see
+    // the ownership re-read in Step 4b). workableUnnamedLead is false
+    // whenever customerId exists, so the customer-attached rejection needs
+    // its own signal to reach the Needs Review surfacing below (codex P2).
+    let sameCallOwnershipRejected = false;
     // The customer-attached path additionally vetoes voicemails: an existing-
     // customer voicemail terminal-skips before Step 3, so a voicemail reaching
     // here with a customerId means a late/racy phone match — treat it like the
@@ -7860,20 +7865,32 @@ const CallRecordingProcessor = {
             // DIFFERENT customer: keeping leadId would pair this call's PPC
             // attribution, triage activity and notifications with a foreign
             // lead (codex P2). Re-read the owner on a 0-row same-call write
-            // and drop the association when it is not ours; downstream is
-            // already written to skip cleanly on a null leadId, and the
-            // workable-lead card surfaces the call for the office.
+            // and drop the association when it is not ours; downstream skips
+            // cleanly on a null leadId, and sameCallOwnershipRejected drives
+            // the Needs Review card below — workableUnnamedLead cannot,
+            // because it is false whenever customerId exists, so the
+            // customer-attached rejection would otherwise finish silently as
+            // 'processed' with no lead and no card (codex P2).
             if (!enriched && sameCallLeadReuse && leadId) {
               let nowOwned = null;
+              let ownershipVerified = true;
               try {
                 nowOwned = await db('leads').where({ id: leadId }).first('customer_id');
               } catch (ownerErr) {
+                // FAIL CLOSED: an unverifiable owner is treated as foreign
+                // (codex P2). Swallowing the error and keeping leadId left
+                // attribution, voicemail/dropped-call actions and booking
+                // consumers pointing at the very row the guarded write just
+                // refused — the outcome this re-read exists to prevent.
+                ownershipVerified = false;
                 logger.warn(`[call-proc] same-call ownership re-read failed: ${ownerErr.code || ownerErr.name || 'db_error'}`);
               }
               const ownerId = nowOwned?.customer_id ? String(nowOwned.customer_id) : null;
-              if (ownerId && ownerId !== String(customerId || '')) {
-                logger.warn(`[call-proc] same-call lead ${leadId} is now owned by another customer — dropping the association for ${maskSid(callSid)}`);
+              const foreign = ownerId && ownerId !== String(customerId || '');
+              if (!ownershipVerified || foreign) {
+                logger.warn(`[call-proc] same-call lead ${leadId} ${foreign ? 'is now owned by another customer' : 'ownership unverifiable'} — dropping the association for ${maskSid(callSid)}`);
                 leadId = null;
+                sameCallOwnershipRejected = true;
               }
             }
             if (!enriched && existingLead && !sameCallLeadReuse && !phone && !raceRecovered) {
@@ -8302,7 +8319,13 @@ const CallRecordingProcessor = {
     // failed, open review_status, AND write a triage_items row — the Needs Review
     // inbox (admin-triage) is driven by triage_items, not review_status alone, so
     // without this the failed recovery call would never surface for a human.
-    if (workableUnnamedLead && !leadId) {
+    // sameCallOwnershipRejected joins the condition (codex P2): a
+    // customer-ATTACHED retry whose sid row was claimed by another customer
+    // has its association dropped above, but workableUnnamedLead is false
+    // whenever customerId exists — so without this the call finished as a
+    // clean 'processed' with no lead and nothing for a human to look at.
+    // Same flag and lane: the lead this call needed is not available.
+    if ((workableUnnamedLead || sameCallOwnershipRejected) && !leadId) {
       finalStatus = 'lead_creation_failed';
       logger.error(`[call-proc] Customer-less recovery lead did not persist for ${callSid} — flagged lead_creation_failed`);
       try {
