@@ -40,11 +40,44 @@ const CODES = ['REENTRY_SAFETY_CLAIM', 'BANNED_TOPIC'];
 // input than production sees — a small divergence, but the wrong kind in the
 // one instrument that decides whether to enable a blocking gate.
 
+// SENTENCE MODE MEASURES DISCRIMINATION, NOT PRODUCTION PERFORMANCE.
+// Each corpus case is one isolated sentence, but production hands the gate a
+// title, a full article-sized body, and every editable meta field in one call
+// (Codex PR #3295 r4). Two things sentence mode cannot see:
+//   - long-document recall: whether one violating clause is still found in
+//     ~1500 words of compliant copy;
+//   - context-dependent attribution: whether a banned topic is being OFFERED
+//     by Waves or merely discussed, which is decided by surrounding text the
+//     isolated sentence does not carry.
+// --document embeds each fixture in a representative article shell so the call
+// shape matches production. The shell is deliberately compliant and neutral;
+// it changes the DOCUMENT, never the labelled sentence, and its own copy is
+// asserted clean in sentence mode first (see SHELL_SELF_CHECK).
+const DOC_SHELL_BEFORE = [
+  'Southwest Florida homeowners in Manatee, Sarasota, and Charlotte counties deal with pest pressure year round. Warm winters and heavy summer rain keep populations active in months when northern states get a break.',
+  'The most common questions we hear concern timing: when treatment happens, what the technician checks on each visit, and how the schedule shifts between the wet and dry seasons.',
+  'Our technicians inspect entry points, note conducive conditions such as standing water or wood-to-soil contact, and document what they find so the next visit builds on the last one.',
+];
+const DOC_SHELL_AFTER = [
+  'Seasonal timing matters more here than in most of the country. Subtropical humidity keeps activity high, so the interval between visits is set by pest pressure rather than by the calendar.',
+  'If you have questions about your service plan or want to review what the last visit covered, your technician can walk through the notes with you.',
+];
+// The shell must never itself trip a code, or every document-mode case would
+// be contaminated. Verified in sentence mode before any document run.
+const SHELL_SELF_CHECK = [...DOC_SHELL_BEFORE, ...DOC_SHELL_AFTER].join('\n\n');
+
+function buildDocument(text) {
+  return [...DOC_SHELL_BEFORE, text, ...DOC_SHELL_AFTER].join('\n\n');
+}
+
 function parseArgs(argv) {
-  const args = { limit: 40, concurrency: 4, all: false, code: null };
+  const args = {
+    limit: 40, concurrency: 4, all: false, code: null, document: false,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--all') args.all = true;
+    else if (a === '--document') args.document = true;
     else if (a === '--limit') args.limit = Number.parseInt(argv[++i], 10);
     else if (a === '--concurrency') args.concurrency = Number.parseInt(argv[++i], 10);
     else if (a === '--code') args.code = argv[++i];
@@ -224,14 +257,30 @@ async function main() {
   if (args.code) corpus = corpus.filter((c) => c.code === args.code);
   // Motivating cases always run — they are the point of the exercise.
   const motivating = args.code ? MOTIVATING_CASES.filter((c) => c.code === args.code) : MOTIVATING_CASES;
-  const selected = [...motivating, ...(args.all ? corpus : sample(corpus, args.limit))];
+  // Deduplicate by (text, code, verdict) — the motivating set overlaps the
+  // extracted corpus, and the corpus itself restates several regression
+  // fixtures across tests (Codex PR #3295 r4). Without this, a phrase is scored
+  // two or three times and carries weight proportional to how often the test
+  // file happens to repeat it, which is not a property of the phrase. Also
+  // wasted live calls. Motivating cases come first so they survive the dedupe.
+  const seen = new Set();
+  const dedupe = (list) => list.filter((c) => {
+    const key = `${c.code}|${c.shouldBlock}|${c.text.trim()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const selectedRaw = [...motivating, ...(args.all ? corpus : sample(corpus, args.limit))];
+  const selected = dedupe(selectedRaw);
+  const duplicates = selectedRaw.length - selected.length;
 
   console.log(`corpus: ${allCases.length} labelled cases parsed from ${path.relative(REPO, TEST_FILE)}`);
   console.log(`        + ${motivating.length} motivating cases (r21/r22/r23 + approved idiom), always run`);
   if (otherCode) console.log(`        ${otherCode} block(s) assert other guardrail codes — out of scope, not counted`);
   if (unparsed) console.log(`        ${unparsed} block(s) could not be parsed and are NOT counted — coverage is under-reported, never over-reported`);
   if (args.code) console.log(`filter: ${args.code} → ${corpus.length}`);
-  console.log(`running: ${selected.length} case(s) at concurrency ${args.concurrency}${args.all ? '' : ` (sample; --all for every case)`}`);
+  if (duplicates) console.log(`        ${duplicates} duplicate case(s) collapsed — a phrase is scored once, not once per test that restates it`);
+  console.log(`running: ${selected.length} case(s) at concurrency ${args.concurrency}${args.all ? '' : ` (sample; --all for every case)`}${args.document ? ' — DOCUMENT mode' : ''}`);
   console.log(`each case is one live LLM call — expect roughly ${Math.ceil(selected.length / args.concurrency)} sequential round-trips\n`);
 
   // ARM THE GATE FOR THIS PROCESS. It ships dark (off unless GATE_COMPLIANCE
@@ -245,8 +294,21 @@ async function main() {
   const complianceGate = require(path.join(REPO, 'server/services/content/compliance-gate'));
   const guardrails = require(path.join(REPO, 'server/services/content/content-guardrails'));
 
+  // Guard the instrument before trusting it: if the shell itself trips a code,
+  // every document-mode verdict is contaminated and the run means nothing.
+  if (args.document) {
+    const shellCheck = await complianceGate.evaluate({ body: SHELL_SELF_CHECK });
+    const shellFindings = (shellCheck.findings || []).filter((f) => f.severity === 'P0');
+    if (shellFindings.length) {
+      console.error('ABORT: the document shell itself trips a P0 — every document-mode result would be contaminated.');
+      for (const f of shellFindings) console.error(`  ${f.code} ${f.message}`);
+      process.exit(1);
+    }
+    console.log(`document shell self-check: clean (${shellCheck.checked ? 'checked' : 'UNCHECKED — fail-open, results unreliable'})\n`);
+  }
+
   const results = await runPool(selected, args.concurrency, async (c) => {
-    const body = c.text;
+    const body = args.document ? buildDocument(c.text) : c.text;
     let semanticBlocked = null;
     let codeMatched = null;
     let checked = false;
@@ -331,6 +393,13 @@ async function main() {
   }
   console.log('\nGate P0-blocks in production. If precision here is poor, ship advisory-only');
   console.log('(cap findings at P1) and tune the prompt before enabling the block.');
+  if (!args.document) {
+    console.log('\nNOTE: these are SENTENCE-level numbers. Production sends a title, a full');
+    console.log('article-sized body, and all editable meta in ONE call, so this measures');
+    console.log('discrimination — not long-document recall, and not whether a banned topic');
+    console.log('reads as OFFERED vs merely discussed given surrounding context. Run');
+    console.log('--document before using any of this to justify GATE_COMPLIANCE=true.');
+  }
 }
 
 // Only run when invoked directly — requiring this file (tests, tooling) must

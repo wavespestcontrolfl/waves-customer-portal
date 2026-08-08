@@ -965,6 +965,38 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     expect(excepted.ok).toBe(true);
   });
 
+  test('validateFixedBlogFile BLOCKS a remediation that introduces a semantic compliance violation', async () => {
+    // Remediation rewrites body and meta AFTER the publisher's compliance gate
+    // ran, so a fix can introduce exactly the semantic-only violation the
+    // deterministic guard cannot express, and the new head commits on a clean
+    // Codex follow-up (Codex PR #3295 r4).
+    const deps = {
+      factCheckEvaluate: async () => ({ pass: true }),
+      complianceEvaluate: async () => ({
+        pass: false,
+        findings: [{
+          severity: 'P0',
+          code: 'REENTRY_SAFETY_CLAIM',
+          message: '"safe for pets and works after it dries" — dry clause governs "works"',
+        }],
+      }),
+    };
+    const r = await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true }, deps);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/compliance REENTRY_SAFETY_CLAIM/);
+  });
+
+  test('validateFixedBlogFile sends the editable META to the compliance gate, not just the body', async () => {
+    let seenBody = null;
+    const deps = {
+      factCheckEvaluate: async () => ({ pass: true }),
+      complianceEvaluate: async ({ body }) => { seenBody = body; return { pass: true }; },
+    };
+    await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true }, deps);
+    expect(seenBody).toContain('Bait stations target the colony itself.');
+    expect(seenBody).toContain(TERMITE_FM.meta_description);
+  });
+
   test('runRemediationForPr threads ctx.operatorFaqException into the content-gate re-run', async () => {
     let optsSeen = null;
     const spy = (md, opts) => { optsSeen = opts; return { ok: true }; };
