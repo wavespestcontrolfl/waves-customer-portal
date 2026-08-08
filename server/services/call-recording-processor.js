@@ -2380,6 +2380,82 @@ function dropFilledLeadColumns(leadUpdates, lockedLead) {
   return out;
 }
 
+// Re-decide the CONDITIONAL (non-identity) lead fields against the LOCKED
+// row (codex P1 r22): every one of these decisions is made from `current`,
+// read before the enrichment transaction takes its row lock, and a staff
+// edit or a concurrent call in that gap would otherwise be clobbered by the
+// stale payload despite the lock — a filled service_interest overwritten, a
+// re-parked status reopened, a pulled-in follow-up pushed out, and the
+// needs_confirmation union computed against reasons that no longer exist.
+// The rolling per-call fields (transcript_summary, this call's own
+// extraction payload) refresh unconditionally by design. Dropped or
+// recomputed keys also stay out of the rollback ledgers, exactly like the
+// identity drops. Pure: returns the reconciled payload plus what the call
+// site must sync (the re-judged contact completeness; whether the
+// service_interest fill was dropped, so the persisted-label pair the V2
+// reassert consumes can be nulled — its WHERE is self-guarded, but the
+// label must tell the truth). Runs AFTER dropFilledLeadColumns, so a
+// dropped identity key means the locked value is the live one.
+function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null } = {}) {
+  if (!lockedLead || !updates) return { updates, contact: null, serviceInterestDropped: false };
+  const stillEmpty = (v) => v === null || v === undefined || v === '';
+  const out = { ...updates };
+  let serviceInterestDropped = false;
+  // service_interest is fill-if-empty.
+  if (Object.prototype.hasOwnProperty.call(out, 'service_interest') && !stillEmpty(lockedLead.service_interest)) {
+    delete out.service_interest;
+    serviceInterestDropped = true;
+  }
+  // urgency: 'urgent' is upgrade-only and always applies; 'normal' was a
+  // fill-if-empty decision.
+  if (out.urgency === 'normal' && !stillEmpty(lockedLead.urgency)) delete out.urgency;
+  // The 'unresponsive' → 'new' reopen only holds while the row is still
+  // parked as unresponsive.
+  if (Object.prototype.hasOwnProperty.call(out, 'status') && lockedLead.status !== 'unresponsive') delete out.status;
+  // The quote-due follow-up is pull-in-only vs the live row.
+  if (Object.prototype.hasOwnProperty.call(out, 'next_follow_up_at')) {
+    const lockedFollowUp = lockedLead.next_follow_up_at ? new Date(lockedLead.next_follow_up_at) : null;
+    if (lockedFollowUp && !isNaN(lockedFollowUp.getTime()) && lockedFollowUp <= out.next_follow_up_at) {
+      delete out.next_follow_up_at;
+    }
+  }
+  // extracted_data replaces wholesale, but two of its members and
+  // is_qualified derive from the pre-lock row: re-union needs_confirmation
+  // with the LOCKED row's standing reasons, and re-judge contact
+  // completeness with the locked values behind this pass's effective fills.
+  let contact = null;
+  if (Object.prototype.hasOwnProperty.call(out, 'extracted_data')) {
+    let payload = null;
+    try { payload = JSON.parse(out.extracted_data); } catch { payload = null; }
+    if (payload) {
+      const lockedPriorNeedsConfirmation = (() => {
+        try {
+          const data = typeof lockedLead.extracted_data === 'string'
+            ? JSON.parse(lockedLead.extracted_data)
+            : (lockedLead.extracted_data || {});
+          return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
+        } catch { return []; }
+      })();
+      const remergedNeedsConfirmation = mergeNeedsConfirmation(lockedPriorNeedsConfirmation, bridgeNeedsConfirmation);
+      contact = leadContactCompleteness({
+        first_name: out.first_name ?? lockedLead.first_name,
+        last_name: out.last_name ?? lockedLead.last_name,
+        service_address: out.address ?? lockedLead.address,
+        email: out.email ?? lockedLead.email,
+      });
+      delete payload.needs_confirmation;
+      delete payload.missing_for_qualification;
+      if (remergedNeedsConfirmation.length) payload.needs_confirmation = remergedNeedsConfirmation;
+      if (contact.missing.length) payload.missing_for_qualification = contact.missing;
+      out.extracted_data = JSON.stringify(payload);
+      if (Object.prototype.hasOwnProperty.call(out, 'is_qualified')) {
+        out.is_qualified = ['hot', 'warm'].includes(leadQuality) && contact.complete;
+      }
+    }
+  }
+  return { updates: out, contact, serviceInterestDropped };
+}
+
 // Postgres casts for the per-field compare-and-swap — parameters arrive as
 // text; non-text columns need explicit casts for IS NOT DISTINCT FROM.
 const STAMPED_LEAD_FIELD_CASTS = {
@@ -2404,13 +2480,41 @@ const STAMPED_LEAD_FIELD_CASTS = {
 // instead of finalizing half-reconciled.
 async function clearStampAndRestoreLead(call, procToken, callSid) {
   return db.transaction(async (trx) => {
-    const fresh = await trx('call_log').where({ id: call.id }).first('metadata');
-    let md = {};
-    try {
-      md = typeof fresh?.metadata === 'string' ? JSON.parse(fresh.metadata) : (fresh?.metadata || {});
-    } catch { md = {}; }
-    const stampedLeadId = md?.lead_id ? String(md.lead_id) : null;
+    const readOwnMd = async () => {
+      const fresh = await trx('call_log').where({ id: call.id }).first('metadata');
+      try {
+        return typeof fresh?.metadata === 'string' ? JSON.parse(fresh.metadata) : (fresh?.metadata || {});
+      } catch { return {}; }
+    };
+    let md = await readOwnMd();
+    let stampedLeadId = md?.lead_id ? String(md.lead_id) : null;
     if (!stampedLeadId) return true;
+    // Reconciliation is SERIALIZED on the stamped lead's row — the same
+    // FOR UPDATE lock the stamp+enrich transaction takes, acquired BEFORE
+    // the call_log clear so every stamp writer follows one lock order
+    // (leads → call_log) and two transactions can never deadlock. Without
+    // it, two retries concurrently rejecting calls stamped to the same
+    // lead raced (codex P1 r22): the later call could clear its stamp and
+    // restore first, while the earlier transaction still saw it as a live
+    // successor, skipped every overlapping field, and left this call's
+    // AI-written values on the lead with both calls finishing rejected.
+    // Own metadata is RE-READ under the lock — a sibling's reconciliation
+    // may have re-parented THIS call's baseline while we waited — and the
+    // successor scan below is consistent for the same reason: nothing can
+    // stamp, clear, or re-parent against this lead without the lock.
+    for (let attempt = 0; ; attempt += 1) {
+      await trx('leads').where({ id: stampedLeadId }).forUpdate().first();
+      md = await readOwnMd();
+      const lockedStampedLeadId = md?.lead_id ? String(md.lead_id) : null;
+      if (!lockedStampedLeadId) return true;
+      if (lockedStampedLeadId === stampedLeadId) break;
+      // The stamp moved to a different lead while we waited (only this
+      // call's own token holder can do that — vanishingly rare). Re-lock
+      // the lead it points at now; give up to the caller's retry path
+      // rather than looping unbounded.
+      stampedLeadId = lockedStampedLeadId;
+      if (attempt >= 2) throw new Error('call→lead stamp kept moving during reconciliation');
+    }
     const priorState = md.lead_prior_state && typeof md.lead_prior_state === 'object' ? md.lead_prior_state : null;
     const writtenState = md.lead_written_state && typeof md.lead_written_state === 'object' ? md.lead_written_state : null;
     const ownStampedAt = typeof md.lead_stamped_at === 'string' ? md.lead_stamped_at : null;
@@ -8161,8 +8265,20 @@ const CallRecordingProcessor = {
             // lead_prior_state is preserved so the ORIGINAL baseline
             // survives re-enrichment; lead_written_state always refreshes
             // to THIS pass's payload.
-            const stampThisPass = !phone && existingLead && !raceRecovered
-              && !(call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid);
+            // ALSO taken when a retry GAINED a phone but is enriching the
+            // lead its earlier phone-less attempt already stamped (codex P1
+            // r22): the stamp is deliberately retained in that case (see the
+            // maintenance block), so this pass's writes — the phone fill,
+            // the rolling summary/extraction, qualification — must land in
+            // the same fenced transaction and refresh lead_written_state,
+            // or a later rejection's CAS cannot match and roll them back.
+            // A race-recovered row is freshly minted, so a pre-existing
+            // stamp can never point at it; the sid-match exclusion cannot
+            // co-occur with a stamp either (stamps are only ever written
+            // for different-sid leads).
+            const stampThisPass = (!phone && existingLead && !raceRecovered
+              && !(call.twilio_call_sid && existingLead.twilio_call_sid === call.twilio_call_sid))
+              || (!raceRecovered && !!leadId && currentStampedLeadId === String(leadId));
             if (stampThisPass) {
               // A prior stamp pointing at a DIFFERENT lead must be settled
               // (cleared + its lead's state restored) BEFORE the
@@ -8209,7 +8325,17 @@ const CallRecordingProcessor = {
                 // stale fill. Dropping the key here also keeps it out of
                 // the rollback ledgers below — a field this call never
                 // wrote must never be restored by its rejection.
-                const effectiveUpdates = dropFilledLeadColumns(leadUpdates, lockedLead);
+                const reconciled = reconcileConditionalLeadFieldsUnderLock(
+                  dropFilledLeadColumns(leadUpdates, lockedLead),
+                  lockedLead,
+                  { bridgeNeedsConfirmation, leadQuality: extracted.lead_quality },
+                );
+                if (reconciled.serviceInterestDropped) {
+                  persistedServiceInterestLabel = null;
+                  persistedServiceInterestExtras = null;
+                }
+                if (reconciled.contact) contact = reconciled.contact;
+                const effectiveUpdates = reconciled.updates;
                 // Is this a CHRONOLOGICAL restamp — a force-reprocess of an
                 // older call after a DIFFERENT call enriched the same reused
                 // lead (codex P2 r17)? Merging ledgers would keep this
@@ -12083,6 +12209,7 @@ CallRecordingProcessor._test = {
   findReusableCallLead,
   applySameCallLeadEligibility,
   dropFilledLeadColumns,
+  reconcileConditionalLeadFieldsUnderLock,
   FILL_ONLY_LEAD_FIELDS,
   parseStampedLeadId,
   snapshotStampedLeadStates,

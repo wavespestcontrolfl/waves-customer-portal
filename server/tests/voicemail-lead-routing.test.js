@@ -518,3 +518,106 @@ describe('dropFilledLeadColumns — fill-only re-decision under the row lock', (
     );
   });
 });
+
+describe('reconcileConditionalLeadFieldsUnderLock — conditional re-decision under the row lock', () => {
+  const { reconcileConditionalLeadFieldsUnderLock } = CallRecordingProcessor._test;
+
+  test('drops the service_interest fill when the locked row already carries one, and says so', () => {
+    // Pre-lock `current` had service_interest empty; the office filled it in
+    // the gap. The stale fill must not clobber it, and the call site needs
+    // the flag to null the persisted-label pair the V2 reassert consumes.
+    const { updates, serviceInterestDropped } = reconcileConditionalLeadFieldsUnderLock(
+      { service_interest: 'Pest Control', transcript_summary: 'ants' },
+      { service_interest: 'Termite Inspection' },
+    );
+
+    expect(updates).not.toHaveProperty('service_interest');
+    expect(serviceInterestDropped).toBe(true);
+    expect(updates.transcript_summary).toBe('ants'); // rolling field → untouched
+  });
+
+  test("keeps the 'urgent' upgrade but drops a 'normal' fill against a locked urgency", () => {
+    const urgent = reconcileConditionalLeadFieldsUnderLock(
+      { urgency: 'urgent' },
+      { urgency: 'normal' },
+    );
+    expect(urgent.updates.urgency).toBe('urgent'); // upgrade-only always applies
+
+    const normalFill = reconcileConditionalLeadFieldsUnderLock(
+      { urgency: 'normal' },
+      { urgency: 'urgent' },
+    );
+    expect(normalFill.updates).not.toHaveProperty('urgency'); // fill decided pre-lock, row no longer empty
+  });
+
+  test('drops the unresponsive→new reopen when the office moved the lead in the gap', () => {
+    const { updates } = reconcileConditionalLeadFieldsUnderLock(
+      { status: 'new' },
+      { status: 'contacted' },
+    );
+    expect(updates).not.toHaveProperty('status');
+  });
+
+  test('keeps the reopen while the locked row is still unresponsive', () => {
+    const { updates } = reconcileConditionalLeadFieldsUnderLock(
+      { status: 'new' },
+      { status: 'unresponsive' },
+    );
+    expect(updates.status).toBe('new');
+  });
+
+  test('quote-due follow-up stays pull-in-only vs the locked row', () => {
+    const due = new Date('2026-08-08T21:00:00Z');
+    const pulledIn = reconcileConditionalLeadFieldsUnderLock(
+      { next_follow_up_at: due },
+      { next_follow_up_at: '2026-08-10T14:00:00Z' }, // later → pull in stands
+    );
+    expect(pulledIn.updates.next_follow_up_at).toBe(due);
+
+    const alreadyEarlier = reconcileConditionalLeadFieldsUnderLock(
+      { next_follow_up_at: due },
+      { next_follow_up_at: '2026-08-08T15:00:00Z' }, // earlier under the lock → stays put
+    );
+    expect(alreadyEarlier.updates).not.toHaveProperty('next_follow_up_at');
+  });
+
+  test('re-unions needs_confirmation with the LOCKED row and re-judges qualification', () => {
+    // Pre-lock merge saw no standing reasons; a concurrent call added one.
+    // Staff also CLEARED the email in the gap — qualification must be
+    // re-judged against the locked identity, not the pre-lock snapshot.
+    const stalePayload = JSON.stringify({ sentiment: 'positive', needs_confirmation: ['email_unverified'] });
+    const { updates, contact } = reconcileConditionalLeadFieldsUnderLock(
+      { extracted_data: stalePayload, is_qualified: true },
+      {
+        extracted_data: JSON.stringify({ needs_confirmation: ['address_unverified'] }),
+        first_name: 'Jeff', last_name: 'Brooks', address: '1 Palm Ct', email: '',
+      },
+      { bridgeNeedsConfirmation: ['email_unverified'], leadQuality: 'hot' },
+    );
+
+    const payload = JSON.parse(updates.extracted_data);
+    expect(payload.needs_confirmation).toEqual(expect.arrayContaining(['address_unverified', 'email_unverified']));
+    expect(payload.needs_confirmation).toHaveLength(2);
+    expect(payload.missing_for_qualification).toEqual(['email']);
+    expect(updates.is_qualified).toBe(false); // hot, but contact incomplete under the lock
+    expect(contact.complete).toBe(false);
+    expect(payload.sentiment).toBe('positive'); // this call's own payload survives
+  });
+
+  test('this pass\'s effective fills count toward qualification', () => {
+    const { updates } = reconcileConditionalLeadFieldsUnderLock(
+      { email: 'j@example.com', extracted_data: JSON.stringify({}), is_qualified: false },
+      { first_name: 'Jeff', last_name: 'Brooks', address: '1 Palm Ct', email: null },
+      { bridgeNeedsConfirmation: [], leadQuality: 'warm' },
+    );
+    expect(updates.is_qualified).toBe(true);
+    expect(JSON.parse(updates.extracted_data)).not.toHaveProperty('missing_for_qualification');
+  });
+
+  test('a missing locked row passes through untouched', () => {
+    const leadUpdates = { service_interest: 'Pest Control' };
+    const out = reconcileConditionalLeadFieldsUnderLock(leadUpdates, null);
+    expect(out.updates).toBe(leadUpdates);
+    expect(out.serviceInterestDropped).toBe(false);
+  });
+});
