@@ -2841,7 +2841,7 @@ describe('codex #3235 r9 — canonical liveness + late-booked follow-up', () => 
     expect(JSON.parse(seq.plan)).toHaveLength(1);
     expect(JSON.parse(seq.plan)[0].templateKey).toBe('first_treatment_ask');
     const body = mockSendCustomerMessage.mock.calls[0][0].body;
-    expect(body).toMatch(/Treatment 1 done/);
+    expect(body).toMatch(/First treatment's done/);
   });
 });
 
