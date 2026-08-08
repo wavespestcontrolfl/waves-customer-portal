@@ -33,6 +33,7 @@ const BASE_DATA = {
   proposal: {
     enabled: true,
     synthesized: false,
+    pestRecurringOnly: true,
     title: 'Commercial Service Proposal',
     preparedFor: 'Pat Example',
     propertyAddress: '600 Sample Plaza Dr, Sarasota, FL 34299',
@@ -72,7 +73,7 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('Commercial Service Proposal');
     expect(text).toContain('Recurring service plan');
     expect(text).toContain('$513.60');
-    expect(text).toContain('What your commercial service includes');
+    expect(text).toContain('What your commercial pest service includes');
     expect(text).toContain('Valid through');
     // Commercial terms only — no residential guarantee claims anywhere.
     expect(text).toContain('No long-term contract · Auto Pay billing · Cancel your plan in the app');
@@ -121,7 +122,7 @@ describe('EstimateProposalDocument', () => {
     // Residential pest inclusions stack rides along.
     expect(text).toContain('Protected 4× a year — full perimeter, entry points, eaves & harborage zones, every visit');
     expect(text).toContain('approve online');
-    expect(text).not.toContain('What your commercial service includes');
+    expect(text).not.toContain('What your commercial pest service includes');
   });
 
   it('suppresses plan roll-ups for synthesized per-application plans (AGENTS.md price copy)', () => {
@@ -161,6 +162,35 @@ describe('EstimateProposalDocument', () => {
     expect(text).not.toContain('First-year total');
     expect(text).not.toContain('/month across the year');
     expect(text).not.toContain('$376.00');
+  });
+
+  it('keeps non-pest commercial proposals terms-neutral with no pest inclusions', () => {
+    const termite = {
+      ...BASE_DATA,
+      proposal: {
+        ...BASE_DATA.proposal,
+        pestRecurringOnly: false,
+        buildings: [{
+          name: '600 Sample Plaza Dr',
+          note: null,
+          lineItems: [{
+            description: 'Termite bait station monitoring',
+            quantity: 1,
+            unitPrice: 200,
+            amount: 200,
+            frequency: 'quarterly',
+            frequencyLabel: 'Quarterly',
+            taxable: false,
+          }],
+        }],
+      },
+    };
+    const { container } = render(<EstimateProposalDocument data={termite} token="tok-123" />);
+    const text = container.textContent;
+    expect(text).toContain('Termite bait station monitoring');
+    expect(text).not.toContain('What your commercial pest service includes');
+    expect(text).not.toContain('Cancel your plan in the app');
+    expect(text).toContain('Licensed & insured · Satisfaction guaranteed');
   });
 
   it('keeps a plain Total for one-time-only documents', () => {

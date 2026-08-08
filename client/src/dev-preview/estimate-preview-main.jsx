@@ -424,6 +424,7 @@ function proposalScenario() {
     proposal: {
       enabled: true,
       synthesized: false,
+      pestRecurringOnly: true,
       title: 'Commercial Service Proposal',
       preparedFor: 'Morgan Example',
       propertyAddress: '600 Sample Plaza Dr, Sarasota, FL 34299',

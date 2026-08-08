@@ -117,14 +117,16 @@ export default function EstimateProposalDocument({ data, token }) {
   }
 
   // Distinct service stacks across the proposal lines. Commercial estimates
-  // always read the commercial stack — the mapping is deliberate here (not
-  // via the page's release flag) because this document is itself gated by
-  // GATE_ESTIMATE_DOC_PDF. Residential lines map per-line through
-  // glassServiceSlug; unmappable lines simply contribute no stack.
+  // read the commercial PEST stack only when the server classified this
+  // proposal's recurring lines as pest work (proposal.pestRecurringOnly —
+  // truth-scope rule: a termite/rodent/mixed commercial proposal shows its
+  // line items with NO inclusions claims). Residential lines map per-line
+  // through glassServiceSlug; unmappable lines simply contribute no stack.
+  const pestRecurringOnly = proposal?.pestRecurringOnly === true;
   const inclusionStacks = useMemo(() => {
     if (isCommercial) {
-      const stack = glassRowInclusions('commercial_pest');
-      return stack ? [{ key: 'commercial_pest', title: 'What your commercial service includes', items: stack }] : [];
+      const stack = pestRecurringOnly ? glassRowInclusions('commercial_pest') : null;
+      return stack ? [{ key: 'commercial_pest', title: 'What your commercial pest service includes', items: stack }] : [];
     }
     const seen = new Map();
     for (const building of buildings) {
@@ -140,15 +142,18 @@ export default function EstimateProposalDocument({ data, token }) {
       }
     }
     return [...seen.values()];
-  }, [isCommercial, buildings]);
+  }, [isCommercial, pestRecurringOnly, buildings]);
 
   // Terms line — only claims the estimate page itself already makes for the
-  // same population: commercial gets the commercial terms, recurring
-  // residential gets the shared recurring micro line, one-time-only quotes
-  // get the neutral licensed/guaranteed line (their category packs carry
-  // their own callback periods online).
+  // same population: commercial PEST plans get the commercial terms, other
+  // commercial work (termite/rodent/mixed — pestRecurringOnly false) stays
+  // terms-neutral, recurring residential gets the shared recurring micro
+  // line, one-time-only quotes get the neutral licensed/guaranteed line
+  // (their category packs carry their own callback periods online).
   const termsLine = isCommercial
-    ? 'No long-term contract · Auto Pay billing · Cancel your plan in the app'
+    ? (pestRecurringOnly
+      ? 'No long-term contract · Auto Pay billing · Cancel your plan in the app'
+      : 'Licensed & insured · Satisfaction guaranteed')
     : estimate.isOneTimeOnly === true
       ? 'Licensed & insured · Satisfaction guaranteed'
       : GLASS_COPY.ctaMicro;

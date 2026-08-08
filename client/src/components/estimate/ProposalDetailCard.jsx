@@ -45,11 +45,15 @@ export default function ProposalDetailCard({ proposal }) {
   if (!proposal || !Array.isArray(proposal.buildings) || !proposal.buildings.length) return null;
   const totals = proposal.totals || {};
   const multiBuilding = proposal.buildings.length > 1;
-  // The commercial inclusions stack. The gate lives server-side: /data only
-  // ships a `proposal` block under GATE_ESTIMATE_COMMERCIAL_GLASS, and this
-  // card renders nothing without one. An unknown key would return null and
-  // simply hide the section — never residential claims.
-  const inclusions = glassRowInclusions('commercial_pest') || null;
+  // The commercial PEST inclusions stack — only when the server classified
+  // this proposal's recurring lines as pest work (proposal.pestRecurringOnly,
+  // truth-scope rule): a termite/rodent/mixed proposal must not promise
+  // recurring pest treatment or cancellable-plan terms, so it shows its line
+  // items with no inclusions block at all. The gate lives server-side: /data
+  // only ships a `proposal` block under GATE_ESTIMATE_COMMERCIAL_GLASS.
+  const inclusions = proposal.pestRecurringOnly === true
+    ? (glassRowInclusions('commercial_pest') || null)
+    : null;
 
   return (
     <div style={estimateCard()}>
@@ -126,7 +130,7 @@ export default function ProposalDetailCard({ proposal }) {
       {inclusions ? (
         <div style={estimateInnerBox({ marginTop: 16, padding: '16px 16px' })}>
           <div style={{ fontSize: 14, fontWeight: 800, color: W.blueDeeper, marginBottom: 6 }}>
-            What your commercial service includes
+            What your commercial pest service includes
           </div>
           <ul style={{ margin: 0, paddingLeft: 20 }}>
             {inclusions.map((line) => (

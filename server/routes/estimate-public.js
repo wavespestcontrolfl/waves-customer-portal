@@ -2565,6 +2565,32 @@ function fmtMoney(n) {
 // Price label for the "Estimate viewed" admin notification. One-time-only
 // estimates (pre-slab, WDO) have monthly_total 0/null — rendering them with
 // monthly framing produced "$0/mo as proposed" in the bell.
+// Truth-scope classification for the commercial copy stacks (SSR card +
+// /data proposal projection): the pest inclusions and no-contract/Auto-Pay
+// terms only apply when the proposal's RECURRING lines are actually pest
+// work. Authored lines are free text, so classify conservatively — an
+// explicit non-pest service word disqualifies the whole proposal; wholly
+// unclassified lines lean on the estimate's own service identity; anything
+// else stays neutral (fail closed on claims — a termite/rodent/mixed
+// proposal must never promise recurring pest treatment or cancellable-plan
+// terms it doesn't carry).
+function proposalPestRecurringOnly(proposal, estimate = {}) {
+  const classify = (description) => {
+    const raw = String(description || '').toLowerCase();
+    if (/termite|wdo|wood[- ]destroying|rodent|mosquito|lawn|turf|tree|shrub|foam|bed ?bug|flea|exclusion|bait station/.test(raw)) return 'nonpest';
+    if (/pest/.test(raw)) return 'pest';
+    return 'unclassified';
+  };
+  const recurringClasses = (proposal?.buildings || [])
+    .flatMap((building) => (building.lineItems || []))
+    .filter((item) => item.frequency !== 'one_time')
+    .map((item) => classify(item.description));
+  const identityIsPest = /pest/.test(String(estimate.service_interest || '').toLowerCase());
+  return recurringClasses.length > 0
+    && !recurringClasses.includes('nonpest')
+    && (recurringClasses.includes('pest') || identityIsPest);
+}
+
 function proposalPriceLabel(estimate) {
   const monthly = Number(estimate?.monthly_total || 0);
   if (monthly > 0) return `${fmtMoney(monthly)}/mo as proposed`;
@@ -5346,8 +5372,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-monthly-note">Averages ${fmtMoney(proposalCardTotals.monthlyEquivalent)}/month across the year for the recurring service.</div>` : ''}
     </div>
     ${proposalForCard.terms ? `<div class="proposal-terms">${escapeHtml(proposalForCard.terms)}</div>` : ''}
-    <div class="proposal-included">
-      <div class="proposal-included-title">What your commercial service includes</div>
+    ${proposalPestRecurringOnly(proposalForCard, est) ? `<div class="proposal-included">
+      <div class="proposal-included-title">What your commercial pest service includes</div>
       <ul>
         <li>Recurring exterior treatment &mdash; foundation, entry points, and grounds on your scheduled cadence</li>
         <li>Interior treatment included on request &mdash; no extra charge, no surprise fees</li>
@@ -5356,7 +5382,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <li>Every visit documented &mdash; time on site, areas treated, and products applied</li>
         <li>No long-term contract &mdash; Auto Pay billing, cancel your plan right in the app</li>
       </ul>
-    </div>
+    </div>` : ''}
   </section>`;
       }
     } catch (e) {
@@ -20262,6 +20288,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         proposalPublicView = {
           enabled: proposalForView.enabled === true,
           synthesized: proposalForView.synthesized === true,
+          // Drives the commercial inclusions/terms stacks client-side — see
+          // proposalPestRecurringOnly's truth-scope classification.
+          pestRecurringOnly: proposalPestRecurringOnly(proposalForView, estimate),
           title: proposalForView.title,
           preparedFor: proposalForView.preparedFor,
           propertyAddress: proposalForView.propertyAddress,

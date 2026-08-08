@@ -5,6 +5,7 @@ import ProposalDetailCard from './ProposalDetailCard';
 
 const PROPOSAL = {
   enabled: true,
+  pestRecurringOnly: true,
   title: 'Commercial Service Proposal',
   taxLabel: 'Sales tax',
   buildings: [{
@@ -41,7 +42,7 @@ describe('ProposalDetailCard', () => {
     expect(screen.getByText('$480.00')).toBeTruthy();
     expect(screen.getByText('Sales tax')).toBeTruthy();
     expect(screen.getByText('$513.60')).toBeTruthy();
-    expect(screen.getByText('What your commercial service includes')).toBeTruthy();
+    expect(screen.getByText('What your commercial pest service includes')).toBeTruthy();
     expect(screen.getByText(/Interior treatment included on request/)).toBeTruthy();
   });
 
@@ -57,6 +58,12 @@ describe('ProposalDetailCard', () => {
     expect(empty.container.firstChild).toBeNull();
     const noBuildings = render(<ProposalDetailCard proposal={{ enabled: true, buildings: [] }} />);
     expect(noBuildings.container.firstChild).toBeNull();
+  });
+
+  it('hides the inclusions block when the proposal is not pest-recurring-only', () => {
+    const { container } = render(<ProposalDetailCard proposal={{ ...PROPOSAL, pestRecurringOnly: false }} />);
+    expect(container.textContent).not.toContain('What your commercial pest service includes');
+    expect(container.textContent).not.toContain('Tenant-reported pests');
   });
 
   it('names buildings only on multi-building proposals', () => {

@@ -22,7 +22,7 @@ const AUTHORED_PROPOSAL = {
     name: '600 Sample Plaza Dr',
     note: null,
     lineItems: [{
-      description: 'Recurring service plan',
+      description: 'Quarterly pest control — recurring service plan',
       quantity: 1,
       unitPrice: 120,
       frequency: 'quarterly',
@@ -45,11 +45,11 @@ const BASE_ESTIMATE = {
 describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => {
   test('authored proposal itemizes on-page: line items, totals, commercial inclusions', () => {
     const html = renderPage('proposal-card-token', BASE_ESTIMATE, { proposal: AUTHORED_PROPOSAL });
-    expect(html).toContain('Recurring service plan');
+    expect(html).toContain('Quarterly pest control — recurring service plan');
     expect(html).toContain('First-year total');
     // 120 × 4 = 480.00 annual; the card itemizes the year total.
     expect(html).toContain('480.00');
-    expect(html).toContain('What your commercial service includes');
+    expect(html).toContain('What your commercial pest service includes');
     expect(html).toContain('No long-term contract');
     // The proposal hero copy still leads the page.
     expect(html).toContain('your formal proposal is ready');
@@ -57,7 +57,7 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
 
   test('commercial inclusions carry no residential guarantee claims', () => {
     const html = renderPage('proposal-claims-token', BASE_ESTIMATE, { proposal: AUTHORED_PROPOSAL });
-    const included = html.slice(html.indexOf('What your commercial service includes'));
+    const included = html.slice(html.indexOf('What your commercial pest service includes'));
     const inclusionsBlock = included.slice(0, included.indexOf('</section>'));
     expect(inclusionsBlock).not.toMatch(/90-day/i);
     expect(inclusionsBlock).not.toMatch(/money-back/i);
@@ -66,10 +66,33 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
 
   test('an enabled flag with no authored buildings renders no proposal card', () => {
     const html = renderPage('proposal-degenerate-token', BASE_ESTIMATE, { proposal: { enabled: true } });
-    expect(html).not.toContain('What your commercial service includes');
+    expect(html).not.toContain('What your commercial pest service includes');
     // The degenerate flag still gets the formal-proposal hero (pre-existing
     // behavior) — only the itemized card requires authored buildings.
     expect(html).toContain('your formal proposal is ready');
+  });
+
+  test('a non-pest commercial proposal renders its lines with NO pest inclusions or plan terms', () => {
+    const termiteProposal = {
+      ...AUTHORED_PROPOSAL,
+      buildings: [{
+        name: '600 Sample Plaza Dr',
+        note: null,
+        lineItems: [{
+          description: 'Termite bait station monitoring',
+          quantity: 1,
+          unitPrice: 200,
+          frequency: 'quarterly',
+          taxable: false,
+        }],
+      }],
+    };
+    const html = renderPage('proposal-termite-token', BASE_ESTIMATE, { proposal: termiteProposal });
+    // The line items still itemize…
+    expect(html).toContain('Termite bait station monitoring');
+    // …but the pest inclusions/terms stack stays out (truth-scope rule).
+    expect(html).not.toContain('What your commercial pest service includes');
+    expect(html).not.toContain('Tenant-reported pests handled between visits');
   });
 
   test('non-proposal estimates render no proposal card', () => {
@@ -78,7 +101,7 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
     }, {
       result: { recurring: { services: [{ name: 'Quarterly Pest Control', mo: 60, annual: 720 }] } },
     });
-    expect(html).not.toContain('What your commercial service includes');
+    expect(html).not.toContain('What your commercial pest service includes');
   });
 });
 
