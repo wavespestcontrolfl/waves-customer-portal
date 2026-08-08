@@ -2924,6 +2924,9 @@ const REENTRY_SAFETY_SRCS = [
   // Adverbial form: "you can safely re-enter/return/walk" — same claim,
   // same conditional-idiom exemption path (contains "safe").
   "\\bsafely\\s+(?:re-?enter\\w*|return\\w*|go\\s+back|walk\\w*|play\\w*|be\\s+(?:in|on|inside|around))\\b",
+  // Verb-then-adverb order (Codex PR r12 audit): "the pesticide can be
+  // used safely around pets" is the same unconditional claim.
+  "\\b(?:used?|apply(?:ing)?|applied|applies|spray(?:ed|ing|s)?)\\s+safely\\b",
   "\\bre-?entry\\s+(?:is|becomes?|will\\s+be)\\s+(?:completely\\s+|totally\\s+|perfectly\\s+)?(?:safe|harmless|risk[-\\s]?free)\\b",
   "\\bsafe\\s+(?:for\\s+)?re-?entry\\b",
   // "the treatment/product/pesticide/lawn is safe (for kids/pets/around …)"
@@ -2989,7 +2992,9 @@ const REENTRY_SAFETY_SRCS = [
   // minutes"), duration-then-action ("wait 30 minutes before re-entering",
   // "allow 30 minutes of drying time"), and keep-off forms ("keep pets off
   // the lawn for 30 minutes").
-  `\\b(?:re-?enter|re-?entry|re-?occup\\w+|return\\w*|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
+  // "once 30 minutes have passed" is the same fixed figure (Codex PR
+  // r12 audit) — `once` joins the preposition set.
+  `\\b(?:re-?enter|re-?entry|re-?occup\\w+|return\\w*|walk\\s+on|go\\s+back)\\b[^.!?\\n]{0,40}?\\b(?:in|within|after|once)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`,
   // A bounded qualifier may sit between the drying verb and the
   // preposition (Codex PR r8: "dries completely within 45 minutes").
   { src: `\\bdr(?:y|ies|ied)\\s+(?:\\w+\\s+){0,2}?(?:in|within|after)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
@@ -3185,7 +3190,7 @@ function reentrySafetyClaimFinding(text) {
 // as trapping/removal (Codex PR r5: "our wildlife relocation service",
 // "we offer wildlife exclusion"). "animal control" stays out — it names
 // the county agency in legal referral copy ("contact animal control").
-const BANNED_TOPIC_CORE_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|wildlife\\s+(?:trapping|removal|control|relocation|exclusion|eviction)|animal\\s+(?:trapping|removal|relocation|exclusion|eviction)|(?:raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\s+(?:removal|trapping|eviction|exclusion|control|relocation)|door[-\\s]?to[-\\s]?door)";
+const BANNED_TOPIC_CORE_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|wildlife\\s+(?:trapping|removal|control|relocation|exclusion|eviction|extraction)|animal\\s+(?:trapping|removal|relocation|exclusion|eviction|extraction)|(?:raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\s+(?:removal|trapping|eviction|exclusion|control|relocation|extraction)|door[-\\s]?to[-\\s]?door)";
 const BANNED_TOPIC_SRC = `(?:${BANNED_TOPIC_CORE_SRC}|insulation)`;
 // The object gap between the service verb and the topic must be
 // negation-guarded exactly like the pre-verb filler — otherwise "We do NOT
@@ -3249,7 +3254,7 @@ const BANNED_TOPIC_SRCS = [
   // door-to-door" — ownership expressed through the ACTION verb rather
   // than offer/provide.
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}installs?\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?|extracts?|extracting)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
   // EXCLUDE also means "omit" (Codex PR r6): only a physical
   // location/entry-point tail makes it the wildlife-exclusion service —
   // "we exclude wildlife examples from this comparison" stays legal.

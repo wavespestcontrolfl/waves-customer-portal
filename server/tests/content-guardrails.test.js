@@ -3306,6 +3306,13 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(linked.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('used-safely order and once-N-minutes prepositions block (Codex PR r12 audit)', () => {
+    const usedSafely = guardrails.evaluate({ body: 'Our pesticide can be used safely around pets.' }, {});
+    expect(usedSafely.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const oncePassed = guardrails.evaluate({ body: 'You may return once 30 minutes have passed after treatment.' }, {});
+    expect(oncePassed.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('comparative duration qualifiers and reoccupy forms block (Codex PR r12)', () => {
     const under = guardrails.evaluate({ body: 'The pesticide dries in under 30 minutes.' }, {});
     expect(under.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3643,6 +3650,13 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(letUs.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
     const bold = guardrails.evaluate({ body: 'We offer **wildlife removal** services.' }, {});
     expect(bold.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('extraction phrasing is the same wildlife service (Codex PR r12 audit)', () => {
+    const extraction = guardrails.evaluate({ body: 'We provide raccoon extraction from attics.' }, {});
+    expect(extraction.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const extracts = guardrails.evaluate({ body: 'Our team extracts squirrels from soffits.' }, {});
+    expect(extracts.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('conduct/manage fulfillment verbs are offerings too (Codex PR r10)', () => {
