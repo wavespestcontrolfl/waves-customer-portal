@@ -352,7 +352,9 @@ async function fetchCrmCalls(days = 30) {
     // retry that minted before its cleanup ran), which would duplicate the
     // call row through this OR join and make buildMatches read the twin as
     // an equal-score second candidate → false ambiguity; dedupeCrmCallRows
-    // below collapses to one row per call, sid-linked lead winning.
+    // below collapses that shape, sid-linked lead winning. Two live leads
+    // genuinely sharing one sid stay multi-row, so their ambiguity — and
+    // the conservative no-bridge it triggers — survives.
     .leftJoin('leads as l', function joinLeadForCall() {
       this.on(function linkageArms() {
         this.on('c.twilio_call_sid', 'l.twilio_call_sid')
@@ -383,26 +385,61 @@ async function fetchCrmCalls(days = 30) {
     // by the window's inbound calls on the main line (≤2 rows each); the
     // 500-call cap applies to deduped calls below.
     .then(dedupeCrmCallRows)
-    .then((rows) => rows.slice(0, 500));
+    .then((rows) => capDistinctCalls(rows, 500));
 }
 
-// One row per call: the OR join above can transiently return a call twice
-// (stale stamp + a different sid-linked lead). The sid-linked lead is
-// authoritative — same precedence findReusableCallLead uses (codex P2, PR
-// #3275).
+// Collapse ONLY the stamp-plus-sid duplicate the OR join above can
+// transiently produce (a stale stamp coexisting with a different sid-linked
+// lead); the sid-linked lead is authoritative — same precedence
+// findReusableCallLead uses (codex P2, PR #3275).
+//
+// Genuine ambiguity is PRESERVED: leads.twilio_call_sid carries no unique
+// index, so two live leads can share one sid. Those rows made buildMatches
+// see an equal-score second candidate and mark the google call ambiguous —
+// a conservative no-bridge. Collapsing them to whichever row Postgres
+// returned first would let the bridge rewrite an arbitrary lead's source
+// and leave the real one unattributed, so multi-sid-linked calls keep every
+// sid-linked row (codex P2, PR #3275).
 function dedupeCrmCallRows(rows) {
+  const isSidLinked = (r) => !!(r.lead_call_sid && r.twilio_call_sid && r.lead_call_sid === r.twilio_call_sid);
   const byId = new Map();
   for (const row of rows) {
-    const prev = byId.get(row.id);
-    if (!prev) {
-      byId.set(row.id, row);
-    } else if (row.lead_call_sid && row.twilio_call_sid
-      && row.lead_call_sid === row.twilio_call_sid
-      && !(prev.lead_call_sid && prev.lead_call_sid === prev.twilio_call_sid)) {
-      byId.set(row.id, row);
-    }
+    if (!byId.has(row.id)) byId.set(row.id, []);
+    byId.get(row.id).push(row);
   }
-  return [...byId.values()];
+  const deduped = [];
+  for (const group of byId.values()) {
+    if (group.length === 1) { deduped.push(group[0]); continue; }
+    const seenLeadIds = new Set();
+    const sidLinked = group.filter((r) => {
+      if (!isSidLinked(r)) return false;
+      const key = String(r.lead_id);
+      if (seenLeadIds.has(key)) return false;
+      seenLeadIds.add(key);
+      return true;
+    });
+    if (sidLinked.length === 1) deduped.push(sidLinked[0]);
+    else if (sidLinked.length > 1) deduped.push(...sidLinked);
+    else deduped.push(group[0]);
+  }
+  return deduped;
+}
+
+// The scan cap counts DISTINCT calls, not join rows — a call kept ambiguous
+// above contributes several rows, and a raw row cap would silently drop
+// older distinct calls from the window (an omitted paid call stays
+// unbridged and falls to the organic sweep; codex P2, PR #3275).
+function capDistinctCalls(rows, limit) {
+  const kept = [];
+  const seen = new Set();
+  for (const row of rows) {
+    if (!seen.has(row.id)) {
+      if (seen.size >= limit) break;
+      seen.add(row.id);
+    }
+    kept.push(row);
+  }
+  return kept;
 }
 
 async function ensureBridgeLeadSource() {
@@ -725,6 +762,8 @@ module.exports = {
   _private: {
     areaCode,
     buildMatches,
+    capDistinctCalls,
+    dedupeCrmCallRows,
     findLeadForCall,
     googleAdsBridgeMetadata,
     leadMatchPlan,

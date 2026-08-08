@@ -369,3 +369,48 @@ describe('scheduled-SMS rail purpose map', () => {
     expect(purposeForScheduledMessageType(null)).toBe('conversational');
   });
 });
+
+describe('dropFilledLeadColumns — fill-only re-decision under the row lock (PR #3275)', () => {
+  const { dropFilledLeadColumns, FILL_ONLY_LEAD_FIELDS } = CallRecordingProcessor._test;
+
+  test('drops a fill-only column an admin filled between the pre-lock read and the lock', () => {
+    // `current` (pre-lock) saw first_name empty, so the pass queued a fill.
+    // The LOCKED row already carries the admin's entry — re-applying the
+    // stale fill would overwrite it despite fill-only semantics.
+    const leadUpdates = { first_name: 'Bob', address: '12 Palm Ct', transcript_summary: 'called about ants' };
+    const out = dropFilledLeadColumns(leadUpdates, { first_name: 'Robert', address: null });
+
+    expect(out).not.toHaveProperty('first_name');
+    expect(out.address).toBe('12 Palm Ct');           // still empty under the lock → fill stands
+    expect(out.transcript_summary).toBe('called about ants'); // not fill-only → untouched
+  });
+
+  test('does not mutate the caller\'s payload (the loop reuses it on a race re-run)', () => {
+    const leadUpdates = { first_name: 'Bob', is_qualified: true };
+    const out = dropFilledLeadColumns(leadUpdates, { first_name: 'Robert' });
+
+    expect(leadUpdates.first_name).toBe('Bob');
+    expect(out).not.toBe(leadUpdates);
+    expect(out.is_qualified).toBe(true);
+  });
+
+  test('returns the payload untouched when nothing was filled in the gap', () => {
+    const leadUpdates = { email: 'a@b.com', city: 'Bradenton' };
+    const out = dropFilledLeadColumns(leadUpdates, { email: '', city: null, zip: '34205' });
+
+    expect(out).toBe(leadUpdates);
+  });
+
+  test('a missing locked row leaves the payload alone (no lock, no re-decision)', () => {
+    const leadUpdates = { first_name: 'Bob' };
+    expect(dropFilledLeadColumns(leadUpdates, null)).toBe(leadUpdates);
+  });
+
+  test('covers exactly the fill-if-empty identity columns Step 4b writes', () => {
+    // Guards against drift: a new fill-if-empty assignment that is not in
+    // this list silently keeps the stale pre-lock decision.
+    expect(FILL_ONLY_LEAD_FIELDS).toEqual(
+      ['phone', 'first_name', 'last_name', 'email', 'address', 'city', 'zip'],
+    );
+  });
+});

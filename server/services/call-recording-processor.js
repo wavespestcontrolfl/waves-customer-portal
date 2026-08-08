@@ -2344,6 +2344,29 @@ function snapshotStampedLeadStates(leadRow, leadUpdates) {
   return { prior, written };
 }
 
+// The lead columns Step 4b writes FILL-ONLY (set only while the lead's own
+// value is still empty). Their decision basis is the `current` row, read
+// BEFORE the enrichment transaction takes its row lock — an admin edit or a
+// concurrent call can fill one of them in that gap, and re-applying the
+// stale decision would overwrite the newer entry despite the documented
+// fill-only behavior (codex P2 r17). Re-decided against the LOCKED row
+// inside the transaction; keep this list in step with the fill-if-empty
+// assignments in Step 4b.
+const FILL_ONLY_LEAD_FIELDS = ['phone', 'first_name', 'last_name', 'email', 'address', 'city', 'zip'];
+
+function dropFilledLeadColumns(leadUpdates, lockedLead) {
+  if (!lockedLead || !leadUpdates) return leadUpdates;
+  const stillEmpty = (v) => v === null || v === undefined || v === '';
+  let out = leadUpdates;
+  for (const f of FILL_ONLY_LEAD_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(out, f)) continue;
+    if (stillEmpty(lockedLead[f])) continue;
+    if (out === leadUpdates) out = { ...leadUpdates };
+    delete out[f];
+  }
+  return out;
+}
+
 // Postgres casts for the per-field compare-and-swap — parameters arrive as
 // text; non-text columns need explicit casts for IS NOT DISTINCT FROM.
 const STAMPED_LEAD_FIELD_CASTS = {
@@ -7823,6 +7846,9 @@ const CallRecordingProcessor = {
             // lead stayed unreachable by phone forever and later calls
             // could not reuse it by number (codex P1 r15b). Fill-if-empty
             // like the other identity fields; an existing phone never moves.
+            // (These fill-if-empty columns are listed in
+            // FILL_ONLY_LEAD_FIELDS and re-decided against the locked row
+            // inside the stamp transaction — keep the two in step.)
             if (phone && isEmpty(current?.phone)) leadUpdates.phone = phone;
             if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = capitalizeName(extracted.first_name);
             if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = capitalizeName(extracted.last_name);
@@ -8139,13 +8165,52 @@ const CallRecordingProcessor = {
                 // rejection would then restore a snapshot that erases the
                 // earlier call's committed enrichment. The locked read
                 // serializes stampers so each baseline reflects committed
-                // state; the loop's `current` stays the fill-only decision
-                // basis (identity races are the guarded write's job).
+                // state — and, since r17, so does the fill-only decision
+                // below (identity races stay the guarded write's job).
                 const lockedLead = await trx('leads')
                   .where({ id: leadId })
                   .forUpdate()
                   .first();
-                const { prior, written } = snapshotStampedLeadStates(lockedLead || current, leadUpdates);
+                // Fill-only columns are re-decided against the LOCKED row
+                // (codex P2 r17): `current` was read before the lock, so a
+                // name/email/address an admin or another call entered in
+                // that gap would otherwise be overwritten by this pass's
+                // stale fill. Dropping the key here also keeps it out of
+                // the rollback ledgers below — a field this call never
+                // wrote must never be restored by its rejection.
+                const effectiveUpdates = dropFilledLeadColumns(leadUpdates, lockedLead);
+                // Is this a CHRONOLOGICAL restamp — a force-reprocess of an
+                // older call after a DIFFERENT call enriched the same reused
+                // lead (codex P2 r17)? Merging ledgers would keep this
+                // call's original pre-first-run baseline, so a later
+                // rejection would restore straight over the intervening
+                // accepted state, and successor re-parenting could not
+                // recover it either (the other call's stamp is EARLIER than
+                // this one's, so the re-parent loop skips it by design).
+                // Rebase instead: fresh prior from the locked row — which
+                // already carries the intervening writes — fresh written,
+                // and a fresh lead_stamped_at that makes this restamp the
+                // newest ordered mutation on the lead.
+                const freshCall = await trx('call_log').where({ id: call.id }).first('metadata');
+                let freshMd = {};
+                try {
+                  freshMd = typeof freshCall?.metadata === 'string' ? JSON.parse(freshCall.metadata) : (freshCall?.metadata || {});
+                } catch { freshMd = {}; }
+                const ownStampedAt = (freshMd?.lead_id && String(freshMd.lead_id) === String(leadId)
+                  && typeof freshMd.lead_stamped_at === 'string') ? freshMd.lead_stamped_at : null;
+                let rebaseStamp = false;
+                if (ownStampedAt) {
+                  const interveningStamp = await trx('call_log')
+                    .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
+                    .whereNot('id', call.id)
+                    .whereRaw("metadata->>'lead_stamped_at' > ?", [ownStampedAt])
+                    .first('id');
+                  rebaseStamp = !!interveningStamp;
+                }
+                // Sentinel (never a lead id) drives every same-lead CASE in
+                // the stamp SQL down its ELSE arm, i.e. fresh ledgers.
+                const sameLeadKey = rebaseStamp ? '__rebase__' : String(leadId);
+                const { prior, written } = snapshotStampedLeadStates(lockedLead || current, effectiveUpdates);
                 const stamped = await trx('call_log')
                   .where({ id: call.id })
                   .where('processing_token', procToken)
@@ -8161,10 +8226,13 @@ const CallRecordingProcessor = {
                     // re-parenting (only snapshots stamped AFTER this call's
                     // may be re-parented — a predecessor's baseline must
                     // never be rewritten; codex P2 r13). Preserved on
-                    // same-lead re-stamp like the prior ledger.
+                    // same-lead re-stamp like the prior ledger. A
+                    // different-lead stamp — or a chronological restamp,
+                    // where sameLeadKey carries the sentinel — starts all
+                    // three ledgers fresh.
                     metadata: db.raw(
                       "jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true), '{lead_prior_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN ?::jsonb || COALESCE(metadata->'lead_prior_state', '{}'::jsonb) ELSE ?::jsonb END, true), '{lead_written_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN COALESCE(metadata->'lead_written_state', '{}'::jsonb) || ?::jsonb ELSE ?::jsonb END, true), '{lead_stamped_at}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN COALESCE(metadata->'lead_stamped_at', ?::jsonb) ELSE ?::jsonb END, true)",
-                      [JSON.stringify(String(leadId)), String(leadId), JSON.stringify(prior), JSON.stringify(prior), String(leadId), JSON.stringify(written), JSON.stringify(written), String(leadId), JSON.stringify(new Date().toISOString()), JSON.stringify(new Date().toISOString())],
+                      [JSON.stringify(String(leadId)), sameLeadKey, JSON.stringify(prior), JSON.stringify(prior), sameLeadKey, JSON.stringify(written), JSON.stringify(written), sameLeadKey, JSON.stringify(new Date().toISOString()), JSON.stringify(new Date().toISOString())],
                     ),
                     updated_at: new Date(),
                   });
@@ -8173,7 +8241,7 @@ const CallRecordingProcessor = {
                   lost.abortProcessing = true;
                   throw lost;
                 }
-                return enrichmentWrite.transacting(trx).update(leadUpdates);
+                return enrichmentWrite.transacting(trx).update(effectiveUpdates);
               });
               currentStampedLeadId = String(leadId);
             } else {
@@ -11901,6 +11969,8 @@ CallRecordingProcessor._test = {
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,
   findReusableCallLead,
+  dropFilledLeadColumns,
+  FILL_ONLY_LEAD_FIELDS,
   resolveCallAdditionalProperties,
   resolveCallQuoteSignals,
   resolveCallSecondaryContact,
