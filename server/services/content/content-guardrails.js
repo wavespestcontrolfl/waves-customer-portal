@@ -2908,7 +2908,7 @@ const REENTRY_DURATION_SRC = `(?:(?:\\d+(?:\\.\\d+)?(?:${REENTRY_RANGE_CONNECTOR
 // adverbs may sit between the modal and the linking verb (Codex PR r9:
 // "will eventually be safe") — negation stays outside so "will not be
 // safe" remains a disclaimer.
-const REENTRY_LINKING_VERB_SRC = `(?:is|are|remains?|stays?|becomes?|appears?|seems?|looks?|(?:will|can|could|should|would|may|might|must)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)\\w+\\s+){0,2}?(?:be|remain|stay|become|appear|seem|look))`;
+const REENTRY_LINKING_VERB_SRC = `(?:is|are|was|were|remains?|remained|stays?|stayed|becomes?|became|appears?|appeared|seems?|seemed|looks?|looked|(?:will|can|could|should|would|may|might|must)\\s+(?:(?!${NEGATION_WORD_SRC}\\b)\\w+\\s+){0,2}?(?:be|remain|stay|become|appear|seem|look))`;
 // Bounded qualifiers accepted wherever a duration is parsed (Codex PR
 // r9): "in just 30 minutes", "wait only 30 minutes".
 const REENTRY_QUALIFIER_SRC = "(?:(?:about|around|roughly|approximately|between|just|only|at\\s+least|up\\s+to|under|over|less\\s+than|more\\s+than|no\\s+more\\s+than|fewer\\s+than|as\\s+little\\s+as)\\s+){0,2}?";
@@ -2958,7 +2958,7 @@ const REENTRY_SAFETY_SRCS = [
   // Hazard-negation predicates are the same unconditional claim (Codex
   // PR r14): "poses no risk to pets", "is without risk to your family" —
   // like harmless/risk-free these never earn the conditional idiom.
-  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)\\b[^.!?\\n]{0,30}?\\b(?:poses?|presents?|carries|creates?)\\s+(?:no|zero)\\s+(?:risks?|threats?|dangers?|hazards?)\\b`,
+  `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)\\b[^.!?\\n]{0,30}?\\b(?:poses?|presents?|carries|creates?)\\s+(?:(?:absolutely|virtually|essentially|practically|basically|truly|really|almost|nearly)\\s+)?(?:no|zero)\\s+(?:risks?|threats?|dangers?|hazards?)\\b`,
   `\\b(?:treated\\s+)?(?:treatments?|products?|pesticides?|insecticides?|herbicides?|sprays?|applications?|granules?|baits?|chemicals?|materials?|solutions?|pest[-\\s]?control|lawn\\s+care|mosquito\\s+control)\\b[^.!?\\n]{0,20}?\\b(?:is|are|remains?)\\s+without\\s+(?:risks?|dangers?)\\b`,
   // Pronoun subjects with a treatment ANTECEDENT (Codex PR r5): "We apply
   // a granular treatment. It is safe once dry." is the same claim with the
@@ -3081,7 +3081,7 @@ const REENTRY_SAFETY_SRCS = [
   { src: `\\bdry(?:ing)?(?:\\s+time|\\s+period|\\s+window)?\\b[^.!?\\n]{0,40}?\\b(?:takes?|is|runs?|lasts?)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   // "dry time" is the same noun as "drying time" (Codex PR r9: "has a
   // dry time of 30 minutes").
-  { src: `\\bdry(?:ing)?\\s+time\\s+of\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
+  { src: `\\bdry(?:ing)?\\s+(?:times?|periods?|windows?)\\s+of\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
   // Attributive figures, hyphenated or not: "a 30 minute re-entry
   // interval", "a 45-minute re-entry window" — the re-entry/wait tails are
   // intrinsic; the drying tail needs treatment context (Codex PR r5).
@@ -3110,7 +3110,9 @@ const DRY_CONDITION_RE = /\b(?:once|when|after|until)\b(?:(?!\bwet\b)[^.!?\n]){0
 // timing" is the opposite of the idiom — the subject→verb and
 // verb→object gaps refuse negation, and there is no subjectless
 // alternative.
-const TECH_CONFIRMS_NEG_SRC = "(?:not|never|no|doesn['’]?t|don['’]?t|won['’]?t|cannot|can['’]?t|isn['’]?t|wasn['’]?t)";
+// Refusal/failure/inability framing negates the confirmation too (Codex
+// PR r15: "refuses to confirm", "failed to confirm", "unable to confirm").
+const TECH_CONFIRMS_NEG_SRC = "(?:not|never|no|doesn['’]?t|don['’]?t|won['’]?t|cannot|can['’]?t|isn['’]?t|wasn['’]?t|refus\\w+|fail\\w+|unable|declin\\w+|neglect\\w+|without)";
 const TECH_CONFIRMS_RE = new RegExp(
   `\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\b(?:confirms?|will\\s+confirm|advises?(?:\\s+on)?|verif(?:y|ies)|lets?\\s+you\\s+know)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,30}?\\b(?:timing|re-?entry|dry\\w*|safe\\b|all[-\\s]clear|when\\s+[^.!?\\n]{0,25}?\\b(?:safe|re-?ent\\w+|dry\\w*|return\\w*|go\\s+back)\\b)`
   + `|\\b(?:technicians?|techs?|applicators?|pros?)\\b(?:(?!\\b${TECH_CONFIRMS_NEG_SRC}\\b)[^.!?\\n]){0,60}?\\bgives?\\s+you\\s+the\\s+all[-\\s]clear\\b`,
@@ -3129,15 +3131,35 @@ function normalizeHardCopyText(text) {
     // the values stay in the scanned text.
     // Quote-aware tag scan (Codex PR r14): a `>` inside a quoted prop
     // must not terminate the tag early or the value's prefix is dropped.
-    .replace(/<\/?[a-zA-Z](?:"[^"\n]*"|'[^'\n]*'|\{[^}\n]*\}|[^>"'{\n])*>/g, (tag) => {
+    .replace(/<\/?[a-zA-Z](?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\{[^}\n]*\}|[^>"'{\n])*>/g, (tag) => {
       const vals = [];
       // Bare quoted attrs AND MDX expression-string forms (Codex PR r13
-      // audit b: `verdict={"…is safe for pets."}` renders the same copy).
-      const attrRe = /=\s*(?:"([^"]*)"|'([^']*)'|\{\s*"([^"]*)"\s*\}|\{\s*'([^']*)'\s*\}|\{\s*`([^`]*)`\s*\})/g;
+      // audit b: `verdict={"…is safe for pets."}` renders the same
+      // copy). Escape-aware (Codex PR r15): `{'Waves\' treatment…'}`
+      // must not truncate at the escaped quote.
+      const attrRe = /=\s*(?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'|\{\s*"((?:[^"\\\n]|\\.)*)"\s*\}|\{\s*'((?:[^'\\\n]|\\.)*)'\s*\}|\{\s*`([^`]*)`\s*\})/g;
       let m;
-      while ((m = attrRe.exec(tag)) !== null) vals.push(m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5]);
+      while ((m = attrRe.exec(tag)) !== null) {
+        const raw = m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5];
+        vals.push(raw.replace(/\\(['"\\])/g, '$1'));
+      }
       return vals.length ? ` ${vals.join(' ')} ` : '';
     })
+    // HTML character references render as their characters (Codex PR
+    // r15: `pet&#45;safe` renders as pet-safe). Decoded AFTER the tag
+    // scan — an ENCODED `&lt;em&gt;` renders as literal text in the
+    // browser, never as a tag.
+    .replace(/&#(\d+);/g, (m, n) => {
+      const cp = parseInt(n, 10);
+      return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : m;
+    })
+    .replace(/&#x([0-9a-fA-F]+);/g, (m, n) => {
+      const cp = parseInt(n, 16);
+      return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : m;
+    })
+    .replace(/&(amp|lt|gt|quot|apos|nbsp|ndash|mdash|hyphen|dash|minus);/g, (m, name) => ({
+      amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', hyphen: '-', dash: '-', minus: '-',
+    }[name] || m))
     .replace(/(\*\*|__|~~|[*_`])/g, '');
 }
 
@@ -3231,7 +3253,7 @@ function reentrySafetyClaimFinding(text) {
 // as trapping/removal (Codex PR r5: "our wildlife relocation service",
 // "we offer wildlife exclusion"). "animal control" stays out — it names
 // the county agency in legal referral copy ("contact animal control").
-const BANNED_TOPIC_CORE_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|wildlife\\s+(?:trapping|removal|control|relocation|exclusion|eviction|extraction)|animal\\s+(?:trapping|removal|relocation|exclusion|eviction|extraction)|(?:raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\s+(?:removal|trapping|eviction|exclusion|control|relocation|extraction)|door[-\\s]?to[-\\s]?door)";
+const BANNED_TOPIC_CORE_SRC = "(?:structural\\s+)?(?:fumigat\\w+|tent(?:ing)?\\b|wildlife\\s+(?:trapping|removal|control|relocation|exclusion|eviction|extraction)|animal\\s+(?:trapping|removal|relocation|exclusion|eviction|extraction)|(?:raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\s+(?:removal|trapping|eviction|exclusion|control|relocation|extraction)|(?:removals?|relocations?|extractions?|trapping|evictions?|exclusions?)\\s+of\\s+(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)|door[-\\s]?to[-\\s]?door)";
 const BANNED_TOPIC_SRC = `(?:${BANNED_TOPIC_CORE_SRC}|insulation)`;
 // The object gap between the service verb and the topic must be
 // negation-guarded exactly like the pre-verb filler — otherwise "We do NOT
@@ -3314,7 +3336,12 @@ const BANNED_TOPIC_SRCS = [
   // the topic as our service even without "with us" (Codex audit). A
   // THIRD-PARTY referral stays legal via the negative lookahead: "schedule
   // tenting with a licensed structural fumigator" directs elsewhere.
-  `\\b(?:schedule|book)\\s+(?:your\\s+|a\\s+|an\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?))?\\b(?!\\s+(?:with|through)\\s+(?!us\\b|waves\\b))`,
+  // The service-noun suffix is committed when present (the middle
+  // lookahead forbids skipping it via backtracking — Codex PR r15:
+  // "schedule a wildlife removal consultation WITH A LICENSED
+  // SPECIALIST" must reach the third-party check with the suffix
+  // consumed), and referral nouns after the topic stay legal.
+  `\\b(?:schedule|book)\\s+(?:your\\s+|a\\s+|an\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?))?\\b(?!\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?|referrals?|partners?|specialists?)\\b)(?!\\s+(?:with|through)\\s+(?!us\\b|waves\\b))`,
   // REVERSE brand attribution (Codex PR r13 audit): "Wildlife removal by
   // Waves Pest Control", "Raccoon Removal | Waves Pest Control", "attic
   // insulation services from Waves" present the service as ours without a
