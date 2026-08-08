@@ -95,18 +95,16 @@ function requeueStatusFor({ resolved, enqueue, errorCode }) {
  * Is this outcome worth trying again tomorrow rather than consuming the
  * regression?
  *
- * enqueueRefresh reports queued=false in cases that are NOT "a corrective
- * refresh is under way":
- *   - status 'done' — the upsert preserves a completed same-key row, so the
- *     dedupe key blocks a NEW refresh for a regression that happened AFTER
- *     that refresh finished. Nothing corrective is queued at all.
- *   - status 'claimed' / 'pending_review' from ANOTHER page-editing action —
- *     the in-flight query spans all of PAGE_EDITING_ACTIONS, so a pending
- *     rewrite_title_meta suppresses our refresh. That edit is not a fix for
- *     this regression.
- * Stamping either terminally would drop the regression forever with no work
- * done. They are retried instead, under the same bounded attempt budget that
- * stops a stuck row from occupying the batch (retired as <status>_exhausted).
+ * enqueueRefresh reports queued=false when ANOTHER page-editing action already
+ * holds this page — the in-flight query spans all of PAGE_EDITING_ACTIONS, so
+ * a pending rewrite_title_meta suppresses our refresh, and that edit is not a
+ * fix for this regression. Stamping it terminally would drop the regression
+ * forever with no corrective work done, so it is retried under the same
+ * bounded attempt budget that stops a stuck row from occupying the batch
+ * (retired as <status>_exhausted).
+ *
+ * A stale status='done' row no longer reaches here: this lane passes a
+ * per-regression cycleKey, so its dedupe key is always fresh.
  */
 function isRetryableStatus(status) {
   return typeof status === 'string' && status.startsWith('inflight:');
@@ -177,13 +175,21 @@ async function inCooldown(database, refreshAudit, pageUrl, since) {
   return Boolean(row);
 }
 
+// Returns whether the marker actually persisted. Callers must NOT report
+// success on a false: the exactly-once contract lives in this row, and a
+// swallowed failure would have the next sweep reprocess the same regression
+// and eventually retire it as an exhausted no-op despite work having been
+// queued. Re-processing itself is safe — the cycleKey makes the enqueue
+// idempotent — but it must be reported as unfinished, not as success.
 async function stamp(database, id, status, attempts = null) {
   const patch = { requeued_at: new Date(), requeue_status: String(status).slice(0, 40), updated_at: new Date() };
   if (attempts != null) patch.requeue_attempts = attempts;
   try {
     await database('content_optimization_impact').where('id', id).update(patch);
+    return true;
   } catch (err) {
-    logger.error(`[regression-requeue] failed to stamp impact ${id}: ${err.message}`);
+    logger.error(`[regression-requeue] failed to stamp impact ${id} (${status}): ${err.message}`);
+    return false;
   }
 }
 
@@ -194,8 +200,7 @@ async function noteRetry(database, row, status = 'error') {
   const attempts = (Number(row.requeue_attempts) || 0) + 1;
   if (attempts >= MAX_TRANSIENT_ATTEMPTS) {
     const exhausted = `${status}_exhausted`.slice(0, 40);
-    await stamp(database, row.id, exhausted, attempts);
-    return exhausted;
+    return (await stamp(database, row.id, exhausted, attempts)) ? exhausted : 'stamp_failed';
   }
   try {
     await database('content_optimization_impact')
@@ -287,7 +292,14 @@ async function requeueRegressedPagesLocked(opts = {}) {
           results.push({ id: row.id, page_url: row.page_url, status: 'gated' });
           continue;
         } else {
-          const enqueue = await refreshAudit.enqueueRefresh({ blogPostId: post.id });
+          // cycleKey: this regression is its OWN refresh cycle. Without it the
+          // dedupe key is stable per page and the upsert preserves an earlier
+          // status='done', so after a page's first completed refresh every
+          // later confirmed regression — including ones past the 90-day
+          // cooldown — would be told "already handled" and never re-queued.
+          // Keying on the impact row also makes a retry idempotent: the same
+          // regression always resolves to the same queue row.
+          const enqueue = await refreshAudit.enqueueRefresh({ blogPostId: post.id, cycleKey: `reg-${row.id}` });
           status = requeueStatusFor({ resolved: post, enqueue });
         }
       }
@@ -329,7 +341,13 @@ async function requeueRegressedPagesLocked(opts = {}) {
       continue;
     }
 
-    await stamp(database, row.id, status);
+    // The marker IS the exactly-once contract. If it did not persist, this row
+    // is unfinished — never counted as queued, and left for the next sweep
+    // (which is safe to repeat: the cycleKey makes the enqueue idempotent).
+    if (!(await stamp(database, row.id, status))) {
+      results.push({ id: row.id, page_url: row.page_url, status: 'stamp_failed', intended: status });
+      continue;
+    }
     if (status === 'queued') queued += 1; else skipped += 1;
     results.push({ id: row.id, page_url: row.page_url, status });
   }

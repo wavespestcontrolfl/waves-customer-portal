@@ -354,8 +354,19 @@ class RefreshAudit {
    * raw-URL lookup is unsafe on this hub/spoke network (paths are shared across
    * domains, so a URL could resolve to the wrong domain's post). blogPostId is
    * unambiguous and pins the exact page + its domain (via astro_live_url).
+   *
+   * `cycleKey` (optional) starts a NEW refresh cycle for a page that already
+   * has a completed one. Without it the dedupe key is stable per page and the
+   * upsert preserves status='done', so a page can be refreshed through this
+   * path exactly once, ever — fine for the operator button (a second click on
+   * a finished page should be a no-op) but wrong for an automated caller
+   * reacting to a NEW signal months later, which would otherwise be told
+   * "already handled" forever. A distinct cycleKey gives that cycle its own
+   * key while every other guard still applies unchanged: the page-edit
+   * arbitration below is keyed on the PAGE, not the dedupe key, so a new cycle
+   * still cannot race a pending/claimed edit on the same page.
    */
-  async enqueueRefresh({ blogPostId = null } = {}) {
+  async enqueueRefresh({ blogPostId = null, cycleKey = null } = {}) {
     if (!blogPostId) {
       const err = new Error('blogPostId is required');
       err.code = 'BAD_REQUEST';
@@ -492,7 +503,8 @@ class RefreshAudit {
     const score = Math.max(ENQUEUE_FLOOR, priority);
     // Domain in the key: hub + spoke pages can share a slug/path, and a
     // domain-less key would conflate them under ON CONFLICT.
-    const dedupeKey = `refresh-audit:${targetDomain}:${post.slug || post.id}`.slice(0, 200);
+    const cycleSuffix = cycleKey ? `:${String(cycleKey).replace(/[^a-zA-Z0-9._-]/g, '')}` : '';
+    const dedupeKey = `refresh-audit:${targetDomain}:${post.slug || post.id}${cycleSuffix}`.slice(0, 200);
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
     // Mirror intercept-brief-seeder's upsert: never reset a claimed/done/in-review

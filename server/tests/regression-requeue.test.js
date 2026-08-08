@@ -44,7 +44,11 @@ function makeDb({ pending = [], cooldownHit = false } = {}) {
       limit: (n) => { q._limit = n; return q; },
       select: async () => pending.slice(0, q._limit || pending.length),
       first: async () => (cooldownHit ? { id: 'prior-row' } : undefined),
-      update: async (patch) => { state.updates.push({ id: q._id, ...patch }); return 1; },
+      update: async (patch) => {
+        if (state.failUpdates) throw new Error('update failed');
+        state.updates.push({ id: q._id, ...patch });
+        return 1;
+      },
     };
     return q;
   };
@@ -112,7 +116,9 @@ describe('requeueRegressedPages', () => {
     const refreshAudit = audit();
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
-    expect(refreshAudit.enqueueRefresh).toHaveBeenCalledWith({ blogPostId: 42 });
+    // cycleKey per regression: without it the stable dedupe key preserves an
+    // earlier status='done' and the page can never be refreshed twice.
+    expect(refreshAudit.enqueueRefresh).toHaveBeenCalledWith({ blogPostId: 42, cycleKey: 'reg-imp-1' });
     expect(out).toMatchObject({ scanned: 1, queued: 1, skipped: 0 });
     expect(db.state.updates).toHaveLength(1);
     expect(db.state.updates[0]).toMatchObject({ id: 'imp-1', requeue_status: 'queued' });
@@ -162,10 +168,22 @@ describe('requeueRegressedPages', () => {
     expect(out.unsupported).toBe(1);
   });
 
+  test('a failed marker write is NOT reported as success', async () => {
+    // The marker is the exactly-once contract; swallowing its failure would
+    // have the next sweep reprocess and eventually retire the regression as an
+    // exhausted no-op even though work HAD been queued.
+    const db = makeDb({ pending: [row()] });
+    db.state.failUpdates = true;
+    const out = await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() });
+
+    expect(out.queued).toBe(0);
+    expect(out.results[0]).toMatchObject({ status: 'stamp_failed', intended: 'queued' });
+  });
+
   test('queued=false does NOT consume the regression — it retries under the attempt budget', async () => {
-    // A completed same-key row, or another page-editing action holding the
-    // page, both report queued=false. Neither is a corrective refresh.
-    for (const status of ['done', 'claimed', 'pending_review']) {
+    // Another page-editing action holding the page reports queued=false, and
+    // that edit is not a fix for this regression.
+    for (const status of ['claimed', 'pending_review']) {
       const db = makeDb({ pending: [row({ requeue_attempts: 0 })] });
       const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => ({ queued: false, status })) });
       const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
@@ -179,10 +197,10 @@ describe('requeueRegressedPages', () => {
 
   test('a page stuck behind other edits is retired at the cap, not retried forever', async () => {
     const db = makeDb({ pending: [row({ requeue_attempts: requeue.THRESHOLDS.MAX_TRANSIENT_ATTEMPTS - 1 })] });
-    const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => ({ queued: false, status: 'done' })) });
+    const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => ({ queued: false, status: 'claimed' })) });
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
-    expect(out.results[0].status).toBe('inflight:done_exhausted');
+    expect(out.results[0].status).toBe('inflight:claimed_exhausted');
     expect(db.state.updates[0].requeued_at).toBeInstanceOf(Date);
   });
 
