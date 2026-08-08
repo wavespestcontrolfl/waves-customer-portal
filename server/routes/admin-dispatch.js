@@ -9518,6 +9518,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               });
             } catch (e) { /* log-only */ }
           }
+          // Full-balance sweep (owner ruling 2026-08-08): the visit's own
+          // charge just SUCCEEDED on this method — collect the customer's
+          // other open DELIVERED self-pay invoices through the same
+          // chargeInvoiceWithSavedCard rail, one capped charge per invoice,
+          // oldest first, stop on first failure. Detached so the tech's
+          // completion response never waits on N Stripe round-trips; every
+          // outcome lands in autopay_log. Dark behind
+          // GATE_COMPLETION_BALANCE_SWEEP (re-checked inside the service).
+          if (['paid', 'processing'].includes(freshStatus)) {
+            const sweepArgs = {
+              customerId: svc.customer_id,
+              excludeInvoiceId: invoice.id,
+              paymentMethodId: autopayPm.id,
+              triggerScheduledServiceId: svc.id,
+            };
+            setImmediate(() => {
+              require('../services/completion-balance-sweep')
+                .runCompletionBalanceSweep(sweepArgs)
+                .catch((sweepErr) => logger.error(`[dispatch] balance sweep crashed for customer ${sweepArgs.customerId}: ${sweepErr.message}`));
+            });
+          }
         }
       } catch (chargeErr) {
         const suppressAlternateCollection = StripeService.savedCardChargeSuppressesAlternateCollection(chargeErr);

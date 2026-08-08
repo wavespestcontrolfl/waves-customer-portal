@@ -2110,6 +2110,13 @@ export default function PayPageV2() {
   const depositCreditTotal = depositCreditTotalFromLineItems(invoice.lineItems);
   const invoiceAttachments = invoice.attachments || [];
   const annualPrepay = invoice.annualPrepay || null;
+  // Other open invoices on this account (GATE_BALANCE_VISIBILITY; absent
+  // while the gate is dark). Each entry pays via its own existing pay link.
+  const previousBalance = (data.previousBalance
+    && Array.isArray(data.previousBalance.invoices)
+    && data.previousBalance.invoices.length > 0)
+    ? data.previousBalance
+    : null;
   const isOverdue = invoice.status !== 'paid'
     && isInvoiceDueDateOverdue(invoice.dueDate);
   // Generated invoice titles carry a "— Month YYYY" suffix that doubles
@@ -2384,6 +2391,67 @@ export default function PayPageV2() {
               )}
               <SummaryRow label="Total due" value={fmtCurrency(invoice.amountDue ?? invoice.total)} strong />
             </div>
+
+            {previousBalance && (
+              <div style={{
+                padding: SP.md,
+                borderRadius: RADIUS.input,
+                marginBottom: SP.xl,
+                background: '#EEF6FF',
+                border: '1px solid #BFE4F8',
+              }}>
+                <div style={{ ...eyebrow, color: '#065A8C', marginBottom: SP.xxs }}>Previous balance</div>
+                <div style={{ fontSize: FS.body, color: DOC.ink, lineHeight: LH.body, marginBottom: SP.sm }}>
+                  You also have {fmtCurrency(previousBalance.total)} outstanding from
+                  {' '}{previousBalance.invoices.length === 1 ? 'an earlier invoice' : `${previousBalance.invoices.length} earlier invoices`}.
+                  The payment below covers this invoice only — each earlier invoice can be
+                  paid from its own link here.
+                </div>
+                <div style={{ display: 'grid', gap: SP.xs }}>
+                  {previousBalance.invoices.map((prev) => (
+                    <a
+                      key={prev.invoiceNumber}
+                      href={prev.payPath}
+                      style={{
+                        minHeight: 44,
+                        display: 'grid',
+                        gridTemplateColumns: 'minmax(0, 1fr) auto',
+                        alignItems: 'center',
+                        gap: SP.sm,
+                        padding: '10px 12px',
+                        borderRadius: RADIUS.input,
+                        border: `1px solid ${DOC.border}`,
+                        background: DOC.surface,
+                        color: DOC.ink,
+                        textDecoration: 'none',
+                      }}
+                    >
+                      <span style={{ minWidth: 0 }}>
+                        <span style={{
+                          display: 'block',
+                          fontSize: FS.body,
+                          fontWeight: FW.bold,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}>
+                          Invoice {prev.invoiceNumber}
+                          {prev.serviceType ? ` · ${prev.serviceType}` : ''}
+                        </span>
+                        {prev.serviceDate && (
+                          <span style={{ display: 'block', fontSize: FS.caption, color: DOC.muted, marginTop: 2 }}>
+                            {fmtDate(prev.serviceDate)}
+                          </span>
+                        )}
+                      </span>
+                      <span style={{ fontFamily: DOC_FONT, fontWeight: FW.semibold }}>
+                        {fmtCurrency(prev.amountDue)}
+                      </span>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {invoice.notes && (
               <div data-glass-clear="" style={{ marginBottom: SP.xl, ...subtlePanel, padding: SP.md }}>
