@@ -3096,8 +3096,11 @@ const ReviewService = {
       // fields above null — handing that token out sends the customer to
       // /go's finality bounce (already-submitted rate page) instead of
       // Google (pre-push audit r4b). Same finality predicate as everywhere.
+      // Grouped with whereNull: `NULL NOT IN (...)` is UNKNOWN in Postgres,
+      // so a bare whereNotIn would silently drop live legacy rows whose
+      // status is NULL (pre-push audit r5).
       .whereNull("rated_at")
-      .whereNotIn("status", ["submitted", "reviewed", "rated"])
+      .where((b) => b.whereNull("status").orWhereNotIn("status", ["submitted", "reviewed", "rated"]))
       .orderBy("created_at", "desc")
       .first()
       .catch(() => null);

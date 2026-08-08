@@ -54,9 +54,10 @@ function installMock(initial = {}) {
     },
   };
   const cmp = (l, op, v) => {
-    // NOT IN follows SQL three-valued semantics loosely: a NULL column passes
-    // (matches Postgres only when the list has no NULLs, which ours don't).
-    if (op === 'notIn') return l == null || !v.includes(l);
+    // Postgres three-valued semantics: `NULL NOT IN (...)` is UNKNOWN, which
+    // a WHERE clause treats as false — a NULL column FAILS notIn. Production
+    // must pair whereNotIn with a whereNull OR-arm for nullable columns.
+    if (op === 'notIn') return l != null && !v.includes(l);
     if (l == null) return false;
     return op === '>' ? l > v : op === '<' ? l < v : op === '>=' ? l >= v : op === '<=' ? l <= v : l === v;
   };
@@ -74,6 +75,7 @@ function installMock(initial = {}) {
       orWhere(c, op, v) { return sub.where(c, op, v); },
       orWhereNull(c) { return sub.whereNull(c); },
       orWhereNotNull(c) { return sub.whereNotNull(c); },
+      orWhereNotIn(c, vals) { branches.push((r) => cmp(val(r, c), 'notIn', vals)); return sub; },
     };
     fn.call(sub, sub);
     return (r) => branches.some((b) => b(r));
@@ -338,6 +340,17 @@ describe('livePortalReviewUrlFor', () => {
       ],
     });
     expect(await ReviewService.livePortalReviewUrlFor('cust-1')).toBeNull();
+  });
+
+  test('a live legacy row with NULL status still surfaces (NOT IN is UNKNOWN on NULL)', async () => {
+    installMock({
+      customers: [CUSTOMER],
+      review_requests: [
+        sentAsk({ token: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000), status: null }),
+      ],
+    });
+    expect(await ReviewService.livePortalReviewUrlFor('cust-1'))
+      .toBe(`https://portal.test/api/rate/${'a'.repeat(64)}/go`);
   });
 
   test('never mints a token — a button render is not an ask', async () => {
