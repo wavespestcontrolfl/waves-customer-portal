@@ -240,6 +240,10 @@ function shapeCallLog(row) {
     googleAdsCallResourceName: row.google_ads_call_resource_name || null,
     googleAdsBridgedAt: row.google_ads_bridged_at || null,
     googleAdsLeadMatched: !!bridgeMetadata?.leadMatch?.leadId,
+    // Which lead the recorded match points at — the repoint detector in
+    // shouldRetryLeadAttribution compares it against the CURRENT joined
+    // lead (codex P1, PR #3303).
+    googleAdsLeadMatchedLeadId: bridgeMetadata?.leadMatch?.leadId || null,
     googleAdsLeadMatchedAt: bridgeMetadata?.leadAttributedAt || null,
   };
 }
@@ -257,9 +261,19 @@ function googleAdsBridgeMetadata(metadata) {
 }
 
 function shouldRetryLeadAttribution(match) {
-  return match?.status === 'already_bridged'
-    && !!match.callLog?.id
-    && !match.callLog.googleAdsLeadMatched;
+  if (match?.status !== 'already_bridged' || !match.callLog?.id) return false;
+  if (!match.callLog.googleAdsLeadMatched) return true;
+  // A SETTLED stamp can still be repointed by a later force-reprocess
+  // (codex P1, PR #3303): the recorded leadMatch then references the OLD
+  // lead while the fetch join surfaces the new one — without this arm the
+  // scan only ever backfilled the new lead's funnel row, leaving the
+  // former lead's paid attribution intact alongside it. A recorded lead
+  // that differs from the CURRENT joined lead re-enters the retry lane,
+  // which re-runs attribution against the live linkage and reconciles the
+  // old funnel row.
+  const recordedLeadId = match.callLog.googleAdsLeadMatchedLeadId;
+  const joinedLeadId = match.callLog.leadId;
+  return !!(recordedLeadId && joinedLeadId && String(recordedLeadId) !== String(joinedLeadId));
 }
 
 function redactedLeadMatch(leadMatch) {
@@ -654,7 +668,12 @@ async function updateLeadAttribution(leadMatch, bridgeSource, now, { linkageCall
 function summarize(matches, crmCalls) {
   return {
     googleCalls: matches.length,
-    crmMainLineCalls: crmCalls.length,
+    // DISTINCT calls, not join rows (codex P2, PR #3303): preserved
+    // shared-sid ambiguity keeps multiple rows for one call, and the
+    // scheduler reads a value >= 500 as the fetch subquery's cap being
+    // hit — 499 distinct calls plus one ambiguity twin must not block
+    // the unclaimed→organic sweep.
+    crmMainLineCalls: new Set(crmCalls.map((call) => String(call.id))).size,
     ready: matches.filter((m) => m.status === 'ready').length,
     alreadyBridged: matches.filter((m) => m.status === 'already_bridged').length,
     ambiguous: matches.filter((m) => m.status === 'ambiguous').length,
@@ -837,6 +856,27 @@ async function applyBridge(options = {}) {
         const attribution = await db.transaction(async (trx) => {
           const res = await attributeResolvedLead(match.callLog, bridgeSource, now, trx);
           if (!res.match) return res;
+          // Stamp REPOINTED since the recorded match (codex P1, PR #3303):
+          // this call's paid funnel row moved with it — retire the OLD
+          // lead's row so the call isn't counted paid twice. Tightly
+          // fingerprinted to the row THIS call's attribution created:
+          // call-sourced google_ads (every web-attributed row carries a
+          // click id or UTM and is protected, same guards as
+          // recordCallPpcAttribution), dated by this call. A same-day row
+          // another paid call legitimately owns re-heals on that call's
+          // next bridge pass. The old lead's lead_source_id is left as-is:
+          // the prior value was never recorded, and guessing would corrupt
+          // real attribution.
+          const recordedLeadId = match.callLog.googleAdsLeadMatchedLeadId;
+          if (recordedLeadId && String(recordedLeadId) !== String(res.match.leadId)) {
+            await trx('ad_service_attribution')
+              .where({ lead_id: recordedLeadId, lead_source: 'google_ads', funnel_stage: 'lead' })
+              .where({ lead_date: etDateString(match.callLog.createdAt ? new Date(match.callLog.createdAt) : new Date(now)) })
+              .whereNull('gclid').whereNull('wbraid').whereNull('gbraid')
+              .whereNull('fbclid').whereNull('fbc')
+              .whereNull('utm_campaign').whereNull('utm_term')
+              .del();
+          }
           await trx('call_log')
             .where({ id: match.callLog.id })
             .update({
