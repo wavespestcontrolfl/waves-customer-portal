@@ -90,4 +90,67 @@ describe('ProposalDetailCard', () => {
     expect(multi.getByText('600 Sample Plaza Dr')).toBeTruthy();
     expect(multi.getByText('Tower B')).toBeTruthy();
   });
+
+  it('identifies taxable lines — marker, rate, disclosure (codex #3281 r4)', () => {
+    const mixed = render(<ProposalDetailCard proposal={{
+      ...PROPOSAL,
+      buildings: [{
+        name: '600 Sample Plaza Dr',
+        note: null,
+        lineItems: [
+          { ...PROPOSAL.buildings[0].lineItems[0] },
+          {
+            description: 'Grounds maintenance',
+            quantity: 1,
+            unitPrice: 200,
+            amount: 200,
+            frequency: 'quarterly',
+            frequencyLabel: 'Quarterly',
+            taxable: false,
+          },
+        ],
+      }],
+      totals: { ...PROPOSAL.totals, taxRate: 0.07 },
+    }} />);
+    const text = mixed.container.textContent;
+    // Taxed amount carries the marker; the exempt one doesn't.
+    expect(text).toContain('$120.00 *');
+    expect(text).not.toContain('$200.00 *');
+    // Rate beside the tax total, and the marker explained.
+    expect(text).toContain('Sales tax (7.00%)');
+    expect(text).toContain('* Taxable line.');
+  });
+
+  it('labels a one-time-only proposal total as Total, never First-year (codex #3281 r4)', () => {
+    const oneTime = render(<ProposalDetailCard proposal={{
+      ...PROPOSAL,
+      buildings: [{
+        name: '600 Sample Plaza Dr',
+        note: null,
+        lineItems: [{
+          description: 'Initial corrective service',
+          quantity: 1,
+          unitPrice: 675,
+          amount: 675,
+          frequency: 'one_time',
+          frequencyLabel: 'One-time',
+          taxable: false,
+        }],
+      }],
+      totals: {
+        annualRecurring: 0,
+        monthlyEquivalent: 0,
+        oneTime: 675,
+        recurringTax: 0,
+        oneTimeTax: 0,
+        totalTax: 0,
+        firstYearTotal: 675,
+        hasTax: false,
+        isMultiBuilding: false,
+      },
+    }} />);
+    const text = oneTime.container.textContent;
+    expect(text).toContain('Total');
+    expect(text).not.toContain('First-year total');
+  });
 });

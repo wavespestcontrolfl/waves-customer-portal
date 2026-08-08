@@ -339,6 +339,22 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('* Taxable line.');
   });
 
+  it('omits estimator pricing intelligence on authored proposals (codex #3281 r4)', () => {
+    // BASE_DATA is an authored proposal with estimator intelligence attached —
+    // the operator entered these lines/prices, so the satellite-measurement
+    // story must not claim to have built them.
+    const authored = render(<EstimateProposalDocument data={BASE_DATA} token="tok-123" />);
+    expect(authored.container.textContent).not.toContain('How your price was built');
+    // A synthesized (engine-priced) document keeps the section — there the
+    // methodology claim is true.
+    const synthesized = {
+      ...BASE_DATA,
+      proposal: { ...BASE_DATA.proposal, enabled: false, synthesized: true },
+    };
+    const engine = render(<EstimateProposalDocument data={synthesized} token="tok-123" />);
+    expect(engine.container.textContent).toContain('How your price was built');
+  });
+
   it('explains the taxable marker even when totals omit the rate', () => {
     // BASE_DATA's totals carry hasTax without taxRate — the label stays
     // plain and the disclosure still renders beside the marked line.

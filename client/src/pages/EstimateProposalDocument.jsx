@@ -113,7 +113,13 @@ export default function EstimateProposalDocument({ data, token }) {
   const authoredProposal = proposal?.enabled === true;
   const buildings = Array.isArray(proposal?.buildings) ? proposal.buildings : [];
   const multiBuilding = buildings.length > 1;
-  const intelligence = estimate.intelligence || null;
+  // "How your price was built" comes from the ESTIMATOR's inputs (satellite
+  // measurement, property specs). An authored proposal's lines and prices are
+  // operator-entered and may have nothing to do with those inputs, so the
+  // section would claim a methodology that didn't set this price — omit it
+  // for authored proposals (codex #3281 r4). Synthesized/engine-priced
+  // documents keep it: there the claim is true.
+  const intelligence = authoredProposal ? null : (estimate.intelligence || null);
 
   // Failed-image accounting for the render pipeline (parity with
   // ServiceReportDocument): the satellite snapshot is the one remote image;

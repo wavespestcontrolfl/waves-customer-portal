@@ -58,6 +58,16 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
   const inclusions = proposal.pestRecurringOnly === true && !proposal.terms
     ? (glassRowInclusions('commercial_pest') || null)
     : null;
+  // Taxable-line identification (codex #3281 r4) — parity with the PDF and
+  // the pdfkit document it replaced: mark each taxed amount, show the rate,
+  // explain the marker. A mixed taxable/exempt proposal must let the
+  // customer verify the calculation line by line.
+  const anyTaxableLine = proposal.buildings.some((b) => (b.lineItems || []).some((li) => li.taxable === true));
+  const taxRateSource = Number(totals.taxRate) > 0 ? Number(totals.taxRate) : Number(proposal.taxRate);
+  const taxRatePct = taxRateSource > 0 ? (taxRateSource * 100).toFixed(2) : null;
+  // One-time-only proposals have no plan year — "First-year total" would
+  // imply an ongoing program (codex #3281 r4; same rule as the PDF).
+  const grandTotalLabel = Number(totals.annualRecurring) > 0 ? 'First-year total' : 'Total';
 
   return (
     <div style={estimateCard()}>
@@ -91,6 +101,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
               </span>
               <span style={amtStyle}>
                 {fmtMoney(item.amount)}
+                {item.taxable === true ? ' *' : ''}
                 {item.frequencyLabel ? (
                   <span style={{ fontWeight: 500, color: W.textCaption }}> {String(item.frequencyLabel).toLowerCase()}</span>
                 ) : null}
@@ -115,17 +126,27 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
         ) : null}
         {totals.hasTax ? (
           <div style={lineRow}>
-            <span>{proposal.taxLabel || 'Sales tax'}</span>
+            <span>
+              {proposal.taxLabel || 'Sales tax'}
+              {taxRatePct ? ` (${taxRatePct}%)` : ''}
+            </span>
             <span style={amtStyle}>{fmtMoney(totals.totalTax)}</span>
           </div>
         ) : null}
         <div style={{ ...lineRow, borderBottom: 0, fontWeight: 800, color: W.blueDeeper, fontSize: 16 }}>
-          <span>First-year total</span>
+          <span>{grandTotalLabel}</span>
           <span style={{ ...amtStyle, fontSize: 18 }}>{fmtMoney(totals.firstYearTotal)}</span>
         </div>
         {Number(totals.annualRecurring) > 0 ? (
           <div style={{ fontSize: 14, color: W.textCaption, marginTop: 2 }}>
             Averages {fmtMoney(totals.monthlyEquivalent)}/month across the year for the recurring service.
+          </div>
+        ) : null}
+        {totals.hasTax || anyTaxableLine ? (
+          <div style={{ fontSize: 13, color: W.textCaption, marginTop: 6, lineHeight: 1.5 }}>
+            * Taxable line. Tax applies only to lines marked taxable, at the Florida state rate plus
+            the service county surtax. Residential pest control and residential lawn maintenance are
+            tax-exempt in Florida; commercial services may be taxable.
           </div>
         ) : null}
       </div>

@@ -5361,9 +5361,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         ${(building.lineItems || []).map((item) => `
         <div class="proposal-line">
           <span class="proposal-line-desc">${escapeHtml(item.description || 'Service')}${item.quantity > 1 ? ` &times; ${item.quantity}` : ''}</span>
-          <span class="proposal-line-amt">${fmtMoney(item.amount)}${item.frequencyLabel ? ` <span class="proposal-line-freq">${escapeHtml(String(item.frequencyLabel).toLowerCase())}</span>` : ''}</span>
+          <span class="proposal-line-amt">${fmtMoney(item.amount)}${item.taxable === true ? ' *' : ''}${item.frequencyLabel ? ` <span class="proposal-line-freq">${escapeHtml(String(item.frequencyLabel).toLowerCase())}</span>` : ''}</span>
         </div>`).join('')}
       </div>`).join('');
+      // Taxable-line identification + one-time total label (codex #3281 r4)
+      // — SSR parity with ProposalDetailCard / EstimateProposalDocument.
+      const proposalAnyTaxable = (proposalForCard.buildings || [])
+        .some((b) => (b.lineItems || []).some((li) => li.taxable === true));
+      const proposalTaxRatePct = proposalCardTotals.taxRate > 0
+        ? (proposalCardTotals.taxRate * 100).toFixed(2)
+        : null;
+      const proposalGrandTotalLabel = proposalCardTotals.annualRecurring > 0 ? 'First-year total' : 'Total';
       proposalCardHtml = `
   <section class="card proposal-card">
     <h2>${escapeHtml(proposalForCard.title || 'Commercial Service Proposal')}</h2>
@@ -5374,9 +5382,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     <div class="proposal-totals">
       ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">Recurring service (per year)</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.annualRecurring)}</span></div>` : ''}
       ${proposalCardTotals.oneTime > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">One-time services</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.oneTime)}</span></div>` : ''}
-      ${proposalCardTotals.hasTax ? `<div class="proposal-line"><span class="proposal-line-desc">${escapeHtml(proposalForCard.taxLabel || 'Sales tax')}</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.totalTax)}</span></div>` : ''}
-      <div class="proposal-line proposal-line-total"><span class="proposal-line-desc">First-year total</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.firstYearTotal)}</span></div>
+      ${proposalCardTotals.hasTax ? `<div class="proposal-line"><span class="proposal-line-desc">${escapeHtml(proposalForCard.taxLabel || 'Sales tax')}${proposalTaxRatePct ? ` (${proposalTaxRatePct}%)` : ''}</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.totalTax)}</span></div>` : ''}
+      <div class="proposal-line proposal-line-total"><span class="proposal-line-desc">${proposalGrandTotalLabel}</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.firstYearTotal)}</span></div>
       ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-monthly-note">Averages ${fmtMoney(proposalCardTotals.monthlyEquivalent)}/month across the year for the recurring service.</div>` : ''}
+      ${proposalCardTotals.hasTax || proposalAnyTaxable ? `<div class="proposal-monthly-note">* Taxable line. Tax applies only to lines marked taxable, at the Florida state rate plus the service county surtax. Residential pest control and residential lawn maintenance are tax-exempt in Florida; commercial services may be taxable.</div>` : ''}
     </div>
     ${proposalForCard.terms ? `<div class="proposal-terms">${escapeHtml(proposalForCard.terms)}</div>` : ''}
     ${proposalPestRecurringOnly(proposalForCard, est) && !proposalForCard.terms ? `<div class="proposal-included">
