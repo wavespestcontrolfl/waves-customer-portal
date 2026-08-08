@@ -2431,15 +2431,23 @@ async function createSelfBooking(payload = {}) {
         // client never retries. Rolling the booking back instead was
         // rejected: stage bookkeeping must never cost a customer a booking.
         logger.warn(`[booking:confirm] customer promotion failed (non-blocking) for customer=${custId}: ${e.message}`);
-        await trx('notifications').insert({
-          recipient_type: 'admin',
-          category: 'customer_promotion_review',
-          title: 'Self-booking committed without customer promotion',
-          body: `A booking was confirmed but the customer row could not be promoted to a live stage (it may still show churned/past customer/lead). Open the customer and set the stage manually.`,
-          icon: '\u{1F514}',
-          link: `/admin/customers?customerId=${custId}`,
-          metadata: JSON.stringify({ customerId: custId, scheduledServiceId: scheduledRow.id, error: String(e.message || e).slice(0, 200) }),
-        });
+        // Through NotificationService, not a raw insert (codex #3282 r2 P1):
+        // the central path owns internal-test-account suppression and the
+        // bell policy; `connection: trx` keeps the marker in this booking's
+        // transaction. The service contains its own failures (logs + null),
+        // so a marker miss can still never fail the booking.
+        await require('../services/notification-service').notifyAdmin(
+          'customer_promotion_review',
+          'Self-booking committed without customer promotion',
+          'A booking was confirmed but the customer row could not be promoted to a live stage (it may still show churned/past customer/lead). Open the customer and set the stage manually.',
+          {
+            icon: '\u{1F514}',
+            link: `/admin/customers?customerId=${custId}`,
+            bell: true,
+            metadata: { customerId: custId, scheduledServiceId: scheduledRow.id, error: String(e.message || e).slice(0, 200) },
+            connection: trx,
+          },
+        );
       }
 
       return { booking: bookingRow, serviceRow: scheduledRow };
