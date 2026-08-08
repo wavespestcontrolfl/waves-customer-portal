@@ -44,7 +44,11 @@
 const SERVICES = [
   {
     service_key: 'foam_drill',
-    name: 'Drill-and-Foam Termite Treatment Service',
+    // EXACTLY the engine line label (priceFoamDrill returns name
+    // 'Drill-and-Foam Termite'): one-time bookings schedule under the raw
+    // line name, and completion's name-fallback is an exact lower(name)
+    // match — an invented prettier name would never resolve (codex r4 P1).
+    name: 'Drill-and-Foam Termite',
     short_name: 'Foam Drill',
     description: 'Tiered drill-and-foam termite treatment. Drill points through slab or block, foam termiticide injected into galleries and voids. Tiers: Spot (≤5 points), Moderate (≤10), Extensive (≤15), Full Perimeter (≤20).',
     category: 'termite',
@@ -75,7 +79,12 @@ const SERVICES = [
   },
   {
     service_key: 'foam_recurring',
-    name: 'Recurring Foam Termite Treatment Service',
+    // EXACTLY the reserved-slot label (slot-reservation returns 'Recurring
+    // Foam Treatment' for foam_recurring) and the engine's cadence-less
+    // base name — reserved rows carry no service_id, so the exact-name
+    // fallback is their only route to the typed profile (codex r4 P1).
+    // Cadence-suffixed converter rows link by service_id instead.
+    name: 'Recurring Foam Treatment',
     short_name: 'Recurring Foam',
     description: 'Recurring spot-foam termite program at a per-application discount vs one-time treatment. Quarterly, bi-monthly, or monthly cadence; up to 20 drill points per application (larger jobs are one-time foam or custom).',
     category: 'termite',
@@ -113,7 +122,11 @@ const SERVICES = [
 ];
 
 const STATE_KEY = 'migration.20260808070000.state';
+const PROFILE_MARKER = '[foam_catalog_action=inserted]';
 
+// state.services entries are { key, id } — down() removes services by the
+// recorded UUID, never by key, so a row an admin deleted and recreated
+// under the same key (new UUID) survives rollback (codex r4 P1).
 async function recordState(knex, state) {
   if (!(await knex.schema.hasTable('system_settings'))) return;
   const existing = await knex('system_settings').where({ key: STATE_KEY }).first();
@@ -122,8 +135,12 @@ async function recordState(knex, state) {
     // set of rows down() is allowed to remove.
     let prior = { services: [], profiles: [] };
     try { prior = { services: [], profiles: [], ...JSON.parse(existing.value) }; } catch { /* keep empty */ }
+    const byId = new Map();
+    for (const entry of [...prior.services, ...state.services]) {
+      if (entry && entry.id) byId.set(entry.id, entry);
+    }
     const merged = {
-      services: [...new Set([...prior.services, ...state.services])],
+      services: [...byId.values()],
       profiles: [...new Set([...prior.profiles, ...state.profiles])],
     };
     await knex('system_settings').where({ key: STATE_KEY }).update({ value: JSON.stringify(merged) });
@@ -146,9 +163,17 @@ exports.up = async function up(knex) {
       console.warn(`[foam-catalog] ${svc.service_key}: services row already exists — leaving untouched`);
       continue;
     }
-    await knex('services').insert(svc);
-    inserted.services.push(svc.service_key);
-    console.log(`[foam-catalog] ${svc.service_key}: services row inserted`);
+    const returned = await knex('services').insert(svc).returning('id');
+    const first = Array.isArray(returned) ? returned[0] : returned;
+    const newId = first && typeof first === 'object' ? first.id : first;
+    if (newId) {
+      inserted.services.push({ key: svc.service_key, id: newId });
+      console.log(`[foam-catalog] ${svc.service_key}: services row inserted (${newId})`);
+    } else {
+      // No UUID back means down() cannot prove ownership — leave the row
+      // out of the removable set rather than guessing by key.
+      console.warn(`[foam-catalog] ${svc.service_key}: inserted but no id returned — row will survive rollback`);
+    }
   }
 
   if (!(await knex.schema.hasTable('service_completion_profiles'))) {
@@ -199,7 +224,7 @@ exports.up = async function up(knex) {
       followup_policy: followupPolicy,
       default_followup_days: followupDays,
       active: true,
-      notes: '[foam_catalog_action=inserted]',
+      notes: PROFILE_MARKER,
     });
     inserted.profiles.push(svc.service_key);
     console.log(`[foam-catalog] ${svc.service_key}: profile inserted → service_report/termite_treatment/auto_send`);
@@ -209,9 +234,11 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  // Remove ONLY what up() proved it inserted (state row) — a pre-existing
-  // admin-created row for either key survives rollback untouched. No state
-  // row (or no system_settings table) → up() never inserted anything here.
+  // Remove ONLY what up() proved it inserted — services by recorded UUID
+  // (a same-key row an admin recreated has a new UUID and survives),
+  // profiles by key AND the insertion marker in notes (an admin-replaced
+  // profile without the marker survives). No state row (or no
+  // system_settings table) → up() never inserted anything here.
   let state = { services: [], profiles: [] };
   if (await knex.schema.hasTable('system_settings')) {
     const row = await knex('system_settings').where({ key: STATE_KEY }).first();
@@ -225,20 +252,26 @@ exports.down = async function down(knex) {
   }
 
   if (state.profiles.length > 0 && (await knex.schema.hasTable('service_completion_profiles'))) {
-    await knex('service_completion_profiles').whereIn('service_key', state.profiles).del();
+    for (const key of state.profiles) {
+      const profile = await knex('service_completion_profiles').where({ service_key: key }).first();
+      if (!profile) continue;
+      if (!String(profile.notes || '').includes(PROFILE_MARKER)) {
+        console.warn(`[foam-catalog] down: profile ${key} lacks the insertion marker — admin-replaced, leaving untouched`);
+        continue;
+      }
+      await knex('service_completion_profiles').where({ service_key: key }).del();
+    }
   }
 
-  if (state.services.length > 0 && (await knex.schema.hasTable('services'))) {
-    const ids = await knex('services').whereIn('service_key', state.services).pluck('id');
-    if (ids.length > 0) {
-      if (await knex.schema.hasColumn('service_records', 'service_id')) {
-        await knex('service_records').whereIn('service_id', ids).update({ service_id: null });
-      }
-      if (await knex.schema.hasColumn('scheduled_services', 'service_id')) {
-        await knex('scheduled_services').whereIn('service_id', ids).update({ service_id: null });
-      }
-      await knex('services').whereIn('service_key', state.services).del();
+  const ids = state.services.map((entry) => entry && entry.id).filter(Boolean);
+  if (ids.length > 0 && (await knex.schema.hasTable('services'))) {
+    if (await knex.schema.hasColumn('service_records', 'service_id')) {
+      await knex('service_records').whereIn('service_id', ids).update({ service_id: null });
     }
+    if (await knex.schema.hasColumn('scheduled_services', 'service_id')) {
+      await knex('scheduled_services').whereIn('service_id', ids).update({ service_id: null });
+    }
+    await knex('services').whereIn('id', ids).del();
   }
 
   if (await knex.schema.hasTable('system_settings')) {
