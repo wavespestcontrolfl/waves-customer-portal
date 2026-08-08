@@ -31,7 +31,9 @@
  *    reported — they're comparison-PAGE candidates for the operator, not
  *    autonomous blog topics.
  *  - Cost: 1 self + ~11 competitor ranked_keywords calls ≈ $1.30/run at
- *    1000 rows each; quarterly cadence. Logged per call by the client.
+ *    1000 rows each; monthly cadence (matches the 30-day row expiry — the
+ *    original quarterly cadence left rows dead 60 days per cycle).
+ *    Logged per call by the client.
  */
 
 const db = require('../../models/db');
@@ -362,7 +364,10 @@ class CompetitorGapMiner {
     if (!opportunities.length) return 0;
     let count = 0;
     const now = new Date();
-    const expiresAt = new Date(Date.now() + 30 * 86400_000); // quarterly cadence → longer shelf life than GSC rows
+    // 32 days: covers the longest calendar-month interval between monthly
+    // 1st-of-month runs (31 days) with a day of margin, so rows never sit
+    // expired waiting for the revival re-mine.
+    const expiresAt = new Date(Date.now() + 32 * 86400_000);
 
     const winners = new Map();
     for (const o of opportunities) {

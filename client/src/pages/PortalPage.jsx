@@ -12266,16 +12266,32 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
   const [submitError, setSubmitError] = useState('');
   const [lastService, setLastService] = useState(null);
   const [nextService, setNextService] = useState(null);
+  // /api/schedule payload — carries the server-gated streamline handoff flag
+  // (overlayHandoff), the re-service picker url/lanes, and the per-visit
+  // reschedule token links. Null until loaded (or on failure), which renders
+  // the classic ticket form — the handoff only ever REPLACES the form when
+  // the server explicitly grants it.
+  const [scheduleData, setScheduleData] = useState(null);
   const fileRef = useRef(null);
 
   useEffect(() => {
-    if (open) {
-      setSubmitError('');
-      api.getServices({ limit: 1 }).then(d => {
-        if (d.services?.length) setLastService(d.services[0]);
-      }).catch(() => {});
-      api.getNextService().then(d => setNextService(d.next || null)).catch(() => {});
-    }
+    if (!open) return undefined;
+    let stale = false;
+    setSubmitError('');
+    api.getServices({ limit: 1 }).then(d => {
+      if (!stale && d.services?.length) setLastService(d.services[0]);
+    }).catch(() => {});
+    api.getNextService().then(d => { if (!stale) setNextService(d.next || null); }).catch(() => {});
+    // Fail-closed on every path: reset BEFORE the fetch and null on failure,
+    // so a reopen after the streamline kill switch (or an eligibility change)
+    // can never keep serving a stale handoff off the previous payload — a
+    // fetch miss renders the classic ticket form. The stale flag discards
+    // responses from an obsolete open/close cycle.
+    setScheduleData(null);
+    api.getSchedule()
+      .then(d => { if (!stale) setScheduleData(d || null); })
+      .catch(() => { if (!stale) setScheduleData(null); });
+    return () => { stale = true; };
   }, [open]);
 
   const requestCategories = [
@@ -12309,6 +12325,27 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     const daysSince = (new Date() - svcDate) / (1000 * 60 * 60 * 24);
     return daysSince <= 30 && daysSince >= 0;
   })();
+
+  // Streamline handoff (owner ruling 2026-08-08: re-services go through the
+  // /reservice/:token picker ONLY). Server-gated end to end: overlayHandoff is
+  // computed from GATE_RESERVICE_STREAMLINE and reservice.url/lanes only exist
+  // while GATE_RESERVICE_SELF_SERVE grants a lane — with either gate dark this
+  // is null and the overlay renders exactly as it does today. When granted,
+  // the eligible pest/lawn ticket form is REPLACED by the picker CTA (the
+  // picker's own details box reaches dispatch notes; photos are accepted as
+  // lost on this lane — the ticket form survives only for ineligible plans).
+  const overlayHandoff = !!scheduleData?.overlayHandoff;
+  const handoffLane = category === 'pest_issue' ? 'pest' : category === 'lawn_concern' ? 'lawn' : null;
+  const pickerHandoffUrl = overlayHandoff && handoffLane && scheduleData?.reservice?.url
+    && (scheduleData.reservice.lanes || []).includes(handoffLane)
+    ? scheduleData.reservice.url
+    : null;
+  // schedule_change: offer each upcoming visit's own /reschedule/:token page
+  // (the same page the reminder texts link). The ticket form stays below for
+  // adds/adjustments a per-visit move can't express.
+  const reschedulableVisits = overlayHandoff && category === 'schedule_change'
+    ? (scheduleData?.upcoming || []).filter(v => v.rescheduleUrl)
+    : [];
 
   // Schedule awareness: next service within 3 days
   const nextServiceSoon = nextService && (() => {
@@ -12466,6 +12503,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 
   const handleSubmit = async (e) => {
     e?.preventDefault();
+    // Handoff-active categories have no submit button, but a stale Enter-key
+    // submit must not file the ticket the picker replaced.
+    if (pickerHandoffUrl) return;
     if (!category || !description.trim()) {
       setSubmitError('Choose a request type and add a short description so the team has enough context.');
       return;
@@ -12716,7 +12756,60 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 </div>
               </section>
 
-              {(isCallbackEligible || (nextServiceSoon && isProblemCategory)) && (
+              {pickerHandoffUrl && (
+                <section data-glass="card" style={{
+                  ...card,
+                  padding: 16,
+                  background: PORTAL_SHELL.successBg,
+                  borderColor: PORTAL_SHELL.successBorder,
+                }}>
+                  <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                    <span style={{ ...iconTile, background: B.greenLight, color: B.glassNavy }}><Icon name="checkCircle" size={16} strokeWidth={2} /></span>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.successText }}>Covered — book your free re-service</div>
+                      <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.successText, lineHeight: 1.45 }}>
+                        {activeTierName
+                          ? `Re-services are included with your WaveGuard ${tierName} plan.`
+                          : 'Re-services are included with your plan.'}
+                        {' '}Pick a time that works and tell us what you're seeing — it goes straight on the schedule, no office follow-up needed.
+                      </div>
+                      <a href={pickerHandoffUrl} data-glass-accent="" style={{
+                        ...secondaryAction,
+                        marginTop: 12,
+                        padding: '0 16px',
+                        background: B.glassNavy,
+                        borderColor: B.glassNavy,
+                        color: '#fff',
+                        display: 'inline-flex',
+                      }}>
+                        Book a free re-service
+                      </a>
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {reschedulableVisits.length > 0 && (
+                <section data-glass="card" style={{ ...card, padding: 16 }}>
+                  <div style={sectionTitle}>Reschedule online</div>
+                  <div style={helperText}>Move a visit yourself — each link opens that visit's scheduling page. Use the form below for anything else.</div>
+                  <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
+                    {reschedulableVisits.map(v => (
+                      <div key={v.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{v.serviceType || 'Service visit'}</div>
+                          <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{fmtDate(v.date, { weekday: 'short', month: 'short', day: 'numeric' })}</div>
+                        </div>
+                        <a href={v.rescheduleUrl} data-glass-accent="" style={{ ...secondaryAction, padding: '0 12px', flexShrink: 0 }}>
+                          Reschedule
+                        </a>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {!pickerHandoffUrl && (isCallbackEligible || (nextServiceSoon && isProblemCategory)) && (
                 <section style={{ display: 'grid', gap: 8 }}>
                   {isCallbackEligible && (category === 'pest_issue' || category === 'lawn_concern') && (
                     <div style={{
@@ -12761,7 +12854,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 </section>
               )}
 
-              {isProblemCategory && (
+              {isProblemCategory && !pickerHandoffUrl && (
                 <section data-glass="card" style={{ ...card, padding: 16 }}>
                   <div style={sectionTitle}>Priority</div>
                   <div style={helperText}>Routine is best for most issues. Use urgent for active interior activity or access-sensitive timing.</div>
@@ -12805,6 +12898,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 </section>
               )}
 
+              {!pickerHandoffUrl && (
               <section data-glass="card" style={{ ...card, padding: 16 }}>
                 <label htmlFor="portal-request-description" style={sectionTitle}>Details</label>
                 <div style={helperText}>
@@ -12851,8 +12945,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   <span>{description.length}/{descriptionLimit}</span>
                 </div>
               </section>
+              )}
 
-              {isProblemCategory && (
+              {isProblemCategory && !pickerHandoffUrl && (
                 <section data-glass="card" style={{ ...card, padding: 16 }}>
                   <div style={sectionTitle}>Location</div>
                   <div style={helperText}>Select the area where the issue is happening.</div>
@@ -12886,6 +12981,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 </section>
               )}
 
+              {!pickerHandoffUrl && (
               <section data-glass="card" style={{ ...card, padding: 16 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
                   <div>
@@ -12985,6 +13081,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   </div>
                 </div>
               </section>
+              )}
 
               {submitError && (
                 <div role="alert" style={{
@@ -13025,6 +13122,28 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   Text
                 </a>
               </div>
+              {pickerHandoffUrl ? (
+                <a href={pickerHandoffUrl} data-glass-accent="" style={{
+                  minHeight: 44,
+                  borderRadius: 8,
+                  border: 'none',
+                  background: B.glassNavy,
+                  color: '#fff',
+                  fontSize: 14,
+                  fontWeight: 850,
+                  fontFamily: FONTS.heading,
+                  cursor: 'pointer',
+                  textDecoration: 'none',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  padding: '0 18px',
+                  minWidth: compact ? '100%' : 180,
+                }}>
+                  Book a free re-service
+                </a>
+              ) : (
               <button type="submit" disabled={!canSubmit} style={{
                 minHeight: 44,
                 borderRadius: 8,
@@ -13044,6 +13163,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               }}>
                 {submitting ? 'Sending...' : 'Submit Request'}
               </button>
+              )}
             </footer>
           </form>
         )}

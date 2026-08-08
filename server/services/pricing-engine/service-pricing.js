@@ -4002,6 +4002,24 @@ function mosquitoRecurringAnchors(programIndex) {
   return anchors;
 }
 
+// Cadence bound for the mosquito programs (owner GO 2026-08-08): the
+// Monthly-12 per-visit price never lands ABOVE the Seasonal-9 per-visit at
+// the same treatable size. The relation is baked into mosquito_base_prices
+// (~7-12% under Seasonal at every bucket), but the table is admin-editable
+// with nothing else enforcing it — a reprice that inverted a cell would
+// silently sell the denser program at a premium per visit while the cards
+// present it as the value option. Same class as the lawn 12x≤9x lookup
+// bound (2026-07-29). Pressure multiplies both programs identically, so
+// bounding the interpolated base bounds the final per-visit too.
+function mosquitoBoundedBasePrice(programIndex, pricingSqFt) {
+  const base = interpolateMosquitoPrice(mosquitoRecurringAnchors(programIndex), pricingSqFt);
+  const monthlyIdx = MOSQUITO.programs.indexOf('monthly12');
+  const seasonalIdx = MOSQUITO.programs.indexOf('seasonal9');
+  if (programIndex !== monthlyIdx || monthlyIdx < 0 || seasonalIdx < 0) return base;
+  const seasonal = interpolateMosquitoPrice(mosquitoRecurringAnchors(seasonalIdx), pricingSqFt);
+  return seasonal > 0 ? Math.min(base, seasonal) : base;
+}
+
 // Continuous lot-size pressure: ramps up to lot_half by the HALF boundary and
 // to lot_acre by the ACRE boundary — matching the old categorical values where
 // each category began — so the customer price has no boundary jumps.
@@ -4075,7 +4093,7 @@ function priceMosquito(property, options = {}) {
   if (tierIndex < 0) throw new Error(`Unknown mosquito program: ${tier}`);
   const tierWasForced = !!normalizedRequestedTier && selectedProgram !== recommendedProgram;
   if (tierWasForced) recommendationReasons.push('forced_by_request');
-  const basePrice = interpolateMosquitoPrice(mosquitoRecurringAnchors(tierIndex), pricingSqFt);
+  const basePrice = mosquitoBoundedBasePrice(tierIndex, pricingSqFt);
 
   const perVisit = Math.round(basePrice * pressure);
   const visits = MOSQUITO.tierVisits[selectedProgram];
@@ -4107,7 +4125,7 @@ function priceMosquito(property, options = {}) {
   const marginFloorOk = margin >= GLOBAL.MARGIN_FLOOR;
 
   const tiers = MOSQUITO.programs.map((name, idx) => {
-    const bp = interpolateMosquitoPrice(mosquitoRecurringAnchors(idx), pricingSqFt);
+    const bp = mosquitoBoundedBasePrice(idx, pricingSqFt);
     const pv = Math.round(bp * pressure);
     const v = MOSQUITO.tierVisits[name];
     const ann = pv * v + annualAddOns;

@@ -34,6 +34,11 @@ const thread = (over = {}) => ({
   peer: '9415558360', message_body: 'Do you plan to swing by next week?', created_at: '2026-08-05T14:00:00Z',
   customer_name: 'Test Customerthree', customer_id: 'cu-1', ...over,
 });
+const request = (over = {}) => ({
+  id: 'r1', category: 'pest_issue', subject: 'Bees making nests all over the house',
+  urgency: 'routine', status: 'new', created_at: '2026-08-04T12:00:00Z',
+  customer_name: 'Test Customerfour', customer_id: 'cu-2', ...over,
+});
 
 describe('composeUnworkedCommsDigest', () => {
   test('fully-worked day composes nothing', () => {
@@ -47,13 +52,13 @@ describe('composeUnworkedCommsDigest', () => {
       followUps: [followUp(), followUp({ id: 't2', status: 'pending' })],
       unanswered: [thread()],
     });
-    expect(composed.subject).toBe('ACT: 4 unworked comms at end of day — 1 callback, 2 follow-ups, 1 unanswered text');
+    expect(composed.subject).toBe('ACT: 4 unworked comms at end of day — 1 callback, 2 follow-ups, 1 unanswered text, 0 open requests');
     expect(composed.total).toBe(4);
   });
 
   test('single lane composes with only that section', () => {
     const composed = composeUnworkedCommsDigest({ unanswered: [thread()] });
-    expect(composed.subject).toBe('ACT: 1 unworked comm at end of day — 0 callbacks, 0 follow-ups, 1 unanswered text');
+    expect(composed.subject).toBe('ACT: 1 unworked comm at end of day — 0 callbacks, 0 follow-ups, 1 unanswered text, 0 open requests');
     expect(composed.text).toContain('Test Customerthree');
     expect(composed.text).not.toContain('Callbacks requested');
     expect(composed.text).not.toContain('Follow-up tasks');
@@ -74,6 +79,27 @@ describe('composeUnworkedCommsDigest', () => {
     const composed = composeUnworkedCommsDigest({ unanswered: [thread({ message_body: 'hi <b>&' })] });
     expect(composed.html).toContain('hi &lt;b&gt;&amp;');
   });
+
+  test('open service requests compose their own section with age and urgency', () => {
+    const composed = composeUnworkedCommsDigest({ requests: [request({ urgency: 'urgent' })] });
+    expect(composed.subject).toBe('ACT: 1 unworked comm at end of day — 0 callbacks, 0 follow-ups, 0 unanswered texts, 1 open request');
+    expect(composed.requests).toBe(1);
+    expect(composed.text).toContain('Service requests still open');
+    expect(composed.text).toContain('Test Customerfour');
+    expect(composed.text).toContain('pest issue');
+    expect(composed.text).toContain('URGENT');
+    expect(composed.text).toContain('Bees making nests');
+    // Deep-links the customer profile — the only remaining resolve surface.
+    expect(composed.html).toContain('/admin/customers?customerId=cu-2');
+  });
+
+  test('request-lane overflow reports the full backlog via total_count', () => {
+    const composed = composeUnworkedCommsDigest({
+      requests: [request({ total_count: 14 })],
+    });
+    expect(composed.subject).toContain('14 open requests');
+    expect(composed.text).toContain('…and 13 more not shown');
+  });
 });
 
 describe('runUnworkedCommsWatcher', () => {
@@ -83,6 +109,7 @@ describe('runUnworkedCommsWatcher', () => {
     loadCallbackCalls: async () => [],
     loadDroppedFollowUps: async () => [],
     loadUnansweredThreads: async () => [],
+    loadOpenServiceRequests: async () => [],
     sentRecently: never,
     stampSendMarker: noop,
     ...over,
@@ -145,6 +172,7 @@ describe('runUnworkedCommsWatcher', () => {
       loadCallbackCalls: boom,
       loadDroppedFollowUps: boom,
       loadUnansweredThreads: boom,
+      loadOpenServiceRequests: boom,
     }));
     expect(result).toEqual({ skipped: 'query_failed' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();

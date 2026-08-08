@@ -1394,6 +1394,11 @@ const ReviewService = {
           first_name: firstNameFrom(contact.name) || customer.first_name || "",
           review_url: reviewUrl,
           tech_name: techName,
+          // {reservice_line} EXPAND half (reservice-link.js): '' unless both
+          // re-service gates are on and the plan grants a lane. Must be
+          // supplied before the token lands in the body — an unsupplied key
+          // suppresses the whole send.
+          reservice_line: await require("./reservice-link").reserviceLineForCustomer(customer.id),
         });
       } catch {
         /* template lookup failed → null */
