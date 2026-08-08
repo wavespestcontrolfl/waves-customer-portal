@@ -145,7 +145,13 @@ router.post('/', async (req, res, next) => {
       // 30-day cooldown, the already-reviewed flag, and the outreach funnel —
       // and the click could never be attributed. sendGatedAsk mints the token,
       // applies the gates, and records the row.
-      let asked = { outcome: 'send_failed' };
+      // 'error' (NOT 'send_failed'): a THROW here means nothing was
+      // persisted — sendGatedAsk's own send_failed outcome implies a row was
+      // queued for cron retry, but a fail-closed gate error leaves no row, so
+      // classifying it as queued would tell the customer to wait for a text
+      // that never comes (codex #3285 r5). 'error' falls through to the
+      // in-app fallback chain instead.
+      let asked = { outcome: 'error' };
       try {
         // #3288's {reservice_line} contract holds through the fold: the
         // gated path renders via ReviewService.sendSMS, whose render site

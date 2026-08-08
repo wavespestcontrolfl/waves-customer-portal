@@ -191,7 +191,14 @@ export function ProjectAskWaves({ token }) {
 
 export function ProjectReviewAsk({ data }) {
   if (data?.hasLeftGoogleReview) return null;
-  const location = reviewLocationForProject(data);
+  // Server-resolved canonical office first (payload.reviewLocation — the ONE
+  // resolver in config/locations.js); the local substring table is only a
+  // fallback for cached pre-resolver payloads. The table is incomplete by
+  // construction (no Port Charlotte / 33948) — never extend it, extend the
+  // server resolver.
+  const location = data?.reviewLocation?.reviewUrl
+    ? { key: data.reviewLocation.id, reviewUrl: data.reviewLocation.reviewUrl }
+    : reviewLocationForProject(data);
   return (
     <section
       data-glass="card"

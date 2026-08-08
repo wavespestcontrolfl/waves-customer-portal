@@ -3124,7 +3124,12 @@ const ReviewService = {
     if (existingPark) return;
     await db("review_sequences").insert({
       customer_id: customerId,
-      location_id: locationId || customer?.nearest_location_id || null,
+      // Canonical resolution at park time — the sweep later passes this back
+      // as an EXPLICIT locationId, so persisting raw nearest_location_id here
+      // would bypass the resolver and send the redeemed final cadence to the
+      // geographically-nearest profile (the downtown-Sarasota misroute) even
+      // though ordinary sequences resolve canonically (codex #3285 r5).
+      location_id: locationId || resolveLocation(customer || {}),
       status: "deferred",
       stop_reason: "opener_in_flight",
       plan: JSON.stringify(Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN),

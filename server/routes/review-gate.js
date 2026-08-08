@@ -47,7 +47,13 @@ const directLinkLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  handler: (req, res) => res.redirect(302, `/rate/${encodeURIComponent(String(req.params?.token || ''))}`),
+  // Absolute portal origin, same as the in-handler fallback — a root-relative
+  // /rate resolves on the API origin (404) in a split-origin deploy
+  // (codex #3285 r5).
+  handler: (req, res) => {
+    const { publicPortalUrl } = require('../utils/portal-url');
+    return res.redirect(302, `${publicPortalUrl()}/rate/${encodeURIComponent(String(req.params?.token || ''))}`);
+  },
 });
 const { isBotUserAgent } = require('../utils/bot-ua');
 
@@ -61,7 +67,11 @@ router.param('token', (req, res, next, token) => {
   // /go's contract is that EVERY failure path degrades to the rate page
   // (which renders a friendly not-found state) — keep that for malformed
   // tokens too; everything else gets the same generic 404 as unknown.
-  if (req.path.endsWith('/go')) return res.redirect(302, `/rate/${encodeURIComponent(String(token))}`);
+  if (req.path.endsWith('/go')) {
+    // Absolute portal origin (split-origin safe) — see the limiter handler.
+    const { publicPortalUrl } = require('../utils/portal-url');
+    return res.redirect(302, `${publicPortalUrl()}/rate/${encodeURIComponent(String(token))}`);
+  }
   return res.status(404).json({ error: 'Review link not found or expired' });
 });
 

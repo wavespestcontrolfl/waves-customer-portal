@@ -133,7 +133,10 @@ describe('review-gate token gate (url-safe 32-64)', () => {
   test('malformed token on /go degrades to the rate page, never a bare 404', async () => {
     const res = await get('/api/rate/tooshort/go');
     expect(res.status).toBe(302);
-    expect(res.headers.get('location')).toBe('/rate/tooshort');
+    // ABSOLUTE portal origin — a root-relative /rate resolves on the API
+    // origin (404) in a split-origin deploy (codex #3285 r5).
+    const { publicPortalUrl } = require('../utils/portal-url');
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/tooshort`);
     expect(db).not.toHaveBeenCalled();
   });
 
