@@ -282,8 +282,11 @@ router.get('/:token', reviewPageLimiter, async (req, res, next) => {
     // submissions (review-public.js) that now land here via redirect — those
     // mark completion with rated_at + status rated/reviewed rather than
     // 'submitted', so honor them too or a finished customer would see a fresh,
-    // overwritable rating flow instead of the thank-you state.
-    if (request.status === 'submitted' || request.rated_at) {
+    // overwritable rating flow instead of the thank-you state. Same
+    // finality predicate as /go and submitRating — a status-only 'rated'
+    // legacy row must not reopen the form (pre-push audit r5b).
+    if (request.rated_at
+      || ['submitted', 'reviewed', 'rated'].includes(String(request.status || '').toLowerCase())) {
       return res.status(200).json({ alreadySubmitted: true, message: 'You already submitted feedback — thank you!' });
     }
 
@@ -357,14 +360,23 @@ router.post('/:token/score', reviewPageLimiter, async (req, res, next) => {
       return res.status(410).json({ error: 'This review link has expired' });
     }
 
-    if (['submitted', 'reviewed'].includes(request.status) || request.rated_at) {
+    // Same finality predicate as /go, the page GET, and submitRating —
+    // a status-only 'rated' legacy row must not accept score mutation
+    // (pre-push audit r5b).
+    if (request.rated_at
+      || ['submitted', 'reviewed', 'rated'].includes(String(request.status || '').toLowerCase())) {
       return res.status(409).json({ error: 'Feedback already submitted' });
     }
 
     const category = categorizeScore(score);
     await db('review_requests')
       .where({ id: request.id })
-      .whereNotIn('status', ['submitted', 'reviewed'])
+      // NULL-safe grouped guard (NULL NOT IN (...) is UNKNOWN in Postgres) —
+      // mirrors the conditional-update guard on the submit handler.
+      .where(function () {
+        this.whereNull('status').orWhereNotIn('status', ['submitted', 'reviewed', 'rated']);
+      })
+      .whereNull('rated_at')
       .update({
         score,
         highlights: highlights ? JSON.stringify(highlights) : null,
