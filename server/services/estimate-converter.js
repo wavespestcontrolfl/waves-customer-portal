@@ -1560,7 +1560,15 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
 // catalog — an absent key would only add lookup-warn noise.
 function remainingUnitCatalogKey(svc = {}) {
   const key = String(svc.serviceKey || svc.service_key || '').trim();
-  return /^tree_shrub(_program|_quarterly|_6week)$/.test(key) ? key : null;
+  if (/^tree_shrub(_program|_quarterly|_6week)$/.test(key)) return key;
+  // Recurring foam: key verified against the catalog 2026-08-08 — the
+  // foam_recurring row ships in the same PR (20260808070000). The seeder
+  // normalizer matches both the engine key (priceRecurringFoam returns
+  // service 'foam_recurring') and the "Recurring Foam Treatment" display
+  // name, so legacy name-only lines link too. Absent row (env not yet
+  // migrated) degrades to the existing name-only warn path.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'foam_recurring') return 'foam_recurring';
+  return null;
 }
 
 function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}) {

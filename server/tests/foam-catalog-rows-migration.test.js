@@ -1,6 +1,6 @@
 /**
  * 20260808070000 foam catalog rows (owner ruling 2026-08-08): foam_drill +
- * recurring_foam services rows keyed 1:1 to the published pricing keys,
+ * foam_recurring services rows keyed 1:1 to the published pricing keys,
  * plus typed completion profiles (service_report/termite_treatment) so a
  * completed foam visit closes under the termite report, not the generic
  * fallback. booking_enabled stays FALSE — foam is assessment-first.
@@ -77,7 +77,7 @@ describe('20260808070000 foam catalog rows', () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
 
-    for (const key of ['foam_drill', 'recurring_foam']) {
+    for (const key of ['foam_drill', 'foam_recurring']) {
       expect(svcRow(db, key)).toMatchObject({
         category: 'termite',
         booking_enabled: false,
@@ -94,21 +94,40 @@ describe('20260808070000 foam catalog rows', () => {
       });
     }
     expect(svcRow(db, 'foam_drill').billing_type).toBe('one_time');
-    expect(svcRow(db, 'recurring_foam')).toMatchObject({
+    expect(svcRow(db, 'foam_recurring')).toMatchObject({
       billing_type: 'recurring',
       frequency: 'quarterly',
       visits_per_year: 4,
     });
     expect(stateValue(db)).toEqual({
-      services: ['foam_drill', 'recurring_foam'],
-      profiles: ['foam_drill', 'recurring_foam'],
+      services: ['foam_drill', 'foam_recurring'],
+      profiles: ['foam_drill', 'foam_recurring'],
     });
+  });
+
+  test('foam_recurring duration bounds cover every pricer tier, and NO default exists to clobber tier-accurate slots', async () => {
+    const sp = require('../services/pricing-engine');
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    const row = svcRow(db, 'foam_recurring');
+
+    // The converter overwrites svc.estimatedDurationMinutes with any
+    // non-null catalog default — foam slots are tier-priced (60–180 min),
+    // so the catalog must not carry one.
+    expect(row.default_duration_minutes).toBeNull();
+    const smallest = sp.priceRecurringFoam(1, { cadence: 'quarterly' }).estimatedDurationMinutes;
+    const largest = sp.priceRecurringFoam(20, { cadence: 'quarterly' }).estimatedDurationMinutes;
+    expect(row.min_duration_minutes).toBeLessThanOrEqual(smallest);
+    expect(row.max_duration_minutes).toBeGreaterThanOrEqual(largest);
+    // The engine's key IS the catalog key — the converter resolves this row
+    // by the service value the pricer returns.
+    expect(sp.priceRecurringFoam(5, {}).service).toBe(row.service_key);
   });
 
   test('both catalog names classify as termite through the shared detector (the bug that started this lane)', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
-    for (const key of ['foam_drill', 'recurring_foam']) {
+    for (const key of ['foam_drill', 'foam_recurring']) {
       expect(detectServiceCategory(svcRow(db, key).name)).toBe('termite');
     }
   });
@@ -124,17 +143,17 @@ describe('20260808070000 foam catalog rows', () => {
     expect(profileRow(db, 'foam_drill')).toMatchObject({ service_name_snapshot: 'Adam Custom Foam' });
     // State claims only what up() actually inserted.
     expect(stateValue(db)).toEqual({
-      services: ['recurring_foam'],
-      profiles: ['foam_drill', 'recurring_foam'],
+      services: ['foam_recurring'],
+      profiles: ['foam_drill', 'foam_recurring'],
     });
   });
 
   test('up() leaves an existing completion profile untouched', async () => {
     const db = emptyDb();
-    db.service_completion_profiles.push({ service_key: 'recurring_foam', completion_mode: 'project_required', marker: 'admin' });
+    db.service_completion_profiles.push({ service_key: 'foam_recurring', completion_mode: 'project_required', marker: 'admin' });
     await migration.up(fakeKnex(db));
 
-    expect(profileRow(db, 'recurring_foam')).toMatchObject({ completion_mode: 'project_required', marker: 'admin' });
+    expect(profileRow(db, 'foam_recurring')).toMatchObject({ completion_mode: 'project_required', marker: 'admin' });
     expect(stateValue(db).profiles).toEqual(['foam_drill']);
   });
 
@@ -147,8 +166,8 @@ describe('20260808070000 foam catalog rows', () => {
     expect(db.service_completion_profiles).toHaveLength(2);
     // State unions across runs — run one's inserts stay removable by down().
     expect(stateValue(db)).toEqual({
-      services: ['foam_drill', 'recurring_foam'],
-      profiles: ['foam_drill', 'recurring_foam'],
+      services: ['foam_drill', 'foam_recurring'],
+      profiles: ['foam_drill', 'foam_recurring'],
     });
   });
 
@@ -185,6 +204,6 @@ describe('20260808070000 foam catalog rows', () => {
     await migration.up(fakeKnex(db));
 
     expect(db.services).toHaveLength(2);
-    expect(stateValue(db)).toEqual({ services: ['foam_drill', 'recurring_foam'], profiles: [] });
+    expect(stateValue(db)).toEqual({ services: ['foam_drill', 'foam_recurring'], profiles: [] });
   });
 });

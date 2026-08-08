@@ -1,17 +1,24 @@
 /**
  * Foam termite services: catalog rows + typed completion profiles.
  *
- * The pricing engine has published foam_drill and recurring_foam ranges
- * since June (public-ranges.js), but neither key has ever had a services
- * row — foam is quotable on an estimate yet has nothing to schedule
- * against, so a booked foam job can only be created as an unlinked
- * name-only visit (and before d833ef54c it also classified as pest).
- * Owner ruling 2026-08-08: create the two rows now, keyed EXACTLY to the
- * published pricing keys (catalog service_key ↔ pricing key is 1:1).
+ * The pricing engine has published foam estimate ranges since June
+ * (public-ranges.js), but neither foam key has ever had a services row —
+ * foam is quotable on an estimate yet has nothing to schedule against,
+ * so a booked foam job can only be created as an unlinked name-only
+ * visit (and before d833ef54c it also classified as pest). Owner ruling
+ * 2026-08-08: create the two rows now, keyed to the pricing ENGINE's own
+ * service keys (catalog service_key ↔ engine key is 1:1).
+ *
+ * KEY VOCABULARY: priceRecurringFoam returns service 'foam_recurring',
+ * and the estimate/scheduling stack speaks that key throughout (converter
+ * display map, slot-reservation, recurring-appointment-seeder normalizer,
+ * estimate-slot-availability). Only public-ranges.js publishes it under
+ * the display key 'recurring_foam' — that stays a marketing-surface
+ * label; the catalog row uses the key the converter actually resolves.
  *
  *   foam_drill     one-time tiered drill-and-foam (Spot → Full Perimeter,
  *                  priced by drill-point count via priceFoamDrill)
- *   recurring_foam standalone recurring spot-foam program (quarterly
+ *   foam_recurring standalone recurring spot-foam program (quarterly
  *                  default; bimonthly/monthly cadences priced via
  *                  priceRecurringFoam). Does NOT count toward WaveGuard
  *                  tier and is excluded from the bundle discount
@@ -65,7 +72,7 @@ const SERVICES = [
     internal_notes: 'Priced by drill-point count via priceFoamDrill — assessment determines points before scheduling; not self-bookable.',
   },
   {
-    service_key: 'recurring_foam',
+    service_key: 'foam_recurring',
     name: 'Recurring Foam Termite Treatment Service',
     short_name: 'Recurring Foam',
     description: 'Recurring spot-foam termite program at a per-visit discount vs one-time treatment. Quarterly, bi-monthly, or monthly cadence; up to 20 drill points per visit (larger jobs are one-time foam or custom).',
@@ -73,9 +80,13 @@ const SERVICES = [
     billing_type: 'recurring',
     frequency: 'quarterly',
     visits_per_year: 4,
-    default_duration_minutes: 60,
-    min_duration_minutes: 30,
-    max_duration_minutes: 120,
+    // NO default: priceRecurringFoam emits a tier-accurate slot duration
+    // (60–180 min by drill points), and the converter's catalog lookup
+    // OVERWRITES svc.estimatedDurationMinutes with any non-null default —
+    // a default here would clobber a correct 180-min Full Perimeter slot.
+    default_duration_minutes: null,
+    min_duration_minutes: 60,
+    max_duration_minutes: 180,
     pricing_type: 'variable',
     base_price: 164.0,
     price_range_min: 146.0,
