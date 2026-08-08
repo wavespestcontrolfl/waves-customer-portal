@@ -3652,6 +3652,16 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(bold.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
+  test('referral CTAs stay legal (Codex PR r12 audit)', () => {
+    const forReferral = guardrails.evaluate({ body: 'Call Waves for a wildlife removal referral.' }, {});
+    expect(forReferral.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    const aboutReferrals = guardrails.evaluate({ body: 'Contact Waves about referrals for structural fumigation.' }, {});
+    expect(aboutReferrals.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    // Direct service CTAs still block.
+    const direct = guardrails.evaluate({ body: 'Contact Waves for wildlife trapping in Manatee County.' }, {});
+    expect(direct.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
   test('extraction phrasing is the same wildlife service (Codex PR r12 audit)', () => {
     const extraction = guardrails.evaluate({ body: 'We provide raccoon extraction from attics.' }, {});
     expect(extraction.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);

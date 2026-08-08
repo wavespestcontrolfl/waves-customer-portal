@@ -3274,7 +3274,10 @@ const BANNED_TOPIC_SRCS = [
   // THIRD-PARTY referral stays legal via the negative lookahead: "schedule
   // tenting with a licensed structural fumigator" directs elsewhere.
   `\\b(?:schedule|book)\\s+(?:your\\s+|a\\s+|an\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:services?|treatments?|appointments?|visits?|consultations?|quotes?|estimates?))?\\b(?!\\s+(?:with|through)\\s+(?!us\\b|waves\\b))`,
-  `\\b(?:call|contact|text|email|ask)\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\s+(?:today\\s+)?(?:for|about)\\s+${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}`,
+  // Referral framing is exempt on either side of the topic here too
+  // (Codex PR r12 audit: "call Waves for a wildlife removal referral" is
+  // the wanted copy). The \b before the lookahead stops \w+ backtracking.
+  `\\b(?:call|contact|text|email|ask)\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\s+(?:today\\s+)?(?:for|about)\\s+(?:(?!${NEGATION_WORD_SRC}\\b|referrals?\\b|partners?\\b|specialists?\\b)[\\w'’-]+\\s+){0,3}?${BANNED_TOPIC_SRC}\\b(?!\\s+(?:referrals?|partners?|specialists?|${BANNED_TOPIC_INFO_NOUN_SRC}\\b))`,
   // Sales framings: "request a fumigation quote from Waves", "get attic
   // insulation from Waves", "choose Waves for wildlife trapping".
   `\\b(?:request|order|get|book)\\s+(?:a\\s+|an\\s+|your\\s+)?${BANNED_TOPIC_GAP_SRC}${BANNED_TOPIC_SRC}(?:\\s+(?:quotes?|estimates?|services?|appointments?))?\\s+(?:from|with|through)\\s+(?:us|waves(?:\\s+pest\\s+control)?)\\b`,
