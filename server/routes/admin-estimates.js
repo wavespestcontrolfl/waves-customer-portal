@@ -1953,6 +1953,102 @@ router.put('/:id/proposal', async (req, res, next) => {
     if (hasNegativeLine) {
       return res.status(400).json({ error: 'Proposal line items cannot have negative quantities or unit prices.' });
     }
+    // Same feedback-over-silent-clamp rule for structured corrective-work
+    // amounts (slice 1A-i) — they fold into the one-time totals like any
+    // one_time line, so a negative here is the same repricing hazard.
+    if (Array.isArray(incoming.correctiveWork)
+      && incoming.correctiveWork.some((w) => Number(w?.amount ?? w?.price) < 0)) {
+      return res.status(400).json({ error: 'Corrective work amounts cannot be negative.' });
+    }
+    // Oversized structured-section lists get a 400, not a silent clamp —
+    // normalizeProposal truncates lines and drops over-limit entries as a
+    // safety net, but an operator's contractual bullet must never vanish or
+    // cut mid-sentence without explanation (codex #3297 r3).
+    const overLimit = (arr, maxItems, maxLen, pick) => Array.isArray(arr)
+      && (arr.length > maxItems || arr.some((entry) => String(pick(entry) ?? '').length > maxLen));
+    if (Array.isArray(incoming.correctiveWork)) {
+      if (incoming.correctiveWork.length > 24) {
+        return res.status(400).json({ error: 'Corrective work is limited to 24 items.' });
+      }
+      for (const work of incoming.correctiveWork) {
+        // Same alias expression the normalizer reads (label ?? description) —
+        // validating only `label` let an aliased oversized description slip
+        // through to the silent clamp (codex #3297 r5).
+        if (String(work?.label ?? work?.description ?? '').length > 160) {
+          return res.status(400).json({ error: 'Corrective work descriptions are limited to 160 characters.' });
+        }
+        if (overLimit(work?.includes, 12, 200, (line) => line)) {
+          return res.status(400).json({ error: 'Each corrective work item is limited to 12 include lines of 200 characters.' });
+        }
+      }
+    }
+    if (overLimit(incoming.customerResponsibilities, 16, 200, (line) => line)) {
+      return res.status(400).json({ error: 'Customer responsibilities are limited to 16 lines of 200 characters.' });
+    }
+    {
+      const scopeItems = incoming.propertyScope?.items ?? (Array.isArray(incoming.propertyScope) ? incoming.propertyScope : null);
+      if (Array.isArray(scopeItems)
+        && (scopeItems.length > 24 || scopeItems.some((item) => String(item?.label ?? '').length > 80 || String(item?.value ?? '').length > 160))) {
+        return res.status(400).json({ error: 'Property scope is limited to 24 rows (labels 80 chars, values 160 chars).' });
+      }
+    }
+    // Present-but-invalid term numbers get a 400, not a silent normalize:
+    // cleanBoundedInt rounds fractions and drops out-of-range values, so
+    // without this the operator could see "1.5" or "61" months while the
+    // saved proposal says "2 months" or omits the term (codex 1A-i r4).
+    const badBoundedInt = (value, min, max) => value != null && String(value).trim() !== ''
+      && (!Number.isInteger(Number(value)) || Number(value) < min || Number(value) > max);
+    // Hoisted for the atomic UPDATE below: saving a canonical payment term
+    // must be predicated on bill_by_invoice STILL being true at write time.
+    let savingPaymentTerm = false;
+    if (incoming.commercialTerms && typeof incoming.commercialTerms === 'object') {
+      if (badBoundedInt(incoming.commercialTerms.initialTermMonths, 0, 60)) {
+        return res.status(400).json({ error: 'Initial term must be a whole number of months between 0 and 60.' });
+      }
+      // Payment terms speak the canonical payer vocabulary only — free text
+      // here would silently normalize to null (codex #3297 r2).
+      const rawPaymentTerms = incoming.commercialTerms.paymentTerms;
+      const canonicalPaymentTerms = rawPaymentTerms != null && String(rawPaymentTerms).trim() !== ''
+        ? require('../services/estimate-proposal').normalizePaymentTerms(rawPaymentTerms)
+        : null;
+      if (rawPaymentTerms != null && String(rawPaymentTerms).trim() !== '' && canonicalPaymentTerms === null) {
+        return res.status(400).json({ error: 'Payment terms must be one of: Due on receipt, Net-15, Net-30.' });
+      }
+      // Structured payment terms exist because billing CONSUMES them (the
+      // acceptance invoice's due date). Only invoice-mode proposals have
+      // that path — on any other proposal the field would render a promise
+      // no invoice ever reads. Payment language for manually-billed
+      // agreements belongs in Additional terms (codex #3297 r4).
+      if (canonicalPaymentTerms && !estimate.bill_by_invoice) {
+        return res.status(400).json({ error: 'Structured payment terms require Bill by invoice. Put payment language in Additional terms, or turn on invoice billing for this proposal.' });
+      }
+      savingPaymentTerm = Boolean(canonicalPaymentTerms);
+      // A linked ACTIVE payer's terms are the standing billing relationship
+      // (they drive statement accrual and the acceptance invoice via
+      // resolveAcceptanceTermDays). Authoring a CONTRADICTING term here
+      // would render a promise the invoice won't keep — reject it at the
+      // only surface that authors terms, so agreement and invoice always
+      // match (codex #3297 r2d).
+      if (canonicalPaymentTerms && estimate.customer_id) {
+        const { resolveForInvoice } = require('../services/payer');
+        let payerResolution;
+        try {
+          // throwOnError: uncertainty must BLOCK authoring — fail-soft
+          // self-pay would let a contradicting term publish (codex 1A-i r3).
+          payerResolution = await resolveForInvoice({ customerId: estimate.customer_id, throwOnError: true });
+        } catch (resolveErr) {
+          logger.warn(`[admin-estimates] payer term check failed for estimate ${estimate.id}: ${resolveErr.message}`);
+          return res.status(503).json({ error: 'Could not verify the customer’s payer billing terms just now — try saving again.' });
+        }
+        if (payerResolution?.payerId != null && payerResolution.paymentTerms
+          && payerResolution.paymentTerms !== canonicalPaymentTerms) {
+          const labels = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+          return res.status(400).json({
+            error: `This customer bills through a payer on ${labels[payerResolution.paymentTerms] || payerResolution.paymentTerms} terms — set payment terms to match, or leave them unset.`,
+          });
+        }
+      }
+    }
 
     // per_application is a RENDERING-only cadence (the estimate PDF's
     // synthesized lines). It must never be persisted here: the editor payload
@@ -2000,20 +2096,29 @@ router.put('/:id/proposal', async (req, res, next) => {
     // pre-read; scope the UPDATE to the same editable conditions so a customer
     // accept or another admin's Mark accepted landing between SELECT and UPDATE
     // can't overwrite the locked accepted price/proposal. 409 when it loses.
-    const updatedCount = await db('estimates')
+    const updateQuery = db('estimates')
       .where({ id: estimate.id })
       .whereNull('price_locked_at')
-      .whereNotIn('status', ['accepted', 'declined', 'expired', 'sending'])
-      .update({
-        estimate_data: JSON.stringify(nextData),
-        category: 'COMMERCIAL',
-        monthly_total: totals.monthlyEquivalent,
-        annual_total: totals.annualRecurring,
-        onetime_total: totals.oneTime,
-        updated_at: db.fn.now(),
-      });
+      .whereNotIn('status', ['accepted', 'declined', 'expired', 'sending']);
+    // Payment terms are predicated on bill_by_invoice AT WRITE TIME too — a
+    // concurrent PATCH turning invoice mode off between the pre-read guard
+    // and this UPDATE must not persist a term no billing path enforces
+    // (codex #3297 r4c).
+    if (savingPaymentTerm) updateQuery.where({ bill_by_invoice: true });
+    const updatedCount = await updateQuery.update({
+      estimate_data: JSON.stringify(nextData),
+      category: 'COMMERCIAL',
+      monthly_total: totals.monthlyEquivalent,
+      annual_total: totals.annualRecurring,
+      onetime_total: totals.oneTime,
+      updated_at: db.fn.now(),
+    });
     if (!updatedCount) {
-      return res.status(409).json({ error: 'Estimate was accepted or locked while you were editing. Refresh and retry.' });
+      return res.status(409).json({
+        error: savingPaymentTerm
+          ? 'Estimate was accepted, locked, or switched off invoice billing while you were editing. Refresh and retry.'
+          : 'Estimate was accepted or locked while you were editing. Refresh and retry.',
+      });
     }
 
     logger.info(`[estimates] Saved commercial proposal for estimate ${estimate.id} (${normalized.buildings.length} buildings, first-year ${totals.firstYearTotal})`);
@@ -2581,6 +2686,15 @@ router.patch('/:id', async (req, res, next) => {
         estimateData: estimate.estimate_data,
       }) : null;
       if (deliveryError) return res.status(400).json({ error: deliveryError });
+      // Structured payment terms exist only where invoice billing consumes
+      // them — turning invoice mode OFF while the authored proposal still
+      // promises a term would strand a promise no billing path enforces
+      // (and Mark won would then 409). Same invariant as the proposal PUT
+      // guard, enforced on the other side (codex #3297 r4b).
+      if (!nextBillByInvoice && estimate.bill_by_invoice
+        && parseEstimateData(estimate.estimate_data)?.proposal?.commercialTerms?.paymentTerms) {
+        return res.status(400).json({ error: 'This proposal has structured payment terms, which require invoice billing. Clear the payment terms in the proposal editor first.' });
+      }
       updates.bill_by_invoice = nextBillByInvoice;
     }
     if (req.body.status !== undefined) {
@@ -2601,6 +2715,18 @@ router.patch('/:id', async (req, res, next) => {
     // accept racing this PATCH can't be silently overwritten.
     let updateQuery = db('estimates').where({ id: req.params.id });
     if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status });
+    // Turning invoice mode OFF is predicated on the stored proposal STILL
+    // having no structured payment term at write time — the pre-read guard
+    // above can race a concurrent proposal PUT that saves one (the PUT's
+    // write predicates on bill_by_invoice=true; this is the mirror side, so
+    // the two writes serialize instead of interleaving into a promised term
+    // with no billing path — codex #3297 r4d). JSONB path verified against
+    // the live schema.
+    if (updates.bill_by_invoice === false) {
+      updateQuery = updateQuery.whereRaw(
+        "COALESCE(estimate_data->'proposal'->'commercialTerms'->>'paymentTerms', '') = ''",
+      );
+    }
     const updatedCount = await updateQuery.update(updates);
     if (!updatedCount) {
       return res.status(409).json({ error: 'Estimate changed while you were editing. Refresh and retry.' });

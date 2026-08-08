@@ -59,6 +59,8 @@ const emptyLine = () => ({
 });
 const emptyBuilding = (i) => ({ name: `Building ${i + 1}`, note: '', lineItems: [emptyLine()] });
 
+const roundMoney = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
 const lineAmount = (li) => (Number(li.quantity) || 0) * (Number(li.unitPrice) || 0);
 const lineAnnual = (li) =>
   li.frequency === 'one_time' ? 0 : lineAmount(li) * (PER_YEAR[li.frequency] || 0);
@@ -73,7 +75,7 @@ function buildingSubtotals(b) {
 }
 
 // Mirrors server computeProposalTotals so totals update live as you type.
-function computeTotals(buildings, taxRate) {
+function computeTotals(buildings, taxRate, correctiveWork = []) {
   let annualRecurring = 0, oneTime = 0, taxableAnnual = 0, taxableOneTime = 0;
   for (const b of buildings) {
     for (const li of b.lineItems) {
@@ -88,13 +90,29 @@ function computeTotals(buildings, taxRate) {
       }
     }
   }
-  const totalTax = (taxableAnnual + taxableOneTime) * (Number(taxRate) || 0);
+  // Structured corrective-work lines fold into the one-time side, exactly
+  // like the server's computeProposalTotals — amounts cent-rounded like
+  // normalizeCorrectiveWorkItem so the preview shows what will save.
+  // Same nonblank-label predicate as structuredSectionsPayload: a row typed
+  // amount-first is dropped by the save, so it must not inflate the sidebar
+  // (codex #3297 r1).
+  for (const w of correctiveWork.filter((item) => String(item.label || '').trim())) {
+    const amount = roundMoney(w.amount);
+    oneTime += amount;
+    if (w.taxable) taxableOneTime += amount;
+  }
+  // Per-bucket cent rounding, mirroring computeProposalTotals — a merged
+  // bucket can drift a cent from the saved proposal/PDF (codex 1A-i r3).
+  const rate = Number(taxRate) || 0;
+  const totalTax = roundMoney(roundMoney(taxableAnnual * rate) + roundMoney(taxableOneTime * rate));
+  annualRecurring = roundMoney(annualRecurring);
+  oneTime = roundMoney(oneTime);
   return {
     annualRecurring,
-    monthlyEquivalent: annualRecurring / 12,
+    monthlyEquivalent: roundMoney(annualRecurring / 12),
     oneTime,
     totalTax,
-    firstYearTotal: annualRecurring + oneTime + totalTax,
+    firstYearTotal: roundMoney(annualRecurring + oneTime + totalTax),
   };
 }
 
@@ -163,6 +181,16 @@ export default function CommercialProposalPage() {
   const [taxRatePct, setTaxRatePct] = useState('0');
   const [terms, setTerms] = useState('');
   const [buildings, setBuildings] = useState([emptyBuilding(0)]);
+  // Structured agreement sections (slice 1A-i) — all optional; leaving a
+  // card empty omits its section from the saved proposal, and the customer
+  // surfaces render exactly as before.
+  const [scopeItems, setScopeItems] = useState([]);
+  const [correctiveWork, setCorrectiveWork] = useState([]);
+  const [responsibilitiesText, setResponsibilitiesText] = useState('');
+  const [commercialTerms, setCommercialTerms] = useState({
+    paymentTerms: '', initialTermMonths: '', renewal: '',
+    priceAdjustment: '', cancellation: '', accessRequirements: '',
+  });
   const [sendMethod, setSendMethod] = useState('email');
   // Engine-composed prospect research (commercial proposal lane). Read-only
   // context for pricing the walkthrough — never sent to the customer.
@@ -170,6 +198,13 @@ export default function CommercialProposalPage() {
   const [briefOpen, setBriefOpen] = useState(true);
 
   const locked = lockReason(estimate);
+
+  // Monotonic edit generation: every field edit bumps it, and save() applies
+  // the normalized reload ONLY if no edit landed while the save round-trip
+  // was in flight — otherwise a slow connection would silently discard
+  // keystrokes made after clicking Save (codex #3297 r5).
+  const editGenRef = React.useRef(0);
+  const markEdit = () => { editGenRef.current += 1; setDirty(true); };
 
   const applyLoaded = useCallback((data) => {
     const p = data.proposal || {};
@@ -195,6 +230,24 @@ export default function CommercialProposalPage() {
           }))
         : [emptyBuilding(0)],
     );
+    setScopeItems((p.propertyScope?.items || []).map((item) => ({
+      label: item.label || '', value: item.value || '',
+    })));
+    setCorrectiveWork((p.correctiveWork || []).map((w) => ({
+      label: w.label || '',
+      amount: w.amount ?? 0,
+      taxable: w.taxable === true,
+      includesText: (w.includes || []).join('\n'),
+    })));
+    setResponsibilitiesText((p.customerResponsibilities || []).join('\n'));
+    setCommercialTerms({
+      paymentTerms: p.commercialTerms?.paymentTerms || '',
+      initialTermMonths: p.commercialTerms?.initialTermMonths != null ? String(p.commercialTerms.initialTermMonths) : '',
+      renewal: p.commercialTerms?.renewal || '',
+      priceAdjustment: p.commercialTerms?.priceAdjustment || '',
+      cancellation: p.commercialTerms?.cancellation || '',
+      accessRequirements: p.commercialTerms?.accessRequirements || '',
+    });
     setProspectBrief(data.prospectBrief || null);
     // An already-authored proposal means download/send are meaningful now.
     setSavedOnce(p.enabled === true);
@@ -221,12 +274,15 @@ export default function CommercialProposalPage() {
   }, [estimateId, applyLoaded]);
 
   const taxRate = (Number(taxRatePct) || 0) / 100;
-  const totals = useMemo(() => computeTotals(buildings, taxRate), [buildings, taxRate]);
+  const totals = useMemo(
+    () => computeTotals(buildings, taxRate, correctiveWork),
+    [buildings, taxRate, correctiveWork],
+  );
 
-  const touch = () => setDirty(true);
+  const touch = () => markEdit();
 
   const mutateBuilding = useCallback((bi, fn) => {
-    setDirty(true);
+    markEdit();
     setBuildings((prev) => prev.map((b, i) => (i === bi ? fn(b) : b)));
   }, []);
 
@@ -239,9 +295,9 @@ export default function CommercialProposalPage() {
   const addLine = (bi) => mutateBuilding(bi, (b) => ({ ...b, lineItems: [...b.lineItems, emptyLine()] }));
   const removeLine = (bi, li) =>
     mutateBuilding(bi, (b) => ({ ...b, lineItems: b.lineItems.filter((_, i) => i !== li) }));
-  const addBuilding = () => { setDirty(true); setBuildings((prev) => [...prev, emptyBuilding(prev.length)]); };
+  const addBuilding = () => { markEdit(); setBuildings((prev) => [...prev, emptyBuilding(prev.length)]); };
   const duplicateBuilding = (bi) => {
-    setDirty(true);
+    markEdit();
     setBuildings((prev) => {
       const src = prev[bi];
       const copy = {
@@ -252,16 +308,62 @@ export default function CommercialProposalPage() {
       return [...prev.slice(0, bi + 1), copy, ...prev.slice(bi + 1)];
     });
   };
-  const removeBuilding = (bi) => { setDirty(true); setBuildings((prev) => prev.filter((_, i) => i !== bi)); };
+  const removeBuilding = (bi) => { markEdit(); setBuildings((prev) => prev.filter((_, i) => i !== bi)); };
 
-  const buildPayload = () => ({
+  // Render-assigned mirror of the current form state: save()'s retry loop
+  // runs inside ONE async closure, whose captured state variables freeze at
+  // the render that started it — a retry building from those would re-save
+  // the stale payload and then overwrite the newer edits on reload (codex
+  // #3297 r5b P0). The ref is reassigned every render, so each retry builds
+  // from what is actually on screen.
+  const formRef = React.useRef(null);
+  formRef.current = {
+    title, preparedFor, propertyAddress, taxRate, terms,
+    buildings, scopeItems, correctiveWork, responsibilitiesText, commercialTerms,
+  };
+
+  // Structured sections serialize only when actually authored — an empty
+  // card omits its key so the server normalizes it to null and the customer
+  // surfaces render exactly as before.
+  const structuredSectionsPayload = (f) => {
+    const items = f.scopeItems
+      .map((item) => ({ label: item.label.trim(), value: item.value.trim() }))
+      .filter((item) => item.label && item.value);
+    const work = f.correctiveWork
+      .map((w) => ({
+        label: w.label.trim(),
+        amount: Number(w.amount) || 0,
+        taxable: w.taxable === true,
+        includes: w.includesText.split('\n').map((s) => s.trim()).filter(Boolean),
+      }))
+      .filter((w) => w.label);
+    const responsibilities = f.responsibilitiesText.split('\n').map((s) => s.trim()).filter(Boolean);
+    const ct = {
+      paymentTerms: f.commercialTerms.paymentTerms.trim() || null,
+      initialTermMonths: f.commercialTerms.initialTermMonths.trim() === '' ? null : Number(f.commercialTerms.initialTermMonths),
+      renewal: f.commercialTerms.renewal.trim() || null,
+      priceAdjustment: f.commercialTerms.priceAdjustment.trim() || null,
+      cancellation: f.commercialTerms.cancellation.trim() || null,
+      accessRequirements: f.commercialTerms.accessRequirements.trim() || null,
+    };
+    const hasTerms = Object.values(ct).some((v) => v !== null);
+    return {
+      ...(items.length ? { propertyScope: { items } } : {}),
+      ...(work.length ? { correctiveWork: work } : {}),
+      ...(responsibilities.length ? { customerResponsibilities: responsibilities } : {}),
+      ...(hasTerms ? { commercialTerms: ct } : {}),
+    };
+  };
+
+  const buildPayload = (f = formRef.current) => ({
     proposal: {
-      title: title.trim() || 'Commercial Service Proposal',
-      preparedFor: preparedFor.trim(),
-      propertyAddress: propertyAddress.trim(),
-      taxRate,
-      terms: terms.trim() || null,
-      buildings: buildings.map((b) => ({
+      title: f.title.trim() || 'Commercial Service Proposal',
+      preparedFor: f.preparedFor.trim(),
+      propertyAddress: f.propertyAddress.trim(),
+      taxRate: f.taxRate,
+      terms: f.terms.trim() || null,
+      ...structuredSectionsPayload(f),
+      buildings: f.buildings.map((b) => ({
         name: b.name.trim() || 'Building',
         note: b.note.trim() || null,
         lineItems: b.lineItems
@@ -277,23 +379,50 @@ export default function CommercialProposalPage() {
     },
   });
 
-  // Returns true on success so download/send can persist edits first.
+  // Returns true ONLY when the persisted proposal equals the on-screen
+  // state — download/send/Mark-won gate on this, and a true returned while
+  // newer keystrokes sit unsaved would let them act on a stale snapshot
+  // (codex #3297 r5 P0). Mid-save edits re-save in a bounded loop.
   const save = async () => {
-    const payload = buildPayload();
-    if (payload.proposal.buildings.length === 0) {
-      setError('Add at least one building with a described line item.');
-      return false;
-    }
     setSaving(true);
     setError(null);
     try {
-      await adminFetch(`/admin/estimates/${estimateId}/proposal`, {
-        method: 'PUT',
-        body: JSON.stringify(payload),
-      });
-      setSavedOnce(true);
-      setDirty(false);
-      return true;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        // Applying the normalized reload below is only safe if no keystroke
+        // lands while the round-trip is in flight — otherwise it would
+        // silently discard those edits (codex #3297 r5). Generation is
+        // captured BEFORE the payload builds: an edit interleaving here
+        // makes the end-check fail toward a retry, never toward treating a
+        // stale payload as current. (React flushes discrete input events
+        // synchronously, so formRef is committed before this continuation
+        // runs.)
+        const genAtSave = editGenRef.current;
+        const payload = buildPayload();
+        if (payload.proposal.buildings.length === 0) {
+          setError('Add at least one building with a described line item.');
+          return false;
+        }
+        await adminFetch(`/admin/estimates/${estimateId}/proposal`, {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        });
+        // Swap in the NORMALIZED state before download/send can proceed —
+        // the operator must see exactly what persisted (the server clamps
+        // string lengths as a safety net; approving un-normalized local
+        // state could send a document that differs from the screen — codex
+        // #3297 r2). Direct fetch, NOT reload(): reload swallows its error
+        // into the page-level banner and resolves (codex #3297 r3).
+        const fresh = await adminFetch(`/admin/estimates/${estimateId}/proposal`);
+        if (editGenRef.current === genAtSave) {
+          applyLoaded(fresh);
+          setDirty(false);
+          setSavedOnce(true);
+          return true;
+        }
+        // Edits landed mid-flight — loop and persist the newer state.
+      }
+      setError('Your latest edits are still unsaved — pause typing and save again.');
+      return false;
     } catch (e) {
       setError(e.message);
       return false;
@@ -604,6 +733,44 @@ export default function CommercialProposalPage() {
             </Card>
           )}
 
+          <Card>
+            <CardHeader>
+              <CardTitle>Property scope</CardTitle>
+            </CardHeader>
+            <CardBody className="space-y-2">
+              <div className="text-12 text-zinc-500">
+                Optional — facts the proposal was scoped against (buildings, units, turf sq ft,
+                device counts). Shown on the proposal when filled in.
+              </div>
+              {scopeItems.map((item, idx) => (
+                <div key={idx} className="flex gap-2 items-center">
+                  <Input
+                    size="sm" className="w-48 shrink-0" placeholder="Label (e.g. Units)" maxLength={80}
+                    value={item.label} disabled={!!locked}
+                    onChange={(e) => { markEdit(); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
+                  />
+                  <Input
+                    size="sm" className="flex-1" placeholder="Value (e.g. 4 residential units, tenant-occupied)" maxLength={160}
+                    value={item.value} disabled={!!locked}
+                    onChange={(e) => { markEdit(); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, value: e.target.value } : it))); }}
+                  />
+                  {!locked && (
+                    <Button variant="ghost" size="sm" title="Remove row"
+                      onClick={() => { markEdit(); setScopeItems((prev) => prev.filter((_, i) => i !== idx)); }}>
+                      <Trash2 size={14} />
+                    </Button>
+                  )}
+                </div>
+              ))}
+              {!locked && (
+                <Button variant="ghost" size="sm"
+                  onClick={() => { markEdit(); setScopeItems((prev) => [...prev, { label: '', value: '' }]); }}>
+                  <Plus size={14} /> Add scope row
+                </Button>
+              )}
+            </CardBody>
+          </Card>
+
           {buildings.map((b, bi) => {
             const sub = buildingSubtotals(b);
             return (
@@ -722,7 +889,137 @@ export default function CommercialProposalPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Terms</CardTitle>
+              <CardTitle>Corrective work (one-time)</CardTitle>
+            </CardHeader>
+            <CardBody className="space-y-3">
+              <div className="text-12 text-zinc-500">
+                Optional — one-time remediation separated from the recurring programs.
+                Amounts count toward the one-time and first-year totals.
+              </div>
+              {correctiveWork.map((w, idx) => (
+                <div key={idx} className="space-y-2 border-b border-hairline border-zinc-100 pb-3 last:border-0 last:pb-0">
+                  <div className="flex gap-2 items-center">
+                    <Input
+                      size="sm" className="flex-1" placeholder="Work description (e.g. Initial German roach cleanout — Units 2 & 4)" maxLength={160}
+                      value={w.label} disabled={!!locked}
+                      onChange={(e) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
+                    />
+                    <Input
+                      size="sm" className="w-28 shrink-0" type="number" min="0" step="0.01" title="Amount"
+                      value={w.amount} disabled={!!locked}
+                      onChange={(e) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, amount: e.target.value } : it))); }}
+                    />
+                    <div className="flex items-center gap-1 shrink-0" title="Taxable line">
+                      <Switch checked={w.taxable} disabled={!!locked}
+                        onChange={(v) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, taxable: v } : it))); }} />
+                      <span className="text-12 text-zinc-500">Tax</span>
+                    </div>
+                    {!locked && (
+                      <Button variant="ghost" size="sm" title="Remove work item"
+                        onClick={() => { markEdit(); setCorrectiveWork((prev) => prev.filter((_, i) => i !== idx)); }}>
+                        <Trash2 size={14} />
+                      </Button>
+                    )}
+                  </div>
+                  <Textarea
+                    rows={2} value={w.includesText} disabled={!!locked}
+                    placeholder={'What it includes — one per line\ne.g. Crack & crevice treatment in both kitchens\nFollow-up inspection at 2 weeks'}
+                    onChange={(e) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, includesText: e.target.value } : it))); }}
+                  />
+                </div>
+              ))}
+              {!locked && (
+                <Button variant="ghost" size="sm"
+                  onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { label: '', amount: 0, taxable: false, includesText: '' }]); }}>
+                  <Plus size={14} /> Add corrective work
+                </Button>
+              )}
+            </CardBody>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Customer responsibilities</CardTitle>
+            </CardHeader>
+            <CardBody>
+              <Textarea
+                rows={3} value={responsibilitiesText} disabled={!!locked}
+                placeholder={'Optional — one per line\ne.g. Provide unit access with 24-hour tenant notice\nReport pest activity through the Waves app or office line'}
+                onChange={(e) => { setResponsibilitiesText(e.target.value); touch(); }}
+              />
+            </CardBody>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Commercial terms</CardTitle>
+            </CardHeader>
+            <CardBody>
+              <div className="text-12 text-zinc-500 mb-2">
+                Optional — structured terms shown as their own section on the proposal.
+                Free-text terms below become &ldquo;Additional terms&rdquo; once any of these are set.
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="block">
+                  <span className={LABEL}>Payment terms</span>
+                  {/* Canonical payer vocabulary only (server rejects free
+                      text) — billing derives due dates from these tokens,
+                      which only exists for invoice-mode proposals. */}
+                  {/* Stays ENABLED when a stored term exists on a
+                      non-invoice proposal so the operator can CLEAR the
+                      stale term (the PUT rejects setting a new one). */}
+                  <Select
+                    size="sm" className="mt-1" value={commercialTerms.paymentTerms}
+                    disabled={!!locked || (!estimate?.billByInvoice && !commercialTerms.paymentTerms)}
+                    onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, paymentTerms: e.target.value })); }}
+                  >
+                    <option value="">Not set</option>
+                    <option value="due_on_receipt">Due on receipt</option>
+                    <option value="net15">Net-15</option>
+                    <option value="net30">Net-30</option>
+                  </Select>
+                  {!estimate?.billByInvoice && (
+                    <span className="mt-1 block text-11 text-zinc-400">
+                      Requires Bill by invoice — for manually billed agreements, put payment language in Additional terms.
+                    </span>
+                  )}
+                </label>
+                {/* maxLength mirrors normalizeCommercialTerms' clamps so a
+                    contractual sentence can never silently truncate on save
+                    (codex #3297 r2). */}
+                {[
+                  ['initialTermMonths', 'Initial term (months, 0 = month-to-month)', 'number', 'e.g. 12', undefined],
+                  ['renewal', 'Renewal', 'text', 'e.g. Renews month-to-month after the initial term', 120],
+                  ['priceAdjustment', 'Price adjustment', 'text', 'e.g. Rates reviewed annually with 30-day notice', 160],
+                  ['cancellation', 'Cancellation', 'text', 'e.g. 30-day written notice, no cancellation fee', 160],
+                ].map(([key, label, type, placeholder, maxLength]) => (
+                  <label key={key} className="block">
+                    <span className={LABEL}>{label}</span>
+                    <Input
+                      size="sm" className="mt-1" type={type}
+                      min={type === 'number' ? '0' : undefined} step={type === 'number' ? '1' : undefined}
+                      max={key === 'initialTermMonths' ? '60' : undefined}
+                      maxLength={maxLength}
+                      value={commercialTerms[key]} disabled={!!locked} placeholder={placeholder}
+                      onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
+                    />
+                  </label>
+                ))}
+                <label className="block sm:col-span-2">
+                  <span className={LABEL}>Property access</span>
+                  <Input
+                    size="sm" className="mt-1" maxLength={200} value={commercialTerms.accessRequirements} disabled={!!locked}
+                    placeholder="e.g. Office provides keys for common areas; tenants notified by property manager"
+                    onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, accessRequirements: e.target.value })); }}
+                  />
+                </label>
+              </div>
+            </CardBody>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Additional terms</CardTitle>
             </CardHeader>
             <CardBody>
               <Textarea

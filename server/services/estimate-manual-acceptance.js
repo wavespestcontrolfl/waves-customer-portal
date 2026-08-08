@@ -529,6 +529,18 @@ async function markEstimateManuallyAccepted({
         customerId: updatedEstimate.customer_id,
         proposal: normalizeProposal(updatedEstimate),
       });
+      // A NON-invoice-mode win with authored structured payment terms has no
+      // path that consumes them — the customer accepted a payment promise
+      // nothing will enforce (billing mode may have been flipped after
+      // authoring; the PUT guard can't see that). Reject with direction
+      // rather than record the win (codex #3297 r4).
+      if (!updatedEstimate.bill_by_invoice
+        && normalizeProposal(updatedEstimate).commercialTerms?.paymentTerms) {
+        throw httpError(
+          'This proposal promises structured payment terms, which only invoice-mode billing enforces. Turn on Bill by invoice, or move the payment language to Additional terms, then mark won again.',
+          409,
+        );
+      }
       // Invoice-mode win: build the first invoice from the proposal line items.
       if (updatedEstimate.bill_by_invoice) {
         try {
@@ -540,6 +552,12 @@ async function markEstimateManuallyAccepted({
           });
         } catch (err) {
           logger.warn(`[estimate-manual-acceptance] proposal invoice failed for estimate ${updatedEstimate.id}: ${err.message}`);
+          // Expected validation conflicts (4xx, e.g. the payer-term mismatch
+          // 409) carry an actionable operator message — pass them through
+          // instead of flattening to a generic 500 (codex #3297 r2e).
+          if (Number.isInteger(err?.statusCode) && err.statusCode >= 400 && err.statusCode < 500) {
+            throw httpError(err.message, err.statusCode);
+          }
           throw httpError('Proposal invoice could not be created; estimate was not marked accepted.', 500);
         }
         // Invoice mode promises a first invoice. If the proposal has no billable
