@@ -239,6 +239,14 @@ function shapeCallLog(row) {
     leadSourceName: row.lead_source_name || null,
     googleAdsCallResourceName: row.google_ads_call_resource_name || null,
     googleAdsBridgedAt: row.google_ads_bridged_at || null,
+    // Terminal no-attribution verdict (codex P1, PR #3303): spam/voicemail
+    // terminals by status; the non-lead verdict finalizes 'processed' and
+    // carries the metadata marker the processor writes atomically with its
+    // attribution retirement. A rejected call still sid-joins its lead in
+    // fetchCrmCalls, and without this the next scan recreated the row the
+    // processor just retired.
+    noAttribution: ['spam', 'voicemail'].includes(String(row.processing_status || '').toLowerCase())
+      || parseCallMetadata(row.metadata)?.no_attribution === true,
     googleAdsLeadMatched: !!bridgeMetadata?.leadMatch?.leadId,
     // Which lead the recorded match points at — the repoint detector in
     // shouldRetryLeadAttribution compares it against the CURRENT joined
@@ -247,6 +255,14 @@ function shapeCallLog(row) {
     googleAdsLeadMatchedStrategy: bridgeMetadata?.leadMatch?.strategy || null,
     googleAdsLeadMatchedAt: bridgeMetadata?.leadAttributedAt || null,
   };
+}
+
+function parseCallMetadata(metadata) {
+  if (!metadata) return {};
+  if (typeof metadata === 'string') {
+    try { return JSON.parse(metadata) || {}; } catch { return {}; }
+  }
+  return metadata;
 }
 
 function googleAdsBridgeMetadata(metadata) {
@@ -1015,7 +1031,12 @@ async function applyBridge(options = {}) {
       // writes zero rows and is NEVER recorded, and stamp reconciliation
       // cannot interleave between the lead write and the call record.
       await db.transaction(async (trx) => {
-        const { match: attributed } = await attributeResolvedLead(match.callLog, bridgeSource, now, trx);
+        // A terminal no-attribution verdict skips lead attribution and the
+        // funnel entirely (codex P1, PR #3303) — the google call itself
+        // still bridges, so the ads-side record stays accurate.
+        const { match: attributed } = match.callLog?.noAttribution
+          ? { match: null }
+          : await attributeResolvedLead(match.callLog, bridgeSource, now, trx);
         if (attributed) {
           bridgePayload.leadMatch = redactedLeadMatch(attributed);
           bridgePayload.leadAttributedAt = now.toISOString();

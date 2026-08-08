@@ -9206,15 +9206,20 @@ const CallRecordingProcessor = {
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
       }
     } else {
-      // Non-lead verdict (non-lead nature / existing-customer stage). The
-      // attribution retire is DEFERRED to the final fenced status write —
-      // where the verdict actually becomes durable — and armed REGARDLESS
-      // of stamp presence (pre-push P0 r12, P1 r13): a sid-linked call
-      // carries a provenanced funnel row but never a metadata stamp, and
-      // stamp-gated arming left that row's revenue attributed to a
-      // rejected call. Only the lead-state restoration below needs the
-      // stamp.
-      deferredNonLeadAttributionRetire = true;
+      // Lead creation skipped. Two very different reasons live here
+      // (pre-push P0 r14):
+      //   - CONTENT rejection (nonLeadCall — wrong-number/solicitor/etc.):
+      //     the call supports no lead, so its funnel attribution retires
+      //     at finalization — armed REGARDLESS of stamp presence (a
+      //     sid-linked call has a provenanced row but no stamp; P1 r13),
+      //     deferred to the final fenced status write where the verdict
+      //     becomes durable (P0 r12).
+      //   - LIFECYCLE skip (the caller's prospect record has since
+      //     advanced to won/active_customer): the ORIGINAL inquiry and its
+      //     booked/completed revenue are still perfectly valid — a
+      //     force-reprocess must NEVER delete that history just because
+      //     the stage now prevents creating another lead.
+      if (nonLeadCall) deferredNonLeadAttributionRetire = true;
       if (priorStampedLeadId) {
       // The retry was VETOED out of lead creation but an earlier attempt
       // stamped a lead — the stamp must not survive a non-lead verdict,
@@ -12116,6 +12121,19 @@ const CallRecordingProcessor = {
       // earlier settle, whose pass could still have failed into a retry.
       if (written > 0 && deferredNonLeadAttributionRetire) {
         await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id);
+        // Durable no-attribution verdict, same transaction (pre-push P1
+        // r14): the google bridge would otherwise re-join this call's
+        // sid-linked lead on its next scan and recreate the row just
+        // retired. Spam/voicemail terminals are self-evident from
+        // processing_status; the non-lead verdict finalizes 'processed'
+        // and needs this marker.
+        await trx('call_log')
+          .where({ id: call.id })
+          .update({
+            metadata: db.raw(
+              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)",
+            ),
+          });
       }
       return written;
     });

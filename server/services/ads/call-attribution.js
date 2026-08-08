@@ -169,7 +169,16 @@ async function recordCallPpcAttribution({
         .where({ source_call_id: sourceCallId })
         .first('id', 'lead_id');
       if (provenanced && String(provenanced.lead_id) !== String(leadId)) {
-        await reconcileMovedCallAttributionRow(dbc, sourceCallId, provenanced.lead_id, leadId, new Date(), { toCustomerId: customerId });
+        const moved = await reconcileMovedCallAttributionRow(dbc, sourceCallId, provenanced.lead_id, leadId, new Date(), { toCustomerId: customerId });
+        // A conflict means the target lead owns a row this call cannot
+        // prove is its own — a LEGACY row (NULL source_call_id) would slip
+        // past the other_call guard below and get patched with this call's
+        // campaign/service data (pre-push P1 r14). Return immediately,
+        // exactly like the bridge's conflict handling: unknown-provenance
+        // rows stay conservative.
+        if (moved === 'retired_conflict') {
+          return { recorded: false, reason: 'other_call' };
+        }
       }
     }
     // One funnel row per lead — dedupe by lead_id. Backfill richer data onto an
