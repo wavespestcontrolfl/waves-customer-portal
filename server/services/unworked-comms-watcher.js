@@ -511,17 +511,51 @@ async function loadUnansweredThreads(cutoff = new Date()) {
   return rows;
 }
 
+// Lane 4: open service_requests past their promised response window.
+// The /admin/requests triage page was removed and the bell is read-once, so
+// this digest is the ONLY thing that can nag about a rotting ticket (the
+// 2026-08-08 audit found 14 rows, 14 still 'new', zero ever resolved, oldest
+// April). No created_at horizon on purpose: a ticket is an explicit customer
+// ask with an explicit terminal status — it stays in the pager until someone
+// resolves/closes it, however old it gets. Due = past the response window the
+// confirmation SMS promises (urgent 2h, routine 24h).
+async function loadOpenServiceRequests(cutoff = new Date()) {
+  const { rows } = await db.raw(
+    `
+    SELECT sr.id, sr.category, sr.subject, sr.urgency, sr.status, sr.created_at,
+           sr.customer_id,
+           NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
+           COUNT(*) OVER () AS total_count
+    FROM service_requests sr
+    LEFT JOIN customers cu ON cu.id = sr.customer_id
+    WHERE sr.status NOT IN ('resolved', 'closed', 'cancelled')
+      AND sr.created_at <= CAST(:cutoff AS timestamptz)
+        - CASE WHEN sr.urgency = 'urgent' THEN interval '2 hours' ELSE interval '24 hours' END
+    -- Urgent first, then oldest-first — unlike the other lanes: this lane has
+    -- no horizon, the backlog is the story, and the longest-waiting customer
+    -- is the one the owner must see first. A fresh urgent row still can't be
+    -- starved behind a stale-12 backlog (it sorts ahead of every routine row);
+    -- everything else persists in the overflow count.
+    ORDER BY CASE WHEN sr.urgency = 'urgent' THEN 0 ELSE 1 END, sr.created_at ASC
+    LIMIT :cap
+    `,
+    { cap: MAX_PER_SECTION, cutoff },
+  );
+  return rows;
+}
+
 // Pure composition: null = the day is fully worked (the common, quiet case).
 // laneFailures ({ lane, message }) come from the per-lane fail-soft in
 // runUnworkedCommsWatcher: a failed lane's queue is INVISIBLE, so the digest
 // must still send (even with zero surviving items), name the failed lane in
 // the subject (FIX: — Adam's action is fixing the lane), and say the counts
 // are incomplete — a crashed lane must never read as a quiet day.
-function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered = [] } = {}, laneFailures = []) {
+function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered = [], requests = [] } = {}, laneFailures = []) {
   const failures = (laneFailures || []).filter(Boolean);
   const a = (callbacks || []).filter(Boolean);
   const b = (followUps || []).filter(Boolean);
   const c = (unanswered || []).filter(Boolean);
+  const d = (requests || []).filter(Boolean);
   // Full per-lane counts ride each row as total_count (COUNT(*) OVER ()) —
   // the LIMIT keeps the email readable, but the SUBJECT and the "+N more"
   // lines must report everything: overflow rows would otherwise vanish
@@ -531,14 +565,15 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   const aTotal = laneTotal(a);
   const bTotal = laneTotal(b);
   const cTotal = laneTotal(c);
-  const total = aTotal + bTotal + cTotal;
+  const dTotal = laneTotal(d);
+  const total = aTotal + bTotal + cTotal + dTotal;
   if (!total && !failures.length) return null;
   const moreLine = (shown, totalCount) => (totalCount > shown ? [`…and ${totalCount - shown} more not shown`] : []);
 
   const failedLaneNames = failures.map((f) => f.lane).join(', ');
   const subject = failures.length
     ? `FIX: comms digest lane${failures.length === 1 ? '' : 's'} failed (${failedLaneNames}) — ${total ? `${total} unworked comm${total === 1 ? '' : 's'} in surviving lanes` : 'surviving lanes clear'}`
-    : `ACT: ${total} unworked comm${total === 1 ? '' : 's'} at end of day — ${aTotal} callback${aTotal === 1 ? '' : 's'}, ${bTotal} follow-up${bTotal === 1 ? '' : 's'}, ${cTotal} unanswered text${cTotal === 1 ? '' : 's'}`;
+    : `ACT: ${total} unworked comm${total === 1 ? '' : 's'} at end of day — ${aTotal} callback${aTotal === 1 ? '' : 's'}, ${bTotal} follow-up${bTotal === 1 ? '' : 's'}, ${cTotal} unanswered text${cTotal === 1 ? '' : 's'}, ${dTotal} open request${dTotal === 1 ? '' : 's'}`;
 
   const sectionText = [];
   const sectionHtml = [];
@@ -573,6 +608,16 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     sectionHtml.push(`<p><strong>Texts still waiting on a reply</strong> (thread ends inbound):</p><ul style="margin:0 0 12px 18px;padding:0;">${c.map((r) => `<li style="margin:0 0 6px 0;">${esc(etDateTime(r.created_at))} ${r.customer_id ? `<a href="${esc(adminPortalUrl())}/admin/communications?thread=${esc(r.customer_id)}">${esc(r.customer_name || maskPhone(r.peer))}</a>` : esc(r.customer_name || maskPhone(r.peer))}: &quot;${esc(String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120))}&quot;</li>`).join('')}</ul>${cTotal > c.length ? `<p>…and ${cTotal - c.length} more not shown</p>` : ''}`);
   }
 
+  if (d.length) {
+    const ageDays = (r) => Math.max(0, Math.floor((Date.now() - new Date(r.created_at).getTime()) / (24 * 60 * 60 * 1000)));
+    const reqLine = (r) => `${r.customer_name || 'Unknown customer'} [${String(r.category || '').replace(/_/g, ' ')}${r.urgency === 'urgent' ? ', URGENT' : ''}, ${ageDays(r)}d old] — ${String(r.subject || '').replace(/\s+/g, ' ').trim().slice(0, 120)}`;
+    sectionText.push('Service requests still open (no triage page exists — this email is the only nag):');
+    sectionText.push(...d.map((r) => `- ${reqLine(r)}`));
+    sectionText.push(...moreLine(d.length, dTotal));
+    sectionText.push('');
+    sectionHtml.push(`<p><strong>Service requests still open</strong> (no triage page exists — this email is the only nag):</p><ul style="margin:0 0 12px 18px;padding:0;">${d.map((r) => `<li style="margin:0 0 6px 0;">${r.customer_id ? `<a href="${esc(adminPortalUrl())}/admin/customers?customerId=${esc(r.customer_id)}">${esc(r.customer_name || 'Unknown customer')}</a>` : esc(r.customer_name || 'Unknown customer')} [${esc(String(r.category || '').replace(/_/g, ' '))}${r.urgency === 'urgent' ? ', URGENT' : ''}, ${ageDays(r)}d old] — ${esc(String(r.subject || '').replace(/\s+/g, ' ').trim().slice(0, 120))}</li>`).join('')}</ul>${dTotal > d.length ? `<p>…and ${dTotal - d.length} more not shown</p>` : ''}`);
+  }
+
   const text = [
     `End-of-day check: ${total} open comm item${total === 1 ? '' : 's'} (rolling 30-day worklist — items stay until worked).`,
     '',
@@ -595,6 +640,7 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     callbacks: aTotal,
     followUps: bTotal,
     unanswered: cTotal,
+    requests: dTotal,
     ...(failures.length ? { failedLanes: failures.map((f) => f.lane) } : {}),
   };
 }
@@ -642,6 +688,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
     { key: 'callbacks', label: 'callbacks', load: opts.loadCallbackCalls || loadCallbackCalls },
     { key: 'followUps', label: 'follow-ups', load: opts.loadDroppedFollowUps || loadDroppedFollowUps },
     { key: 'unanswered', label: 'unanswered texts', load: opts.loadUnansweredThreads || loadUnansweredThreads },
+    { key: 'requests', label: 'service requests', load: opts.loadOpenServiceRequests || loadOpenServiceRequests },
   ];
   const settled = await Promise.allSettled(lanes.map((lane) => lane.load(windowCutoff)));
   const sections = {};
@@ -698,7 +745,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
     return { sent: false, error: true, ...composed };
   }
   await (opts.stampSendMarker || stampSendMarker)(windowCutoff);
-  logger.info(`[unworked-comms] sent: ${composed.total} unworked (${composed.callbacks} callbacks, ${composed.followUps} follow-ups, ${composed.unanswered} unanswered)`);
+  logger.info(`[unworked-comms] sent: ${composed.total} unworked (${composed.callbacks} callbacks, ${composed.followUps} follow-ups, ${composed.unanswered} unanswered, ${composed.requests} open requests)`);
   return { sent: true, ...composed };
 }
 

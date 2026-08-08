@@ -8651,6 +8651,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         <footer className="sr-footer">
           Questions about today&apos;s service? Ask Waves in your portal or call (941) 297-5749.
           {data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard ? ' WaveGuard members receive free re-service when covered activity continues after the treatment window.' : ''}
+          {/* Pair the sentence with the customer's standing self-serve page.
+              Server-gated: reserviceUrl is only in the payload when the
+              streamline gate is on and the plan grants a lane. Live view only
+              — PDF/static/sms_preview keep the print pipeline byte-identical. */}
+          {data.reserviceUrl && mode === 'live' ? (
+            <>
+              {' '}
+              <a href={data.reserviceUrl} style={{ color: '#04395E', fontWeight: 600 }}>Book a free re-service</a>.
+            </>
+          ) : ''}
           {' '}This report is provided for your records.
           {/* Only claim tamper-evidence when at least one photo is displayed and
               every displayed photo is part of the chain. Lawn turf photos

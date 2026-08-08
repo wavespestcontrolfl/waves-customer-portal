@@ -113,6 +113,15 @@ router.get('/', async (req, res, next) => {
     res.json({
       hasCancellableWork: cancellable,
       reservice,
+      // Streamline (GATE_RESERVICE_STREAMLINE, owner ruling 2026-08-08): when
+      // true, the Request Service overlay hands an eligible pest/lawn issue
+      // straight to the picker (reservice.url above) instead of filing a
+      // notify-only service_requests ticket, and schedule_change offers the
+      // per-visit /reschedule token pages below. Top-level — the reschedule
+      // half applies even when no re-service lane is granted. The client keys
+      // ONLY off this server-computed flag, so the overlay stays
+      // byte-identical until Adam flips the gate.
+      overlayHandoff: require('../config/feature-gates').isEnabled('reserviceStreamline'),
       upcoming: upcoming.map(s => ({
         id: s.id,
         date: s.scheduled_date,
@@ -222,6 +231,14 @@ router.post('/:id/reschedule', async (req, res, next) => {
 
     const { preferredDate, notes } = await schema.validateAsync(req.body);
 
+    // Streamline (GATE_RESERVICE_STREAMLINE): stop flipping the visit to
+    // status='rescheduled'. That status removes the visit from dispatch and
+    // nothing ever re-books it — the request rides the service_requests row
+    // and the admin alert while the visit STAYS on the books at its current
+    // date until someone actually moves it. Gate off = legacy flip.
+    const { isEnabled } = require('../config/feature-gates');
+    const keepOnBooks = isEnabled('reserviceStreamline');
+
     // Lock the row before deriving the appended notes and changing status.
     // This preserves DB timestamp precision and makes an earlier staff edit
     // finish before we read it. A separate durable service_requests row below
@@ -254,8 +271,7 @@ router.post('/:id/reschedule', async (req, res, next) => {
           status: service.status,
         })
         .update({
-          status: 'rescheduled',
-          customer_confirmed: false,
+          ...(keepOnBooks ? {} : { status: 'rescheduled', customer_confirmed: false }),
           notes: notes
             ? `${service.notes ? service.notes + ' | ' : ''}RESCHEDULE REQUEST: ${notes}${preferredDate ? ` (preferred: ${preferredDate})` : ''}`
             : service.notes,

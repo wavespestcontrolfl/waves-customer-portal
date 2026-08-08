@@ -3600,6 +3600,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ? reportWaveGuardTier
     : null;
 
+  // Self-serve re-service deep link for the report footer. The footer already
+  // TELLS members "WaveGuard members receive free re-service…" with no way to
+  // act on it — this pairs the sentence with the customer's standing
+  // /reservice/:token page. Gated (GATE_RESERVICE_STREAMLINE +
+  // GATE_RESERVICE_SELF_SERVE) and lane-checked through the same shared
+  // eligibility helper the SMS clause uses; null renders the footer exactly
+  // as it reads today. Same-customer token, same exposure posture as the
+  // portal schedule payload. Best-effort — never blocks the report.
+  let reserviceUrl = null;
+  try {
+    const { reserviceStreamlineAccess } = require('../reservice-link');
+    const reserviceAccess = await reserviceStreamlineAccess(service.customer_id);
+    if (reserviceAccess) reserviceUrl = `/reservice/${reserviceAccess.token}`;
+  } catch { /* footer link is optional */ }
+
   // Lawn Report V2 — THE lawn report (owner ruling 2026-07-09; the
   // LAWN_REPORT_V2 env flag is retired). Deterministic structure
   // (diagnosis / water / mowing / treatment / trends) from the data already
@@ -4249,6 +4264,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // report viewer to suppress the per-visit "Time on site" duration for members while
     // non-member reports honor the admin showDuration setting.
     waveGuardTier,
+    // Standing self-serve re-service page for this customer (null while the
+    // streamline gate is dark or the plan grants no lane) — the footer's
+    // "free re-service" sentence links here in the live view.
+    reserviceUrl,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,
