@@ -184,6 +184,13 @@ function sanitizeCustomerNote(raw) {
   const { validateOutbound } = require('./sms-guard');
   const guard = validateOutbound(gsm);
   if (!guard.ok) return { error: 'note_guard_blocked', guardReason: guard.reason };
+  // Compliance-language hard rules (product-safety "safe" claims,
+  // EPA-approved, fixed re-entry timing) apply to EVERY customer surface —
+  // free-form notes included (codex pre-push r5). Deterministic extraction
+  // of the social-compliance-judge rules; see customer-copy-compliance.js.
+  const { findComplianceViolation } = require('./messaging/customer-copy-compliance');
+  const violation = findComplianceViolation(gsm);
+  if (violation) return { error: 'note_compliance_blocked', complianceRule: violation.rule };
   return { note };
 }
 

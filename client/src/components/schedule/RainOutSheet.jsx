@@ -106,6 +106,7 @@ const ERROR_COPY = {
   note_link_blocked: "Links can't go in the note — the text already includes the reschedule link.",
   note_emoji_blocked: "Emoji can't go in customer texts — remove them.",
   note_guard_blocked: 'That note would trip the SMS safety guard — avoid {braces} and the words null, undefined, or 1970.',
+  note_compliance_blocked: 'That wording isn’t allowed in customer texts — no "safe" claims (say "safe once dry"), no EPA-approved, no fixed re-entry times.',
   note_invalid: 'That note could not be sent — plain text only.',
 };
 
@@ -140,6 +141,18 @@ function noteGuardTrips(note) {
   const lower = note.toLowerCase();
   if (NOTE_BROKEN_SUBSTRINGS.some((s) => lower.includes(s))) return true;
   return /\bnull\b/i.test(note);
+}
+// Mirror of the compliance hard rules (customer-copy-compliance.js): no
+// "safe" claims outside the drying/protective idioms, EPA-registered/
+// -exempt only, no fixed re-entry timing.
+const NOTE_SAFE_STRIP_RE = /\bsafe\s+(?:once|when|after)\b[^.!?]*|\bsafe\s+from\b|\bstay\s+safe\b|\bsafety\s+data\s+sheet\b/gi;
+const NOTE_REENTRY_CTX = '(?:re-?ent(?:er|ry)|back\\s+(?:inside|in)|(?:pets?|dogs?|cats?|kids?|children)\\s+(?:out|outside|inside|back)|dr(?:y|ies|ying))';
+const NOTE_TIME_AMT = '(?:\\d+\\s*(?:min(?:ute)?|hour|hr)s?|an?\\s+hour|half\\s+an?\\s+hour)';
+const NOTE_FIXED_TIMING_RE = new RegExp(`${NOTE_REENTRY_CTX}[^.!?]{0,40}${NOTE_TIME_AMT}|${NOTE_TIME_AMT}[^.!?]{0,40}${NOTE_REENTRY_CTX}`, 'i');
+function noteComplianceTrips(note) {
+  if (/\bsafe(?:ly)?\b/i.test(note.replace(NOTE_SAFE_STRIP_RE, ''))) return true;
+  if (/\bepa\b(?![-\s](?:registered|exempt))/i.test(note)) return true;
+  return NOTE_FIXED_TIMING_RE.test(note);
 }
 // Same canonicalization the server runs before the shortener test —
 // encoded/unicode-dot hosts (`bit%2ely`, `bit。ly`) resolve to real links.
@@ -316,10 +329,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     || NOTE_URL_RE.test(note) || NOTE_URL_RE.test(noteCanonical);
   const noteEmoji = NOTE_EMOJI_RE.test(note);
   const noteGuard = noteGuardTrips(note);
-  const noteBlocked = notify && (noteLink || noteEmoji || noteGuard);
+  const noteCompliance = noteComplianceTrips(note);
+  const noteBlocked = notify && (noteLink || noteEmoji || noteGuard || noteCompliance);
   const noteBlockedCopy = noteLink ? ERROR_COPY.note_link_blocked
     : noteEmoji ? ERROR_COPY.note_emoji_blocked
-      : ERROR_COPY.note_guard_blocked;
+      : noteGuard ? ERROR_COPY.note_guard_blocked
+        : ERROR_COPY.note_compliance_blocked;
 
   const handleCommit = async () => {
     if (!selected || busy || noteBlocked) return;

@@ -1471,6 +1471,22 @@ describe('rain-out service', () => {
       expect(sanitize()('value un\u2060defined here')).toEqual({ error: 'note_guard_blocked', guardReason: 'broken-render:undefined' });
     });
 
+    test('sanitizer: compliance hard rules \u2014 no safe claims / EPA-approved / fixed re-entry timing', () => {
+      // Deterministic extraction of the social-compliance-judge hard rules
+      // (codex r5) \u2014 free-form notes are customer copy like any other.
+      expect(sanitize()('our treatment is pet-safe')).toEqual({ error: 'note_compliance_blocked', complianceRule: 'safety' });
+      expect(sanitize()('products are totally safe for kids')).toEqual({ error: 'note_compliance_blocked', complianceRule: 'safety' });
+      expect(sanitize()('EPA-approved products only')).toEqual({ error: 'note_compliance_blocked', complianceRule: 'epa' });
+      expect(sanitize()('re-enter after 30 minutes')).toEqual({ error: 'note_compliance_blocked', complianceRule: 'reentry_timing' });
+      expect(sanitize()('wait an hour before letting pets out')).toEqual({ error: 'note_compliance_blocked', complianceRule: 'reentry_timing' });
+      // Approved idioms and unrelated durations pass.
+      expect(sanitize()('yard is safe once completely dry')).toEqual({ note: 'yard is safe once completely dry' });
+      expect(sanitize()('keeping your home safe from termites')).toEqual({ note: 'keeping your home safe from termites' });
+      expect(sanitize()('EPA-registered product, same as always')).toEqual({ note: 'EPA-registered product, same as always' });
+      expect(sanitize()('visit takes about 45 minutes')).toEqual({ note: 'visit takes about 45 minutes' });
+      expect(sanitize()('barrier lasts 21-30 days')).toEqual({ note: 'barrier lasts 21-30 days' });
+    });
+
     test('sanitizer: rejects emoji BEFORE the move (send layer would block the SMS after)', () => {
       // sendCustomerMessage's EMOJI_FOR_CUSTOMER validator would otherwise
       // fire after the reschedule committed — move done, customer silent.
