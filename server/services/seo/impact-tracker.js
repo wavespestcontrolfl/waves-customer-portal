@@ -53,10 +53,19 @@ const REGRESSION_PAUSE_THRESHOLD = 3;
 // engine mostly PUBLISHES rather than refreshes, so the measurement design and
 // the work being measured were mismatched.
 //
-// Launches are therefore graded on what the page ACTUALLY EARNED. Refreshes
-// keep the control-adjusted diff-in-diff below, which is correct for them and
-// starts mattering as soon as the refresh lanes carry real volume.
-const LAUNCH_ACTION_TYPES = new Set(['new_supporting_blog']);
+// Launches are therefore graded on what the page ACTUALLY EARNED. Pages with a
+// real baseline keep the control-adjusted diff-in-diff below, which is correct
+// for them and starts mattering as soon as the refresh lanes carry volume.
+//
+// The regime is chosen from the DATA — "is there a baseline to difference
+// against?" — never from action_type. new_supporting_blog does NOT prove the
+// page is new: astro-publisher adopts and rewrites a post that already renders
+// the route, and pages-poll says so outright ("new_supporting_blog, which can
+// UPDATE an existing slug"). Routing on the action type would take a page with
+// a genuine 2,000-impression baseline, ignore it, and score ordinary existing
+// traffic as a successful launch — even if the page actually declined.
+// An absent baseline, by contrast, IS the precondition: it is exactly the
+// state in which no difference can be computed.
 const LAUNCH_MIN_IMPRESSIONS = 30;  // same "did it register at all" floor
 const LAUNCH_RANKED_POSITION = 20;  // ranking somewhere a human might see it
 
@@ -136,12 +145,13 @@ function confidenceScore({ baselineImpressions, windowImpressions, controlCount 
  *
  * baseline / window: { position, clicks, impressions }
  * controlDeltas: [{ position_delta, clicks_pct }] for each control page.
- * isLaunch: the run PUBLISHED this page rather than changing an existing one,
- *   so there is no baseline to difference against — see launchVerdict.
  */
-function computeVerdict({ baseline, window, controlDeltas = [], isLaunch = false }) {
-  if (isLaunch) return launchVerdict({ window });
+function computeVerdict({ baseline, window, controlDeltas = [] }) {
   const baselineImpr = Number(baseline?.impressions) || 0;
+  // No usable baseline → nothing to difference against → grade the page on
+  // what it earned. See the LAUNCH_* block above for why this keys on the data
+  // rather than on action_type.
+  if (baselineImpr < LAUNCH_MIN_IMPRESSIONS) return launchVerdict({ window });
   const windowImpr = Number(window?.impressions) || 0;
   const controlCount = controlDeltas.length;
 
@@ -155,7 +165,10 @@ function computeVerdict({ baseline, window, controlDeltas = [], isLaunch = false
   const confidence = confidenceScore({ baselineImpressions: baselineImpr, windowImpressions: windowImpr, controlCount });
 
   let verdict;
-  if (baselineImpr < MIN_IMPRESSIONS || windowImpr < MIN_IMPRESSIONS || controlCount < 1) {
+  // No baseline check here: the launch-regime routing above already returned
+  // for every row under the floor, so `baselineImpr < MIN_IMPRESSIONS` is
+  // unreachable at this point. Leaving it in would read as a live guard.
+  if (windowImpr < MIN_IMPRESSIONS || controlCount < 1) {
     verdict = 'insufficient_data';
   } else if ((liftPos >= LIFT_POSITION_IMPROVED || liftClicksPct >= LIFT_CLICKS_IMPROVED_PCT) && confidence >= MIN_CONFIDENCE) {
     verdict = 'improved';
@@ -507,7 +520,7 @@ function draftPayloadUrl(value) {
 
 // ── measurement sweep ───────────────────────────────────────────────
 
-async function measureWindow(database, impactRow, days, { isLaunch = false } = {}) {
+async function measureWindow(database, impactRow, days) {
   const start = impactRow.measurement_start;
   const end = etDateString(addETDays(etDayAnchor(impactRow.measurement_start), days));
   const page = await aggregatePageMetrics(database, impactRow.page_url, start, end);
@@ -531,7 +544,7 @@ async function measureWindow(database, impactRow, days, { isLaunch = false } = {
     clicks: impactRow.baseline_clicks,
     impressions: impactRow.baseline_impressions,
   };
-  const verdict = computeVerdict({ baseline, window: page, controlDeltas, isLaunch });
+  const verdict = computeVerdict({ baseline, window: page, controlDeltas });
 
   // Target-query view (display only — the diff-in-diff verdict above stays
   // the authoritative call). One entry per frozen cohort query.
@@ -573,14 +586,10 @@ async function checkPending({ db: database = db, now = new Date() } = {}) {
   const today = etDateString(now);
   let rows = [];
   try {
-    // action_type comes from the RUN, not inferred from a zero baseline: an
-    // existing page can legitimately have had no impressions, and grading that
-    // as a launch would call a flat refresh a successful publication.
-    rows = await database('content_optimization_impact as i')
-      .leftJoin('autonomous_runs as r', 'r.id', 'i.run_id')
-      .whereNotNull('i.measurement_start')
-      .where((b) => b.whereNull('i.checked_21d_at').orWhereNull('i.checked_14d_at'))
-      .select('i.*', 'r.action_type as run_action_type');
+    rows = await database('content_optimization_impact')
+      .whereNotNull('measurement_start')
+      .where((b) => b.whereNull('checked_21d_at').orWhereNull('checked_14d_at'))
+      .select('*');
   } catch (err) {
     logger.warn(`[impact-tracker] checkPending query failed: ${err.message}`);
     return { checked: 0, error: err.message };
@@ -588,13 +597,12 @@ async function checkPending({ db: database = db, now = new Date() } = {}) {
 
   let checked = 0;
   for (const row of rows) {
-    const isLaunch = LAUNCH_ACTION_TYPES.has(row.run_action_type);
     const day14 = etDateString(addETDays(etDayAnchor(row.measurement_start), 14));
     const day21 = etDateString(addETDays(etDayAnchor(row.measurement_start), 21));
     const patch = { updated_at: now };
 
     if (!row.checked_14d_at && today >= day14) {
-      const r = await measureWindow(database, row, 14, { isLaunch });
+      const r = await measureWindow(database, row, 14);
       patch.metrics_14d = JSON.stringify({ ...r.page, target_queries: r.targetQueries });
       patch.control_delta_14d = JSON.stringify({ deltas: r.controlDeltas });
       patch.checked_14d_at = now;
@@ -605,7 +613,7 @@ async function checkPending({ db: database = db, now = new Date() } = {}) {
       patch.estimated_lift_clicks_pct = r.verdict.estimated_lift_clicks_pct;
     }
     if (!row.checked_21d_at && today >= day21) {
-      const r = await measureWindow(database, row, 21, { isLaunch });
+      const r = await measureWindow(database, row, 21);
       patch.metrics_21d = JSON.stringify({ ...r.page, target_queries: r.targetQueries });
       patch.control_delta_21d = JSON.stringify({ deltas: r.controlDeltas });
       patch.checked_21d_at = now;
@@ -734,6 +742,6 @@ module.exports = {
     BASELINE_DAYS, DEPLOY_LAG_DAYS, MIN_IMPRESSIONS, MIN_CONFIDENCE,
     LIFT_POSITION_IMPROVED, LIFT_CLICKS_IMPROVED_PCT,
     LIFT_POSITION_REGRESSED, LIFT_CLICKS_REGRESSED_PCT, REGRESSION_PAUSE_THRESHOLD,
-    LAUNCH_MIN_IMPRESSIONS, LAUNCH_RANKED_POSITION, LAUNCH_ACTION_TYPES,
+    LAUNCH_MIN_IMPRESSIONS, LAUNCH_RANKED_POSITION,
   },
 };

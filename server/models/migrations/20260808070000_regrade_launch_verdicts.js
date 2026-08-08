@@ -9,9 +9,12 @@
  * days, which is exactly the blindness the regime change exists to end.
  *
  * Pure recomputation from metrics ALREADY stored on the row — no GSC re-query,
- * no measurement re-run. Only verdict + verdict_confidence are touched, and
- * only on rows whose run PUBLISHED a page (action_type = new_supporting_blog).
- * Refresh rows are left entirely alone: diff-in-diff is correct for them.
+ * no measurement re-run. The cohort is chosen the same way the runtime chooses
+ * the regime: rows with NO USABLE BASELINE (< 30 impressions), which is the
+ * precondition that makes a difference impossible to compute. Deliberately NOT
+ * action_type — new_supporting_blog can update an existing slug, so it would
+ * sweep in pages that have a real baseline and score their ordinary traffic as
+ * a launch. Rows with a baseline are left alone: diff-in-diff is right there.
  *
  * Thresholds are inlined rather than imported so this migration stays a
  * point-in-time operation that cannot drift when the service constants change.
@@ -31,9 +34,8 @@ exports.up = async function up(knex) {
                i.metrics_14d
              ) AS m
       FROM content_optimization_impact i
-      JOIN autonomous_runs r ON r.id = i.run_id
-      WHERE r.action_type = 'new_supporting_blog'
-        AND i.verdict = 'insufficient_data'
+      WHERE i.verdict = 'insufficient_data'
+        AND COALESCE(i.baseline_impressions, 0) < 30
         AND (i.checked_14d_at IS NOT NULL OR i.checked_21d_at IS NOT NULL)
     ), scored AS (
       SELECT id,
@@ -52,6 +54,11 @@ exports.up = async function up(knex) {
            END,
            -- Volume-based confidence, matching launchVerdict: min(1, impr/200).
            verdict_confidence = ROUND(LEAST(1, s.impr / 200.0), 2),
+           -- launchVerdict returns both as null and the admin UI labels a
+           -- non-null value as control-adjusted lift, so leaving the old
+           -- diff-regime numbers behind would mislabel launch rows.
+           estimated_lift_position = NULL,
+           estimated_lift_clicks_pct = NULL,
            updated_at = now()
       FROM scored s
      WHERE t.id = s.id
@@ -61,36 +68,28 @@ exports.up = async function up(knex) {
 };
 
 /**
- * Down restores insufficient_data — but ONLY for the exact cohort up touched.
+ * Down is a deliberate NO-OP.
  *
- * up regrades launch rows that were ALREADY MEASURED when it ran. Once the
- * launch regime is live, checkPending grades new launches itself, and those
- * verdicts are real data this migration never created. A blanket
- * "reset every improved/neutral launch row" down would destroy them.
+ * up recomputes a verdict from metrics already on the row; it does not create
+ * state that can be meaningfully "put back". The prior value was
+ * insufficient_data with a confidence produced by the diff formula, and that
+ * formula does not apply to these rows — restoring it would re-assert a
+ * grade the code itself no longer believes.
  *
- * The cohort is therefore pinned by time: rows whose measurement landed BEFORE
- * this migration ran, read from knex_migrations. Anything measured after is
- * runtime output and is left alone. If the migration row cannot be read the
- * cohort is unidentifiable, so we touch nothing rather than guess.
+ * Every mechanical reconstruction considered was destructive or wrong:
+ *   - reset all improved/neutral launch rows → destroys verdicts the RUNTIME
+ *     wrote after this migration, which it never created;
+ *   - bound that by migration_time → still catches pre-migration rows up never
+ *     touched, still cannot restore the original confidence, and silently
+ *     misses rows that stayed insufficient_data but had confidence rewritten.
+ * Recording prior values durably would mean a table whose only purpose is to
+ * un-improve accurate data.
+ *
+ * The meaningful rollback here is reverting the CODE: with the launch regime
+ * gone, checkPending simply stops producing these verdicts. Rows already
+ * graded keep a verdict that is more accurate than insufficient_data, which is
+ * strictly better than deleting correct data for the sake of symmetry.
  */
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('content_optimization_impact'))) return;
-  if (!(await knex.schema.hasTable('autonomous_runs'))) return;
-
-  const marker = await knex.raw(
-    'SELECT migration_time FROM knex_migrations WHERE name = ? ORDER BY id DESC LIMIT 1',
-    ['20260808070000_regrade_launch_verdicts.js'],
-  );
-  const ranAt = marker.rows && marker.rows[0] && marker.rows[0].migration_time;
-  if (!ranAt) return;
-
-  await knex.raw(`
-    UPDATE content_optimization_impact t
-       SET verdict = 'insufficient_data', verdict_confidence = NULL, updated_at = now()
-      FROM autonomous_runs r
-     WHERE r.id = t.run_id
-       AND r.action_type = 'new_supporting_blog'
-       AND t.verdict IN ('improved', 'neutral')
-       AND COALESCE(t.checked_21d_at, t.checked_14d_at) < ?
-  `, [ranAt]);
+exports.down = async function down() {
+  // Intentionally empty — see above.
 };
