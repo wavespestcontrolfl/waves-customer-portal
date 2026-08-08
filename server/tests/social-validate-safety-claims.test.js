@@ -12,6 +12,8 @@ const { validateContent } = require('../services/social-media');
 
 // Audience/compound forms + EPA-approved (SAFETY_OVERCLAIMS regex).
 const FLAGGED_OVERCLAIM = [
+  // #3278 r13: dotted/spaced EPA spellings are the same banned claim.
+  'E.P.A. approved pest control',
   'pet-safe pest control in Sarasota',
   'kid safe treatments',
   'family-safe barrier spray',
@@ -71,6 +73,10 @@ const FLAGGED_TIMING = [
   // belongs to the restriction, not to the watering.
   'keep pets off treated areas for 30 minutes before watering',
   'keep off the lawn for 2 hours after watering',
+  // #3278 r13: compact/decimal durations; the sentence splitter must not
+  // treat the decimal point in "1.5" as a boundary.
+  'keep pets off treated areas for 30m',
+  're-enter treated areas in 1.5 hours',
   // A clock time asserts the same fixed re-entry moment a duration does
   // (codex P1 #3176 r20).
   'safe to return after 7 PM',

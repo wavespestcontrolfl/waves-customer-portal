@@ -135,7 +135,7 @@ const NOTE_SAFETY_WORD_RE = /\bsafe(?:ly|ty)?\b/i;
 // AGRONOMIC_EXEMPT_RE — keep in sync) so the inline advisor recognizes
 // everything the server rejects: spelled-out durations ("two hours"),
 // clock times, and the full re-entry phrasing set.
-const NOTE_TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b|\d{1,2}:\d{2}\b)/i;
+const NOTE_TIMING_DURATION_RE = /\b(?:\d+(?:\.\d+)?\s*(?:[-–]\s*(?:\d+(?:\.\d+)?\s*)?)?(?:minutes?|mins?|m|hours?|hrs?|h)\b|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b|\d{1,2}:\d{2}\b)/i;
 const NOTE_REENTRY_CONTEXT_RE = /\bre-?ent\w*|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\benter(?:ing)?\b[^.!?\n]{0,30}\b(?:treated|areas?|lawn|yard|home|house)\b|\b(?:treated|areas?|lawn|yard|home|house)\b[^.!?\n]{0,30}\benter(?:ing)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family|residents?|occupants?|everyone)\b[^.!?\n]{0,20}\breturn\w*\b|^\s*return(?:ing)?\b/i;
 const NOTE_AGRONOMIC_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|overseed\w*|aerat\w*|rain)\b/i;
 // Mirror of the server's IMPLIED_REENTRY_DIRECTIVE_RE: a keep-away
@@ -146,7 +146,7 @@ const NOTE_IMPLIED_DIRECTIVE_RE = /\b(?:stay|keep|remain|wait)\b[^.!?\n]{0,30}\b
 // Same clause walk as the canonical checker (sentence → clause on
 // commas/semicolons/conjunctions; agronomic clauses exempt).
 function noteTimingTrips(note) {
-  for (const sentence of note.split(/[.!?\n]+/)) {
+  for (const sentence of note.split(/[!?\n]+|(?<!\d)\.+|\.+(?!\d)/)) {
     for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
       if (!clause.trim()) continue;
       if (NOTE_TIMING_DURATION_RE.test(clause)
@@ -166,7 +166,7 @@ function noteComplianceTrips(note) {
     .replace(NOTE_WORKER_SAFETY_RE, '')
     .replace(NOTE_WELL_WISH_SAFE_RE, '');
   if (NOTE_SAFETY_WORD_RE.test(scope)) return true;
-  if (/\bepa\b(?![-\s](?:registered|exempt))/i.test(note)) return true;
+  if (/\be\.?\s*p\.?\s*a\b(?!\.?[-\s]?(?:registered|exempt))/i.test(note)) return true;
   return noteTimingTrips(note);
 }
 // Same canonicalization the server runs before the shortener test —

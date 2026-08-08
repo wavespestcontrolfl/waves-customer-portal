@@ -1507,6 +1507,12 @@ describe('rain-out service', () => {
         .toEqual({ note: 'Treatment is safe once dry. Your technician confirms drying time at the appointment.' });
       // Spelled-out durations are the same banned class as digits.
       blocked('Keep pets off treated areas for two hours');
+      // Compact/decimal durations and dotted EPA (pre-push r13): the
+      // sentence splitter must not treat a decimal point as a boundary,
+      // and "30m" / "1.5 hours" / "E.P.A." are the same banned classes.
+      blocked('Stay off for 30m');
+      blocked('Re-enter in 1.5 hours');
+      blocked('This is E.P.A. approved');
       // Cross-sentence context (pre-push r10): the note ALWAYS rides a
       // treatment SMS, so the claim and its product/area context need not
       // share a sentence — impliedTreatmentContext closes the split.
