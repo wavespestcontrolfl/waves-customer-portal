@@ -3197,6 +3197,36 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(legal.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
+  test('duration-first orders and escaped backticks block; comments and non-visible HTML attrs do not (Codex PR r18)', () => {
+    for (const body of [
+      // No leading wait/allow verb — the figure opens the sentence.
+      'After 30 minutes, you may re-enter the treated room.',
+      'Within 30 minutes, you can re-enter the treated area.',
+      // An escaped backtick must not end template-literal extraction and
+      // discard the prohibited suffix.
+      '<BottomLineBox verdict={`Ordinary \\` phrase then EPA-approved treatment`} />',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    for (const body of [
+      // Comments are dropped by the renderer — never customer-visible.
+      '<!-- The treatment is pet-safe. -->',
+      '{/* The pesticide is EPA-approved. */}',
+      // class/id/data-*/href never reach the reader; only a CSS class here.
+      '<div class="pet-safe-layout">Ordinary visible copy.</div>',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    }
+    // …but genuinely visible HTML attributes still count.
+    const alt = guardrails.evaluate({ body: '<img alt="The treatment is pet-safe." src="/x.png" />' }, {});
+    expect(alt.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    // The ambiguous duration-first action stays treatment-context-gated.
+    const ambiguous = guardrails.evaluate({ body: 'After 30 minutes, check the mailbox and go back inside.' }, {});
+    expect(ambiguous.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
   test('escaped quotes inside MDX expression props survive extraction (Codex PR r15)', () => {
     const r = guardrails.evaluate({ body: "<BottomLineBox verdict={'Waves\\' treatment is safe for pets > ordinary products.'} />" }, {});
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3885,6 +3915,10 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
       const r = guardrails.evaluate({ body }, {});
       expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
     }
+    // `able to` is the same ownership claim as the trained/ready forms
+    // (Codex PR r18).
+    const ableTo = guardrails.evaluate({ body: 'Our technicians are able to remove raccoons from attics.' }, {});
+    expect(ableTo.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('removal-of-animal forms block; third-party schedule referrals stay legal (Codex PR r15)', () => {

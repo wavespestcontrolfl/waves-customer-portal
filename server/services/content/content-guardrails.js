@@ -3015,6 +3015,13 @@ const REENTRY_SAFETY_SRCS = [
   // pets outside 30 minutes after treatment" — treatment-context-gated.
   { src: `\\b(?:re-?enter\\w*|re-?entry|re-?occup\\w+|return\\w*|walk\\s+on|go\\s+back|enter\\w*)\\b[^.!?\\n]{0,30}?\\b${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\s+${REENTRY_AFTER_TAIL_SRC}\\b`, needsTreatmentContext: true },
   { src: `\\bkeep\\s+(?:the\\s+|your\\s+)?(?:pets?|kids?|children|dogs?|cats?|everyone|people|famil(?:y|ies))\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside|indoors|outdoors|outside)\\b[^.!?\\n]{0,40}?\\b${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\s+${REENTRY_AFTER_TAIL_SRC}\\b`, needsTreatmentContext: true },
+  // DURATION-FIRST instructions carrying no leading wait/allow verb (Codex
+  // PR r18): "After 30 minutes, you may re-enter the treated room." Same
+  // action split as the duration-then-action branches — the intrinsically
+  // re-entry actions match bare, the AMBIGUOUS ones keep the
+  // treatment-context gate so ordinary timing prose stays legal.
+  `\\b(?:after|in|within|once)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,40}?\\b(?:re-?enter\\w*|re-?entry|re-?occup\\w+)\\b`,
+  { src: `\\b(?:after|in|within|once)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b[^.!?\\n]{0,40}?\\b(?:enter\\w*|return\\w*|walk\\w*|play\\w*|go\\s+(?:back|inside|into|in)\\b)`, needsTreatmentContext: true },
   // A bounded qualifier may sit between the drying verb and the
   // preposition (Codex PR r8: "dries completely within 45 minutes").
   { src: `\\bdr(?:y|ies|ied)\\s+(?:\\w+\\s+){0,2}?(?:in|within|after|for)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
@@ -3142,6 +3149,12 @@ const MDX_TAG_RE = new RegExp(
 
 function normalizeHardCopyText(text) {
   return String(text || '')
+    // HTML and MDX comments are dropped ENTIRELY by the renderer, so their
+    // bodies are never customer-visible (Codex PR r18). Blanked FIRST, before
+    // any other pass, so an author's note ("<!-- is pet-safe ok here? -->")
+    // cannot burn a writer retry or park a refresh over text no reader sees.
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, ' ')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     // Reference-style and collapsed/shortcut links render as their
     // anchor text too (Codex PR r16: "[safe][policy]").
@@ -3154,22 +3167,34 @@ function normalizeHardCopyText(text) {
     // Quote-aware tag scan (Codex PR r14): a `>` inside a quoted prop
     // must not terminate the tag early or the value's prefix is dropped.
     .replace(MDX_TAG_RE, (tag) => {
+      // The two tag families differ in what actually RENDERS, so they get
+      // different extraction (Codex PR r18).
+      //
+      // MDX COMPONENTS (capitalized) render their string props as copy, so
+      // every literal in one is candidate visible text — scalar attrs,
+      // expression strings, and strings nested in array/object props alike
+      // (Codex PR r17: `items={[{ label: "Pet-safe treatment" }]}`).
+      // Enumerating prop SHAPES kept missing new ones, so this arm stays
+      // shape-agnostic; object keys ride along harmlessly since no
+      // compliance code matches a bare field name.
+      //
+      // PLAIN HTML tags are the opposite: `class`, `id`, `data-*` and
+      // `href` never reach the reader, so scanning them rejects compliant
+      // drafts over a CSS class ("pet-safe-layout"). Only genuinely visible
+      // attributes count there.
+      const name = /^<\/?\s*([a-zA-Z][\w.-]*)/.exec(tag)?.[1] || '';
       const vals = [];
-      // EVERY string literal inside the tag is candidate visible copy —
-      // scalar attrs (`verdict="…"`), MDX expression strings (Codex PR
-      // r13 audit b: `verdict={"…"}`), and strings nested inside
-      // array/object props alike (Codex PR r17:
-      // `items={[{ label: "Pet-safe treatment" }]}`, ComparisonTable
-      // cells). Enumerating prop SHAPES kept missing new ones, so the
-      // scan is shape-agnostic; object keys ride along harmlessly since
-      // no compliance code matches a bare field name.
-      // Escape-aware (Codex PR r15): `{'Waves\' treatment…'}` must not
-      // truncate at the escaped quote.
-      const strRe = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`([^`]*)`/g;
+      // Escape-aware in EVERY arm: quotes since Codex PR r15
+      // (`{'Waves\' treatment…'}`), backticks since r18 — a `\`` inside a
+      // template literal must not end extraction and drop the visible tail.
+      const push = (raw) => vals.push(String(raw).replace(/\\(['"`\\])/g, '$1'));
       let m;
-      while ((m = strRe.exec(tag)) !== null) {
-        const raw = m[1] ?? m[2] ?? m[3];
-        vals.push(raw.replace(/\\(['"\\])/g, '$1'));
+      if (/^[A-Z]/.test(name)) {
+        const strRe = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\]|\\.)*)`/g;
+        while ((m = strRe.exec(tag)) !== null) push(m[1] ?? m[2] ?? m[3]);
+      } else {
+        const visRe = /\b(?:title|alt|aria-label|aria-description|placeholder)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|\{\s*"((?:[^"\\]|\\.)*)"\s*\}|\{\s*'((?:[^'\\]|\\.)*)'\s*\}|\{\s*`((?:[^`\\]|\\.)*)`\s*\})/gi;
+        while ((m = visRe.exec(tag)) !== null) push(m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5]);
       }
       return vals.length ? ` ${vals.join(' ')} ` : '';
     })
@@ -3314,7 +3339,7 @@ const BANNED_TOPIC_ACTION_FILLER_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b|partners?\
 // BANNED_TOPIC_ACTION_FILLER_SRC still police everything else. Negation
 // stays outside it — "we cannot help you remove wildlife" never matches
 // the group, and the filler refuses the negation word behind it.
-const BANNED_TOPIC_AUX_FRAMING_SRC = "(?:(?:can|could|will|would|may)\\s+(?:help|assist)\\s+(?:you\\s+)?|(?:helps?|assists?)\\s+(?:you\\s+)?|(?:are|is|get|gets|got)\\s+(?:fully\\s+|properly\\s+|specially\\s+)?trained\\s+to\\s+|(?:are|is)\\s+(?:here|ready|available|equipped|certified|licensed)\\s+to\\s+)?";
+const BANNED_TOPIC_AUX_FRAMING_SRC = "(?:(?:can|could|will|would|may)\\s+(?:help|assist)\\s+(?:you\\s+)?|(?:helps?|assists?)\\s+(?:you\\s+)?|(?:are|is|get|gets|got)\\s+(?:fully\\s+|properly\\s+|specially\\s+)?trained\\s+to\\s+|(?:are|is)\\s+(?:able|here|ready|available|equipped|certified|licensed)\\s+to\\s+)?";
 // The insulation object gap must not match THROUGH inspection artifacts
 // (Codex PR r6): "we can provide photos of attic insulation during the
 // inspection" is rodent-inspection copy, not an insulation offering.
