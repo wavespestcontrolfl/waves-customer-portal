@@ -3051,8 +3051,10 @@ const REENTRY_SAFETY_SRCS = [
   // Attributive figures, hyphenated or not: "a 30 minute re-entry
   // interval", "a 45-minute re-entry window" — the re-entry/wait tails are
   // intrinsic; the drying tail needs treatment context (Codex PR r5).
-  "\\b(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+(?:re-?entry|wait(?:ing)?)\\b",
-  { src: "\\b(?:\\d+|one|two|three|four|five|ten|fifteen|twenty|thirty|forty[-\\s]?five|sixty|ninety)[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+dry(?:ing)?\\b", needsTreatmentContext: true },
+  // The full spelled-number grammar applies attributively too (Codex PR
+  // r11 audit: "a twelve-minute dry time").
+  `\\b(?:\\d+|${REENTRY_SPELLED_NUM_SRC})[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+(?:re-?entry|wait(?:ing)?)\\b`,
+  { src: `\\b(?:\\d+|${REENTRY_SPELLED_NUM_SRC})[-‑\\s]\\s?(?:minute|min|hour|hr|second|sec|day|week)\\s+dry(?:ing)?\\b`, needsTreatmentContext: true },
 ];
 
 // The APPROVED conditional idiom has TWO required parts (AGENTS.md): the
@@ -3193,7 +3195,11 @@ const BANNED_TOPIC_SRCS = [
   // service — the same exemption the possessive branch carries.
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:(?:proud|pleased|happy|excited|glad|ready)\\s+to\\s+)?(?:offers?|provides?|performs?|do(?:es)?\\b|handles?|includes?|specializ\\w+\\s+in|delivers?|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|covers?|conducts?|manag(?:es?|ing)|carr(?:y|ies|ied)\\s+out)\\s+(?:(?!${NEGATION_WORD_SRC}\\b|${BANNED_TOPIC_INFO_NOUN_SRC}\\b)[\\w'’-]+\\s+){0,3}?${BANNED_TOPIC_CORE_SRC}`,
   // Insulation with SERVICE-UNAMBIGUOUS verbs only.
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:(?:proud|pleased|happy|excited|glad|ready)\\s+to\\s+)?(?:offers?|provides?|sells?|installs?|replaces?)\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
+  // The insulation branch carries the full offering-verb set (Codex PR
+  // r11 audit: "we specialize in attic insulation", "we can help with
+  // attic insulation") — handle/tackle stay OUT so the r1 inspection
+  // exemption ("handle attic insulation carefully") holds.
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|services?|programs?|plans?|offerings?))\\s+${NON_NEGATED_FILLER_SRC}(?:(?:proud|pleased|happy|excited|glad|ready)\\s+to\\s+)?(?:offers?|provides?|sells?|installs?|replaces?|specializ\\w+\\s+in|helps?\\s+with|assists?\\s+with|takes?\\s+care\\s+of|delivers?|conducts?|manag(?:es?|ing)|carr(?:y|ies|ied)\\s+out)\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
   // Work/project phrasing is an unambiguous insulation OFFERING even with
   // the broad verbs the bare-noun branch excludes (Codex PR r6): "we
   // perform attic insulation work" — the trailing work-noun is what

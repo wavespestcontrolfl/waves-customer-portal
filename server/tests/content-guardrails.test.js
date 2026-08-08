@@ -3253,6 +3253,11 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(day.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
   });
 
+  test('attributive spelled numbers use the full grammar (Codex PR r11 audit)', () => {
+    const r = guardrails.evaluate({ body: 'The treatment has a twelve-minute dry time.' }, {});
+    expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+  });
+
   test('go-inside/go-into re-entry instructions carry the figure too (Codex PR r7)', () => {
     const inside = guardrails.evaluate({ body: 'Do not go inside the treated home for 30 minutes.' }, {});
     expect(inside.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3602,6 +3607,15 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(conduct.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
     const manages = guardrails.evaluate({ body: 'Waves manages wildlife removal for local homeowners.' }, {});
     expect(manages.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+  });
+
+  test('specialize-in / help-with insulation offerings block; inspection handling still legal (Codex PR r11 audit)', () => {
+    const specialize = guardrails.evaluate({ body: 'We specialize in attic insulation.' }, {});
+    expect(specialize.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const helpWith = guardrails.evaluate({ body: 'We can help with attic insulation.' }, {});
+    expect(helpWith.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    const inspection = guardrails.evaluate({ body: 'Our technicians handle attic insulation carefully while checking for rodent entry points.' }, {});
+    expect(inspection.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
   });
 
   test('proud-to/pleased-to framing before offer verbs blocks (Codex PR r11)', () => {
