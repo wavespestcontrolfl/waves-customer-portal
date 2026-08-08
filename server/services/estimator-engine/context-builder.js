@@ -462,18 +462,22 @@ async function buildCallContext(callLogId) {
   if (!customerMatch.customer && !resolvedLoadFailed) {
     customerMatch = await loadCustomerByPhone(phone, extraction);
   }
-  // Email identity guard (codex P1 ×2, PR #3275): an ACTIVE customer whose
-  // phone resolution found nothing — blocked caller ID with NO number, or a
-  // stated NEW/spouse callback number that isn't on the account — would
-  // reach the engine as isExistingCustomer=false and get prospect-priced
-  // (dropping membership discounts/fee waivers), exactly what the
-  // fail-closed rule forbids. Whenever no customer was identified and the
-  // extraction carries an email belonging to a REAL customer
-  // (pipeline_stage active_customer/won/at_risk — the canonical
-  // whereRealCustomer stages; lead-stage rows are NOT members and stay
-  // draft-eligible), fail closed into the red-lane identity review. Lookup
-  // failure fails closed the same way as the phone path.
-  if (!customerMatch.customer) {
+  // Email identity guard (codex P1 ×3, PR #3275): the stated email is
+  // checked against REAL, active customers whenever the extraction carries
+  // one — not only when phone resolution found nobody. The failure modes it
+  // closes: (a) blocked caller ID with no usable number, (b) a stated
+  // new/spouse callback number that matches NO account (phone truthy but
+  // unmatched), and (c) a callback number that matches a DIFFERENT
+  // customer — where drafting would link and price against the phone
+  // owner's property and membership instead of the stated email's owner.
+  // "Real, active" = pipeline_stage active_customer/won/at_risk (the
+  // canonical whereRealCustomer stages) AND active=true — the two are
+  // independently editable, and a deactivated former customer calling as a
+  // new prospect must stay draft-eligible, matching the grounded-customer
+  // loader's own active===true requirement (codex P2). Lead-stage rows are
+  // NOT members and stay draft-eligible. Lookup failure fails closed like
+  // the phone path.
+  {
     // Enriched (V2) payloads carry the email at caller.email; the top-level
     // field is the V1 fallback shape — reading only the top level made this
     // guard a no-op for every valid V2 extraction (codex P1, PR #3275).
@@ -482,12 +486,17 @@ async function buildCallContext(callLogId) {
       try {
         const emailOwner = await db('customers')
           .whereNull('deleted_at')
+          .where('active', true)
           .whereRaw('LOWER(TRIM(email)) = ?', [extractionEmailLc])
           .whereIn('pipeline_stage', ['active_customer', 'won', 'at_risk'])
           .first('id');
-        if (emailOwner) {
-          logger.warn('[estimator-engine] email-only call matches an active customer — failing closed to identity review');
+        if (emailOwner && !customerMatch.customer) {
+          logger.warn('[estimator-engine] unidentified call states an active customer\'s email — failing closed to identity review');
           return { error: 'email_matches_existing_customer', call };
+        }
+        if (emailOwner && customerMatch.customer && String(emailOwner.id) !== String(customerMatch.customer.id)) {
+          logger.warn('[estimator-engine] stated email belongs to a DIFFERENT active customer than the phone match — failing closed to identity review');
+          return { error: 'email_identity_conflict', call };
         }
       } catch (emailErr) {
         logger.warn(`[estimator-engine] email-owner check failed — failing closed: ${emailErr.code || emailErr.name || 'db_error'}`);
