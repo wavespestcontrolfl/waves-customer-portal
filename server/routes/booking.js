@@ -3,6 +3,7 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
@@ -2407,6 +2408,54 @@ async function createSelfBooking(payload = {}) {
         source: 'self_book',
       });
 
+      // Winback/conversion promotion — the canonical booking-promotion
+      // helper, same as the admin and call paths (codex #3282 r1 P2 + audit
+      // P1): a former customer (churned/past_customer/dormant) or a
+      // stage-stranded lead who self-books is a live customer again, and the
+      // promotion must be ATOMIC with the booking (a post-commit write can
+      // be lost to a crash, stranding a live booking on an archived row).
+      // Nested transaction = savepoint: a promotion failure rolls back to it
+      // and the booking still commits — stage bookkeeping must never fail a
+      // customer's booking (the helper has no internal containment by
+      // design; callers own it). NOT for callbackVisit (codex #3282 r3 P2):
+      // a free warranty/re-treatment callback via /reservice/:token is not a
+      // new sale — promoting would flip an archived row to won and erase
+      // preserved churn history, same reason the call-booking path skips
+      // conversion for covered re-services.
+      if (!callbackVisit) {
+        try {
+          await trx.transaction(async (inner) => {
+            await promoteCustomerOnBooking(inner, custId);
+          });
+        } catch (e) {
+        // Durable repair marker, committed WITH the booking (codex #3282 r3
+        // P1: a swallowed savepoint failure would otherwise strand a live
+        // booking on an archived row with nothing to heal it): ring the
+        // admin bell in this same transaction — the existing stamp-and-
+        // notify mechanism — so the inconsistency surfaces even if the
+        // client never retries. Rolling the booking back instead was
+        // rejected: stage bookkeeping must never cost a customer a booking.
+        logger.warn(`[booking:confirm] customer promotion failed (non-blocking) for customer=${custId}: ${e.message}`);
+        // Through NotificationService, not a raw insert (codex #3282 r2 P1):
+        // the central path owns internal-test-account suppression and the
+        // bell policy; `connection: trx` keeps the marker in this booking's
+        // transaction. The service contains its own failures (logs + null),
+        // so a marker miss can still never fail the booking.
+        await require('../services/notification-service').notifyAdmin(
+          'customer_promotion_review',
+          'Self-booking committed without customer promotion',
+          'A booking was confirmed but the customer row could not be promoted to a live stage (it may still show churned/past customer/lead). Open the customer and set the stage manually.',
+          {
+            icon: '\u{1F514}',
+            link: `/admin/customers?customerId=${custId}`,
+            bell: true,
+            metadata: { customerId: custId, scheduledServiceId: scheduledRow.id, error: String(e.message || e).slice(0, 200) },
+            connection: trx,
+          },
+        );
+        }
+      }
+
       return { booking: bookingRow, serviceRow: scheduledRow };
       });
     } catch (txErr) {
@@ -2460,6 +2509,20 @@ async function createSelfBooking(payload = {}) {
 
     if (txResult.existing) {
       await markBookingIntentsConverted(txResult.existing.id);
+      // Replay heal (codex #3282 audit P1): if the original request crashed
+      // between the booking commit and its promotion savepoint, the retry
+      // takes THIS path and would otherwise never promote — the helper is
+      // idempotent (returns false with no write when the row is already a
+      // live customer), so run it contained on every replay. Skipped for
+      // callbackVisit, matching the primary path: a free warranty callback
+      // never promotes (codex #3282 r3 P2).
+      if (!callbackVisit) {
+        try {
+          await promoteCustomerOnBooking(db, custId);
+        } catch (e) {
+          logger.warn(`[booking:confirm] replay customer promotion failed (non-blocking) for customer=${custId}: ${e.message}`);
+        }
+      }
       logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slotDateStr} ${slot_start} — returning existing booking ${txResult.existing.id}`);
       // Re-offer the inline card step on replay (Codex #2771 r2): if the
       // first response was lost after the pending card row landed, this

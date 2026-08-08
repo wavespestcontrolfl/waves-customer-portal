@@ -24,6 +24,7 @@ const {
   isNewRecurringSignupCandidate,
 } = require('./new-recurring-welcome-sms');
 const { etDateString } = require('../utils/datetime-et');
+const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const { normalizeGrassType } = require('./lawn-grass-context');
 const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
 
@@ -2318,7 +2319,7 @@ const EstimateConverter = {
           // customer (or a former one), keep its real start; if it was a lead,
           // overwrite the lead-intake date with today. Uses the already-loaded
           // row, not database.raw, to stay mock-friendly.
-          member_since: ['active_customer', 'won', 'at_risk', 'churned', 'dormant'].includes(customer.pipeline_stage)
+          member_since: ['active_customer', 'won', 'at_risk', ...FORMER_CUSTOMER_STAGES].includes(customer.pipeline_stage)
             ? (customer.member_since || etDateString())
             : etDateString(),
           // An all-commercial recurring plan is NOT a WaveGuard membership. Store
