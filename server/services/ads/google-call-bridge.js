@@ -471,6 +471,35 @@ async function ensureBridgeLeadSource() {
   });
 }
 
+// The linkage predicate shared by every joined-lead revalidation: the call
+// still points at THIS lead, by sid or by the metadata stamp. Applied as a
+// correlated EXISTS inside the leads query/update so the check is atomic
+// with whatever rides on it — `callLog.leadId` is a snapshot taken before
+// the awaited Google Ads scan, and call-processing reconciliation can clear
+// or repoint a provisional stamp in that gap (pre-push P1 r1).
+function whereCallStillLinked(builder, callLogId) {
+  return builder.whereExists(function stillLinked() {
+    this.select(db.raw('1'))
+      .from('call_log')
+      .where('call_log.id', callLogId)
+      .andWhere(function linkageArms() {
+        this.whereRaw('call_log.twilio_call_sid = leads.twilio_call_sid')
+          .orWhereRaw("call_log.metadata->>'lead_id' = leads.id::text");
+      });
+  });
+}
+
+// Read-side revalidation for paths that only write the FUNNEL row (no lead
+// mutation): is the joined lead still live and still linked to this call?
+async function joinedLeadStillLive(callLog) {
+  if (!callLog?.leadId || !callLog?.id) return false;
+  const row = await whereCallStillLinked(
+    db('leads').where({ id: callLog.leadId }).whereNull('deleted_at'),
+    callLog.id,
+  ).first('id');
+  return !!row;
+}
+
 // The JOINED lead (sid- or metadata-stamp-linked in fetchCrmCalls) is
 // authoritative when present — findLeadForCall's plan needs a customer link
 // or a usable caller phone and returns null for exactly the phone-less
@@ -481,15 +510,34 @@ async function ensureBridgeLeadSource() {
 // the call Google Ads). The joined lead's own customer rides along so
 // writeCallPpcAttribution can create the funnel row for a lead claimed
 // after the call.
-async function joinedOrPlannedLeadMatch(callLog) {
+//
+// Resolution and ATTRIBUTION are one step: the joined arm's UPDATE carries
+// the linkage EXISTS, so a stamp cleared or repointed after the fetch
+// writes zero rows — then the plan fallback gets its chance, and only a
+// match whose live-lead update actually landed is ever returned (pre-push
+// P1 r1). Returns { match } on success; { match: null, reason } for the
+// caller's skip bookkeeping.
+async function attributeResolvedLead(callLog, bridgeSource, now) {
+  let joinedWentStale = false;
   if (callLog?.leadId) {
-    return {
+    const joined = {
       strategy: 'joined_lead',
       leadId: callLog.leadId,
       customerId: callLog.customerId || callLog.leadCustomerId || null,
     };
+    if (await updateLeadAttribution(joined, bridgeSource, now, { linkageCallId: callLog.id })) {
+      return { match: joined };
+    }
+    joinedWentStale = true;
   }
-  return findLeadForCall(callLog);
+  const planned = await findLeadForCall(callLog);
+  if (!planned?.leadId) {
+    return { match: null, reason: joinedWentStale ? 'lead_not_live' : 'lead_not_found' };
+  }
+  if (!await updateLeadAttribution(planned, bridgeSource, now)) {
+    return { match: null, reason: 'lead_not_live' };
+  }
+  return { match: planned };
 }
 
 async function findLeadForCall(callLog) {
@@ -517,7 +565,7 @@ async function findLeadForCall(callLog) {
   return lead?.id ? { ...plan, leadId: lead.id, customerId: plan.customerId || lead.customer_id || null } : null;
 }
 
-async function updateLeadAttribution(leadMatch, bridgeSource, now) {
+async function updateLeadAttribution(leadMatch, bridgeSource, now, { linkageCallId = null } = {}) {
   if (!leadMatch?.leadId) return false;
   // Live-lead check happens HERE, at write time, not only in the fetch join
   // (codex P2, PR #3275): previewBridge awaits the Google Ads scan between
@@ -526,13 +574,17 @@ async function updateLeadAttribution(leadMatch, bridgeSource, now) {
   // retries from resolving a live replacement. findLeadForCall enforces the
   // same predicate; the joined shortcut now matches it. A zero-row update
   // reports false so the caller does not record a bridge match.
-  const updated = await db('leads')
+  // With `linkageCallId` (the joined-lead arm), the sid/stamp linkage is
+  // revalidated ATOMICALLY with the write via the correlated EXISTS —
+  // never from the pre-scan snapshot (pre-push P1 r1).
+  let query = db('leads')
     .where({ id: leadMatch.leadId })
-    .whereNull('deleted_at')
-    .update({
-      lead_source_id: bridgeSource.id,
-      updated_at: now,
-    });
+    .whereNull('deleted_at');
+  if (linkageCallId) query = whereCallStillLinked(query, linkageCallId);
+  const updated = await query.update({
+    lead_source_id: bridgeSource.id,
+    updated_at: now,
+  });
   return !!updated;
 }
 
@@ -632,6 +684,14 @@ async function applyBridge(options = {}) {
           // resolve the lead in that case before attributing.
           let backfillLeadId = match.callLog?.leadId || null;
           let backfillCustomerId = match.callLog?.customerId || match.callLog?.leadCustomerId || null;
+          // Same snapshot-staleness rule as the attribution paths (pre-push
+          // P1 r1): the joined lead only feeds the funnel row while it is
+          // still live AND still linked to this call; otherwise drop to the
+          // plan (and to the call's own customer link).
+          if (backfillLeadId && !(await joinedLeadStillLive(match.callLog))) {
+            backfillLeadId = null;
+            backfillCustomerId = match.callLog?.customerId || null;
+          }
           if (!backfillLeadId) {
             const lm = await findLeadForCall(match.callLog).catch(() => null);
             if (lm?.leadId) { backfillLeadId = lm.leadId; backfillCustomerId = lm.customerId || backfillCustomerId; }
@@ -643,25 +703,14 @@ async function applyBridge(options = {}) {
       }
 
       try {
-        // The JOINED lead (sid- or metadata-stamp-linked in fetchCrmCalls)
-        // is authoritative when present — findLeadForCall's plan needs a
-        // customer link or a usable caller phone and returns null for
-        // exactly the phone-less reused-lead calls the stamp join exists
-        // for; skipping them confirmed the Google call but never repointed
-        // its lead, and the unclaimed sweep later recorded that paid lead
-        // as organic (codex P1, PR #3275).
-        const leadMatch = await joinedOrPlannedLeadMatch(match.callLog);
-        if (!leadMatch?.leadId) {
-          skipped.push({ ...match, skipReason: 'lead_not_found' });
-          continue;
-        }
-
-        // A joined lead soft-deleted between fetch and apply writes zero
-        // rows — do NOT stamp it as this call's match, or a later retry can
-        // never resolve a live replacement (codex P2, PR #3275). Not a
-        // write_failed: the retry lane re-evaluates it on the next pass.
-        if (!await updateLeadAttribution(leadMatch, bridgeSource, now)) {
-          skipped.push({ ...match, skipReason: 'lead_not_live' });
+        // Resolution + attribution in one guarded step: the joined lead is
+        // authoritative but revalidated atomically with its write; a stale
+        // or soft-deleted lead falls back to the plan, and only a landed
+        // update proceeds (codex P1/P2, PR #3275; pre-push P1 r1). Not a
+        // write_failed on skip: the retry lane re-evaluates next pass.
+        const { match: leadMatch, reason: leadSkipReason } = await attributeResolvedLead(match.callLog, bridgeSource, now);
+        if (!leadMatch) {
+          skipped.push({ ...match, skipReason: leadSkipReason });
           continue;
         }
         await db('call_log')
@@ -701,12 +750,13 @@ async function applyBridge(options = {}) {
         reasons: match.reasons,
         bridgedAt: now.toISOString(),
       };
-      const leadMatch = await joinedOrPlannedLeadMatch(match.callLog);
       // The google call is confirmed either way; only the LEAD attribution
-      // is conditional. A lead soft-deleted between fetch and apply writes
-      // zero rows, and recording it would block a later retry from finding
-      // the live replacement (codex P2, PR #3275).
-      if (leadMatch && await updateLeadAttribution(leadMatch, bridgeSource, now)) {
+      // is conditional. Resolution + attribution are one guarded step —
+      // a lead soft-deleted or unlinked between fetch and apply writes
+      // zero rows and is NEVER recorded (recording it would block a later
+      // retry from finding the live replacement; codex P2, PR #3275).
+      const { match: leadMatch } = await attributeResolvedLead(match.callLog, bridgeSource, now);
+      if (leadMatch) {
         bridgePayload.leadMatch = redactedLeadMatch(leadMatch);
         bridgePayload.leadAttributedAt = now.toISOString();
       }
@@ -728,10 +778,15 @@ async function applyBridge(options = {}) {
       // Surface this confirmed Google Ads call in the PPC funnel
       // (ad_service_attribution), tagged with the campaign Google reported, so
       // phone leads stop being invisible to PPC ROI. Idempotent; best-effort.
+      // Only an ATTRIBUTED lead reaches the funnel row (pre-push P1 r1):
+      // the snapshot leadId could belong to a lead whose update just wrote
+      // zero rows — a permanent funnel row for a deleted lead that later
+      // double-counts when retry finds the live replacement. The call's
+      // own customer link stands on its own either way.
       await writeCallPpcAttribution(
         match,
         leadMatch?.customerId || match.callLog?.customerId || null,
-        leadMatch?.leadId || match.callLog?.leadId || null,
+        leadMatch?.leadId || null,
       );
 
       applied.push(match);
