@@ -149,6 +149,14 @@ const TAG_TO_SERVICE = {
   tree_shrub: 'tree-shrub',
 };
 
+// Distinct from "no such page": a duplicate blog row is transient, so callers
+// must be able to retry rather than write the page off.
+function ambiguous(url) {
+  const err = new Error(`more than one blog_posts row matches ${url} on its domain`);
+  err.code = 'AMBIGUOUS_URL';
+  return err;
+}
+
 function pageUrlFor(post) {
   if (post.astro_live_url) return post.astro_live_url;
   return post.slug ? `${HUB}/${post.slug}/` : null;
@@ -311,10 +319,12 @@ class RefreshAudit {
    * all, and a caller that parks the latter would park a post that is about to
    * be republished.
    *
-   * Fails closed: returns null when nothing matches AND when more than one row
-   * matches. An ambiguous match is the exact hazard the blogPostId-only rule
-   * exists to prevent — guessing a domain would point the refresh engine at
-   * the wrong site's page.
+   * Fails closed on ambiguity, but DISTINGUISHABLY: null means a confirmed
+   * absence, while more than one match throws AMBIGUOUS_URL. Guessing between
+   * them is the exact hazard the blogPostId-only rule exists to prevent — but
+   * the two are not the same fact. An absence is structural; an ambiguity is a
+   * duplicate row somebody will clean up, so a caller that permanently parks
+   * absences must be able to keep retrying ambiguities.
    */
   async resolvePostByUrl(url) {
     // Published first, so a live page is never shadowed by a stale draft that
@@ -339,7 +349,7 @@ class RefreshAudit {
       .select(columns)
       .limit(2);
     if (live.length === 1) return live[0];
-    if (live.length > 1) return null;
+    if (live.length > 1) throw ambiguous(url);
 
     // Fallback for a row that has no live URL recorded yet: match on slug
     // path, still domain-scoped via target_domain (or the hub default, so a
@@ -355,6 +365,7 @@ class RefreshAudit {
       .whereRaw(`coalesce(nullif(${bareDomainSql('target_domain')}, ''), ?) = ?`, [HUB_DOMAIN, domain])
       .select(columns)
       .limit(2);
+    if (bySlug.length > 1) throw ambiguous(url);
     return bySlug.length === 1 ? bySlug[0] : null;
   }
 

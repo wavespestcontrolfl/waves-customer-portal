@@ -91,9 +91,12 @@ describe('resolvePostByUrl', () => {
     expect(binds).toContain('wavespestcontrol.com');
   });
 
-  test('FAILS CLOSED on an ambiguous live match rather than guessing a domain', async () => {
+  test('an ambiguous live match THROWS rather than guessing — and is not an absence', async () => {
     scriptDb([[{ id: 7 }, { id: 8 }]]);
-    expect(await RefreshAudit.resolvePostByUrl('https://www.wavespestcontrol.com/a/')).toBeNull();
+    // Distinct from null on purpose: callers park confirmed absences, and a
+    // duplicate row is transient, so it must stay retryable.
+    await expect(RefreshAudit.resolvePostByUrl('https://www.wavespestcontrol.com/a/'))
+      .rejects.toMatchObject({ code: 'AMBIGUOUS_URL' });
   });
 
   test('falls back to a domain-scoped slug match when no live URL is recorded', async () => {
@@ -105,9 +108,10 @@ describe('resolvePostByUrl', () => {
     expect(calls[1].whereRaw.map(([, b]) => b).flat()).toContain('wavespestcontrol.com');
   });
 
-  test('FAILS CLOSED on an ambiguous slug fallback', async () => {
+  test('an ambiguous slug fallback throws too', async () => {
     scriptDb([[], [{ id: 9 }, { id: 10 }]]);
-    expect(await RefreshAudit.resolvePostByUrl('https://www.wavespestcontrol.com/a/')).toBeNull();
+    await expect(RefreshAudit.resolvePostByUrl('https://www.wavespestcontrol.com/a/'))
+      .rejects.toMatchObject({ code: 'AMBIGUOUS_URL' });
   });
 
   test('null when nothing matches', async () => {

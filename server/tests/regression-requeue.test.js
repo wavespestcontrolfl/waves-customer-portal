@@ -220,6 +220,17 @@ describe('requeueRegressedPages', () => {
     expect(out.results[0]).toMatchObject({ status: 'stamp_failed', intended: 'queued' });
   });
 
+  test('an AMBIGUOUS url is retried, never parked — the duplicate row will be cleaned up', async () => {
+    const err = new Error('two rows match'); err.code = 'AMBIGUOUS_URL';
+    const db = makeDb({ pending: [row()] });
+    const refreshAudit = audit({ resolvePostByUrl: jest.fn(async () => { throw err; }) });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
+
+    expect(out.results[0].status).toBe('ambiguous_url');
+    expect(db.state.updates[0]).toMatchObject({ requeue_status: 'ambiguous_url', requeue_attempts: 1 });
+    expect(db.state.updates[0].requeued_at).toBeUndefined();
+  });
+
   test('queued=false does NOT consume the regression — it retries under the attempt budget', async () => {
     // Another page-editing action holding the page reports queued=false, and
     // that edit is not a fix for this regression.
