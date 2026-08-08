@@ -3317,6 +3317,11 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(html.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
     const htmlTopic = guardrails.evaluate({ body: 'We offer <strong>wildlife removal</strong> services.' }, {});
     expect(htmlTopic.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    // MDX string props are customer-visible copy (Codex PR r13 audit).
+    const mdxProp = guardrails.evaluate({ body: '<BottomLineBox verdict="Our pesticide is safe for pets." tone="reassuring" />' }, {});
+    expect(mdxProp.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    const mdxTopic = guardrails.evaluate({ body: '<HonestRejection reason="We offer wildlife removal services." />' }, {});
+    expect(mdxTopic.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
   });
 
   test('used-safely order and once-N-minutes prepositions block (Codex PR r12 audit)', () => {

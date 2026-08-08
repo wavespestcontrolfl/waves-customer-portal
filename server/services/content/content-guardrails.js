@@ -3103,8 +3103,17 @@ const TECH_CONFIRMS_RE = /\b(?:technicians?|techs?|applicators?|pros?)\b[^.!?\n]
 function normalizeHardCopyText(text) {
   return String(text || '')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-    // inline HTML/MDX tags render away too (<em>, <strong>, <b>, <i>…)
-    .replace(/<\/?[a-zA-Z][^>\n]*>/g, '')
+    // inline HTML/MDX tags render away too (<em>, <strong>, <b>, <i>…) —
+    // but their quoted STRING PROPS are customer-visible copy (Codex PR
+    // r13 audit: `<BottomLineBox verdict="…is safe for pets." />`), so
+    // the values stay in the scanned text.
+    .replace(/<\/?[a-zA-Z][^>\n]*>/g, (tag) => {
+      const vals = [];
+      const attrRe = /=\s*"([^"]*)"|=\s*'([^']*)'/g;
+      let m;
+      while ((m = attrRe.exec(tag)) !== null) vals.push(m[1] ?? m[2]);
+      return vals.length ? ` ${vals.join(' ')} ` : '';
+    })
     .replace(/(\*\*|__|~~|[*_`])/g, '');
 }
 
