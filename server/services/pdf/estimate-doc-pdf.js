@@ -152,6 +152,22 @@ async function renderEstimateDocumentPdfInner(estimate, { validThrough = null } 
 
 const safeFilename = (s) => String(s || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves';
 
+// Playwright navigation errors embed the full render URL, which carries the
+// estimate BEARER token and the signed dpin — credentials that must never
+// reach logs (AGENTS.md PII-in-logs rule; pre-push codex r5b). Every
+// fallback log site (attachment builder + the public and admin download
+// routes) passes its error through this before logging: query strings and
+// /estimate/<token> path segments are redacted, plus any long hex run as a
+// backstop for tokens quoted outside a URL. Bounded so a giant browser
+// stack can't flood a log line.
+function sanitizeRenderError(err) {
+  return String(err?.message || err || '')
+    .replace(/\?[^\s"')]*/g, '?[redacted-query]')
+    .replace(/\/estimate\/[A-Za-z0-9_-]+/g, '/estimate/[redacted-token]')
+    .replace(/[a-f0-9]{24,}/gi, '[redacted-hex]')
+    .slice(0, 300);
+}
+
 // SendGrid attachment shape — same filename convention as the pdfkit
 // attachment builder so the email channel is unchanged either way.
 async function buildEstimateDocEmailAttachment(estimate, { validThrough = null } = {}) {
@@ -176,7 +192,7 @@ async function buildEstimateProposalEmailAttachmentPreferred(estimate, { validTh
     try {
       return await buildEstimateDocEmailAttachment(estimate, { validThrough });
     } catch (e) {
-      logger.warn(`[estimate-doc-pdf] browser attachment render failed for estimate ${estimate?.id}; falling back to pdfkit: ${e.message}`);
+      logger.warn(`[estimate-doc-pdf] browser attachment render failed for estimate ${estimate?.id}; falling back to pdfkit: ${sanitizeRenderError(e)}`);
     }
   }
   const { buildEstimateProposalEmailAttachment } = require('./estimate-pdf');
@@ -192,4 +208,5 @@ module.exports = {
   renderEstimateDocumentPdf,
   buildEstimateDocEmailAttachment,
   buildEstimateProposalEmailAttachmentPreferred,
+  sanitizeRenderError,
 };

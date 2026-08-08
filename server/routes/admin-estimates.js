@@ -2046,7 +2046,8 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
         res.set('Content-Disposition', 'inline; filename="proposal.pdf"');
         return res.send(buffer);
       } catch (e) {
-        logger.warn(`[admin-estimates] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${e.message}`);
+        const { sanitizeRenderError } = require('../services/pdf/estimate-doc-pdf');
+        logger.warn(`[admin-estimates] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${sanitizeRenderError(e)}`);
       }
     }
     // Same live billing lane the customer-facing download resolves, so the

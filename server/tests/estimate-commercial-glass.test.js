@@ -189,4 +189,20 @@ describe('estimate document render pin', () => {
       if (savedJwt !== undefined) process.env.JWT_SECRET = savedJwt;
     }
   });
+
+  test('render errors are sanitized before logging — no bearer token, dpin, or hex runs', () => {
+    const { sanitizeRenderError } = require('../services/pdf/estimate-doc-pdf');
+    const token = 'ab'.repeat(32);
+    const msg = `page.goto: net::ERR_FAILED at https://portal.internal/estimate/${token}?mode=pdf&dpin=deadbeef1234deadbeef1234.99999 (30s timeout)`;
+    const out = sanitizeRenderError(new Error(msg));
+    expect(out).not.toContain(token);
+    expect(out).not.toContain('dpin=');
+    expect(out).not.toContain('deadbeef1234deadbeef1234');
+    expect(out).toContain('/estimate/[redacted-token]');
+    expect(out).toContain('ERR_FAILED');
+    // Bounded — a giant browser stack can't flood the log line.
+    expect(sanitizeRenderError(new Error('x'.repeat(5000))).length).toBeLessThanOrEqual(300);
+    // Non-Error inputs degrade safely.
+    expect(sanitizeRenderError(null)).toBe('');
+  });
 });

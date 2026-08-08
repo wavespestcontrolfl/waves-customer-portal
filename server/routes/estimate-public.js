@@ -19542,7 +19542,8 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
         res.set('Content-Disposition', `inline; filename="${fileName}"`);
         return res.send(buffer);
       } catch (e) {
-        logger.warn(`[estimate-pdf] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${e.message}`);
+        const { sanitizeRenderError } = require('../services/pdf/estimate-doc-pdf');
+        logger.warn(`[estimate-pdf] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${sanitizeRenderError(e)}`);
       }
     }
     // Lazy require: pdfkit only loads when a PDF is actually requested.
