@@ -146,13 +146,19 @@ function pendingRegressions(database, { limit = MAX_PER_RUN, excludeBuckets = []
  * breaker and re-queue the same page again. Uses refresh-audit's identity
  * helpers so this lane and the refresh lane agree on what "same page" means.
  *
- * Evidence is restricted to statuses that mean real refresh work exists —
- * 'queued' and 'inflight:*'. requeued_at is stamped on REFUSALS too
- * (unresolved_page, no_gsc_signal, cooldown, …), and counting those would let
- * a page that was never refreshed suppress its own next valid regression, with
- * each successive 'cooldown' stamp rolling the window forward indefinitely.
+ * Evidence is EXACTLY one status: 'queued'. That is the only outcome that
+ * proves a corrective refresh was created, and the cooldown's entire job is to
+ * stop a refresh→regress→refresh oscillation — so it must be anchored to a
+ * refresh that actually happened.
+ *
+ * Everything else stamps requeued_at without queueing anything:
+ * unsupported_target, no_gsc_signal, cooldown itself, and the
+ * `inflight:<status>_exhausted` retirements — which explicitly mean the
+ * attempt budget ran out with NO refresh created. Counting any of them would
+ * let a page that was never refreshed suppress its own next valid regression
+ * for 90 days, with each successive stamp rolling the window forward. Plain
+ * `inflight:*` retries never reach here at all: they leave requeued_at null.
  */
-const COOLDOWN_EVIDENCE_PREFIX = 'inflight:';
 const COOLDOWN_EVIDENCE_STATUSES = ['queued'];
 
 async function inCooldown(database, refreshAudit, pageUrl, since) {
@@ -164,9 +170,7 @@ async function inCooldown(database, refreshAudit, pageUrl, since) {
   const row = await database('content_optimization_impact')
     .whereNotNull('requeued_at')
     .where('requeued_at', '>=', since)
-    .where((b) => b
-      .whereIn('requeue_status', COOLDOWN_EVIDENCE_STATUSES)
-      .orWhere('requeue_status', 'like', `${COOLDOWN_EVIDENCE_PREFIX}%`))
+    .whereIn('requeue_status', COOLDOWN_EVIDENCE_STATUSES)
     .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
     .whereRaw(`${hostRegistrableSql('page_url')} = ?`, [domain])
     .first('id');

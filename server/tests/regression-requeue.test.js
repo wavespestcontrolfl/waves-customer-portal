@@ -20,8 +20,7 @@ function makeDb({ pending = [], cooldownHit = false } = {}) {
       _id: null,
       _limit: null,
       where: (col, val) => {
-        // Both the paused-bucket exclusion and the cooldown-evidence filter
-        // are callback predicates; record what each one asked for.
+        // The paused-bucket exclusion is a callback predicate.
         if (typeof col === 'function') {
           const sub = {
             whereRaw: () => sub,
@@ -36,6 +35,8 @@ function makeDb({ pending = [], cooldownHit = false } = {}) {
         if (col === 'id') q._id = val;
         return q;
       },
+      // The cooldown-evidence filter is now a plain top-level whereIn.
+      whereIn: (_col, vals) => { state.evidence.push(...vals); return q; },
       whereRaw: (sql, binds) => { state.rawBinds.push(...(binds || [])); return q; },
       whereNotNull: () => q,
       whereNull: () => q,
@@ -258,17 +259,15 @@ describe('requeueRegressedPages', () => {
     expect(t.pausedBuckets).toHaveBeenCalledWith(expect.objectContaining({ strict: true }));
   });
 
-  test('cooldown evidence is only real refresh work, never a refusal stamp', async () => {
+  test('cooldown evidence is EXACTLY queued — no status that queued nothing counts', async () => {
     const db = makeDb({ pending: [row()], cooldownHit: true });
     await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() });
 
-    // 'queued' + 'inflight:%' count. A page stamped unresolved_page /
-    // no_gsc_signal / cooldown was never refreshed and must not suppress its
-    // own next valid regression, nor roll the window forward forever.
-    expect(db.state.evidence).toContain('queued');
-    expect(db.state.evidence).toContain('inflight:%');
-    expect(db.state.evidence).not.toContain('unresolved_page');
-    expect(db.state.evidence).not.toContain('cooldown');
+    // Only a real corrective refresh may start a 90-day suppression. In
+    // particular `inflight:<status>_exhausted` IS stamped but means the
+    // attempt budget ran out with nothing queued, so an `inflight:%` pattern
+    // would silently match it and suppress the next valid regression.
+    expect(db.state.evidence).toEqual(['queued']);
   });
 
   test('the sweep runs inside the distributed cron lock', async () => {
