@@ -577,7 +577,7 @@ async function checkPending({ db: database = db, now = new Date() } = {}) {
  * Buckets with >= REGRESSION_PAUSE_THRESHOLD confirmed regressions. The runner
  * consults this to stop drafting an action type that keeps losing.
  */
-async function pausedBuckets({ db: database = db } = {}) {
+async function pausedBuckets({ db: database = db, strict = false } = {}) {
   try {
     // Only 21-day-confirmed regressions count toward the pause threshold.
     // checkPending() writes verdict='regressed' at the 14-day provisional
@@ -596,6 +596,14 @@ async function pausedBuckets({ db: database = db } = {}) {
       .filter((r) => r.regressions >= REGRESSION_PAUSE_THRESHOLD);
   } catch (err) {
     logger.warn(`[impact-tracker] pausedBuckets failed: ${err.message}`);
+    // Default stays lenient: the runner already treats an unreadable pause
+    // list as "not paused" and has its own downstream gates, and failing its
+    // claim loop closed would stall drafting on any transient DB blip.
+    // A caller that cannot tell an empty result apart from a failure — the
+    // digest's marker re-arm, which would read "no buckets paused" as "every
+    // paused lane recovered" and delete all of their dedupe markers — opts
+    // into strict and stands down instead.
+    if (strict) throw err;
     return [];
   }
 }

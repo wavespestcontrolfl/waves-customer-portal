@@ -1450,10 +1450,48 @@ function initScheduledJobs() {
     if (!isEnabled('autonomousContentEngine')) return;
     logger.info('Running: content-optimization impact tracker');
     try {
-      const ImpactTracker = require('./seo/impact-tracker');
-      await ImpactTracker.sweepNewlyLive({});
-      await ImpactTracker.checkPending({});
-      await ImpactTracker.checkAeoVisibility({});
+      // The MEASUREMENT pass and the REPORTING leg share one cross-instance
+      // lease. Locking only the digest is not enough: checkPending stamps
+      // checked_14d_at / checked_21d_at with the `now` it captured at entry,
+      // so during a Railway deploy overlap the other instance can begin before
+      // the digest's cutoff and commit after it, writing a timestamp BELOW
+      // that cutoff. The rollup's query would miss the row (not yet committed)
+      // and the next window's exclusive boundary would skip it forever. No
+      // cutoff can fix that — a wall-clock stamp cannot express commit order —
+      // so the two phases must not interleave across instances at all.
+      // Overlapping ticks return { skipped: 'lease_held' } and self-heal
+      // tomorrow; nesting is safe because runExclusive takes its own pooled
+      // connection per lock key.
+      await runExclusive('impact-tracker-daily', async () => {
+        const ImpactTracker = require('./seo/impact-tracker');
+        const live = await ImpactTracker.sweepNewlyLive({});
+        const checked = await ImpactTracker.checkPending({});
+        await ImpactTracker.checkAeoVisibility({});
+        // Leg 4 — surface what the sweep just found (halted lanes, weekly
+        // verdicts). Chained here rather than given its own cron so it always
+        // describes POST-sweep state.
+        //
+        // Chaining alone is still not enough: sweepNewlyLive/checkPending
+        // CATCH a failed query and resolve with { error } rather than
+        // throwing, so a failed sweep looks identical to a quiet one from
+        // here. Running the digest anyway would email and stamp a weekly
+        // rollup built on PRE-sweep verdicts and then suppress the corrected
+        // one for six days. (checkAeoVisibility is not gated on: it writes
+        // only aeo_* columns, which no digest leg reads.)
+        if (live?.error || checked?.error) {
+          logger.warn(`[impact-digest] sweep incomplete — skipping digests this tick (${live?.error || checked?.error})`);
+          return;
+        }
+        // The digest keeps its own lease (it is also reachable from the CLI
+        // preview and any future ad-hoc run). runExclusive RETURNS
+        // { skipped: true, reason } instead of throwing, so an unignored pool
+        // exhaustion would let reporting never run while this outer job still
+        // recorded success — the precise blindness this leg exists to remove.
+        const digested = await require('./seo/impact-verdict-digest').sendImpactDigestsIfDue({});
+        if (digested?.skipped === true) {
+          throw new Error(`impact digest did not run (${digested.reason || 'lease'})`);
+        }
+      });
     } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 

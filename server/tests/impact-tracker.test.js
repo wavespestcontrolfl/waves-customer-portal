@@ -235,6 +235,28 @@ describe('pausedBuckets — confirmed-regression gating', () => {
     expect(calls.whereNotNull).toContain('checked_21d_at');
     expect(out).toEqual([{ bucket: 'thin_content', regressions: 3 }]);
   });
+
+  // A query failure is otherwise indistinguishable from "nothing is paused".
+  // Fine for the runner (it has downstream gates and must not stall on a
+  // blip); NOT fine for a caller that would act on the empty result.
+  describe('lookup failure', () => {
+    const explodingDb = () => {
+      const builder = {
+        where: () => builder, whereNotNull: () => builder, groupBy: () => builder, select: () => builder,
+        count: () => Promise.reject(new Error('connection terminated')),
+      };
+      return () => builder;
+    };
+
+    test('defaults to an empty list so the runner keeps drafting', async () => {
+      await expect(tracker.pausedBuckets({ db: explodingDb() })).resolves.toEqual([]);
+    });
+
+    test('strict:true propagates it so a caller that would act on [] can stand down', async () => {
+      await expect(tracker.pausedBuckets({ db: explodingDb(), strict: true }))
+        .rejects.toThrow('connection terminated');
+    });
+  });
 });
 
 describe('sweepNewlyLive', () => {
