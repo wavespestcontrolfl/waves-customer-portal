@@ -56,6 +56,18 @@ describe('stageLifecycleStamps', () => {
     expect(s.member_since).toBe(TODAY);
   });
 
+  test('entering a live stage re-activates the row (active: true)', () => {
+    const s = stageLifecycleStamps('past_customer', 'active_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s.active).toBe(true);
+    const s2 = stageLifecycleStamps('churned', 'won', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s2.active).toBe(true);
+  });
+
+  test('archival move to past_customer does NOT touch the active flag', () => {
+    const s = stageLifecycleStamps('churned', 'past_customer', { member_since: '2025-01-01' }, { today: TODAY });
+    expect(s).not.toHaveProperty('active');
+  });
+
   test('archiving a churned customer as past_customer PRESERVES churn history', () => {
     const s = stageLifecycleStamps('churned', 'past_customer', { member_since: '2025-01-01', churned_at: '2026-03-01' }, { today: TODAY });
     expect(s).not.toHaveProperty('churned_at');

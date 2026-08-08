@@ -6,7 +6,7 @@ const LeadScorer = require('../services/lead-scorer');
 const PipelineManager = require('../services/pipeline-manager');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
-const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
+const { stageLifecycleStamps } = require('../services/customer-stages');
 const { etDateString } = require('../utils/datetime-et');
 const { formatAddress, normalizeLeadAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 const { recordAuditEvent } = require('../services/audit-log');
@@ -748,60 +748,10 @@ function isValidStage(stage) {
   return !stage || CUSTOMER_STAGE_SET.has(stage);
 }
 
-// Post-conversion ("real customer") stages — entering one stamps member_since.
-// Mirrors the dashboard's whereRealCustomer definition.
-const REAL_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
-// Stages indicating the row WAS (or is) a customer — so an existing member_since
-// is their real start and must be preserved. Anything else (new_lead, contacted,
-// estimate_*, follow_up, negotiating, lost) is a pre-sale lead: a member_since
-// there is just a lead-intake date and should be overwritten on conversion.
-const FORMER_OR_CURRENT_CUSTOMER_STAGES = new Set([...REAL_CUSTOMER_STAGES, ...FORMER_CUSTOMER_STAGES]);
-
-// Lifecycle field stamps to apply when a customer's pipeline_stage CHANGES,
-// shared by PUT /:id/stage and the general PUT /:id edit so both keep
-// member_since / churned_at consistent (otherwise editing the stage from
-// Customers 360 would skip them). `today` is the ET calendar date — member_since
-// and churned_at are DATE columns, so a JS Date would land on the wrong day
-// after ET midnight. Returns {} for a no-op (same-stage) save so it never resets
-// pipeline_stage_changed_at or restamps churned_at on a churned→churned re-save.
-function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason } = {}) {
-  if (newStage === oldStage) {
-    // No-op (same-stage) save: never restamp churned_at / pipeline_stage_changed_at,
-    // but still let an admin correct/add a churn reason on an already-churned row.
-    return (newStage === 'churned' && churnReason) ? { churn_reason: churnReason } : {};
-  }
-  const stamps = { pipeline_stage_changed_at: new Date() };
-  if (newStage === 'churned') {
-    // Always timestamp the churn so retention can see it; reason optional. Set
-    // the reason explicitly (to the new value or null) so a stale reason from a
-    // prior churn never carries over to a fresh one.
-    stamps.churned_at = today;
-    stamps.churn_reason = churnReason || null;
-  } else {
-    // Reactivation / any non-churned target: clear a stale churn stamp so a
-    // reactivated customer never carries a leftover churned_at. Keyed on the
-    // STAMP's presence, not just oldStage, since churned_at can exist on a
-    // non-churned row (e.g. a deactivation backfill). EXCEPTION: moving to
-    // past_customer is an archival relabel, not a reactivation — the real
-    // cancellation history survives the filing change (codex #3282 P2); it
-    // still clears later if the row genuinely reactivates out of the archive.
-    if (newStage !== 'past_customer' && (oldStage === 'churned' || customer.churned_at)) {
-      stamps.churned_at = null;
-      stamps.churn_reason = null;
-    }
-    if (REAL_CUSTOMER_STAGES.has(newStage)) {
-      if (!FORMER_OR_CURRENT_CUSTOMER_STAGES.has(oldStage)) {
-        // Converting from a lead stage → member_since is the conversion date,
-        // overwriting any lead-intake date a capture path stamped earlier.
-        stamps.member_since = today;
-      } else if (!customer.member_since) {
-        // Re-activating a former customer with no recorded start — best effort.
-        stamps.member_since = today;
-      }
-    }
-  }
-  return stamps;
-}
+// Lifecycle field stamps on pipeline_stage change now live in the canonical
+// customer-stages service (single source of truth for member_since /
+// churned_at / active consistency, shared with the Intelligence Bar paths) —
+// imported at top; still re-exported below for this route's test suite.
 
 function mapPipelineCustomer(c, stage = c.pipeline_stage) {
   return {

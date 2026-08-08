@@ -14,7 +14,7 @@ const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
   windowDurationMinutes, deriveWindowEnd,
 } = require('../../utils/datetime-et');
-const { FORMER_CUSTOMER_STAGES } = require('../customer-stages');
+const { FORMER_CUSTOMER_STAGES, stageLifecycleStamps } = require('../customer-stages');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
@@ -1003,13 +1003,15 @@ async function updateCustomer(customerId, updates) {
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
   clearLineTypeOnPhoneChange(clean, before);
 
-  // Moving into a customer stage → stamp member_since so the metrics count them.
-  // Matches the route lifecycle: a pre-sale lead gets the conversion date
-  // (overwriting its intake date); a current/former customer keeps its real
-  // start but is filled if missing (e.g. a churned/dormant reactivation).
-  if (clean.pipeline_stage && ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)) {
-    const wasCustomer = ['active_customer', 'won', 'at_risk', ...FORMER_CUSTOMER_STAGES].includes(before.pipeline_stage);
-    clean.member_since = wasCustomer ? (before.member_since || etDateString()) : etDateString();
+  // Stage change → the FULL canonical lifecycle stamps, identical to the
+  // admin route (codex #3282 audit P1 — the old member_since-only handling
+  // left a reactivated archived row with active=false and a stale
+  // churned_at, so whereLiveCustomer never saw it): activation, churn
+  // clearing/stamping, stage timestamp, and member date, in the same write.
+  if (clean.pipeline_stage) {
+    Object.assign(clean, stageLifecycleStamps(
+      before.pipeline_stage, clean.pipeline_stage, before, { today: etDateString() },
+    ));
   }
 
   // An address edit must stay consistent with the Customers route (PUT /:id):
@@ -1207,17 +1209,40 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // when phone is part of the update).
   if (clean.phone !== undefined) clean.line_type = null;
 
-  // Moving rows into a customer stage in bulk → set member_since per row from
-  // the OLD pipeline_stage (a CASE, since there's no per-row before-state),
-  // mirroring the route lifecycle: a pre-sale lead gets the conversion date
-  // (overwriting any intake date), a current/former customer keeps its real
-  // start (COALESCE fills only the missing).
+  // Bulk stage moves mirror the canonical stageLifecycleStamps in SQL (CASE
+  // per row, since there's no per-row before-state) — codex #3282 audit P1:
+  // member_since alone left bulk-reactivated archived rows with active=false
+  // and stale churn stamps, invisible to whereLiveCustomer.
+  //  - into a live stage: activate, clear churn stamps, member_since per the
+  //    old stage (former keeps its real start, lead gets conversion date)
+  //  - into past_customer: archival relabel — churn history PRESERVED
+  //  - into churned: stamp churned_at only for rows not already churned
+  //    (never restamp an existing churn)
+  //  - other lead-stage targets: clear stale churn stamps, like the route
+  //  - pipeline_stage_changed_at only bumps on rows actually changing stage
   const formerOrCurrent = ['active_customer', 'won', 'at_risk', ...FORMER_CUSTOMER_STAGES];
-  const stageStamp = ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)
-    ? { member_since: db.raw(
+  let stageStamp = {};
+  if (clean.pipeline_stage) {
+    stageStamp.pipeline_stage_changed_at = db.raw(
+      'CASE WHEN pipeline_stage <> ? THEN now() ELSE pipeline_stage_changed_at END',
+      [clean.pipeline_stage]);
+    if (['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)) {
+      stageStamp.member_since = db.raw(
         `CASE WHEN pipeline_stage IN (${formerOrCurrent.map(() => '?').join(',')}) THEN COALESCE(member_since, ?) ELSE ? END`,
-        [...formerOrCurrent, etDateString(), etDateString()]) }
-    : {};
+        [...formerOrCurrent, etDateString(), etDateString()]);
+      stageStamp.active = true;
+      stageStamp.churned_at = null;
+      stageStamp.churn_reason = null;
+    } else if (clean.pipeline_stage === 'churned') {
+      stageStamp.churned_at = db.raw(
+        "CASE WHEN pipeline_stage = 'churned' THEN churned_at ELSE ? END", [etDateString()]);
+      stageStamp.churn_reason = db.raw(
+        "CASE WHEN pipeline_stage = 'churned' THEN churn_reason ELSE NULL END");
+    } else if (clean.pipeline_stage !== 'past_customer') {
+      stageStamp.churned_at = null;
+      stageStamp.churn_reason = null;
+    }
+  }
 
   // notes maps to free-text crm_notes — redact from logs (see updateCustomer).
   const logUpdates = updates.notes !== undefined ? { ...updates, notes: '[redacted]' } : updates;

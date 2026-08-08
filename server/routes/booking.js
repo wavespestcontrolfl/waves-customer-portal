@@ -3,6 +3,7 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
@@ -2407,6 +2408,24 @@ async function createSelfBooking(payload = {}) {
         source: 'self_book',
       });
 
+      // Winback/conversion promotion — the canonical booking-promotion
+      // helper, same as the admin and call paths (codex #3282 r1 P2 + audit
+      // P1): a former customer (churned/past_customer/dormant) or a
+      // stage-stranded lead who self-books is a live customer again, and the
+      // promotion must be ATOMIC with the booking (a post-commit write can
+      // be lost to a crash, stranding a live booking on an archived row).
+      // Nested transaction = savepoint: a promotion failure rolls back to it
+      // and the booking still commits — stage bookkeeping must never fail a
+      // customer's booking (the helper has no internal containment by
+      // design; callers own it).
+      try {
+        await trx.transaction(async (inner) => {
+          await promoteCustomerOnBooking(inner, custId);
+        });
+      } catch (e) {
+        logger.warn(`[booking:confirm] customer promotion failed (non-blocking) for customer=${custId}: ${e.message}`);
+      }
+
       return { booking: bookingRow, serviceRow: scheduledRow };
       });
     } catch (txErr) {
@@ -2460,6 +2479,16 @@ async function createSelfBooking(payload = {}) {
 
     if (txResult.existing) {
       await markBookingIntentsConverted(txResult.existing.id);
+      // Replay heal (codex #3282 audit P1): if the original request crashed
+      // between the booking commit and its promotion savepoint, the retry
+      // takes THIS path and would otherwise never promote — the helper is
+      // idempotent (returns false with no write when the row is already a
+      // live customer), so run it contained on every replay.
+      try {
+        await promoteCustomerOnBooking(db, custId);
+      } catch (e) {
+        logger.warn(`[booking:confirm] replay customer promotion failed (non-blocking) for customer=${custId}: ${e.message}`);
+      }
       logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slotDateStr} ${slot_start} — returning existing booking ${txResult.existing.id}`);
       // Re-offer the inline card step on replay (Codex #2771 r2): if the
       // first response was lost after the pending card row landed, this
@@ -2516,19 +2545,6 @@ async function createSelfBooking(payload = {}) {
 
     const { booking, serviceRow } = txResult;
     // (new-booking intents already converted in the transaction above)
-
-    // Winback/conversion promotion — the canonical booking-promotion helper,
-    // same as the admin and call paths (codex #3282 P2): a former customer
-    // (churned/past_customer/dormant) or a stage-stranded lead who self-books
-    // is a live customer again; without this the row stays outside every
-    // live-customer surface. Post-commit and contained: a promotion hiccup
-    // must never fail a committed customer booking.
-    try {
-      const { promoteCustomerOnBooking } = require('../services/customer-stages');
-      await promoteCustomerOnBooking(db, custId);
-    } catch (e) {
-      logger.warn(`[booking:confirm] post-commit customer promotion failed (non-blocking) for customer=${custId}: ${e.message}`);
-    }
 
     // Appointment-type automations (tagging, prep guide emails) — same hook
     // the admin scheduling path runs. Post-commit and fire-and-forget so the

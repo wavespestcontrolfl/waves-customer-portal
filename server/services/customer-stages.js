@@ -51,6 +51,59 @@ function whereLiveCustomer(qb) {
 // retention / acquisition windows. created_at is timestamptz → AT TIME ZONE once.
 const CONVERSION_DATE_SQL = "COALESCE(member_since, (created_at AT TIME ZONE 'America/New_York')::date)";
 
+// Lifecycle field stamps to apply when a customer's pipeline_stage CHANGES —
+// the single source of truth for member_since / churned_at / active
+// consistency, shared by the admin stage routes, the general customer edit,
+// and the Intelligence Bar single-update path (bulk mirrors it in SQL).
+// `today` is the ET calendar date — member_since and churned_at are DATE
+// columns, so a JS Date would land on the wrong day after ET midnight.
+// Returns {} for a no-op (same-stage) save so it never resets
+// pipeline_stage_changed_at or restamps churned_at on a churned→churned
+// re-save.
+function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason } = {}) {
+  if (newStage === oldStage) {
+    // No-op (same-stage) save: never restamp churned_at / pipeline_stage_changed_at,
+    // but still let an admin correct/add a churn reason on an already-churned row.
+    return (newStage === 'churned' && churnReason) ? { churn_reason: churnReason } : {};
+  }
+  const stamps = { pipeline_stage_changed_at: new Date() };
+  if (newStage === 'churned') {
+    // Always timestamp the churn so retention can see it; reason optional. Set
+    // the reason explicitly (to the new value or null) so a stale reason from a
+    // prior churn never carries over to a fresh one.
+    stamps.churned_at = today;
+    stamps.churn_reason = churnReason || null;
+  } else {
+    // Reactivation / any non-churned target: clear a stale churn stamp so a
+    // reactivated customer never carries a leftover churned_at. Keyed on the
+    // STAMP's presence, not just oldStage, since churned_at can exist on a
+    // non-churned row (e.g. a deactivation backfill). EXCEPTION: moving to
+    // past_customer is an archival relabel, not a reactivation — the real
+    // cancellation history survives the filing change (codex #3282 P2); it
+    // still clears later if the row genuinely reactivates out of the archive.
+    if (newStage !== 'past_customer' && (oldStage === 'churned' || customer.churned_at)) {
+      stamps.churned_at = null;
+      stamps.churn_reason = null;
+    }
+    if (CUSTOMER_STAGES.includes(newStage)) {
+      // Entering a live customer stage is a (re)activation: the row must be
+      // live for whereLiveCustomer or the UI shows an active stage the
+      // metrics can't see (codex #3282 audit P1 — churned rows archived as
+      // past_customer kept active=false through a later stage reactivation).
+      stamps.active = true;
+      if (![...CUSTOMER_STAGES, ...FORMER_CUSTOMER_STAGES].includes(oldStage)) {
+        // Converting from a lead stage → member_since is the conversion date,
+        // overwriting any lead-intake date a capture path stamped earlier.
+        stamps.member_since = today;
+      } else if (!customer.member_since) {
+        // Re-activating a former customer with no recorded start — best effort.
+        stamps.member_since = today;
+      }
+    }
+  }
+  return stamps;
+}
+
 // Booking always means an ACTIVE customer — the promotion every booking path
 // owes the customer row when a lead converts (mirrors the admin-leads
 // schedule-appointment route; shared so the paths can't drift):
@@ -91,5 +144,6 @@ async function promoteCustomerOnBooking(database, customerId) {
 }
 
 module.exports = {
-  CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES, CREATED_VIA, whereLiveCustomer, CONVERSION_DATE_SQL, promoteCustomerOnBooking,
+  CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES, CREATED_VIA, whereLiveCustomer, CONVERSION_DATE_SQL,
+  stageLifecycleStamps, promoteCustomerOnBooking,
 };
