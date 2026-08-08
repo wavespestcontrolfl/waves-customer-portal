@@ -364,7 +364,10 @@ class CompetitorGapMiner {
     if (!opportunities.length) return 0;
     let count = 0;
     const now = new Date();
-    const expiresAt = new Date(Date.now() + 30 * 86400_000); // matches the monthly mine cadence — each run revives still-valid expired gaps
+    // 32 days: covers the longest calendar-month interval between monthly
+    // 1st-of-month runs (31 days) with a day of margin, so rows never sit
+    // expired waiting for the revival re-mine.
+    const expiresAt = new Date(Date.now() + 32 * 86400_000);
 
     const winners = new Map();
     for (const o of opportunities) {
