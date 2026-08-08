@@ -257,6 +257,23 @@ function shapeCallLog(row) {
   };
 }
 
+// Fresh, LOCKED verdict re-check inside an attribution transaction
+// (pre-push P1 r16): the snapshot's noAttribution can be minutes old, and a
+// processor rejection committing in the gap must win. FOR UPDATE on the
+// call row serializes against the rejection's own terminal write (which
+// updates the same row), so either we see its verdict, or it waits for us
+// and its retire then removes what we wrote. Lock order stays
+// leads → call_log, same as every stamp writer.
+async function callStillAttributable(trx, callLogId) {
+  const row = await trx('call_log')
+    .where({ id: callLogId })
+    .forUpdate()
+    .first('processing_status', 'metadata');
+  if (!row) return false;
+  if (['spam', 'voicemail'].includes(String(row.processing_status || '').toLowerCase())) return false;
+  return parseCallMetadata(row.metadata)?.no_attribution !== true;
+}
+
 function parseCallMetadata(metadata) {
   if (!metadata) return {};
   if (typeof metadata === 'string') {
@@ -600,12 +617,22 @@ async function joinedLeadLiveRow(callLog, { dbc = db, lock = false } = {}) {
 // bookkeeping.
 async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFallback = false } = {}) {
   let joinedWentStale = false;
+  let verdictChecked = false;
   if (callLog?.leadId) {
     const lockedLead = await trx('leads')
       .where({ id: callLog.leadId })
       .whereNull('deleted_at')
       .forUpdate()
       .first('id', 'customer_id');
+    // Terminal verdict re-checked fresh under the CALL row lock, taken
+    // AFTER the lead lock so the leads → call_log order every stamp
+    // writer uses is preserved (pre-push P1 r16) — the pre-scan
+    // snapshot's noAttribution is not proof against a rejection that
+    // committed mid-scan.
+    if (!(await callStillAttributable(trx, callLog.id))) {
+      return { match: null, reason: 'call_rejected' };
+    }
+    verdictChecked = true;
     if (lockedLead) {
       const joined = {
         strategy: 'joined_lead',
@@ -632,6 +659,13 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFa
   // legitimately plan-attribute the call through the normal flow.
   if (noPlanFallback) {
     return { match: null, reason: joinedWentStale ? 'lead_not_live' : 'lead_not_found' };
+  }
+  // Plan-only flow: no lead is locked yet, so the call-row check runs
+  // first — a rare call_log → leads inversion against a concurrent
+  // stamped rejection; PostgreSQL resolves the deadlock by aborting one
+  // side and both callers land in retry lanes.
+  if (!verdictChecked && !(await callStillAttributable(trx, callLog.id))) {
+    return { match: null, reason: 'call_rejected' };
   }
   const planned = await findLeadForCall(callLog, { dbc: trx });
   if (!planned?.leadId) {
@@ -874,6 +908,10 @@ async function applyBridge(options = {}) {
               let backfillCustomerId = null;
               if (backfillLeadId) {
                 const liveJoined = await joinedLeadLiveRow(match.callLog, { dbc: trx, lock: true });
+                // Fresh verdict under the call row lock, AFTER the lead
+                // lock (leads → call_log order; pre-push P1 r16) — a
+                // rejection committing after the scan must win.
+                if (!(await callStillAttributable(trx, match.callLog.id))) return;
                 if (liveJoined) {
                   // The joined lead's CURRENT owner ONLY — an unclaimed
                   // lead stays customer-less and the funnel write
@@ -885,6 +923,10 @@ async function applyBridge(options = {}) {
                 }
               }
               if (!backfillLeadId) {
+                // Plan-only flow (or joined lead gone): verify the verdict
+                // fresh here too when the joined arm didn't already —
+                // rare call_log-first inversion, PostgreSQL-resolved.
+                if (!match.callLog?.leadId && !(await callStillAttributable(trx, match.callLog.id))) return;
                 // The plan fallback resolves on the global connection —
                 // lock and revalidate the selected lead INSIDE this
                 // transaction before it feeds the funnel (pre-push P1 r5):

@@ -7077,6 +7077,12 @@ const CallRecordingProcessor = {
             review_status: 'open',
             processing_token: null,
             processing_started_at: null,
+            // A definitive rejection that finalizes 'processed' (wrong
+            // number with is_spam false) needs the durable marker or the
+            // bridge re-attributes it next scan (pre-push P1 r16).
+            ...(v2VetoDefinitiveRejection ? {
+              metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)"),
+            } : {}),
             updated_at: new Date(),
           });
         if (!vetoWrote) {
