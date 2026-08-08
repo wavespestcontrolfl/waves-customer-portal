@@ -156,8 +156,10 @@ describe('requeueRegressedPages', () => {
 
     expect(refreshAudit.resolvePublishedPostByUrl).not.toHaveBeenCalled();
     expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
-    expect(db.state.updates[0]).toMatchObject({ requeue_status: 'cooldown' });
-    expect(out).toMatchObject({ queued: 0, skipped: 1 });
+    // A cooldown EXPIRES — it defers the regression, it does not consume it.
+    expect(db.state.updates[0]).toMatchObject({ requeue_status: 'cooldown', requeue_attempts: 1 });
+    expect(db.state.updates[0].requeued_at).toBeUndefined();
+    expect(out.queued).toBe(0);
   });
 
   test('a target outside the lane is PARKED, not consumed — requeued_at stays null', async () => {
@@ -178,7 +180,7 @@ describe('requeueRegressedPages', () => {
     const db = makeDb({ pending: [row()] });
     await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() });
     // The scan filters them out by status rather than by a handled-marker.
-    expect(db.state.statusFilters).toContain('unsupported_target');
+    expect(db.state.excluded).toContain('unsupported_target');
   });
 
   test('after a failed stamp, the retry RECOVERS its own queue row as success', async () => {
@@ -227,9 +229,8 @@ describe('requeueRegressedPages', () => {
       const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
       expect(out.results[0].status).toBe(`inflight:${status}`);
-      expect(db.state.updates[0]).toMatchObject({ requeue_attempts: 1 });
+      expect(db.state.updates[0]).toMatchObject({ requeue_attempts: 1, requeue_status: `inflight:${status}` });
       expect(db.state.updates[0].requeued_at).toBeUndefined();
-      expect(db.state.updates[0].requeue_status).toBeUndefined();
     }
   });
 
@@ -255,14 +256,17 @@ describe('requeueRegressedPages', () => {
     expect(db.state.orderBy[1]).toEqual(['checked_21d_at', 'asc']);
   });
 
-  test('a coded refusal from the refresh lane is terminal and stamped', async () => {
+  test('a RECOVERABLE coded refusal is recorded but stays actionable', async () => {
     const err = new Error('no Search Console impressions'); err.code = 'NO_GSC_SIGNAL';
     const db = makeDb({ pending: [row()] });
     const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => { throw err; }) });
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
-    expect(db.state.updates[0]).toMatchObject({ requeue_status: 'no_gsc_signal' });
-    expect(out).toMatchObject({ queued: 0, skipped: 1 });
+    // GSC signal comes back when traffic does; consuming the regression here
+    // would drop it for a condition that had already healed.
+    expect(db.state.updates[0]).toMatchObject({ requeue_status: 'no_gsc_signal', requeue_attempts: 1 });
+    expect(db.state.updates[0].requeued_at).toBeUndefined();
+    expect(out.queued).toBe(0);
   });
 
   test('a TRANSIENT failure counts an attempt but does NOT stamp a terminal status', async () => {
@@ -272,10 +276,9 @@ describe('requeueRegressedPages', () => {
 
     expect(out.results[0].status).toBe('error');
     expect(db.state.updates).toHaveLength(1);
-    expect(db.state.updates[0]).toMatchObject({ requeue_attempts: 1 });
-    // Not stamped terminal — the next sweep retries it.
+    expect(db.state.updates[0]).toMatchObject({ requeue_attempts: 1, requeue_status: 'error' });
+    // Not consumed — the next sweep retries it.
     expect(db.state.updates[0].requeued_at).toBeUndefined();
-    expect(db.state.updates[0].requeue_status).toBeUndefined();
   });
 
   test('a persistently failing row keeps counting attempts but is never consumed', async () => {
@@ -364,10 +367,10 @@ describe('requeueRegressedPages', () => {
 
     expect(out.scanned).toBe(2);
     expect(out.queued).toBe(1);
-    // imp-1 only had its attempt counted; imp-2 still got its terminal stamp.
-    const stamped = db.state.updates.filter((u) => u.requeue_status);
-    expect(stamped).toHaveLength(1);
-    expect(stamped[0]).toMatchObject({ id: 'imp-2', requeue_status: 'queued' });
+    // imp-1 only had its attempt counted; imp-2 is the one actually consumed.
+    const consumed = db.state.updates.filter((u) => u.requeued_at);
+    expect(consumed).toHaveLength(1);
+    expect(consumed[0]).toMatchObject({ id: 'imp-2', requeue_status: 'queued' });
   });
 
   test('the nightly fan-out is bounded', async () => {

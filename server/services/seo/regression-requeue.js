@@ -74,23 +74,31 @@ const MAX_PER_RUN = 5;
 // fresh regression and simply waits for a quieter night. requeue_attempts is
 // now a priority input rather than a death clock.
 //
-// The one status that leaves the pool without being consumed is
-// 'unsupported_target' — see UNSUPPORTED_STATUS.
+// The only statuses that leave the pool without being consumed are the
+// structural ones — see PARK_STATUSES below.
 const UNSUPPORTED_STATUS = 'unsupported_target';
 
-// enqueueRefresh's coded refusals, mapped straight through to requeue_status.
-// Anything uncoded is treated as transient and left unstamped for a retry.
-const TERMINAL_ERROR_CODES = new Set([
-  'NO_GSC_SIGNAL', 'NO_SERVICE', 'NOT_PUBLISHED', 'NOT_FOUND', 'NO_URL', 'BAD_REQUEST',
-]);
+// Outcomes that leave the scan WITHOUT being consumed. Only two things
+// qualify: there is no blog_posts row to key an enqueue on, or the post that
+// was there is gone. Both are structural — no amount of retrying changes them,
+// and both are revived wholesale by clearing the status.
+//
+// Everything else stays retryable ON PURPOSE, including the coded refusals
+// from enqueueRefresh. NO_GSC_SIGNAL recovers when traffic returns,
+// NOT_PUBLISHED when the post is republished, NO_SERVICE / NO_URL when a tag
+// or slug is fixed, and a cooldown expires by definition. Treating any of them
+// as terminal would drop a real regression for a condition that had already
+// healed.
+const PARK_STATUSES = new Set([UNSUPPORTED_STATUS, 'not_found']);
 
 /**
  * Pure: given a resolution outcome, what goes in requeue_status?
  * Split out so the status vocabulary is testable without a DB or the engine.
  *
- * Only 'queued' is terminal-because-successful. queued=false does NOT prove
- * the regression is being corrected, so those outcomes stay actionable — see
- * isRetryableStatus.
+ * Only 'queued' means corrective work exists. queued=false does NOT prove the
+ * regression is being corrected — another page-editing action may simply be
+ * holding the page — so those outcomes stay actionable (see PARK_STATUSES for
+ * the only two that leave the scan).
  */
 function requeueStatusFor({ resolved, enqueue, errorCode }) {
   if (errorCode) return String(errorCode).toLowerCase();
@@ -107,26 +115,6 @@ function requeueStatusFor({ resolved, enqueue, errorCode }) {
   return `inflight:${enqueue.status || 'unknown'}`.slice(0, 40);
 }
 
-/**
- * Is this outcome worth trying again tomorrow rather than consuming the
- * regression?
- *
- * enqueueRefresh reports queued=false when ANOTHER page-editing action already
- * holds this page — the in-flight query spans all of PAGE_EDITING_ACTIONS, so
- * a pending rewrite_title_meta suppresses our refresh, and that edit is not a
- * fix for this regression. Stamping it terminally would drop the regression
- * forever with no corrective work done, so it is retried under the same
- * attempt counter, which only ever DEMOTES it in the batch ordering — it is
- * never retired, because the edit blocking it will clear eventually and the
- * regression still deserves its fix.
- *
- * A stale status='done' row no longer reaches here: this lane passes a
- * per-regression cycleKey, so its dedupe key is always fresh.
- */
-function isRetryableStatus(status) {
-  return typeof status === 'string' && status.startsWith('inflight:');
-}
-
 // Confirmed regressions nobody has acted on yet. checked_21d_at (not 14d) is
 // the bar on purpose — the same confirmation pausedBuckets counts, so the two
 // halves of the reversal story never disagree.
@@ -136,11 +124,10 @@ function pendingRegressions(database, { limit = MAX_PER_RUN, excludeBuckets = []
     .whereNotNull('checked_21d_at')
     .whereNull('requeued_at')
     .whereNotNull('page_url')
-    // Targets this lane structurally cannot act on are parked, NOT consumed:
-    // they carry a requeue_status but no requeued_at, so they leave the batch
-    // without being marked handled. When a URL-keyed enqueue path lands,
-    // clearing this one status makes every parked regression actionable again.
-    .where((b) => b.whereNull('requeue_status').orWhere('requeue_status', '<>', UNSUPPORTED_STATUS))
+    // Parked targets are excluded here, NOT consumed: they carry a
+    // requeue_status but no requeued_at, so they leave the batch without being
+    // marked handled. Clearing those statuses revives every one of them.
+    .where((b) => b.whereNull('requeue_status').orWhereNotIn('requeue_status', [...PARK_STATUSES]))
     // A regression from a PAUSED bucket is left in place, not skipped-and-
     // stamped: stamping would burn its one attempt while the lane is under
     // review, and leaving it visible-but-unstamped would clog the bounded
@@ -226,9 +213,11 @@ async function stamp(database, id, status, attempts = null) {
 async function noteRetry(database, row, status = 'error') {
   const attempts = (Number(row.requeue_attempts) || 0) + 1;
   try {
+    // requeue_status is recorded for visibility; requeued_at deliberately is
+    // NOT, so the row stays actionable.
     await database('content_optimization_impact')
       .where('id', row.id)
-      .update({ requeue_attempts: attempts, updated_at: new Date() });
+      .update({ requeue_attempts: attempts, requeue_status: String(status).slice(0, 40), updated_at: new Date() });
   } catch (err) {
     logger.error(`[regression-requeue] failed to count attempt on impact ${row.id}: ${err.message}`);
   }
@@ -346,56 +335,48 @@ async function requeueRegressedPagesLocked(opts = {}) {
       }
     } catch (err) {
       const code = err && err.code;
-      if (!TERMINAL_ERROR_CODES.has(code)) {
-        // Transient (DB blip, unexpected throw): don't burn the page's one
-        // attempt — but DO count it, so a permanently-stuck row can't hold a
-        // slot in the bounded batch forever and starve newer regressions.
-        logger.error(`[regression-requeue] ${row.page_url} failed transiently: ${err.message}`);
-        if (!requeueEnabled()) {
-          logger.info(`[regression-requeue] gated OFF — not counting the failed attempt on ${row.page_url}`);
-          results.push({ id: row.id, page_url: row.page_url, status: 'gated' });
-          continue;
-        }
-        await noteRetry(database, row, 'error');
-        results.push({ id: row.id, page_url: row.page_url, status: 'error' });
-        continue;
-      }
-      status = requeueStatusFor({ resolved: post, errorCode: code });
+      if (!code) logger.error(`[regression-requeue] ${row.page_url} failed: ${err.message}`);
+      status = code ? requeueStatusFor({ resolved: post, errorCode: code }) : 'error';
     }
 
-    // Gate re-checked here too: a refusal computed above (cooldown /
-    // unsupported target) must not write state while the lane is dark.
+    // Gate re-checked here too: an outcome computed above must not write state
+    // while the lane is dark — not even an attempt count, or the flip would
+    // act on a backlog this lane had already re-ordered while inert.
     if (!requeueEnabled()) {
       logger.info(`[regression-requeue] gated OFF — ${row.page_url} would be recorded as ${status}`);
       results.push({ id: row.id, page_url: row.page_url, status: 'gated' });
       continue;
     }
 
-    // queued=false means NO corrective refresh was created — another
-    // page-editing action is holding the page. Count the attempt (which only
-    // demotes the row in tomorrow's ordering) and leave the regression
-    // actionable: that edit will clear, and the fix is still owed.
-    if (isRetryableStatus(status)) {
-      await noteRetry(database, row, status);
-      results.push({ id: row.id, page_url: row.page_url, status });
-      continue;
-    }
-
-    // Structurally out of reach: park without consuming.
-    if (status === UNSUPPORTED_STATUS) {
+    // ONE rule, three outcomes. requeued_at is stamped only when corrective
+    // work actually exists; nothing else may consume the regression.
+    //
+    //   queued  → stamp. A refresh is in the queue for this page.
+    //   park    → status only, requeued_at NULL, excluded from the scan. The
+    //             lane structurally cannot act (no blog_posts row to key on,
+    //             or the post is gone). Clearing the status revives them all.
+    //   retry   → status + attempt count, stays in the scan, demoted in
+    //             tomorrow's ordering. EVERY recoverable refusal lands here:
+    //             a blocking edit clears, GSC signal returns, a draft gets
+    //             republished, a missing tag/slug gets fixed, a cooldown
+    //             expires. None of those are permanent, so none of them may
+    //             be permanent here either.
+    if (status === 'queued') {
+      // The marker IS the exactly-once contract. If it did not persist, this
+      // row is unfinished — never counted as queued, and left for the next
+      // sweep (safe to repeat: the cycleKey makes the enqueue idempotent and
+      // `own` lets the retry recognise the row it already created).
+      if (!(await stamp(database, row.id, status))) {
+        results.push({ id: row.id, page_url: row.page_url, status: 'stamp_failed', intended: status });
+        continue;
+      }
+      queued += 1;
+    } else if (PARK_STATUSES.has(status)) {
       await park(database, row.id, status);
-      results.push({ id: row.id, page_url: row.page_url, status });
-      continue;
+      skipped += 1;
+    } else {
+      await noteRetry(database, row, status);
     }
-
-    // The marker IS the exactly-once contract. If it did not persist, this row
-    // is unfinished — never counted as queued, and left for the next sweep
-    // (which is safe to repeat: the cycleKey makes the enqueue idempotent).
-    if (!(await stamp(database, row.id, status))) {
-      results.push({ id: row.id, page_url: row.page_url, status: 'stamp_failed', intended: status });
-      continue;
-    }
-    if (status === 'queued') queued += 1; else skipped += 1;
     results.push({ id: row.id, page_url: row.page_url, status });
   }
 
@@ -409,6 +390,6 @@ module.exports = {
   requeueRegressedPages,
   // exposed for tests / reuse
   requeueStatusFor,
-  _internals: { pendingRegressions, inCooldown, noteRetry, park, isRetryableStatus },
-  THRESHOLDS: { COOLDOWN_DAYS, MAX_PER_RUN, UNSUPPORTED_STATUS },
+  _internals: { pendingRegressions, inCooldown, noteRetry, park },
+  THRESHOLDS: { COOLDOWN_DAYS, MAX_PER_RUN, UNSUPPORTED_STATUS, PARK_STATUSES },
 };
