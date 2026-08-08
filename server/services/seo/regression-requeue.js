@@ -91,6 +91,12 @@ const UNSUPPORTED_STATUS = 'unsupported_target';
 // healed.
 const PARK_STATUSES = new Set([UNSUPPORTED_STATUS, 'not_found']);
 
+// A refresh queued AFTER this regression was confirmed already addresses it —
+// so this row IS handled, even though this tick queued nothing itself. It is
+// the one non-'queued' status that legitimately consumes a regression.
+const COVERED_STATUS = 'covered_by_refresh';
+const CONSUMING_STATUSES = new Set(['queued', COVERED_STATUS]);
+
 /**
  * Pure: given a resolution outcome, what goes in requeue_status?
  * Split out so the status vocabulary is testable without a DB or the engine.
@@ -172,7 +178,7 @@ function pendingRegressions(database, { limit = MAX_PER_RUN, excludeBuckets = []
  */
 const COOLDOWN_EVIDENCE_STATUSES = ['queued'];
 
-async function inCooldown(database, refreshAudit, pageUrl, since) {
+async function findCoveringRefresh(database, refreshAudit, pageUrl, since) {
   const { canonPathSql, hostRegistrableSql, urlToPath, registrableDomain } = refreshAudit._identity;
   const path = urlToPath(pageUrl);
   const domain = registrableDomain(pageUrl);
@@ -184,8 +190,31 @@ async function inCooldown(database, refreshAudit, pageUrl, since) {
     .whereIn('requeue_status', COOLDOWN_EVIDENCE_STATUSES)
     .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
     .whereRaw(`${hostRegistrableSql('page_url')} = ?`, [domain])
-    .first('id');
-  return Boolean(row);
+    .orderBy('requeued_at', 'desc')
+    .first('id', 'requeued_at');
+  return row || null;
+}
+
+/**
+ * Did an existing refresh already ADDRESS this regression, as opposed to
+ * merely landing near it?
+ *
+ * Impact rows are unique per RUN, so a page optimized more than once has one
+ * row per run and they can all regress. The first row queues a refresh; the
+ * rest hit the cooldown. Those are two different situations:
+ *
+ *   refresh queued AFTER this row was confirmed → the fix already accounts for
+ *     this regression. It is genuinely handled; consume it. Otherwise the row
+ *     just waits out the 90 days and then queues a SECOND refresh for a
+ *     regression that was already corrected.
+ *   refresh queued BEFORE this row was confirmed → the page regressed again
+ *     after that fix. Still owed; keep it actionable and defer.
+ */
+function isCoveredBy(coveringRow, impactRow) {
+  const coveredAt = new Date(coveringRow?.requeued_at || 0).getTime();
+  const confirmedAt = new Date(impactRow?.checked_21d_at || 0).getTime();
+  if (!coveredAt || !confirmedAt) return false; // unknown → defer, never consume
+  return coveredAt > confirmedAt;
 }
 
 // Returns whether the marker actually persisted. Callers must NOT report
@@ -310,8 +339,9 @@ async function requeueRegressedPagesLocked(opts = {}) {
     let post = null;
 
     try {
-      if (await inCooldown(database, refreshAudit, row.page_url, cooldownSince)) {
-        status = 'cooldown';
+      const covering = await findCoveringRefresh(database, refreshAudit, row.page_url, cooldownSince);
+      if (covering) {
+        status = isCoveredBy(covering, row) ? COVERED_STATUS : 'cooldown';
       } else {
         post = await refreshAudit.resolvePostByUrl(row.page_url);
         if (!post) {
@@ -371,7 +401,7 @@ async function requeueRegressedPagesLocked(opts = {}) {
     //             republished, a missing tag/slug gets fixed, a cooldown
     //             expires. None of those are permanent, so none of them may
     //             be permanent here either.
-    if (status === 'queued') {
+    if (CONSUMING_STATUSES.has(status)) {
       // The marker IS the exactly-once contract. If it did not persist, this
       // row is unfinished — never counted as queued, and left for the next
       // sweep (safe to repeat: the cycleKey makes the enqueue idempotent and
@@ -381,7 +411,7 @@ async function requeueRegressedPagesLocked(opts = {}) {
         results.push({ id: row.id, page_url: row.page_url, status: 'stamp_failed', intended: status });
         continue;
       }
-      queued += 1;
+      if (status === 'queued') queued += 1; else skipped += 1;
     } else if (PARK_STATUSES.has(status)) {
       if (!(await park(database, row.id, status))) persistFailures += 1;
       skipped += 1;
@@ -411,6 +441,6 @@ module.exports = {
   requeueRegressedPages,
   // exposed for tests / reuse
   requeueStatusFor,
-  _internals: { pendingRegressions, inCooldown, noteRetry, park },
-  THRESHOLDS: { COOLDOWN_DAYS, MAX_PER_RUN, UNSUPPORTED_STATUS, PARK_STATUSES },
+  _internals: { pendingRegressions, findCoveringRefresh, isCoveredBy, noteRetry, park },
+  THRESHOLDS: { COOLDOWN_DAYS, MAX_PER_RUN, UNSUPPORTED_STATUS, PARK_STATUSES, COVERED_STATUS },
 };

@@ -13,8 +13,10 @@ const { requeueRegressedPages, requeueStatusFor } = requeue;
 // scan; `cooldownHit` decides what the cooldown .first() sees; every .update()
 // is recorded with the id it was keyed on, and every whereRaw bind is captured
 // so the cooldown's page-identity predicate can be asserted.
-function makeDb({ pending = [], cooldownHit = false } = {}) {
-  const state = { updates: [], rawBinds: [], excluded: [], evidence: [], statusFilters: [], orderBy: [] };
+function makeDb({ pending = [], cooldownHit = false, coveringAt = new Date('2026-07-01T00:00:00Z') } = {}) {
+  // coveringAt defaults BEFORE the fixture row's checked_21d_at (2026-08-01),
+  // i.e. the page regressed again after that refresh → still owed.
+  const state = { updates: [], rawBinds: [], excluded: [], evidence: [], statusFilters: [], orderBy: [], coveringAt };
   const fakeDb = () => {
     const q = {
       _id: null,
@@ -50,7 +52,7 @@ function makeDb({ pending = [], cooldownHit = false } = {}) {
         if (state.failSelect) throw new Error('select failed');
         return pending.slice(0, q._limit || pending.length);
       },
-      first: async () => (cooldownHit ? { id: 'prior-row' } : undefined),
+      first: async () => (cooldownHit ? { id: 'prior-row', requeued_at: state.coveringAt } : undefined),
       update: async (patch) => {
         if (state.failUpdates) throw new Error('update failed');
         state.updates.push({ id: q._id, ...patch });
@@ -152,7 +154,7 @@ describe('requeueRegressedPages', () => {
     expect(out.results[0].status).toBe('gated');
   });
 
-  test('cooldown: a page re-queued recently is left alone (no second enqueue)', async () => {
+  test('cooldown: a page refreshed BEFORE this regression is deferred, not consumed', async () => {
     const db = makeDb({ pending: [row()], cooldownHit: true });
     const refreshAudit = audit();
     const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
@@ -231,6 +233,32 @@ describe('requeueRegressedPages', () => {
       .rejects.toThrow('2 of 2 row(s) could not persist their state');
     // Both were processed before the throw, not just the first.
     expect(refreshAudit.enqueueRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  test('a refresh queued AFTER this regression CONSUMES it — no duplicate refresh in 90 days', async () => {
+    // Impact rows are unique per RUN, so a twice-optimized page has two rows.
+    // The first queues a fix; the second must recognise that fix as covering
+    // it, or it waits out the cooldown and queues a redundant second refresh.
+    const db = makeDb({
+      pending: [row()],
+      cooldownHit: true,
+      coveringAt: new Date('2026-08-05T00:00:00Z'), // after checked_21d_at
+    });
+    const refreshAudit = audit();
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
+
+    expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
+    expect(out.results[0].status).toBe('covered_by_refresh');
+    expect(db.state.updates[0]).toMatchObject({ requeue_status: 'covered_by_refresh' });
+    expect(db.state.updates[0].requeued_at).toBeInstanceOf(Date);
+    expect(out.queued).toBe(0);
+  });
+
+  test('an unknown covering timestamp defers rather than consuming', async () => {
+    const db = makeDb({ pending: [row()], cooldownHit: true, coveringAt: null });
+    const out = await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() });
+    expect(out.results[0].status).toBe('cooldown');
+    expect(db.state.updates[0].requeued_at).toBeUndefined();
   });
 
   test('an AMBIGUOUS url is retried, never parked — the duplicate row will be cleaned up', async () => {
