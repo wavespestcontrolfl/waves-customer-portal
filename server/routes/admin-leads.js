@@ -908,8 +908,12 @@ router.get('/:id', async (req, res, next) => {
             // repointed, and surfacing it here could expose another
             // caller's transcript on the wrong lead card (pre-push P1 r3).
             this.orWhere(function stampArm() {
+              // Settled = token NULL AND a durable successful pass — the
+              // error path clears the token while the stamp stays pending
+              // the extraction_failed retry (pre-push P1 r8).
               this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
-                .whereNull('processing_token');
+                .whereNull('processing_token')
+                .where('processing_status', 'processed');
             });
             if (ten) {
               this.orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ten]);

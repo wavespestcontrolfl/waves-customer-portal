@@ -510,13 +510,16 @@ function whereCallStillLinked(builder, callLogId) {
         this.whereRaw('call_log.twilio_call_sid = leads.twilio_call_sid')
           .orWhere(function settledStampArm() {
             // Only a SETTLED call's stamp is authoritative (pre-push P1
-            // r2): every stamp mutation is fenced on processing_token, so
-            // a non-null token means a pass is mid-flight and its
-            // maintenance may still clear or repoint this stamp — skip,
-            // and the retry lane re-evaluates on the next cron pass. The
-            // sid arm is stable linkage and carries no such condition.
+            // r2/r8): settled = token NULL **and** a durable successful
+            // pass (processing_status 'processed'). Token nullness alone
+            // is not proof — the error path clears the token while the
+            // stamp stays pending the extraction_failed retry, which may
+            // clear or repoint it. A non-null token means a pass is
+            // mid-flight. The sid arm is stable linkage and carries no
+            // such condition.
             this.whereRaw("call_log.metadata->>'lead_id' = leads.id::text")
-              .whereNull('call_log.processing_token');
+              .whereNull('call_log.processing_token')
+              .where('call_log.processing_status', 'processed');
           });
       });
   });
