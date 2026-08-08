@@ -46,7 +46,7 @@ const ERROR_COPY = {
   note_link_blocked: "Links can't go in the note — the text already includes the reschedule link.",
   note_emoji_blocked: "Emoji can't go in customer texts — remove them.",
   note_guard_blocked: 'That note would trip the SMS safety guard — avoid {braces} and the words null, undefined, or 1970.',
-  note_compliance_blocked: 'That wording isn’t allowed in customer texts — no "safe" claims (say "safe once dry"), no EPA-approved, no fixed re-entry times.',
+  note_compliance_blocked: 'That wording isn’t allowed in customer texts — no "safe" claims (say "safe once dry — your technician confirms timing"), no EPA-approved, no fixed re-entry times.',
   note_invalid: 'That note could not be sent — plain text only.',
 };
 
@@ -85,12 +85,21 @@ function noteGuardTrips(note) {
 // Mirror of the compliance hard rules (customer-copy-compliance.js): no
 // "safe" claims outside the drying/protective idioms, EPA-registered/
 // -exempt only, no fixed re-entry timing.
-const NOTE_SAFE_STRIP_RE = /\bsafe\s+(?:once|when|after)\b[^.!?]*|\bsafe\s+from\b|\bstay\s+safe\b|\bsafety\s+data\s+sheet\b/gi;
+// The dry idiom ("safe once dry") is only allowed when the copy ALSO says
+// the technician confirms timing — same rule the canonical server checker
+// (social-media.js complianceLanguageIssues) enforces, so the mirror never
+// green-lights wording the server then rejects.
+const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
+const NOTE_SAFE_DRY_IDIOM_RE = /\bsafe\s+(?:once|when|after)\b[^.!?]*/gi;
+const NOTE_SAFE_OTHER_STRIP_RE = /\bsafe\s+from\b|\bstay\s+safe\b|\bsafety\s+data\s+sheet\b/gi;
 const NOTE_REENTRY_CTX = '(?:re-?ent(?:er|ry)|back\\s+(?:inside|in)|(?:pets?|dogs?|cats?|kids?|children)\\s+(?:out|outside|inside|back)|dr(?:y|ies|ying))';
 const NOTE_TIME_AMT = '(?:\\d+\\s*(?:min(?:ute)?|hour|hr)s?|an?\\s+hour|half\\s+an?\\s+hour)';
 const NOTE_FIXED_TIMING_RE = new RegExp(`${NOTE_REENTRY_CTX}[^.!?]{0,40}${NOTE_TIME_AMT}|${NOTE_TIME_AMT}[^.!?]{0,40}${NOTE_REENTRY_CTX}`, 'i');
 function noteComplianceTrips(note) {
-  if (/\bsafe(?:ly)?\b/i.test(note.replace(NOTE_SAFE_STRIP_RE, ''))) return true;
+  const idiomAllowed = NOTE_TECH_CONFIRM_RE.test(note);
+  const scope = (idiomAllowed ? note.replace(NOTE_SAFE_DRY_IDIOM_RE, '') : note)
+    .replace(NOTE_SAFE_OTHER_STRIP_RE, '');
+  if (/\bsafe(?:ly)?\b/i.test(scope)) return true;
   if (/\bepa\b(?![-\s](?:registered|exempt))/i.test(note)) return true;
   return NOTE_FIXED_TIMING_RE.test(note);
 }
