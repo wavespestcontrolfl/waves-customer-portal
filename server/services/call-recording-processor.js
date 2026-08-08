@@ -2196,14 +2196,25 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
   // there is. Extracted phone/email are MUTABLE across reprocessing attempts
   // — branching on them first let a retry whose contact fields changed
   // reuse an unrelated phone-matched lead or mint a second lead for the
-  // same SID (codex P2 r8 + audit P1 r14). Shared-phone ambiguity doesn't
-  // apply to the call's own row.
+  // same SID (codex P2 r8 + audit P1 r14). The SID row still passes the
+  // SAME ownership/lifecycle filters as the contact-based lookups (audit P1
+  // r17): a retry that now resolves to a different customer must not adopt
+  // a lead another customer owns, and the workableUnnamedLead path stays
+  // active-leads-only — an ineligible SID row falls through to contact
+  // reuse or a fresh mint like any other rejected candidate.
   if (callSid) {
-    const own = await database('leads')
+    let ownQuery = database('leads')
       .whereNull('deleted_at')
-      .where('twilio_call_sid', callSid)
-      .orderBy('created_at', 'desc')
-      .first();
+      .where('twilio_call_sid', callSid);
+    if (workableUnnamedLead) {
+      ownQuery = ownQuery.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
+    }
+    if (unclaimedOnly) {
+      ownQuery = ownQuery.whereNull('customer_id');
+    } else if (customerId) {
+      ownQuery = ownQuery.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
+    }
+    const own = await ownQuery.orderBy('created_at', 'desc').first();
     if (own) return own;
   }
   // The email key must be a REAL email, validated here and not just at the
@@ -7555,6 +7566,12 @@ const CallRecordingProcessor = {
           let raceRecovered = false;
           for (;;) {
             leadUpdates = {};
+            // A retry can RECOVER a callback number and still reuse the
+            // phone-less lead via same-call SID identity — without this fill
+            // the lead stayed unreachable by phone forever and later calls
+            // could not reuse it by number (audit P1 r23). Fill-if-empty
+            // like the other identity fields; an existing phone never moves.
+            if (phone && isEmpty(current?.phone)) leadUpdates.phone = phone;
             if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = capitalizeName(extracted.first_name);
             if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = capitalizeName(extracted.last_name);
             if (extracted.email && isEmpty(current?.email)) leadUpdates.email = extracted.email;
@@ -7812,7 +7829,13 @@ const CallRecordingProcessor = {
               }
             }
             enriched = await enrichmentWrite.update(leadUpdates);
-            if (!enriched && existingLead && !phone && !raceRecovered) {
+            if (!enriched && existingLead && !sameCallLeadReuse && !phone && !raceRecovered) {
+              // sameCallLeadReuse is EXCLUDED from the remint (codex P2
+              // r16): a same-call row claimed between the lookup and the
+              // anonymous unclaimed backstop is still THIS call's lead —
+              // keep its id and skip enrichment, exactly like a fresh
+              // insert claimed during its first attempt. Reminting here
+              // inserted and notified a duplicate for the identical call.
               // Recovery is for REUSED email-matched candidates only (hence
               // the existingLead gate): a 0-row write on a lead THIS call
               // just inserted means an admin legitimately claimed our own

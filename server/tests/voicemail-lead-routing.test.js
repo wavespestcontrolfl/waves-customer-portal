@@ -346,3 +346,60 @@ describe('scheduled-SMS rail purpose map', () => {
     expect(purposeForScheduledMessageType(null)).toBe('conversational');
   });
 });
+
+describe('findReusableCallLead same-call SID branch applies ownership + lifecycle filters', () => {
+  // The SID fast path returned its row BEFORE the ownership/lifecycle
+  // filters, so a retry that now resolves to a different customer could
+  // adopt a lead another customer owns, and a force-reprocess could select a
+  // won/converted row on the active-only path. An ineligible SID row must
+  // fall through to contact reuse or a fresh mint like any other rejected
+  // candidate (audit P1 r17).
+  const makeDb = () => {
+    const calls = [];
+    const builder = {};
+    for (const m of ['where', 'whereNull', 'whereRaw', 'whereNotIn', 'orderBy', 'limit']) {
+      builder[m] = (...a) => { calls.push([m, a]); return builder; };
+    }
+    builder.first = async () => { calls.push(['first', []]); return null; };
+    builder.then = (resolve) => resolve([]);
+    const db = (table) => { calls.push(['table', [table]]); return builder; };
+    db.calls = calls;
+    return db;
+  };
+  // Predicates recorded before the SID lookup resolves (its `first` call).
+  const beforeFirstFetch = (db) => db.calls.slice(0, db.calls.findIndex(([m]) => m === 'first'));
+
+  test('anonymous retry (unclaimedOnly) requires an UNCLAIMED sid row', async () => {
+    const db = makeDb();
+    await findReusableCallLead(db, {
+      phone: null, email: 'a@b.com', firstName: 'Pat', callSid: 'CA-retry',
+      unclaimedOnly: true, workableUnnamedLead: false,
+    });
+    const pre = beforeFirstFetch(db);
+    expect(pre.some(([m, a]) => m === 'where' && a[0] === 'twilio_call_sid')).toBe(true);
+    expect(pre.some(([m, a]) => m === 'whereNull' && a[0] === 'customer_id')).toBe(true);
+  });
+
+  test('workableUnnamedLead retry excludes terminal + converted sid rows', async () => {
+    const db = makeDb();
+    await findReusableCallLead(db, {
+      phone: null, email: 'a@b.com', firstName: 'Pat', callSid: 'CA-retry',
+      workableUnnamedLead: true,
+    });
+    const pre = beforeFirstFetch(db);
+    expect(pre.some(([m, a]) => m === 'whereNotIn' && a[0] === 'status')).toBe(true);
+    expect(pre.some(([m, a]) => m === 'whereNull' && a[0] === 'converted_at')).toBe(true);
+  });
+
+  test('a customer-attached retry scopes the sid row to that customer', async () => {
+    const db = makeDb();
+    await findReusableCallLead(db, {
+      phone: '+19415550101', callSid: 'CA-retry',
+      customerId: 'cust-1', workableUnnamedLead: false,
+    });
+    // The customer arm is a grouped callback — assert the group was applied
+    // to the sid query rather than the row returning unconditionally.
+    const pre = beforeFirstFetch(db);
+    expect(pre.some(([m, a]) => m === 'where' && typeof a[0] === 'function')).toBe(true);
+  });
+});
