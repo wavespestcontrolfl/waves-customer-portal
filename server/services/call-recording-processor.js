@@ -7796,15 +7796,18 @@ const CallRecordingProcessor = {
             if (customerId) {
               enrichmentWrite = enrichmentWrite.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
             }
-            if (!phone && sameCallLeadReuse && !customerId) {
-              // Same-call reuse skips the weak-identity revalidation, but an
-              // ANONYMOUS write still needs the unclaimed backstop — the
-              // lookup now rejects customer-claimed rows (audit P1 r15) and
-              // this repeats that predicate against the claim race between
-              // lookup and write; a 0-row lands in the recovery mint below.
-              // Without it the `if (customerId)` arm above never fires for an
-              // anonymous caller, leaving the write with NO ownership
-              // predicate at all.
+            if (sameCallLeadReuse && !customerId) {
+              // Same-call reuse skips the weak-identity revalidation, but a
+              // customer-LESS write still needs the unclaimed backstop — the
+              // lookup rejects customer-claimed rows whenever customerId is
+              // null (audit P1 r15) and this repeats that predicate against
+              // the claim race between lookup and write.
+              // NOT gated on `!phone` (codex P2): a retry can RECOVER a
+              // callback number and still resolve no customer, and the
+              // `if (customerId)` arm above never fires for it — so gating
+              // on phone left the phone-bearing customer-less retry writing
+              // with no ownership predicate at all, exactly the case the
+              // lookup already refuses to serve.
               enrichmentWrite = enrichmentWrite.whereNull('customer_id');
             }
             if (!phone && existingLead && !sameCallLeadReuse) {
@@ -7850,6 +7853,29 @@ const CallRecordingProcessor = {
               }
             }
             enriched = await enrichmentWrite.update(leadUpdates);
+            // A same-call row is excluded from the remint below because a
+            // claim between lookup and write usually means an admin linked
+            // OUR OWN row — still this call's lead, so enrichment is simply
+            // skipped. That reasoning fails when the row was assigned to a
+            // DIFFERENT customer: keeping leadId would pair this call's PPC
+            // attribution, triage activity and notifications with a foreign
+            // lead (codex P2). Re-read the owner on a 0-row same-call write
+            // and drop the association when it is not ours; downstream is
+            // already written to skip cleanly on a null leadId, and the
+            // workable-lead card surfaces the call for the office.
+            if (!enriched && sameCallLeadReuse && leadId) {
+              let nowOwned = null;
+              try {
+                nowOwned = await db('leads').where({ id: leadId }).first('customer_id');
+              } catch (ownerErr) {
+                logger.warn(`[call-proc] same-call ownership re-read failed: ${ownerErr.code || ownerErr.name || 'db_error'}`);
+              }
+              const ownerId = nowOwned?.customer_id ? String(nowOwned.customer_id) : null;
+              if (ownerId && ownerId !== String(customerId || '')) {
+                logger.warn(`[call-proc] same-call lead ${leadId} is now owned by another customer — dropping the association for ${maskSid(callSid)}`);
+                leadId = null;
+              }
+            }
             if (!enriched && existingLead && !sameCallLeadReuse && !phone && !raceRecovered) {
               // sameCallLeadReuse is EXCLUDED from the remint (codex P2
               // r16): a same-call row claimed between the lookup and the
