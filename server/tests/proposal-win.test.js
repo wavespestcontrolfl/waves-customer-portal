@@ -221,32 +221,49 @@ describe('createProposalAcceptanceInvoice', () => {
     expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-07-05');
   });
 
-  test('an ACTIVE linked payer\'s canonical terms take precedence over the proposal term (codex #3297 r2c)', async () => {
+  test('payer-term resolution: match proceeds on payer terms, mismatch REJECTS acceptance, self-pay uses the proposal term (codex #3297 r2d)', async () => {
     const { resolveForInvoice } = require('../services/payer');
+    // Active payer whose terms MATCH the authored term → invoices on it.
     InvoiceService.create.mockResolvedValue({ id: 10, invoice_number: 'WPC-2026-0010', total: 1 });
-    // Canonical resolver reports an active payer on net30; proposal says
-    // net15 — the standing billing relationship wins so due date and
-    // statement accrual read one term.
     resolveForInvoice.mockResolvedValueOnce({ payerId: 77, paymentTerms: 'net30' });
-    const { trx } = makeInvoiceTrx({ propertyType: 'commercial' });
     await createProposalAcceptanceInvoice({
-      trx,
+      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
       estimate: { id: 42 },
-      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net15' } },
+      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net30' } },
       customerId: 'cust-1',
     });
     expect(InvoiceService.create.mock.calls[0][0].dueDate).toBe('2026-07-20');
-    // Self-pay resolution (inactive/no payer) falls back to the proposal term.
-    InvoiceService.create.mockResolvedValue({ id: 11, invoice_number: 'WPC-2026-0011', total: 1 });
-    resolveForInvoice.mockResolvedValueOnce({ payerId: null, paymentTerms: null });
-    const selfPay = makeInvoiceTrx({ propertyType: 'commercial' });
-    await createProposalAcceptanceInvoice({
-      trx: selfPay.trx,
+
+    // Active payer CONTRADICTING the rendered agreement → 409, no invoice —
+    // acceptance must never silently bill a term the customer didn't see.
+    resolveForInvoice.mockResolvedValueOnce({ payerId: 77, paymentTerms: 'net30' });
+    await expect(createProposalAcceptanceInvoice({
+      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
       estimate: { id: 43 },
       proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net15' } },
       customerId: 'cust-1',
+    })).rejects.toMatchObject({ statusCode: 409 });
+    expect(InvoiceService.create).toHaveBeenCalledTimes(1);
+
+    // Payer with terms but NO authored term → payer terms, no conflict.
+    resolveForInvoice.mockResolvedValueOnce({ payerId: 77, paymentTerms: 'net15' });
+    await createProposalAcceptanceInvoice({
+      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
+      estimate: { id: 44 },
+      proposal: SIESTA_PROPOSAL,
+      customerId: 'cust-1',
     });
     expect(InvoiceService.create.mock.calls[1][0].dueDate).toBe('2026-07-05');
+
+    // Self-pay resolution falls back to the authored proposal term.
+    resolveForInvoice.mockResolvedValueOnce({ payerId: null, paymentTerms: null });
+    await createProposalAcceptanceInvoice({
+      trx: makeInvoiceTrx({ propertyType: 'commercial' }).trx,
+      estimate: { id: 45 },
+      proposal: { ...SIESTA_PROPOSAL, commercialTerms: { paymentTerms: 'net15' } },
+      customerId: 'cust-1',
+    });
+    expect(InvoiceService.create.mock.calls[2][0].dueDate).toBe('2026-07-05');
   });
 
   test('flags a non-commercial customer commercial when the proposal is taxable', async () => {

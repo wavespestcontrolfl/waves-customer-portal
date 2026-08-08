@@ -312,17 +312,25 @@ function proposalNetTermDays(proposal) {
   return NET_TERM_DAYS[proposal?.commercialTerms?.paymentTerms] || 0;
 }
 
-// One resolved term for the acceptance invoice: an ACTIVE linked payer's
-// canonical payment_terms are the STANDING billing relationship (they also
-// drive statement accrual), so they take precedence; the proposal's authored
-// term applies only for self-pay customers. Resolution goes through the
-// canonical PayerService.resolveForInvoice — it owns active-payer filtering
-// and fail-soft-to-self-pay, so an inactive payer's stale terms can never
-// override the accepted proposal (codex #3297 r2c).
+// One resolved term for the acceptance invoice, resolved through the
+// canonical PayerService.resolveForInvoice (it owns active-payer filtering
+// and fail-soft-to-self-pay). The accepted proposal's rendered term is the
+// AGREEMENT — if an active payer's canonical terms contradict it (payer
+// attached or edited after authoring; the PUT guard can't see the future),
+// acceptance REJECTS rather than silently invoicing a term the customer
+// never saw. The operator re-authors or clears the term (codex #3297 r2d).
 async function resolveAcceptanceTermDays({ trx, customerId, proposal }) {
   const { resolveForInvoice } = require('./payer');
   const resolved = await resolveForInvoice({ database: trx, customerId });
+  const authoredTerm = proposal?.commercialTerms?.paymentTerms || null;
   if (resolved?.payerId != null && resolved.paymentTerms) {
+    if (authoredTerm && authoredTerm !== resolved.paymentTerms) {
+      throw winError(
+        `This proposal promises ${authoredTerm} payment terms but the customer bills through a payer on ${resolved.paymentTerms} terms. `
+        + 'Update the proposal terms (or the payer) so the agreement and the invoice match, then mark won again.',
+        409,
+      );
+    }
     return NET_TERM_DAYS[resolved.paymentTerms] || 0;
   }
   return proposalNetTermDays(proposal);
@@ -335,6 +343,10 @@ async function createProposalAcceptanceInvoice({ trx, estimate, proposal, custom
     logger.warn(`[proposal-win] proposal estimate ${estimate.id} has no billable lines — invoice skipped`);
     return null;
   }
+
+  // Resolve (and possibly reject on payer-term mismatch) BEFORE any write in
+  // this flow — a 409 here must leave nothing half-done.
+  const acceptanceTermDays = await resolveAcceptanceTermDays({ trx, customerId, proposal });
 
   // Ensure the billed customer is commercial for a taxable proposal (else
   // InvoiceService forces $0 tax). Defensive — the win flow also flags it upstream.
@@ -349,10 +361,9 @@ async function createProposalAcceptanceInvoice({ trx, estimate, proposal, custom
     notes: `Generated from accepted commercial proposal (estimate #${estimate.id}). `
       + 'Covers one-time items plus the first period of each recurring service; '
       + 'ongoing recurring visits are billed as completed.',
-    // Honor the resolved term (payer precedence, else authored proposal
-    // term) — the shared ET calendar-day helper owns DST-safe day addition
-    // (codex #3297 r1).
-    dueDate: etDateString(addETDays(new Date(), await resolveAcceptanceTermDays({ trx, customerId, proposal }))),
+    // Honor the resolved term — the shared ET calendar-day helper owns
+    // DST-safe day addition (codex #3297 r1).
+    dueDate: etDateString(addETDays(new Date(), acceptanceTermDays)),
   });
   logger.info(`[proposal-win] invoice ${invoice.invoice_number} ($${built.total}) from won proposal estimate ${estimate.id}`);
   return invoice;
