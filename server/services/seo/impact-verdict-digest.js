@@ -466,18 +466,19 @@ async function alertBlindLoop({ database, mailer }) {
  *
  * The watermark is paired with a pre-query CUTOFF (see sendVerdictRollup),
  * because an exclusive watermark stamped at SEND time turns a harmless
- * double-count into a permanent skip: checkPending runs outside this module's
- * advisory lock, so during a Railway deploy overlap the other instance can
- * still be writing verdicts while this one queries. Anything it wrote between
- * our query and our stamp would fall below the next window's `>` boundary and
- * never be reported at all. Bounding the query at a cutoff taken BEFORE it
- * runs, and stamping that same cutoff, makes the windows exactly abut: later
- * writes land above the cutoff and are picked up next time.
+ * double-count into a permanent skip: a verdict written between our query and
+ * our stamp would fall below the next window's `>` boundary and never be
+ * reported. Bounding the query at a cutoff taken BEFORE it runs, and stamping
+ * that same cutoff, makes consecutive windows abut exactly.
  *
- * (Wrapping the whole sweep + digest in one cross-instance lock would also
- * work, but it would serialize the tracker's measurement pass behind the
- * reporting leg for a reporting-only concern — a much larger blast radius
- * than an upper-bounded query.)
+ * The cutoff alone does NOT make this safe across instances, and it is not
+ * asked to: checkPending stamps checked_* with the `now` it captured at entry,
+ * so an overlapping sweep can commit a timestamp below our cutoff after we
+ * queried — no wall-clock cutoff can express commit order. The scheduler
+ * therefore runs the measurement pass and this reporting leg under ONE
+ * cross-instance lease (`impact-tracker-daily`), which is what actually closes
+ * that race. The cutoff remains correct and useful for any caller outside that
+ * lease (the CLI preview, a future ad-hoc run).
  */
 async function rollupWindowStart(database) {
   const fallback = addETDays(new Date(), -ROLLUP_WINDOW_DAYS);
