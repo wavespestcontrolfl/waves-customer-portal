@@ -57,6 +57,9 @@ const FLAGGED_PRODUCT_SAFETY = [
   // #3278 r16: the confirmation must come from the technician.
   'Treatment is safe once dry. The office confirms timing.',
   'Treatment is safe once dry. Timing will be confirmed by dispatch.',
+  // #3278 r20: strip-and-recombine must not pair the technician with
+  // another party's confirmation.
+  'Treatment is safe once dry. Your technician confirms arrival timing; the office confirms timing.',
   // r6: "safe UNTIL dry" claims wet-safety — the opposite of the idiom.
   'Our treatments are safe until dry; your technician confirms timing',
   'safe pesticide treatments',

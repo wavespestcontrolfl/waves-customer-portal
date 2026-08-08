@@ -111,7 +111,7 @@ function noteGuardTrips(note) {
 // drying/re-entry timing ("confirms the gate code" does not exempt;
 // "when"/"ready" only count tied to drying/safety so "gate code is
 // ready" doesn't either — keep in sync with TECH_CONFIRM_CONTEXT_RE).
-const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+(?:dr(?:y|ies|ying)(?:[\s-]+tim(?:e|es|ing))?|re-?ent\w*(?:[\s-]+tim(?:e|es|ing))?|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|(?:^|[.!?\n,;:—–-]\s*|\b(?:the|your|our|exact|drying|dry|re-?entry)[\s-]+)timing\b[^.!?\n]{0,30}\bconfirm\w*\s+by\s+(?:your\s+|our\s+|the\s+)?tech(?:nician)?s?\b/i;
+const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?,;\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+(?:dr(?:y|ies|ying)(?:[\s-]+tim(?:e|es|ing))?|re-?ent\w*(?:[\s-]+tim(?:e|es|ing))?|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|(?:^|[.!?\n,;:—–-]\s*|\b(?:the|your|our|exact|drying|dry|re-?entry)[\s-]+)timing\b[^.!?,;\n]{0,30}\bconfirm\w*\s+by\s+(?:your\s+|our\s+|the\s+)?tech(?:nician)?s?\b/i;
 // A confirmation about appointment logistics ("confirms arrival timing")
 // is not a drying confirmation — stripped before the confirm test. Gap is
 // tempered so "confirms DRYING time at the appointment" survives. Both
@@ -181,7 +181,7 @@ function noteTimingTrips(note) {
   return false;
 }
 function noteComplianceTrips(note) {
-  const idiomAllowed = NOTE_TECH_CONFIRM_RE.test(note.replace(NOTE_UNRELATED_CONFIRM_RE, ''));
+  const idiomAllowed = NOTE_TECH_CONFIRM_RE.test(note.replace(NOTE_UNRELATED_CONFIRM_RE, '.'));
   // Per-sentence walk, same order of strips as the server: the
   // protective-advice strip is sentence-scoped (guarded on that
   // sentence's product context), so the whole-note shortcut no longer

@@ -1513,6 +1513,11 @@ describe('rain-out service', () => {
       // its timing object (r15).
       blocked('Treatment is safe once dry. Your technician confirms the invoice time.');
       blocked('Treatment is safe once dry. The invoice timing will be confirmed by your technician.');
+      // Stripping an unrelated confirmation must not recombine the
+      // technician with ANOTHER party's confirmation across the deleted
+      // span or a clause boundary (r20).
+      blocked('Treatment is safe once dry. Your technician confirms arrival timing; the office confirms timing.');
+      blocked('Treatment is safe once dry. Your technician confirms arrival timing and the office confirms timing.');
       // Passive order can't smuggle logistics past the strip either (r12).
       blocked('Treatment is safe once dry. Appointment timing will be confirmed by your technician.');
       expect(sanitize()('Treatment is safe once dry. Timing will be confirmed by your technician.'))

@@ -496,7 +496,7 @@ const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|when)\s+(?:completely\
 // requires the TECHNICIAN — "The office confirms timing"/"confirmed by
 // dispatch" defers to nobody qualified to judge drying (codex r16); the
 // passive tail is prefix-anchored (no lookbehind — Safari <16.4 parse).
-const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+(?:dr(?:y|ies|ying)(?:[\s-]+tim(?:e|es|ing))?|re-?ent\w*(?:[\s-]+tim(?:e|es|ing))?|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|(?:^|[.!?\n,;:—–-]\s*|\b(?:the|your|our|exact|drying|dry|re-?entry)[\s-]+)timing\b[^.!?\n]{0,30}\bconfirm\w*\s+by\s+(?:your\s+|our\s+|the\s+)?tech(?:nician)?s?\b/i;
+const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?,;\n]{0,40}\b(?:will\s+let\s+you\s+know(?=\s*(?:$|[.!?,;\n])|\s+when\b)|(?:confirm\w*|advise\w*|tells?\b|will\s+tell\b)(?:\s+(?:you|us|the|a|an|your|our|it['’]s|its|it|is|are|exact|precise|estimated))*\s+(?:dr(?:y|ies|ying)(?:[\s-]+tim(?:e|es|ing))?|re-?ent\w*(?:[\s-]+tim(?:e|es|ing))?|tim(?:e|es|ing)|when\s+(?:it\s+is\s+|it['’]s\s+)?(?:dry|safe)\b|when(?=\s*(?:$|[.!?,;\n]))|ready\s+for\s+re-?ent\w*)\b)|(?:^|[.!?\n,;:—–-]\s*|\b(?:the|your|our|exact|drying|dry|re-?entry)[\s-]+)timing\b[^.!?,;\n]{0,30}\bconfirm\w*\s+by\s+(?:your\s+|our\s+|the\s+)?tech(?:nician)?s?\b/i;
 // A confirmation ABOUT something other than drying/re-entry ("technician
 // confirms ARRIVAL timing", "confirms the appointment") defers appointment
 // logistics, not the drying claim — it must not exempt "safe once dry"
@@ -557,7 +557,7 @@ function complianceOverclaims(text, { impliedTreatmentContext = false } = {}) {
   // the whole copy once; the idiom strip itself stays per-sentence.
   // Unrelated confirmations (arrival/appointment timing) are stripped
   // first so they can't stand in for a drying confirmation.
-  const idiomAllowed = TECH_CONFIRM_CONTEXT_RE.test(String(text || '').replace(UNRELATED_CONFIRM_RE, ''));
+  const idiomAllowed = TECH_CONFIRM_CONTEXT_RE.test(String(text || '').replace(UNRELATED_CONFIRM_RE, '.'));
   for (const sentence of sentences) {
     if (!sentence.trim()) continue;
     let safetyScope = (idiomAllowed
