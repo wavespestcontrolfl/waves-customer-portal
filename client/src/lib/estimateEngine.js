@@ -403,7 +403,10 @@ const LAWN_PRICING_V2 = {
   // row's version so a mid-flight admin change stamps correctly too.
   // _FREQ_DISCOUNT (2026-08-07): 9x/12x carry a -4%/-8% per-application
   // discount off the 6x anchor (server mirror).
-  pricingVersion: 'LAWN_PRICING_V2_FREQ_DISCOUNT',
+  // _EDGE_PARITY (2026-08-07, owner ruling on #3274): >20k extrapolated
+  // 9x/12x carry a per-app parity floor against the 6x anchor (server
+  // mirror) — the discount ends at the table edge.
+  pricingVersion: 'LAWN_PRICING_V2_EDGE_PARITY',
   laborRateLoaded: 35,
   equipmentReservePerVisit: 0,
   adminAnnualDefault: 51,

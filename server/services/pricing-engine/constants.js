@@ -282,7 +282,12 @@ const LAWN_PRICING_V2 = {
   // cadences within ~1.5% per application at large lawns, so the cards read
   // as identical. Cadence now carries a real frequency discount off the 6x
   // per-application anchor — see LAWN_CADENCE_DISCOUNT below.
-  pricingVersion: 'LAWN_PRICING_V2_FREQ_DISCOUNT',
+  // _EDGE_PARITY (2026-08-07, owner ruling on #3274): the discount ends at
+  // the table edge — >20k sqft extrapolated 9x/12x lookups carry a per-app
+  // parity floor against the 6x anchor, raising them off the discounted
+  // slope. Estimates stamped _FREQ_DISCOUNT priced >20k lawns ~4% lower
+  // per application than this schedule.
+  pricingVersion: 'LAWN_PRICING_V2_EDGE_PARITY',
   laborRateLoaded: 35,
   equipmentIncludedInLabor: true,
   equipmentReservePerVisit: 0,
