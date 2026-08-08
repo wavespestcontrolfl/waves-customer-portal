@@ -183,7 +183,9 @@ describe('20260808070000 foam catalog rows', () => {
 
   test('up() never overwrites an admin-created services row, but still heals its missing profile', async () => {
     const db = emptyDb();
-    const adminRow = { id: 'admin-foam', service_key: 'foam_drill', name: 'Adam Custom Foam', category: 'termite' };
+    // is_active: true mirrors prod — the column default fills it on any
+    // real insert; the heal path requires explicit true.
+    const adminRow = { id: 'admin-foam', service_key: 'foam_drill', name: 'Adam Custom Foam', category: 'termite', is_active: true };
     db.services.push({ ...adminRow });
     await migration.up(fakeKnex(db));
 
@@ -195,16 +197,25 @@ describe('20260808070000 foam catalog rows', () => {
     expect(stateValue(db).profiles.sort()).toEqual(['foam_drill', 'foam_recurring']);
   });
 
-  test('up() never attaches a profile to an admin-deactivated or archived row', async () => {
+  test('up() never attaches a profile to a row that is not explicitly active', async () => {
     const db = emptyDb();
     db.services.push({ id: 'inactive-foam', service_key: 'foam_drill', name: 'Foam Drill', is_active: false });
-    db.services.push({ id: 'archived-foam', service_key: 'foam_recurring', name: 'Recurring Foam', is_archived: true });
+    // NULL is_active reads as inactive in every catalog filter, and profile
+    // resolution never re-checks active state — literal-false-only would
+    // leak an auto_send profile onto a NULL-active row (codex r5 P2).
+    db.services.push({ id: 'null-active-foam', service_key: 'foam_recurring', name: 'Recurring Foam', is_active: null });
     await migration.up(fakeKnex(db));
 
-    // Rows untouched, and neither gets an active auto_send profile that
-    // would resurrect typed sends the admin turned off.
     expect(db.service_completion_profiles).toHaveLength(0);
     expect(stateValue(db)).toEqual({ services: [], profiles: [] });
+  });
+
+  test('up() never attaches a profile to an archived row even when it is active', async () => {
+    const db = emptyDb();
+    db.services.push({ id: 'archived-foam', service_key: 'foam_drill', name: 'Foam Drill', is_active: true, is_archived: true });
+    await migration.up(fakeKnex(db));
+
+    expect(profileRow(db, 'foam_drill')).toBeUndefined();
   });
 
   test('up() leaves an existing completion profile untouched', async () => {

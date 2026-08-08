@@ -191,9 +191,12 @@ exports.up = async function up(knex) {
     // An admin-deactivated/archived row keeps its posture: attaching an
     // active auto_send profile would re-enable typed sends the admin
     // turned off (codex 2026-08-08 P1 — same rule as the termite cutover's
-    // inactive-row loud skip).
-    if (service.is_active === false || service.is_archived === true) {
-      console.warn(`[foam-catalog] ${svc.service_key}: services row is INACTIVE/ARCHIVED — skipping profile (admin decision preserved)`);
+    // inactive-row loud skip). Explicitly-true only: NULL is_active reads
+    // as inactive in every catalog filter, and completion-profile
+    // resolution never re-checks the service's active state (codex r5 P2).
+    // Rows this migration just inserted always carry is_active: true.
+    if (service.is_active !== true || service.is_archived === true) {
+      console.warn(`[foam-catalog] ${svc.service_key}: services row is not explicitly active (or archived) — skipping profile (admin decision preserved)`);
       continue;
     }
     const existing = await knex('service_completion_profiles')
