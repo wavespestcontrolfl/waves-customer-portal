@@ -5330,6 +5330,17 @@ const CallRecordingProcessor = {
         const rawPrior = call.transcription_metadata;
         priorMeta = typeof rawPrior === 'string' ? JSON.parse(rawPrior) : (rawPrior && typeof rawPrior === 'object' ? rawPrior : {});
       } catch { priorMeta = {}; }
+      // A prior attempt may have STAMPED a reused (different-sid) lead as
+      // this call's linkage — parse it before the update below clears it,
+      // so the reused lead's rolling summary can be reverted too (codex P1
+      // r16: without this, the metadata-join consumers kept presenting the
+      // rejected call — and its hallucinated summary — as lead evidence).
+      const rejectedStampedLeadId = (() => {
+        try {
+          const md = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+          return md?.lead_id ? String(md.lead_id) : null;
+        } catch { return null; }
+      })();
       // Fence on processing_token like the finalization write: if a peer
       // reclaimed the stale lock, this matches 0 rows and we bail without
       // overwriting the peer's state. Clear disposition + enriched extraction
@@ -5353,6 +5364,9 @@ const CallRecordingProcessor = {
           // linked this empty voicemail to a phantom customer; the unified
           // voice sync attaches messages whenever customer_id is set, so unlink.
           customer_id: null,
+          // …and may have stamped a reused lead — the rejected call must
+          // stop being that lead's evidence (codex P1 r16).
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'lead_id'"),
           processing_token: null,
           processing_started_at: null,
           updated_at: new Date(),
@@ -5394,6 +5408,33 @@ const CallRecordingProcessor = {
         if (retired > 0) logger.info(`[call-proc] Retired ${retired} phantom call-sourced lead(s) for ${maskSid(callSid)} after transcript rejection`);
       } catch (leadErr) {
         logger.warn(`[call-proc] phantom-lead retire skipped for ${maskSid(callSid)}: ${leadErr.message}`);
+      }
+      // A REUSED (different-sid) lead this call had stamped is NOT retired —
+      // it predates this call and carries its own history — but the prior
+      // hallucinated enrichment may have written this call's rolling
+      // transcript_summary onto it. Revert the summary ONLY when it still
+      // matches the rejected extraction's (no prior value is stored, so an
+      // exact match is the only safe revert); the stamp itself was cleared
+      // atomically in the rejection update above (codex P1 r16).
+      if (rejectedStampedLeadId) {
+        try {
+          const rejectedSummary = (() => {
+            try {
+              const ex = typeof call.ai_extraction === 'string' ? JSON.parse(call.ai_extraction) : (call.ai_extraction || {});
+              return ex?.call_summary || null;
+            } catch { return null; }
+          })();
+          if (rejectedSummary) {
+            const reverted = await db('leads')
+              .where({ id: rejectedStampedLeadId })
+              .whereNull('deleted_at')
+              .where('transcript_summary', rejectedSummary)
+              .update({ transcript_summary: null, updated_at: new Date() });
+            if (reverted > 0) logger.info(`[call-proc] Reverted rejected-call summary on the stamped lead for ${maskSid(callSid)}`);
+          }
+        } catch (revErr) {
+          logger.warn(`[call-proc] stamped-lead summary revert skipped for ${maskSid(callSid)}: ${revErr.code || revErr.name || 'db_error'}`);
+        }
       }
       await updateUnifiedVoiceMessage(
         { ...call, transcription: TRANSCRIPTION_REJECTED_SENTINEL, answered_by: 'voicemail' },
@@ -7903,7 +7944,13 @@ const CallRecordingProcessor = {
               }
             }
             enriched = await enrichmentWrite.update(leadUpdates);
-            if (!enriched && existingLead && !phone && !raceRecovered) {
+            if (!enriched && existingLead && !sameCallLeadReuse && !phone && !raceRecovered) {
+              // sameCallLeadReuse is EXCLUDED from the remint (codex P2
+              // r16): a same-call row claimed between lookup and the
+              // anonymous unclaimed backstop is still THIS call's lead —
+              // keep its id and skip enrichment, exactly like a fresh
+              // insert claimed during its first attempt. Reminting here
+              // inserted and notified a duplicate for the identical call.
               // Recovery is for REUSED email-matched candidates only (hence
               // the existingLead gate): a 0-row write on a lead THIS call
               // just inserted means an admin legitimately claimed our own
