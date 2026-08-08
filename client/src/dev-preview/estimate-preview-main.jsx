@@ -15,7 +15,7 @@ import WavesShell from '../components/brand/WavesShell';
 // the preview's colors drift from the real page.
 import '../styles/brand-tokens.css';
 
-const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'accepted'];
+const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'accepted', 'proposal'];
 const scenario = (() => {
   const requested = new URLSearchParams(window.location.search).get('scenario');
   return SCENARIOS.includes(requested) ? requested : 'pest';
@@ -395,6 +395,85 @@ function bundleReferralScenario() {
   };
 }
 
+// Authored commercial proposal (GATE_ESTIMATE_COMMERCIAL_GLASS): quote-required
+// by design, no online checkout — the page renders the ProposalDetailCard +
+// TerminalStateCard. Fictional numbers shaped like a small-commercial proposal
+// ($120/quarter). With ?mode=pdf this same payload renders the
+// EstimateProposalDocument print artifact.
+function proposalScenario() {
+  return {
+    estimate: {
+      ...BASE_ESTIMATE,
+      category: 'COMMERCIAL',
+      serviceCategory: 'commercial',
+      customerFirstName: 'Morgan',
+      customerName: 'Morgan Example',
+      address: '600 Sample Plaza Dr, Sarasota, FL 34299',
+      intelligence: {
+        eyebrow: 'Waves AI',
+        title: 'Waves AI reviewed your property before pricing this proposal',
+        body: 'We measured your building, lot, and grounds from satellite imagery and county property records before pricing this plan.',
+        metrics: [
+          { label: 'Building', value: '2,446 sq ft' },
+          { label: 'Lot size', value: '5,850 sq ft' },
+          { label: 'Stories', value: '2' },
+        ],
+        signals: [],
+      },
+    },
+    proposal: {
+      enabled: true,
+      synthesized: false,
+      title: 'Commercial Service Proposal',
+      preparedFor: 'Morgan Example',
+      propertyAddress: '600 Sample Plaza Dr, Sarasota, FL 34299',
+      taxRate: 0.07,
+      taxLabel: 'Sales tax',
+      terms: null,
+      buildings: [{
+        name: '600 Sample Plaza Dr',
+        note: null,
+        lineItems: [{
+          description: 'Quarterly pest control — small multifamily building (interior + exterior)',
+          quantity: 1,
+          unitPrice: 120,
+          amount: 120,
+          frequency: 'quarterly',
+          frequencyLabel: 'Quarterly',
+          taxable: true,
+        }],
+      }],
+      totals: {
+        annualRecurring: 480.00,
+        monthlyEquivalent: 40.00,
+        oneTime: 0,
+        totalTax: 33.60,
+        firstYearTotal: 513.60,
+        hasTax: true,
+        isMultiBuilding: false,
+      },
+    },
+    pricing: {
+      services: [],
+      renderFlags: {},
+      askChips: ['What does each visit include?', 'Do you treat inside the units?', 'What if a tenant reports a pest?'],
+      oneTimeBreakdown: { total: 0, items: [] },
+      defaultServiceMode: 'recurring',
+    },
+    cta: {
+      canAccept: false,
+      terminalState: 'quote_required',
+      quoteRequired: true,
+      quoteRequiredReason: 'commercial_proposal',
+      reviewBeforeBooking: false,
+      commercialProposal: true,
+      commercialAutoPriced: false,
+      commercialGlass: true,
+      proposalPdfEmailed: false,
+    },
+  };
+}
+
 const PAYLOADS = {
   pest: pestScenario,
   preslab: preslabScenario,
@@ -402,6 +481,7 @@ const PAYLOADS = {
   bundle_referral: bundleReferralScenario,
   lawn: lawnScenario,
   accepted: acceptedScenario,
+  proposal: proposalScenario,
 };
 
 // ── canned endpoint responses ───────────────────────────────────────────

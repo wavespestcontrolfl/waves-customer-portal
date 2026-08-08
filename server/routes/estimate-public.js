@@ -5299,6 +5299,70 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     </div>` : ''}
   </section>` : '';
   const membershipBlockHtml = renderMembershipBlockHtml(membership);
+  // Authored commercial proposal, on-page (GATE_ESTIMATE_COMMERCIAL_GLASS —
+  // SSR parity with the React ProposalDetailCard): the same buildings/line
+  // items the emailed PDF carries, so the page finally answers "what am I
+  // paying for" instead of only pointing at an email. normalizeProposal is a
+  // sync read here because an AUTHORED proposal (enabled) always renders its
+  // stored buildings — recurringMode/livePricing only shape the synthesized
+  // fallback, which this card never shows. Inclusions bullets mirror the
+  // client's commercial_pest stack in estimate-glass-copy.js — grounded in
+  // standing owner terms only, no residential guarantee claims.
+  let proposalCardHtml = '';
+  if (commercialProposal && featureGates.isEnabled('estimateCommercialGlass')) {
+    try {
+      const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
+      // renderPage carries the parsed estimate_data separately — hand the
+      // normalizer the estData it already trusts, not whatever serialization
+      // rides the row object.
+      const proposalForCard = normalizeProposal({ ...est, estimate_data: estData });
+      // A raw enabled flag with no authored buildings normalizes to the
+      // synthesized fallback (enabled:false) — nothing authored to itemize,
+      // so the card stays out rather than rendering an empty shell.
+      if (proposalForCard.enabled !== true) {
+        proposalCardHtml = '';
+      } else {
+      const proposalCardTotals = computeProposalTotals(proposalForCard);
+      const proposalBuildingsHtml = (proposalForCard.buildings || []).map((building) => `
+      <div class="proposal-building">
+        ${proposalForCard.buildings.length > 1 ? `<div class="proposal-building-name">${escapeHtml(building.name || 'Service location')}</div>` : ''}
+        ${building.note ? `<div class="proposal-building-note">${escapeHtml(building.note)}</div>` : ''}
+        ${(building.lineItems || []).map((item) => `
+        <div class="proposal-line">
+          <span class="proposal-line-desc">${escapeHtml(item.description || 'Service')}${item.quantity > 1 ? ` &times; ${item.quantity}` : ''}</span>
+          <span class="proposal-line-amt">${fmtMoney(item.amount)}${item.frequencyLabel ? ` <span class="proposal-line-freq">${escapeHtml(String(item.frequencyLabel).toLowerCase())}</span>` : ''}</span>
+        </div>`).join('')}
+      </div>`).join('');
+      proposalCardHtml = `
+  <section class="card proposal-card">
+    <h2>${escapeHtml(proposalForCard.title || 'Commercial Service Proposal')}</h2>
+    <p class="card-sub">Everything in your formal proposal, itemized — the emailed PDF carries this same detail.</p>
+    ${proposalBuildingsHtml}
+    <div class="proposal-totals">
+      ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">Recurring service (per year)</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.annualRecurring)}</span></div>` : ''}
+      ${proposalCardTotals.oneTime > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">One-time services</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.oneTime)}</span></div>` : ''}
+      ${proposalCardTotals.hasTax ? `<div class="proposal-line"><span class="proposal-line-desc">${escapeHtml(proposalForCard.taxLabel || 'Sales tax')}</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.totalTax)}</span></div>` : ''}
+      <div class="proposal-line proposal-line-total"><span class="proposal-line-desc">First-year total</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.firstYearTotal)}</span></div>
+      ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-monthly-note">Averages ${fmtMoney(proposalCardTotals.monthlyEquivalent)}/month across the year for the recurring service.</div>` : ''}
+    </div>
+    ${proposalForCard.terms ? `<div class="proposal-terms">${escapeHtml(proposalForCard.terms)}</div>` : ''}
+    <div class="proposal-included">
+      <div class="proposal-included-title">What your commercial service includes</div>
+      <ul>
+        <li>Recurring exterior treatment &mdash; foundation, entry points, and grounds on your scheduled cadence</li>
+        <li>Interior treatment included on request &mdash; no extra charge, no surprise fees</li>
+        <li>Tenant-reported pests handled between visits &mdash; re-service requests are included in the plan</li>
+        <li>Tenants can be added to the Waves app for arrival alerts and service reports</li>
+        <li>Every visit documented &mdash; time on site, areas treated, and products applied</li>
+        <li>No long-term contract &mdash; Auto Pay billing, cancel your plan right in the app</li>
+      </ul>
+    </div>
+  </section>`;
+      }
+    } catch (e) {
+      logger.warn(`[estimate-ssr] proposal card build failed for estimate ${est.id}: ${e.message}`);
+    }
+  }
   // Ask Waves chips read the raw rows merged with the normalized one-time rows
   // (the same superset the AI card + Bora-Care detection use), so engine-backed /
   // nested-result estimates still surface service-specific chips like
@@ -5472,6 +5536,22 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .choice-treatment .save-row{margin-top:8px}
   .choice-treatment .day-price{margin-top:8px}
   .onetime-note{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;max-width:640px}
+  .proposal-building{margin-top:10px}
+  .proposal-building-name{font-size:15px;font-weight:800;color:#1B2C5B;margin-bottom:4px}
+  .proposal-building-note{font-size:14px;color:#475569;margin-bottom:6px;line-height:1.5}
+  .proposal-line{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid #E2DCCB;font-size:15px;color:#3F4A65;line-height:1.45}
+  .proposal-line-desc{min-width:0}
+  .proposal-line-amt{font-weight:700;color:#1B2C5B;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .proposal-line-freq{font-weight:500;color:#6B7280}
+  .proposal-totals{margin-top:14px}
+  .proposal-line-total{border-bottom:0;font-weight:800;color:#1B2C5B;font-size:16px}
+  .proposal-line-total .proposal-line-amt{font-size:18px}
+  .proposal-monthly-note{margin-top:4px;font-size:14px;color:#475569}
+  .proposal-terms{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;white-space:pre-wrap}
+  .proposal-included{margin-top:16px}
+  .proposal-included-title{font-size:14px;font-weight:800;color:#1B2C5B;margin-bottom:6px}
+  .proposal-included ul{margin:0;padding-left:20px}
+  .proposal-included li{font-size:14px;color:#3F4A65;line-height:1.6}
   @media(max-width:760px){.service-price-list{grid-template-columns:1fr}.service-big-price .num{font-size:clamp(42px,14vw,56px)}.supplemental-service-row{grid-template-columns:1fr}.supplemental-service-row strong{white-space:normal}}
   .card{background:#F2EEE0;border-radius:12px;padding:24px;margin-bottom:16px;border:1px solid #D9D3C4;box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06)}
   .card h2{margin:0 0 6px}
@@ -5814,6 +5894,8 @@ ${shellTopBar()}
     ${canChooseOneTime && (!oneTimeToggleCopy || oneTimeToggleCopy.callbackNote) ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.callbackNote || 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
+
+  ${proposalCardHtml}
 
   ${membershipBlockHtml}
 
@@ -7899,10 +7981,17 @@ async function handleEstimateView(req, res, next) {
     // it still excludes staff preview hits from the GrowthBook experiment
     // assignment below.
     const adminPreviewRequested = req.query.adminPreview === '1';
+    // Headless estimate-document render (?mode=pdf): the browser pass must
+    // always reach the React page — EstimateProposalDocument only exists
+    // there — regardless of this estimate's v1/v2 assignment. Never counts
+    // as a customer view (the /data route skips its view side effects) and
+    // never enters the experiment below.
+    const estimatePdfRenderPass = req.query.mode === 'pdf';
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
-      || recurringCardForcesReactView;
+      || recurringCardForcesReactView
+      || estimatePdfRenderPass;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -7924,6 +8013,7 @@ async function handleEstimateView(req, res, next) {
       && !effectiveInvoiceMode
       && !cardHoldForcesReactView
       && !recurringCardForcesReactView
+      && !estimatePdfRenderPass
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -19377,6 +19467,26 @@ router.get('/:token/pdf', dataLimiter, async (req, res, next) => {
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
+    // Browser-rendered document (GATE_ESTIMATE_DOC_PDF): the work-order style
+    // EstimateProposalDocument, rendered through the headless pipeline. Any
+    // failure falls through to the legacy pdfkit proposal below — the
+    // download must never 500 on a browser hiccup.
+    if (featureGates.isEnabled('estimateDocPdf')) {
+      try {
+        const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
+        const { normalizeProposal } = require('../services/estimate-proposal');
+        const buffer = await renderEstimateDocumentPdf(estimate);
+        // Same filename the pdfkit generator sets, so the customer's saved
+        // file is named identically whichever renderer served it.
+        const preparedFor = normalizeProposal(estimate).preparedFor || estimate.id;
+        const fileName = `proposal-${String(preparedFor).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves'}.pdf`;
+        res.set('Content-Type', 'application/pdf');
+        res.set('Content-Disposition', `inline; filename="${fileName}"`);
+        return res.send(buffer);
+      } catch (e) {
+        logger.warn(`[estimate-pdf] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${e.message}`);
+      }
+    }
     // Lazy require: pdfkit only loads when a PDF is actually requested.
     const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
     // Resolve the LIVE billing lane, exactly like the page's pricing bundle —
@@ -19802,7 +19912,22 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
     // suppress the very first "viewed" count + admin notification.
     const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
-    if (!verifiedStaffPreview && !isInternalRefresh && shouldCountView(req, ip, estimate)) {
+    // Headless document render (?mode=pdf — the estimate-PDF browser pass,
+    // mirroring /report/:token?mode=pdf). `mode` alone only shapes CONTENT
+    // (the proposal block + publicOrigin below — data the token holder's own
+    // PDF already carries). Side-effect suppression additionally requires the
+    // SIGNED render pin every server-driven render mints (estimate-doc-pdf
+    // signEstimateDocPin): without it, building the proposal email ATTACHMENT
+    // would stamp viewed_at and fire the "Estimate viewed" notification
+    // before the customer ever opened the link — while a customer poking
+    // ?mode=pdf by hand still counts as the view it is (unlike the refresh
+    // param above, no public input can dodge first-view tracking).
+    const isPdfRenderPass = req.query.mode === 'pdf';
+    const docRenderPin = isPdfRenderPass && req.query.dpin
+      ? require('../services/pdf/estimate-doc-pdf').verifyEstimateDocPin(req.query.dpin, estimate.token)
+      : null;
+    const verifiedPdfRenderPass = isPdfRenderPass && docRenderPin !== null;
+    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate)) {
       // ONE transaction for the aggregate counter + the per-open row: written
       // separately, a failure of either half leaves view_count permanently
       // diverged from COUNT(estimate_views) — the dashboard count and the
@@ -19839,7 +19964,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // The staff draft preview is hard-excluded above IP/UA heuristics: the
     // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
     // effect) if a staff preview ever slipped through shouldApplyFirstView.
-    if (!verifiedStaffPreview && !isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       // Don't break an in-flight send's `sending` claim (which also gates
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at.
@@ -20104,8 +20229,82 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       }
     }
 
+    // Commercial glass parity (GATE_ESTIMATE_COMMERCIAL_GLASS): the client's
+    // commercial copy pack + the on-page proposal line items ride this flag —
+    // fail-closed, absent flag renders exactly today's page.
+    const commercialGlassEnabled = featureGates.isEnabled('estimateCommercialGlass');
+    // Public proposal view — the authored buildings/line items the customer's
+    // emailed PDF already contains, projected for the on-page glass render.
+    // Resolved with the SAME live billing lane as the PDF generator so the
+    // page and the attachment can never quote different cadences. Projection
+    // is field-by-field on purpose: the stored proposal block is admin-
+    // authored and may grow internal fields the token holder shouldn't read.
+    //
+    // The headless document render (mode=pdf) gets the block for EVERY
+    // estimate — synthesized fallback included — because the document's
+    // pricing table is normalizeProposal's lines, exactly what the pdfkit
+    // generator prints today; it must not depend on the page-side commercial
+    // gate. On-page renders keep the authored-proposal + gate condition.
+    let proposalPublicView = null;
+    if ((isPdfRenderPass && featureGates.isEnabled('estimateDocPdf'))
+      || (commercialGlassEnabled && estimateDataForIntelligence?.proposal?.enabled === true)) {
+      try {
+        const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
+        const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+        const proposalBilling = await resolveProposalBillingContext(estimate);
+        const proposalForView = normalizeProposal(estimate, {
+          recurringMode: proposalBilling?.billsPerApplication === true ? 'per_application' : 'legacy',
+          livePricing: proposalBilling?.livePricing || null,
+        });
+        proposalPublicView = {
+          enabled: proposalForView.enabled === true,
+          synthesized: proposalForView.synthesized === true,
+          title: proposalForView.title,
+          preparedFor: proposalForView.preparedFor,
+          propertyAddress: proposalForView.propertyAddress,
+          taxRate: proposalForView.taxRate,
+          taxLabel: proposalForView.taxLabel,
+          terms: proposalForView.terms,
+          buildings: (proposalForView.buildings || []).map((building) => ({
+            name: building.name,
+            note: building.note,
+            lineItems: (building.lineItems || []).map((item) => ({
+              description: item.description,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice,
+              amount: item.amount,
+              frequency: item.frequency,
+              frequencyLabel: item.frequencyLabel,
+              ...(item.visitsPerYear > 0 ? { visitsPerYear: item.visitsPerYear } : {}),
+              taxable: item.taxable === true,
+            })),
+          })),
+          totals: computeProposalTotals(proposalForView),
+        };
+        // On-page renders only itemize truly AUTHORED proposals — a raw
+        // enabled flag with no buildings normalizes to the synthesized
+        // fallback (enabled:false), which would paint an empty card. The
+        // pdf pass keeps the synthesized view: it IS the document's pricing
+        // table for ordinary estimates.
+        if (!isPdfRenderPass && proposalPublicView.enabled !== true) {
+          proposalPublicView = null;
+        }
+      } catch (e) {
+        logger.warn(`[estimate-data] proposal view build failed for estimate ${estimate.id}: ${e.message}`);
+      }
+    }
+
     res.json({
       ...(propertyGroup ? { propertyGroup } : {}),
+      // Authored commercial proposal, rendered on-page under the commercial
+      // glass gate. Key only exists for gated proposal estimates so every
+      // other response stays byte-identical.
+      ...(proposalPublicView ? { proposal: proposalPublicView } : {}),
+      // Canonical public origin for links baked into the rendered document —
+      // the headless browser reaches this page through an internal hostname,
+      // so window.location.origin would leak it into a customer artifact
+      // (same rule as the service-report document). pdf-pass only.
+      ...(isPdfRenderPass ? { publicOrigin: require('../utils/portal-url').configuredPublicPortalOrigin() } : {}),
       // Only present on a verified staff draft preview — the React page keys
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
@@ -20168,7 +20367,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         askToken: signEstimateAskToken(estimate),
         category: estimate.category || 'RESIDENTIAL',
         createdAt: estimate.created_at,
-        expiresAt: estimate.expires_at,
+        // Pinned override only on a signed pdf render pass — see docRenderPin.
+        expiresAt: docRenderPin?.validThrough || estimate.expires_at,
         status: estimate.status,
         satelliteUrl: estimate.satellite_url || null,
         intelligence,
@@ -20228,6 +20428,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // commercial identity too — its bundle card keeps the monthly contract
         // price, mirroring the SSR fork (codex #3128 r5).
         commercialAutoPriced: isCommercialAutoAcceptEstimate(estimate),
+        // Commercial glass release (GATE_ESTIMATE_COMMERCIAL_GLASS): the
+        // client activates the commercial copy pack + on-page proposal
+        // section only when the server affirms — fail-closed like
+        // glassDefault above.
+        commercialGlass: commercialGlassEnabled,
         // The non-commercial monthly identity (codex #3128 r6): a current
         // monthly member's accept preserves membership billing, so their
         // bundle's combined total is the real charge and must not be replaced

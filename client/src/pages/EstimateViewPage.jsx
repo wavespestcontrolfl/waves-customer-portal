@@ -51,8 +51,11 @@ import EstimateGlassTheme, { fireGlassConfetti } from '../components/estimate/gl
 const glassAppearanceActive = () => document.documentElement.hasAttribute('data-glass-theme');
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
+import ProposalDetailCard from '../components/estimate/ProposalDetailCard';
+import EstimateProposalDocument from './EstimateProposalDocument';
 import { estimateCopyFor } from '../lib/estimate-copy';
 import {
+  commercialGlassActive,
   glassCopyActive,
   glassCtaMicroForKeys,
   glassDayLinesFor,
@@ -60,8 +63,10 @@ import {
   glassOneTimeHeroOverlay,
   glassServiceSlug,
   glassTierDisplay,
+  setCommercialGlass,
   setGlassDefault,
   useGlassCopyActive,
+  useCommercialGlassActive,
   GLASS_COPY,
 } from '../lib/estimate-glass-copy';
 import {
@@ -3649,6 +3654,10 @@ function EstimateViewPageInner() {
   // memo boundaries exist below. Without this, a flag flip never scheduled a
   // re-render and siblings painted torn glass/plain copy.
   useGlassCopyActive();
+  // Same root subscription for the commercial glass release flag — its
+  // render-time commercialGlassActive() reads (copy category, PriceCard row
+  // slugs) need the identical torn-paint guarantee.
+  useCommercialGlassActive();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
@@ -3667,6 +3676,24 @@ function EstimateViewPageInner() {
       return new URLSearchParams(window.location.search).get('adminPreview') === '1';
     } catch {
       return false;
+    }
+  });
+  // Headless document capture (?mode=pdf — mirrors /report/:token?mode=pdf):
+  // renders EstimateProposalDocument instead of the interactive page. The
+  // /data fetch carries the mode (plus the optional signed valid-through pin)
+  // so the server skips view side effects and ships the proposal block.
+  const [pdfDocumentMode] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('mode') === 'pdf';
+    } catch {
+      return false;
+    }
+  });
+  const [pdfDocPin] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('dpin') || null;
+    } catch {
+      return null;
     }
   });
 
@@ -3933,6 +3960,10 @@ function EstimateViewPageInner() {
     setLoadError(false);
     const params = [];
     if (isRefresh) params.push('refresh=1');
+    if (pdfDocumentMode) {
+      params.push('mode=pdf');
+      if (pdfDocPin) params.push(`dpin=${encodeURIComponent(pdfDocPin)}`);
+    }
     let fetchOpts;
     if (adminPreviewRequested) {
       params.push('adminPreview=1');
@@ -3974,6 +4005,10 @@ function EstimateViewPageInner() {
     // page. The marketing copy stays category-scoped server-side; the old
     // ?glass URL override is retired. (The glass THEME itself is unconditional.)
     setGlassDefault(body.glassDefault === true);
+    // Commercial glass release rides the same module-state mechanism (and the
+    // same ordering rule — before setData) so the commercial copy pack and
+    // the residential fallback can never render torn on one paint.
+    setCommercialGlass(body?.cta?.commercialGlass === true);
     setData(body);
     setLoading(false);
     const defaultServiceMode = body?.estimate?.defaultServiceMode || body?.pricing?.defaultServiceMode;
@@ -4001,7 +4036,7 @@ function EstimateViewPageInner() {
     }
     setSelected(nextSelected);
     setSelectedAddOns(selectedAddOnsForServices(nextServices, nextSelected));
-  }, [token, adminPreviewRequested]);
+  }, [token, adminPreviewRequested, pdfDocumentMode, pdfDocPin]);
 
   // Verified staff draft preview (server sets this only after checking the
   // staff JWT): show the banner and keep every money/booking action inert —
@@ -4898,6 +4933,13 @@ function EstimateViewPageInner() {
     );
   }
 
+  // Headless document capture (?mode=pdf): the loaded data renders as the
+  // print document — no shell, no configurator, no side effects. Mirrors
+  // ReportViewPage's mode==='pdf' branch.
+  if (pdfDocumentMode) {
+    return <EstimateProposalDocument data={data} token={token} />;
+  }
+
   const { estimate, pricing, cta } = data;
   const canAccept = cta?.canAccept === true;
   // Review-before-booking (e.g. priced termite trenching) is NOT terminal: the
@@ -4905,7 +4947,19 @@ function EstimateViewPageInner() {
   // terminal state (accepted/declined/expired/quote_required) always wins.
   const reviewBeforeBooking = cta?.reviewBeforeBooking === true && !cta?.terminalState;
   const showAskBar = !['accepted', 'declined', 'expired'].includes(cta?.terminalState);
-  const serviceCategory = estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
+  // Commercial identity for COPY selection — resolved here (before the copy
+  // packs) rather than reusing isCommercialEstimate below, which doesn't
+  // exist yet at this point in the render. Under the server's commercial
+  // glass release, commercial estimates read the commercial pack instead of
+  // inheriting residential guarantee claims; gate off → exactly today's
+  // category resolution.
+  const copyCommercial = commercialGlassActive()
+    && (cta?.commercialProposal === true
+      || cta?.commercialAutoPriced === true
+      || cta?.quoteRequiredReason === 'commercial_proposal');
+  const serviceCategory = copyCommercial
+    ? 'commercial'
+    : estimate?.serviceCategory || (services.length > 1 ? 'bundle' : services[0]?.key) || 'pest_control';
   const copy = estimateCopyFor(serviceCategory);
   // Glass copy pack — null unless glass is active; every service category
   // has a pack now (unknown categories fall back to the property-generic
@@ -5384,6 +5438,12 @@ function EstimateViewPageInner() {
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
         {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+        {/* Authored commercial proposal, on-page (GATE_ESTIMATE_COMMERCIAL_GLASS
+            → /data ships `proposal`): the line items + totals + included-service
+            terms the customer used to get only inside the emailed PDF. Rendered
+            BEFORE the AI card — the price-before-AI ordering rule applies to a
+            proposal's price content too. */}
+        {isCommercialProposal && data.proposal ? <ProposalDetailCard proposal={data.proposal} /> : null}
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar ? (
           <EstimateAskBar

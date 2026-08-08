@@ -46,10 +46,7 @@ const {
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
 const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
-const {
-  generateEstimateProposalPDF,
-  buildEstimateProposalEmailAttachment,
-} = require('../services/pdf/estimate-pdf');
+const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
   acceptanceServiceLists,
   buildPricingBundle,
@@ -1064,10 +1061,17 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
         let proposalPdfFailed = false;
         if (proposalMode) {
           try {
-            proposalAttachments = [await buildEstimateProposalEmailAttachment({
-              ...freshEstimate,
-              expires_at: nextExpiresAt,
-            })];
+            // Browser document under GATE_ESTIMATE_DOC_PDF (falls back to the
+            // pdfkit builder internally — this call throws only when BOTH
+            // renderers fail, preserving the no-PDF-no-proposal-email rule).
+            // nextExpiresAt travels as a signed display pin because the row's
+            // expires_at persists later in this send flow; the pdfkit
+            // fallback receives the same override on the row object.
+            const { buildEstimateProposalEmailAttachmentPreferred } = require('../services/pdf/estimate-doc-pdf');
+            proposalAttachments = [await buildEstimateProposalEmailAttachmentPreferred(
+              freshEstimate,
+              { validThrough: nextExpiresAt },
+            )];
           } catch (e) {
             proposalPdfFailed = true;
             logger.error(`[admin-estimates] proposal PDF attachment failed for estimate ${estimate.id}: ${e.message}`);
@@ -2024,6 +2028,27 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    // Browser-rendered document (GATE_ESTIMATE_DOC_PDF) — same renderer as
+    // the customer download so the operator's copy matches the customer's.
+    // Only for rows the public /data route will serve (the headless page
+    // fetches it): drafts/scheduled/expired/send_failed/archived rows keep
+    // the pdfkit generator, which reads the row directly. Any render failure
+    // also falls through to pdfkit — the admin download must never 500 on a
+    // browser hiccup.
+    const publicViewable = !estimate.archived_at
+      && !['draft', 'scheduled', 'expired', 'send_failed'].includes(estimate.status)
+      && !(estimate.expires_at && new Date(estimate.expires_at) < new Date() && !['accepted', 'declined'].includes(estimate.status));
+    if (publicViewable && require('../config/feature-gates').isEnabled('estimateDocPdf')) {
+      try {
+        const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
+        const buffer = await renderEstimateDocumentPdf(estimate);
+        res.set('Content-Type', 'application/pdf');
+        res.set('Content-Disposition', 'inline; filename="proposal.pdf"');
+        return res.send(buffer);
+      } catch (e) {
+        logger.warn(`[admin-estimates] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${e.message}`);
+      }
+    }
     // Same live billing lane the customer-facing download resolves, so the
     // operator's copy and the customer's copy stay byte-identical.
     const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');

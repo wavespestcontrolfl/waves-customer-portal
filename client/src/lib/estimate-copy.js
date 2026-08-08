@@ -148,6 +148,22 @@ export const SERVICE_COPY = {
       dayLine: "That's about {amount}/day for this quote.",
     },
   },
+  // Commercial — grounded in standing owner terms only (no residential
+  // guarantee claims); mirrors the GLASS_COMMERCIAL pack in
+  // estimate-glass-copy.js so the non-glass fallbacks agree with it.
+  commercial: {
+    headline: "Hey {first}, here's your commercial service plan.",
+    aiEyebrow: 'Waves AI',
+    aiTitle: 'Waves AI reviewed your property before pricing this plan',
+    aiBody: 'We measured your building, lot, and grounds from satellite imagery and county property records before pricing this plan.',
+    askChips: [
+      'What does each visit include?',
+      'Do you treat inside the units?',
+      'What if a tenant reports a pest?',
+      'How do I cancel if I need to?',
+    ],
+    priceWording: {},
+  },
   bundle: {
     headline: "Hey {first}, here's your custom Waves plan.",
     aiEyebrow: 'Waves AI',
