@@ -310,6 +310,61 @@ describe('rewrite_title_meta live adapter', () => {
     }
   });
 
+  test('a spoke-host page with domains:[] still arms the brand guard by target host (Codex PR r13 audit)', async () => {
+    const previousShadow = process.env.SHADOW_MODE_REWRITE_TITLE_META;
+    process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';
+    try {
+      const claimedAt = new Date('2026-05-27T13:00:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({ id: 'opp_meta_spokedom', action_type: 'rewrite_title_meta', claimed_at: claimedAt }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_meta_spokedom',
+          action_type: 'rewrite_title_meta',
+          page_type: 'metadata',
+          target_url: 'https://www.sarasotaflpestcontrol.com/pest-control-sarasota-fl/',
+          target_keyword: 'pest control sarasota fl',
+          city: 'Sarasota',
+          service: 'pest',
+          serp_signal: { dominant_intent: 'service' },
+          gsc_signal: { impressions: 800 },
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: {
+            type: 'metadata',
+            title: 'Pest Control in Sarasota, FL | Waves',
+            meta_description: 'Waves Pest Control treats Sarasota homes for ants, roaches, and rodents. Call ☎️ {{cityPhone}} for a same-week estimate and honest pricing.',
+          },
+        }),
+      };
+      const publisher = {
+        // A spoke-host page whose frontmatter carries a PRESENT-EMPTY
+        // domains array — the target host must arm the guard anyway.
+        getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/services/pest-control-sarasota-fl.md', domains: [] }),
+        publishMetadataRewrite: jest.fn(),
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, publisher });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('content_guardrails_failed');
+      expect(result.reviewer_notes).toMatch(/BRAND_TOKEN_LEAK/);
+      expect(publisher.publishMetadataRewrite).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_REWRITE_TITLE_META;
+      else process.env.SHADOW_MODE_REWRITE_TITLE_META = previousShadow;
+    }
+  });
+
   test('parks spammy metadata without opening a PR', async () => {
     const previousShadow = process.env.SHADOW_MODE_REWRITE_TITLE_META;
     process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';

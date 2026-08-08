@@ -1936,7 +1936,13 @@ class AutonomousRunner {
     // array is explicit hub-only data and stays as-is.
     if (targetPageType === 'supporting-blog') {
       if (liveDomains == null || liveDomains.length === 0) liveDomains = FLEET_SPOKE_SITE_KEYS;
-    } else if (liveDomains == null) {
+    } else if (liveDomains == null || liveDomains.length === 0) {
+      // Host resolution runs for PRESENT-EMPTY arrays too (Codex PR r13
+      // audit): a page served from a spoke host ships on that spoke no
+      // matter what its frontmatter says — [] must not unarm the brand
+      // guard there. A hub-host (or host-unresolvable present-empty)
+      // page keeps explicit hub-only; only a fully-unresolvable NULL
+      // parks.
       let targetHost = null;
       try {
         targetHost = new URL(String(brief.target_url || brief.page_url || draft.page_url || '')).hostname.toLowerCase().replace(/^www\./, '');
@@ -1945,7 +1951,7 @@ class AutonomousRunner {
         liveDomains = [];
       } else if (targetHost) {
         liveDomains = [targetHost];
-      } else {
+      } else if (liveDomains == null) {
         return {
           notes: 'metadata_domains_unresolved',
           patch: {
