@@ -2404,6 +2404,37 @@ function dropFilledLeadColumns(leadUpdates, lockedLead) {
   return out;
 }
 
+// Fill-only fields this pass's extraction SUPPLIED that were dropped because
+// the lead already carries the SAME value — the caller REAFFIRMED it on this
+// call (codex P1 r4). These must enter this call's lead_written_state (as
+// the lead's current value, prior = the same, so this call's own rejection
+// no-ops the field): without the claim, a PREDECESSOR call later reprocessed
+// as spam/voicemail/vetoed sees no successor ownership and restores the
+// field to its old baseline — often null — erasing a value an ACCEPTED
+// later call independently stated. A supplied value that DIFFERS from the
+// lead's is not a reaffirmation and claims nothing. Phone compares on the
+// last 10 digits; other identity fields case-insensitively.
+function reaffirmedFilledLeadFields(leadUpdates, lockedLead) {
+  const out = {};
+  if (!lockedLead || !leadUpdates) return out;
+  const norm = (f, v) => {
+    const s = String(v == null ? '' : v).trim().toLowerCase();
+    if (f === 'phone') {
+      const digits = s.replace(/\D/g, '');
+      return digits.length >= 10 ? digits.slice(-10) : digits;
+    }
+    return s;
+  };
+  for (const f of FILL_ONLY_LEAD_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(leadUpdates, f)) continue;
+    const lockedVal = lockedLead[f];
+    if (lockedVal === null || lockedVal === undefined || lockedVal === '') continue;
+    const supplied = norm(f, leadUpdates[f]);
+    if (supplied && supplied === norm(f, lockedVal)) out[f] = lockedVal;
+  }
+  return out;
+}
+
 // Re-decide the CONDITIONAL (non-identity) lead fields against the LOCKED
 // row (codex P1 r22): every one of these decisions is made from `current`,
 // read before the enrichment transaction takes its row lock, and a staff
@@ -2608,6 +2639,30 @@ async function clearStampAndRestoreLead(call, procToken, callSid, existingTrx = 
           [...binds, stampedLeadId],
         );
         logger.info(`[call-proc] Reconciled the stamped lead's state after rejection for ${maskSid(callSid)}`);
+        // Re-judge qualification against the POST-RESTORE row (codex P1
+        // r4): the restore may have removed a contact field a later
+        // accepted call's qualification relied on but never restated —
+        // is_qualified=true must not survive on a lead whose contact
+        // fields no longer support it. DOWNGRADE ONLY: an incomplete
+        // judgment here never promotes, and a complete row is left
+        // exactly as the surviving owners wrote it.
+        const restoredRow = await trx('leads')
+          .where({ id: stampedLeadId })
+          .whereNull('deleted_at')
+          .first('is_qualified', 'first_name', 'last_name', 'address', 'email');
+        if (restoredRow?.is_qualified) {
+          const restoredContact = leadContactCompleteness({
+            first_name: restoredRow.first_name,
+            last_name: restoredRow.last_name,
+            service_address: restoredRow.address,
+            email: restoredRow.email,
+          });
+          if (!restoredContact.complete) {
+            await trx('leads')
+              .where({ id: stampedLeadId })
+              .update({ is_qualified: false, updated_at: new Date() });
+          }
+        }
       }
       // Re-parent SUCCESSOR snapshots (audit P1 r21): a call that reused
       // this lead AFTER this one snapshotted THIS call's written values as
@@ -8447,6 +8502,17 @@ const CallRecordingProcessor = {
                 if (reconciled.contact) contact = reconciled.contact;
                 const effectiveUpdates = reconciled.updates;
                 const { prior, written } = snapshotStampedLeadStates(lockedLead || current, effectiveUpdates);
+                // Reaffirmed fills claim ledger ownership without a write
+                // (codex P1 r4): the caller restated a value the lead
+                // already carries, so this call's written state records the
+                // CURRENT value with prior = the same — its own rejection
+                // no-ops the field, but a predecessor's rejection now sees
+                // a live successor owner and leaves the value alone.
+                for (const [f, v] of Object.entries(reaffirmedFilledLeadFields(leadUpdates, lockedLead))) {
+                  const sv = serializeStampedLeadValue(f, v);
+                  written[f] = sv;
+                  prior[f] = sv;
+                }
                 // Ledger composition has two live modes — a chronological
                 // restamp was settled above and lands here stamp-less, so
                 // it takes the fresh branch:
@@ -12291,6 +12357,7 @@ CallRecordingProcessor._test = {
   findReusableCallLead,
   applySameCallLeadEligibility,
   dropFilledLeadColumns,
+  reaffirmedFilledLeadFields,
   reconcileConditionalLeadFieldsUnderLock,
   FILL_ONLY_LEAD_FIELDS,
   parseStampedLeadId,

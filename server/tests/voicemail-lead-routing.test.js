@@ -621,3 +621,40 @@ describe('reconcileConditionalLeadFieldsUnderLock — conditional re-decision un
     expect(out.serviceInterestDropped).toBe(false);
   });
 });
+
+describe('reaffirmedFilledLeadFields — successor ownership of restated fills', () => {
+  const { reaffirmedFilledLeadFields } = CallRecordingProcessor._test;
+
+  test('claims a fill the caller restated with the value the lead already carries', () => {
+    // The fill-only drop removed email from the payload, so without the
+    // claim this call's written ledger never owned it — and a predecessor
+    // later reprocessed as spam would restore it to null.
+    const out = reaffirmedFilledLeadFields(
+      { email: 'JBrooks00005@Gmail.com ', first_name: 'Jeff' },
+      { email: 'jbrooks00005@gmail.com', first_name: 'Jeff' },
+    );
+    expect(out).toEqual({ email: 'jbrooks00005@gmail.com', first_name: 'Jeff' });
+  });
+
+  test('a DIFFERING supplied value is not a reaffirmation and claims nothing', () => {
+    const out = reaffirmedFilledLeadFields(
+      { email: 'other@example.com' },
+      { email: 'jbrooks00005@gmail.com' },
+    );
+    expect(out).toEqual({});
+  });
+
+  test('phone compares on the last 10 digits across formats', () => {
+    const out = reaffirmedFilledLeadFields(
+      { phone: '(941) 555-0134' },
+      { phone: '+19415550134' },
+    );
+    expect(out).toEqual({ phone: '+19415550134' });
+  });
+
+  test('empty lead values and unsupplied fields claim nothing', () => {
+    expect(reaffirmedFilledLeadFields({ email: 'a@b.com' }, { email: null })).toEqual({});
+    expect(reaffirmedFilledLeadFields({}, { email: 'a@b.com' })).toEqual({});
+    expect(reaffirmedFilledLeadFields({ email: 'a@b.com' }, null)).toEqual({});
+  });
+});
