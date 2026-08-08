@@ -424,6 +424,20 @@ const gates = {
   // is_callback visits the office already manages).
   reserviceSelfServe: process.env.GATE_RESERVICE_SELF_SERVE === 'true',
 
+  // Re-service request streamline — the picker (/reservice/:token) becomes the
+  // only path for covered re-services (owner ruling 2026-08-08): the portal's
+  // Request Service overlay hands eligible pest/lawn issues to the picker
+  // instead of filing a notify-only service_requests ticket, schedule_change
+  // offers the per-visit /reschedule/:token pages, the legacy
+  // POST /api/schedule/:id/reschedule stops flipping visits to
+  // status='rescheduled' (off the books), and the completion/report/review SMS
+  // carry the customer's standing re-service link. Rides ON TOP of
+  // reserviceSelfServe — with that gate dark nothing here can surface either.
+  // Customer-facing behavior change, so opt-in in EVERY environment.
+  // Kill switch: unset GATE_RESERVICE_STREAMLINE — overlay files tickets,
+  // reschedule flips status, and the SMS line renders empty again.
+  reserviceStreamline: process.env.GATE_RESERVICE_STREAMLINE === 'true',
+
   // Portal "Pay now" — authenticated /billing/balance includes the
   // customer's open-invoice pay links (`openInvoices`) so the Billing tab
   // can offer the existing tokenized /pay checkout in-app instead of the

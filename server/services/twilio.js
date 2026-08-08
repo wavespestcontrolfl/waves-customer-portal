@@ -1020,6 +1020,11 @@ const TwilioService = {
             // caller today, but keep the method correct.
             service_type: service?.service_type || "service",
             portal_url: publicPortalUrl(),
+            // {reservice_line} rides the completion family (EXPAND half —
+            // reservice-link.js). '' unless both re-service gates are on and
+            // the plan grants a lane; unsupplied would suppress the send once
+            // the token lands in the body.
+            reservice_line: await require("./reservice-link").reserviceLineForCustomer(customerId),
           }, { workflow: "service_complete", entity_type: "service_record", entity_id: serviceRecordId })
         : null;
     if (!body) {

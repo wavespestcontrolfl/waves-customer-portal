@@ -534,13 +534,13 @@ describe('deprecated client estimator pricing drift guards', () => {
       ONE_TIME.mosquito.XL,
       ONE_TIME.mosquito.ESTATE,
       ONE_TIME.mosquito.ACRE_CLASS,
-    ]).toEqual([149, 169, 189, 209, 239, 269]);
-    expect(ONE_TIME.mosquito.overAcreIncrementPrice).toBe(40);
+    ]).toEqual([156, 177, 198, 219, 251, 282]);
+    expect(ONE_TIME.mosquito.overAcreIncrementPrice).toBe(42);
 
     // Anchors + 500-sf interpolation must mirror the server curve
     // (service-pricing.js ONE_TIME_MOSQUITO_ANCHOR_SQFT + interpolateMosquitoPrice).
-    expect(source).toContain('const otAnchors = [[7500, 149], [11000, 169], [16000, 189], [24000, 209], [32000, 239], [43560, 269]];');
-    expect(source).toContain('p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;');
+    expect(source).toContain('const otAnchors = [[7500, 156], [11000, 177], [16000, 198], [24000, 219], [32000, 251], [43560, 282]];');
+    expect(source).toContain('p = 282 + Math.ceil((treatableSqFt - 43560) / 10000) * 42;');
     // Retired bands must be gone (2026-06 flat ladder and the 2x-market band).
     expect(source).not.toContain('let p = 99;');
     expect(source).not.toContain('let p = 149;');

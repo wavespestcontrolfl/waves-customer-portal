@@ -3600,6 +3600,24 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ? reportWaveGuardTier
     : null;
 
+  // Self-serve re-service eligibility for the report footer. The footer
+  // already TELLS members "WaveGuard members receive free re-service…" with
+  // no way to act on it — this lets the live view pair the sentence with a
+  // "book it" link. ELIGIBILITY BOOLEAN ONLY, never the reservice_token: the
+  // report is a forwardable public bearer link, and embedding the standing
+  // token would escalate report-view into unauthenticated booking capability
+  // (pre-push audit P0, 2026-08-08) — the client links to the AUTHENTICATED
+  // portal Schedule tab (?tab=schedule), where the picker card already
+  // renders behind login. Gated (GATE_RESERVICE_STREAMLINE +
+  // GATE_RESERVICE_SELF_SERVE) and lane-checked through the same shared
+  // eligibility helper the SMS clause uses; false renders the footer exactly
+  // as it reads today. Best-effort — never blocks the report.
+  let reserviceEligible = false;
+  try {
+    const { reserviceStreamlineAccess } = require('../reservice-link');
+    reserviceEligible = !!(await reserviceStreamlineAccess(service.customer_id));
+  } catch { /* footer link is optional */ }
+
   // Lawn Report V2 — THE lawn report (owner ruling 2026-07-09; the
   // LAWN_REPORT_V2 env flag is retired). Deterministic structure
   // (diagnosis / water / mowing / treatment / trends) from the data already
@@ -4249,6 +4267,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // report viewer to suppress the per-visit "Time on site" duration for members while
     // non-member reports honor the admin showDuration setting.
     waveGuardTier,
+    // Self-serve re-service eligibility (false while the streamline gate is
+    // dark or the plan grants no lane) — the footer's "free re-service"
+    // sentence links to the authenticated portal Schedule tab in the live
+    // view. Boolean only; the standing token never rides the public report.
+    reserviceEligible,
     serviceAddress: compactAddress(service),
     propertyAddress: compactAddress(service),
     mapCenter,

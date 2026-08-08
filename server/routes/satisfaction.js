@@ -147,6 +147,10 @@ router.post('/', async (req, res, next) => {
       // applies the gates, and records the row.
       let asked = { outcome: 'send_failed' };
       try {
+        // #3288's {reservice_line} contract holds through the fold: the
+        // gated path renders via ReviewService.sendSMS, whose render site
+        // supplies reservice_line (review-request.js) — this route no longer
+        // renders the template itself.
         asked = await ReviewService.sendGatedAsk({
           customerId: customer.id,
           customer,

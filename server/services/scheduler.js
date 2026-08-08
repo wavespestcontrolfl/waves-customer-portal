@@ -1159,14 +1159,17 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
-  // QUARTERLY (Jan/Apr/Jul/Oct 1st, 4AM) — Competitor keyword gap mining.
-  // Pulls tracked competitors' ranked keywords from DataForSEO Labs, diffs
-  // against our rankings + live sitemap, enqueues blog gaps the GSC/AEO
-  // miners structurally can't see (zero-footprint topics). ~$1.30/run.
+  // MONTHLY (1st, 4AM) — Competitor keyword gap mining. Pulls tracked
+  // competitors' ranked keywords from DataForSEO Labs, diffs against our
+  // rankings + live sitemap, enqueues blog gaps the GSC/AEO miners
+  // structurally can't see (zero-footprint topics). ~$1.30/run.
+  // Monthly matches the queue's 30-day row expiry — on the original
+  // quarterly cadence, 96 of 157 mined rows expired unclaimed during the
+  // 60-day dead window between shelf life and the next revival re-mine.
   // runExclusive: the Labs pulls cost real money — never double-run.
-  cron.schedule('0 4 1 1,4,7,10 *', async () => {
+  cron.schedule('0 4 1 * *', async () => {
     if (!isEnabled('seoIntelligence')) return;
-    logger.info('Running: Competitor keyword gap mining (quarterly)');
+    logger.info('Running: Competitor keyword gap mining (monthly)');
     try {
       await runExclusive('competitor-gap-miner', async () => {
         const miner = require('./seo/competitor-gap-miner');

@@ -33,6 +33,7 @@
 const InvoiceService = require('./invoice');
 const { computeProposalTotals } = require('./estimate-proposal');
 const { etDateString } = require('../utils/datetime-et');
+const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const logger = require('./logger');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 
@@ -41,7 +42,7 @@ const { applyContactNormalization } = require('../utils/intake-normalize');
 const REAL_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
 // Stages whose member_since is a genuine customer start to preserve; anything
 // else is a pre-sale lead-intake date that conversion overwrites.
-const FORMER_OR_CURRENT_CUSTOMER_STAGES = new Set([...REAL_CUSTOMER_STAGES, 'churned', 'dormant']);
+const FORMER_OR_CURRENT_CUSTOMER_STAGES = new Set([...REAL_CUSTOMER_STAGES, ...FORMER_CUSTOMER_STAGES]);
 
 // Human label for the first occurrence of each recurring cadence, appended to
 // the invoice line so a board reader knows the recurring price is one period.

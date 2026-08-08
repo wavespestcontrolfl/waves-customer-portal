@@ -62,9 +62,10 @@ import {
 export function oneTimeMosquitoLadderPrice(treatableSqFt) {
   let p;
   if (treatableSqFt > 43560) {
-    p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;
+    // Repriced 2026-08-08 (owner +5% across the board): 282 base + $42/10k.
+    p = 282 + Math.ceil((treatableSqFt - 43560) / 10000) * 42;
   } else {
-    const otAnchors = [[7500, 149], [11000, 169], [16000, 189], [24000, 209], [32000, 239], [43560, 269]];
+    const otAnchors = [[7500, 156], [11000, 177], [16000, 198], [24000, 219], [32000, 251], [43560, 282]];
     const stepped = Math.ceil(Math.max(0, treatableSqFt) / 500) * 500;
     p = otAnchors[otAnchors.length - 1][1];
     if (stepped <= otAnchors[0][0]) {
@@ -2413,11 +2414,14 @@ export function calculateEstimate(inputs) {
     // price matches what the server actually charges.
     // Terminal (ACRE) anchors extend past one acre at the previous segment's
     // slope so the per-500-sf increment keeps declining into the widest lots
-    // (mirrors mosquitoRecurringAnchors: 35000 + ceil((97-86)/((86-79)/17000)/500)*500
-    // = 62000 seasonal; 35000 + ceil((86-77)/((77-73)/17000)/500)*500 = 73500 monthly).
+    // (mirrors mosquitoRecurringAnchors: 35000 + ceil((102-90)/((90-83)/17000)/500)*500
+    // = 64500 seasonal; 35000 + ceil((90-81)/((81-77)/17000)/500)*500 = 73500 monthly).
+    // Values repriced 2026-08-08 (owner +5% across the board, rounded
+    // half-up) — must stay in sync with MOSQUITO.basePrices and the live
+    // mosquito_base_prices row (migration 20260808010000).
     const mqAnchors = {
-      seasonal9: [[8000, 73], [12000, 76], [18000, 79], [35000, 86], [62000, 97]],
-      monthly12: [[8000, 66], [12000, 69], [18000, 73], [35000, 77], [73500, 86]],
+      seasonal9: [[8000, 77], [12000, 80], [18000, 83], [35000, 90], [64500, 102]],
+      monthly12: [[8000, 69], [12000, 72], [18000, 77], [35000, 81], [73500, 90]],
     };
     const mqInterp = (anchors, sqft) => {
       const stepped = Math.ceil(Math.max(0, sqft) / 500) * 500;
@@ -2432,9 +2436,16 @@ export function calculateEstimate(inputs) {
       return anchors[anchors.length - 1][1];
     };
     const ri = (pr >= 1.30 || nearWater || treeDensity === 'HEAVY') ? 1 : 0;
+    // Cadence bound (server mosquitoBoundedBasePrice mirror, owner GO
+    // 2026-08-08): Monthly-12 per-visit never above Seasonal-9 at the same
+    // size — an admin table edit that inverted the relation must not sell
+    // the denser program at a per-visit premium. Pressure multiplies both
+    // identically, so bounding the interpolated base bounds the price.
+    const mqSeasonalBase = mqInterp(mqAnchors.seasonal9, mqPricingSqFt);
+    const mqMonthlyBase = Math.min(mqInterp(mqAnchors.monthly12, mqPricingSqFt), mqSeasonalBase);
     const mt = [
-      { n: 'Seasonal Mosquito Program (9 visits)', pv: Math.round(mqInterp(mqAnchors.seasonal9, mqPricingSqFt) * pr), v: 9, tier: 'seasonal9' },
-      { n: 'Monthly Mosquito Program (12 visits)', pv: Math.round(mqInterp(mqAnchors.monthly12, mqPricingSqFt) * pr), v: 12, tier: 'monthly12' },
+      { n: 'Seasonal Mosquito Program (9 visits)', pv: Math.round(mqSeasonalBase * pr), v: 9, tier: 'seasonal9' },
+      { n: 'Monthly Mosquito Program (12 visits)', pv: Math.round(mqMonthlyBase * pr), v: 12, tier: 'monthly12' },
     ];
     R.mq = [];
     R.mqMeta = { pr: prDisplay, sz, ri, treatableSqFt, grossLotCategory };
