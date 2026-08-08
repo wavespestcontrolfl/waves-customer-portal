@@ -146,6 +146,65 @@ describe('etDayAnchor — ET-safe window math', () => {
   });
 });
 
+describe('launchVerdict — net-new pages, no baseline to diff against', () => {
+  const { launchVerdict } = tracker;
+  const L = (impressions, clicks, position) => launchVerdict({ window: { impressions, clicks, position } });
+
+  test('a real launch that earns traffic reads as improved', () => {
+    // The prod page that exposed this: 8,283 impressions, filed as
+    // insufficient_data by the diff regime because it had no "before".
+    expect(L(8283, 120, 8).verdict).toBe('improved');
+    expect(L(166, 3, 14).verdict).toBe('improved');
+  });
+
+  test('impressions alone are enough when the page is actually ranking', () => {
+    expect(L(60, 0, 12).verdict).toBe('improved');
+  });
+
+  test('registered but going nowhere is neutral, not a failure to measure', () => {
+    expect(L(60, 0, null).verdict).toBe('neutral');   // volume, no rank, no clicks
+    expect(L(60, 0, 55).verdict).toBe('neutral');     // ranking too deep to matter
+    expect(L(10, 2, 9).verdict).toBe('neutral');      // clicks prove it is real, volume too thin to call
+  });
+
+  test('genuinely nothing yet is insufficient_data', () => {
+    expect(L(0, 0, null).verdict).toBe('insufficient_data');
+    expect(L(12, 0, null).verdict).toBe('insufficient_data');
+  });
+
+  test('NEVER regressed — pausedBuckets counts those, and a dud launch must not pause a lane', () => {
+    const matrix = [[0, 0, null], [5, 0, 90], [60, 0, null], [8283, 120, 1], [29, 0, 3], [30, 0, 21]];
+    for (const [i, c, pos] of matrix) expect(L(i, c, pos).verdict).not.toBe('regressed');
+  });
+
+  test('confidence reflects volume, and lift stays null (a diff-regime concept)', () => {
+    expect(L(200, 5, 3).confidence).toBe(1);
+    expect(L(50, 0, 10).confidence).toBe(0.25);
+    expect(L(8283, 120, 8).estimated_lift_position).toBeNull();
+    expect(L(8283, 120, 8).estimated_lift_clicks_pct).toBeNull();
+  });
+});
+
+describe('computeVerdict routing', () => {
+  test('isLaunch bypasses the baseline/control short-circuit entirely', () => {
+    const args = { baseline: { impressions: 0, clicks: 0, position: 0 }, window: { impressions: 900, clicks: 20, position: 6 }, controlDeltas: [] };
+    // Same inputs: the diff regime cannot grade it, the launch regime can.
+    expect(computeVerdict(args).verdict).toBe('insufficient_data');
+    expect(computeVerdict({ ...args, isLaunch: true }).verdict).toBe('improved');
+  });
+
+  test('a REFRESH still gets the control-adjusted diff regime', () => {
+    const r = computeVerdict({
+      baseline: { position: 15, clicks: 50, impressions: 2000 },
+      window: { position: 10, clicks: 80, impressions: 2200 },
+      controlDeltas: [{ position_delta: 0, clicks_pct: 5 }, { position_delta: 0, clicks_pct: 0 }],
+      isLaunch: false,
+    });
+    expect(r.verdict).toBe('improved');
+    expect(r.estimated_lift_position).not.toBeNull();
+  });
+});
+
 describe('computeVerdict (diff-in-diff)', () => {
   const ctrlFlat = [{ position_delta: 0, clicks_pct: 5 }, { position_delta: 0, clicks_pct: 0 }];
 

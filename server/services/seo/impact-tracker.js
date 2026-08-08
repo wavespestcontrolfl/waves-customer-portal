@@ -44,6 +44,22 @@ const LIFT_POSITION_REGRESSED = -3;
 const LIFT_CLICKS_REGRESSED_PCT = -25;
 const REGRESSION_PAUSE_THRESHOLD = 3;
 
+// ── launch regime (net-new pages) ───────────────────────────────────
+// A brand-new page has NO trailing-28d baseline — it did not exist — so
+// diff-in-differences cannot grade it: baseline impressions are 0 by
+// definition and the insufficient_data short-circuit fires every single time.
+// In prod that was 100% of measured rows (28/28 insufficient_data, across
+// pages holding 287 clicks and up to 8,283 impressions between them). The
+// engine mostly PUBLISHES rather than refreshes, so the measurement design and
+// the work being measured were mismatched.
+//
+// Launches are therefore graded on what the page ACTUALLY EARNED. Refreshes
+// keep the control-adjusted diff-in-diff below, which is correct for them and
+// starts mattering as soon as the refresh lanes carry real volume.
+const LAUNCH_ACTION_TYPES = new Set(['new_supporting_blog']);
+const LAUNCH_MIN_IMPRESSIONS = 30;  // same "did it register at all" floor
+const LAUNCH_RANKED_POSITION = 20;  // ranking somewhere a human might see it
+
 // AEO visibility feedback loop (aeo_gap rows only).
 const AEO_REPROBE_DAYS = 21;        // wait this many days post-deploy before judging
 const AEO_MIN_OBSERVATIONS = 5;     // distinct post-deploy probe-days needed for a verdict
@@ -55,6 +71,36 @@ function aeoVerdict({ observedDays, wavesHitDays, minObservations = AEO_MIN_OBSE
   if (observedDays < minObservations) return { verdict: 'insufficient_data', nowCited: null };
   const nowCited = wavesHitDays > 0;
   return { verdict: nowCited ? 'now_cited' : 'still_absent', nowCited };
+}
+
+/**
+ * Pure: grade a NET-NEW page on what it earned, with no baseline to diff.
+ *
+ * Never returns 'regressed'. A page cannot lose ground it never had, and
+ * pausedBuckets counts regressed rows — so a dud launch must not be able to
+ * pause an entire content lane. A launch that goes nowhere is 'neutral'.
+ *
+ * `confidence` here answers "is there enough data to call this yet", NOT the
+ * control-adjusted noise question the diff regime asks — a launch has no
+ * control to adjust against, so borrowing MIN_CONFIDENCE would be meaningless.
+ */
+function launchVerdict({ window: win } = {}) {
+  const impressions = Number(win?.impressions) || 0;
+  const clicks = Number(win?.clicks) || 0;
+  const position = win?.position == null ? null : Number(win.position);
+  const ranked = position != null && position > 0 && position <= LAUNCH_RANKED_POSITION;
+  const confidence = Math.round(Math.min(1, impressions / 200) * 100) / 100;
+
+  let verdict;
+  if (impressions < LAUNCH_MIN_IMPRESSIONS && clicks === 0) {
+    verdict = 'insufficient_data';           // genuinely nothing to judge yet
+  } else if (impressions >= LAUNCH_MIN_IMPRESSIONS && (clicks > 0 || ranked)) {
+    verdict = 'improved';                    // it launched and it is earning
+  } else {
+    verdict = 'neutral';                     // registered, but going nowhere
+  }
+  // Lift is a diff-regime concept; leaving it null is honest for a launch.
+  return { verdict, confidence, estimated_lift_position: null, estimated_lift_clicks_pct: null };
 }
 
 function median(nums) {
@@ -90,8 +136,11 @@ function confidenceScore({ baselineImpressions, windowImpressions, controlCount 
  *
  * baseline / window: { position, clicks, impressions }
  * controlDeltas: [{ position_delta, clicks_pct }] for each control page.
+ * isLaunch: the run PUBLISHED this page rather than changing an existing one,
+ *   so there is no baseline to difference against — see launchVerdict.
  */
-function computeVerdict({ baseline, window, controlDeltas = [] }) {
+function computeVerdict({ baseline, window, controlDeltas = [], isLaunch = false }) {
+  if (isLaunch) return launchVerdict({ window });
   const baselineImpr = Number(baseline?.impressions) || 0;
   const windowImpr = Number(window?.impressions) || 0;
   const controlCount = controlDeltas.length;
@@ -458,7 +507,7 @@ function draftPayloadUrl(value) {
 
 // ── measurement sweep ───────────────────────────────────────────────
 
-async function measureWindow(database, impactRow, days) {
+async function measureWindow(database, impactRow, days, { isLaunch = false } = {}) {
   const start = impactRow.measurement_start;
   const end = etDateString(addETDays(etDayAnchor(impactRow.measurement_start), days));
   const page = await aggregatePageMetrics(database, impactRow.page_url, start, end);
@@ -482,7 +531,7 @@ async function measureWindow(database, impactRow, days) {
     clicks: impactRow.baseline_clicks,
     impressions: impactRow.baseline_impressions,
   };
-  const verdict = computeVerdict({ baseline, window: page, controlDeltas });
+  const verdict = computeVerdict({ baseline, window: page, controlDeltas, isLaunch });
 
   // Target-query view (display only — the diff-in-diff verdict above stays
   // the authoritative call). One entry per frozen cohort query.
@@ -524,10 +573,14 @@ async function checkPending({ db: database = db, now = new Date() } = {}) {
   const today = etDateString(now);
   let rows = [];
   try {
-    rows = await database('content_optimization_impact')
-      .whereNotNull('measurement_start')
-      .where((b) => b.whereNull('checked_21d_at').orWhereNull('checked_14d_at'))
-      .select('*');
+    // action_type comes from the RUN, not inferred from a zero baseline: an
+    // existing page can legitimately have had no impressions, and grading that
+    // as a launch would call a flat refresh a successful publication.
+    rows = await database('content_optimization_impact as i')
+      .leftJoin('autonomous_runs as r', 'r.id', 'i.run_id')
+      .whereNotNull('i.measurement_start')
+      .where((b) => b.whereNull('i.checked_21d_at').orWhereNull('i.checked_14d_at'))
+      .select('i.*', 'r.action_type as run_action_type');
   } catch (err) {
     logger.warn(`[impact-tracker] checkPending query failed: ${err.message}`);
     return { checked: 0, error: err.message };
@@ -535,12 +588,13 @@ async function checkPending({ db: database = db, now = new Date() } = {}) {
 
   let checked = 0;
   for (const row of rows) {
+    const isLaunch = LAUNCH_ACTION_TYPES.has(row.run_action_type);
     const day14 = etDateString(addETDays(etDayAnchor(row.measurement_start), 14));
     const day21 = etDateString(addETDays(etDayAnchor(row.measurement_start), 21));
     const patch = { updated_at: now };
 
     if (!row.checked_14d_at && today >= day14) {
-      const r = await measureWindow(database, row, 14);
+      const r = await measureWindow(database, row, 14, { isLaunch });
       patch.metrics_14d = JSON.stringify({ ...r.page, target_queries: r.targetQueries });
       patch.control_delta_14d = JSON.stringify({ deltas: r.controlDeltas });
       patch.checked_14d_at = now;
@@ -551,7 +605,7 @@ async function checkPending({ db: database = db, now = new Date() } = {}) {
       patch.estimated_lift_clicks_pct = r.verdict.estimated_lift_clicks_pct;
     }
     if (!row.checked_21d_at && today >= day21) {
-      const r = await measureWindow(database, row, 21);
+      const r = await measureWindow(database, row, 21, { isLaunch });
       patch.metrics_21d = JSON.stringify({ ...r.page, target_queries: r.targetQueries });
       patch.control_delta_21d = JSON.stringify({ deltas: r.controlDeltas });
       patch.checked_21d_at = now;
@@ -674,10 +728,12 @@ module.exports = {
   // exposed for tests / reuse
   aggregatePageMetrics,
   selectControlPages,
+  launchVerdict,
   _internals: { median, clicksPct, positionDelta, confidenceScore, etDayAnchor, parseAstroPrNumber, resolveRunPageUrl, aeoVerdict, normalizeQueryCohort, queryLift, domainFromUrl },
   THRESHOLDS: {
     BASELINE_DAYS, DEPLOY_LAG_DAYS, MIN_IMPRESSIONS, MIN_CONFIDENCE,
     LIFT_POSITION_IMPROVED, LIFT_CLICKS_IMPROVED_PCT,
     LIFT_POSITION_REGRESSED, LIFT_CLICKS_REGRESSED_PCT, REGRESSION_PAUSE_THRESHOLD,
+    LAUNCH_MIN_IMPRESSIONS, LAUNCH_RANKED_POSITION, LAUNCH_ACTION_TYPES,
   },
 };
