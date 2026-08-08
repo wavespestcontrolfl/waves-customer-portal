@@ -55,6 +55,7 @@ function buildServiceReportV1SmsVars({
   reportUrl,
   payUrl,
   serviceType,
+  reserviceLine,
 } = {}) {
   const url = String(reportUrl || '').trim();
   if (!url) return null;
@@ -76,6 +77,15 @@ function buildServiceReportV1SmsVars({
     service_type: serviceTypeLabel(serviceType),
     reentry_line: '',
     pay_url: String(payUrl || '').trim(),
+    // EXPAND half for the re-service streamline (same rollout discipline as
+    // service_type above): supplied at every render site BEFORE any template
+    // body carries {reservice_line}. The clause is computed by the caller
+    // (reservice-link.reserviceLineForCustomer) and is '' unless
+    // GATE_RESERVICE_STREAMLINE + GATE_RESERVICE_SELF_SERVE are both on AND
+    // the customer's live plan grants a re-service lane. The contract half —
+    // the migration appending the token to the bodies — ships as a separate
+    // PR once this is deployed.
+    reservice_line: typeof reserviceLine === 'string' ? reserviceLine : '',
   };
 }
 
@@ -85,6 +95,7 @@ function buildServiceReportV1DeliveryContext({
   reportUrl,
   smsReportUrl,
   payUrl,
+  reserviceLine,
 } = {}) {
   if (!shouldSendServiceReportV1Delivery(record)) {
     return { enabled: false, smsType: null, metadata: {} };
@@ -102,6 +113,7 @@ function buildServiceReportV1DeliveryContext({
     reportUrl: smsReportUrl || reportUrl,
     payUrl,
     serviceType,
+    reserviceLine,
   });
   return {
     enabled: true,

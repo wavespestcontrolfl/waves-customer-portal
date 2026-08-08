@@ -10016,6 +10016,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // normalize, and resolveTracedExteriorZone queries scheduled_services,
         // resolves a completion profile and reads treatment_zone_maps — real
         // synchronous work on every completion whose result would be discarded.
+        // {reservice_line} for every completion-family template (EXPAND half —
+        // supplied before any body carries the token; see
+        // service-report/delivery.js). '' unless GATE_RESERVICE_STREAMLINE +
+        // GATE_RESERVICE_SELF_SERVE are on and the plan grants a lane, so
+        // today's renders are byte-identical. Never throws.
+        const { reserviceLineForCustomer } = require('../services/reservice-link');
+        const completionReserviceLine = await reserviceLineForCustomer(svc.customer_id);
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
             record,
@@ -10023,6 +10030,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             reportUrl,
             smsReportUrl: reportSmsUrl,
             payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
+            reserviceLine: completionReserviceLine,
           })
           : null;
         // A billed report-v1 visit may take the report lane only when the
@@ -10079,6 +10087,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
               pay_url: payUrl,
+              reservice_line: completionReserviceLine,
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
@@ -10094,6 +10103,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             service_type: displayServiceType,
             portal_url: reportSmsUrl || reportUrl,
             pay_url: payUrl,
+            reservice_line: completionReserviceLine,
           }, {
             workflow: 'dispatch_service_complete',
             entity_type: 'service_record',
@@ -10115,6 +10125,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
+              reservice_line: completionReserviceLine,
             };
             const paidTemplateContext = {
               workflow: 'dispatch_service_complete',
@@ -10168,6 +10179,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
+              reservice_line: completionReserviceLine,
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',

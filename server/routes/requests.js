@@ -182,6 +182,33 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       });
     }
 
+    // Streamline (GATE_RESERVICE_STREAMLINE, owner ruling 2026-08-08): a
+    // covered pest/lawn issue books through the /reservice/:token picker, not
+    // a ticket — the notify-then-hand-send step is the one being deleted, and
+    // the ticket queue is a proven black hole (14 requests, zero resolved).
+    // Enforced server-side so an older cached client can't keep filing
+    // tickets the overlay no longer offers. Only the customer's OWN granted
+    // lane is refused; ineligible plans (mosquito/termite/tree&shrub/
+    // one-time/lapsed) still file tickets — those genuinely are office calls.
+    // Fail-open on lookup errors: a broken eligibility check must not block a
+    // customer from reporting a problem.
+    if (category === 'pest_issue' || category === 'lawn_concern') {
+      try {
+        const { reserviceStreamlineAccess } = require('../services/reservice-link');
+        const access = await reserviceStreamlineAccess(req.customer.id);
+        const lane = category === 'pest_issue' ? 'pest' : 'lawn';
+        if (access && access.lanes.includes(lane)) {
+          return res.status(409).json({
+            error: 'Good news — this is covered by your plan. Book your free re-service from the Schedule tab (or the link in your service texts) and it goes straight on the calendar.',
+            code: 'use_reservice_picker',
+            reserviceUrl: `/reservice/${access.token}`,
+          });
+        }
+      } catch (eligibilityErr) {
+        logger.warn(`Reservice eligibility check failed for ${req.customer.id}: ${eligibilityErr.message}`);
+      }
+    }
+
     // A cancellation must have something to cancel. The client gates the
     // Pause/Cancel controls, but the API accepts category 'cancellation' from
     // any authenticated customer — without this guard an account with no
