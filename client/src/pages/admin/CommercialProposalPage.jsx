@@ -232,6 +232,11 @@ export default function CommercialProposalPage() {
   // keystrokes made after clicking Save (codex #3297 r5).
   const editGenRef = React.useRef(0);
   const markEdit = () => { editGenRef.current += 1; setDirty(true); };
+  // Building-ITEMIZATION edits specifically — generation's authored-lines
+  // guard keys on this, never on the global dirty flag (an unrelated
+  // title/scope edit must not block program generation — codex 1A-ii r2).
+  const buildingsEditedRef = React.useRef(false);
+  const markBuildingsEdit = () => { buildingsEditedRef.current = true; markEdit(); };
 
   const applyLoaded = useCallback((data) => {
     const p = data.proposal || {};
@@ -290,6 +295,7 @@ export default function CommercialProposalPage() {
     // An already-authored proposal means download/send are meaningful now.
     setSavedOnce(p.enabled === true);
     setLoadedAuthored(p.enabled === true && p.synthesized !== true);
+    buildingsEditedRef.current = false;
     setDirty(false);
   }, []);
 
@@ -347,7 +353,7 @@ export default function CommercialProposalPage() {
       // proposal was actually operator-authored or the operator edited this
       // session — a never-saved draft shows the server's SYNTHESIZED
       // fallback lines, which generation may freely replace (codex 1A-ii r1).
-      const hasAuthoredBuildingLines = (live.loadedAuthored || live.dirty)
+      const hasAuthoredBuildingLines = (live.loadedAuthored || buildingsEditedRef.current)
         && live.buildings.some((b) => (b.lineItems || []).some((l) => String(l.description || '').trim()));
       if (draft?.programs?.length && !live.programsState.some((p) => p.label.trim()) && !hasAuthoredBuildingLines) {
         setProgramsState(draft.programs.map((program) => ({
@@ -360,6 +366,15 @@ export default function CommercialProposalPage() {
           inclusionsText: (program.inclusions || []).join('\n'),
           exclusionsText: (program.exclusions || []).join('\n'),
           coversText: '',
+        })));
+        filled += 1;
+      }
+      if (draft?.correctiveWork?.length && !live.correctiveWork.some((w) => String(w.label || '').trim())) {
+        setCorrectiveWork(draft.correctiveWork.map((w) => ({
+          label: w.label,
+          amount: w.amount,
+          taxable: w.taxable === true,
+          includesText: (w.includes || []).join('\n'),
         })));
         filled += 1;
       }
@@ -385,7 +400,7 @@ export default function CommercialProposalPage() {
   const touch = () => markEdit();
 
   const mutateBuilding = useCallback((bi, fn) => {
-    markEdit();
+    markBuildingsEdit();
     setBuildings((prev) => prev.map((b, i) => (i === bi ? fn(b) : b)));
   }, []);
 
@@ -398,9 +413,9 @@ export default function CommercialProposalPage() {
   const addLine = (bi) => mutateBuilding(bi, (b) => ({ ...b, lineItems: [...b.lineItems, emptyLine()] }));
   const removeLine = (bi, li) =>
     mutateBuilding(bi, (b) => ({ ...b, lineItems: b.lineItems.filter((_, i) => i !== li) }));
-  const addBuilding = () => { markEdit(); setBuildings((prev) => [...prev, emptyBuilding(prev.length)]); };
+  const addBuilding = () => { markBuildingsEdit(); setBuildings((prev) => [...prev, emptyBuilding(prev.length)]); };
   const duplicateBuilding = (bi) => {
-    markEdit();
+    markBuildingsEdit();
     setBuildings((prev) => {
       const src = prev[bi];
       const copy = {
@@ -411,7 +426,7 @@ export default function CommercialProposalPage() {
       return [...prev.slice(0, bi + 1), copy, ...prev.slice(bi + 1)];
     });
   };
-  const removeBuilding = (bi) => { markEdit(); setBuildings((prev) => prev.filter((_, i) => i !== bi)); };
+  const removeBuilding = (bi) => { markBuildingsEdit(); setBuildings((prev) => prev.filter((_, i) => i !== bi)); };
 
   // Render-assigned mirror of the current form state: save()'s retry loop
   // runs inside ONE async closure, whose captured state variables freeze at

@@ -273,6 +273,72 @@ function derivePrograms(estimateData, estimate = {}) {
   return { programs: programs.length ? programs : null, warning: null };
 }
 
+// One-time priced work → corrective-work drafts. Programs mode omits the
+// building lines on save and the PUT recomputes onetime_total from
+// corrective work, so a generated draft that ignored priced one-time rows
+// would ERASE an authoritative one-time charge when saved (pre-push codex
+// P0). Same authority discipline as programs: reconcile against the stored
+// onetime_total to the cent or fail the whole monetary draft.
+function deriveCorrectiveWork(estimateData, estimate = {}) {
+  const engineResult = estimateData.result || estimateData.engineResult || estimateData || {};
+  const fromOneTime = Array.isArray(engineResult.oneTime?.items) ? engineResult.oneTime.items : [];
+  const fromLineItems = Array.isArray(engineResult.lineItems)
+    ? engineResult.lineItems.filter((line) => num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime) > 0)
+    : [];
+  const work = [];
+  for (const item of fromOneTime) {
+    const amount = num(item.priceAfterDiscount ?? item.price ?? item.amount ?? item.total);
+    if (!(amount > 0)) continue;
+    work.push({
+      label: String(item.label || item.name || item.service || 'One-time service').slice(0, 160),
+      amount: Math.round(amount * 100) / 100,
+      taxable: item.taxable === true,
+      includes: item.detail ? [String(item.detail).slice(0, 200)] : [],
+    });
+  }
+  for (const line of fromLineItems) {
+    const amount = num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime);
+    if (!(amount > 0)) continue;
+    work.push({
+      label: String(line.displayName || line.name || line.service || 'One-time service').slice(0, 160),
+      amount: Math.round(amount * 100) / 100,
+      taxable: line.taxable === true,
+      includes: [],
+    });
+  }
+  const storedOneTime = num(estimate.onetime_total);
+  if (!work.length) {
+    // A positive stored one-time total with NO representable rows must fail
+    // the draft — programs-mode saving would recompute onetime_total to
+    // zero and erase the charge (pre-push codex P0).
+    if (storedOneTime > 0) {
+      return {
+        correctiveWork: null,
+        warning: `One-time work was not generated: the estimate carries a $${storedOneTime.toFixed(2)} one-time total but no representable one-time items were found. Author the corrective work manually so the charge is fully represented.`,
+      };
+    }
+    return { correctiveWork: null, warning: null };
+  }
+  if (work.length > 24) {
+    // The PUT caps corrective work at 24 items — truncating monetary rows
+    // is never acceptable (pre-push codex P0).
+    return {
+      correctiveWork: null,
+      warning: `One-time work was not generated: the estimate has ${work.length} one-time items and proposals are limited to 24 corrective-work lines. Author the corrective work manually.`,
+    };
+  }
+  if (storedOneTime > 0) {
+    const generated = Math.round(work.reduce((acc, w) => acc + w.amount, 0) * 100) / 100;
+    if (Math.round(generated * 100) !== Math.round(storedOneTime * 100)) {
+      return {
+        correctiveWork: null,
+        warning: `One-time work was not generated: the priced one-time items sum to $${generated.toFixed(2)} but the estimate's one-time total is $${storedOneTime.toFixed(2)}. Author the corrective work manually so the one-time charge is fully represented.`,
+      };
+    }
+  }
+  return { correctiveWork: work, warning: null };
+}
+
 function deriveResponsibilities(programs) {
   if (!programs) return null;
   const seen = new Set();
@@ -295,17 +361,26 @@ function deriveResponsibilities(programs) {
 function deriveProposalDraft(estimate = {}) {
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
   const { programs, warning } = derivePrograms(estimateData, estimate);
+  const { correctiveWork, warning: oneTimeWarning } = deriveCorrectiveWork(estimateData, estimate);
+  // A monetary draft is all-or-nothing across BOTH sides: installing
+  // programs while the one-time side failed (or vice versa) would save an
+  // itemization missing a priced charge and rewrite the authoritative
+  // totals without it (pre-push codex P0).
+  const warnings = [warning, oneTimeWarning].filter(Boolean);
+  const monetaryOk = warnings.length === 0;
   return {
     propertyScope: derivePropertyScope(estimateData),
-    programs,
-    customerResponsibilities: deriveResponsibilities(programs),
-    warnings: warning ? [warning] : [],
+    programs: monetaryOk ? programs : null,
+    correctiveWork: monetaryOk ? correctiveWork : null,
+    customerResponsibilities: deriveResponsibilities(monetaryOk ? programs : null),
+    warnings,
   };
 }
 
 module.exports = {
   deriveProposalDraft,
   derivePrograms,
+  deriveCorrectiveWork,
   derivePropertyScope,
   deriveResponsibilities,
   programFamilyForService,

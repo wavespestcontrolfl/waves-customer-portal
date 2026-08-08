@@ -212,8 +212,61 @@ describe('deriveProposalDraft', () => {
     expect(mismatched.warnings[0]).toMatch(/annual total/);
   });
 
+  test('derives one-time work into corrective drafts, all-or-nothing with programs (pre-push P0)', () => {
+    const withOneTime = deriveProposalDraft({
+      onetime_total: 275,
+      estimate_data: {
+        result: {
+          recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] },
+          oneTime: { items: [{ service: 'pest_initial_roach', name: 'German Cockroach Treatment', price: 275, detail: 'Includes 1 treatment visit.' }] },
+        },
+      },
+    });
+    expect(withOneTime.correctiveWork).toEqual([{
+      label: 'German Cockroach Treatment', amount: 275, taxable: false, includes: ['Includes 1 treatment visit.'],
+    }]);
+    expect(withOneTime.programs).toHaveLength(1);
+
+    // A one-time mismatch with the stored onetime_total fails the WHOLE
+    // monetary draft — programs must not install without the one-time side.
+    const mismatch = deriveProposalDraft({
+      onetime_total: 300,
+      estimate_data: {
+        result: {
+          recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] },
+          oneTime: { items: [{ name: 'Cleanout', price: 275 }] },
+        },
+      },
+    });
+    expect(mismatch.programs).toBeNull();
+    expect(mismatch.correctiveWork).toBeNull();
+    expect(mismatch.warnings[0]).toMatch(/one-time total/);
+  });
+
+  test('a stored one-time total with no representable rows, or >24 items, fails the draft (pre-push P0)', () => {
+    const orphanTotal = deriveProposalDraft({
+      onetime_total: 275,
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
+      },
+    });
+    expect(orphanTotal.programs).toBeNull();
+    expect(orphanTotal.correctiveWork).toBeNull();
+    expect(orphanTotal.warnings[0]).toMatch(/no representable one-time items/);
+
+    const tooMany = deriveProposalDraft({
+      estimate_data: {
+        result: {
+          oneTime: { items: Array.from({ length: 25 }, (_, i) => ({ name: `Item ${i}`, price: 10 })) },
+        },
+      },
+    });
+    expect(tooMany.correctiveWork).toBeNull();
+    expect(tooMany.warnings[0]).toMatch(/limited to 24/);
+  });
+
   test('returns null sections for an estimate with nothing to derive', () => {
     const draft = deriveProposalDraft({ estimate_data: {} });
-    expect(draft).toEqual({ propertyScope: null, programs: null, customerResponsibilities: null, warnings: [] });
+    expect(draft).toEqual({ propertyScope: null, programs: null, correctiveWork: null, customerResponsibilities: null, warnings: [] });
   });
 });
