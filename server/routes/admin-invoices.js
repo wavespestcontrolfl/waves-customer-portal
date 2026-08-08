@@ -812,7 +812,12 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
       try {
         // The batch path pairs every SMS with the sendReceiptEmail attempt
         // above — declare the sidecar so email-only customers skip the text.
-        const r = await InvoiceService.sendReceipt(invoiceId, { hasEmailLeg: true });
+        // operatorInitiated: the admin confirmed "Send N receipts via
+        // SMS + email?" for these specific invoices, same as the single
+        // manual-resend routes below — without it an after-hours batch
+        // holds the SMS leg, the email success stamps receipt_sent_at,
+        // and the chosen text is dropped for good.
+        const r = await InvoiceService.sendReceipt(invoiceId, { hasEmailLeg: true, operatorInitiated: true });
         if (r?.sent) {
           smsOk = true;
         } else {

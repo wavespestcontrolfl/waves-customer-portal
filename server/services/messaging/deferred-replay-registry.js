@@ -94,6 +94,14 @@ const REGISTRY = {
       return finalizeDeferredCompletionSend(meta, { retry: ctx.retry === true });
     },
     async onTerminal(meta) {
+      // Reset the record's 'deferred' status to 'failed' FIRST — the
+      // completion dedupe treats 'deferred' as an owned obligation, so a
+      // dead replay must hand the send back to the next completion attempt
+      // (same restore the decline-notice entry runs).
+      const { terminalDeferredCompletionSend } = require('../dispatch-completion-deferred');
+      await terminalDeferredCompletionSend(meta).catch((err) => {
+        logger.warn(`[deferred-replay] completion terminal status restore failed for record ${meta.service_record_id || 'unknown'}: ${err.message}`);
+      });
       // The completion text (and the bundled review link inside it) will
       // never deliver — arm the standalone review sender. Armed ONLY here,
       // never on a timer, so it can't race a still-retryable replay.
@@ -341,11 +349,24 @@ const REGISTRY = {
       }
     },
     async finalize(meta) {
+      // Claim settlement (lead stamp 'sent' + phone-claim outcome 'sent') —
+      // the helpers swallow their own DB errors by design for the inline
+      // path, so check their returned success and report ok:false to ride
+      // the durable finalize_only rail: a crash or transient DB failure
+      // here must not strand the claims as 'scheduled' after delivery
+      // (a stale 'scheduled' lead stamp also blocks the atomic re-claim
+      // and misroutes the bounce handler's claimed-lead correlation).
       const { _deferredClaims } = require('../voicemail-lead-sms');
-      if (meta.lead_id) await _deferredClaims.stampStatus(meta.lead_id, 'sent');
-      if (meta.voicemail_phone) await _deferredClaims.stampPhoneClaim(meta.voicemail_phone, 'sent');
-      return { ok: true };
+      let ok = true;
+      if (meta.lead_id) {
+        ok = (await _deferredClaims.stampStatus(meta.lead_id, 'sent')) && ok;
+      }
+      if (meta.voicemail_phone) {
+        ok = (await _deferredClaims.stampPhoneClaim(meta.voicemail_phone, 'sent')) && ok;
+      }
+      return { ok };
     },
+    durableFinalize: true,
     async onTerminal(meta) {
       // The text-back provably never delivered — release BOTH one-shot
       // claims so a repeat caller (or the suppressed-replay path) can
@@ -354,6 +375,32 @@ const REGISTRY = {
       if (meta.lead_id) await _deferredClaims.clearLeadClaim(meta.lead_id);
       if (meta.voicemail_phone) await _deferredClaims.releasePhoneClaim(meta.voicemail_phone);
       logger.info(`[deferred-replay] voicemail text-back for lead ${meta.lead_id || 'unknown'} terminally blocked — claims released`);
+    },
+  },
+
+  customer_service_request_deferred: {
+    async onTerminal(meta) {
+      // Only the CANCELLATION confirmation needs a terminal fallback: the
+      // route deactivated the account before queueing this text, so the
+      // customer can neither receive the replay (it terminally died) nor
+      // open the portal to see the request — without this hook they get no
+      // confirmation at all. Ordinary request confirmations already sent
+      // the "request received" email inline, and an active customer can
+      // see the request in the portal.
+      if (meta.is_cancellation !== true || !meta.service_request_id) return;
+      const request = await db('service_requests').where({ id: meta.service_request_id }).first();
+      if (!request) {
+        logger.warn(`[deferred-replay] cancellation confirmation fallback skipped — service request ${meta.service_request_id} missing`);
+        return;
+      }
+      const AccountMembershipEmail = require('../account-membership-email');
+      // Idempotent by its own key (account.cancellation_received:<request id>),
+      // so a double-fired terminal hook can't double-email.
+      await AccountMembershipEmail.sendCancellationReceived({
+        customerId: meta.waves_customer_id || request.customer_id,
+        request,
+      });
+      logger.info(`[deferred-replay] cancellation confirmation for request ${request.id} terminally blocked — cancellation-safe email fallback sent`);
     },
   },
 

@@ -367,6 +367,15 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
               replay_purpose: 'support_resolution',
               refresh_customer_phone: true,
               resolve_from_by_customer: true,
+              // Terminal-replay linkage: a cancellation confirmation that
+              // dies on the replay rail (phone removed overnight, opt-out,
+              // retries exhausted) must still run the cancellation-safe
+              // email fallback below — the account is already deactivated,
+              // so the customer can't see the request in the portal and
+              // this queued row was their only confirmation.
+              service_request_id: request.id,
+              is_cancellation: isCancellation,
+              waves_customer_id: req.customer.id,
             }),
           });
           logger.info(`[requests] confirmation SMS held outside the 8AM-8PM ET send window — queued for ${smsResult.nextAllowedAt}`);

@@ -145,6 +145,28 @@ async function finalizeDeferredDeclineNotice(claimMeta = {}) {
   return { ok };
 }
 
+// Terminally-blocked completion replay: restore the inline-failure state
+// ('failed', same key shape as admin-dispatch's inline failure writes)
+// instead of leaving 'deferred' — completionSmsAlreadyHandled treats
+// 'deferred' as an owned obligation on every later completion attempt, so
+// a replay that terminally died (phone removed, opted out, retries
+// exhausted) would otherwise block the report/pay-link text forever, even
+// after the operator fixes the phone and re-completes.
+async function terminalDeferredCompletionSend(claimMeta = {}) {
+  if (!claimMeta.service_record_id) return;
+  await db('service_records').where({ id: claimMeta.service_record_id }).update({
+    structured_notes: db.raw(
+      "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+      [JSON.stringify({
+        completionSmsStatus: 'failed',
+        completionSmsError: 'deferred replay terminally blocked',
+        completionSmsFailedAt: new Date().toISOString(),
+      })],
+    ),
+  });
+  logger.warn(`[completion-deferred] completion SMS for record ${claimMeta.service_record_id} terminally blocked — status restored to failed`);
+}
+
 // Terminally-blocked decline-notice replay: restore the inline-failure
 // state ('failed', which a later completion resume may retry) instead of
 // leaving 'deferred' — the resume dedupe treats 'deferred' as handled, so
@@ -160,4 +182,4 @@ async function terminalDeferredDeclineNotice(claimMeta = {}) {
   logger.warn(`[completion-deferred] decline notice for record ${claimMeta.service_record_id} terminally blocked — status restored to failed`);
 }
 
-module.exports = { finalizeDeferredCompletionSend, finalizeDeferredDeclineNotice, terminalDeferredDeclineNotice };
+module.exports = { finalizeDeferredCompletionSend, finalizeDeferredDeclineNotice, terminalDeferredCompletionSend, terminalDeferredDeclineNotice };

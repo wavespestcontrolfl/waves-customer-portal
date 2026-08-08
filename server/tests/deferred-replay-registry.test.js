@@ -19,10 +19,25 @@ jest.mock('../services/invoice-followups', () => ({
 jest.mock('../services/dispatch-completion-deferred', () => ({
   finalizeDeferredCompletionSend: jest.fn(async () => ({ ok: true })),
   finalizeDeferredDeclineNotice: jest.fn(async () => ({ ok: true })),
+  terminalDeferredCompletionSend: jest.fn(async () => {}),
   terminalDeferredDeclineNotice: jest.fn(async () => {}),
 }));
 jest.mock('../services/appointment-card-request', () => ({
   sendDeferredInvitationEmailLeg: jest.fn(async () => ({ ok: true })),
+}));
+jest.mock('../services/review-request', () => ({
+  markInlineRetryable: jest.fn(async () => {}),
+  markInlineDelivered: jest.fn(async () => {}),
+}));
+const mockVmClaims = {
+  stampStatus: jest.fn(async () => true),
+  stampPhoneClaim: jest.fn(async () => true),
+  clearLeadClaim: jest.fn(async () => true),
+  releasePhoneClaim: jest.fn(async () => true),
+};
+jest.mock('../services/voicemail-lead-sms', () => ({ _deferredClaims: mockVmClaims }));
+jest.mock('../services/account-membership-email', () => ({
+  sendCancellationReceived: jest.fn(async () => ({ ok: true })),
 }));
 
 const db = require('../models/db');
@@ -201,6 +216,67 @@ describe('deferred-replay registry', () => {
     // Deliberately NOT durable: an email miss must never fake an
     // undelivered SMS back onto a retry rail.
     expect(requiresDurableFinalize('appointment_card_request_deferred')).toBe(false);
+  });
+
+  test('completion terminal (r15): resets the stuck deferred status FIRST, then arms the review fallback', async () => {
+    const { terminalDeferredCompletionSend } = require('../services/dispatch-completion-deferred');
+    const { markInlineRetryable } = require('../services/review-request');
+
+    // No bundled review: the status reset must still run before the early return.
+    await onTerminalDeferredReplay('dispatch_completion_deferred', { service_record_id: 'rec-1' });
+    expect(terminalDeferredCompletionSend).toHaveBeenCalledWith({ service_record_id: 'rec-1' });
+    expect(markInlineRetryable).not.toHaveBeenCalled();
+
+    // Bundled review: reset runs first, then the standalone fallback arms.
+    jest.clearAllMocks();
+    const meta = { service_record_id: 'rec-1', bundled_review_request_id: 'rev-1' };
+    await onTerminalDeferredReplay('dispatch_completion_deferred', meta);
+    expect(terminalDeferredCompletionSend).toHaveBeenCalledWith(meta);
+    expect(markInlineRetryable).toHaveBeenCalledWith('rev-1', expect.any(Date));
+    expect(terminalDeferredCompletionSend.mock.invocationCallOrder[0])
+      .toBeLessThan(markInlineRetryable.mock.invocationCallOrder[0]);
+  });
+
+  test('voicemail (r15): claim settlement rides the durable rail and propagates failed stamps', async () => {
+    expect(requiresDurableFinalize('voicemail_lead_sms_deferred')).toBe(true);
+    expect(DURABLE_FINALIZE_ENTRY_POINTS).toContain('voicemail_lead_sms_deferred');
+
+    const meta = { lead_id: 'lead-1', voicemail_phone: '+15551234567' };
+    const ok = await finalizeDeferredReplay('voicemail_lead_sms_deferred', meta, {});
+    expect(ok.ok).toBe(true);
+    expect(mockVmClaims.stampStatus).toHaveBeenCalledWith('lead-1', 'sent');
+    expect(mockVmClaims.stampPhoneClaim).toHaveBeenCalledWith('+15551234567', 'sent');
+
+    // A swallowed DB failure inside either helper must surface as ok:false
+    // so the finalize_only retry rail re-runs the settlement.
+    mockVmClaims.stampStatus.mockResolvedValueOnce(false);
+    const failed = await finalizeDeferredReplay('voicemail_lead_sms_deferred', meta, {});
+    expect(failed.ok).toBe(false);
+  });
+
+  test('cancellation confirmation (r15): terminal replay runs the cancellation-safe email fallback', async () => {
+    const { sendCancellationReceived } = require('../services/account-membership-email');
+    const request = { id: 'req-1', customer_id: 'cust-1', subject: 'Cancel my service', category: 'cancellation', created_at: '2026-08-07' };
+
+    db.mockReturnValueOnce(firstChain(request));
+    await onTerminalDeferredReplay('customer_service_request_deferred', {
+      is_cancellation: true, service_request_id: 'req-1', waves_customer_id: 'cust-1',
+    });
+    expect(sendCancellationReceived).toHaveBeenCalledWith({ customerId: 'cust-1', request });
+
+    // Ordinary request confirmations already emailed inline — no fallback.
+    jest.clearAllMocks();
+    await onTerminalDeferredReplay('customer_service_request_deferred', {
+      is_cancellation: false, service_request_id: 'req-1', waves_customer_id: 'cust-1',
+    });
+    expect(sendCancellationReceived).not.toHaveBeenCalled();
+
+    // Missing request row: skip loudly, never email an unlinked customer.
+    db.mockReturnValueOnce(firstChain(null));
+    await onTerminalDeferredReplay('customer_service_request_deferred', {
+      is_cancellation: true, service_request_id: 'req-gone', waves_customer_id: 'cust-1',
+    });
+    expect(sendCancellationReceived).not.toHaveBeenCalled();
   });
 
   test('lead-menu finalize stamps real sids and releases sentinel outcomes', async () => {
