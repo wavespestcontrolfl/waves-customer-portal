@@ -1976,9 +1976,28 @@ router.put('/:id/proposal', async (req, res, next) => {
       // Payment terms speak the canonical payer vocabulary only — free text
       // here would silently normalize to null (codex #3297 r2).
       const rawPaymentTerms = incoming.commercialTerms.paymentTerms;
-      if (rawPaymentTerms != null && String(rawPaymentTerms).trim() !== ''
-        && require('../services/estimate-proposal').normalizePaymentTerms(rawPaymentTerms) === null) {
+      const canonicalPaymentTerms = rawPaymentTerms != null && String(rawPaymentTerms).trim() !== ''
+        ? require('../services/estimate-proposal').normalizePaymentTerms(rawPaymentTerms)
+        : null;
+      if (rawPaymentTerms != null && String(rawPaymentTerms).trim() !== '' && canonicalPaymentTerms === null) {
         return res.status(400).json({ error: 'Payment terms must be one of: Due on receipt, Net-15, Net-30.' });
+      }
+      // A linked ACTIVE payer's terms are the standing billing relationship
+      // (they drive statement accrual and the acceptance invoice via
+      // resolveAcceptanceTermDays). Authoring a CONTRADICTING term here
+      // would render a promise the invoice won't keep — reject it at the
+      // only surface that authors terms, so agreement and invoice always
+      // match (codex #3297 r2d).
+      if (canonicalPaymentTerms && estimate.customer_id) {
+        const { resolveForInvoice } = require('../services/payer');
+        const payerResolution = await resolveForInvoice({ customerId: estimate.customer_id });
+        if (payerResolution?.payerId != null && payerResolution.paymentTerms
+          && payerResolution.paymentTerms !== canonicalPaymentTerms) {
+          const labels = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+          return res.status(400).json({
+            error: `This customer bills through a payer on ${labels[payerResolution.paymentTerms] || payerResolution.paymentTerms} terms — set payment terms to match, or leave them unset.`,
+          });
+        }
       }
     }
 
