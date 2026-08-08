@@ -343,6 +343,20 @@ async function fetchCrmCalls(days = 30) {
   const since = addETDays(new Date(), -safeDays);
   const target = mainLine();
 
+  // The 500-call bound stays INSIDE Postgres (codex P2, PR #3275). Capping
+  // in JS made the cron/admin bridge materialize every call in the window
+  // plus every OR-join duplicate before discarding the tail — memory and
+  // latency growing with 90 days of history to keep 500 rows. This subquery
+  // has no joins, so its LIMIT counts DISTINCT calls; the join below then
+  // adds at most the stale-stamp twin for each of them.
+  const newestCallIds = db('call_log')
+    .select('id')
+    .where('direction', 'inbound')
+    .whereIn('to_phone', phoneVariants(target.number))
+    .where('created_at', '>=', since)
+    .orderBy('created_at', 'desc')
+    .limit(500);
+
   return db('call_log as c')
     .leftJoin('customers as cu', 'c.customer_id', 'cu.id')
     // The sid join misses a phone-less reused-lead call: the lead keeps its
@@ -365,9 +379,7 @@ async function fetchCrmCalls(days = 30) {
       }).andOn(db.raw('l.deleted_at IS NULL'));
     })
     .leftJoin('lead_sources as ls', 'l.lead_source_id', 'ls.id')
-    .where('c.direction', 'inbound')
-    .whereIn('c.to_phone', phoneVariants(target.number))
-    .where('c.created_at', '>=', since)
+    .whereIn('c.id', newestCallIds)
     .select(
       'c.*',
       'cu.first_name as customer_first_name',
@@ -378,14 +390,11 @@ async function fetchCrmCalls(days = 30) {
       'ls.name as lead_source_name',
     )
     .orderBy('c.created_at', 'desc')
-    // No SQL LIMIT: the OR join can emit two rows for one call (stale stamp
-    // + sid-linked lead), and a pre-dedup cap could drop older DISTINCT
-    // calls from a full scan — an omitted paid call stays unbridged and
-    // falls to the organic sweep (codex P2, PR #3275). Row count is bounded
-    // by the window's inbound calls on the main line (≤2 rows each); the
-    // 500-call cap applies to deduped calls below.
-    .then(dedupeCrmCallRows)
-    .then((rows) => capDistinctCalls(rows, 500));
+    // No LIMIT here — it would count JOIN ROWS, so a call kept ambiguous
+    // below could push an older DISTINCT call out of the window and leave a
+    // paid call unbridged for the organic sweep. The distinct-call bound is
+    // the newestCallIds subquery above (codex P2, PR #3275).
+    .then(dedupeCrmCallRows);
 }
 
 // Collapse ONLY the stamp-plus-sid duplicate the OR join above can
@@ -423,23 +432,6 @@ function dedupeCrmCallRows(rows) {
     else deduped.push(group[0]);
   }
   return deduped;
-}
-
-// The scan cap counts DISTINCT calls, not join rows — a call kept ambiguous
-// above contributes several rows, and a raw row cap would silently drop
-// older distinct calls from the window (an omitted paid call stays
-// unbridged and falls to the organic sweep; codex P2, PR #3275).
-function capDistinctCalls(rows, limit) {
-  const kept = [];
-  const seen = new Set();
-  for (const row of rows) {
-    if (!seen.has(row.id)) {
-      if (seen.size >= limit) break;
-      seen.add(row.id);
-    }
-    kept.push(row);
-  }
-  return kept;
 }
 
 async function ensureBridgeLeadSource() {
@@ -762,7 +754,6 @@ module.exports = {
   _private: {
     areaCode,
     buildMatches,
-    capDistinctCalls,
     dedupeCrmCallRows,
     findLeadForCall,
     googleAdsBridgeMetadata,

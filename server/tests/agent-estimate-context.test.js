@@ -8,6 +8,8 @@ let mockContextSidCallRow = null;
 let mockContextOtherLeads = [];
 let mockLinkedCustomerRow = null;
 let mockOtherCustomerOnPhone = null;
+// call id -> { extraction, source }; unset ids keep the inert default.
+let mockExtractionByCallId = {};
 
 jest.mock('../models/db', () => {
   const db = (table) => {
@@ -54,7 +56,7 @@ jest.mock('../services/estimator-engine/context-builder', () => ({
   loadPriorEstimates: (...args) => mockLoadPriorEstimates(...args),
   loadSmsThread: (...args) => mockLoadSmsThread(...args),
   _private: {
-    extractionFromCall: () => ({ extraction: {}, source: 'none' }),
+    extractionFromCall: (call) => mockExtractionByCallId[call?.id] || ({ extraction: {}, source: 'none' }),
     firstExternalPhone: (...candidates) => {
       const SENTINELS = new Set(['266696687', '7378742833', '86282452253']);
       for (const candidate of candidates) {
@@ -433,5 +435,112 @@ describe('repeat leads vs shared phones', () => {
     const context = await buildAgentEstimateContext('lead-1');
 
     expect(context.shared_phone_history_suppressed).toBe(true);
+  });
+});
+
+describe('owned-call extraction shape handling (PR #3275)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockExtractionByCallId = {};
+    mockContextLead = {
+      id: 'lead-1', customer_id: null, estimate_id: null,
+      first_name: 'Pat', last_name: 'Prospect', phone: '9415550100',
+      email: null, address: '1 St', city: 'Bradenton', zip: '34208',
+      twilio_call_sid: null, transcript_summary: null, extracted_data: null,
+      status: 'new',
+    };
+    mockContextCallRows = [];
+    mockContextStampedCallRows = [];
+    mockContextOtherLeads = [];
+    mockLinkedCustomerRow = null;
+    mockOtherCustomerOnPhone = null;
+    mockLoadCustomerByPhone.mockResolvedValue({ customer: null, ambiguous: false });
+  });
+
+  afterAll(() => {
+    mockExtractionByCallId = {};
+    mockContextStampedCallRows = [];
+  });
+
+  test('a V2 summary at meta.call_summary matches provenance — no synthetic row eats a pack slot', async () => {
+    // The enriched payload stores the summary under meta; reading only the
+    // V1 top-level paths made provenance fail for EVERY valid V2 call, so
+    // the synthetic summary row was always unshifted in and could evict a
+    // real transcript from the three-call cap.
+    mockContextLead.transcript_summary = 'Ants in the kitchen; quoted quarterly.';
+    mockContextStampedCallRows = [{
+      id: 'call-v2', twilio_call_sid: 'CA-v2', direction: 'inbound',
+      duration_seconds: 90, transcription: 'the anonymous quote call', created_at: '2026-07-03',
+    }];
+    mockExtractionByCallId['call-v2'] = {
+      source: 'enriched',
+      extraction: { property: {}, caller: {}, meta: { call_summary: 'Ants in the kitchen; quoted quarterly.' } },
+    };
+
+    const context = await buildAgentEstimateContext('lead-1');
+
+    expect(context.calls.map((c) => c.id)).toEqual(['call-v2']);
+    expect(context.calls[0].transcript_summary).toBe('Ants in the kitchen; quoted quarterly.');
+  });
+
+  test('a summary no owned call supplied still rides the synthetic row', async () => {
+    mockContextLead.transcript_summary = 'Summary from an older call.';
+    mockContextStampedCallRows = [{
+      id: 'call-v2', twilio_call_sid: 'CA-v2', direction: 'inbound',
+      duration_seconds: 90, transcription: 'a later call that produced no summary', created_at: '2026-07-03',
+    }];
+    mockExtractionByCallId['call-v2'] = {
+      source: 'enriched',
+      extraction: { property: {}, caller: {}, meta: { call_summary: null } },
+    };
+
+    const context = await buildAgentEstimateContext('lead-1');
+
+    expect(context.calls[0].id).toBe('lead-summary:lead-1');
+    expect(context.calls[0].transcript_summary).toBe('Summary from an older call.');
+  });
+
+  test('disambiguation prefers an older ENRICHED caller block over a newer V1 shape', async () => {
+    // pickCustomerMatch reads extraction.caller only, so selecting the V1
+    // call for its top-level names hands the matcher an identity it ignores.
+    mockContextStampedCallRows = [
+      {
+        id: 'call-new-v1', twilio_call_sid: 'CA-new', direction: 'inbound',
+        duration_seconds: 60, transcription: 'newer call, v1 fallback', created_at: '2026-07-05',
+      },
+      {
+        id: 'call-old-v2', twilio_call_sid: 'CA-old', direction: 'inbound',
+        duration_seconds: 90, transcription: 'older call, enriched', created_at: '2026-07-01',
+      },
+    ];
+    mockExtractionByCallId['call-new-v1'] = {
+      source: 'v1',
+      extraction: { first_name: 'Pat', last_name: 'Prospect' },
+    };
+    mockExtractionByCallId['call-old-v2'] = {
+      source: 'enriched',
+      extraction: { property: {}, caller: { first_name: 'Pat', last_name: 'Prospect' } },
+    };
+
+    await buildAgentEstimateContext('lead-1');
+
+    const [, extractionPassed] = mockLoadCustomerByPhone.mock.calls[0];
+    expect(extractionPassed?.caller).toEqual({ first_name: 'Pat', last_name: 'Prospect' });
+  });
+
+  test('no enriched identity anywhere falls back to the newest owned call', async () => {
+    mockContextStampedCallRows = [{
+      id: 'call-only-v1', twilio_call_sid: 'CA-only', direction: 'inbound',
+      duration_seconds: 60, transcription: 'v1 only', created_at: '2026-07-05',
+    }];
+    mockExtractionByCallId['call-only-v1'] = {
+      source: 'v1',
+      extraction: { first_name: 'Pat', last_name: 'Prospect' },
+    };
+
+    await buildAgentEstimateContext('lead-1');
+
+    const [, extractionPassed] = mockLoadCustomerByPhone.mock.calls[0];
+    expect(extractionPassed).toEqual({ first_name: 'Pat', last_name: 'Prospect' });
   });
 });

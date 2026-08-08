@@ -8207,10 +8207,32 @@ const CallRecordingProcessor = {
                     .first('id');
                   rebaseStamp = !!interveningStamp;
                 }
-                // Sentinel (never a lead id) drives every same-lead CASE in
-                // the stamp SQL down its ELSE arm, i.e. fresh ledgers.
-                const sameLeadKey = rebaseStamp ? '__rebase__' : String(leadId);
                 const { prior, written } = snapshotStampedLeadStates(lockedLead || current, effectiveUpdates);
+                // Ledger composition has THREE modes, not two (codex P2 r18).
+                // A rebase must NOT discard the restamp's original-only
+                // entries: when call A first filled `email` and this
+                // reprocess drops that column as already-filled, A is still
+                // the call that wrote it, and losing the entry would strand
+                // A's value on the lead through both rejection orders. So a
+                // rebase rewrites only the fields it actually re-wrote and
+                // KEEPS the rest:
+                //   different lead → fresh prior + fresh written
+                //   same lead, rebase → merged, THIS pass wins shared keys
+                //   same lead, retry → merged, the ORIGINAL baseline wins
+                // `written` merges the same way in both same-lead modes —
+                // fill-once fields absent from a later payload must survive
+                // so rejection can still restore them.
+                const sameLead = "COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ?";
+                const priorExpr = `CASE WHEN ${sameLead} THEN (CASE WHEN ?::boolean`
+                  + " THEN COALESCE(metadata->'lead_prior_state', '{}'::jsonb) || ?::jsonb"
+                  + " ELSE ?::jsonb || COALESCE(metadata->'lead_prior_state', '{}'::jsonb) END)"
+                  + ' ELSE ?::jsonb END';
+                const writtenExpr = `CASE WHEN ${sameLead}`
+                  + " THEN COALESCE(metadata->'lead_written_state', '{}'::jsonb) || ?::jsonb"
+                  + ' ELSE ?::jsonb END';
+                const stampedAtExpr = `CASE WHEN ${sameLead} AND NOT ?::boolean`
+                  + " THEN COALESCE(metadata->'lead_stamped_at', ?::jsonb) ELSE ?::jsonb END";
+                const nowIso = JSON.stringify(new Date().toISOString());
                 const stamped = await trx('call_log')
                   .where({ id: call.id })
                   .where('processing_token', procToken)
@@ -8225,14 +8247,21 @@ const CallRecordingProcessor = {
                     // lead_stamped_at is the ORDERING marker for rejection
                     // re-parenting (only snapshots stamped AFTER this call's
                     // may be re-parented — a predecessor's baseline must
-                    // never be rewritten; codex P2 r13). Preserved on
-                    // same-lead re-stamp like the prior ledger. A
-                    // different-lead stamp — or a chronological restamp,
-                    // where sameLeadKey carries the sentinel — starts all
-                    // three ledgers fresh.
+                    // never be rewritten; codex P2 r13). Preserved on a
+                    // same-lead RETRY; a different-lead stamp and a
+                    // chronological rebase both take a fresh marker, which
+                    // is what makes the rebase the newest mutation.
                     metadata: db.raw(
-                      "jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true), '{lead_prior_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN ?::jsonb || COALESCE(metadata->'lead_prior_state', '{}'::jsonb) ELSE ?::jsonb END, true), '{lead_written_state}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN COALESCE(metadata->'lead_written_state', '{}'::jsonb) || ?::jsonb ELSE ?::jsonb END, true), '{lead_stamped_at}', CASE WHEN COALESCE(metadata, '{}'::jsonb)->>'lead_id' = ? THEN COALESCE(metadata->'lead_stamped_at', ?::jsonb) ELSE ?::jsonb END, true)",
-                      [JSON.stringify(String(leadId)), sameLeadKey, JSON.stringify(prior), JSON.stringify(prior), sameLeadKey, JSON.stringify(written), JSON.stringify(written), sameLeadKey, JSON.stringify(new Date().toISOString()), JSON.stringify(new Date().toISOString())],
+                      "jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{lead_id}', ?::jsonb, true)"
+                      + `, '{lead_prior_state}', ${priorExpr}, true)`
+                      + `, '{lead_written_state}', ${writtenExpr}, true)`
+                      + `, '{lead_stamped_at}', ${stampedAtExpr}, true)`,
+                      [
+                        JSON.stringify(String(leadId)),
+                        String(leadId), rebaseStamp, JSON.stringify(prior), JSON.stringify(prior), JSON.stringify(prior),
+                        String(leadId), JSON.stringify(written), JSON.stringify(written),
+                        String(leadId), rebaseStamp, nowIso, nowIso,
+                      ],
                     ),
                     updated_at: new Date(),
                   });

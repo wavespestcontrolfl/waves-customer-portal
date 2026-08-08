@@ -208,9 +208,15 @@ async function loadCalls(lead, phoneKey) {
       // summarizes (codex P2 r14). No provenance match → the summary rides
       // the synthetic summary-only row below instead of claiming a
       // transcript.
+      // The ENRICHED (V2) payload keeps its summary at meta.call_summary;
+      // only the V1 shape has it top-level. Reading the V1 paths alone made
+      // provenance fail for every valid V2 call, so the synthetic row below
+      // was always inserted — and being unshifted, it ate one of the three
+      // pack slots and could evict the real transcript carrying the identity
+      // or service evidence (codex P2 r18).
       const suppliedSummary = (call) => {
         const ex = call.extraction || {};
-        const s = String(ex.call_summary || ex.call_metadata?.call_summary || '').trim();
+        const s = String(ex.meta?.call_summary || ex.call_summary || ex.call_metadata?.call_summary || '').trim();
         return s && clampText(s, 4000) === leadSummary;
       };
       const matchingCall = calls.find((call) => call.for_this_lead && suppliedSummary(call));
@@ -356,9 +362,14 @@ async function buildAgentEstimateContext(leadId) {
   // ambiguous and suppressed tier/current-service context despite usable
   // owned evidence (codex P2 r13).
   const ownedCalls = rawCalls.filter((call) => call.for_this_lead && !String(call.id).startsWith('lead-summary:'));
+  // Only an ENRICHED (V2) caller block counts as usable identity here:
+  // pickCustomerMatch disambiguates exclusively through `extraction.caller`,
+  // so preferring a newer V1 call for its top-level names selected a row the
+  // matcher then ignores — leaving a shared-phone customer ambiguous while
+  // an older enriched call could have resolved it (codex P2 r18).
   const carriesCallerIdentity = (call) => {
-    const ex = call.extraction || {};
-    const who = ex.caller || ex;
+    if (call.extraction_source !== 'enriched') return false;
+    const who = call.extraction?.caller || {};
     return !!(String(who.first_name || '').trim() || String(who.last_name || '').trim());
   };
   const leadCall = ownedCalls.find(carriesCallerIdentity) || ownedCalls[0] || null;

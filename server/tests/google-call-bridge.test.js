@@ -267,8 +267,8 @@ describe('isBridgeTargetNumber', () => {
   });
 });
 
-describe('dedupeCrmCallRows / capDistinctCalls (PR #3275)', () => {
-  const { capDistinctCalls, dedupeCrmCallRows } = GoogleCallBridge._private;
+describe('dedupeCrmCallRows (PR #3275)', () => {
+  const { dedupeCrmCallRows } = GoogleCallBridge._private;
   const row = (id, leadId, leadCallSid, callSid = 'CAcall') => ({
     id, lead_id: leadId, lead_call_sid: leadCallSid, twilio_call_sid: callSid,
   });
@@ -307,13 +307,5 @@ describe('dedupeCrmCallRows / capDistinctCalls (PR #3275)', () => {
   test('passes through lead-less calls and never merges distinct calls', () => {
     const deduped = dedupeCrmCallRows([row('c1', null, null), row('c2', null, null, 'CAother')]);
     expect(deduped.map((r) => r.id)).toEqual(['c1', 'c2']);
-  });
-
-  test('the cap counts DISTINCT calls, so an ambiguous pair costs one slot', () => {
-    // A raw row cap would drop c2 here; an omitted paid call stays unbridged
-    // and falls to the organic sweep.
-    const rows = [row('c1', 'lead-a', 'CAcall'), row('c1', 'lead-b', 'CAcall'), row('c2', null, null, 'CAother')];
-    expect(capDistinctCalls(rows, 2).map((r) => r.id)).toEqual(['c1', 'c1', 'c2']);
-    expect(capDistinctCalls(rows, 1).map((r) => r.id)).toEqual(['c1', 'c1']);
   });
 });

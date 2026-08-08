@@ -470,6 +470,12 @@ async function buildCallContext(callLogId) {
   // unmatched), and (c) a callback number that matches a DIFFERENT
   // customer — where drafting would link and price against the phone
   // owner's property and membership instead of the stated email's owner.
+  // The email is matched against EVERY customer email slot — primary plus
+  // service_contact{,2,3}_email — because a blocked-ID spouse, tenant or
+  // property manager stating a slot email is just as much an existing
+  // account's caller (codex P1 r18). This guard only ever fails CLOSED to
+  // identity review; it never links a customer, so the call path's
+  // phone-slot exclusion is untouched.
   // "Real, active" = pipeline_stage active_customer/won/at_risk (the
   // canonical whereRealCustomer stages) AND active=true — the two are
   // independently editable, and a deactivated former customer calling as a
@@ -484,17 +490,35 @@ async function buildCallContext(callLogId) {
     const extractionEmailLc = String(extraction?.caller?.email || extraction?.email || '').trim().toLowerCase();
     if (extractionEmailLc) {
       try {
-        const emailOwner = await db('customers')
+        // EVERY customer email slot, not just the primary (codex P1 r18):
+        // service_contact{,2,3}_email are established contacts on the
+        // account (see customer-contact.js), so a blocked-ID spouse, tenant
+        // or property manager stating one of them is an existing customer's
+        // caller — matching on `email` alone let that call draft a
+        // prospect-priced estimate for a live account.
+        // ALL owners, not .first(): one email can legitimately sit on
+        // several accounts (a property manager in the service-contact slots
+        // of every building they run). Picking one arbitrarily would raise a
+        // phantom identity conflict against a phone match that IS one of
+        // them. The conflict is real only when the phone match is not among
+        // the owners at all.
+        const emailOwners = await db('customers')
           .whereNull('deleted_at')
           .where('active', true)
-          .whereRaw('LOWER(TRIM(email)) = ?', [extractionEmailLc])
+          .whereRaw(
+            '(LOWER(TRIM(email)) = ? OR LOWER(TRIM(service_contact_email)) = ?'
+            + ' OR LOWER(TRIM(service_contact2_email)) = ? OR LOWER(TRIM(service_contact3_email)) = ?)',
+            [extractionEmailLc, extractionEmailLc, extractionEmailLc, extractionEmailLc],
+          )
           .whereIn('pipeline_stage', ['active_customer', 'won', 'at_risk'])
-          .first('id');
-        if (emailOwner && !customerMatch.customer) {
+          .limit(25)
+          .select('id');
+        if (emailOwners.length && !customerMatch.customer) {
           logger.warn('[estimator-engine] unidentified call states an active customer\'s email — failing closed to identity review');
           return { error: 'email_matches_existing_customer', call };
         }
-        if (emailOwner && customerMatch.customer && String(emailOwner.id) !== String(customerMatch.customer.id)) {
+        if (emailOwners.length && customerMatch.customer
+          && !emailOwners.some((o) => String(o.id) === String(customerMatch.customer.id))) {
           logger.warn('[estimator-engine] stated email belongs to a DIFFERENT active customer than the phone match — failing closed to identity review');
           return { error: 'email_identity_conflict', call };
         }
