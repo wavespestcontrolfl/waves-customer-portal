@@ -325,7 +325,13 @@ async function buildSummary(service) {
           // surfacing their token here would re-solicit a Google review
           // instead of the rate page's thank-you state (codex #3286 r2).
           .whereNull('rated_at')
-          .whereNotIn('status', ['submitted', 'reviewed', 'rated'])
+          // …and DELIVERED asks only: pending/deferred rows are still owned by
+          // processScheduled, and failed/suppressed rows were blocked by
+          // policy or consent — surfacing their token would bypass that
+          // suppression entirely (pre-push audit r2). Same delivered
+          // predicate as livePortalReviewUrlFor / getDeliveredAskStats.
+          .whereRaw('(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)')
+          .whereNotIn('status', ['submitted', 'reviewed', 'rated', 'suppressed', 'failed', 'deferred'])
           .where((b) => b.whereNull('expires_at').orWhere('expires_at', '>', new Date()))
           .orderBy('created_at', 'desc')
           .first('token');

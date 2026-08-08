@@ -31,6 +31,9 @@ const LEGACY_32_TOKEN = 'ef'.repeat(16);
 const liveAsk = (over = {}) => ({
   customer_id: 'customer-1',
   token: LIVE_TOKEN,
+  status: 'sent',
+  sms_sent_at: new Date(Date.now() - 86400000).toISOString(),
+  sent_at: null,
   expires_at: new Date(Date.now() + 7 * 86400000).toISOString(),
   created_at: new Date(Date.now() - 86400000).toISOString(),
   ...over,
@@ -49,6 +52,15 @@ function makeReviewRequestsQuery(rows) {
     return row[col] === val;
   };
   const chain = {
+    whereRaw: jest.fn((sql) => {
+      // Only the delivered predicate is used here; anything else must fail
+      // loud rather than silently pass unevaluated.
+      if (sql === '(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)') {
+        filtered = filtered.filter((r) => r.sms_sent_at != null || r.sent_at != null);
+        return chain;
+      }
+      throw new Error(`unhandled whereRaw in review_requests mock: ${sql}`);
+    }),
     whereNull: jest.fn((col) => {
       filtered = filtered.filter((r) => r[col] == null);
       return chain;
@@ -355,6 +367,37 @@ describe('public track token expiry', () => {
       reviewRequests: [
         liveAsk({ rated_at: new Date(Date.now() - 3600000).toISOString() }),
         liveAsk({ token: STALE_TOKEN, status: 'submitted', created_at: new Date(Date.now() - 2 * 86400000).toISOString() }),
+      ],
+    });
+
+    const summary = await trackPublicRouter._test.buildSummary({
+      id: 'scheduled-1',
+      customer_id: 'customer-1',
+      completed_at: '2026-05-05T12:00:00.000Z',
+    });
+
+    expect(summary.reviewUrl).toBeNull();
+  });
+
+  test('undelivered asks never surface — pending stays owned by the scheduler, suppressed stays suppressed', async () => {
+    // A pending scheduled row's send still belongs to processScheduled (the
+    // customer would click, then get the SMS anyway); a suppressed/failed row
+    // was blocked by policy or consent, and surfacing its token would bypass
+    // that suppression (pre-push audit r2).
+    installSummaryDb({
+      record: {
+        id: 'record-1',
+        report_view_token: 'report-token',
+        structured_notes: JSON.stringify({ typedReportDelivery: 'auto_send' }),
+      },
+      customer: { has_left_google_review: false },
+      reviewRequests: [
+        liveAsk({ status: 'pending', sms_sent_at: null }),
+        liveAsk({
+          token: STALE_TOKEN,
+          status: 'suppressed',
+          created_at: new Date(Date.now() - 2 * 86400000).toISOString(),
+        }),
       ],
     });
 
