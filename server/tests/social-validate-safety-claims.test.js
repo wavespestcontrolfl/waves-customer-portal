@@ -143,6 +143,10 @@ const CLEAN = [
   'Our treatments are safe, once dry — tech confirms when',
   // r4: the confirmation may live in the adjacent sentence.
   'Our treatments are safe once dry. Your technician confirms timing.',
+  // #3278 r8: a DRYING confirmation whose location is the appointment is
+  // still a drying confirmation — the appointment noun alone must not
+  // reclassify it as logistics.
+  'Treatment is safe once dry. Your technician confirms drying time at the appointment.',
   'Enter within 24 hours for a chance to win',
   'Technicians wear protective equipment to stay safe while applying pesticides',
 ];

@@ -91,24 +91,42 @@ function noteGuardTrips(note) {
 // green-lights wording the server then rejects.
 const NOTE_TECH_CONFIRM_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
 // A confirmation about appointment logistics ("confirms arrival timing")
-// is not a drying confirmation — stripped before the confirm test.
-const NOTE_UNRELATED_CONFIRM_RE = /\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))[^.!?\n]{0,25}\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b(?:[^.!?\n]{0,15}\btim(?:es?|ing)?\b)?/gi;
+// is not a drying confirmation — stripped before the confirm test. Gap is
+// tempered so "confirms DRYING time at the appointment" survives.
+const NOTE_UNRELATED_CONFIRM_RE = /\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))(?:(?!\b(?:dr(?:y|ies|ying)|re-?ent))[^.!?\n]){0,25}\b(?:arrival|appointment|visit|schedule|scheduling|start|eta)\b(?:[^.!?\n]{0,15}\btim(?:es?|ing)?\b)?/gi;
 const NOTE_SAFE_DRY_IDIOM_RE = /\bsafe\s+(?:once|when|after)\b[^.!?]*/gi;
 const NOTE_SAFE_OTHER_STRIP_RE = /\bsafe\s+from\b|\bstay\s+safe\b|\bsafety\s+data\s+sheet\b/gi;
 // "safe" only counts as a violation in a pesticide/product context — the
 // same co-occurrence the canonical server checker requires, so ordinary
 // wording like "please drive safely" never blocks the move.
 const NOTE_PRODUCT_CTX_RE = /\b(?:pesticides?|products?|treatments?|sprays?(?:ing)?|chemicals?|applications?|pest\s+control|exterminat\w*)\b/i;
-const NOTE_REENTRY_CTX = '(?:re-?ent(?:er|ry)|back\\s+(?:inside|in)|(?:pets?|dogs?|cats?|kids?|children)\\s+(?:out|outside|inside|back)|dr(?:y|ies|ying))';
-const NOTE_TIME_AMT = '(?:\\d+\\s*(?:min(?:ute)?|hour|hr)s?|an?\\s+hour|half\\s+an?\\s+hour)';
-const NOTE_FIXED_TIMING_RE = new RegExp(`${NOTE_REENTRY_CTX}[^.!?]{0,40}${NOTE_TIME_AMT}|${NOTE_TIME_AMT}[^.!?]{0,40}${NOTE_REENTRY_CTX}`, 'i');
+// Verbatim copies of the canonical clause-level timing rules
+// (social-media.js TIMING_DURATION_RE / REENTRY_CONTEXT_RE /
+// AGRONOMIC_EXEMPT_RE — keep in sync) so the inline advisor recognizes
+// everything the server rejects: spelled-out durations ("two hours"),
+// clock times, and the full re-entry phrasing set.
+const NOTE_TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b|\d{1,2}:\d{2}\b)/i;
+const NOTE_REENTRY_CONTEXT_RE = /\bre-?ent\w*|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\benter(?:ing)?\b[^.!?\n]{0,30}\b(?:treated|areas?|lawn|yard|home|house)\b|\b(?:treated|areas?|lawn|yard|home|house)\b[^.!?\n]{0,30}\benter(?:ing)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family|residents?|occupants?|everyone)\b[^.!?\n]{0,20}\breturn\w*\b|^\s*return(?:ing)?\b/i;
+const NOTE_AGRONOMIC_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|overseed\w*|aerat\w*|rain)\b/i;
+// Same clause walk as the canonical checker (sentence → clause on
+// commas/semicolons/conjunctions; agronomic clauses exempt).
+function noteTimingTrips(note) {
+  for (const sentence of note.split(/[.!?\n]+/)) {
+    for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
+      if (!clause.trim()) continue;
+      if (NOTE_TIMING_DURATION_RE.test(clause) && NOTE_REENTRY_CONTEXT_RE.test(clause)
+        && !NOTE_AGRONOMIC_RE.test(clause)) return true;
+    }
+  }
+  return false;
+}
 function noteComplianceTrips(note) {
   const idiomAllowed = NOTE_TECH_CONFIRM_RE.test(note.replace(NOTE_UNRELATED_CONFIRM_RE, ''));
   const scope = (idiomAllowed ? note.replace(NOTE_SAFE_DRY_IDIOM_RE, '') : note)
     .replace(NOTE_SAFE_OTHER_STRIP_RE, '');
   if (/\bsafe(?:ly)?\b/i.test(scope) && NOTE_PRODUCT_CTX_RE.test(scope)) return true;
   if (/\bepa\b(?![-\s](?:registered|exempt))/i.test(note)) return true;
-  return NOTE_FIXED_TIMING_RE.test(note);
+  return noteTimingTrips(note);
 }
 // Same canonicalization the server runs before the shortener test —
 // encoded/unicode-dot hosts (`bit%2ely`, `bit。ly`) resolve to real links.

@@ -1487,6 +1487,11 @@ describe('rain-out service', () => {
       // A confirmation about APPOINTMENT logistics is not a drying
       // confirmation and must not exempt the idiom (codex r7).
       blocked('Treatment is safe once dry. Your technician confirms arrival timing.');
+      // ...but a DRYING confirmation located at the appointment IS one (r8).
+      expect(sanitize()('Treatment is safe once dry. Your technician confirms drying time at the appointment.'))
+        .toEqual({ note: 'Treatment is safe once dry. Your technician confirms drying time at the appointment.' });
+      // Spelled-out durations are the same banned class as digits.
+      blocked('Keep pets off treated areas for two hours');
       // Approved framings and unrelated durations pass.
       expect(sanitize()('Safe once dry - your technician confirms timing')).toEqual({ note: 'Safe once dry - your technician confirms timing' });
       expect(sanitize()('keeping your home safe from termites')).toEqual({ note: 'keeping your home safe from termites' });

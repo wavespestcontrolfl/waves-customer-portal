@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { upsertReplyExampleFromAgentReview } = require('../services/reply-training-capture');
+const { upsertReplyExampleFromAgentReview, NON_HUMAN_REPLY_MESSAGE_TYPES } = require('../services/reply-training-capture');
 const { SUGGEST_WORKFLOW } = require('../services/sms-suggest-mode');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -97,7 +97,10 @@ function compactRecord(row, keys) {
 
 function isAdminAuthoredSmsReply(row = {}) {
   const type = String(row.type || '').toLowerCase();
-  if (['internal_alert', 'system_note'].includes(type)) return false;
+  // Shared list with reply-training-capture: templated sends that stamp
+  // adminUserId for audit attribution (rain-out Quick Moves) are not
+  // human-authored replies and must not pre-populate the review form.
+  if (NON_HUMAN_REPLY_MESSAGE_TYPES.includes(type)) return false;
   return !!row.adminUserId || type === 'manual';
 }
 
