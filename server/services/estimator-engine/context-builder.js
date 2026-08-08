@@ -218,6 +218,34 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         .first();
       if (byCall) return { lead: byCall, forThisCall: true };
     }
+    // Phone-less reuse linkage: when a phone-less caller's later call reuses
+    // a prior lead, the processor stamps call_log.metadata.lead_id instead
+    // of restamping the lead's sid (the lead keeps its ORIGINAL call's sid —
+    // rolling it would destroy that call's identity). Follow the stamp
+    // before the phone fallback; with no phone there is nothing else to
+    // follow, and without this the current call's estimator draft could not
+    // link to its lead (codex P1, PR #3275).
+    const stampedLeadId = (() => {
+      try {
+        const md = typeof call?.metadata === 'string' ? JSON.parse(call.metadata) : (call?.metadata || {});
+        return md?.lead_id || null;
+      } catch { return null; }
+    })();
+    // SETTLED stamps only — same rule as the bridge and the admin card
+    // (#3303): stamp mutations are token-fenced, so a non-null
+    // processing_token means a pass is mid-flight and may still clear or
+    // repoint this stamp; grounding a draft on it could link the wrong
+    // lead. buildCallContext loads the full row, so the token is present
+    // here; a caller passing a trimmed row without the column keeps
+    // today's behavior.
+    if (stampedLeadId && !call?.processing_token) {
+      const byStamp = await db('leads')
+        .select(LEAD_COLS)
+        .where({ id: stampedLeadId })
+        .whereNull('deleted_at')
+        .first();
+      if (byStamp) return { lead: byStamp, forThisCall: true };
+    }
     const digits = last10(phone);
     if (!digits) return { lead: null, forThisCall: false };
     // A REUSED open lead (the processor updates it without restamping
@@ -440,6 +468,77 @@ async function buildCallContext(callLogId) {
 
   if (!customerMatch.customer && !resolvedLoadFailed) {
     customerMatch = await loadCustomerByPhone(phone, extraction);
+  }
+  // Email identity guard (codex P1 ×3, PR #3275): the stated email is
+  // checked against REAL, active customers whenever the extraction carries
+  // one — not only when phone resolution found nobody. The failure modes it
+  // closes: (a) blocked caller ID with no usable number, (b) a stated
+  // new/spouse callback number that matches NO account (phone truthy but
+  // unmatched), and (c) a callback number that matches a DIFFERENT
+  // customer — where drafting would link and price against the phone
+  // owner's property and membership instead of the stated email's owner.
+  // The email is matched against EVERY customer email slot — primary plus
+  // service_contact{,2,3}_email — because a blocked-ID spouse, tenant or
+  // property manager stating a slot email is just as much an existing
+  // account's caller (codex P1 r18). This guard only ever fails CLOSED to
+  // identity review; it never links a customer, so the call path's
+  // phone-slot exclusion is untouched.
+  // "Real, active" = pipeline_stage active_customer/won/at_risk (the
+  // canonical whereRealCustomer stages) AND active=true — the two are
+  // independently editable, and a deactivated former customer calling as a
+  // new prospect must stay draft-eligible, matching the grounded-customer
+  // loader's own active===true requirement (codex P2). Lead-stage rows are
+  // NOT members and stay draft-eligible. Lookup failure fails closed like
+  // the phone path.
+  {
+    // Enriched (V2) payloads carry the email at caller.email; the top-level
+    // field is the V1 fallback shape — reading only the top level made this
+    // guard a no-op for every valid V2 extraction (codex P1, PR #3275).
+    const extractionEmailLc = String(extraction?.caller?.email || extraction?.email || '').trim().toLowerCase();
+    if (extractionEmailLc) {
+      try {
+        // EVERY customer email slot, not just the primary (codex P1 r18):
+        // service_contact{,2,3}_email are established contacts on the
+        // account (see customer-contact.js), so a blocked-ID spouse, tenant
+        // or property manager stating one of them is an existing customer's
+        // caller — matching on `email` alone let that call draft a
+        // prospect-priced estimate for a live account.
+        // Two EXACT questions instead of a capped owner list (codex P2, PR
+        // #3275): "does anyone own this email" and, separately, "does the
+        // phone match own it". One email legitimately sits on many accounts
+        // (a property manager in the service-contact slots of every building
+        // they run), so a bounded, unordered fetch could omit the very owner
+        // the phone matched and raise a phantom conflict against a
+        // legitimate draft. Scoping the second query by id keeps both cheap
+        // however many accounts share the address.
+        const emailOwnerQuery = () => db('customers')
+          .whereNull('deleted_at')
+          .where('active', true)
+          .whereRaw(
+            '(LOWER(TRIM(email)) = ? OR LOWER(TRIM(service_contact_email)) = ?'
+            + ' OR LOWER(TRIM(service_contact2_email)) = ? OR LOWER(TRIM(service_contact3_email)) = ?)',
+            [extractionEmailLc, extractionEmailLc, extractionEmailLc, extractionEmailLc],
+          )
+          .whereIn('pipeline_stage', ['active_customer', 'won', 'at_risk']);
+        const anyEmailOwner = await emailOwnerQuery().first('id');
+        if (anyEmailOwner && !customerMatch.customer) {
+          logger.warn('[estimator-engine] unidentified call states an active customer\'s email — failing closed to identity review');
+          return { error: 'email_matches_existing_customer', call };
+        }
+        if (anyEmailOwner && customerMatch.customer) {
+          const matchOwnsEmail = await emailOwnerQuery()
+            .where('id', customerMatch.customer.id)
+            .first('id');
+          if (!matchOwnsEmail) {
+            logger.warn('[estimator-engine] stated email belongs to a DIFFERENT active customer than the phone match — failing closed to identity review');
+            return { error: 'email_identity_conflict', call };
+          }
+        }
+      } catch (emailErr) {
+        logger.warn(`[estimator-engine] email-owner check failed — failing closed: ${emailErr.code || emailErr.name || 'db_error'}`);
+        return { error: 'customer_lookup_unavailable', call };
+      }
+    }
   }
   // Fail CLOSED on lookup failure, exactly like the SMS-origin path: a
   // failed query is not a no-match — an existing member could be hiding
