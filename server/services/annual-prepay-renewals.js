@@ -1222,6 +1222,19 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
     if (!term?.id || !term.customer_id || !coverageVisitCount || !(totalAmount > 0)) return summary;
     const rows = await coverageRowsForTerm(term, conn);
     const slices = splitCoverageAmount(totalAmount, coverageVisitCount);
+    // This term's OWN prepay invoice, resolved once for the self-referential
+    // guard below. `undefined` means the caller handed us a partial term row
+    // that never selected the column — that must NOT read as "this term has
+    // no prepay invoice", which would silently fail the guard OPEN and mint
+    // the very credit it exists to prevent. Every caller passes a full row
+    // today; this keeps a future partial select from re-opening the bug.
+    let prepayInvoiceId = term.prepay_invoice_id;
+    if (prepayInvoiceId === undefined) {
+      const fullTerm = await conn('annual_prepay_terms')
+        .where({ id: term.id })
+        .first('prepay_invoice_id');
+      prepayInvoiceId = fullTerm ? fullTerm.prepay_invoice_id : null;
+    }
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
       if (String(row.status || '').toLowerCase() !== 'completed') continue;
@@ -1235,6 +1248,18 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
         .orderBy('created_at', 'desc')
         .first();
       if (!invoice) continue;
+      // SELF-REFERENTIAL: the visit's invoice IS this term's own prepay
+      // invoice. A same-day close bills the completed first visit and sells
+      // the annual on ONE invoice — the prepay invoice carries the visit's
+      // scheduled_service_id, so the lookup above finds it and its 'paid'
+      // status reads as "the visit was separately collected on top of the
+      // annual". It wasn't: that payment IS the annual. Crediting the slice
+      // here hands back money the customer never paid twice, and settling it
+      // would mark the term's own prepay invoice as covered by that term.
+      // Compare against the TERM's prepay_invoice_id, not the invoice's
+      // annual_prepay_term_id — that column is null on some prepay invoices
+      // (verified against prod), so the invoice-side check would miss them.
+      if (prepayInvoiceId && String(invoice.id) === String(prepayInvoiceId)) continue;
       // Payer-billed visit: the money (owed or collected) is the PAYER's AR,
       // not the homeowner's — settling it as homeowner coverage or crediting
       // the homeowner a slice for the payer's money are both wrong. The
@@ -1384,6 +1409,18 @@ function reconcileBornPaidTerm(term, conn) {
 // operator follow-up (a partial reversal still writes its dedupe row, so a
 // later retry never claws back more).
 const PENDING_COMPLETION_REVERSAL_BY = 'system:annual_prepay_pending_completion_reversal';
+// The self-referential backfill (migration 20260808040000) reverses the same
+// grants under its OWN identity. This path must count those as already
+// reversed: without it, a later refund of the annual would find the original
+// positive credit still sitting in the ledger and claw the SAME slice back a
+// second time. The migration is frozen and cannot import this constant — the
+// literal is duplicated there and pinned by a test in
+// annual-prepay-renewals.test.js, so the two can never drift apart.
+const PENDING_COMPLETION_BACKFILL_BY = 'system:annual_prepay_self_referential_credit_backfill';
+const PENDING_COMPLETION_REVERSAL_IDENTITIES = [
+  PENDING_COMPLETION_REVERSAL_BY,
+  PENDING_COMPLETION_BACKFILL_BY,
+];
 
 async function reversePendingWindowCompletionCredits(term, conn = db, { visitId = null } = {}) {
   let reversedCount = 0;
@@ -1405,7 +1442,8 @@ async function reversePendingWindowCompletionCredits(term, conn = db, { visitId 
         .select('*');
       if (!credits.length) return;
       const reversalNotes = (await t('customer_credit_ledger')
-        .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_REVERSAL_BY })
+        .where({ customer_id: term.customer_id })
+        .whereIn('created_by', PENDING_COMPLETION_REVERSAL_IDENTITIES)
         .select('note')).map((r) => String(r.note || ''));
       const { postCreditMovement } = require('./customer-credit');
       for (const credit of credits) {
@@ -3614,6 +3652,7 @@ module.exports = {
   normalizeWindowStart,
   findVisitWindowConflict,
   _private: {
+    PENDING_COMPLETION_REVERSAL_IDENTITIES,
     dateOnly,
     addMonthsSameDay,
     addDaysYmd,
