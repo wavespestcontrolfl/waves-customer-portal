@@ -7987,6 +7987,11 @@ const CallRecordingProcessor = {
                 // primary by design.
                 serviceInterest: extracted.matched_service || extracted.requested_service || null,
                 leadDate: call.created_at || null, // date by the actual call
+                // Provenance for the bridge's repoint reconciliation (codex
+                // P1, PR #3303): the funnel row THIS call creates carries
+                // its call id, so a later stamp repoint can transfer or
+                // retire exactly this row and never another call's.
+                sourceCallId: call.id || null,
               }).catch(() => {});
               await pending;
             }

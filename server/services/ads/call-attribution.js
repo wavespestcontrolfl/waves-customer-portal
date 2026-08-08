@@ -112,9 +112,11 @@ async function recordCallPpcAttribution({
   isPaid = true,
   // Which call_log row this attribution derives from — the bridge's
   // repoint reconciliation identifies THE EXACT row a call created by it
-  // (codex P1, PR #3303). Written on insert and backfilled onto an
-  // existing row that lacks it, so a row first created by the immediate
-  // call path gains provenance on the bridge's next pass.
+  // (codex P1, PR #3303). Written on INSERT only: an existing row with
+  // NULL provenance may have been created by a DIFFERENT call reusing the
+  // same lead, and claiming it would let a later repoint transfer or
+  // delete another call's first-touch row (codex P1 r2) — legacy NULL
+  // rows stay untouched and are never reconciled.
   sourceCallId = null,
   // Transaction handle for the ad_service_attribution statements. The
   // google-call bridge attributes while holding a FOR UPDATE lock on the
@@ -200,7 +202,6 @@ async function recordCallPpcAttribution({
       applyService('service_line', serviceLine);
       applyService('specific_service', specificService);
       applyService('service_bucket', serviceBucket);
-      if (sourceCallId && !existing.source_call_id) patch.source_call_id = sourceCallId;
       if (Object.keys(patch).length) {
         patch.updated_at = new Date();
         await dbc('ad_service_attribution').where({ id: existing.id }).update(patch);

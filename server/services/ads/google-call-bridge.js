@@ -655,9 +655,13 @@ async function findLeadForCall(callLog, { dbc = db } = {}) {
 // new lead when that slot is free (funnel stage and metrics ride along),
 // retired when the new lead already owns a row or the link cleared
 // entirely. Pre-provenance rows (NULL source_call_id, written before the
-// column shipped) are conservatively left alone — the bridge backfills the
-// stamp on its next ordinary pass, after which repoints reconcile.
-async function reconcileMovedCallAttribution(trx, callLogId, recordedLeadId, newLeadId, now) {
+// column shipped or by writers without call identity) are PERMANENTLY left
+// alone — NULL provenance cannot prove ownership, and claiming such a row
+// could move another call's first-touch attribution (codex P1 r2). The
+// transfer carries the new lead's CURRENT customer (read under the lead
+// lock by the caller) so the row never pairs the new lead with the former
+// lead's customer.
+async function reconcileMovedCallAttribution(trx, callLogId, recordedLeadId, newLeadId, newCustomerId, now) {
   const oldRow = await trx('ad_service_attribution')
     .where({ lead_id: recordedLeadId, source_call_id: callLogId })
     .first('id');
@@ -667,7 +671,7 @@ async function reconcileMovedCallAttribution(trx, callLogId, recordedLeadId, new
     if (!conflict) {
       await trx('ad_service_attribution')
         .where({ id: oldRow.id })
-        .update({ lead_id: newLeadId, updated_at: now });
+        .update({ lead_id: newLeadId, customer_id: newCustomerId || null, updated_at: now });
       return;
     }
   }
@@ -902,7 +906,7 @@ async function applyBridge(options = {}) {
             // supports and a future re-link can attribute cleanly. The
             // google call itself stays bridged.
             if (recordedLeadId) {
-              await reconcileMovedCallAttribution(trx, match.callLog.id, recordedLeadId, null, now);
+              await reconcileMovedCallAttribution(trx, match.callLog.id, recordedLeadId, null, null, now);
               await trx('call_log')
                 .where({ id: match.callLog.id })
                 .update({
@@ -920,7 +924,7 @@ async function applyBridge(options = {}) {
           // prior value was never recorded, and guessing would corrupt
           // real attribution.
           if (recordedLeadId && String(recordedLeadId) !== String(res.match.leadId)) {
-            await reconcileMovedCallAttribution(trx, match.callLog.id, recordedLeadId, res.match.leadId, now);
+            await reconcileMovedCallAttribution(trx, match.callLog.id, recordedLeadId, res.match.leadId, res.match.customerId, now);
           }
           await trx('call_log')
             .where({ id: match.callLog.id })
