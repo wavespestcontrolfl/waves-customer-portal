@@ -1971,7 +1971,10 @@ router.put('/:id/proposal', async (req, res, next) => {
         return res.status(400).json({ error: 'Corrective work is limited to 24 items.' });
       }
       for (const work of incoming.correctiveWork) {
-        if (String(work?.label ?? '').length > 160) {
+        // Same alias expression the normalizer reads (label ?? description) —
+        // validating only `label` let an aliased oversized description slip
+        // through to the silent clamp (codex #3297 r5).
+        if (String(work?.label ?? work?.description ?? '').length > 160) {
           return res.status(400).json({ error: 'Corrective work descriptions are limited to 160 characters.' });
         }
         if (overLimit(work?.includes, 12, 200, (line) => line)) {

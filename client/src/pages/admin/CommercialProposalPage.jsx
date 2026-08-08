@@ -199,6 +199,13 @@ export default function CommercialProposalPage() {
 
   const locked = lockReason(estimate);
 
+  // Monotonic edit generation: every field edit bumps it, and save() applies
+  // the normalized reload ONLY if no edit landed while the save round-trip
+  // was in flight — otherwise a slow connection would silently discard
+  // keystrokes made after clicking Save (codex #3297 r5).
+  const editGenRef = React.useRef(0);
+  const markEdit = () => { editGenRef.current += 1; setDirty(true); };
+
   const applyLoaded = useCallback((data) => {
     const p = data.proposal || {};
     const est = data.estimate || null;
@@ -272,10 +279,10 @@ export default function CommercialProposalPage() {
     [buildings, taxRate, correctiveWork],
   );
 
-  const touch = () => setDirty(true);
+  const touch = () => markEdit();
 
   const mutateBuilding = useCallback((bi, fn) => {
-    setDirty(true);
+    markEdit();
     setBuildings((prev) => prev.map((b, i) => (i === bi ? fn(b) : b)));
   }, []);
 
@@ -288,9 +295,9 @@ export default function CommercialProposalPage() {
   const addLine = (bi) => mutateBuilding(bi, (b) => ({ ...b, lineItems: [...b.lineItems, emptyLine()] }));
   const removeLine = (bi, li) =>
     mutateBuilding(bi, (b) => ({ ...b, lineItems: b.lineItems.filter((_, i) => i !== li) }));
-  const addBuilding = () => { setDirty(true); setBuildings((prev) => [...prev, emptyBuilding(prev.length)]); };
+  const addBuilding = () => { markEdit(); setBuildings((prev) => [...prev, emptyBuilding(prev.length)]); };
   const duplicateBuilding = (bi) => {
-    setDirty(true);
+    markEdit();
     setBuildings((prev) => {
       const src = prev[bi];
       const copy = {
@@ -301,7 +308,7 @@ export default function CommercialProposalPage() {
       return [...prev.slice(0, bi + 1), copy, ...prev.slice(bi + 1)];
     });
   };
-  const removeBuilding = (bi) => { setDirty(true); setBuildings((prev) => prev.filter((_, i) => i !== bi)); };
+  const removeBuilding = (bi) => { markEdit(); setBuildings((prev) => prev.filter((_, i) => i !== bi)); };
 
   // Structured sections serialize only when actually authored — an empty
   // card omits its key so the server normalizes it to null and the customer
@@ -369,6 +376,10 @@ export default function CommercialProposalPage() {
     }
     setSaving(true);
     setError(null);
+    // Applying the normalized reload below is only safe if no keystroke
+    // landed while the round-trip was in flight — otherwise it would
+    // silently discard those edits (codex #3297 r5).
+    const genAtSave = editGenRef.current;
     try {
       await adminFetch(`/admin/estimates/${estimateId}/proposal`, {
         method: 'PUT',
@@ -381,9 +392,15 @@ export default function CommercialProposalPage() {
       // Direct fetch, NOT reload(): reload swallows its error into the
       // page-level banner and resolves, which would let save() return true
       // without the normalized swap (codex #3297 r3).
-      await adminFetch(`/admin/estimates/${estimateId}/proposal`).then(applyLoaded);
+      const fresh = await adminFetch(`/admin/estimates/${estimateId}/proposal`);
+      if (editGenRef.current === genAtSave) {
+        applyLoaded(fresh);
+        setDirty(false);
+      }
+      // Edits arrived mid-save → keep the operator's local state and the
+      // dirty flag; the persisted snapshot is what was saved, and the next
+      // save will normalize the newer edits.
       setSavedOnce(true);
-      setDirty(false);
       return true;
     } catch (e) {
       setError(e.message);
@@ -709,16 +726,16 @@ export default function CommercialProposalPage() {
                   <Input
                     size="sm" className="w-48 shrink-0" placeholder="Label (e.g. Units)" maxLength={80}
                     value={item.label} disabled={!!locked}
-                    onChange={(e) => { setDirty(true); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
+                    onChange={(e) => { markEdit(); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
                   />
                   <Input
                     size="sm" className="flex-1" placeholder="Value (e.g. 4 residential units, tenant-occupied)" maxLength={160}
                     value={item.value} disabled={!!locked}
-                    onChange={(e) => { setDirty(true); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, value: e.target.value } : it))); }}
+                    onChange={(e) => { markEdit(); setScopeItems((prev) => prev.map((it, i) => (i === idx ? { ...it, value: e.target.value } : it))); }}
                   />
                   {!locked && (
                     <Button variant="ghost" size="sm" title="Remove row"
-                      onClick={() => { setDirty(true); setScopeItems((prev) => prev.filter((_, i) => i !== idx)); }}>
+                      onClick={() => { markEdit(); setScopeItems((prev) => prev.filter((_, i) => i !== idx)); }}>
                       <Trash2 size={14} />
                     </Button>
                   )}
@@ -726,7 +743,7 @@ export default function CommercialProposalPage() {
               ))}
               {!locked && (
                 <Button variant="ghost" size="sm"
-                  onClick={() => { setDirty(true); setScopeItems((prev) => [...prev, { label: '', value: '' }]); }}>
+                  onClick={() => { markEdit(); setScopeItems((prev) => [...prev, { label: '', value: '' }]); }}>
                   <Plus size={14} /> Add scope row
                 </Button>
               )}
@@ -864,21 +881,21 @@ export default function CommercialProposalPage() {
                     <Input
                       size="sm" className="flex-1" placeholder="Work description (e.g. Initial German roach cleanout — Units 2 & 4)" maxLength={160}
                       value={w.label} disabled={!!locked}
-                      onChange={(e) => { setDirty(true); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
+                      onChange={(e) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, label: e.target.value } : it))); }}
                     />
                     <Input
                       size="sm" className="w-28 shrink-0" type="number" min="0" step="0.01" title="Amount"
                       value={w.amount} disabled={!!locked}
-                      onChange={(e) => { setDirty(true); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, amount: e.target.value } : it))); }}
+                      onChange={(e) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, amount: e.target.value } : it))); }}
                     />
                     <div className="flex items-center gap-1 shrink-0" title="Taxable line">
                       <Switch checked={w.taxable} disabled={!!locked}
-                        onChange={(v) => { setDirty(true); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, taxable: v } : it))); }} />
+                        onChange={(v) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, taxable: v } : it))); }} />
                       <span className="text-12 text-zinc-500">Tax</span>
                     </div>
                     {!locked && (
                       <Button variant="ghost" size="sm" title="Remove work item"
-                        onClick={() => { setDirty(true); setCorrectiveWork((prev) => prev.filter((_, i) => i !== idx)); }}>
+                        onClick={() => { markEdit(); setCorrectiveWork((prev) => prev.filter((_, i) => i !== idx)); }}>
                         <Trash2 size={14} />
                       </Button>
                     )}
@@ -886,13 +903,13 @@ export default function CommercialProposalPage() {
                   <Textarea
                     rows={2} value={w.includesText} disabled={!!locked}
                     placeholder={'What it includes — one per line\ne.g. Crack & crevice treatment in both kitchens\nFollow-up inspection at 2 weeks'}
-                    onChange={(e) => { setDirty(true); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, includesText: e.target.value } : it))); }}
+                    onChange={(e) => { markEdit(); setCorrectiveWork((prev) => prev.map((it, i) => (i === idx ? { ...it, includesText: e.target.value } : it))); }}
                   />
                 </div>
               ))}
               {!locked && (
                 <Button variant="ghost" size="sm"
-                  onClick={() => { setDirty(true); setCorrectiveWork((prev) => [...prev, { label: '', amount: 0, taxable: false, includesText: '' }]); }}>
+                  onClick={() => { markEdit(); setCorrectiveWork((prev) => [...prev, { label: '', amount: 0, taxable: false, includesText: '' }]); }}>
                   <Plus size={14} /> Add corrective work
                 </Button>
               )}
@@ -933,7 +950,7 @@ export default function CommercialProposalPage() {
                   <Select
                     size="sm" className="mt-1" value={commercialTerms.paymentTerms}
                     disabled={!!locked || (!estimate?.billByInvoice && !commercialTerms.paymentTerms)}
-                    onChange={(e) => { setDirty(true); setCommercialTerms((prev) => ({ ...prev, paymentTerms: e.target.value })); }}
+                    onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, paymentTerms: e.target.value })); }}
                   >
                     <option value="">Not set</option>
                     <option value="due_on_receipt">Due on receipt</option>
@@ -963,7 +980,7 @@ export default function CommercialProposalPage() {
                       max={key === 'initialTermMonths' ? '60' : undefined}
                       maxLength={maxLength}
                       value={commercialTerms[key]} disabled={!!locked} placeholder={placeholder}
-                      onChange={(e) => { setDirty(true); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
+                      onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, [key]: e.target.value })); }}
                     />
                   </label>
                 ))}
@@ -972,7 +989,7 @@ export default function CommercialProposalPage() {
                   <Input
                     size="sm" className="mt-1" maxLength={200} value={commercialTerms.accessRequirements} disabled={!!locked}
                     placeholder="e.g. Office provides keys for common areas; tenants notified by property manager"
-                    onChange={(e) => { setDirty(true); setCommercialTerms((prev) => ({ ...prev, accessRequirements: e.target.value })); }}
+                    onChange={(e) => { markEdit(); setCommercialTerms((prev) => ({ ...prev, accessRequirements: e.target.value })); }}
                   />
                 </label>
               </div>
