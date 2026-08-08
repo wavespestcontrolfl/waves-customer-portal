@@ -1212,10 +1212,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // mirroring the route lifecycle: a pre-sale lead gets the conversion date
   // (overwriting any intake date), a current/former customer keeps its real
   // start (COALESCE fills only the missing).
+  const formerOrCurrent = ['active_customer', 'won', 'at_risk', ...FORMER_CUSTOMER_STAGES];
   const stageStamp = ['active_customer', 'won', 'at_risk'].includes(clean.pipeline_stage)
     ? { member_since: db.raw(
-        `CASE WHEN pipeline_stage IN ('active_customer','won','at_risk','churned','dormant') THEN COALESCE(member_since, ?) ELSE ? END`,
-        [etDateString(), etDateString()]) }
+        `CASE WHEN pipeline_stage IN (${formerOrCurrent.map(() => '?').join(',')}) THEN COALESCE(member_since, ?) ELSE ? END`,
+        [...formerOrCurrent, etDateString(), etDateString()]) }
     : {};
 
   // notes maps to free-text crm_notes — redact from logs (see updateCustomer).
