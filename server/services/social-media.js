@@ -383,7 +383,7 @@ const PRICING_PATTERNS = /\$\d+(?:\.\d{2})?(?:\s*\/\s*(?:mo(?:nth)?|yr|year|visi
 // Includes the compliance-language class (AGENTS.md): no pesticide is ever
 // blanket-"safe" (pet-safe / family-safe / safe for kids), and it's
 // "EPA-registered", never "EPA-approved".
-const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects|(?:pet|kid|child|family)[\s-]*(?:and[\s-]*(?:pet|kid|child|family)[\s-]*)?safe|safe\s+(?:for|around)\s+(?:your\s+|the\s+|our\s+)?(?:pets?|kids?|children|famil(?:y|ies))|E\.?\s*P\.?\s*A\b\.?[\s-]*approved|approved\s+by\s+(?:the\s+)?E\.?\s*P\.?\s*A\b)\.?/i;
+const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects|(?:pet|kid|child|family)[\s-]*(?:and[\s-]*(?:pet|kid|child|family)[\s-]*)?safe|safe\s+(?:for|around)\s+(?:your\s+|the\s+|our\s+)?(?:pets?|kids?|children|famil(?:y|ies))|E\.?\s*P\.?\s*A\b\.?[\s-]*approved|approved\s+by\s+(?:the\s+)?E\.?\s*P\.?\s*A\b)\b/i;
 // Word-order enumeration of banned claims proved unbounded across review
 // rounds (#3059 r2-r9), so the timing and product-safety classes are caught
 // by CLAUSE-LEVEL CO-OCCURRENCE instead. These constants are the vocabulary.

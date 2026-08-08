@@ -130,6 +130,11 @@ const NOTE_SAFE_FROM_RE = /\bsafe(?:ly|ty)?\s+from\s+[\w'-]+(?:\s+(?:and|or)\s+[
 const NOTE_WORKER_SAFETY_RE = /\b(?:technicians?|applicators?|staff|crew|team)\b[^.!?\n]*\b(?:stay(?:ing)?|keep(?:ing)?|remain(?:ing)?|be)\s+safe(?:ly)?\b/gi;
 const NOTE_WELL_WISH_SAFE_RE = /\b(?:stay|be|drive|travel|get\s+home)\s+safe(?:ly)?\b/gi;
 const NOTE_SAFETY_WORD_RE = /\bsafe(?:ly|ty)?\b/i;
+// Verbatim mirror of the canonical SAFETY_OVERCLAIMS (social-media.js —
+// keep in sync): guarantees, 100%, pet/kid-safe, EPA-approved (incl.
+// dotted "E.P.A."). Only APPROVED-status EPA claims block — "Following
+// EPA label directions" is compliant and must stay enabled.
+const NOTE_SAFETY_OVERCLAIMS_RE = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects|(?:pet|kid|child|family)[\s-]*(?:and[\s-]*(?:pet|kid|child|family)[\s-]*)?safe|safe\s+(?:for|around)\s+(?:your\s+|the\s+|our\s+)?(?:pets?|kids?|children|famil(?:y|ies))|E\.?\s*P\.?\s*A\b\.?[\s-]*approved|approved\s+by\s+(?:the\s+)?E\.?\s*P\.?\s*A\b)\b/i;
 // Verbatim copies of the canonical clause-level timing rules
 // (social-media.js TIMING_DURATION_RE / REENTRY_CONTEXT_RE /
 // AGRONOMIC_EXEMPT_RE — keep in sync) so the inline advisor recognizes
@@ -166,7 +171,7 @@ function noteComplianceTrips(note) {
     .replace(NOTE_WORKER_SAFETY_RE, '')
     .replace(NOTE_WELL_WISH_SAFE_RE, '');
   if (NOTE_SAFETY_WORD_RE.test(scope)) return true;
-  if (/\be\.?\s*p\.?\s*a\b(?!\.?[-\s]?(?:registered|exempt))/i.test(note)) return true;
+  if (NOTE_SAFETY_OVERCLAIMS_RE.test(note)) return true;
   return noteTimingTrips(note);
 }
 // Same canonicalization the server runs before the shortener test —

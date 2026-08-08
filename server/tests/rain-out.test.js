@@ -1513,6 +1513,10 @@ describe('rain-out service', () => {
       blocked('Stay off for 30m');
       blocked('Re-enter in 1.5 hours');
       blocked('This is E.P.A. approved');
+      // ...but only APPROVED-status EPA claims block — label-direction
+      // references are compliant (r14 client-parity case).
+      expect(sanitize()('Following EPA label directions as always'))
+        .toEqual({ note: 'Following EPA label directions as always' });
       // Cross-sentence context (pre-push r10): the note ALWAYS rides a
       // treatment SMS, so the claim and its product/area context need not
       // share a sentence — impliedTreatmentContext closes the split.
