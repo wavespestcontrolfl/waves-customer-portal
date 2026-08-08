@@ -1563,6 +1563,85 @@ function remainingUnitCatalogKey(svc = {}) {
   return /^tree_shrub(_program|_quarterly|_6week)$/.test(key) ? key : null;
 }
 
+// Back-to-back stacking for same-day multi-service accepts (owner directive
+// 2026-08-08: "one day, back to back, at least for the first initial"). The
+// promoted units below used to copy the reserved visit's window verbatim, so
+// a lawn+pest accept produced two jobs sitting on the SAME clock time and
+// dispatch had no ordering. Stacking walks a cursor forward instead.
+//
+// `window_start`/`window_end` are `time without time zone` ('HH:MM:SS').
+// Returns null — never a wrapped time — when the arithmetic would roll past
+// midnight, so a late reserved slot degrades to the old same-window copy
+// instead of stamping a visit at 00:30 on the reserved DATE.
+function addMinutesToClock(clock, minutes) {
+  const parts = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(String(clock || '').trim());
+  const delta = Number(minutes);
+  if (!parts || !Number.isFinite(delta)) return null;
+  const total = Number(parts[1]) * 60 + Number(parts[2]) + delta;
+  if (!(total >= 0) || total >= 24 * 60) return null;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}:00`;
+}
+
+// `window_start` is ALWAYS HH:00:00 (AGENTS.md, owner 2026-07-27) — only
+// `window_end` may legitimately land off-hour. A 90-minute reserved visit ends
+// at 10:30, so the next stacked visit starts at 11:00, not 10:30. Returns null
+// rather than rolling into the next day.
+function alignClockUpToHour(clock) {
+  const parts = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec(String(clock || '').trim());
+  if (!parts) return null;
+  const hour = Number(parts[1]);
+  if (Number(parts[2]) === 0) return hour < 24 ? `${String(hour).padStart(2, '0')}:00:00` : null;
+  return hour + 1 < 24 ? `${String(hour + 1).padStart(2, '0')}:00:00` : null;
+}
+
+// Occupancy check for a stacked unit, through the CANONICAL mechanism
+// (services/scheduling/occupancy.js) rather than a second overlap query —
+// findConflictingVisits already encodes the active-reservation predicate, the
+// COALESCE'd nullable window_end, and the technician-NULL blindness the
+// booking conflict-check class warns about.
+//
+// The lock is the NON-BLOCKING variant by design: this runs inside the accept
+// transaction, which already holds row locks, so blocking on the date lock
+// could deadlock against a booking that holds it and wants those rows —
+// exactly the late-rung-1 case tryAcquireOccupancyLock documents. Failing to
+// take the lock degrades to unslotted instead of racing the check.
+async function stackedWindowIsFree(database, { date, startClock, endClock }) {
+  if (!date || !startClock || !endClock) return false;
+  const { tryAcquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
+  if (!(await tryAcquireOccupancyLock(database, date))) return false;
+  const conflicts = await findConflictingVisits({
+    db: database, date, windowStart: startClock, windowEnd: endClock,
+  });
+  return conflicts.length === 0;
+}
+
+// Every `remaining` line that the reservation path should now schedule on the
+// reserved date. Termite and mosquito are excluded because their own
+// promotions carry adjudicated cadence rules (bait must be quarterly;
+// seasonal mosquito rolls into Feb–Oct instead of treating in December) that
+// a generic promotion would flatten.
+function generallyPromotableRemainingUnits(remaining = []) {
+  return (Array.isArray(remaining) ? remaining : [])
+    .filter((line) => {
+      const key = String(recurringServiceKey(line) || '');
+      if (key.startsWith('termite') || isTermiteBillingRiderLine(line)) return false;
+      if (RecurringAppointmentSeeder.serviceKeyFor(line) === 'mosquito') return false;
+      // An unlabeled line would insert a NULL service_type, which the
+      // per-unit catch swallows — completing an accept that bills the
+      // program while scheduling nothing. That is the exact failure the
+      // mosquito r17 normalization closed; do not reopen it.
+      return !!(line.name || line.serviceName || line.service_name);
+    })
+    .map((line) => ({
+      service: { ...line, name: line.name || line.serviceName || line.service_name },
+      // Same key resolution the auto-schedule path uses; a null key degrades
+      // to name-only catalog matching exactly as it does there, which is the
+      // parity this directive asked for.
+      catalogServiceKey: remainingUnitCatalogKey(line),
+      noteKind: 'billed recurring program',
+    }));
+}
+
 function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = {}) {
   const rowKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: scheduledRow.service_type });
   return recurringServices.find((svc) => RecurringAppointmentSeeder.serviceKeyFor(svc) === rowKey)
@@ -1992,6 +2071,18 @@ const EstimateConverter = {
       acceptFrequency: estimateData.customerSelection?.frequency || null,
       supplementalCompanions,
     });
+    // Owner directive 2026-08-08 — read once here because BOTH the series-lock
+    // pre-pass and the reservation scheduling loop below must agree on which
+    // units exist; a gate read that disagreed between them would let the loop
+    // take a lock the pre-pass never ordered, which is exactly the deadlock
+    // the r17 union closed. Read at call time so a flip needs no redeploy.
+    // Inline require is the house convention for call-time gates (every
+    // GATE_BERMUDA_SUPPRESSION site reads it this way) and it matters here:
+    // this module had NO module-level feature-gates dependency, and ~96 test
+    // files mock that module partially. A top-level destructure would break
+    // every one of them that reaches convertEstimate.
+    const multiServiceReservedSchedule = require('../config/feature-gates')
+      .gateEnvValue('GATE_MULTI_SERVICE_RESERVED_SCHEDULE');
     const supplementStandaloneUnits = combinedScheduling.standalone.filter((unit) => unit.fromSupplement);
     // Termite bond lines are RIDERS, not units (owner 2026-07-20): the bond
     // folds into the bait visit via its combined route, so counting it would
@@ -2654,6 +2745,22 @@ const EstimateConverter = {
                       : 'mosquito_monthly',
                   );
                 }
+                continue;
+              }
+              // Generally-promoted lines (lawn, tree & shrub, foam — owner
+              // directive 2026-08-08) take their series locks in the
+              // reservation loop below, so they must join this sorted union
+              // for the same reason termite and mosquito do. Mirrors the
+              // promotion's own exclusions; the 'Service' fallback only ever
+              // makes the union a superset, which over-serializes slightly
+              // rather than reopening a mid-hold wait.
+              if (multiServiceReservedSchedule
+                && !key.startsWith('termite')
+                && !isTermiteBillingRiderLine(svc)) {
+                await addUnit(
+                  svc.name || svc.serviceName || svc.service_name || 'Service',
+                  remainingUnitCatalogKey(svc),
+                );
               }
             }
           } else {
@@ -2774,7 +2881,36 @@ const EstimateConverter = {
               noteKind: 'mosquito program',
             };
           });
-        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits]) {
+        // General promotion (owner directive 2026-08-08) — the "separate
+        // owner decision" the 2026-06-12 adjudication above explicitly
+        // deferred. Termite, bond and mosquito were each promoted one at a
+        // time as someone noticed a billed program that scheduled nothing;
+        // lawn and tree & shrub never were. Every multi-service accept in
+        // prod history (4 of 4) therefore scheduled pest and silently
+        // dropped lawn — the lawn series was hand-built 6 to 37 days later,
+        // once spawning a duplicate pest series that had to be cancelled.
+        // This promotes whatever is LEFT, so a billed recurring line can no
+        // longer convert into nothing.
+        //
+        // Termite and mosquito keys are excluded rather than re-handled:
+        // their promotions above carry adjudicated cadence rules (bait must
+        // be quarterly; seasonal mosquito rolls into Feb–Oct rather than
+        // treating in December) that a generic promotion would flatten.
+        const promotedRemainingUnits = multiServiceReservedSchedule
+          ? generallyPromotableRemainingUnits(remaining)
+          : [];
+        // Back-to-back cursor: the reserved visit's end time, falling back to
+        // its start plus its own duration when window_end is absent.
+        let tripCursor = multiServiceReservedSchedule
+          ? (reservedStart?.window_end
+            || addMinutesToClock(reservedStart?.window_start, reservedStart?.estimated_duration_minutes || 60))
+          : null;
+        for (const unit of [
+          ...(reservedStandalone || []),
+          ...promotedTermiteUnits,
+          ...promotedMosquitoUnits,
+          ...promotedRemainingUnits,
+        ]) {
           if (!reservedStart?.scheduled_date) break;
           // A reserved row already covering this program means nothing to add.
           const unitKey = recurringServiceKey({ name: unit.service.name });
@@ -2796,28 +2932,70 @@ const EstimateConverter = {
             const unitFrequencyLabel = unit.seasonalMosquito
               ? 'seasonal (Feb–Oct)'
               : (unit.service.frequency || 'recurring');
+            // Catalog identity resolves BEFORE the row is built: the unit's
+            // duration is what advances the back-to-back cursor below. The
+            // null-key guard is new — generic promotions legitimately carry
+            // no key (name-only resolution, same as the auto-schedule path),
+            // and `where service_key = NULL` matches nothing anyway.
+            let unitCatalog = null;
+            if (unit.catalogServiceKey) {
+              try {
+                unitCatalog = await database('services')
+                  .where({ service_key: unit.catalogServiceKey })
+                  .first('id', 'default_duration_minutes');
+              } catch (lookupErr) {
+                logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
+              }
+            }
+            // Stack this unit after the running cursor rather than copying the
+            // reserved window verbatim. A cursor that would roll past midnight
+            // yields null and falls back to the reserved window, so a
+            // late-in-the-day accept keeps today's behavior instead of
+            // stamping a visit at 00:30 on the reserved date.
+            // Under the gate EVERY same-trip unit stacks. If it cannot produce
+            // a valid hour-aligned window (null cursor, midnight overflow) or
+            // the window is unavailable, it books UNSLOTTED — never by copying
+            // the reserved visit's own window, which would drop the added
+            // service straight on top of the reserved one and defeat both the
+            // back-to-back directive and the conflict guard.
+            const wantsStack = multiServiceReservedSchedule && sameTrip;
+            const stackedStart = wantsStack ? alignClockUpToHour(tripCursor) : null;
+            const stackedEnd = stackedStart
+              ? addMinutesToClock(stackedStart, unitCatalog?.default_duration_minutes || 60)
+              : null;
+            const useStacked = !!(stackedStart && stackedEnd && await stackedWindowIsFree(database, {
+              date: unitDate, startClock: stackedStart, endClock: stackedEnd,
+            }));
+            const unslotted = wantsStack && !useStacked;
+            if (unslotted) {
+              logger.warn(`[estimate-converter] estimate ${estimateId}: ${unit.service.name} could not stack on ${unitDate}${stackedStart ? ` at ${stackedStart}` : ' (no valid window)'} — booking unslotted for office placement`);
+            }
+            let unitWindowStart = null;
+            let unitWindowEnd = null;
+            if (useStacked) {
+              unitWindowStart = stackedStart;
+              unitWindowEnd = stackedEnd;
+            } else if (!wantsStack && sameTrip) {
+              // Gate OFF only — today's same-window copy, unchanged.
+              unitWindowStart = reservedStart.window_start;
+              unitWindowEnd = reservedStart.window_end;
+            }
             const standaloneRow = {
               customer_id: customerId,
               scheduled_date: unitDate,
-              ...(sameTrip && reservedStart.window_start ? { window_start: reservedStart.window_start } : {}),
-              ...(sameTrip && reservedStart.window_end ? { window_end: reservedStart.window_end } : {}),
-              ...(sameTrip && reservedStart.technician_id ? { technician_id: reservedStart.technician_id } : {}),
+              ...(unitWindowStart ? { window_start: unitWindowStart } : {}),
+              ...(unitWindowEnd ? { window_end: unitWindowEnd } : {}),
+              ...(sameTrip && !unslotted && reservedStart.technician_id
+                ? { technician_id: reservedStart.technician_id } : {}),
               ...(reservedStart.zone ? { zone: reservedStart.zone } : {}),
               service_type: unit.service.name,
               status: 'pending',
               notes: `Auto-scheduled from estimate #${estimateId} (${unit.noteKind || 'standalone bait program'} alongside reserved visit). Frequency: ${unitFrequencyLabel}.`,
               source_estimate_id: estimateId,
             };
-            try {
-              const catalogRow = await database('services')
-                .where({ service_key: unit.catalogServiceKey })
-                .first('id', 'default_duration_minutes');
-              if (catalogRow) {
-                standaloneRow.service_id = catalogRow.id;
-                if (catalogRow.default_duration_minutes) standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
-              }
-            } catch (lookupErr) {
-              logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
+            if (unitCatalog) {
+              standaloneRow.service_id = unitCatalog.id;
+              if (unitCatalog.default_duration_minutes) standaloneRow.estimated_duration_minutes = unitCatalog.default_duration_minutes;
             }
             // Duplicate-series guard (P0): this standalone creator was the
             // third unguarded converter seeding path — a customer already
@@ -2874,6 +3052,10 @@ const EstimateConverter = {
               continue;
             }
             const { parentRow, seedResult } = outcome;
+            // Advance only on a real insert — a duplicate-series skip above
+            // `continue`s without consuming a slot, and moving the cursor
+            // there would leave a gap in the trip.
+            if (useStacked) tripCursor = stackedEnd;
             scheduledCount += 1;
             // The reserved row's reminders were registered by the public
             // accept route; this added row needs its own (Codex r2) —
@@ -4055,6 +4237,10 @@ module.exports.supplementalCompanionLines = supplementalCompanionLines;
 module.exports.COMBINED_SERVICE_ROUTES = COMBINED_SERVICE_ROUTES;
 module.exports.durationMinutesForRecurringService = durationMinutesForRecurringService;
 module.exports.remainingUnitCatalogKey = remainingUnitCatalogKey;
+module.exports.generallyPromotableRemainingUnits = generallyPromotableRemainingUnits;
+module.exports.addMinutesToClock = addMinutesToClock;
+module.exports.alignClockUpToHour = alignClockUpToHour;
+module.exports.stackedWindowIsFree = stackedWindowIsFree;
 module.exports.supportsConverterFollowUpSeeding = supportsConverterFollowUpSeeding;
 module.exports.resolveFirstApplicationAmount = resolveFirstApplicationAmount;
 module.exports.resolveAnnualPrepayDraftAmount = resolveAnnualPrepayDraftAmount;

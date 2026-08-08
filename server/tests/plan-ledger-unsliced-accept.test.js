@@ -22,6 +22,10 @@
 
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  // convertEstimate reads GATE_MULTI_SERVICE_RESERVED_SCHEDULE through this
+  // call-time parser; the mock must model it or the accept path throws
+  // before any ledger assertion runs. Off, like every other gate here.
+  gateEnvValue: jest.fn(() => false),
   gates: {},
 }));
 jest.mock('../services/new-recurring-welcome-sms', () => ({
