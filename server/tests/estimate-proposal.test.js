@@ -209,6 +209,22 @@ describe('structured proposal sections (slice 1A-i)', () => {
     expect(p.accountManager).toBeNull();
   });
 
+  it('keeps a BLANK initial term unset — Number(null)/Number("") must never coerce to the month-to-month claim', () => {
+    const p = normalizeProposal(authored({
+      commercialTerms: { validDays: 30, initialTermMonths: null, paymentTerms: 'Net-30' },
+    }));
+    expect(p.commercialTerms.initialTermMonths).toBeNull();
+    const empty = normalizeProposal(authored({
+      commercialTerms: { validDays: 30, initialTermMonths: '', paymentTerms: 'Net-30' },
+    }));
+    expect(empty.commercialTerms.initialTermMonths).toBeNull();
+    // Explicit 0 IS month-to-month — the operator selected it.
+    const zero = normalizeProposal(authored({
+      commercialTerms: { validDays: 30, initialTermMonths: 0 },
+    }));
+    expect(zero.commercialTerms.initialTermMonths).toBe(0);
+  });
+
   it('clamps hostile structured input: negative amounts to 0, out-of-range term numbers to null, empty sections to null', () => {
     const p = normalizeProposal(authored({
       correctiveWork: [{ label: 'Hostile', amount: -500 }, { amount: 100 }],

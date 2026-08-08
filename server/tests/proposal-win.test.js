@@ -55,6 +55,26 @@ describe('buildProposalFirstInvoice', () => {
     expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
   });
 
+  test('bills structured corrective-work lines too — the accepted remediation must reach the invoice (slice 1A-i)', () => {
+    const built = buildProposalFirstInvoice({
+      ...SIESTA_PROPOSAL,
+      correctiveWork: [
+        { label: 'German roach cleanout — Units 2 & 4', amount: 450, taxable: true, includes: ['Both kitchens'] },
+        { label: 'Soffit exclusion', amount: 300, taxable: false },
+        { label: 'Zero-dollar note', amount: 0 },
+      ],
+    });
+    expect(built.lineItems.slice(-2)).toEqual([
+      { description: 'German roach cleanout — Units 2 & 4', quantity: 1, unit_price: 450 },
+      { description: 'Soffit exclusion', quantity: 1, unit_price: 300 },
+    ]);
+    expect(built.subtotal).toBe(2960);           // 2210 + 750
+    expect(built.taxableSubtotal).toBe(1160);    // 710 + 450
+    expect(built.taxAmount).toBe(81.2);          // 1160 * 0.07
+    expect(built.total).toBe(3041.2);
+    expect(Math.round(built.subtotal * built.blendedTaxRate * 100) / 100).toBe(built.taxAmount);
+  });
+
   test('single building omits the building prefix', () => {
     const built = buildProposalFirstInvoice({
       taxRate: 0,

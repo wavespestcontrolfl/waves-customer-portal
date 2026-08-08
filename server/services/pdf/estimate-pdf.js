@@ -242,6 +242,47 @@ function buildingBlock(ctx, building, y, taxRate) {
   return y;
 }
 
+// Property scope (slice 1A-i) — the label/value facts the proposal was
+// scoped against. Rendered by the fallback too: a browser-render failure
+// must not email an agreement missing the scoped facts the React document
+// shows (pre-push codex P1).
+function propertyScopeBlock(ctx, propertyScope, y) {
+  const { doc } = ctx;
+  const items = Array.isArray(propertyScope?.items) ? propertyScope.items : [];
+  if (items.length === 0) return y;
+  y = ensureSpace(ctx, y, 40);
+  y = sectionLabel(doc, 'Property scope', L, y);
+  doc.fontSize(10).font('Helvetica');
+  for (const item of items) {
+    const valueW = W - 130;
+    const valueH = doc.heightOfString(item.value, { width: valueW });
+    y = ensureSpace(ctx, y, valueH + 4);
+    doc.font('Helvetica').fillColor(MUTED).text(item.label, L, y, { width: 120 });
+    doc.fillColor(INK).text(item.value, L + 130, y, { width: valueW });
+    y += Math.max(valueH, 12) + 2;
+  }
+  return y + 6;
+}
+
+// Customer responsibilities (slice 1A-i) — bullet list, fallback parity with
+// the React document for the same reason as propertyScopeBlock.
+function responsibilitiesBlock(ctx, responsibilities, y) {
+  const { doc } = ctx;
+  const lines = Array.isArray(responsibilities) ? responsibilities : [];
+  if (lines.length === 0) return y;
+  y = ensureSpace(ctx, y, 40);
+  y = sectionLabel(doc, 'Customer responsibilities', L, y);
+  for (const line of lines) {
+    const text = `• ${line}`;
+    doc.fontSize(10).font('Helvetica');
+    const lineH = doc.heightOfString(text, { width: W, lineGap: 1.5 });
+    y = ensureSpace(ctx, y, lineH + 4);
+    doc.fontSize(10).font('Helvetica').fillColor(BODY).text(text, L, y, { width: W, lineGap: 1.5 });
+    y += lineH + 3;
+  }
+  return y + 6;
+}
+
 // Structured corrective-work lines (slice 1A-i). Their amounts are inside
 // computeProposalTotals' one-time totals, so this fallback document must
 // print the rows too — a totals line with no visible source would look like
@@ -428,11 +469,14 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   yRight = detailsBlock(doc, estimate, L + W / 2 + 20, yRight);
   let y = Math.max(yLeft, yRight) + 18;
 
+  y = propertyScopeBlock(ctx, proposal.propertyScope, y);
+
   for (const building of proposal.buildings) {
     y = buildingBlock(ctx, building, y, proposal.taxRate);
   }
 
   y = correctiveWorkBlock(ctx, proposal.correctiveWork, y);
+  y = responsibilitiesBlock(ctx, proposal.customerResponsibilities, y);
   y = totalsBlock(ctx, totals, y + 4);
   y = termsBlock(ctx, proposal, totals, y + 8);
 

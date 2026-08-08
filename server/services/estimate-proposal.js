@@ -158,6 +158,10 @@ function normalizeCustomerResponsibilities(raw) {
 }
 
 function cleanBoundedInt(value, { min, max }) {
+  // Number(null) and Number('') are 0 — a blank editor field must stay
+  // "unset", never coerce to the 0-means-month-to-month claim the operator
+  // didn't select (pre-push codex P1).
+  if (value == null || String(value).trim() === '') return null;
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
   const rounded = Math.round(n);

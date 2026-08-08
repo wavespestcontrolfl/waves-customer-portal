@@ -121,6 +121,22 @@ function buildProposalFirstInvoice(proposal) {
     }
   }
 
+  // Structured corrective-work lines (slice 1A-i) are one-time charges inside
+  // computeProposalTotals' one-time totals — the acceptance invoice must bill
+  // them too, or a marked-won bill-by-invoice proposal underbills exactly the
+  // remediation the customer accepted (pre-push codex P0).
+  for (const work of (Array.isArray(proposal?.correctiveWork) ? proposal.correctiveWork : [])) {
+    const amount = roundMoney(work?.amount);
+    if (!(amount > 0)) continue;
+    lineItems.push({
+      description: cleanStr(work.label || 'Corrective work', 300),
+      quantity: 1,
+      unit_price: amount,
+    });
+    subtotal = roundMoney(subtotal + amount);
+    if (work.taxable === true) taxableSubtotal = roundMoney(taxableSubtotal + amount);
+  }
+
   const taxAmount = roundMoney(taxableSubtotal * taxRate);
   // Blended rate so InvoiceService (single-rate) reproduces the exact tax
   // dollars across mixed-taxability lines. round(subtotal * (taxAmount/subtotal))
