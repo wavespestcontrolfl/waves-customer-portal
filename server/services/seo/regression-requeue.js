@@ -26,9 +26,12 @@
  * auto-merges, so rewriting history is not a safe move for this engine.
  *
  * Two loop-breakers, because a refresh can itself regress:
- *   • requeued_at — each impact row is acted on exactly once, ever, whatever
- *     the outcome. requeue_status records WHY when it wasn't queued, so a page
- *     the lane can't act on is visible instead of silently retried nightly.
+ *   • requeued_at — stamped once a row reaches a CONCLUSIVE outcome: corrective
+ *     work was queued, or the lane established it can never act on this page.
+ *     An outcome that queued nothing (a completed same-key row, another
+ *     page-editing action holding the page, a transient failure) is retried
+ *     under a bounded attempt budget instead, so a regression is never
+ *     consumed by a tick that did no work. requeue_status records which.
  *   • COOLDOWN_DAYS — a page re-queued recently is not re-queued again, so a
  *     refresh→regress→refresh oscillation dies after one cycle. The second
  *     regression still shows up as a regressed verdict for a human to read.
@@ -75,15 +78,38 @@ const TERMINAL_ERROR_CODES = new Set([
 /**
  * Pure: given a resolution outcome, what goes in requeue_status?
  * Split out so the status vocabulary is testable without a DB or the engine.
+ *
+ * Only 'queued' is TERMINAL-because-successful. queued=false does NOT prove
+ * the regression is being corrected, so those outcomes are retryable — see
+ * isRetryableStatus.
  */
 function requeueStatusFor({ resolved, enqueue, errorCode }) {
   if (errorCode) return String(errorCode).toLowerCase();
-  if (!resolved) return 'unresolved_page';
+  if (!resolved) return 'unsupported_target';
   if (!enqueue) return 'unknown';
   if (enqueue.queued) return 'queued';
-  // enqueueRefresh reports queued=false when a row for this page is already
-  // claimed / done / in review — the page is already being handled.
   return `inflight:${enqueue.status || 'unknown'}`.slice(0, 40);
+}
+
+/**
+ * Is this outcome worth trying again tomorrow rather than consuming the
+ * regression?
+ *
+ * enqueueRefresh reports queued=false in cases that are NOT "a corrective
+ * refresh is under way":
+ *   - status 'done' — the upsert preserves a completed same-key row, so the
+ *     dedupe key blocks a NEW refresh for a regression that happened AFTER
+ *     that refresh finished. Nothing corrective is queued at all.
+ *   - status 'claimed' / 'pending_review' from ANOTHER page-editing action —
+ *     the in-flight query spans all of PAGE_EDITING_ACTIONS, so a pending
+ *     rewrite_title_meta suppresses our refresh. That edit is not a fix for
+ *     this regression.
+ * Stamping either terminally would drop the regression forever with no work
+ * done. They are retried instead, under the same bounded attempt budget that
+ * stops a stuck row from occupying the batch (retired as <status>_exhausted).
+ */
+function isRetryableStatus(status) {
+  return typeof status === 'string' && status.startsWith('inflight:');
 }
 
 // Confirmed regressions nobody has acted on yet, oldest first. checked_21d_at
@@ -157,13 +183,15 @@ async function stamp(database, id, status, attempts = null) {
   }
 }
 
-// Count a transient failure. Once the cap is hit the row is stamped terminal
-// so it stops occupying the bounded batch.
-async function noteTransientFailure(database, row) {
+// Count an attempt that did NOT consume the regression (a transient failure,
+// or an enqueue that queued nothing). Once the cap is hit the row is stamped
+// terminal so it stops occupying the bounded batch.
+async function noteRetry(database, row, status = 'error') {
   const attempts = (Number(row.requeue_attempts) || 0) + 1;
   if (attempts >= MAX_TRANSIENT_ATTEMPTS) {
-    await stamp(database, row.id, 'error_exhausted', attempts);
-    return 'error_exhausted';
+    const exhausted = `${status}_exhausted`.slice(0, 40);
+    await stamp(database, row.id, exhausted, attempts);
+    return exhausted;
   }
   try {
     await database('content_optimization_impact')
@@ -172,7 +200,7 @@ async function noteTransientFailure(database, row) {
   } catch (err) {
     logger.error(`[regression-requeue] failed to count attempt on impact ${row.id}: ${err.message}`);
   }
-  return 'error';
+  return status;
 }
 
 /**
@@ -240,7 +268,15 @@ async function requeueRegressedPagesLocked(opts = {}) {
       } else {
         post = await refreshAudit.resolvePublishedPostByUrl(row.page_url);
         if (!post) {
-          status = 'unresolved_page';
+          // Out of this lane's reach, not a transient miss. enqueueRefresh is
+          // keyed by blogPostId, so a regressed page with no blog_posts row —
+          // a city/service or other non-blog Astro target, which the GSC miner
+          // also emits refresh_existing_page work for — cannot be handed to it
+          // at all. Recorded and WARNed rather than retried, so the gap is
+          // countable instead of silent; covering those targets needs a
+          // URL-keyed enqueue path in refresh-audit (see the PR body).
+          status = 'unsupported_target';
+          logger.warn(`[regression-requeue] no published blog_posts row for ${row.page_url} — outside this lane's reach`);
         } else if (!requeueEnabled()) {
           // Shadow: report the decision, change nothing, stamp nothing.
           logger.info(`[regression-requeue] gated OFF — would re-queue ${row.page_url} (post ${post.id}, bucket ${row.bucket || '—'})`);
@@ -263,8 +299,8 @@ async function requeueRegressedPagesLocked(opts = {}) {
           results.push({ id: row.id, page_url: row.page_url, status: 'gated' });
           continue;
         }
-        const outcome = await noteTransientFailure(database, row);
-        if (outcome === 'error_exhausted') skipped += 1;
+        const outcome = await noteRetry(database, row, 'error');
+        if (outcome !== 'error') skipped += 1;
         results.push({ id: row.id, page_url: row.page_url, status: outcome });
         continue;
       }
@@ -272,10 +308,20 @@ async function requeueRegressedPagesLocked(opts = {}) {
     }
 
     // Gate re-checked here too: a refusal computed above (cooldown /
-    // unresolved) must not write state while the lane is dark.
+    // unsupported target) must not write state while the lane is dark.
     if (!requeueEnabled()) {
       logger.info(`[regression-requeue] gated OFF — ${row.page_url} would be recorded as ${status}`);
       results.push({ id: row.id, page_url: row.page_url, status: 'gated' });
+      continue;
+    }
+
+    // queued=false means NO corrective refresh was created (a completed
+    // same-key row, or another page-editing action holding the page). Retry
+    // under the attempt budget instead of consuming the regression.
+    if (isRetryableStatus(status)) {
+      const outcome = await noteRetry(database, row, status);
+      if (outcome !== status) skipped += 1;
+      results.push({ id: row.id, page_url: row.page_url, status: outcome });
       continue;
     }
 
@@ -284,14 +330,15 @@ async function requeueRegressedPagesLocked(opts = {}) {
     results.push({ id: row.id, page_url: row.page_url, status });
   }
 
-  logger.info(`[regression-requeue] scanned ${rows.length}, queued ${queued}, skipped ${skipped}`);
-  return { scanned: rows.length, queued, skipped, results };
+  const unsupported = results.filter((r) => r.status === 'unsupported_target').length;
+  logger.info(`[regression-requeue] scanned ${rows.length}, queued ${queued}, skipped ${skipped}${unsupported ? `, unsupported targets ${unsupported}` : ''}`);
+  return { scanned: rows.length, queued, skipped, unsupported, results };
 }
 
 module.exports = {
   requeueRegressedPages,
   // exposed for tests / reuse
   requeueStatusFor,
-  _internals: { pendingRegressions, inCooldown, noteTransientFailure },
+  _internals: { pendingRegressions, inCooldown, noteRetry, isRetryableStatus },
   THRESHOLDS: { COOLDOWN_DAYS, MAX_PER_RUN, MAX_TRANSIENT_ATTEMPTS },
 };

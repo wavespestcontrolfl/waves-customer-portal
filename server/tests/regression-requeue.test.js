@@ -90,8 +90,8 @@ describe('requeueStatusFor', () => {
     expect(requeueStatusFor({ resolved: {}, enqueue: { queued: false, status: 'claimed' } })).toBe('inflight:claimed');
   });
 
-  test('unresolved_page when the URL matched no published post', () => {
-    expect(requeueStatusFor({ resolved: null })).toBe('unresolved_page');
+  test('unsupported_target when the URL matched no published blog post', () => {
+    expect(requeueStatusFor({ resolved: null })).toBe('unsupported_target');
   });
 
   test('a coded refusal is recorded verbatim, lowercased', () => {
@@ -149,13 +149,40 @@ describe('requeueRegressedPages', () => {
     expect(out).toMatchObject({ queued: 0, skipped: 1 });
   });
 
-  test('an unresolvable URL is recorded, not silently retried forever', async () => {
+  test('a target outside the lane (no blog_posts row) is recorded and counted, not retried', async () => {
     const db = makeDb({ pending: [row()] });
     const refreshAudit = audit({ resolvePublishedPostByUrl: jest.fn(async () => null) });
-    await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
 
     expect(refreshAudit.enqueueRefresh).not.toHaveBeenCalled();
-    expect(db.state.updates[0]).toMatchObject({ requeue_status: 'unresolved_page' });
+    expect(db.state.updates[0]).toMatchObject({ requeue_status: 'unsupported_target' });
+    // Countable rather than silent — enqueueRefresh is blogPostId-keyed, so a
+    // city/service Astro page genuinely cannot be handed to this lane.
+    expect(out.unsupported).toBe(1);
+  });
+
+  test('queued=false does NOT consume the regression — it retries under the attempt budget', async () => {
+    // A completed same-key row, or another page-editing action holding the
+    // page, both report queued=false. Neither is a corrective refresh.
+    for (const status of ['done', 'claimed', 'pending_review']) {
+      const db = makeDb({ pending: [row({ requeue_attempts: 0 })] });
+      const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => ({ queued: false, status })) });
+      const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
+
+      expect(out.results[0].status).toBe(`inflight:${status}`);
+      expect(db.state.updates[0]).toMatchObject({ requeue_attempts: 1 });
+      expect(db.state.updates[0].requeued_at).toBeUndefined();
+      expect(db.state.updates[0].requeue_status).toBeUndefined();
+    }
+  });
+
+  test('a page stuck behind other edits is retired at the cap, not retried forever', async () => {
+    const db = makeDb({ pending: [row({ requeue_attempts: requeue.THRESHOLDS.MAX_TRANSIENT_ATTEMPTS - 1 })] });
+    const refreshAudit = audit({ enqueueRefresh: jest.fn(async () => ({ queued: false, status: 'done' })) });
+    const out = await requeueRegressedPages({ db, refreshAudit, tracker: tracker() });
+
+    expect(out.results[0].status).toBe('inflight:done_exhausted');
+    expect(db.state.updates[0].requeued_at).toBeInstanceOf(Date);
   });
 
   test('a coded refusal from the refresh lane is terminal and stamped', async () => {

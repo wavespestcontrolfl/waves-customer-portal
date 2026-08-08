@@ -1454,12 +1454,19 @@ function initScheduledJobs() {
       await ImpactTracker.sweepNewlyLive({});
       await ImpactTracker.checkPending({});
       await ImpactTracker.checkAeoVisibility({});
-      // Reversal leg — hand pages we confirmed we made WORSE back to the
-      // existing refresh lane. Chained here (not its own cron) so it reads the
-      // verdicts checkPending just wrote; each impact row is acted on exactly
-      // once, so a skipped day self-heals on the next tick.
-      await require('./seo/regression-requeue').requeueRegressedPages({});
     } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
+
+    // Reversal leg — hand pages we confirmed we made WORSE back to the
+    // existing refresh lane. Chained after the sweep so it reads the verdicts
+    // checkPending just wrote, but in its OWN try: checkPending has no per-row
+    // catch around measurement and persistence, so a single permanently
+    // failing impact row rejects the block above every single day. Sharing one
+    // try would let that one row starve the entire confirmed-regression
+    // backlog indefinitely. Already-written verdicts stay actionable even when
+    // the sweep that would have added more to them died.
+    try {
+      await require('./seo/regression-requeue').requeueRegressedPages({});
+    } catch (err) { logger.error(`Regression re-queue failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // DAILY 8:10AM ET — Parked-content digest (owner-authorized lane
