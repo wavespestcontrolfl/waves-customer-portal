@@ -121,6 +121,60 @@ describe('ProposalDetailCard', () => {
     expect(text).toContain('* Taxable line.');
   });
 
+  it('renders the structured agreement sections when authored (slice 1A-i)', () => {
+    const { container } = render(<ProposalDetailCard proposal={{
+      ...PROPOSAL,
+      propertyScope: { items: [{ label: 'Units', value: '4 residential units' }] },
+      correctiveWork: [{ label: 'German roach cleanout', amount: 450, taxable: true, includes: ['Both kitchens', 'Follow-up at 2 weeks'] }],
+      customerResponsibilities: ['Provide unit access with 24-hour tenant notice'],
+      commercialTerms: {
+        validDays: 30, paymentTerms: 'net30', initialTermMonths: 0,
+        renewal: null, priceAdjustment: null, cancellation: '30-day written notice', accessRequirements: null,
+      },
+    }} />);
+    const text = container.textContent;
+    expect(text).toContain('Property scope');
+    expect(text).toContain('4 residential units');
+    expect(text).toContain('Corrective work (one-time)');
+    expect(text).toContain('$450.00 *');
+    expect(text).toContain('Follow-up at 2 weeks');
+    expect(text).toContain('Customer responsibilities');
+    expect(text).toContain('Service terms');
+    // validDays never renders — the enforced expires_at is the only validity
+    // date any surface may print (codex 1A-i r1).
+    expect(text).not.toContain('30 days from issue');
+    // Canonical payment token renders its label.
+    expect(text).toContain('Net-30');
+    expect(text).toContain('None — month-to-month');
+    // Structured terms are authored terms — the canned inclusions stack
+    // must not sit beside them (same rule as free-text terms).
+    expect(text).not.toContain('What your commercial pest service includes');
+  });
+
+  it('demotes free-text terms to "Additional terms" only beside structured terms', () => {
+    const structured = render(<ProposalDetailCard proposal={{
+      ...PROPOSAL,
+      terms: 'Interior visits billed per visit.',
+      commercialTerms: {
+        validDays: null, paymentTerms: null, initialTermMonths: null,
+        renewal: null, priceAdjustment: null, cancellation: '30-day written notice', accessRequirements: null,
+      },
+    }} />);
+    expect(structured.container.textContent).toContain('Additional terms');
+    const legacy = render(<ProposalDetailCard proposal={{ ...PROPOSAL, terms: 'Interior visits billed per visit.' }} />);
+    expect(legacy.container.textContent).not.toContain('Additional terms');
+    expect(legacy.container.textContent).toContain('Interior visits billed per visit.');
+  });
+
+  it('renders a legacy proposal with no structured keys exactly as before (no new section headings)', () => {
+    const { container } = render(<ProposalDetailCard proposal={PROPOSAL} />);
+    const text = container.textContent;
+    expect(text).not.toContain('Property scope');
+    expect(text).not.toContain('Corrective work');
+    expect(text).not.toContain('Customer responsibilities');
+    expect(text).not.toContain('Service terms');
+  });
+
   it('labels a one-time-only proposal total as Total, never First-year (codex #3281 r4)', () => {
     const oneTime = render(<ProposalDetailCard proposal={{
       ...PROPOSAL,

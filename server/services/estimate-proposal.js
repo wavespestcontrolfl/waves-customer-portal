@@ -91,6 +91,118 @@ function normalizeLineItem(raw = {}) {
   };
 }
 
+// ── Structured proposal sections (2026-08-08, slice 1A-i) ───────────────────
+// Optional, operator-authored sections that turn the proposal into a real
+// commercial service agreement (property scope, one-time corrective work,
+// customer responsibilities, structured terms). ALL optional and null when
+// absent — a legacy proposal (buildings + free-text terms) normalizes and
+// renders exactly as before. Every section here MUST be returned by
+// normalizeProposal in the same PR that writes it: PUT /:id/proposal persists
+// the normalizer's output, so an unreturned field is silently dropped on save.
+
+function cleanString(value, max) {
+  const s = String(value ?? '').trim();
+  return s ? s.slice(0, max) : null;
+}
+
+function cleanStringList(raw, { maxItems, maxLen }) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((line) => cleanString(line, maxLen))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+// §3 Property scope — label/value facts about the property (buildings, units,
+// turf sqft, device counts). Items render only when authored.
+function normalizePropertyScope(raw) {
+  const items = Array.isArray(raw?.items) ? raw.items : Array.isArray(raw) ? raw : [];
+  const cleaned = items
+    .map((item) => ({
+      label: cleanString(item?.label, 80),
+      value: cleanString(item?.value, 160),
+    }))
+    .filter((item) => item.label && item.value)
+    .slice(0, 24);
+  return cleaned.length ? { items: cleaned } : null;
+}
+
+// §5 Corrective work — one-time remediation lines, separated from the
+// recurring programs. Amounts are real charges: computeProposalTotals folds
+// them into the one-time totals, so every renderer (React document, on-page
+// card, SSR card, pdfkit fallback) must print these rows beside the totals.
+function normalizeCorrectiveWorkItem(raw = {}) {
+  return {
+    label: cleanString(raw.label ?? raw.description, 160),
+    // Same clamp rationale as normalizeLineItem: commercial quote amounts are
+    // never negative, and this normalizer is what totals + persistence read.
+    amount: Math.max(0, roundMoney(num(raw.amount ?? raw.price, 0))),
+    taxable: raw.taxable === true,
+    includes: cleanStringList(raw.includes, { maxItems: 12, maxLen: 200 }),
+  };
+}
+
+function normalizeCorrectiveWork(raw) {
+  if (!Array.isArray(raw)) return null;
+  const cleaned = raw
+    .map(normalizeCorrectiveWorkItem)
+    .filter((item) => item.label)
+    .slice(0, 24);
+  return cleaned.length ? cleaned : null;
+}
+
+// §6 Customer responsibilities — plain bullet list.
+function normalizeCustomerResponsibilities(raw) {
+  const cleaned = cleanStringList(raw, { maxItems: 16, maxLen: 200 });
+  return cleaned.length ? cleaned : null;
+}
+
+// Canonical payment-terms vocabulary — CONSUMED from the payer mechanism
+// (payer.js PAYMENT_TERMS), never a local copy: proposals, payer statements,
+// and acceptance invoicing must speak one term language (codex #3297
+// r2/r4c: free text or a sibling vocabulary driving billing = a parallel
+// mechanism). Common human spellings canonicalize; anything not in the
+// canonical list is null (and the PUT route 400s it).
+const { PAYMENT_TERMS: PROPOSAL_PAYMENT_TERMS } = require('./payer');
+
+function normalizePaymentTerms(value) {
+  const t = String(value ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  if (!t) return null;
+  const candidate = t === 'dueonreceipt' ? 'due_on_receipt' : t;
+  return PROPOSAL_PAYMENT_TERMS.includes(candidate) ? candidate : null;
+}
+
+function cleanBoundedInt(value, { min, max }) {
+  // Number(null) and Number('') are 0 — a blank editor field must stay
+  // "unset", never coerce to the 0-means-month-to-month claim the operator
+  // didn't select (pre-push codex P1).
+  if (value == null || String(value).trim() === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const rounded = Math.round(n);
+  return rounded >= min && rounded <= max ? rounded : null;
+}
+
+// §10 Commercial terms — the structured agreement block. Free-text `terms`
+// demotes to an "Additional terms" override rendered beneath these.
+// NO validity-period field here on purpose: the send flow stamps the
+// enforced expiry (expires_at) from the fixed ESTIMATE_SEND_EXPIRY_DAYS, so
+// an authored validity option would persist a promise nothing enforces or
+// renders (codex #3297 r2). The adjustable-expiry lane adds it together
+// with enforcement and rendering.
+function normalizeCommercialTerms(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const terms = {
+    paymentTerms: normalizePaymentTerms(raw.paymentTerms),
+    initialTermMonths: cleanBoundedInt(raw.initialTermMonths, { min: 0, max: 60 }),
+    renewal: cleanString(raw.renewal, 120),
+    priceAdjustment: cleanString(raw.priceAdjustment, 160),
+    cancellation: cleanString(raw.cancellation, 160),
+    accessRequirements: cleanString(raw.accessRequirements, 200),
+  };
+  return Object.values(terms).some((v) => v !== null) ? terms : null;
+}
+
 function normalizeBuilding(raw = {}, index = 0) {
   const lineItems = Array.isArray(raw.lineItems || raw.line_items)
     ? (raw.lineItems || raw.line_items).map(normalizeLineItem)
@@ -446,6 +558,17 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
     taxLabel: String(base.taxLabel || 'Sales tax').slice(0, 60),
     terms: base.terms ? String(base.terms).slice(0, 2000) : null,
     buildings,
+    // Structured sections (slice 1A-i) — null when absent, so legacy
+    // proposals round-trip and render exactly as before. Read from the
+    // STORED proposal only: the synthesized fallback never authors these.
+    // Deliberately NO accountManager field yet — every customer surface
+    // uses the shared constant, and a storage-only field would just force
+    // saves to preserve dead state; it lands with its authoring + rendering
+    // slice (codex #3297 r3, same rule as validDays).
+    propertyScope: normalizePropertyScope(base.propertyScope),
+    correctiveWork: normalizeCorrectiveWork(base.correctiveWork),
+    customerResponsibilities: normalizeCustomerResponsibilities(base.customerResponsibilities),
+    commercialTerms: normalizeCommercialTerms(base.commercialTerms),
   };
 }
 
@@ -481,6 +604,15 @@ function computeProposalTotals(proposal) {
     }
   }
 
+  // Structured corrective-work lines (slice 1A-i) are real one-time charges —
+  // they fold into the one-time totals exactly like a one_time line item, so
+  // the operator authors remediation once, in its own section, without a
+  // shadow line item to keep in sync.
+  for (const work of proposal.correctiveWork || []) {
+    oneTime += work.amount;
+    if (work.taxable) taxableOneTime += work.amount;
+  }
+
   annualRecurring = roundMoney(annualRecurring);
   oneTime = roundMoney(oneTime);
   const monthlyEquivalent = roundMoney(annualRecurring / 12);
@@ -512,6 +644,12 @@ module.exports = {
   normalizeFrequency,
   normalizeLineItem,
   normalizeBuilding,
+  normalizePropertyScope,
+  normalizeCorrectiveWork,
+  normalizeCustomerResponsibilities,
+  normalizeCommercialTerms,
+  normalizePaymentTerms,
+  PROPOSAL_PAYMENT_TERMS,
   normalizeProposal,
   perApplicationRecurringLines,
   annualizedAmount,

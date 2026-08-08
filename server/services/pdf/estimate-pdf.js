@@ -242,6 +242,111 @@ function buildingBlock(ctx, building, y, taxRate) {
   return y;
 }
 
+// Property scope (slice 1A-i) — the label/value facts the proposal was
+// scoped against. Rendered by the fallback too: a browser-render failure
+// must not email an agreement missing the scoped facts the React document
+// shows (pre-push codex P1).
+function propertyScopeBlock(ctx, propertyScope, y) {
+  const { doc } = ctx;
+  const items = Array.isArray(propertyScope?.items) ? propertyScope.items : [];
+  if (items.length === 0) return y;
+  y = ensureSpace(ctx, y, 40);
+  y = sectionLabel(doc, 'Property scope', L, y);
+  doc.fontSize(10).font('Helvetica');
+  for (const item of items) {
+    const labelW = 120;
+    const valueW = W - 130;
+    // An 80-char label wraps in its column — advance by the TALLER column or
+    // the next row paints over the wrapped label (codex #3297 r1).
+    const rowH = Math.max(
+      doc.heightOfString(item.label, { width: labelW }),
+      doc.heightOfString(item.value, { width: valueW }),
+      12,
+    );
+    y = ensureSpace(ctx, y, rowH + 4);
+    doc.font('Helvetica').fillColor(MUTED).text(item.label, L, y, { width: labelW });
+    doc.fillColor(INK).text(item.value, L + 130, y, { width: valueW });
+    y += rowH + 2;
+  }
+  return y + 6;
+}
+
+// Customer responsibilities (slice 1A-i) — bullet list, fallback parity with
+// the React document for the same reason as propertyScopeBlock.
+function responsibilitiesBlock(ctx, responsibilities, y) {
+  const { doc } = ctx;
+  const lines = Array.isArray(responsibilities) ? responsibilities : [];
+  if (lines.length === 0) return y;
+  y = ensureSpace(ctx, y, 40);
+  y = sectionLabel(doc, 'Customer responsibilities', L, y);
+  for (const line of lines) {
+    const text = `• ${line}`;
+    doc.fontSize(10).font('Helvetica');
+    const lineH = doc.heightOfString(text, { width: W, lineGap: 1.5 });
+    y = ensureSpace(ctx, y, lineH + 4);
+    doc.fontSize(10).font('Helvetica').fillColor(BODY).text(text, L, y, { width: W, lineGap: 1.5 });
+    y += lineH + 3;
+  }
+  return y + 6;
+}
+
+// Structured corrective-work lines (slice 1A-i). Their amounts are inside
+// computeProposalTotals' one-time totals, so this fallback document must
+// print the rows too — a totals line with no visible source would look like
+// a billing error.
+function correctiveWorkBlock(ctx, correctiveWork, y) {
+  const { doc } = ctx;
+  if (!Array.isArray(correctiveWork) || correctiveWork.length === 0) return y;
+  y = ensureSpace(ctx, y, 40);
+  y = sectionLabel(doc, 'Corrective work (one-time)', L, y);
+  for (const work of correctiveWork) {
+    // Label + cadence + amount are one indivisible row; the include bullets
+    // paginate LINE BY LINE below it. Twelve 200-char bullets can exceed a
+    // full page, and handing ensureSpace an over-page indivisible row lets
+    // pdfkit auto-flow the description while the amount stays painted at the
+    // original y (codex #3297 r2).
+    doc.fontSize(10);
+    const labelH = doc.heightOfString(work.label, { width: COL_W.desc });
+    const headH = Math.max(labelH + 6, 18);
+    y = ensureSpace(ctx, y, headH + 4);
+    doc.fontSize(10).font('Helvetica').fillColor(INK).text(work.label, COL.desc, y, { width: COL_W.desc });
+    doc.fontSize(9).fillColor(BODY).text('One-time', COL.freq, y + 1, { width: COL_W.freq });
+    doc.fontSize(10).fillColor(INK)
+      .text(currency(work.amount) + (work.taxable ? ' *' : ''), COL.amount, y, { width: COL_W.amount, align: 'right' });
+    y += headH;
+    for (const inc of (work.includes || [])) {
+      const line = `• ${inc}`;
+      doc.fontSize(9).font('Helvetica');
+      const lineH = doc.heightOfString(line, { width: COL_W.desc });
+      y = ensureSpace(ctx, y, lineH + 3);
+      doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(line, COL.desc, y, { width: COL_W.desc });
+      y += lineH + 2;
+    }
+    y += 4;
+  }
+  return y + 6;
+}
+
+// Structured commercial terms (slice 1A-i) → the flat lines this document's
+// terms block prints. Labels mirror client/src/lib/proposal-sections.js —
+// including its validDays omission (the enforced expires_at is the only
+// validity date any renderer may print; codex 1A-i r1).
+function commercialTermLines(commercialTerms) {
+  if (!commercialTerms || typeof commercialTerms !== 'object') return [];
+  // Canonical payment tokens → labels (same map as proposal-sections.js).
+  const paymentLabel = { due_on_receipt: 'Due on receipt', net15: 'Net-15', net30: 'Net-30' };
+  return [
+    ['Payment', paymentLabel[commercialTerms.paymentTerms] || null],
+    ['Initial term', commercialTerms.initialTermMonths != null
+      ? (commercialTerms.initialTermMonths > 0 ? `${commercialTerms.initialTermMonths} months` : 'None — month-to-month')
+      : null],
+    ['Renewal', commercialTerms.renewal],
+    ['Price adjustment', commercialTerms.priceAdjustment],
+    ['Cancellation', commercialTerms.cancellation],
+    ['Property access', commercialTerms.accessRequirements],
+  ].filter(([, value]) => value != null).map(([label, value]) => `${label}: ${value}`);
+}
+
 function quotesPerApplication(proposal) {
   return (proposal.buildings || []).some((building) => (building.lineItems || [])
     .some((item) => item.frequency === 'per_application'));
@@ -307,11 +412,21 @@ function totalsBlock(ctx, totals, y) {
 function termsBlock(ctx, proposal, totals, y) {
   const { doc } = ctx;
   const lines = [];
-  if (totals.hasTax || (proposal.buildings || []).some((b) => b.lineItems.some((i) => i.taxable))) {
+  if (totals.hasTax
+    || (proposal.buildings || []).some((b) => b.lineItems.some((i) => i.taxable))
+    || (proposal.correctiveWork || []).some((w) => w.taxable)) {
     lines.push('* Taxable line. Tax applies only to lines marked taxable, at the Florida state rate plus the service county surtax. Residential pest control and residential lawn maintenance are tax-exempt in Florida; commercial services may be taxable.');
   }
   lines.push(`Licensed & insured — Florida FDACS #${WAVES_FDACS_LICENSE_NUMBER}. Certificate of Insurance available on request.`);
-  lines.push('Integrated Pest Management (IPM) program with documented service records and a callback guarantee between scheduled visits.');
+  // Authored terms govern (same rule as the React/SSR renderers, codex #3281
+  // r1 / #3297 r2b): the canned callback-guarantee claim must not sit beside
+  // operator terms that may state the opposite. The neutral licensed-line
+  // above stays — it makes no plan claims.
+  const structuredTermLines = commercialTermLines(proposal.commercialTerms);
+  if (!proposal.terms && structuredTermLines.length === 0) {
+    lines.push('Integrated Pest Management (IPM) program with documented service records and a callback guarantee between scheduled visits.');
+  }
+  lines.push(...structuredTermLines);
   if (proposal.terms) lines.push(proposal.terms);
 
   y = ensureSpace(ctx, y, 26);
@@ -379,10 +494,14 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   yRight = detailsBlock(doc, estimate, L + W / 2 + 20, yRight);
   let y = Math.max(yLeft, yRight) + 18;
 
+  y = propertyScopeBlock(ctx, proposal.propertyScope, y);
+
   for (const building of proposal.buildings) {
     y = buildingBlock(ctx, building, y, proposal.taxRate);
   }
 
+  y = correctiveWorkBlock(ctx, proposal.correctiveWork, y);
+  y = responsibilitiesBlock(ctx, proposal.customerResponsibilities, y);
   y = totalsBlock(ctx, totals, y + 4);
   y = termsBlock(ctx, proposal, totals, y + 8);
 

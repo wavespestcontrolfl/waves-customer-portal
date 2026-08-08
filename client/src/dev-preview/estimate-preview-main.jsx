@@ -15,7 +15,7 @@ import WavesShell from '../components/brand/WavesShell';
 // the preview's colors drift from the real page.
 import '../styles/brand-tokens.css';
 
-const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'accepted', 'proposal', 'proposal_terms'];
+const SCENARIOS = ['pest', 'preslab', 'bundle', 'bundle_referral', 'lawn', 'accepted', 'proposal', 'proposal_terms', 'proposal_structured'];
 const scenario = (() => {
   const requested = new URLSearchParams(window.location.search).get('scenario');
   return SCENARIOS.includes(requested) ? requested : 'pest';
@@ -528,6 +528,57 @@ function proposalTermsScenario() {
   };
 }
 
+// Structured proposal sections (slice 1A-i): property scope + corrective
+// work + responsibilities + structured commercial terms, with free-text terms
+// demoted to "Additional terms". Fictional numbers; corrective work folds
+// into the one-time/first-year totals exactly like computeProposalTotals.
+function proposalStructuredScenario() {
+  const base = proposalScenario();
+  return {
+    ...base,
+    proposal: {
+      ...base.proposal,
+      propertyScope: {
+        items: [
+          { label: 'Units', value: '4 residential units, tenant-occupied' },
+          { label: 'Building', value: '2,446 sq ft · 2 stories' },
+          { label: 'Grounds', value: '5,850 sq ft lot with shared courtyard' },
+        ],
+      },
+      correctiveWork: [{
+        label: 'Initial German roach cleanout — Units 2 & 4',
+        amount: 450,
+        taxable: true,
+        includes: ['Crack & crevice treatment in both kitchens', 'Follow-up inspection at 2 weeks'],
+      }],
+      customerResponsibilities: [
+        'Provide unit access with 24-hour tenant notice',
+        'Report pest activity through the Waves app or office line',
+      ],
+      commercialTerms: {
+        paymentTerms: 'net30',
+        initialTermMonths: 0,
+        renewal: null,
+        priceAdjustment: 'Rates reviewed annually with 30-day notice',
+        cancellation: '30-day written notice, no cancellation fee',
+        accessRequirements: 'Office provides common-area keys',
+      },
+      terms: 'Interior service visits beyond the quarterly schedule are billed per visit.',
+      totals: {
+        annualRecurring: 480.00,
+        monthlyEquivalent: 40.00,
+        oneTime: 450.00,
+        taxRate: 0.07,
+        taxableOneTime: 450.00,
+        totalTax: 65.10,          // (480 + 450) taxable * 0.07
+        firstYearTotal: 995.10,   // 480 + 450 + 65.10
+        hasTax: true,
+        isMultiBuilding: false,
+      },
+    },
+  };
+}
+
 const PAYLOADS = {
   pest: pestScenario,
   preslab: preslabScenario,
@@ -537,6 +588,7 @@ const PAYLOADS = {
   accepted: acceptedScenario,
   proposal: proposalScenario,
   proposal_terms: proposalTermsScenario,
+  proposal_structured: proposalStructuredScenario,
 };
 
 // ── canned endpoint responses ───────────────────────────────────────────

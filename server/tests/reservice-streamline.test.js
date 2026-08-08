@@ -1,13 +1,16 @@
 /**
- * Re-service request streamline (owner ruling 2026-08-08) — the {reservice_line}
- * clause and shared eligibility helper stay fail-closed:
- *   - '' / null while GATE_RESERVICE_STREAMLINE is dark (todays renders are
- *     byte-identical), regardless of the self-serve gate underneath;
- *   - '' / null for lane-less, inactive, token-less, or missing customers;
- *   - the clause + token payload only when BOTH gates are lit and the live
- *     plan grants a lane;
- *   - never throws (an unsupplied {reservice_line} suppresses the whole SMS,
- *     so every failure mode must resolve to a string).
+ * Re-service request streamline (owner ruling 2026-08-08) — the shared
+ * eligibility helper stays fail-closed:
+ *   - null while GATE_RESERVICE_STREAMLINE is dark, regardless of the
+ *     self-serve gate underneath;
+ *   - null for lane-less, inactive, token-less, or missing customers;
+ *   - the token payload only when BOTH gates are lit and the live plan grants
+ *     a lane;
+ *   - never throws.
+ * Plus the {reservice_line} retirement (owner directive 2026-08-08): the
+ * automatic post-service texts carry no re-service booking clause, and the
+ * helper still resolves to a string at every render site — an unsupplied
+ * {reservice_line} suppresses the whole SMS.
  * Plus the confirmation-copy migration contract: the sentence swap targets the
  * VERBATIM prod sentence that defeated 20260715220000's whole-body guard.
  */
@@ -52,7 +55,6 @@ jest.mock('../models/db', () => {
 const {
   reserviceLineForCustomer,
   reserviceStreamlineAccess,
-  reserviceFollowupLineFor,
 } = require('../services/reservice-link');
 
 const liveCustomer = () => ({
@@ -106,20 +108,15 @@ describe('reserviceStreamlineAccess', () => {
   });
 });
 
-describe('reserviceLineForCustomer', () => {
-  test('renders the follow-up clause with the standing link when granted', async () => {
-    const line = await reserviceLineForCustomer('cu-1');
-    expect(line).toContain('book a free re-service');
-    expect(line).toContain(`/reservice/${'a'.repeat(64)}`);
-    expect(line.endsWith('\n\n')).toBe(true);
-  });
-
-  test("'' while the streamline gate is dark — template renders byte-identical", async () => {
-    gateState.reserviceStreamline = false;
+describe('reserviceLineForCustomer (retired — owner directive 2026-08-08)', () => {
+  test("'' even for a fully eligible customer with both gates lit", async () => {
     expect(await reserviceLineForCustomer('cu-1')).toBe('');
   });
 
-  test("'' for lane-less plans and missing customers — never a bare URL, never undefined", async () => {
+  test("'' — always a string, so a body still carrying the token never suppresses a send", async () => {
+    gateState.reserviceStreamline = false;
+    expect(await reserviceLineForCustomer('cu-1')).toBe('');
+    gateState.reserviceStreamline = true;
     scheduler.lanes = [];
     expect(await reserviceLineForCustomer('cu-1')).toBe('');
     customerRows.row = null;
@@ -127,10 +124,9 @@ describe('reserviceLineForCustomer', () => {
     expect(await reserviceLineForCustomer(undefined)).toBe('');
   });
 
-  test('clause helper contract: empty for no URL (clause-var idiom)', () => {
-    expect(reserviceFollowupLineFor(null)).toBe('');
-    expect(reserviceFollowupLineFor('')).toBe('');
-    expect(reserviceFollowupLineFor('https://x/y')).toBe('If a covered issue comes back, book a free re-service: https://x/y\n\n');
+  test('no re-service booking clause is exported for the automatic texts', () => {
+    const mod = require('../services/reservice-link');
+    expect(mod.reserviceFollowupLineFor).toBeUndefined();
   });
 });
 

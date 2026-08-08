@@ -32,7 +32,7 @@
 
 const InvoiceService = require('./invoice');
 const { computeProposalTotals } = require('./estimate-proposal');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
 const logger = require('./logger');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -97,7 +97,12 @@ function buildProposalFirstInvoice(proposal) {
 
   const lineItems = [];
   let subtotal = 0;
-  let taxableSubtotal = 0;
+  // Two taxable buckets, taxed and cent-rounded SEPARATELY —
+  // computeProposalTotals rounds recurringTax and oneTimeTax each on their
+  // own, so a single merged bucket can drift a cent from the proposal the
+  // customer accepted (codex 1A-i r3 P0: two $100.07 taxable lines at 7%).
+  let taxableRecurringSubtotal = 0;
+  let taxableOneTimeSubtotal = 0;
 
   for (const building of buildings) {
     const buildingName = cleanStr(building?.name, 120);
@@ -117,11 +122,35 @@ function buildProposalFirstInvoice(proposal) {
         unit_price: roundMoney(item.unitPrice),
       });
       subtotal = roundMoney(subtotal + amount);
-      if (item.taxable === true) taxableSubtotal = roundMoney(taxableSubtotal + amount);
+      if (item.taxable === true) {
+        if (item.frequency === 'one_time') taxableOneTimeSubtotal = roundMoney(taxableOneTimeSubtotal + amount);
+        else taxableRecurringSubtotal = roundMoney(taxableRecurringSubtotal + amount);
+      }
     }
   }
 
-  const taxAmount = roundMoney(taxableSubtotal * taxRate);
+  // Structured corrective-work lines (slice 1A-i) are one-time charges inside
+  // computeProposalTotals' one-time totals — the acceptance invoice must bill
+  // them too, or a marked-won bill-by-invoice proposal underbills exactly the
+  // remediation the customer accepted (pre-push codex P0).
+  for (const work of (Array.isArray(proposal?.correctiveWork) ? proposal.correctiveWork : [])) {
+    const amount = roundMoney(work?.amount);
+    if (!(amount > 0)) continue;
+    lineItems.push({
+      description: cleanStr(work.label || 'Corrective work', 300),
+      quantity: 1,
+      unit_price: amount,
+    });
+    subtotal = roundMoney(subtotal + amount);
+    if (work.taxable === true) taxableOneTimeSubtotal = roundMoney(taxableOneTimeSubtotal + amount);
+  }
+
+  // Same cent-rounding policy as computeProposalTotals: each bucket's tax
+  // rounds on its own, then the two sum.
+  const taxableSubtotal = roundMoney(taxableRecurringSubtotal + taxableOneTimeSubtotal);
+  const taxAmount = roundMoney(
+    roundMoney(taxableRecurringSubtotal * taxRate) + roundMoney(taxableOneTimeSubtotal * taxRate),
+  );
   // Blended rate so InvoiceService (single-rate) reproduces the exact tax
   // dollars across mixed-taxability lines. round(subtotal * (taxAmount/subtotal))
   // === taxAmount, so the invoice total matches the proposal PDF to the cent.
@@ -271,6 +300,55 @@ async function flagProposalCustomerCommercialIfTaxable({ trx, customerId, propos
   }
 }
 
+// Net-terms from the structured commercial terms (slice 1A-i). paymentTerms
+// is the CANONICAL payer vocabulary, and the token→days map is payer.js's
+// shared PAYMENT_TERM_NET_DAYS (the same map payer statements use) — a
+// lookup, never a parse or a local copy (codex #3297 r2/r4c). Without it,
+// a proposal accepted on authored Net-30 terms invoiced as due immediately
+// (codex 1A-i r4 P0).
+const { PAYMENT_TERM_NET_DAYS: NET_TERM_DAYS } = require('./payer');
+
+function proposalNetTermDays(proposal) {
+  return NET_TERM_DAYS[proposal?.commercialTerms?.paymentTerms] || 0;
+}
+
+// One resolved term for the acceptance invoice, resolved through the
+// canonical PayerService.resolveForInvoice (it owns active-payer filtering
+// and fail-soft-to-self-pay). The accepted proposal's rendered term is the
+// AGREEMENT — if an active payer's canonical terms contradict it (payer
+// attached or edited after authoring; the PUT guard can't see the future),
+// acceptance REJECTS rather than silently invoicing a term the customer
+// never saw. The operator re-authors or clears the term (codex #3297 r2d).
+async function resolveAcceptanceTermDays({ trx, customerId, proposal }) {
+  const { resolveForInvoice } = require('./payer');
+  // Lock-then-read (codex #3297 r4b): freeze the customer's payer LINK
+  // first, then resolve, then freeze the payer's TERMS and re-resolve under
+  // both locks. Locks held to commit mean InvoiceService.create's own payer
+  // re-resolution inside this trx reads the same link and terms — under
+  // READ COMMITTED, a lock taken after the read would leave a window where
+  // the due date comes from stale terms while the invoice snapshot gets the
+  // new ones. throwOnError: a transient lookup failure must ABORT the win,
+  // not fail-soft to self-pay past the mismatch guard (codex 1A-i r3 P0).
+  await trx('customers').where({ id: customerId }).forShare().first('id');
+  let resolved = await resolveForInvoice({ database: trx, customerId, throwOnError: true });
+  if (resolved?.payerId != null) {
+    await trx('payers').where({ id: resolved.payerId }).forShare().first('id');
+    resolved = await resolveForInvoice({ database: trx, customerId, throwOnError: true });
+  }
+  const authoredTerm = proposal?.commercialTerms?.paymentTerms || null;
+  if (resolved?.payerId != null && resolved.paymentTerms) {
+    if (authoredTerm && authoredTerm !== resolved.paymentTerms) {
+      throw winError(
+        `This proposal promises ${authoredTerm} payment terms but the customer bills through a payer on ${resolved.paymentTerms} terms. `
+        + 'Update the proposal terms (or the payer) so the agreement and the invoice match, then mark won again.',
+        409,
+      );
+    }
+    return NET_TERM_DAYS[resolved.paymentTerms] || 0;
+  }
+  return proposalNetTermDays(proposal);
+}
+
 async function createProposalAcceptanceInvoice({ trx, estimate, proposal, customerId }) {
   if (!customerId) throw winError('A customer is required to invoice a proposal win.', 400);
   const built = buildProposalFirstInvoice(proposal);
@@ -278,6 +356,10 @@ async function createProposalAcceptanceInvoice({ trx, estimate, proposal, custom
     logger.warn(`[proposal-win] proposal estimate ${estimate.id} has no billable lines — invoice skipped`);
     return null;
   }
+
+  // Resolve (and possibly reject on payer-term mismatch) BEFORE any write in
+  // this flow — a 409 here must leave nothing half-done.
+  const acceptanceTermDays = await resolveAcceptanceTermDays({ trx, customerId, proposal });
 
   // Ensure the billed customer is commercial for a taxable proposal (else
   // InvoiceService forces $0 tax). Defensive — the win flow also flags it upstream.
@@ -292,7 +374,9 @@ async function createProposalAcceptanceInvoice({ trx, estimate, proposal, custom
     notes: `Generated from accepted commercial proposal (estimate #${estimate.id}). `
       + 'Covers one-time items plus the first period of each recurring service; '
       + 'ongoing recurring visits are billed as completed.',
-    dueDate: etDateString(),
+    // Honor the resolved term — the shared ET calendar-day helper owns
+    // DST-safe day addition (codex #3297 r1).
+    dueDate: etDateString(addETDays(new Date(), acceptanceTermDays)),
   });
   logger.info(`[proposal-win] invoice ${invoice.invoice_number} ($${built.total}) from won proposal estimate ${estimate.id}`);
   return invoice;
@@ -306,5 +390,6 @@ module.exports = {
   promoteLinkedCustomerForProposalWin,
   ensureCustomerForProposalWin,
   flagProposalCustomerCommercialIfTaxable,
+  proposalNetTermDays,
   createProposalAcceptanceInvoice,
 };
