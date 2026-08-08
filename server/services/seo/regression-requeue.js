@@ -218,10 +218,11 @@ async function noteRetry(database, row, status = 'error') {
     await database('content_optimization_impact')
       .where('id', row.id)
       .update({ requeue_attempts: attempts, requeue_status: String(status).slice(0, 40), updated_at: new Date() });
+    return true;
   } catch (err) {
     logger.error(`[regression-requeue] failed to count attempt on impact ${row.id}: ${err.message}`);
+    return false;
   }
-  return status;
 }
 
 // Park a target this lane structurally cannot act on: record WHY, but leave
@@ -302,6 +303,7 @@ async function requeueRegressedPagesLocked(opts = {}) {
   const results = [];
   let queued = 0;
   let skipped = 0;
+  let persistFailures = 0;
 
   for (const row of rows) {
     let status;
@@ -375,15 +377,16 @@ async function requeueRegressedPagesLocked(opts = {}) {
       // sweep (safe to repeat: the cycleKey makes the enqueue idempotent and
       // `own` lets the retry recognise the row it already created).
       if (!(await stamp(database, row.id, status))) {
+        persistFailures += 1;
         results.push({ id: row.id, page_url: row.page_url, status: 'stamp_failed', intended: status });
         continue;
       }
       queued += 1;
     } else if (PARK_STATUSES.has(status)) {
-      await park(database, row.id, status);
+      if (!(await park(database, row.id, status))) persistFailures += 1;
       skipped += 1;
-    } else {
-      await noteRetry(database, row, status);
+    } else if (!(await noteRetry(database, row, status))) {
+      persistFailures += 1;
     }
     results.push({ id: row.id, page_url: row.page_url, status });
   }
@@ -391,6 +394,16 @@ async function requeueRegressedPagesLocked(opts = {}) {
   const unsupported = results.filter((r) => r.status === UNSUPPORTED_STATUS).length;
   const blocked = results.filter((r) => String(r.status).startsWith('inflight:')).length;
   logger.info(`[regression-requeue] scanned ${rows.length}, queued ${queued}, skipped ${skipped}${blocked ? `, blocked-retrying ${blocked}` : ''}${unsupported ? `, parked-unsupported ${unsupported}` : ''}`);
+
+  // Per-row persistence failures are aggregated and thrown AFTER the whole
+  // batch, never during it: one unwritable row must not stop the others (that
+  // isolation is deliberate and tested). But the sweep did not do what it
+  // reports, and runExclusive records success on any resolved callback — so a
+  // persistently unwritable table would otherwise show green forever while
+  // nothing was ever marked. Same reason the two scan reads rethrow.
+  if (persistFailures) {
+    throw new Error(`regression re-queue: ${persistFailures} of ${rows.length} row(s) could not persist their state`);
+  }
   return { scanned: rows.length, queued, skipped, blocked, unsupported, results };
 }
 

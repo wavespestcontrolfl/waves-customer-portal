@@ -211,16 +211,26 @@ describe('requeueRegressedPages', () => {
     expect(out.queued).toBe(0);
   });
 
-  test('a failed marker write is NOT reported as success', async () => {
-    // The marker is the exactly-once contract; swallowing its failure would
-    // have the next sweep reprocess and eventually retire the regression as an
-    // exhausted no-op even though work HAD been queued.
+  test('a failed marker write is NOT reported as success — the whole sweep throws', async () => {
+    // The marker is the exactly-once contract. Swallowing its failure would let
+    // runExclusive record a healthy run while nothing was ever marked.
     const db = makeDb({ pending: [row()] });
     db.state.failUpdates = true;
-    const out = await requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() });
+    await expect(requeueRegressedPages({ db, refreshAudit: audit(), tracker: tracker() }))
+      .rejects.toThrow(/could not persist/);
+  });
 
-    expect(out.queued).toBe(0);
-    expect(out.results[0]).toMatchObject({ status: 'stamp_failed', intended: 'queued' });
+  test('persistence failures are aggregated AFTER the batch — every row is still attempted', async () => {
+    // Row isolation is deliberate: one unwritable row must not stop the others.
+    const pending = [row(), row({ id: 'imp-2', page_url: 'https://www.wavespestcontrol.com/b/' })];
+    const db = makeDb({ pending });
+    db.state.failUpdates = true;
+    const refreshAudit = audit();
+
+    await expect(requeueRegressedPages({ db, refreshAudit, tracker: tracker() }))
+      .rejects.toThrow('2 of 2 row(s) could not persist their state');
+    // Both were processed before the throw, not just the first.
+    expect(refreshAudit.enqueueRefresh).toHaveBeenCalledTimes(2);
   });
 
   test('an AMBIGUOUS url is retried, never parked — the duplicate row will be cleaned up', async () => {
