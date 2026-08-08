@@ -50,24 +50,33 @@ const KEYS = [
 const PLACEHOLDER = '{reservice_line}';
 const VAR_NAME = 'reservice_line';
 
-// The clause var ends with its own '\n\n', so it is inserted on a fresh
-// paragraph BEFORE any trailing opt-out notice or signature; when the clause
-// renders '', the renderer's \n{3,} collapse + trim removes the residue.
+// Byte-identical-until-flip contract: every character this migration adds
+// besides the token itself must vanish exactly when the clause renders ''.
+// The renderer only collapses \n{3,} → \n\n and trims the ends, so the two
+// safe insertions are (a) a BARE token immediately after an existing '\n\n'
+// paragraph break — '' leaves the body unchanged, and the clause's own
+// trailing '\n\n' supplies the separator when it renders — and (b)
+// '\n\n{token}' at the very END, where '' leaves only trailing whitespace
+// the trim removes. Single-newline or inline signature anchors are NOT used:
+// inserting static newlines before them would survive an empty render as a
+// layout change (pre-push audit P1).
 function appendPlaceholder(body) {
-  const anchors = ['\n\nReply STOP to opt out', '\nReply STOP to opt out', '\n\n— Waves', ' — Waves'];
-  for (const anchor of anchors) {
-    const idx = body.lastIndexOf(anchor);
-    if (idx >= 0) {
-      return `${body.slice(0, idx)}\n\n${PLACEHOLDER}${body.slice(idx)}`;
-    }
+  const paragraphAnchor = '\n\nReply STOP to opt out';
+  const idx = body.lastIndexOf(paragraphAnchor);
+  if (idx >= 0) {
+    const insertAt = idx + 2; // right after the existing '\n\n'
+    return `${body.slice(0, insertAt)}${PLACEHOLDER}${body.slice(insertAt)}`;
   }
   return `${body}\n\n${PLACEHOLDER}`;
 }
 
 function stripPlaceholder(body) {
-  return body
-    .split(`\n\n${PLACEHOLDER}`).join('')
-    .split(PLACEHOLDER).join('');
+  // The '\n\n' belongs to the migration only in the END-append form — the
+  // bare mid-body placement sits after a paragraph break the ORIGINAL body
+  // owns, which down must not consume.
+  const endForm = `\n\n${PLACEHOLDER}`;
+  const out = body.endsWith(endForm) ? body.slice(0, -endForm.length) : body;
+  return out.split(PLACEHOLDER).join('');
 }
 
 exports.up = async function up(knex) {
