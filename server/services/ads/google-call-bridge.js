@@ -990,6 +990,14 @@ async function applyBridge(options = {}) {
         const attribution = await db.transaction(async (trx) => {
           const res = await attributeResolvedLead(match.callLog, bridgeSource, now, trx, { noPlanFallback: clearedJoinedTrigger });
           if (!res.match) {
+            // 'call_rejected' is NOT a cleared linkage (pre-push P0 r19):
+            // it covers a MID-FLIGHT pass — whose provisional stamp state
+            // must not be read as a settled unlink while the pass could
+            // still fail — and settled terminal rejections, whose retire
+            // the processor already committed atomically with the verdict.
+            // Either way this scan touches nothing; the retry lane
+            // re-evaluates once the call settles.
+            if (res.reason === 'call_rejected') return res;
             // Recorded match with NO resolvable lead — the CLEARED-link
             // case (codex P1, PR #3303): retire this call's own funnel row
             // (exact provenance) and clear the recorded match, so the
