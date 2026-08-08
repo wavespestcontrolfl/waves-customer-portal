@@ -37,6 +37,17 @@ const PRIOR_BODY =
 const NEW_BODY =
   'Thanks for having us out, {first_name}! A Google review would mean a lot: {review_url}\n\nReply STOP to opt out.';
 
+// Upgraded environments already ran 20260808030000_reservice_line_sms_templates
+// (deployed with #3288), which inserted {reservice_line} right after the
+// '\n\n' before the STOP notice — so the LIVE prod body is the augmented form
+// and an exact match on the pre-placeholder text would no-op there (codex
+// #3285 r6). Fresh databases run THIS migration first (filename order), then
+// 030000 appends the placeholder to the new voice via its anchor — both
+// orders converge on NEW voice + placeholder.
+const RESERVICE = '{reservice_line}';
+const PRIOR_BODY_AUGMENTED = PRIOR_BODY.replace('\n\nReply STOP', `\n\n${RESERVICE}Reply STOP`);
+const NEW_BODY_AUGMENTED = NEW_BODY.replace('\n\nReply STOP', `\n\n${RESERVICE}Reply STOP`);
+
 async function swap(knex, from, to) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
   await knex('sms_templates')
@@ -46,8 +57,10 @@ async function swap(knex, from, to) {
 
 exports.up = async function up(knex) {
   await swap(knex, PRIOR_BODY, NEW_BODY);
+  await swap(knex, PRIOR_BODY_AUGMENTED, NEW_BODY_AUGMENTED);
 };
 
 exports.down = async function down(knex) {
   await swap(knex, NEW_BODY, PRIOR_BODY);
+  await swap(knex, NEW_BODY_AUGMENTED, PRIOR_BODY_AUGMENTED);
 };

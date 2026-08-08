@@ -1197,6 +1197,10 @@ router.post('/:token/ask', async (req, res, next) => {
         db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
         db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
         db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+        // Stored office = the review resolver's last resort (tracking-number
+        // leads with an area-label city, no mapped ZIP, no coords) — without
+        // it the report CTA falls through to the default office (codex r6).
+        'customers.nearest_location_id',
         'customers.has_left_google_review',
         // Map center follows the treated parcel: stamped visit coords first,
         // the primary home only for non-divergent stamps (codex round-9 P2).
@@ -1324,6 +1328,10 @@ router.get('/:token', async (req, res, next) => {
         db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
         db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
         db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+        // Stored office = the review resolver's last resort (tracking-number
+        // leads with an area-label city, no mapped ZIP, no coords) — without
+        // it the report CTA falls through to the default office (codex r6).
+        'customers.nearest_location_id',
         'customers.has_left_google_review',
         // Map center follows the treated parcel: stamped visit coords first,
         // the primary home only for non-divergent stamps (codex round-9 P2).
@@ -1551,6 +1559,10 @@ router.get('/:token/map.svg', async (req, res, next) => {
         db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
         db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
         db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+        // Stored office = the review resolver's last resort (tracking-number
+        // leads with an area-label city, no mapped ZIP, no coords) — without
+        // it the report CTA falls through to the default office (codex r6).
+        'customers.nearest_location_id',
         'customers.has_left_google_review',
         // Map center follows the treated parcel: stamped visit coords first,
         // the primary home only for non-divergent stamps (codex round-9 P2).
@@ -1603,6 +1615,10 @@ router.get('/:token/data', async (req, res, next) => {
         db.raw('COALESCE(ss.service_address_city, customers.city) as city'),
         db.raw('COALESCE(ss.service_address_state, customers.state) as state'),
         db.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+        // Stored office = the review resolver's last resort (tracking-number
+        // leads with an area-label city, no mapped ZIP, no coords) — without
+        // it the report CTA falls through to the default office (codex r6).
+        'customers.nearest_location_id',
         'customers.has_left_google_review',
         'customers.waveguard_tier',
         // Map center follows the treated parcel: stamped visit coords first,

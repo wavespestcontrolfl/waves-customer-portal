@@ -37,7 +37,9 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal
 // with an opt-in "already held" mode for the concurrency case.
 const lockState = { held: false };
 jest.mock('../utils/cron-lock', () => ({
-  runExclusive: async (_key, fn) => (lockState.held ? { skipped: true } : fn()),
+  // 'lease_held' = another holder is mid-send (→ concurrent); a
+  // 'no_connection' skip means the body never ran and maps to 'error'.
+  runExclusive: async (_key, fn) => (lockState.held ? { skipped: true, reason: 'lease_held' } : fn()),
 }));
 jest.mock('../services/customer-contact', () => ({
   getServiceContact: (c) => ({ phone: c.phone, email: c.email, name: c.first_name }),

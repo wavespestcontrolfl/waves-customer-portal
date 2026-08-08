@@ -3094,10 +3094,32 @@ const ReviewService = {
       if (touch.blocked || touch.terminal) {
         return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null };
       }
-      return { outcome: "send_failed", code: touch.code || null, reason: touch.reason || null };
+      // 'send_failed' is a QUEUED outcome to callers (the satisfaction route
+      // hides its fallback link on it), so only report it when a durable
+      // retry actually exists — _applyOutreachSendResult can fail while
+      // writing scheduled_for, leaving a pending row processScheduled() will
+      // never select (codex #3285 r6). No persisted schedule = 'error', and
+      // the caller shows its fallback instead of promising a text.
+      if (touch.requestId) {
+        const retryRow = await db("review_requests")
+          .where({ id: touch.requestId })
+          .first("scheduled_for")
+          .catch(() => null);
+        if (retryRow?.scheduled_for) {
+          return { outcome: "send_failed", code: touch.code || null, reason: touch.reason || null };
+        }
+      }
+      return { outcome: "error", code: touch.code || null, reason: touch.reason || null };
     }, { recordHealth: false });
 
-    if (result && result.skipped) return { outcome: "concurrent" };
+    if (result && result.skipped) {
+      // Reason-aware (codex #3285 r6): 'lease_held' means another send to
+      // this customer is genuinely in flight (concurrent — suppress the
+      // fallback; that send's text carries the link). 'no_connection' means
+      // the callback NEVER RAN and nothing was persisted — that is an error,
+      // not a queued ask.
+      return { outcome: result.reason === "lease_held" ? "concurrent" : "error" };
+    }
     return result;
   },
 
