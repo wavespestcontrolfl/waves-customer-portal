@@ -558,29 +558,22 @@ const REGISTRY = {
     },
   },
 
+  // Booking-confirmation fan-out to a SECONDARY service contact whose send
+  // crossed the 20:00 cutoff after the primary already delivered. The
+  // queued row carries the contact's own rendered body/phone; only the
+  // visit's continued existence gates the replay (consent/opt-in were
+  // checked at enqueue, and the pipeline re-checks suppressions at send).
+  call_booking_contact_confirmation_deferred: {
+    async recheck(meta) {
+      return visitStillUpcoming(meta.scheduled_service_id, 'call-contact-confirmation');
+    },
+  },
+
   appointment_tagger_prep_deferred: {
     async recheck(meta) {
       // Prep instructions are for an upcoming visit — a cancellation or
       // completion overnight makes them noise.
-      try {
-        if (!meta.scheduled_service_id) return { eligible: true };
-        const svc = await db('scheduled_services')
-          .where({ id: meta.scheduled_service_id })
-          .first('status', 'scheduled_date');
-        if (!svc) return { eligible: false, reason: 'visit-missing' };
-        const status = String(svc.status || '').toLowerCase();
-        if (['cancelled', 'completed', 'skipped'].includes(status)) {
-          return { eligible: false, reason: `visit-${status}` };
-        }
-        const ymd = svc.scheduled_date instanceof Date
-          ? svc.scheduled_date.toISOString().slice(0, 10)
-          : String(svc.scheduled_date || '').slice(0, 10);
-        const { etDateString } = require('../../utils/datetime-et');
-        if (ymd && ymd < etDateString()) return { eligible: false, reason: 'visit-past' };
-        return { eligible: true };
-      } catch (err) {
-        return failClosed('prep', meta.scheduled_service_id, err);
-      }
+      return visitStillUpcoming(meta.scheduled_service_id, 'prep');
     },
     async onTerminal(meta) {
       // The queued prep text never delivered (stale-suppressed or
@@ -667,6 +660,30 @@ const REGISTRY = {
 
 function entryFor(entryPoint) {
   return REGISTRY[String(entryPoint || '')] || null;
+}
+
+// Shared: a visit-anchored replay (prep instructions, booking-confirmation
+// fan-out) is noise once the visit dies or passes overnight.
+async function visitStillUpcoming(scheduledServiceId, label) {
+  try {
+    if (!scheduledServiceId) return { eligible: true };
+    const svc = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('status', 'scheduled_date');
+    if (!svc) return { eligible: false, reason: 'visit-missing' };
+    const status = String(svc.status || '').toLowerCase();
+    if (['cancelled', 'completed', 'skipped'].includes(status)) {
+      return { eligible: false, reason: `visit-${status}` };
+    }
+    const ymd = svc.scheduled_date instanceof Date
+      ? svc.scheduled_date.toISOString().slice(0, 10)
+      : String(svc.scheduled_date || '').slice(0, 10);
+    const { etDateString } = require('../../utils/datetime-et');
+    if (ymd && ymd < etDateString()) return { eligible: false, reason: 'visit-past' };
+    return { eligible: true };
+  } catch (err) {
+    return failClosed(label, scheduledServiceId, err);
+  }
 }
 
 // Shared: deferred invoice pay-link/dunning replays must confirm the

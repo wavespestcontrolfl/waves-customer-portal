@@ -118,6 +118,17 @@ describe('deferred-replay registry', () => {
     expect(past.reason).toBe('visit-past');
   });
 
+  test('call-booking contact confirmation (r17): dead or past visits suppress the fan-out replay', async () => {
+    db.mockReturnValueOnce(firstChain({ status: 'cancelled', scheduled_date: '2026-08-09' }));
+    const dead = await recheckDeferredReplay('call_booking_contact_confirmation_deferred', { scheduled_service_id: 'ss-1' });
+    expect(dead.eligible).toBe(false);
+    expect(dead.reason).toBe('visit-cancelled');
+
+    db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
+    const live = await recheckDeferredReplay('call_booking_contact_confirmation_deferred', { scheduled_service_id: 'ss-1' });
+    expect(live.eligible).toBe(true);
+  });
+
   test('document reminder: signed/terminal contracts suppress', async () => {
     db.mockReturnValueOnce(firstChain({ status: 'signed', signed_at: null }));
     const signed = await recheckDeferredReplay('document_request_reminder_deferred', { contract_id: 'ct1' });

@@ -214,7 +214,7 @@ async function recoverStaleScheduledSmsClaims(now) {
       AND scheduled_for IS NOT NULL
       AND scheduled_for <= ?
       AND updated_at <= ?
-    RETURNING status, metadata
+    RETURNING id, status, metadata
   `, [SCHEDULED_SMS_MAX_ATTEMPTS, now, now, now, staleBefore]);
 
   const recovered = result.rows || [];

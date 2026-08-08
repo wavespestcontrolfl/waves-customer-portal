@@ -10359,7 +10359,7 @@ const CallRecordingProcessor = {
                           .first()
                           .catch(() => null);
                         if (recentDup) continue;
-                        await sendCustomerMessage({
+                        const contactResult = await sendCustomerMessage({
                           to: contact.phone,
                           body: contactBody,
                           channel: 'sms',
@@ -10375,7 +10375,47 @@ const CallRecordingProcessor = {
                             appointment_contact_role: contact.role,
                           },
                         });
-                        logger.info(`[call-proc] Appointment SMS fanned out to ${contact.role} for customer ${customerId}`);
+                        if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
+                          && contactResult.deferred && contactResult.nextAllowedAt) {
+                          // The primary confirmation reached Twilio before the
+                          // 20:00 cutoff but THIS contact's send crossed it —
+                          // re-arming the whole confirmation would duplicate
+                          // the delivered primary, so persist only the held
+                          // secondary on the scheduled-SMS rail. NO
+                          // refresh_customer_phone: this row belongs to the
+                          // CONTACT's phone; a send-time swap to the account
+                          // holder's number would misdeliver. The reprocess
+                          // dedupe above also matches this queued row (same
+                          // phone/type/body), so a re-run can't double-queue.
+                          try {
+                            const TWILIO_NUMBERS = require('../config/twilio-numbers');
+                            await db('sms_log').insert({
+                              customer_id: customerId,
+                              direction: 'outbound',
+                              from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+                              to_phone: contact.phone,
+                              message_body: contactBody,
+                              status: 'scheduled',
+                              scheduled_for: new Date(contactResult.nextAllowedAt),
+                              message_type: 'confirmation',
+                              metadata: JSON.stringify({
+                                entry_point: 'call_booking_contact_confirmation_deferred',
+                                scheduled_service_id: scheduledServiceId,
+                                appointment_contact_role: contact.role,
+                                original_block_code: contactResult.code,
+                                replay_purpose: 'appointment_confirmation',
+                                resolve_from_by_customer: true,
+                              }),
+                            });
+                            logger.info(`[call-proc] Appointment SMS to ${contact.role} held outside the 8AM-8PM ET send window — queued for ${contactResult.nextAllowedAt}`);
+                          } catch (queueErr) {
+                            logger.error(`[call-proc] held contact-confirmation requeue failed for ${contact.role} (customer ${customerId}): ${queueErr.message}`);
+                          }
+                        } else if (!contactResult.sent) {
+                          logger.warn(`[call-proc] Appointment SMS fan-out to ${contact.role} blocked/failed for customer ${customerId}: ${contactResult.code || contactResult.reason || 'unknown'}`);
+                        } else {
+                          logger.info(`[call-proc] Appointment SMS fanned out to ${contact.role} for customer ${customerId}`);
+                        }
                       }
                       // Email-only service contacts never appear in the SMS
                       // contact list (getAppointmentContacts is phone-based)
