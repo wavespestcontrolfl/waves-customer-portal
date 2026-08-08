@@ -425,8 +425,17 @@ async function main() {
     // (Codex PR #3295 r7). The meta block is already inside `body` here —
     // buildDocument appends it the way assertComplianceClear does — so the
     // title is the only field to add; passing meta again would double it.
+    // Scored the same way as the semantic side, for the same reason r1 gave
+    // there: production blocks on ANY compliance P0, not on the code matching
+    // the fixture's label. Scoping to the two compliance codes rather than to
+    // every guardrail code keeps an unrelated price/brand P0 from being
+    // credited as "the regex caught this violation" — it caught a different
+    // one. Currently a no-op (0 cases in the corpus fire the other code, and
+    // both codes are always P0), but the asymmetry would have failed silently
+    // and in the flattering direction, which is how the other seven went.
     const regexDraft = payload.title ? { body, frontmatter: { title: payload.title } } : { body };
-    const regexBlocked = guardrails.evaluate(regexDraft, {}).findings.some((f) => f.code === c.code);
+    const regexBlocked = guardrails.evaluate(regexDraft, {}).findings
+      .some((f) => f.severity === 'P0' && CODES.includes(f.code));
     return { ...c, semanticBlocked, codeMatched, regexBlocked, checked, position };
   });
 
