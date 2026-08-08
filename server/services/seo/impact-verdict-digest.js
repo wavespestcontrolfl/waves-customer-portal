@@ -56,6 +56,14 @@ const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wa
 
 const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
 const ROLLUP_WINDOW_DAYS = 7;
+// The two ALERT markers use the six-day re-nag interval above. The rollup
+// needs its own, because six days would let a daily tick send it on day six
+// and turn the "weekly" rollup into a drifting six-day one. A flat seven days
+// has the opposite hazard: the marker is stamped at the tick's own cutoff, so
+// day seven's tick is a few milliseconds SHORT of 7d and would slip to day
+// eight, then nine. An hour of slack makes day seven reliably due and day six
+// reliably not.
+const ROLLUP_DUE_MS = 7 * 24 * 60 * 60 * 1000 - 60 * 60 * 1000;
 const BLIND_LOOP_DAYS = 21;
 // Below this many measured-but-ungraded optimizations the silence is just a
 // quiet engine, not a blind grader. Keeps the alert off a young/low-volume lane.
@@ -93,10 +101,10 @@ function pausedMarkerKey(bucket) {
 // left. Read failure sends anyway — a rare duplicate beats a silently
 // swallowed halted lane.
 
-async function sentRecently(database, key) {
+async function sentRecently(database, key, intervalMs = SIX_DAYS_MS) {
   try {
     const row = await database('ops_email_send_state').where({ email_key: key }).first('last_sent_at');
-    return Boolean(row?.last_sent_at && (Date.now() - new Date(row.last_sent_at).getTime()) < SIX_DAYS_MS);
+    return Boolean(row?.last_sent_at && (Date.now() - new Date(row.last_sent_at).getTime()) < intervalMs);
   } catch (err) {
     logger.warn(`[impact-digest] send-marker read failed for ${key} (${err.message}) — proceeding without the guard`);
     return false;
@@ -481,14 +489,21 @@ async function alertBlindLoop({ database, mailer }) {
  * lease (the CLI preview, a future ad-hoc run).
  */
 async function rollupWindowStart(database) {
-  const fallback = addETDays(new Date(), -ROLLUP_WINDOW_DAYS);
   try {
     const row = await database('ops_email_send_state').where({ email_key: ROLLUP_MARKER_KEY }).first('last_sent_at');
     if (row?.last_sent_at) return { since: new Date(row.last_sent_at), exclusive: true };
+    // Read SUCCEEDED and there is no marker: genuinely the first rollup, so
+    // the fixed window is the right, inclusive, start.
+    return { since: addETDays(new Date(), -ROLLUP_WINDOW_DAYS), exclusive: false };
   } catch (err) {
-    logger.warn(`[impact-digest] rollup watermark read failed (${err.message}) — falling back to a ${ROLLUP_WINDOW_DAYS}d window`);
+    // Read FAILED — which is not the same thing. If a watermark older than
+    // seven days exists but we cannot see it, falling back to a 7d window and
+    // then advancing the marker to our cutoff would permanently skip every
+    // verdict between the real watermark and that boundary. An unknown
+    // watermark means stand down: no query, no send, no stamp.
+    logger.error(`[impact-digest] rollup watermark unreadable, standing down this tick: ${err.message}`);
+    return { error: true };
   }
-  return { since: fallback, exclusive: false };
 }
 
 // Whole days covered by the window, for the subject line — a fixed "7d" would
@@ -499,9 +514,10 @@ function windowDays(since, until) {
 
 // Leg 3 — weekly rollup of what was actually graded.
 async function sendVerdictRollup({ database, mailer }) {
-  if (await sentRecently(database, ROLLUP_MARKER_KEY)) return { skipped: 'not-due' };
+  if (await sentRecently(database, ROLLUP_MARKER_KEY, ROLLUP_DUE_MS)) return { skipped: 'not-due' };
 
-  const { since, exclusive } = await rollupWindowStart(database);
+  const { since, exclusive, error } = await rollupWindowStart(database);
+  if (error) return { skipped: 'error' };
   // Taken BEFORE the query and stamped as the watermark, so a concurrent
   // sweep's writes land above it instead of being skipped forever.
   const cutoff = new Date();
@@ -582,5 +598,5 @@ module.exports = {
   composeBlindLoopAlert,
   composeVerdictRollup,
   _internals: { tallyVerdicts, pausedMarkerKey, checkedSince },
-  THRESHOLDS: { ROLLUP_WINDOW_DAYS, BLIND_LOOP_DAYS, BLIND_LOOP_MIN_MEASURED, SIX_DAYS_MS },
+  THRESHOLDS: { ROLLUP_WINDOW_DAYS, ROLLUP_DUE_MS, BLIND_LOOP_DAYS, BLIND_LOOP_MIN_MEASURED, SIX_DAYS_MS },
 };

@@ -256,6 +256,51 @@ describe('rollup leg — quiet windows do not stamp the weekly marker', () => {
     expect(rollupQuery.op).toBe('>=');
   });
 
+  test('is NOT due at six days — the alert markers\' re-nag interval must not shorten the week', async () => {
+    const sixDaysAgo = new Date(Date.now() - 6 * 86400000);
+    const fakeDb = makeDb({
+      rows: [{ verdict: 'improved' }],
+      markers: [{ email_key: 'impact-verdict-rollup', last_sent_at: sixDaysAgo }],
+    });
+    const out = await digest.sendImpactDigestsIfDue({ db: fakeDb, sendgrid, tracker: { pausedBuckets: async () => [] } });
+    expect(out.rollup.skipped).toBe('not-due');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('IS due at seven days, even though the marker was stamped at that tick\'s own cutoff', async () => {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86400000);
+    const fakeDb = makeDb({
+      rows: [{ verdict: 'improved' }],
+      markers: [{ email_key: 'impact-verdict-rollup', last_sent_at: sevenDaysAgo }],
+    });
+    const out = await digest.sendImpactDigestsIfDue({ db: fakeDb, sendgrid, tracker: { pausedBuckets: async () => [] } });
+    expect(out.rollup.sent).toBe(true);
+  });
+
+  test('an UNREADABLE watermark stands down — it must not fall back and then advance the marker', async () => {
+    // A real watermark older than 7d that we cannot see would otherwise be
+    // replaced by a 7d fallback window, and the stamp would skip everything
+    // between the two boundaries forever.
+    const fakeDb = makeDb({ rows: [{ verdict: 'improved' }] });
+    let call = 0;
+    const orig = fakeDb.state.markers;
+    fakeDb.state.markers = orig;
+    const brokenDb = (table) => {
+      if (table === 'ops_email_send_state') {
+        call += 1;
+        // First read is sentRecently's; the second is the watermark read.
+        if (call >= 2) return { where: () => ({ first: async () => { throw new Error('db down'); } }) };
+      }
+      return fakeDb(table);
+    };
+    brokenDb.state = fakeDb.state;
+
+    await expect(digest.sendImpactDigestsIfDue({ db: brokenDb, sendgrid, tracker: { pausedBuckets: async () => [] } }))
+      .rejects.toThrow(/rollup:error/);
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(fakeDb.state.upserts).not.toContain('impact-verdict-rollup');
+  });
+
   test('the query is upper-bounded and the STAMP is that same cutoff, not the send time', async () => {
     // checkPending runs outside this module's lock. Without an upper bound,
     // a verdict written by a concurrent sweep after our query but before our
