@@ -157,6 +157,21 @@ async function recordCallPpcAttribution({
     const specificService = inferSpecificService(primaryInterest);
     const serviceBucket = inferServiceBucket(primaryInterest);
 
+    // Provenance recovery BEFORE the lead-scoped lookup (pre-push P1 r13):
+    // an interrupted repoint can leave this call's history-bearing row on a
+    // DIFFERENT lead with the old stamp already cleared — a fresh insert
+    // here would double-count the call. Recover the row by source_call_id
+    // and move it to this lead first; a transfer then feeds the existing-
+    // row backfill below, and a target-slot conflict retires the orphan
+    // while the other_call guard protects the target's own row.
+    if (sourceCallId) {
+      const provenanced = await dbc('ad_service_attribution')
+        .where({ source_call_id: sourceCallId })
+        .first('id', 'lead_id');
+      if (provenanced && String(provenanced.lead_id) !== String(leadId)) {
+        await reconcileMovedCallAttributionRow(dbc, sourceCallId, provenanced.lead_id, leadId, new Date(), { toCustomerId: customerId });
+      }
+    }
     // One funnel row per lead — dedupe by lead_id. Backfill richer data onto an
     // existing row (e.g. the bridge later supplies the campaign).
     const existing = await dbc('ad_service_attribution').where({ lead_id: leadId }).first();

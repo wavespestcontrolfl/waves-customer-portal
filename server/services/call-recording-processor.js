@@ -9205,22 +9205,24 @@ const CallRecordingProcessor = {
         await runCallPpcAttribution();
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
       }
-    } else if (priorStampedLeadId) {
-      // The retry was VETOED out of lead creation (non-lead nature /
-      // existing-customer stage) but an earlier attempt stamped a lead —
-      // the stamp must not survive a non-lead verdict, and the lead's prior
-      // summary comes back with the clear, in one fenced transaction (audit
-      // P1 r22/r18/r19). abortProcessing reaches the outer
-      // extraction_failed guard directly.
+    } else {
+      // Non-lead verdict (non-lead nature / existing-customer stage). The
+      // attribution retire is DEFERRED to the final fenced status write —
+      // where the verdict actually becomes durable — and armed REGARDLESS
+      // of stamp presence (pre-push P0 r12, P1 r13): a sid-linked call
+      // carries a provenanced funnel row but never a metadata stamp, and
+      // stamp-gated arming left that row's revenue attributed to a
+      // rejected call. Only the lead-state restoration below needs the
+      // stamp.
+      deferredNonLeadAttributionRetire = true;
+      if (priorStampedLeadId) {
+      // The retry was VETOED out of lead creation but an earlier attempt
+      // stamped a lead — the stamp must not survive a non-lead verdict,
+      // and the lead's prior summary comes back with the clear, in one
+      // fenced transaction (audit P1 r22/r18/r19). abortProcessing
+      // reaches the outer extraction_failed guard directly. 'keep': the
+      // retire rides finalization, not this settle (pre-push P0 r12).
       try {
-        // 'keep', NOT 'retire' (pre-push P0 r12): this settle commits long
-        // before the run finalizes, and a later throw sends the call to
-        // the extraction_failed retry — deleting the funnel history here
-        // would be unrecoverable if the retry then reaches a different
-        // verdict. The retire is DEFERRED to the final fenced status
-        // write below, where the non-lead verdict actually becomes
-        // durable.
-        deferredNonLeadAttributionRetire = true;
         const settled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'keep' });
         if (!settled) {
           const lost = new Error('processing claim lost during call→lead link clear (non-lead path)');
@@ -9232,6 +9234,7 @@ const CallRecordingProcessor = {
         const wrapped = new Error(`call→lead link clear failed (non-lead path): ${clearErr.code || clearErr.name || 'db_error'}`);
         wrapped.abortProcessing = true;
         throw wrapped;
+      }
       }
     }
 
