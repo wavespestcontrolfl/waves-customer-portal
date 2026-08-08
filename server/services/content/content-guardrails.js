@@ -2912,6 +2912,10 @@ const REENTRY_LINKING_VERB_SRC = `(?:is|are|was|were|remains?|remained|stays?|st
 // Bounded qualifiers accepted wherever a duration is parsed (Codex PR
 // r9): "in just 30 minutes", "wait only 30 minutes".
 const REENTRY_QUALIFIER_SRC = "(?:(?:about|around|roughly|approximately|between|just|only|at\\s+least|up\\s+to|under|over|less\\s+than|more\\s+than|no\\s+more\\s+than|fewer\\s+than|as\\s+little\\s+as)\\s+){0,2}?";
+// A duration may be closed by a bare relative adverb instead of a
+// preposition that takes an object (Codex PR r17: "you may re-enter the
+// treated area 30 minutes later"). Same fixed figure, nothing after it.
+const REENTRY_AFTER_TAIL_SRC = "(?:afterwards?|after|following|later)";
 // Drying-duration forms with no intrinsic re-entry word require PESTICIDE
 // context in the sentence (Codex PR r5): "Paint drying takes 30 minutes"
 // and "the caulk needs 30 minutes to dry" are home-maintenance advice —
@@ -3009,8 +3013,8 @@ const REENTRY_SAFETY_SRCS = [
   // Preposition-less order with a trailing after/following clause (Codex
   // PR r13 audit): "you can re-enter 30 minutes after treatment", "keep
   // pets outside 30 minutes after treatment" — treatment-context-gated.
-  { src: `\\b(?:re-?enter\\w*|re-?entry|re-?occup\\w+|return\\w*|walk\\s+on|go\\s+back|enter\\w*)\\b[^.!?\\n]{0,30}?\\b${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\s+(?:after|following)\\b`, needsTreatmentContext: true },
-  { src: `\\bkeep\\s+(?:the\\s+|your\\s+)?(?:pets?|kids?|children|dogs?|cats?|everyone|people|famil(?:y|ies))\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside|indoors|outdoors|outside)\\b[^.!?\\n]{0,10}?\\b${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\s+(?:after|following)\\b`, needsTreatmentContext: true },
+  { src: `\\b(?:re-?enter\\w*|re-?entry|re-?occup\\w+|return\\w*|walk\\s+on|go\\s+back|enter\\w*)\\b[^.!?\\n]{0,30}?\\b${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\s+${REENTRY_AFTER_TAIL_SRC}\\b`, needsTreatmentContext: true },
+  { src: `\\bkeep\\s+(?:the\\s+|your\\s+)?(?:pets?|kids?|children|dogs?|cats?|everyone|people|famil(?:y|ies))\\b[^.!?\\n]{0,40}?\\b(?:off|out|away|inside|indoors|outdoors|outside)\\b[^.!?\\n]{0,40}?\\b${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\s+${REENTRY_AFTER_TAIL_SRC}\\b`, needsTreatmentContext: true },
   // A bounded qualifier may sit between the drying verb and the
   // preposition (Codex PR r8: "dries completely within 45 minutes").
   { src: `\\bdr(?:y|ies|ied)\\s+(?:\\w+\\s+){0,2}?(?:in|within|after|for)\\s+${REENTRY_QUALIFIER_SRC}${REENTRY_DURATION_SRC}\\b`, needsTreatmentContext: true },
@@ -3124,6 +3128,18 @@ const TECH_CONFIRMS_RE = new RegExp(
 // The two hard-copy classifiers scan RENDERED text (Codex PR r12):
 // "We offer **wildlife removal**" and "[wildlife removal](/x/)" carry
 // the same prohibited claim once the Markdown delimiters render away.
+// MDX expression props nest and span lines (`items={[{ label: "…" }]}`), so
+// the tag scanner needs a DEPTH-AWARE brace form (Codex PR r17) — a flat
+// `\{[^}]*\}` stops at the first inner `}`, leaving the rest of the tag
+// unmatched and its visible strings unscanned. Bounded repetition keeps
+// this linear, and the alternation branches are disjoint on their first
+// character, so there is no catastrophic backtracking.
+const MDX_EXPR_SRC = '\\{(?:[^{}]|\\{(?:[^{}]|\\{[^{}]{0,400}\\}){0,400}\\}){0,2000}\\}';
+const MDX_TAG_RE = new RegExp(
+  `<\\/?[a-zA-Z](?:"(?:[^"\\\\\\n]|\\\\.)*"|'(?:[^'\\\\\\n]|\\\\.)*'|${MDX_EXPR_SRC}|[^>"'{\\n])*>`,
+  'g',
+);
+
 function normalizeHardCopyText(text) {
   return String(text || '')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
@@ -3137,16 +3153,22 @@ function normalizeHardCopyText(text) {
     // the values stay in the scanned text.
     // Quote-aware tag scan (Codex PR r14): a `>` inside a quoted prop
     // must not terminate the tag early or the value's prefix is dropped.
-    .replace(/<\/?[a-zA-Z](?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\{[^}\n]*\}|[^>"'{\n])*>/g, (tag) => {
+    .replace(MDX_TAG_RE, (tag) => {
       const vals = [];
-      // Bare quoted attrs AND MDX expression-string forms (Codex PR r13
-      // audit b: `verdict={"…is safe for pets."}` renders the same
-      // copy). Escape-aware (Codex PR r15): `{'Waves\' treatment…'}`
-      // must not truncate at the escaped quote.
-      const attrRe = /=\s*(?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'|\{\s*"((?:[^"\\\n]|\\.)*)"\s*\}|\{\s*'((?:[^'\\\n]|\\.)*)'\s*\}|\{\s*`([^`]*)`\s*\})/g;
+      // EVERY string literal inside the tag is candidate visible copy —
+      // scalar attrs (`verdict="…"`), MDX expression strings (Codex PR
+      // r13 audit b: `verdict={"…"}`), and strings nested inside
+      // array/object props alike (Codex PR r17:
+      // `items={[{ label: "Pet-safe treatment" }]}`, ComparisonTable
+      // cells). Enumerating prop SHAPES kept missing new ones, so the
+      // scan is shape-agnostic; object keys ride along harmlessly since
+      // no compliance code matches a bare field name.
+      // Escape-aware (Codex PR r15): `{'Waves\' treatment…'}` must not
+      // truncate at the escaped quote.
+      const strRe = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`([^`]*)`/g;
       let m;
-      while ((m = attrRe.exec(tag)) !== null) {
-        const raw = m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5];
+      while ((m = strRe.exec(tag)) !== null) {
+        const raw = m[1] ?? m[2] ?? m[3];
         vals.push(raw.replace(/\\(['"\\])/g, '$1'));
       }
       return vals.length ? ` ${vals.join(' ')} ` : '';
@@ -3169,6 +3191,12 @@ function normalizeHardCopyText(text) {
     .replace(/&(amp|lt|gt|quot|apos|nbsp|ndash|mdash|hyphen|dash|minus);/g, (m, name) => ({
       amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—', hyphen: '-', dash: '-', minus: '-',
     }[name] || m))
+    // CommonMark backslash escapes render as the bare punctuation (Codex
+    // PR r17: `pet\-safe` and `EPA\-approved` render as the prohibited
+    // claims), so unescape before the classifiers tokenize. AFTER the
+    // entity decode so an encoded backslash lands here too, and BEFORE
+    // the delimiter strip so an escaped `\*` reduces like a bare one.
+    .replace(/\\([-!"#$%&'()*+,.\/:;<=>?@[\]^_`{|}~\\])/g, '$1')
     .replace(/(\*\*|__|~~|[*_`])/g, '');
 }
 
@@ -3278,6 +3306,15 @@ const BANNED_TOPIC_INFO_NOUN_SRC = "(?:guides?|articles?|posts?|pages?|blogs?|ov
 // have partners trap wildlife" attribute the work to someone else — the
 // wanted referral copy, same exemption the possessive branch carries.
 const BANNED_TOPIC_ACTION_FILLER_SRC = `(?:(?!${NEGATION_WORD_SRC}\\b|partners?\\b|specialists?\\b|professionals?\\b|contractors?\\b|trappers?\\b|experts?\\b)[\\w'’]+\\s+){0,2}?`;
+// Ownership is also expressed through ordinary auxiliary framing (Codex PR
+// r17): "we can help you remove raccoons", "our technicians are trained to
+// remove wildlife" present the service as ours just as directly as "we
+// remove raccoons". Kept as an explicit CLOSED group rather than widening
+// the generic filler, so the third-party subject guards in
+// BANNED_TOPIC_ACTION_FILLER_SRC still police everything else. Negation
+// stays outside it — "we cannot help you remove wildlife" never matches
+// the group, and the filler refuses the negation word behind it.
+const BANNED_TOPIC_AUX_FRAMING_SRC = "(?:(?:can|could|will|would|may)\\s+(?:help|assist)\\s+(?:you\\s+)?|(?:helps?|assists?)\\s+(?:you\\s+)?|(?:are|is|get|gets|got)\\s+(?:fully\\s+|properly\\s+|specially\\s+)?trained\\s+to\\s+|(?:are|is)\\s+(?:here|ready|available|equipped|certified|licensed)\\s+to\\s+)?";
 // The insulation object gap must not match THROUGH inspection artifacts
 // (Codex PR r6): "we can provide photos of attic insulation during the
 // inspection" is rodent-inspection copy, not an insulation offering.
@@ -3326,7 +3363,7 @@ const BANNED_TOPIC_SRCS = [
   // door-to-door" — ownership expressed through the ACTION verb rather
   // than offer/provide.
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}installs?\\s+${BANNED_TOPIC_INSULATION_GAP_SRC}insulation\\b`,
-  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?|extracts?|extracting|clears?|clearing|rids?|ridding|eliminat\\w+|eradicat\\w+)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_AUX_FRAMING_SRC}${BANNED_TOPIC_ACTION_FILLER_SRC}(?:traps?|trapping|removes?|relocates?|catch(?:es)?|evicts?|extracts?|extracting|clears?|clearing|rids?|ridding|eliminat\\w+|eradicat\\w+)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b`,
   // EXCLUDE also means "omit" (Codex PR r6): only a physical
   // location/entry-point tail makes it the wildlife-exclusion service —
   // "we exclude wildlife examples from this comparison" stays legal.
@@ -3335,6 +3372,13 @@ const BANNED_TOPIC_SRCS = [
   // attic", "our team gets squirrels out" (Codex PR r3).
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${BANNED_TOPIC_ACTION_FILLER_SRC}(?:get(?:s|ting)?|took|take(?:s|n|ing)?)\\s+${BANNED_TOPIC_GAP_SRC}(?:wildlife|animals?|raccoons?|squirrels?|opossums?|armadillos?|bats?|snakes?|birds?)\\b[^.!?\\n]{0,20}?\\bout\\b`,
   `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)|let\\s+(?:us|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?)))\\s+${NON_NEGATED_FILLER_SRC}(?:sell|market|canvass)\\w*\\s+${BANNED_TOPIC_GAP_SRC}door[-\\s]?to[-\\s]?door\\b`,
+  // NOUN-FIRST and dispatch forms (Codex PR r17): "we make door-to-door
+  // sales", "Waves sends salespeople door to door", "our team goes door to
+  // door". The sales noun follows the topic here, so the sell/market/canvass
+  // verb above never fires. The verb set stays EXPLICIT rather than matching
+  // any first-person sentence containing the topic, so third-party prose
+  // ("we refer you to companies that go door to door") is not swept in.
+  `\\b(?:we|waves(?:\\s+pest\\s+control)?|our\\s+(?:team|techs?|technicians?|company|crews?|reps?|salespeople))\\s+${NON_NEGATED_FILLER_SRC}(?:makes?|made|do(?:es)?|did|runs?|ran|uses?|used|sends?|sent|goes|go|went|knocks?)\\s+${BANNED_TOPIC_GAP_SRC}door[-\\s]?to[-\\s]?door\\b`,
   // Direct banned-service verbs: "we fumigate homes", "our technicians
   // tent homes across Sarasota" — ownership expressed as the action itself.
   // The trailing guard keeps noun usage reached through the filler out

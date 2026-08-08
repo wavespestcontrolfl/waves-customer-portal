@@ -3168,6 +3168,35 @@ describe('re-entry/safety compliance guard (P0 REENTRY_SAFETY_CLAIM)', () => {
     expect(confirmed.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
   });
 
+  test('relative-adverb durations, backslash escapes and structured MDX props all reach the classifier (Codex PR r17)', () => {
+    for (const body of [
+      // A duration closed by a bare relative adverb, no object.
+      'You may re-enter the treated area 30 minutes later.',
+      'You may re-enter the treated area 30 minutes afterward.',
+      // Same tail on the keep-off branch, with the surface named — the
+      // location→duration gap was too tight to reach it at all before.
+      'Keep pets off the treated lawn 30 minutes later.',
+      'Keep pets off the treated lawn 30 minutes after treatment.',
+      // CommonMark backslash escapes render as the bare punctuation.
+      'The treatment is pet\\-safe.',
+      'The pesticide is EPA\\-approved.',
+      // Visible strings nested in array/object MDX props.
+      '<PestEvidenceGrid items={[{ label: "Pet-safe treatment", note: "Designed for families" }]} />',
+      '<ComparisonTable rows={[{ feature: "Registration", waves: "EPA-approved" }]} />',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
+    }
+    // The relative-adverb tail stays treatment-context-gated: an ordinary
+    // household wait is not a re-entry figure.
+    const household = guardrails.evaluate({ body: 'Keep kids off the trampoline 30 minutes later.' }, {});
+    expect(household.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+    // Shape-agnostic string extraction must not turn ordinary prop copy
+    // into a violation.
+    const legal = guardrails.evaluate({ body: '<BottomLineBox verdict="Waves is a solid local option." />' }, {});
+    expect(legal.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(false);
+  });
+
   test('escaped quotes inside MDX expression props survive extraction (Codex PR r15)', () => {
     const r = guardrails.evaluate({ body: "<BottomLineBox verdict={'Waves\\' treatment is safe for pets > ordinary products.'} />" }, {});
     expect(r.findings.some((f) => f.code === 'REENTRY_SAFETY_CLAIM')).toBe(true);
@@ -3831,6 +3860,31 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(listing.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
     const info = guardrails.evaluate({ body: 'When to call a wildlife removal specialist for attic noises.' }, {});
     expect(info.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+  });
+
+  test('auxiliary ownership framing and noun-first door-to-door claims block (Codex PR r17)', () => {
+    for (const body of [
+      // Ownership through auxiliary framing rather than a bare action verb.
+      'We can help you remove raccoons from your attic.',
+      'Our technicians are trained to remove wildlife.',
+      // The sales noun follows the topic, so the sell/market/canvass verb
+      // never fires.
+      'We make door-to-door sales across Bradenton.',
+      'Waves sends salespeople door to door throughout Sarasota.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(true);
+    }
+    for (const body of [
+      // Negation sits outside the auxiliary group, so the disclaimer holds.
+      'We cannot help you remove raccoons; we refer you to a licensed specialist.',
+      'We do not use door-to-door sales.',
+      // The door-to-door verb set is explicit so third-party prose survives.
+      'We refer you to companies that go door to door.',
+    ]) {
+      const r = guardrails.evaluate({ body }, {});
+      expect(r.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
+    }
   });
 
   test('removal-of-animal forms block; third-party schedule referrals stay legal (Codex PR r15)', () => {
