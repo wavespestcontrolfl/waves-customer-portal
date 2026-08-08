@@ -34,9 +34,14 @@
  *
  * REAPPLY CONTRACT - a cell down() preserved as a post-raise admin edit is
  * already in the post-raise regime; reapply must NOT put another +5% on it.
- * up() skips exactly the cells the latest :down audit recorded as
- * preserved (a cell edited AFTER the rollback is not in that list and gets
- * raised, per derive-from-live).
+ * up() skips every cell ANY :down audit recorded as preserved - the UNION
+ * across all cycles, not just the latest audit (codex r2: a later down()
+ * has nothing to unwind for a preserved cell, so its audit omits it, and a
+ * latest-only read would compound on the third cycle). Preservation is
+ * therefore permanent for this migration: once an admin touches a cell in
+ * the post-raise regime, this up() never re-raises it - the money-safe
+ * bias. A cell edited only AFTER a rollback is in no preserved list and
+ * still gets raised, per derive-from-live.
  */
 
 const MIGRATION_TAG = 'migration:20260808010000';
@@ -152,25 +157,32 @@ exports.up = async function up(knex) {
     reapplyAfterDown = Boolean(lastDown);
   }
 
-  // REAPPLY CONTRACT: cells the latest down() preserved as post-raise admin
-  // edits already carry the raise (e.g. 100 -> up 105 -> admin 110); putting
-  // another +5% on them here would compound to 116. Skip exactly the paths
-  // the :down audit recorded as preserved.
+  // REAPPLY CONTRACT: cells a down() preserved as post-raise admin edits
+  // already carry the raise (e.g. 100 -> up 105 -> admin 110); putting
+  // another +5% on them here would compound to 116. UNION the preserved
+  // paths across ALL :down audits, not just the latest: a second down() has
+  // nothing to unwind for a preserved cell (its capture shows it unchanged)
+  // so its audit omits it, and a latest-only read would re-raise on the
+  // third cycle (codex r2). Once preserved, always preserved.
   const reapplySkips = {};
   if (reapplyAfterDown) {
     for (const configKey of [...Object.keys(PRICE_SHAPES), 'services_mosquito_one_time']) {
-      const downAudit = await knex('pricing_config_audit')
+      const downAudits = await knex('pricing_config_audit')
         .where({ config_key: configKey, changed_by: MIGRATION_TAG + ':down' })
-        .orderBy('id', 'desc')
-        .first('new_value');
-      if (!downAudit || !downAudit.new_value) continue;
-      try {
-        const parsed = JSON.parse(downAudit.new_value);
-        const preserved = (parsed.skippedAdminEditedCells || parsed.skippedAdminEditedFields || [])
-          .map((entry) => entry.path || entry.field)
-          .filter(Boolean);
-        if (preserved.length) reapplySkips[configKey] = new Set(preserved);
-      } catch { /* an unreadable audit row never blocks the raise */ }
+        .orderBy('id', 'asc')
+        .select('new_value');
+      const preserved = new Set();
+      for (const audit of downAudits) {
+        if (!audit.new_value) continue;
+        try {
+          const parsed = JSON.parse(audit.new_value);
+          for (const entry of (parsed.skippedAdminEditedCells || parsed.skippedAdminEditedFields || [])) {
+            const path = entry.path || entry.field;
+            if (path) preserved.add(path);
+          }
+        } catch { /* an unreadable audit row never blocks the raise */ }
+      }
+      if (preserved.size) reapplySkips[configKey] = preserved;
     }
   }
 
