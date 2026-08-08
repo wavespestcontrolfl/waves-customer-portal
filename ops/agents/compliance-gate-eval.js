@@ -69,8 +69,14 @@ function extractCorpus(src) {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     const arrayStart = /for\s*\(const\s+body\s+of\s*\[/.test(line);
+    // `body:` may sit on the SAME line as evaluate({ or on a following one —
+    // multiline fixtures are a common shape in this file and were silently
+    // skipped entirely, not even counted as unparsed, which biased the corpus
+    // toward one-liners (Codex PR #3295 r1).
     const inlineBody = /evaluate\(\s*\{\s*body:\s*(['"`])/.test(line);
-    if (!arrayStart && !inlineBody) continue;
+    const multilineBody = /evaluate\(\s*\{\s*$/.test(line)
+      && /^\s*body:\s*(['"`])/.test(lines[i + 1] || '');
+    if (!arrayStart && !inlineBody && !multilineBody) continue;
 
     // Collect literals until the block closes, then find the assertion that
     // governs them (the first code+boolean expectation after the block).
@@ -93,6 +99,7 @@ function extractCorpus(src) {
       }
       if (arrayStart && depth <= 0 && j > i) { closed = true; break; }
       if (inlineBody) { closed = true; break; }
+      if (multilineBody && literals.length > 0 && j > i) { closed = true; break; }
     }
     if (!closed || literals.length === 0) { unparsed += 1; continue; }
 
@@ -174,24 +181,40 @@ async function main() {
   console.log(`running: ${selected.length} case(s) at concurrency ${args.concurrency}${args.all ? '' : ` (sample; --all for every case)`}`);
   console.log(`each case is one live LLM call — expect roughly ${Math.ceil(selected.length / args.concurrency)} sequential round-trips\n`);
 
+  // ARM THE GATE FOR THIS PROCESS. It ships dark (off unless GATE_COMPLIANCE
+  // is exactly 'true'), and calibration is what earns the right to turn it on —
+  // so without this the documented command would make zero live calls, count
+  // every case as fail-open, and print n/a. Set before the module is required,
+  // since evaluate() reads the flag at call time but the module also snapshots
+  // env-derived config at load (Codex PR #3295 r1).
+  process.env.GATE_COMPLIANCE = 'true';
+
   const complianceGate = require(path.join(REPO, 'server/services/content/compliance-gate'));
   const guardrails = require(path.join(REPO, 'server/services/content/content-guardrails'));
 
   const results = await runPool(selected, args.concurrency, async (c) => {
     const body = c.text.length >= 50 ? c.text : c.text + FILLER;
     let semanticBlocked = null;
+    let codeMatched = null;
     let checked = false;
     try {
       const r = await complianceGate.evaluate({ body });
       checked = r.checked;
-      semanticBlocked = r.findings.some((f) => f.severity === 'P0' && f.code === c.code);
+      // Measure what PRODUCTION does: it blocks on ANY P0, regardless of which
+      // of the two codes the model chose. Requiring the code to match the
+      // fixture would score a swapped-but-blocking P0 on compliant copy as a
+      // pass (inflating precision) and a swapped P0 on violating copy as a hole
+      // (understating recall) — neither matches the deployed behavior
+      // (Codex PR #3295 r1). Code accuracy is reported separately below.
+      semanticBlocked = !r.pass;
+      codeMatched = r.findings.some((f) => f.severity === 'P0' && f.code === c.code);
     } catch (err) {
       semanticBlocked = null;
       console.error(`  ! ${err.message}`);
     }
     // The regex verdict is recorded for COMPARISON only — never as the label.
     const regexBlocked = guardrails.evaluate({ body }, {}).findings.some((f) => f.code === c.code);
-    return { ...c, semanticBlocked, regexBlocked, checked };
+    return { ...c, semanticBlocked, codeMatched, regexBlocked, checked };
   });
 
   const usable = results.filter((r) => r.semanticBlocked !== null && r.checked);
@@ -204,10 +227,17 @@ async function main() {
 
   const pct = (n, d) => (d === 0 ? 'n/a' : `${((n / d) * 100).toFixed(1)}%`);
 
-  console.log('\n─── semantic gate ───');
+  console.log('\n─── semantic gate (blocking verdict, as production computes it) ───');
   console.log(`recall    ${caught}/${shouldBlock.length}  (${pct(caught, shouldBlock.length)}) — violations caught`);
   console.log(`precision ${shouldPass.length - falsePos}/${shouldPass.length}  (${pct(shouldPass.length - falsePos, shouldPass.length)}) — compliant copy left alone`);
   if (failOpen) console.log(`fail-open ${failOpen} case(s) returned unchecked (model unavailable) and are excluded`);
+
+  // Reported separately because it does not affect whether content publishes —
+  // a blocked draft is blocked either way — but a systematically swapped code
+  // sends the wrong retry directive to the writer on redraft.
+  const blockedCorrectly = shouldBlock.filter((r) => r.semanticBlocked);
+  const rightCode = blockedCorrectly.filter((r) => r.codeMatched).length;
+  console.log(`code accuracy ${rightCode}/${blockedCorrectly.length} (${pct(rightCode, blockedCorrectly.length)}) — of the violations it caught, how many it labelled with the expected code`);
 
   // The decision that matters: does the PAIR regress anywhere the regex alone
   // already succeeded? A semantic miss is acceptable where the regex catches

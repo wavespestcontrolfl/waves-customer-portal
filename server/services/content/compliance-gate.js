@@ -89,11 +89,22 @@ Judge (a) by what the clause modifies, not by whether the words co-occur:
 A timing or drying clause attached to any other predicate (works, dries,
 absorbs, bonds, activates) NEVER earns the exemption for a safety claim.
 
-Negated or disclaiming copy is COMPLIANT and must not be flagged: "no product
-is completely safe", "we do not offer wildlife trapping", "the treatment will
-not be safe until it dries", "wildlife removal is not offered by Waves".
-Purely informational mentions of a banned topic are compliant — the rule bans
-presenting it as OUR service, not discussing what the method is.
+NEGATION EXEMPTION — applies to CLAIMS, never to figures.
+A negated safety or service claim is compliant and must not be flagged: "no
+product is completely safe", "we do not offer wildlife trapping", "the
+treatment will not be safe until it dries", "wildlife removal is not offered
+by Waves". Purely informational mentions of a banned topic are compliant too —
+the rule bans presenting it as OUR service, not discussing what the method is.
+
+A FIXED RE-ENTRY OR DRYING FIGURE IS PROHIBITED IN EVERY POLARITY. Negation
+does not rescue it, because the figure IS the prohibited instruction rather
+than a claim about it:
+  VIOLATION   "Do not re-enter until 30 minutes have passed."
+  VIOLATION   "Do not re-enter after 30 minutes."
+  VIOLATION   "Keep pets off the lawn for at least an hour."
+Flag these even though they are phrased as prohibitions. The negation
+exemption above covers only safety/service CLAIMS that contain no fixed
+duration.
 
 Flag ONLY actual violations of the two rules above. Do NOT flag writing style,
 tone, marketing phrasing, calls to action, or copy that is merely incomplete or
@@ -113,14 +124,34 @@ Return ONLY JSON, no prose:
 {"findings":[{"severity":"P0|P1|P2","code":"REENTRY_SAFETY_CLAIM|BANNED_TOPIC","claim":"<exact quoted text from the content>","issue":"<which rule it breaks and why>","fix":"<compliant rewrite>"}]}
 An empty findings array means the content is compliant.`;
 
+// Schema validation runs INSIDE the dispatcher (Codex PR #3295 r1) so a
+// malformed or mis-coded response REJECTS that route and the second provider
+// gets a turn, instead of being silently read as "no findings". Interpreting
+// unusable output as a clean review is the one failure mode this gate must not
+// have: it returns checked:true/pass:true and lets the content publish while
+// reporting that a check happened.
+function validateResponse(result) {
+  const json = result && result.json;
+  if (!json || typeof json !== 'object') return 'no_json';
+  if (!Array.isArray(json.findings)) return 'findings_not_array';
+  for (const f of json.findings) {
+    if (!f || typeof f !== 'object') return 'finding_not_object';
+    const code = String(f.code || '').trim().toUpperCase();
+    // An unrecognized code on a finding the model considers blocking cannot be
+    // routed to a retry directive or explained to a reviewer — and dropping it
+    // would turn a reported violation into a pass. Reject the route instead.
+    if (!VALID_CODES.has(code)) return `unknown_code:${code || 'missing'}`;
+  }
+  return null;
+}
+
 function normalizeFinding(f) {
   // Severity is only prompt-constrained, so normalize casing/space before the
   // allowlist — otherwise a real P0 lands outside the set and gets demoted to
   // the non-blocking P2 and ships (the same trap fact-check-gate guards).
   const sev = String((f && f.severity) || '').trim().toUpperCase();
   const severity = ['P0', 'P1', 'P2'].includes(sev) ? sev : 'P2';
-  const rawCode = String((f && f.code) || '').trim().toUpperCase();
-  const code = VALID_CODES.has(rawCode) ? rawCode : null;
+  const code = String((f && f.code) || '').trim().toUpperCase();
   const claim = String((f && f.claim) || '').slice(0, 300);
   const issue = String((f && f.issue) || '').slice(0, 600);
   const fix = String((f && f.fix) || '').slice(0, 600);
@@ -157,19 +188,17 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
       jsonMode: true,
       system: SYSTEM_PROMPT,
       text: `City: ${city || '(none)'}\nKeyword: ${keyword || '(none)'}\nTag: ${tag || '(none)'}\nTitle: ${title || '(none)'}\n\n--- CONTENT ---\n${body}`,
-    });
+    }, { validate: validateResponse });
     if (!response.ok || !response.json) throw new Error(response.reason || 'invalid_json');
   } catch (err) {
     logger.warn(`[compliance-gate] check failed for "${title}" — passing (fail-open): ${err.message}`);
     return { pass: true, findings: [], checked: false, skipped: 'api_error' };
   }
 
-  const findings = (Array.isArray(response.json.findings) ? response.json.findings : [])
-    .map(normalizeFinding)
-    // A finding whose code the model invented cannot be routed to a retry
-    // directive or explained to a reviewer, so it is dropped rather than
-    // blocking a publish under a meaningless label.
-    .filter((f) => f.code !== null);
+  // validateResponse already guaranteed the shape and the code allowlist on
+  // whichever route succeeded, so nothing is dropped here — a finding that
+  // reached this point is well-formed by construction.
+  const findings = response.json.findings.map(normalizeFinding);
 
   // Block ONLY on P0. P1/P2 are advisory — the same calibration fact-check-gate
   // settled on, for the same reason: a model asked to judge borderline copy
@@ -179,4 +208,9 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
   return { pass, findings, checked: true, model: response.model };
 }
 
-module.exports = { evaluate, _internals: { normalizeFinding, SYSTEM_PROMPT, VALID_CODES, COMPLIANCE_TIMEOUT_MS } };
+module.exports = {
+  evaluate,
+  _internals: {
+    normalizeFinding, validateResponse, SYSTEM_PROMPT, VALID_CODES, COMPLIANCE_TIMEOUT_MS,
+  },
+};

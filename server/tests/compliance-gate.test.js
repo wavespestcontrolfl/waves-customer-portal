@@ -64,6 +64,7 @@ describe('semantic compliance gate', () => {
         fallback: expect.objectContaining({ provider: 'openai' }),
       }),
       expect.objectContaining({ timeoutMs: expect.any(Number), jsonMode: true }),
+      expect.objectContaining({ validate: expect.any(Function) }),
     );
     const payload = mockDispatch.mock.calls.at(-1)[1];
     expect(payload.timeoutMs).toBeGreaterThan(0);
@@ -123,21 +124,42 @@ describe('semantic compliance gate', () => {
     }
   });
 
-  test('DROPS a finding whose code the model invented', async () => {
-    reply([
-      { severity: 'P0', code: 'MADE_UP_CODE', claim: 'x', issue: 'y', fix: 'z' },
-      { severity: 'P0', code: 'BANNED_TOPIC', claim: 'we trap raccoons', issue: 'ours', fix: 'refer out' },
-    ]);
-    const r = await load().evaluate(DRAFT);
-    expect(r.findings).toHaveLength(1);
-    expect(r.findings[0].code).toBe('BANNED_TOPIC');
+  // Malformed / mis-coded output must REJECT the route so the second provider
+  // gets a turn — never be read as "no findings", which would return
+  // checked:true/pass:true and publish while reporting a check happened.
+  describe('response validation (runs inside the dispatcher)', () => {
+    const v = () => load()._internals.validateResponse;
+
+    test('accepts a well-formed response', () => {
+      expect(v()({ json: { findings: [{ severity: 'P0', code: 'BANNED_TOPIC' }] } })).toBeNull();
+      expect(v()({ json: { findings: [] } })).toBeNull();
+    });
+
+    test('rejects a missing or non-object json', () => {
+      expect(v()({})).toBe('no_json');
+      expect(v()({ json: 'nope' })).toBe('no_json');
+    });
+
+    test('rejects findings that are not an array — the silent-empty-list trap', () => {
+      expect(v()({ json: { findings: 'none' } })).toBe('findings_not_array');
+      expect(v()({ json: {} })).toBe('findings_not_array');
+    });
+
+    test('rejects a finding that is not an object', () => {
+      expect(v()({ json: { findings: ['just a string'] } })).toBe('finding_not_object');
+    });
+
+    test('rejects an invented code instead of dropping the finding', () => {
+      expect(v()({ json: { findings: [{ severity: 'P0', code: 'MADE_UP' }] } })).toBe('unknown_code:MADE_UP');
+      expect(v()({ json: { findings: [{ severity: 'P0' }] } })).toBe('unknown_code:missing');
+    });
   });
 
-  test('an invented code does NOT block on its own', async () => {
-    reply([{ severity: 'P0', code: 'HALLUCINATED', claim: 'x', issue: 'y', fix: 'z' }]);
-    const r = await load().evaluate(DRAFT);
-    expect(r.pass).toBe(true);
-    expect(r.findings).toEqual([]);
+  test('hands the validator to dispatchWithFallback so a bad route fails over', async () => {
+    reply([]);
+    await load().evaluate(DRAFT);
+    const opts = mockDispatch.mock.calls.at(-1)[2];
+    expect(typeof opts.validate).toBe('function');
   });
 
   test('fails OPEN when the API throws', async () => {
@@ -224,5 +246,17 @@ describe('semantic compliance gate', () => {
     // prompt so a future prompt edit cannot quietly drop it.
     expect(SYSTEM_PROMPT).toMatch(/works after it dries/i);
     expect(SYSTEM_PROMPT).toMatch(/GOVERNS THE SAFETY PREDICATE/i);
+  });
+
+  test('the prompt qualifies the negation exemption so negated FIGURES still block', () => {
+    const { SYSTEM_PROMPT } = load()._internals;
+    // "Do not re-enter until 30 minutes have passed" is negated AND carries a
+    // prohibited fixed figure; content-guardrails blocks it, so an unqualified
+    // "negated copy is compliant" instruction would tell the model to pass a
+    // known P0 (Codex PR #3295 r1).
+    expect(SYSTEM_PROMPT).toMatch(/PROHIBITED IN EVERY POLARITY/i);
+    expect(SYSTEM_PROMPT).toMatch(/Do not re-enter until 30 minutes have passed/i);
+    // And the exemption must still be scoped to claims, not withdrawn entirely.
+    expect(SYSTEM_PROMPT).toMatch(/we do not offer wildlife trapping/i);
   });
 });

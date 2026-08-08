@@ -570,6 +570,11 @@ const ContentScheduler = {
           'BLOG_GUARDRAILS_FAILED',
           'BLOG_COMPARISON_GATE_FAILED',
           'BLOG_FACTCHECK_FAILED',
+          // A semantic compliance P0 is edit-required exactly like the
+          // fact-check above: the copy states an unconditional safety claim or
+          // offers a service Waves does not provide, and re-running the same
+          // draft through the same gate every 15 minutes cannot change that.
+          'BLOG_COMPLIANCE_FAILED',
           'BLOG_MDX_TOKEN_LEAK',
           // Curated hero URL that 404s / isn't an image — fails identically
           // every attempt (AI hero GENERATION failures stay untagged/transient).
