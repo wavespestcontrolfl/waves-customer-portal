@@ -462,7 +462,16 @@ async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLe
     if (!conflict) {
       let owner = toCustomerId;
       if (owner === undefined) {
-        const lead = await dbc('leads').where({ id: toLeadId }).first('customer_id');
+        // Under the target lead's ROW LOCK (pre-push P1 r12): consumers
+        // prefer the attribution row's non-null customer over the lead
+        // owner, so a claim/reassignment racing this unlocked read would
+        // persist a stale association indefinitely. Callers that already
+        // hold the target lock (the bridge; the in-stamp-txn transfer)
+        // pass the owner instead; a second FOR UPDATE here is a no-op on
+        // the same transaction. Cross-lead lock ordering can deadlock in
+        // principle — PostgreSQL aborts one side and every caller's
+        // failure path lands in a retry lane.
+        const lead = await dbc('leads').where({ id: toLeadId }).forUpdate().first('customer_id');
         owner = lead?.customer_id || null;
       }
       await dbc('ad_service_attribution')

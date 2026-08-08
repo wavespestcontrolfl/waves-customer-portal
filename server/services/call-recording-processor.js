@@ -5798,39 +5798,44 @@ const CallRecordingProcessor = {
       // presenting the rejected call — and its hallucinated summary — as
       // lead evidence). Fence-lost bails exactly like the rejection write's
       // own 0-row path below.
-      const rejectionStampSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'retire' });
+      // The settle's attribution retirement and the rejection write commit
+      // as ONE fenced transaction (pre-push P0 r12): committed separately,
+      // a fence reclaim between them left the call retryable while its
+      // booked/completed funnel history was already deleted — irreversible
+      // data loss, since a retry recreates only a stage='lead' row. A
+      // 0-row terminal write throws inside the transaction so the retire
+      // and stamp clear roll back with it.
+      const rejectionMeta = JSON.stringify(await withPanStamps(call.id, { ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps }));
+      const rejectionStampSettled = await db.transaction(async (trx) => {
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'retire' });
+        if (!settled) return false;
+        const rejected = await trx('call_log')
+          .where({ id: call.id })
+          .where('processing_token', procToken)
+          .update({
+            processing_status: 'voicemail',
+            answered_by: 'voicemail',
+            call_outcome: 'voicemail',
+            transcription: TRANSCRIPTION_REJECTED_SENTINEL,
+            transcription_metadata: rejectionMeta,
+            ai_extraction: null,
+            ai_extraction_enriched: null,
+            v2_extraction_status: null,
+            disposition: null,
+            review_status: null,
+            customer_id: null,
+            processing_token: null,
+            processing_started_at: null,
+            updated_at: new Date(),
+          });
+        if (rejected === 0) {
+          const lost = new Error('rejection fence lost');
+          lost.fenceLost = true;
+          throw lost;
+        }
+        return true;
+      }).catch((e) => { if (e.fenceLost) return false; throw e; });
       if (!rejectionStampSettled) {
-        logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
-        return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
-      }
-      // Fence on processing_token like the finalization write: if a peer
-      // reclaimed the stale lock, this matches 0 rows and we bail without
-      // overwriting the peer's state. Clear disposition + enriched extraction
-      // too — a force-reprocess of a previously-stamped row (e.g. a phantom
-      // estimate_send from the hallucination) must not leave stale artifacts.
-      const rejected = await db('call_log')
-        .where({ id: call.id })
-        .where('processing_token', procToken)
-        .update({
-          processing_status: 'voicemail',
-          answered_by: 'voicemail',
-          call_outcome: 'voicemail',
-          transcription: TRANSCRIPTION_REJECTED_SENTINEL,
-          transcription_metadata: JSON.stringify(await withPanStamps(call.id, { ...priorMeta, transcription_rejected: true, reject_reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rawChars, recording_seconds: recordingSeconds, chars_per_second: cps })),
-          ai_extraction: null,
-          ai_extraction_enriched: null,
-          v2_extraction_status: null,
-          disposition: null,
-          review_status: null,
-          // A prior hallucinated extraction (force-reprocess path) may have
-          // linked this empty voicemail to a phantom customer; the unified
-          // voice sync attaches messages whenever customer_id is set, so unlink.
-          customer_id: null,
-          processing_token: null,
-          processing_started_at: null,
-          updated_at: new Date(),
-        });
-      if (rejected === 0) {
         logger.warn(`[call-proc] Skipped implausible-transcript rejection for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
         return { success: true, skipped: true, reason: 'transcription_rejected_ownership_lost' };
       }
@@ -6141,11 +6146,6 @@ const CallRecordingProcessor = {
       // — atomically, fenced (codex P1 r15 / audit P1 r17/r19). A transient
       // failure here throws to the outer extraction_failed guard rather
       // than finalizing with the rejected linkage in place.
-      const stampSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'retire' });
-      if (!stampSettled) {
-        logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
-        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
-      }
       const terminalUpdate = {
         ai_extraction: JSON.stringify(extracted),
         processing_status: extracted.is_spam ? 'spam' : 'voicemail',
@@ -6157,17 +6157,27 @@ const CallRecordingProcessor = {
         terminalUpdate.answered_by = 'voicemail';
         terminalUpdate.call_outcome = 'voicemail';
       }
-      // Fenced like the finalization write, and BEFORE the shadow/triage
-      // side effects (pre-push P1 r2): the settle above is not an
-      // ownership guarantee — it returns true with nothing to clear, and
-      // the claim can be reclaimed between its commit and this write. A
-      // stale worker must not null a peer's token, overwrite its terminal
-      // status, or run this path's downstream effects.
-      const terminalWrote = await db('call_log')
-        .where({ id: call.id })
-        .where('processing_token', procToken)
-        .update(terminalUpdate);
-      if (!terminalWrote) {
+      // The settle's attribution retirement and the fenced terminal write
+      // commit as ONE transaction, BEFORE the shadow/triage side effects
+      // (pre-push P1 r2, P0 r12): committed separately, a fence reclaim
+      // between them left the call retryable while its funnel history was
+      // already deleted. A 0-row terminal write throws inside the
+      // transaction so the retire and stamp clear roll back with it.
+      const terminalSettled = await db.transaction(async (trx) => {
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'retire' });
+        if (!settled) return false;
+        const terminalWrote = await trx('call_log')
+          .where({ id: call.id })
+          .where('processing_token', procToken)
+          .update(terminalUpdate);
+        if (!terminalWrote) {
+          const lost = new Error('terminal fence lost');
+          lost.fenceLost = true;
+          throw lost;
+        }
+        return true;
+      }).catch((e) => { if (e.fenceLost) return false; throw e; });
+      if (!terminalSettled) {
         logger.warn(`[call-proc] Skipped spam/voicemail terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
@@ -7039,30 +7049,37 @@ const CallRecordingProcessor = {
       // earlier attempt's lead stamp and restore that lead's prior summary,
       // atomically and fenced (codex P1 r15 / audit P1 r17/r19); a
       // transient failure throws to the outer extraction_failed guard.
-      const vetoStampSettled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'retire' });
-      if (!vetoStampSettled) {
-        logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
-        return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
-      }
-      // Fenced like the finalization write (pre-push P1 r2): the settle
-      // above is not an ownership guarantee — it returns true with nothing
-      // to clear, and the claim can be reclaimed between its commit and
-      // this write.
-      const vetoWrote = await db('call_log')
-        .where({ id: call.id })
-        .where('processing_token', procToken)
-        .update({
-          ai_extraction: JSON.stringify(extracted),
-          call_summary: extracted.call_summary || null,
-          sentiment: extracted.sentiment || null,
-          lead_quality: extracted.lead_quality || null,
-          processing_status: extracted.is_spam ? 'spam' : 'processed',
-          review_status: 'open',
-          processing_token: null,
-          processing_started_at: null,
-          updated_at: new Date(),
-        });
-      if (!vetoWrote) {
+      // The settle's attribution retirement and the fenced terminal write
+      // commit as ONE transaction (pre-push P1 r2, P0 r12): committed
+      // separately, a fence reclaim between them left the call retryable
+      // while its funnel history was already deleted. A 0-row terminal
+      // write throws inside the transaction so the retire and stamp clear
+      // roll back with it.
+      const vetoSettled = await db.transaction(async (trx) => {
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'retire' });
+        if (!settled) return false;
+        const vetoWrote = await trx('call_log')
+          .where({ id: call.id })
+          .where('processing_token', procToken)
+          .update({
+            ai_extraction: JSON.stringify(extracted),
+            call_summary: extracted.call_summary || null,
+            sentiment: extracted.sentiment || null,
+            lead_quality: extracted.lead_quality || null,
+            processing_status: extracted.is_spam ? 'spam' : 'processed',
+            review_status: 'open',
+            processing_token: null,
+            processing_started_at: null,
+            updated_at: new Date(),
+          });
+        if (!vetoWrote) {
+          const lost = new Error('veto fence lost');
+          lost.fenceLost = true;
+          throw lost;
+        }
+        return true;
+      }).catch((e) => { if (e.fenceLost) return false; throw e; });
+      if (!vetoSettled) {
         logger.warn(`[call-proc] Skipped V2 hard-veto terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
         return { success: true, skipped: true, reason: 'terminal_write_ownership_lost' };
       }
@@ -7809,6 +7826,10 @@ const CallRecordingProcessor = {
     // customerExpected is false, so a swallowed failure would otherwise look
     // fully 'processed'.
     let finalStatus = (customerExpected && !customerLanded) ? 'customer_creation_failed' : 'processed';
+    // Armed by the non-lead-verdict stamp settle: its attribution retire
+    // must ride the FINAL fenced status write, not the settle's own
+    // transaction (pre-push P0 r12).
+    let deferredNonLeadAttributionRetire = false;
     await db('call_log').where({ id: call.id }).update({
       customer_id: customerId || call.customer_id,
       // Call-creation provenance rides the SAME durable write that links
@@ -9192,7 +9213,15 @@ const CallRecordingProcessor = {
       // P1 r22/r18/r19). abortProcessing reaches the outer
       // extraction_failed guard directly.
       try {
-        const settled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'retire' });
+        // 'keep', NOT 'retire' (pre-push P0 r12): this settle commits long
+        // before the run finalizes, and a later throw sends the call to
+        // the extraction_failed retry — deleting the funnel history here
+        // would be unrecoverable if the retry then reaches a different
+        // verdict. The retire is DEFERRED to the final fenced status
+        // write below, where the non-lead verdict actually becomes
+        // durable.
+        deferredNonLeadAttributionRetire = true;
+        const settled = await clearStampAndRestoreLead(call, procToken, callSid, null, { mode: 'keep' });
         if (!settled) {
           const lost = new Error('processing claim lost during call→lead link clear (non-lead path)');
           lost.abortProcessing = true;
@@ -12065,19 +12094,28 @@ const CallRecordingProcessor = {
       createdCustomerFromCall,
     });
 
-    const finalized = await db('call_log')
-      .where({ id: call.id })
-      .where('processing_token', procToken)
-      .update({
-        processing_status: finalStatus,
-        processing_token: null,
-        processing_started_at: null,
-        // Address unverifiable / caller-not-owner / missing surname, or a
-        // customer-less recovery lead that failed to persist → open the call for
-        // human review instead of letting it look fully processed.
-        ...(bridgeNeedsConfirmation.length || finalStatus === 'lead_creation_failed' ? { review_status: 'open' } : {}),
-        updated_at: new Date(),
-      });
+    const finalized = await db.transaction(async (trx) => {
+      const written = await trx('call_log')
+        .where({ id: call.id })
+        .where('processing_token', procToken)
+        .update({
+          processing_status: finalStatus,
+          processing_token: null,
+          processing_started_at: null,
+          // Address unverifiable / caller-not-owner / missing surname, or a
+          // customer-less recovery lead that failed to persist → open the call for
+          // human review instead of letting it look fully processed.
+          ...(bridgeNeedsConfirmation.length || finalStatus === 'lead_creation_failed' ? { review_status: 'open' } : {}),
+          updated_at: new Date(),
+        });
+      // The non-lead verdict's attribution retire becomes durable HERE,
+      // atomically with the final status (pre-push P0 r12) — never on the
+      // earlier settle, whose pass could still have failed into a retry.
+      if (written > 0 && deferredNonLeadAttributionRetire) {
+        await require('./ads/call-attribution').retireAllCallAttributionRows(trx, call.id);
+      }
+      return written;
+    });
     if (finalized === 0) {
       logger.warn(`[call-proc] Skipped final status write for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
     } else if (finalStatus === 'customer_creation_failed') {
