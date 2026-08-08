@@ -103,9 +103,25 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     if (!/^[a-f0-9]{64}$/.test(token)) return res.redirect(302, ratePageFallback);
     const request = await db('review_requests').where({ token }).first();
     if (!request) return res.redirect(302, ratePageFallback);
+
+    // FINALITY re-check (codex #3286 r3): a stale rendered surface (the track
+    // page, an old text) can carry a /go link the customer taps AFTER
+    // submitting feedback elsewhere or being marked as having reviewed. The
+    // rate page enforces finality; /go must too, or the stale CTA re-solicits
+    // a finalized customer straight to Google. Same predicate submitRating
+    // enforces; the rate-page fallback renders the thank-you/submitted state.
+    if (request.rated_at
+      || ['submitted', 'reviewed', 'rated'].includes(String(request.status || '').toLowerCase())) {
+      return res.redirect(302, ratePageFallback);
+    }
     const expired = !!(request.expires_at && new Date(request.expires_at) < new Date());
 
     const customer = await db('customers').where({ id: request.customer_id }).first();
+    if (customer && customer.has_left_google_review) {
+      // Already reviewed on Google — never re-solicit; the rate page shows
+      // the finalized state instead.
+      return res.redirect(302, ratePageFallback);
+    }
     const loc = resolveReviewLocation(request, customer);
     if (!loc || !loc.googleReviewUrl) return res.redirect(302, ratePageFallback);
 
