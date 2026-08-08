@@ -1319,6 +1319,35 @@ function draftScanTexts(draft, body) {
  * strictness. Names the operator did NOT write stay hard-blocked; mined
  * briefs pass no text, so nothing changes for them.
  */
+// Operator-authorized name matcher, shared by BOTH evaluation paths: the
+// table-less evaluateProse block/park decisions AND the table path's
+// prose-mention finding. Authorized names come from running the SAME mention
+// detector over the operator's brief text — both sides canonicalize
+// identically, so a brief that says "Massey" authorizes a draft that writes
+// the canonical "Massey Services". Matching is word-boundary CONTAINMENT in
+// either direction ("Aptive" ↔ "Aptive Environmental"); names on both sides
+// come from findBusinessMentions' recognition corpus, so containment can't
+// be gamed with arbitrary prose.
+function buildOperatorAuthorized(operatorBriefText) {
+  const stripQ = (s) => String(s).replace(/[\\"“”]/g, ' ');
+  const authorizedNames = new Set();
+  if (operatorBriefText) {
+    for (const m of competitorFacts.findBusinessMentions(stripQ(String(operatorBriefText)))) {
+      authorizedNames.add(String(m.name).toLowerCase());
+    }
+  }
+  const wordBoundaryContains = (haystack, needle) =>
+    new RegExp(`(?:^|\\s)${needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')}(?:\\s|$)`, 'i').test(haystack);
+  return (name) => {
+    const nm = String(name).toLowerCase();
+    if (authorizedNames.has(nm)) return true;
+    for (const auth of authorizedNames) {
+      if (wordBoundaryContains(nm, auth) || wordBoundaryContains(auth, nm)) return true;
+    }
+    return false;
+  };
+}
+
 function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEnabled = false } = {}) {
   const findings = [];
   const scanText = draftScanTexts(draft, body);
@@ -1329,33 +1358,10 @@ function evaluateProse(draft, body, { operatorBriefText = '', namedCompetitorEna
   // linkedCompetitorMentions below. Deliberately NOT applied to
   // operatorBriefText — a URL there is a legitimate operator signal.
   const nameScanText = stripQuotesForNames(stripLinkDestinationsForNames(scanText));
-  // Authorized names come from running the SAME mention detector over the
-  // operator's brief text — both sides canonicalize identically, so a brief
-  // that says "Massey" authorizes a draft that writes the canonical "Massey
-  // Services" (a raw substring compare missed every alias↔canonical pair).
-  // Matching is word-boundary CONTAINMENT in either direction, not exact
-  // string: detection-only tokens canonicalize by surface form, so a brief
-  // that says "Aptive" and a draft that writes "Aptive Environmental"
-  // produce different unknown names for the same business — the operator's
-  // shorter token must still authorize the fuller one (and vice versa).
-  // Names on both sides come from findBusinessMentions' recognition corpus,
-  // so containment can't be gamed with arbitrary prose.
-  const authorizedNames = new Set();
-  if (operatorBriefText) {
-    for (const m of competitorFacts.findBusinessMentions(stripQuotesForNames(String(operatorBriefText)))) {
-      authorizedNames.add(String(m.name).toLowerCase());
-    }
-  }
-  const wordBoundaryContains = (haystack, needle) =>
-    new RegExp(`(?:^|\\s)${needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')}(?:\\s|$)`, 'i').test(haystack);
-  const operatorAuthorized = (name) => {
-    const nm = String(name).toLowerCase();
-    if (authorizedNames.has(nm)) return true;
-    for (const auth of authorizedNames) {
-      if (wordBoundaryContains(nm, auth) || wordBoundaryContains(auth, nm)) return true;
-    }
-    return false;
-  };
+  // Shared matcher — see buildOperatorAuthorized for the canonicalization
+  // and containment contract (alias↔canonical, "Aptive"↔"Aptive
+  // Environmental").
+  const operatorAuthorized = buildOperatorAuthorized(operatorBriefText);
 
   const known = new Set();
   const unknown = new Set();
@@ -1706,9 +1712,11 @@ function escapeForNameRe(name) {
 /**
  * evaluate(draft, { namedCompetitorEnabled, operatorBriefText })
  *   → { pass, findings, requiresHumanReview }
- * operatorBriefText applies to the TABLE-LESS path only (see evaluateProse):
- * table cells always validate against curated competitor-facts — operator
- * authorship can't make an unverifiable table claim verifiable.
+ * operatorBriefText authorizes PROSE MENTIONS on both paths (table-less
+ * evaluateProse and the table path's COMPARISON_COMPETITOR_IN_PROSE
+ * finding — an authorized mention routes to human review instead of
+ * blocking). Table CELLS always validate against curated competitor-facts —
+ * operator authorship can't make an unverifiable table claim verifiable.
  */
 function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '' } = {}) {
   const body = String(draft?.body || draft?.content || '');
@@ -2292,7 +2300,16 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   // table block): no caption requirement — the r2 citation contract — but
   // still counted in `known`, so the feature gate and review routing below
   // see it (Codex r5).
-  for (const n of known) if (!blockNamedKnown.has(n) && !linkedKnown.has(n)) unsourcedKnown.add(n);
+  // Operator-authorized names that never appear in a table block are exempt
+  // from the caption requirement: the caption sources TABLE claims, and an
+  // authorized prose-only mention has no table claims — its validation is
+  // the human review the authorization forces (same contract as the
+  // table-less path). A table block that DOES name the competitor still
+  // requires the sourced caption regardless of authorization.
+  const operatorAuthorized = buildOperatorAuthorized(operatorBriefText);
+  for (const n of known) {
+    if (!blockNamedKnown.has(n) && !linkedKnown.has(n) && !operatorAuthorized(n)) unsourcedKnown.add(n);
+  }
 
   // A competitor may be named ONLY inside the comparison table, where every cell
   // is validated against curated facts. A mention in the surrounding prose /
@@ -2316,7 +2333,38 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   }
 
   // ── Resolve findings ──
+  // Operator authorization (built above for the caption fill) covers
+  // PROSE-ONLY occurrences on this path too, mirroring evaluateProse: a
+  // detection-only competitor the operator's binding brief names (e.g. the
+  // Aptive cancellation brief + mandated table) routes to human review
+  // instead of hard-blocking — but ONLY when the name never appears inside
+  // a comparison block. Any table occurrence keeps the full fail-closed
+  // treatment: operator provenance answers "who wrote it", never "is this
+  // claim verifiable" (standing rule).
+  // Block membership must see ALIASES, not just the canonical spelling: a
+  // "Massey" column canonicalizes to "Massey Services" in `known`, and a raw
+  // canonical-name regex would miss it — exempting a fully-tabled competitor
+  // from the disabled-comparison finding (Codex r4). Canonicalize each
+  // block's mentions with the same matcher that built `known`, and keep the
+  // raw-substring test for names outside the recognition corpus.
+  // Membership means the table CONTENT names the competitor. A citation URL
+  // in a sources={...} prop is attribution, not a table claim — a generic
+  // table citing trugreen.com/terms must not strip the prose-only operator
+  // exemption (Codex r5) — so blank URL destinations before scanning.
+  const BLOCK_URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>)\]}]+/gi;
+  const blockVisibleText = (b) => String(b).replace(BLOCK_URL_RE, ' ');
+  const blockMentionCanonicals = new Set();
+  for (const b of blocks) {
+    for (const m of competitorFacts.findBusinessMentions(blockVisibleText(b))) blockMentionCanonicals.add(m.name);
+  }
+  const nameInAnyBlock = (nm) => {
+    if (blockMentionCanonicals.has(nm)) return true;
+    const re = new RegExp(escapeForNameRe(nm), 'i');
+    return blocks.some((b) => re.test(blockVisibleText(b)));
+  };
+  let operatorAuthorizedProse = false;
   for (const nm of unknown) {
+    if (operatorAuthorized(nm) && !nameInAnyBlock(nm)) { operatorAuthorizedProse = true; continue; }
     findings.push(finding('P0', 'COMPARISON_UNKNOWN_COMPETITOR',
       `Names "${nm}", a recognized competitor not on the curated competitor-facts allowlist — its attributes cannot be verified. Use a provider CATEGORY instead, or add "${nm}" to competitor-facts.js with sourced, dated facts.`));
   }
@@ -2333,12 +2381,27 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
       `Comparison marks a named competitor as lacking a service/reliability criterion (${f}) — a negative reliability claim about a named provider. Routed to human review; state neutral, verifiable attributes only.`));
   }
   for (const nm of competitorInProse) {
+    if (operatorAuthorized(nm)) { operatorAuthorizedProse = true; continue; }
     findings.push(finding('P1', 'COMPARISON_COMPETITOR_IN_PROSE',
       `Names competitor "${nm}" in prose/title/meta, outside the comparison table — claims there are not validated against competitor-facts.js. Name a competitor ONLY inside the <ComparisonTable> (every cell is checked), not in the surrounding copy.`));
   }
-  if (known.size && !namedCompetitorEnabled) {
+  // Operator-authorized PROSE-ONLY knowns are exempt from the feature-flag
+  // finding (same exemption the table-less path gives them): with the flag
+  // off they park on the approvable named-competitor review path instead of
+  // gate-failing — which the runner's approval re-check would reject anyway.
+  // A known named inside a table block still requires the flag. Every use of
+  // the exemption must ALSO force the human-review park — a known reached
+  // only through a link destination never enters the competitorInProse loop,
+  // so without this a link-only operator draft would return pass=true with
+  // requiresHumanReview=false and silently publish (Codex r4).
+  const flagKnown = [];
+  for (const nm of known) {
+    if (operatorAuthorized(nm) && !nameInAnyBlock(nm)) { operatorAuthorizedProse = true; continue; }
+    flagKnown.push(nm);
+  }
+  if (flagKnown.length && !namedCompetitorEnabled) {
     findings.push(finding('P1', 'COMPARISON_NAMED_COMPETITOR_DISABLED',
-      `Names a competitor (${[...known].join(', ')}) but named-competitor comparisons are disabled (GATE_NAMED_COMPETITOR_COMPARISON). Use a category comparison, or enable the flag.`));
+      `Names a competitor (${flagKnown.join(', ')}) but named-competitor comparisons are disabled (GATE_NAMED_COMPETITOR_COMPARISON). Use a category comparison, or enable the flag.`));
   } else if (known.size && unsourcedKnown.size) {
     findings.push(finding('P1', 'COMPARISON_COMPETITOR_UNSOURCED',
       `Names a competitor (${[...unsourcedKnown].join(', ')}) without an "as of <date>" + source caption on the table that names it. Add e.g. caption="Attributes as of June 2026, per each company's public website."`));
@@ -2347,7 +2410,11 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
   // A clean, enabled named-competitor draft still must NOT auto-publish: the
   // runner routes requiresHumanReview drafts to the approvable review queue.
-  const requiresHumanReview = pass && namedCompetitorEnabled && (known.size > 0 || linkedKnown.size > 0);
+  // An operator-authorized prose mention that suppressed its finding above
+  // still forces the review park — a human signs off every draft that names
+  // a competitor outside the table, exactly as on the table-less path.
+  const requiresHumanReview = pass
+    && ((namedCompetitorEnabled && (known.size > 0 || linkedKnown.size > 0)) || operatorAuthorizedProse);
   return { pass, findings, requiresHumanReview };
 }
 

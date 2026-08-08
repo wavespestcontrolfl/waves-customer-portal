@@ -1072,8 +1072,14 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
       email: 'prospect@example.com',
       address_line1: '100 Example Loop',
     };
-    // No callback number → can't work it.
-    expect(hasWorkableLeadSignal({ extracted: base, phone: null })).toBe(false);
+    // No callback number: a VALID spoken email is the one workable reachback
+    // (blocked/anonymous caller ID — the office emails instead of calling)...
+    expect(hasWorkableLeadSignal({ extracted: base, phone: null })).toBe(true);
+    // ...but an address alone is locatable, not contactable → still dropped.
+    expect(hasWorkableLeadSignal({
+      extracted: { matched_service: 'Pest Control', address_line1: '100 Example Loop' },
+      phone: null,
+    })).toBe(false);
     // No service intent → not a sales inquiry we can act on.
     expect(hasWorkableLeadSignal({
       extracted: { email: 'prospect@example.com', address_line1: '100 Example Loop' },

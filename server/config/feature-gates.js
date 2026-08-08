@@ -36,6 +36,7 @@
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
+ *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -190,6 +191,18 @@ const gates = {
   // Read-only by construction; opt-in in EVERY environment. Kill switch:
   // unset — the endpoint 403s.
   mcpReadTools: process.env.GATE_MCP_READ_TOOLS === 'true',
+
+  // Public MCP server: the /api/public/mcp anonymous read-only tool surface
+  // for third-party AI agents (catalog, pricing ranges, service areas, quote
+  // contract). No auth BY DESIGN; rate-limited; opt-in in EVERY environment.
+  // Kill switch: unset — the endpoint 404s (dark).
+  mcpPublic: process.env.GATE_MCP_PUBLIC === 'true',
+
+  // Public A2A endpoint: /api/public/a2a — the informational Agent2Agent
+  // server behind the hub's agent-card.json. Static single-reply, LLM-free,
+  // read-only. No auth BY DESIGN; rate-limited; opt-in in EVERY environment.
+  // Kill switch: unset — the endpoint 404s (dark).
+  a2aPublic: process.env.GATE_A2A_PUBLIC === 'true',
 
   // Twilio — sends real SMS to real phone numbers
   twilioSms: isProd ? process.env.GATE_TWILIO_SMS === 'true' : true,
@@ -410,6 +423,20 @@ const gates = {
   // again with no data cleanup needed (booked callbacks are ordinary
   // is_callback visits the office already manages).
   reserviceSelfServe: process.env.GATE_RESERVICE_SELF_SERVE === 'true',
+
+  // Re-service request streamline — the picker (/reservice/:token) becomes the
+  // only path for covered re-services (owner ruling 2026-08-08): the portal's
+  // Request Service overlay hands eligible pest/lawn issues to the picker
+  // instead of filing a notify-only service_requests ticket, schedule_change
+  // offers the per-visit /reschedule/:token pages, the legacy
+  // POST /api/schedule/:id/reschedule stops flipping visits to
+  // status='rescheduled' (off the books), and the completion/report/review SMS
+  // carry the customer's standing re-service link. Rides ON TOP of
+  // reserviceSelfServe — with that gate dark nothing here can surface either.
+  // Customer-facing behavior change, so opt-in in EVERY environment.
+  // Kill switch: unset GATE_RESERVICE_STREAMLINE — overlay files tickets,
+  // reschedule flips status, and the SMS line renders empty again.
+  reserviceStreamline: process.env.GATE_RESERVICE_STREAMLINE === 'true',
 
   // Portal "Pay now" — authenticated /billing/balance includes the
   // customer's open-invoice pay links (`openInvoices`) so the Billing tab
@@ -719,6 +746,14 @@ const gates = {
   // appointment_cancelled template instead of vanishing silently
   // (2026-08-05 silent-cancel incident). Fail-closed; owner flips.
   cancelNoticeHook: process.env.GATE_CANCEL_NOTICE_HOOK === 'true',
+  // Per-family plan-rate ledger (owner ruling 2026-08-06): with the gate ON,
+  // an accept's customers.monthly_rate becomes the SUM of the customer's
+  // customer_plan_rates components, so a multi-plan customer's same-family
+  // re-quote replaces only that family's slice instead of the whole scalar.
+  // OFF, accepts keep the legacy #3241 scalar semantics byte-for-byte while
+  // the ledger dual-writes advisorily (data accumulates pre-flip). Kill
+  // switch = unset; owner flips after the ops backfill seeds components.
+  planRateLedger: process.env.GATE_PLAN_RATE_LEDGER === 'true',
   // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
   // past-dated visits stuck in on_site/en_route (performed but never
   // completed → no service record, invoice, report, or post-service SMS;
@@ -894,12 +929,39 @@ const gates = {
   // dev; page_type stays 'supporting-blog' so every existing quality/SEO gate
   // and the Codex publish review apply untouched. Kill switch: unset.
   listicleBriefs: isProd ? process.env.GATE_LISTICLE_BRIEFS === 'true' : true,
+
+  // listicle_family opportunity mining — clusters fragmented list-shaped GSC
+  // queries ("drought tolerant plants florida" and its word-order variants)
+  // into families whose SUMMED impressions clear the scoring floor, then
+  // emits a new_supporting_blog opportunity on the family's top real query.
+  // Feeds the listicle brief overlay (same list-shape grammar via
+  // listicle-query.js) and REQUIRES listicleBriefs to also be on — the
+  // miner returns [] unless both gates are true, because mining without
+  // the overlay would persist rows whose briefs come out as ordinary
+  // supporting blogs (lane looks enabled, produces no listicles).
+  // Default OFF in prod: ships dormant so the first mined batch can be
+  // eyeballed before the blog lane starts consuming it
+  // (GATE_LISTICLE_FAMILY_MINING=true to enable).
+  listicleFamilyMining: isProd ? process.env.GATE_LISTICLE_FAMILY_MINING === 'true' : true,
   // Email-reply approval loop for parked autonomous content runs (owner
   // directive 2026-07-28). Explicit opt-in in EVERY environment — a dev
   // server with real SMTP/IMAP creds must never email the real owner inbox
   // or poll the shared mailbox (same posture as the auto-send policy
   // above). Kill switch = unset.
   contentEmailApprovals: process.env.GATE_CONTENT_EMAIL_APPROVALS === 'true',
+  // Parked-content digest (owner-authorized lane 2026-08-07): a daily ACT:
+  // rollup email of autonomous runs parked completed_pending_review on the
+  // admin review queue — the NON-approvable kinds (gate_fail,
+  // publish_validation_failed, operator_slug_mismatch, canary caps, …) that
+  // the email-approval flow above never covers and that otherwise park
+  // silently. Visibility only: reads runs/opportunities, writes nothing but
+  // its own ops_email_send_state watermark — no approvals, no tokens, no
+  // reply parsing. Exception-based: sends only on NEW parks since the last
+  // sent digest, plus a Sunday full digest while the backlog is non-empty.
+  // Explicit opt-in in EVERY environment (same posture as
+  // contentEmailApprovals — a dev server must never email the real owner
+  // inbox). Kill switch = unset.
+  parkedRunDigest: process.env.GATE_PARKED_RUN_DIGEST === 'true',
 
   // Data Hygiene Agent — split into sub-gates so each phase ships
   // independently. All default OFF in prod, ON in dev — except auto-apply,
@@ -963,6 +1025,25 @@ const gates = {
   // and the POST endpoint itself.
   // Enable with GATE_ESTIMATE_EXTENSION_REQUEST=true.
   estimateExtensionRequest: isProd ? process.env.GATE_ESTIMATE_EXTENSION_REQUEST === 'true' : true,
+
+  // Commercial estimate glass parity — the customer estimate page renders an
+  // authored commercial proposal's line items INSIDE the glass layout (plus
+  // the commercial copy pack + inclusions) instead of the bare "formal
+  // proposal is ready" card, and auto-priced commercial estimates swap their
+  // residential inclusions/CTA-micro for the commercial stack. Carried to the
+  // client via cta.commercialGlass on /data (fail-closed: absent → today's
+  // rendering). Off in prod until verified on a live proposal.
+  // Kill switch: unset GATE_ESTIMATE_COMMERCIAL_GLASS.
+  estimateCommercialGlass: isProd ? process.env.GATE_ESTIMATE_COMMERCIAL_GLASS === 'true' : true,
+
+  // Browser-rendered estimate PDF — GET /api/estimates/:token/pdf, the admin
+  // proposal.pdf download, and the proposal email attachment render the React
+  // EstimateProposalDocument (service-report-style document) through the
+  // headless-browser pipeline instead of the legacy pdfkit proposal. Every
+  // failure path falls back to the pdfkit document so estimate delivery never
+  // blocks on a browser. Off in prod until the rendered document is verified.
+  // Kill switch: unset GATE_ESTIMATE_DOC_PDF.
+  estimateDocPdf: isProd ? process.env.GATE_ESTIMATE_DOC_PDF === 'true' : true,
 
   // The liquid-glass theme gates (GATE_ESTIMATE_GLASS / GATE_EMAIL_GLASS /
   // GATE_REPORT_GLASS / GATE_PORTAL_GLASS) were retired once glass shipped to
@@ -1167,7 +1248,27 @@ const gates = {
   // promises and pauses redemption. Kill switch: unset or any non-'true'
   // value.
   inspectionCredit: process.env.GATE_INSPECTION_CREDIT === 'true',
+
+  // Completion-path comms guard (2026-08-07): when a dispatch /complete
+  // lands while the customer has a pending reschedule/away flag (#3232's
+  // comms_guards agent_decisions rows) or an unanswered inbound text, the
+  // post-commit hook surfaces one admin exception — bell notification +
+  // dispatch_alerts card, deduped per visit. Detection/surface ONLY: it
+  // NEVER blocks completion or invoicing and sends no customer
+  // communications. Opt-in in EVERY environment (payerStatements pattern):
+  // dark until the owner flips it after eyeballing the first flagged
+  // completion. Kill switch: unset or any non-'true' value — completions
+  // behave byte-identically to today.
+  completionCommsGuard: process.env.GATE_COMPLETION_COMMS_GUARD === 'true',
 };
+
+// Parse a gate env var at CALL time (for request-time availability checks
+// and gates enforced inside the pricing engine, where a flip must not need
+// a client redeploy and tests mutate the env at runtime). One parser, one
+// truth: '1' / 'true' / 'on', case-insensitive.
+function gateEnvValue(envName) {
+  return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
+}
 
 function isEnabled(gate) {
   const enabled = gates[gate];
@@ -1185,5 +1286,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue };
 // gates 1775330914

@@ -65,6 +65,156 @@ function isValidReason(reasonCode) {
   return !!WEATHER_PHRASES[reasonCode] || (isExtraReason(reasonCode) && extraReasonsEnabled());
 }
 
+// Dispatcher-typed note appended to the end of the moved SMS ("Gate code
+// still works, see you Friday!"). Two hard limits, both re-checked here
+// because the sheet's mirrors are advisory only:
+//   - 200 chars — the templates already run 2-3 segments; an unbounded
+//     note lets one tap send a novel.
+//   - no link shorteners — a shortened URL in an A2P campaign message is
+//     a carrier violation the campaign can NOT be resubmitted after.
+// On a route-scope move the note rides the ANCHOR stop's SMS only — the
+// canonical note is stop-specific (gate codes, pet warnings), and fanning
+// it to every remaining customer would disclose one customer's access
+// details to strangers (codex pre-push P1). Siblings get the standard text.
+const CUSTOMER_NOTE_MAX_CHARS = 200;
+// Host boundaries = any non-domain character (or start/end): catches
+// `(bit.ly/abc)`, `[t.co/x]`, and the valid trailing-root-dot form
+// `bit.ly./abc`, while still passing lookalike words like `habit.ly`
+// whose match is preceded by a domain character (codex pre-push P1 ×2).
+const NOTE_SHORTENER_RE = /(?:^|[^a-z0-9-])(?:bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|is\.gd|buff\.ly|rb\.gy|tiny\.cc|cutt\.ly|shorturl\.at|rebrand\.ly)(?:$|[^a-z0-9-])/i;
+
+// A blocklist of shortener hosts can never be complete (codex r2 P1:
+// tiny.one, v.gd, …), so the real rule is: NO URL of any kind in a note.
+// The moved SMS already carries the tokenized /reschedule link — a note
+// has no legitimate need for another one. Four clickable families, each
+// its own alternative (codex r3 P1 widened this beyond http/www + path):
+//   1. any scheme:// URL (https, ftp, anything)
+//   2. www.-prefixed hosts
+//   3. host.tld immediately followed by a path/query/fragment
+//   4. bare host with NO path ("tiny.one", "example.xyz") — validated
+//      against the real public-suffix list (psl, already a dependency),
+//      not a hand-kept TLD subset (codex r3 P1); prose pairs off the
+//      list ("orbit.lyric", "p.m.") stay prose
+//   5. IPv4 with optional port/path
+// The named-shortener regex above stays as an extra layer for naked
+// shortener hosts. NOTE: this makes typo-prose on real ccTLDs like
+// "late.Be there" block too — late.be IS a registrable Belgian domain,
+// and under a carrier-safety ban the false positive (add a space) is the
+// cheap side of the trade.
+const NOTE_URL_RE = new RegExp([
+  '\\b[a-z][a-z0-9+.-]*://\\S+',
+  '(?:^|[^a-z0-9.-])www\\.\\S+',
+  '(?:^|[^a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\\.[a-z0-9-]+)*\\.[a-z]{2,}[/?#]\\S',
+  '(?:^|[^0-9.])(?:\\d{1,3}\\.){3}\\d{1,3}(?:[:/?#]\\S*)?(?=$|[^0-9])',
+].join('|'), 'i');
+
+// Dot-joined tokens that could be a hostname; each candidate is confirmed
+// against the public-suffix list before it counts as a link.
+const HOST_TOKEN_RE = /(?:^|[^a-z0-9.-])([a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+)(?=$|[^a-z0-9-])/gi;
+// Unicode-label candidates for bare IDNs ("пример.рф", "例子.中国") — the
+// ASCII regex above never sees them (codex r4 P1). Each is punycoded via
+// WHATWG domainToASCII and checked against the same suffix list, so prose
+// like "café.Bueno" (no real suffix) still passes.
+const UNICODE_HOST_TOKEN_RE = /([\p{L}\p{N}][\p{L}\p{N}-]*(?:\.[\p{L}\p{N}-]+)+)/gu;
+function containsBareHost(text) {
+  const psl = require('psl');
+  for (const m of String(text).matchAll(HOST_TOKEN_RE)) {
+    if (psl.isValid(m[1].toLowerCase())) return true;
+  }
+  const { domainToASCII } = require('url');
+  for (const m of String(text).matchAll(UNICODE_HOST_TOKEN_RE)) {
+    if (/^[\x20-\x7F]+$/.test(m[1])) continue; // ASCII handled above
+    const ascii = domainToASCII(m[1].toLowerCase());
+    if (ascii && psl.isValid(ascii)) return true;
+  }
+  return false;
+}
+
+// The regex is textual, so hosts hidden behind encodings that a URL parser
+// (or a tapping thumb) canonicalizes back to the real hostname would slip
+// it: `bit%2ely`, fullwidth `ｂｉｔ．ｌｙ`, ideographic-dot `bit。ly`,
+// zero-width joins (codex PR P1). Check the shortener set against a
+// canonicalized copy too: NFKC fold, unicode dot forms → '.', zero-width
+// chars stripped, then bounded percent-decode.
+function normalizeForLinkCheck(raw) {
+  let out = String(raw).normalize('NFKC');
+  out = out.replace(/[\u3002\uFF0E\uFF61]/g, '.');
+  out = out.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+  for (let i = 0; i < 3; i++) {
+    let decoded;
+    try { decoded = decodeURIComponent(out); } catch { break; }
+    if (decoded === out) break;
+    out = decoded;
+  }
+  return out;
+}
+
+// Compliance fold: compatibility normalization + default-ignorable
+// characters (soft hyphen, joiners, directional marks, variation
+// selectors, BOM) removed — keep in sync with the client's foldNote.
+const DEFAULT_IGNORABLE_RE = /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFE00-\uFE0F\uFEFF]/g;
+function foldForCompliance(text) {
+  return String(text).normalize('NFKC').replace(DEFAULT_IGNORABLE_RE, '');
+}
+
+function sanitizeCustomerNote(raw) {
+  if (raw == null) return { note: null };
+  if (typeof raw !== 'string') return { error: 'note_invalid' };
+  const note = raw.replace(/\s+/g, ' ').trim();
+  if (!note) return { note: null };
+  if (note.length > CUSTOMER_NOTE_MAX_CHARS) return { error: 'note_too_long' };
+  // Validate what the PROVIDER will see, not just what was typed: the send
+  // path runs normalizeGsmPunctuation before its own guard, and that pass
+  // deletes zero-width chars — "19​70" fuses into "1970" AFTER a raw-text
+  // check would have passed (codex r4 P2). All content checks below run on
+  // the GSM-normalized form (idempotent; ZWJ is preserved so emoji
+  // detection is unaffected).
+  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+  const gsm = normalizeGsmPunctuation(note);
+  const canonical = normalizeForLinkCheck(gsm);
+  if (NOTE_SHORTENER_RE.test(gsm) || NOTE_SHORTENER_RE.test(canonical)
+    || NOTE_URL_RE.test(gsm) || NOTE_URL_RE.test(canonical)
+    || containsBareHost(gsm) || containsBareHost(canonical)) {
+    return { error: 'note_link_blocked' };
+  }
+  // Same emoji rule sendCustomerMessage enforces (validators/voice.js) —
+  // checked HERE so an emoji note rejects BEFORE the move commits, instead
+  // of committing the reschedule and then silently blocking the SMS with
+  // EMOJI_FOR_CUSTOMER (codex PR P2).
+  const { _internals: { findEmoji } } = require('./messaging/validators/voice');
+  if (findEmoji(gsm).found) return { error: 'note_emoji_blocked' };
+  // The outbound sms-guard rejects bodies containing unsubstituted {vars},
+  // "undefined"/"null"/"1970" etc. AFTER assembly — a note like "Gate code
+  // 1970 still works" would commit the move and then lose the SMS (codex
+  // r2 P2). Run the same guard on the GSM-normalized note pre-move so it
+  // fails loudly in the sheet instead. (empty-body/too-long can't trip
+  // here: the note is non-blank and ≤200 chars.)
+  const { validateOutbound } = require('./sms-guard');
+  const guard = validateOutbound(gsm);
+  if (!guard.ok) return { error: 'note_guard_blocked', guardReason: guard.reason };
+  // Compliance-language hard rules (product-safety "safe" claims,
+  // EPA-approved, fixed re-entry timing) apply to EVERY customer surface —
+  // free-form notes included (codex pre-push r5/r6). This is the CANONICAL
+  // clause-level checker from social-media.js (same regression matrix as
+  // validateContent), not a parallel weaker copy: bare "safe once dry"
+  // without technician-confirmed timing blocks here too.
+  // impliedTreatmentContext: the note rides an SMS that is ALWAYS about a
+  // treatment visit, so "Treatment today. Totally safe." and "We treated
+  // the lawn. Stay off for 30 minutes." must block even though the claim
+  // and its context sit in different sentences (codex pre-push r10) —
+  // the social surfaces keep the same-sentence co-occurrence rule.
+  // Validate a compliance-FOLDED copy: normalizeGsmPunctuation deliberately
+  // preserves U+200C/U+200D (emoji joins), so "sa‍fe" would slip every
+  // \b-anchored compliance regex while rendering as the banned word to the
+  // customer (codex r24). NFKC + default-ignorable strip closes it; the
+  // SENT text stays gsm.
+  const folded = foldForCompliance(gsm);
+  const { complianceLanguageIssues } = require('./social-media');
+  const complianceIssues = complianceLanguageIssues(folded, { impliedTreatmentContext: true });
+  if (complianceIssues.length) return { error: 'note_compliance_blocked', complianceIssues };
+  return { note };
+}
+
 // Customer-facing lead for the moved SMS, grounded in what we actually know
 // instead of a fixed "heavy rain rolled through" claim (owner call,
 // 2026-07-18). A same-day push means the tech is standing in the weather —
@@ -426,7 +576,7 @@ async function getOptions(serviceId) {
 // without it — the copy is optional, the tech's response is not.
 const FORECAST_DECORATION_TIMEOUT_MS = 1500;
 
-async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, forecastHealth = { degraded: false }, operatorInitiated = false }) {
+async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, customerNote = null, actorUserId = null, forecastHealth = { degraded: false }, operatorInitiated = false }) {
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
   // Moved-first means the new slot is already booked — no confirmation
@@ -566,6 +716,13 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
     return { sent: false, reason: 'missing_template' };
   }
 
+  // Dispatcher note rides AFTER whichever rung rendered — it decorates the
+  // templated copy, never replaces it (the reply-to-adjust link and weather
+  // grounding stay intact). commit() already sanitized it.
+  if (customerNote) {
+    body = `${body}\n\nNote from our team: ${customerNote}`;
+  }
+
   const result = await sendCustomerMessage({
     to: customer.phone,
     body,
@@ -588,7 +745,15 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
     // as a sentinel "success". The legacy-render fallback stamps the v2 key
     // for the same reason — an absent v2 row (rolled-back migration) counts
     // as active there, so the fallback still texts.
-    metadata: { original_message_type: renderedKey, reason_code: reasonCode },
+    metadata: {
+      original_message_type: renderedKey,
+      reason_code: reasonCode,
+      // Operator attribution: twilio-sms.js writes sms_log.admin_user_id
+      // from this key. Without it every rain-out SMS — including ones
+      // carrying a dispatcher-authored note — reads as system-generated in
+      // the durable record (codex r2 P2).
+      ...(actorUserId ? { adminUserId: actorUserId } : {}),
+    },
   });
   if (result?.blocked || result?.sent === false) {
     return { sent: false, reason: result.code || result.reason || 'blocked' };
@@ -618,9 +783,20 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
  *                                       the siblings shift by the anchor's window delta so stop
  *                                       order survives; day moves keep each sibling's own window.
  * @param {boolean} [args.notifyCustomer=true]
+ * @param {string}  [args.customerNote]       optional dispatcher-typed note appended
+ *                                            to the ANCHOR stop's moved-SMS only
+ *                                            (route siblings get the standard
+ *                                            text — a stop-specific note must not
+ *                                            fan out). ≤200 chars, no link
+ *                                            shorteners — rejected as note_too_long
+ *                                            / note_link_blocked / note_invalid.
  * @param {string} [args.initiatedBy='tech']  actor recorded on each reschedule
  *                                            for the audit log — 'admin' from the
  *                                            dispatch board, 'tech' from the app.
+ * @param {string} [args.actorUserId]         acting user's id, stamped as
+ *                                            metadata.adminUserId on each moved-SMS
+ *                                            so sms_log.admin_user_id records who
+ *                                            drove the send (and who authored a note).
  * @param {boolean} [args.operatorInitiated=false]  send-window exemption for the
  *                                            moved SMS. Only the authenticated
  *                                            tech/admin routes set it (an
@@ -629,10 +805,13 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
  *                                            a future autonomous caller can't
  *                                            text at night by omission.
  */
-async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, initiatedBy = 'tech', operatorInitiated = false }) {
+async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, customerNote = null, actorUserId = null, initiatedBy = 'tech', operatorInitiated = false }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
+  const noteCheck = sanitizeCustomerNote(customerNote);
+  if (noteCheck.error) return { ok: false, reason: noteCheck.error };
+  const note = noteCheck.note;
   if (!target?.date || !target.window?.start || !target.window?.end) {
     return { ok: false, reason: 'bad_target' };
   }
@@ -982,7 +1161,15 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             zip: service.zip, latitude: service.customer_latitude, longitude: service.customer_longitude,
           }
           : await db('customers').where({ id: job.customer_id }).first('id', 'phone', 'first_name', 'zip', 'latitude', 'longitude');
-        sms = await sendMovedSms({ job, customer, reasonCode, chosen, serviceId: job.id, forecastHealth, operatorInitiated });
+        sms = await sendMovedSms({
+          job, customer, reasonCode, chosen, serviceId: job.id,
+          // Anchor only — a stop-specific note (gate code, pet warning)
+          // must never fan out to the rest of the route's customers.
+          customerNote: job.id === serviceId ? note : null,
+          actorUserId,
+          forecastHealth,
+          operatorInitiated,
+        });
       } catch (err) {
         logger.warn(`[rain-out] post-move notification failed for ${job.id}: ${err.message}`);
         sms = { sent: false, reason: err.message };
@@ -1008,6 +1195,6 @@ module.exports = {
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
-    EXTRA_REASON_LEADS, isValidReason,
+    EXTRA_REASON_LEADS, isValidReason, sanitizeCustomerNote,
   },
 };

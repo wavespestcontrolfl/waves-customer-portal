@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
+const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
@@ -1349,8 +1350,9 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           customerUpdates.pipeline_stage = 'won';
           customerUpdates.pipeline_stage_changed_at = new Date();
           // Conversion date: keep a former customer's real start (churned/
-          // dormant re-booking), but overwrite a lead's intake date with today.
-          customerUpdates.member_since = ['churned', 'dormant'].includes(existingCustomer.pipeline_stage)
+          // past_customer/dormant re-booking), but overwrite a lead's intake
+          // date with today.
+          customerUpdates.member_since = FORMER_CUSTOMER_STAGES.includes(existingCustomer.pipeline_stage)
             ? (existingCustomer.member_since || etDateString())
             : etDateString();
         }

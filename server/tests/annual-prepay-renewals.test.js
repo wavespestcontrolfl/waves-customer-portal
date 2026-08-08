@@ -1424,6 +1424,10 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
     term_end: '2027-06-15',
     coverage_service_type: 'Quarterly Pest Control',
     coverage_visit_count: 4,
+    // A real term row always carries this column. Distinct from the
+    // 'inv-visit' the other cases use, so only the self-referential tests
+    // below trip the guard.
+    prepay_invoice_id: 'inv-prepay',
   };
   const completedRow = (over = {}) => ({
     id: 'svc-done',
@@ -1615,6 +1619,76 @@ describe('reconcilePendingWindowCompletions (pending-window double-bill guard)',
     expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
     expect(postCreditMovement).not.toHaveBeenCalled();
   });
+
+  // The same-day-close shape: ONE invoice bills the completed first visit AND
+  // sells the annual, so it carries the visit's scheduled_service_id and IS
+  // the term's prepay invoice. Its 'paid' status is the annual being paid —
+  // not a second collection — so neither leg may fire. Prod 2026-08-08 minted
+  // $265 of credit across 3 customers through exactly this hole.
+  test('a completion invoice that IS the term\'s own prepay invoice is never credited', async () => {
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-prepay', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 0 });
+    expect(postCreditMovement).not.toHaveBeenCalled();
+    expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+  });
+
+  // A prepay invoice in prod carries annual_prepay_term_id NULL while its term
+  // points at it, so the guard must key on the TERM's prepay_invoice_id. An
+  // invoice-side check would miss that row and credit it.
+  test('guards on the term\'s prepay_invoice_id even when the invoice\'s own term link is null', async () => {
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-prepay', status: 'paid', annual_prepay_term_id: null, annual_prepay_covered_term_id: null } })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 0 });
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  // A caller that hands over a term row without the column must not read as
+  // "no prepay invoice" — that would fail the guard OPEN and re-mint the bug.
+  test('a partial term row (column not selected) resolves prepay_invoice_id instead of failing open', async () => {
+    const { prepay_invoice_id: _omitted, ...partialTerm } = TERM;
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      annual_prepay_terms: [query({ first: { prepay_invoice_id: 'inv-prepay' } })],
+      invoices: [query({ first: { id: 'inv-prepay', status: 'paid', annual_prepay_covered_term_id: null } })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(partialTerm);
+
+    expect(result).toEqual({ settled: 0, credited: 0 });
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  // Guard scope check: a genuinely separate visit invoice still credits, so
+  // the fix can't silently disable the real double-bill protection.
+  test('a separate paid visit invoice still credits (the real double-bill case survives the guard)', async () => {
+    setDbQueues({
+      scheduled_services: [query({ rows: [completedRow(), pendingRow('s2', '2026-09-20'), pendingRow('s3', '2026-12-20'), pendingRow('s4', '2027-03-20')] })],
+      invoices: [query({ first: { id: 'inv-visit', status: 'paid', payment_recorded_at: '2026-06-21', annual_prepay_covered_term_id: null } })],
+      payments: [query({ first: undefined })],
+      customers: [query({ first: { id: 'customer-1' } })],
+      customer_credit_ledger: [query({ first: undefined })],
+    });
+
+    const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+    expect(result).toEqual({ settled: 0, credited: 1 });
+    expect(postCreditMovement).toHaveBeenCalledWith(expect.objectContaining({
+      delta: 100,
+      invoiceId: 'inv-visit',
+      createdBy: 'system:annual_prepay_pending_completion',
+    }), db);
+  });
 });
 
 describe('reversePendingWindowCompletionCredits (refund claw-back)', () => {
@@ -1716,6 +1790,43 @@ describe('reversePendingWindowCompletionCredits (refund claw-back)', () => {
     expect(reversed).toBe(0);
     expect(postCreditMovement).not.toHaveBeenCalled();
   });
+
+  // The self-referential backfill (migration 20260808040000) reverses the same
+  // grants under its own identity. If this dedupe only recognized the runtime
+  // reversal marker, refunding the annual afterwards would find the original
+  // positive credit still in the ledger and claw the SAME slice back twice.
+  test('a backfill reversal already counts as reversed — a later refund cannot claw the same slice back twice', async () => {
+    setDbQueues({
+      customers: [query({ first: { id: 'customer-1', account_credits: 250 } })],
+      customer_credit_ledger: [
+        query({ rows: [creditRow] }),
+        query({
+          rows: [{
+            note: 'Reversing an annual-prepay credit issued in error — the visit was billed on the '
+              + "term's own prepay invoice, so its slice was never collected twice (term term-1, visit svc-done)",
+          }],
+        }),
+      ],
+    });
+
+    const reversed = await AnnualPrepayRenewals.reversePendingWindowCompletionCredits(TERM);
+
+    expect(reversed).toBe(0);
+    expect(postCreditMovement).not.toHaveBeenCalled();
+  });
+
+  // The migration is frozen and duplicates this literal rather than importing
+  // it. If the service constant is ever renamed without the migration, the
+  // dedupe above silently stops matching and the double-claw-back returns.
+  test('the backfill reversal identity matches the literal the migration writes', () => {
+    const migrationSource = require('fs').readFileSync(
+      require('path').join(__dirname, '../models/migrations/20260808040000_backfill_self_referential_prepay_credits.js'),
+      'utf8',
+    );
+    expect(migrationSource).toContain("const BACKFILL_BY = 'system:annual_prepay_self_referential_credit_backfill'");
+    expect(_private.PENDING_COMPLETION_REVERSAL_IDENTITIES)
+      .toContain('system:annual_prepay_self_referential_credit_backfill');
+  });
 });
 
 describe('createTermForAnnualPrepay born-already-paid reconcile', () => {
@@ -1736,6 +1847,10 @@ describe('createTermForAnnualPrepay born-already-paid reconcile', () => {
     coverage_service_type: 'Quarterly Pest Control',
     coverage_visit_count: 4,
     coverage_cadence: 'quarterly',
+    // The insert returns '*', so the born-paid term carries this column.
+    // Distinct from 'inv-visit' — these cases reconcile a genuinely separate
+    // visit invoice and must still credit.
+    prepay_invoice_id: 'inv-prepay',
   };
   const visitRows = [
     { id: 'svc-done', customer_id: 'customer-1', scheduled_date: '2026-06-20', service_type: 'Quarterly Pest Control', status: 'completed', prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null },
@@ -1929,6 +2044,10 @@ describe('syncTermForInvoicePayment visit-invoice hook (covered-status semantics
     term_end: '2027-06-15',
     coverage_service_type: 'Quarterly Pest Control',
     coverage_visit_count: 4,
+    // coveredTermsAsOf selects t.* — a resolved term always carries this.
+    // Distinct from the 'inv-visit' these cases reconcile, so the
+    // self-referential guard correctly leaves them crediting.
+    prepay_invoice_id: 'inv-prepay',
   };
   const visitRows = [
     { id: 'svc-done', customer_id: 'customer-1', scheduled_date: '2026-06-20', service_type: 'Quarterly Pest Control', status: 'completed', prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null },

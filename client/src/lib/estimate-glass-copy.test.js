@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  commercialGlassActive,
   glassCopyActive,
   glassCtaMicroFor,
   glassCtaMicroForKeys,
@@ -13,6 +14,7 @@ import {
   glassSchedTitle,
   glassServiceSlug,
   glassTierDisplay,
+  setCommercialGlass,
   setGlassDefault,
   GLASS_COPY,
   GLASS_DAY_LINES,
@@ -25,6 +27,7 @@ const setSearch = (search) => {
 afterEach(() => {
   setSearch('');
   setGlassDefault(false);
+  setCommercialGlass(false);
   vi.useRealTimers();
 });
 
@@ -245,5 +248,74 @@ describe('glassRewriteSlotSummary', () => {
   it('passes anything else through untouched', () => {
     expect(glassRewriteSlotSummary('Booked solid that day.', 'x')).toBe('Booked solid that day.');
     expect(glassRewriteSlotSummary(undefined, '')).toBe(undefined);
+  });
+});
+
+describe('commercial glass release', () => {
+  it('follows the server cta.commercialGlass flag only', () => {
+    expect(commercialGlassActive()).toBe(false);
+    setCommercialGlass(true);
+    expect(commercialGlassActive()).toBe(true);
+    setCommercialGlass(undefined);
+    expect(commercialGlassActive()).toBe(false);
+  });
+
+  it('maps commercial keys to the commercial slug only while released', () => {
+    // Gate off: today's behavior — commercial_pest falls through to pest.
+    expect(glassServiceSlug('commercial_pest')).toBe('pest_control');
+    expect(glassServiceSlug('Commercial Pest Control')).toBe('pest_control');
+    setCommercialGlass(true);
+    expect(glassServiceSlug('commercial_pest')).toBe('commercial_pest');
+    expect(glassServiceSlug('Commercial Pest Control')).toBe('commercial_pest');
+    // Residential keys are untouched by the release.
+    expect(glassServiceSlug('pest_control')).toBe('pest_control');
+    expect(glassServiceSlug('lawn_care')).toBe('lawn_care');
+    // Commercial NON-pest lanes keep their service slugs (codex #3281 r1:
+    // commercial_lawn must never inherit pest interior/tenant promises).
+    expect(glassServiceSlug('commercial_lawn')).toBe('lawn_care');
+    expect(glassServiceSlug('commercial_termite_bait')).toBe('termite_bait');
+    expect(glassServiceSlug('commercial_rodent_bait')).toBe('rodent_bait');
+  });
+
+  it('gives commercial rows their own inclusions with no residential guarantee claims', () => {
+    const stack = glassRowInclusions('commercial_pest');
+    expect(Array.isArray(stack)).toBe(true);
+    const joined = stack.join(' ');
+    expect(joined).toContain('Interior treatment included on request');
+    expect(joined).toContain('No long-term contract');
+    expect(joined).not.toMatch(/auto pay|in the app/i);
+    expect(joined).not.toMatch(/90-day/i);
+    expect(joined).not.toMatch(/money-back/i);
+    expect(joined).not.toMatch(/\$99/);
+  });
+
+  it('folds the commercial row slug to the commercial CTA micro line', () => {
+    const micro = glassCtaMicroFor('commercial_pest');
+    expect(micro).toContain('No long-term contract');
+    // Billing-method claims stay out — commercial bills by manual invoice,
+    // not Auto Pay (codex #3281 r2).
+    expect(micro).not.toMatch(/auto pay/i);
+    expect(micro).not.toBe(GLASS_COPY.ctaMicro);
+    expect(micro).not.toMatch(/90-day/i);
+  });
+
+  it('serves the commercial pack for the commercial category', () => {
+    setGlassDefault(true);
+    const pack = glassEstimateCopyFor('commercial');
+    expect(pack.eyebrow).toBe('Your commercial service plan');
+    expect(`${pack.heroSub} ${pack.aiBody}`).not.toMatch(/90-day|money-back/i);
+  });
+
+  it('keeps the neutral commercial pack claim-free (codex #3281 r3)', () => {
+    setGlassDefault(true);
+    const pack = glassEstimateCopyFor('commercial_neutral');
+    expect(pack.eyebrow).toBe('Your commercial service plan');
+    const all = `${pack.heroH1} ${pack.heroSub} ${pack.aiTitle} ${pack.aiBody} ${pack.ctaMicro} ${pack.askChips.join(' ')}`;
+    // No pest-scope, contract, tenant, or pricing-methodology claims —
+    // authored proposals and non-pest commercial subtypes read this pack,
+    // so any promise here could contradict operator terms or the actual
+    // quoted service.
+    expect(all).not.toMatch(/interior|tenant|long-term contract|satellite|county/i);
+    expect(all).not.toMatch(/90-day|money-back|auto pay|unlimited/i);
   });
 });

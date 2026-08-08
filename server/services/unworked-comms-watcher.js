@@ -34,6 +34,15 @@ const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Waves Pest Control';
 const adminPortalUrl = () => (process.env.ADMIN_PORTAL_URL || 'https://portal.wavespestcontrol.com').replace(/\/+$/, '');
 
 const MAX_PER_SECTION = 12;
+// The request lane runs a HIGHER cap than the rolling lanes: it has no
+// created_at horizon (a ticket stays until a terminal status releases it), so
+// a row past the cap would stay invisible indefinitely rather than age out —
+// and this email is the queue's only pager (the /admin/requests triage page
+// was removed). 25 keeps the mail readable while covering several times the
+// worst backlog ever observed (14, 2026-08-08); a backlog past the cap is
+// itself the emergency the overflow count reports, and rows re-enter the
+// visible window as older ones resolve.
+const MAX_REQUEST_ROWS = 25;
 // Outbound types that count as a human answer — automated broadcasts
 // (reminders, en-route, receipts, review asks) must not clear a waiting
 // customer from the digest (codex #3232 r1).
@@ -406,7 +415,7 @@ async function loadDroppedFollowUps(cutoff = new Date()) {
                -- only when admin-authored.
                AND (ci.interaction_type = 'call_outbound' OR ci.admin_user_id IS NOT NULL)
                AND ci.created_at > t.created_at
-           ))
+           )))
     -- Newest-first (codex r8): oldest-first returned the same stuck 12
     -- forever and newer tasks never surfaced with details; yesterday's
     -- rows were already reported and live on in the overflow count.
@@ -511,11 +520,51 @@ async function loadUnansweredThreads(cutoff = new Date()) {
   return rows;
 }
 
+// Lane 4: open service_requests past their promised response window.
+// The /admin/requests triage page was removed and the bell is read-once, so
+// this digest is the ONLY thing that can nag about a rotting ticket (the
+// 2026-08-08 audit found 14 rows, 14 still 'new', zero ever resolved, oldest
+// April). No created_at horizon on purpose: a ticket is an explicit customer
+// ask with an explicit terminal status — it stays in the pager until someone
+// resolves/closes it, however old it gets. Due = past the response window the
+// confirmation SMS promises (urgent 2h, routine 24h).
+async function loadOpenServiceRequests(cutoff = new Date()) {
+  const { rows } = await db.raw(
+    `
+    SELECT sr.id, sr.category, sr.subject, sr.urgency, sr.status, sr.created_at,
+           sr.customer_id,
+           NULLIF(TRIM(COALESCE(cu.first_name, '') || ' ' || COALESCE(cu.last_name, '')), '') AS customer_name,
+           COUNT(*) OVER () AS total_count
+    FROM service_requests sr
+    LEFT JOIN customers cu ON cu.id = sr.customer_id
+    WHERE sr.status NOT IN ('resolved', 'closed', 'cancelled')
+      AND sr.created_at <= CAST(:cutoff AS timestamptz)
+        - CASE WHEN sr.urgency = 'urgent' THEN interval '2 hours' ELSE interval '24 hours' END
+    -- Urgent first, then oldest-first — unlike the other lanes: this lane has
+    -- no horizon, the backlog is the story, and the longest-waiting customer
+    -- is the one the owner must see first. A fresh urgent row still can't be
+    -- starved behind a stale-12 backlog (it sorts ahead of every routine row);
+    -- everything else persists in the overflow count.
+    ORDER BY CASE WHEN sr.urgency = 'urgent' THEN 0 ELSE 1 END, sr.created_at ASC
+    LIMIT :cap
+    `,
+    { cap: MAX_REQUEST_ROWS, cutoff },
+  );
+  return rows;
+}
+
 // Pure composition: null = the day is fully worked (the common, quiet case).
-function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered = [] } = {}) {
+// laneFailures ({ lane, message }) come from the per-lane fail-soft in
+// runUnworkedCommsWatcher: a failed lane's queue is INVISIBLE, so the digest
+// must still send (even with zero surviving items), name the failed lane in
+// the subject (FIX: — Adam's action is fixing the lane), and say the counts
+// are incomplete — a crashed lane must never read as a quiet day.
+function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered = [], requests = [] } = {}, laneFailures = []) {
+  const failures = (laneFailures || []).filter(Boolean);
   const a = (callbacks || []).filter(Boolean);
   const b = (followUps || []).filter(Boolean);
   const c = (unanswered || []).filter(Boolean);
+  const d = (requests || []).filter(Boolean);
   // Full per-lane counts ride each row as total_count (COUNT(*) OVER ()) —
   // the LIMIT keeps the email readable, but the SUBJECT and the "+N more"
   // lines must report everything: overflow rows would otherwise vanish
@@ -525,14 +574,26 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   const aTotal = laneTotal(a);
   const bTotal = laneTotal(b);
   const cTotal = laneTotal(c);
-  const total = aTotal + bTotal + cTotal;
-  if (!total) return null;
+  const dTotal = laneTotal(d);
+  const total = aTotal + bTotal + cTotal + dTotal;
+  if (!total && !failures.length) return null;
   const moreLine = (shown, totalCount) => (totalCount > shown ? [`…and ${totalCount - shown} more not shown`] : []);
 
-  const subject = `ACT: ${total} unworked comm${total === 1 ? '' : 's'} at end of day — ${aTotal} callback${aTotal === 1 ? '' : 's'}, ${bTotal} follow-up${bTotal === 1 ? '' : 's'}, ${cTotal} unanswered text${cTotal === 1 ? '' : 's'}`;
+  const failedLaneNames = failures.map((f) => f.lane).join(', ');
+  const subject = failures.length
+    ? `FIX: comms digest lane${failures.length === 1 ? '' : 's'} failed (${failedLaneNames}) — ${total ? `${total} unworked comm${total === 1 ? '' : 's'} in surviving lanes` : 'surviving lanes clear'}`
+    : `ACT: ${total} unworked comm${total === 1 ? '' : 's'} at end of day — ${aTotal} callback${aTotal === 1 ? '' : 's'}, ${bTotal} follow-up${bTotal === 1 ? '' : 's'}, ${cTotal} unanswered text${cTotal === 1 ? '' : 's'}, ${dTotal} open request${dTotal === 1 ? '' : 's'}`;
 
   const sectionText = [];
   const sectionHtml = [];
+
+  if (failures.length) {
+    sectionText.push(`LANE FAILURE — this digest is INCOMPLETE. Failed lane${failures.length === 1 ? '' : 's'}:`);
+    sectionText.push(...failures.map((f) => `- ${f.lane}: ${f.message || 'query failed'}`));
+    sectionText.push('That lane\'s queue is invisible until the query is fixed — do not read the sections below as the whole day.');
+    sectionText.push('');
+    sectionHtml.push(`<p style="border:1px solid #b91c1c;padding:8px 10px;"><strong>LANE FAILURE — this digest is INCOMPLETE.</strong> Failed lane${failures.length === 1 ? '' : 's'}:</p><ul style="margin:0 0 12px 18px;padding:0;">${failures.map((f) => `<li style="margin:0 0 6px 0;">${esc(f.lane)}: ${esc(f.message || 'query failed')}</li>`).join('')}</ul><p>That lane's queue is invisible until the query is fixed — do not read the sections below as the whole day.</p>`);
+  }
 
   if (a.length) {
     sectionText.push('Callbacks requested on calls today (nothing else tracks these):');
@@ -556,6 +617,16 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     sectionHtml.push(`<p><strong>Texts still waiting on a reply</strong> (thread ends inbound):</p><ul style="margin:0 0 12px 18px;padding:0;">${c.map((r) => `<li style="margin:0 0 6px 0;">${esc(etDateTime(r.created_at))} ${r.customer_id ? `<a href="${esc(adminPortalUrl())}/admin/communications?thread=${esc(r.customer_id)}">${esc(r.customer_name || maskPhone(r.peer))}</a>` : esc(r.customer_name || maskPhone(r.peer))}: &quot;${esc(String(r.message_body || '').replace(/\s+/g, ' ').trim().slice(0, 120))}&quot;</li>`).join('')}</ul>${cTotal > c.length ? `<p>…and ${cTotal - c.length} more not shown</p>` : ''}`);
   }
 
+  if (d.length) {
+    const ageDays = (r) => Math.max(0, Math.floor((Date.now() - new Date(r.created_at).getTime()) / (24 * 60 * 60 * 1000)));
+    const reqLine = (r) => `${r.customer_name || 'Unknown customer'} [${String(r.category || '').replace(/_/g, ' ')}${r.urgency === 'urgent' ? ', URGENT' : ''}, ${ageDays(r)}d old] — ${String(r.subject || '').replace(/\s+/g, ' ').trim().slice(0, 120)}`;
+    sectionText.push('Service requests still open (no triage page exists — this email is the only nag):');
+    sectionText.push(...d.map((r) => `- ${reqLine(r)}`));
+    sectionText.push(...moreLine(d.length, dTotal));
+    sectionText.push('');
+    sectionHtml.push(`<p><strong>Service requests still open</strong> (no triage page exists — this email is the only nag):</p><ul style="margin:0 0 12px 18px;padding:0;">${d.map((r) => `<li style="margin:0 0 6px 0;">${r.customer_id ? `<a href="${esc(adminPortalUrl())}/admin/customers?customerId=${esc(r.customer_id)}">${esc(r.customer_name || 'Unknown customer')}</a>` : esc(r.customer_name || 'Unknown customer')} [${esc(String(r.category || '').replace(/_/g, ' '))}${r.urgency === 'urgent' ? ', URGENT' : ''}, ${ageDays(r)}d old] — ${esc(String(r.subject || '').replace(/\s+/g, ' ').trim().slice(0, 120))}</li>`).join('')}</ul>${dTotal > d.length ? `<p>…and ${dTotal - d.length} more not shown</p>` : ''}`);
+  }
+
   const text = [
     `End-of-day check: ${total} open comm item${total === 1 ? '' : 's'} (rolling 30-day worklist — items stay until worked).`,
     '',
@@ -570,7 +641,17 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     `<p><a href="${esc(adminPortalUrl())}/admin/communications">Open communications</a></p>`,
   ].join('\n');
 
-  return { subject, text, html, total, callbacks: aTotal, followUps: bTotal, unanswered: cTotal };
+  return {
+    subject,
+    text,
+    html,
+    total,
+    callbacks: aTotal,
+    followUps: bTotal,
+    unanswered: cTotal,
+    requests: dTotal,
+    ...(failures.length ? { failedLanes: failures.map((f) => f.lane) } : {}),
+  };
 }
 
 // Durable daily-send guard — same rationale as turf-variance-digest.js.
@@ -606,20 +687,37 @@ async function runUnworkedCommsWatcher(opts = {}) {
   if (await (opts.sentRecently || sentRecently)()) return { skipped: 'recent_send' };
   const windowCutoff = new Date();
 
-  let sections;
-  try {
-    const [callbacks, followUps, unanswered] = await Promise.all([
-      (opts.loadCallbackCalls || loadCallbackCalls)(windowCutoff),
-      (opts.loadDroppedFollowUps || loadDroppedFollowUps)(windowCutoff),
-      (opts.loadUnansweredThreads || loadUnansweredThreads)(windowCutoff),
-    ]);
-    sections = { callbacks, followUps, unanswered };
-  } catch (err) {
-    logger.error(`[unworked-comms] query failed: ${err.message}`);
+  // Per-lane fail-soft (2026-08-07 incident): the three lanes ran in one
+  // Promise.all, so one lane's SQL error killed the whole digest every run —
+  // and a crashed watcher looked identical to a quiet day. Each lane now
+  // fails independently: survivors still send, the failed lane is NAMED in
+  // the email, and only an all-lanes failure keeps the query_failed
+  // contract (the scheduler wrapper turns that into a job_health failure).
+  const lanes = [
+    { key: 'callbacks', label: 'callbacks', load: opts.loadCallbackCalls || loadCallbackCalls },
+    { key: 'followUps', label: 'follow-ups', load: opts.loadDroppedFollowUps || loadDroppedFollowUps },
+    { key: 'unanswered', label: 'unanswered texts', load: opts.loadUnansweredThreads || loadUnansweredThreads },
+    { key: 'requests', label: 'service requests', load: opts.loadOpenServiceRequests || loadOpenServiceRequests },
+  ];
+  const settled = await Promise.allSettled(lanes.map((lane) => lane.load(windowCutoff)));
+  const sections = {};
+  const laneFailures = [];
+  settled.forEach((result, i) => {
+    if (result.status === 'fulfilled') {
+      sections[lanes[i].key] = result.value;
+    } else {
+      sections[lanes[i].key] = [];
+      const message = result.reason?.message || String(result.reason);
+      laneFailures.push({ lane: lanes[i].label, message });
+      logger.error(`[unworked-comms] ${lanes[i].label} lane query failed: ${message}`);
+    }
+  });
+  if (laneFailures.length === lanes.length) {
+    logger.error('[unworked-comms] all lanes failed — nothing to send');
     return { skipped: 'query_failed' };
   }
 
-  const composed = composeUnworkedCommsDigest(sections);
+  const composed = composeUnworkedCommsDigest(sections, laneFailures);
   if (!composed) return { skipped: 'nothing_found' };
 
   if (watcherDisabled()) {
@@ -656,7 +754,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
     return { sent: false, error: true, ...composed };
   }
   await (opts.stampSendMarker || stampSendMarker)(windowCutoff);
-  logger.info(`[unworked-comms] sent: ${composed.total} unworked (${composed.callbacks} callbacks, ${composed.followUps} follow-ups, ${composed.unanswered} unanswered)`);
+  logger.info(`[unworked-comms] sent: ${composed.total} unworked (${composed.callbacks} callbacks, ${composed.followUps} follow-ups, ${composed.unanswered} unanswered, ${composed.requests} open requests)`);
   return { sent: true, ...composed };
 }
 

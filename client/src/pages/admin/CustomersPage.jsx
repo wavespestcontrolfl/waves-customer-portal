@@ -125,6 +125,7 @@ const STAGES = [
     pulse: true,
   },
   { key: "churned", label: "Churned", color: D.red, bg: `${D.red}33` },
+  { key: "past_customer", label: "Past Customer", color: D.muted, bg: `${D.muted}22` },
   { key: "lost", label: "Lost", color: D.muted, bg: `${D.muted}22` },
 ];
 

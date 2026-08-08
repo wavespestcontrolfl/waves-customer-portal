@@ -563,7 +563,15 @@ describe("TwilioService legacy customer SMS helpers", () => {
       "service_complete",
       // service_type + portal_url joined 2026-07-30: the seeded body needs
       // {portal_url}, and rendering without it suppressed this path entirely.
-      { first_name: "Sam", service_type: "Pest Control", portal_url: expect.stringContaining("http") },
+      // reservice_line joined 2026-08-08 (streamline EXPAND half): supplied at
+      // every completion render site before the token lands in the body; ''
+      // with the gates dark.
+      {
+        first_name: "Sam",
+        service_type: "Pest Control",
+        portal_url: expect.stringContaining("http"),
+        reservice_line: "",
+      },
       { workflow: "service_complete", entity_type: "service_record", entity_id: "record-1" },
     );
     expect(sendCustomerMessage).toHaveBeenCalledWith(

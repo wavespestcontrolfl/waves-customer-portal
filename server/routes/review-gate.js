@@ -53,6 +53,32 @@ const directLinkLimiter = rateLimit({
 });
 const { isBotUserAgent } = require('../utils/bot-ua');
 
+// Live review_requests tokens are 32-64 char url-safe (prod-verified
+// 2026-08-07, all 68 rows incl. one legacy 32-char). Malformed tokens get
+// the same generic 404 as unknown ones, before any DB lookup. Applies to
+// every /:token route on this router.
+const REVIEW_TOKEN_RE = /^[A-Za-z0-9_-]{32,64}$/;
+router.param('token', (req, res, next, token) => {
+  if (REVIEW_TOKEN_RE.test(String(token))) return next();
+  // /go's contract is that EVERY failure path degrades to the rate page
+  // (which renders a friendly not-found state) — keep that for malformed
+  // tokens too; everything else gets the same generic 404 as unknown.
+  if (req.path.endsWith('/go')) return res.redirect(302, `/rate/${encodeURIComponent(String(token))}`);
+  return res.status(404).json({ error: 'Review link not found or expired' });
+});
+
+// The page GET and the score/submit writes had no per-route limiter
+// (security review 2026-08-07) — same probing exposure as /go, but these
+// DO touch the DB per hit. 30/min per IP matches directLinkLimiter.
+const reviewPageLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests — please slow down.' },
+});
+
 // GET /api/rate/:token/go — tracked redirect straight to the Google review
 // form (GATE_REVIEW_DIRECT_LINK rollout; the SMS/email {review_url} resolves
 // here via a /l/ short link). Stamps the open + click on the review_requests
@@ -71,14 +97,53 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     // links sitting in old texts.
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('reviewDirectLink')) return res.redirect(302, ratePageFallback);
-    if (!/^[a-f0-9]{64}$/.test(token)) return res.redirect(302, ratePageFallback);
+    // Shared review-token shape, NOT 64-hex-only (codex #3287 r1): live
+    // tokens are 32-64 url-safe (prod-verified incl. one legacy 32-char
+    // row), and the Track CTA + tech-trigger now emit /go for those rows
+    // too — a 64-hex-only check bounced exactly them back to the raw rate
+    // page. router.param already enforces this shape; kept here as
+    // defense-in-depth for the same range.
+    if (!REVIEW_TOKEN_RE.test(token)) return res.redirect(302, ratePageFallback);
     const request = await db('review_requests').where({ token }).first();
     if (!request) return res.redirect(302, ratePageFallback);
+    // Finality first (pre-push audit P1): a request whose feedback was
+    // already submitted — including a detractor's — must never redirect to
+    // Google again, expired or not. The rate page renders its
+    // alreadySubmitted state for exactly these rows, so the fallback IS the
+    // right destination. This also covers the stale-CTA race: a track page
+    // rendered while the ask was live, tapped after the customer finalized
+    // through another link.
+    const requestFinalized = Boolean(request.rated_at)
+      || ['submitted', 'reviewed', 'rated'].includes(request.status);
+    if (requestFinalized) return res.redirect(302, ratePageFallback);
     if (request.expires_at && new Date(request.expires_at) < new Date()) {
+      // Expired-but-real UNANSWERED link (review audit 2026-08-07): a
+      // willing reviewer clicking a weeks-old text used to dead-end on the
+      // rate page's "link expired" state. Send them on to the location's
+      // Google review form anyway — but stamp NOTHING (no click credit, no
+      // cadence stop, no owner bell): the request is past its attribution
+      // window, and an expired token must not keep working as a tracked
+      // link. Customers already marked as reviewers stay on the fallback.
+      try {
+        const expiredCustomer = await db('customers').where({ id: request.customer_id }).first();
+        if (expiredCustomer?.has_left_google_review === true) {
+          return res.redirect(302, ratePageFallback);
+        }
+        const expiredLoc = resolveReviewLocation(request, expiredCustomer);
+        if (expiredLoc?.googleReviewUrl) return res.redirect(302, expiredLoc.googleReviewUrl);
+      } catch (err) {
+        logger.warn(`[review-gate] expired-link GBP resolve failed — rate-page fallback: ${err.message}`);
+      }
       return res.redirect(302, ratePageFallback);
     }
 
     const customer = await db('customers').where({ id: request.customer_id }).first();
+    // Same finality rule for the customer-level flag: once Adam marks
+    // "Left Google review", no live /go link re-solicits — the rate page's
+    // states handle the visit instead.
+    if (customer?.has_left_google_review === true) {
+      return res.redirect(302, ratePageFallback);
+    }
     const loc = resolveReviewLocation(request, customer);
     if (!loc || !loc.googleReviewUrl) return res.redirect(302, ratePageFallback);
 
@@ -187,7 +252,7 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
 });
 
 // GET /api/rate/:token — public page data for the review funnel
-router.get('/:token', async (req, res, next) => {
+router.get('/:token', reviewPageLimiter, async (req, res, next) => {
   try {
     const request = await db('review_requests')
       .where({ token: req.params.token })
@@ -274,7 +339,7 @@ router.get('/:token', async (req, res, next) => {
 // score before committing to feedback or the Google-review path. The request
 // status is intentionally left alone so reminder and low-score workflows still
 // run only from the final /submit path.
-router.post('/:token/score', async (req, res, next) => {
+router.post('/:token/score', reviewPageLimiter, async (req, res, next) => {
   try {
     const { score, highlights } = req.body;
 
@@ -313,7 +378,7 @@ router.post('/:token/score', async (req, res, next) => {
 });
 
 // POST /api/rate/:token/submit — submit NPS score + feedback
-router.post('/:token/submit', async (req, res, next) => {
+router.post('/:token/submit', reviewPageLimiter, async (req, res, next) => {
   try {
     const { score, feedback, highlights } = req.body;
 

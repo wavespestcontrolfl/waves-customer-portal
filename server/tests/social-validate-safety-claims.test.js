@@ -12,6 +12,8 @@ const { validateContent } = require('../services/social-media');
 
 // Audience/compound forms + EPA-approved (SAFETY_OVERCLAIMS regex).
 const FLAGGED_OVERCLAIM = [
+  // #3278 r13: dotted/spaced EPA spellings are the same banned claim.
+  'E.P.A. approved pest control',
   'pet-safe pest control in Sarasota',
   'kid safe treatments',
   'family-safe barrier spray',
@@ -37,6 +39,27 @@ const FLAGGED_PRODUCT_SAFETY = [
   'Our treatments are safe, once dry',
   // r3: a technician MENTION without a confirmation verb is not framing.
   'Our technician applied treatments that are safe once dry',
+  // #3278: a confirmation about APPOINTMENT logistics is not a drying
+  // confirmation — it must not exempt the dry idiom.
+  'Our treatment is safe once dry. Your technician confirms arrival timing.',
+  'Treatments are safe once dry — your tech will confirm the appointment time',
+  // #3278 r9: nor is a confirmation about anything else — the exemption
+  // requires the confirmation's OBJECT to be drying/re-entry timing.
+  'Treatment is safe once dry. Your technician confirms the gate code.',
+  // #3278 r11: "ready"/"will let you know" can't carry an unrelated object.
+  'Treatment is safe once dry. Your technician confirms the gate code is ready.',
+  'Treatment is safe once dry. Your technician will let you know the gate code.',
+  // #3278 r12: passive order — logistics noun before the confirm verb.
+  'Treatment is safe once dry. Appointment timing will be confirmed by your technician.',
+  // #3278 r15: arbitrary nouns can't qualify the time object either.
+  'Treatment is safe once dry. Your technician confirms the invoice time.',
+  'Treatment is safe once dry. The invoice timing will be confirmed by your technician.',
+  // #3278 r16: the confirmation must come from the technician.
+  'Treatment is safe once dry. The office confirms timing.',
+  'Treatment is safe once dry. Timing will be confirmed by dispatch.',
+  // #3278 r20: strip-and-recombine must not pair the technician with
+  // another party's confirmation.
+  'Treatment is safe once dry. Your technician confirms arrival timing; the office confirms timing.',
   // r6: "safe UNTIL dry" claims wet-safety — the opposite of the idiom.
   'Our treatments are safe until dry; your technician confirms timing',
   'safe pesticide treatments',
@@ -59,6 +82,13 @@ const FLAGGED_TIMING = [
   // belongs to the restriction, not to the watering.
   'keep pets off treated areas for 30 minutes before watering',
   'keep off the lawn for 2 hours after watering',
+  // #3278 r13: compact/decimal durations; the sentence splitter must not
+  // treat the decimal point in "1.5" as a boundary.
+  'keep pets off treated areas for 30m',
+  're-enter treated areas in 1.5 hours',
+  // #3278 r18: seconds are the same banned class.
+  'keep pets off treated areas for 30 seconds',
+  're-enter treated areas in 90 sec',
   // A clock time asserts the same fixed re-entry moment a duration does
   // (codex P1 #3176 r20).
   'safe to return after 7 PM',
@@ -139,6 +169,10 @@ const CLEAN = [
   'Our treatments are safe, once dry — tech confirms when',
   // r4: the confirmation may live in the adjacent sentence.
   'Our treatments are safe once dry. Your technician confirms timing.',
+  // #3278 r8: a DRYING confirmation whose location is the appointment is
+  // still a drying confirmation — the appointment noun alone must not
+  // reclassify it as logistics.
+  'Treatment is safe once dry. Your technician confirms drying time at the appointment.',
   'Enter within 24 hours for a chance to win',
   'Technicians wear protective equipment to stay safe while applying pesticides',
 ];

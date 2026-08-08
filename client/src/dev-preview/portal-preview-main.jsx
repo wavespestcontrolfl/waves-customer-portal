@@ -267,8 +267,15 @@ Object.assign(api, {
     }],
   }),
 
-  // schedule
-  getSchedule: async () => ({ hasCancellableWork: true, upcoming: UPCOMING }),
+  // schedule — reservice/overlayHandoff mirror the streamline payload
+  // (GATE_RESERVICE_STREAMLINE) so the Request Service overlay's picker
+  // handoff and reschedule-online list render in the preview.
+  getSchedule: async () => ({
+    hasCancellableWork: true,
+    upcoming: UPCOMING,
+    reservice: { url: '/reservice/demo-reservice-token', lanes: ['pest', 'lawn'] },
+    overlayHandoff: true,
+  }),
   getNextService: async () => ({ next: UPCOMING[0] }),
   confirmAppointment: async () => ({ success: true }),
   rescheduleAppointment: async () => ({ success: true }),

@@ -727,7 +727,9 @@ describe('TerminalStateCard', () => {
       />,
     );
 
-    expect(screen.getByText('Your formal proposal is ready.')).toBeInTheDocument();
+    // The card renders under the hero, which already announces the proposal
+    // is ready — the card answers what happens next (owner 2026-08-08).
+    expect(screen.getByText('What happens next')).toBeInTheDocument();
     expect(screen.queryByText('This treatment needs an inspection.')).not.toBeInTheDocument();
     // proposal copy describes the emailed PDF + account-manager follow-up...
     expect(screen.getByText(/attached as a PDF to the email/i)).toBeInTheDocument();
@@ -747,9 +749,10 @@ describe('TerminalStateCard', () => {
       />,
     );
 
-    expect(screen.getByText('Your formal proposal is ready.')).toBeInTheDocument();
+    expect(screen.getByText('What happens next')).toBeInTheDocument();
     expect(screen.queryByText(/attached as a PDF to the email/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/account manager has your formal proposal/i)).toBeInTheDocument();
+    // The account manager is named (owner 2026-08-08).
+    expect(screen.getByText(/Adam, your Waves account manager, has your formal proposal/i)).toBeInTheDocument();
   });
 
   it('renders account-manager copy for a commercial risk-type hold, not the inspection state', () => {

@@ -44,6 +44,11 @@ const SPOKE_SITES = [
 
 const SPOKE_SITE_KEYS = SPOKE_SITES.map((s) => s.key);
 const SPOKE_SITE_KEY_SET = new Set(SPOKE_SITE_KEYS);
+// The hub domain(s) within the fleet — spoke routing treats these as "not a
+// spoke target". Single-sourced here so the publisher's resolveSpokeTarget
+// and the runner's publish-origin mirror can never disagree on what counts
+// as the hub.
+const HUB_SITE_KEYS = Object.freeze(SPOKE_SITES.filter((s) => s.group === 'Hub').map((s) => s.key));
 
 function arrayFromValue(value) {
   if (Array.isArray(value)) return value;
@@ -102,6 +107,7 @@ function invalidSpokeSites(value) {
 module.exports = {
   SPOKE_SITES,
   SPOKE_SITE_KEYS,
+  HUB_SITE_KEYS,
   normalizeSpokeSites,
   invalidSpokeSites,
   spokeSiteOrigin,

@@ -127,6 +127,32 @@ const bondTermSwitchLimiter = rateLimit({
   message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
 });
 
+// Estimate tokens are 15-32 char url-safe (prod-verified 2026-08-07: all
+// 656 live tokens; upper bound 64 leaves room for a future hex mint).
+// Malformed tokens 404 before any DB lookup, with the same generic body as
+// an unknown token. router.param covers every /:token route in this file.
+const ESTIMATE_TOKEN_RE = /^[A-Za-z0-9_-]{15,64}$/;
+router.param('token', (req, res, next, token) => {
+  if (!ESTIMATE_TOKEN_RE.test(String(token))) return res.status(404).json({ error: 'Estimate not found' });
+  next();
+});
+
+// Accept/decline are the two heaviest public money-adjacent writes on this
+// router and had no per-route limiter (security review 2026-08-07). Keyed
+// per IP+token: the threat this addresses is hammering a KNOWN estimate's
+// accept/decline (race probing, bell spam) — a real customer accepts once,
+// maybe retries on flaky mobile, so 10/hr per token is generous. Cross-token
+// enumeration is already priced by the 15+-char url-safe token space and
+// the global /api/ limiter.
+const acceptDeclineLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${require('../middleware/rate-limit-key').rateLimitKey(req)}:${req.params.token}`,
+  message: { error: 'Too many attempts. Please wait a moment and try again, or call our office.' },
+});
+
 // Token-holder toggle endpoints (tier picker, preference switches): every
 // call is a DB write and select-tier used to ring an admin bell per call —
 // a looping client could spam bells and writes. 30/hr comfortably covers a
@@ -900,6 +926,36 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
   // cross-family accepts fall through to the standard slot pick.
   if (!row && estimate.customer_id
     && featureGates.isEnabled('estimateExistingApptCustomerWide')) {
+    // PROPERTY-SCOPED for grouped estimates (codex #3244 r8): a secondary
+    // property's accept must not adopt an upcoming visit at the customer's
+    // primary property — the adopted row gets stamped to this estimate,
+    // repriced, and the accepted property ends up with NO booked visit
+    // while linkage can no longer correct the already-linked row. Fail
+    // CLOSED on candidates whose property can't be located.
+    const { normalizedEstimateStreet: adoptStreetOf, normalizedStampedStreet: adoptStampedStreetOf, sameScopeKey: adoptSameScope, scopeKeyLacksLocality: adoptKeyLacksLocality } = require('../services/estimate-property-linkage');
+    const adoptionEstimateStreet = estimate.estimate_group_id ? adoptStreetOf(estimate.address) : '';
+    let adoptionPrimaryStreet = '';
+    if (adoptionEstimateStreet) {
+      try {
+        const adoptCust = await conn('customers').where({ id: estimate.customer_id }).first('address_line1', 'address_line2', 'city', 'zip');
+        adoptionPrimaryStreet = adoptStampedStreetOf(adoptCust?.address_line1, adoptCust?.address_line2, adoptCust?.city, adoptCust?.zip);
+      } catch { /* candidates fall back to stamped/source streets only */ }
+    }
+    const candidateAtQuotedProperty = async (cand) => {
+      if (!adoptionEstimateStreet) return true;
+      let candStreet = adoptStampedStreetOf(cand.service_address_line1, cand.service_address_line2, cand.service_address_city, cand.service_address_zip);
+      // Candidates here always carry source_estimate_id IS NULL (the query
+      // adopts only unclaimed rows), so source-estimate locality recovery
+      // can never apply (codex #3248 r7). Adoption consumes a real visit —
+      // the HIGHEST-stakes scope consumer — so it fails CLOSED: a
+      // street-only stamped candidate that cannot prove its locality is
+      // not adoptable by a grouped estimate; the slot picker books the
+      // quoted property a fresh visit instead. Fully-unstamped rows still
+      // fall back to the customer's fully-qualified primary address.
+      candStreet = candStreet || adoptionPrimaryStreet;
+      if (!candStreet || adoptKeyLacksLocality(candStreet)) return false;
+      return adoptSameScope(candStreet, adoptionEstimateStreet);
+    };
     if (familyKeys.size > 0) {
       // Page through the candidate list until a same-family row appears — a
       // fixed pre-filter LIMIT would hide a valid later appointment behind a
@@ -923,9 +979,13 @@ async function findLinkedUpcomingAppointment(estimate = {}, estData = null, opts
         if (requestedId) cw.where('scheduled_services.id', requestedId);
         const candidates = await cw.limit(CANDIDATE_PAGE_SIZE).offset(offset);
         if (!Array.isArray(candidates) || candidates.length === 0) break;
-        row = candidates.find(
-          (cand) => appointmentMatchesEstimateFamily(cand, familyKeys),
-        ) || null;
+        row = null;
+        for (const cand of candidates) {
+          if (!appointmentMatchesEstimateFamily(cand, familyKeys)) continue;
+          if (!(await candidateAtQuotedProperty(cand))) continue;
+          row = cand;
+          break;
+        }
         if (candidates.length < CANDIDATE_PAGE_SIZE) break;
       }
     }
@@ -2400,6 +2460,11 @@ const COMPANY = {
   address: WAVES_ADDRESS_LINE,
 };
 
+// Commercial account manager (owner 2026-08-08: proposals name Adam, not a
+// faceless "your Waves account manager"). Keep in sync with
+// WAVES_ACCOUNT_MANAGER_FIRST_NAME in client/src/constants/business.js.
+const ACCOUNT_MANAGER_FIRST_NAME = 'Adam';
+
 const SOCIAL_LINKS = [
   { name: 'Facebook',  url: 'https://facebook.com/wavespestcontrol',  path: 'M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z' },
   { name: 'Instagram', url: 'https://instagram.com/wavespestcontrol', path: 'M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zM12 0C8.741 0 8.333.014 7.053.072 2.695.272.273 2.69.073 7.052.014 8.333 0 8.741 0 12s.014 3.668.072 4.948c.2 4.358 2.618 6.78 6.98 6.98C8.333 23.986 8.741 24 12 24s3.668-.014 4.948-.072c4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948s-.014-3.667-.072-4.947c-.196-4.354-2.617-6.78-6.979-6.98C15.668.014 15.259 0 12 0zm0 5.838a6.162 6.162 0 100 12.324 6.162 6.162 0 000-12.324zM12 16a4 4 0 110-8 4 4 0 010 8zm6.406-11.845a1.44 1.44 0 100 2.881 1.44 1.44 0 000-2.881z' },
@@ -2505,6 +2570,32 @@ function fmtMoney(n) {
 // Price label for the "Estimate viewed" admin notification. One-time-only
 // estimates (pre-slab, WDO) have monthly_total 0/null — rendering them with
 // monthly framing produced "$0/mo as proposed" in the bell.
+// Truth-scope classification for the commercial copy stacks (SSR card +
+// /data proposal projection): the pest inclusions and no-contract/Auto-Pay
+// terms only apply when the proposal's RECURRING lines are actually pest
+// work. Authored lines are free text, so classify conservatively — an
+// explicit non-pest service word disqualifies the whole proposal; wholly
+// unclassified lines lean on the estimate's own service identity; anything
+// else stays neutral (fail closed on claims — a termite/rodent/mixed
+// proposal must never promise recurring pest treatment or cancellable-plan
+// terms it doesn't carry).
+function proposalPestRecurringOnly(proposal, estimate = {}) {
+  const classify = (description) => {
+    const raw = String(description || '').toLowerCase();
+    if (/termite|wdo|wood[- ]destroying|rodent|mosquito|lawn|turf|tree|shrub|foam|bed ?bug|flea|exclusion|bait station/.test(raw)) return 'nonpest';
+    if (/pest/.test(raw)) return 'pest';
+    return 'unclassified';
+  };
+  const recurringClasses = (proposal?.buildings || [])
+    .flatMap((building) => (building.lineItems || []))
+    .filter((item) => item.frequency !== 'one_time')
+    .map((item) => classify(item.description));
+  const identityIsPest = /pest/.test(String(estimate.service_interest || '').toLowerCase());
+  return recurringClasses.length > 0
+    && !recurringClasses.includes('nonpest')
+    && (recurringClasses.includes('pest') || identityIsPest);
+}
+
 function proposalPriceLabel(estimate) {
   const monthly = Number(estimate?.monthly_total || 0);
   if (monthly > 0) return `${fmtMoney(monthly)}/mo as proposed`;
@@ -3262,6 +3353,14 @@ function recurringServicesWithSupplements(estResult = {}) {
         mo: monthly || null,
         monthly: monthly || null,
         annual: annual || (monthly ? Math.round(monthly * 12 * 100) / 100 : null),
+        // Post-manual audit stamp survives the rebuild (codex #3245 r19):
+        // the plan-rate ledger sizes components post-discount-first, and
+        // dropping the stamp here recorded pre-discount proportions for
+        // operator-adjusted agent drafts. Additive — display consumers
+        // already prefer it where present.
+        ...(item.manualFinalAnnual != null && Number.isFinite(Number(item.manualFinalAnnual))
+          ? { manualFinalAnnual: Number(item.manualFinalAnnual) }
+          : {}),
         perTreatment: firstPositiveNumber(item.perApp, item.perVisit),
         visitsPerYear: firstPositiveNumber(item.visitsPerYear, item.visits, item.frequency, item.appsPerYear),
         // Carry cadence (foam) so pattern inference / cadence-aware shapers don't
@@ -5231,6 +5330,81 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     </div>` : ''}
   </section>` : '';
   const membershipBlockHtml = renderMembershipBlockHtml(membership);
+  // Authored commercial proposal, on-page (GATE_ESTIMATE_COMMERCIAL_GLASS —
+  // SSR parity with the React ProposalDetailCard): the same buildings/line
+  // items the emailed PDF carries, so the page finally answers "what am I
+  // paying for" instead of only pointing at an email. normalizeProposal is a
+  // sync read here because an AUTHORED proposal (enabled) always renders its
+  // stored buildings — recurringMode/livePricing only shape the synthesized
+  // fallback, which this card never shows. Inclusions bullets mirror the
+  // client's commercial_pest stack in estimate-glass-copy.js — grounded in
+  // standing owner terms only, no residential guarantee claims.
+  let proposalCardHtml = '';
+  if (commercialProposal && featureGates.isEnabled('estimateCommercialGlass')) {
+    try {
+      const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
+      // renderPage carries the parsed estimate_data separately — hand the
+      // normalizer the estData it already trusts, not whatever serialization
+      // rides the row object.
+      const proposalForCard = normalizeProposal({ ...est, estimate_data: estData });
+      // A raw enabled flag with no authored buildings normalizes to the
+      // synthesized fallback (enabled:false) — nothing authored to itemize,
+      // so the card stays out rather than rendering an empty shell.
+      if (proposalForCard.enabled !== true) {
+        proposalCardHtml = '';
+      } else {
+      const proposalCardTotals = computeProposalTotals(proposalForCard);
+      const proposalBuildingsHtml = (proposalForCard.buildings || []).map((building) => `
+      <div class="proposal-building">
+        ${proposalForCard.buildings.length > 1 ? `<div class="proposal-building-name">${escapeHtml(building.name || 'Service location')}</div>` : ''}
+        ${building.note ? `<div class="proposal-building-note">${escapeHtml(building.note)}</div>` : ''}
+        ${(building.lineItems || []).map((item) => `
+        <div class="proposal-line">
+          <span class="proposal-line-desc">${escapeHtml(item.description || 'Service')}${item.quantity > 1 ? ` &times; ${item.quantity}` : ''}</span>
+          <span class="proposal-line-amt">${fmtMoney(item.amount)}${item.taxable === true ? ' *' : ''}${item.frequencyLabel ? ` <span class="proposal-line-freq">${escapeHtml(String(item.frequencyLabel).toLowerCase())}</span>` : ''}</span>
+        </div>`).join('')}
+      </div>`).join('');
+      // Taxable-line identification + one-time total label (codex #3281 r4)
+      // — SSR parity with ProposalDetailCard / EstimateProposalDocument.
+      const proposalAnyTaxable = (proposalForCard.buildings || [])
+        .some((b) => (b.lineItems || []).some((li) => li.taxable === true));
+      const proposalTaxRatePct = proposalCardTotals.taxRate > 0
+        ? (proposalCardTotals.taxRate * 100).toFixed(2)
+        : null;
+      const proposalGrandTotalLabel = proposalCardTotals.annualRecurring > 0 ? 'First-year total' : 'Total';
+      proposalCardHtml = `
+  <section class="card proposal-card">
+    <h2>${escapeHtml(proposalForCard.title || 'Commercial Service Proposal')}</h2>
+    <p class="card-sub">${proposalPdfEmailed
+      ? 'Everything in your formal proposal, itemized &mdash; the emailed PDF carries this same detail.'
+      : 'Everything in your formal proposal, itemized.'}</p>
+    ${proposalBuildingsHtml}
+    <div class="proposal-totals">
+      ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">Recurring service (per year)</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.annualRecurring)}</span></div>` : ''}
+      ${proposalCardTotals.oneTime > 0 ? `<div class="proposal-line"><span class="proposal-line-desc">One-time services</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.oneTime)}</span></div>` : ''}
+      ${proposalCardTotals.hasTax ? `<div class="proposal-line"><span class="proposal-line-desc">${escapeHtml(proposalForCard.taxLabel || 'Sales tax')}${proposalTaxRatePct ? ` (${proposalTaxRatePct}%)` : ''}</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.totalTax)}</span></div>` : ''}
+      <div class="proposal-line proposal-line-total"><span class="proposal-line-desc">${proposalGrandTotalLabel}</span><span class="proposal-line-amt">${fmtMoney(proposalCardTotals.firstYearTotal)}</span></div>
+      ${proposalCardTotals.annualRecurring > 0 ? `<div class="proposal-monthly-note">Averages ${fmtMoney(proposalCardTotals.monthlyEquivalent)}/month across the year for the recurring service.</div>` : ''}
+      ${proposalCardTotals.hasTax || proposalAnyTaxable ? `<div class="proposal-monthly-note">* Taxable line. Tax applies only to lines marked taxable, at the Florida state rate plus the service county surtax. Residential pest control and residential lawn maintenance are tax-exempt in Florida; commercial services may be taxable.</div>` : ''}
+    </div>
+    ${proposalForCard.terms ? `<div class="proposal-terms">${escapeHtml(proposalForCard.terms)}</div>` : ''}
+    ${proposalPestRecurringOnly(proposalForCard, est) && !proposalForCard.terms ? `<div class="proposal-included">
+      <div class="proposal-included-title">What your commercial pest service includes</div>
+      <ul>
+        <li>Recurring exterior treatment &mdash; foundation, entry points, and grounds on your scheduled cadence</li>
+        <li>Interior treatment included on request &mdash; no extra charge, no surprise fees</li>
+        <li>Tenant-reported pests handled between visits &mdash; re-service requests are included in the plan</li>
+        <li>Tenants can be added to the Waves app for arrival alerts and service reports</li>
+        <li>Every visit documented &mdash; time on site, areas treated, and products applied</li>
+        <li>No long-term contract &mdash; stay because it works, not because you&rsquo;re locked in</li>
+      </ul>
+    </div>` : ''}
+  </section>`;
+      }
+    } catch (e) {
+      logger.warn(`[estimate-ssr] proposal card build failed for estimate ${est.id}: ${e.message}`);
+    }
+  }
   // Ask Waves chips read the raw rows merged with the normalized one-time rows
   // (the same superset the AI card + Bora-Care detection use), so engine-backed /
   // nested-result estimates still surface service-specific chips like
@@ -5404,6 +5578,22 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .choice-treatment .save-row{margin-top:8px}
   .choice-treatment .day-price{margin-top:8px}
   .onetime-note{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;max-width:640px}
+  .proposal-building{margin-top:10px}
+  .proposal-building-name{font-size:15px;font-weight:800;color:#1B2C5B;margin-bottom:4px}
+  .proposal-building-note{font-size:14px;color:#475569;margin-bottom:6px;line-height:1.5}
+  .proposal-line{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid #E2DCCB;font-size:15px;color:#3F4A65;line-height:1.45}
+  .proposal-line-desc{min-width:0}
+  .proposal-line-amt{font-weight:700;color:#1B2C5B;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .proposal-line-freq{font-weight:500;color:#6B7280}
+  .proposal-totals{margin-top:14px}
+  .proposal-line-total{border-bottom:0;font-weight:800;color:#1B2C5B;font-size:16px}
+  .proposal-line-total .proposal-line-amt{font-size:18px}
+  .proposal-monthly-note{margin-top:4px;font-size:14px;color:#475569}
+  .proposal-terms{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;white-space:pre-wrap}
+  .proposal-included{margin-top:16px}
+  .proposal-included-title{font-size:14px;font-weight:800;color:#1B2C5B;margin-bottom:6px}
+  .proposal-included ul{margin:0;padding-left:20px}
+  .proposal-included li{font-size:14px;color:#3F4A65;line-height:1.6}
   @media(max-width:760px){.service-price-list{grid-template-columns:1fr}.service-big-price .num{font-size:clamp(42px,14vw,56px)}.supplemental-service-row{grid-template-columns:1fr}.supplemental-service-row strong{white-space:normal}}
   .card{background:#F2EEE0;border-radius:12px;padding:24px;margin-bottom:16px;border:1px solid #D9D3C4;box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06)}
   .card h2{margin:0 0 6px}
@@ -5707,7 +5897,7 @@ ${shellTopBar()}
   ${quoteRequired && est.status !== 'accepted' ? (commercialProposal
     ? `<div class="quote-required-banner">${proposalPdfEmailed
         ? 'Your formal proposal is attached as a PDF to the email we sent.'
-        : 'Your Waves account manager has your formal proposal and will share the PDF with you directly.'} There\u2019s no online checkout for a commercial bid \u2014 your account manager will follow up to finalize. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
+        : `${ACCOUNT_MANAGER_FIRST_NAME}, your Waves account manager, has your formal proposal and will share the PDF with you directly.`} There\u2019s no online checkout for a commercial bid \u2014 ${ACCOUNT_MANAGER_FIRST_NAME} will follow up to finalize. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
     : commercialRiskType
     ? `<div class="quote-required-banner">This is a commercial service plan \u2014 your Waves account manager will confirm the details with you and finalize it directly, so there\u2019s no online checkout for this one. Questions? Call <a href="tel:${COMPANY.phoneRaw}" style="color:#9A3412">${COMPANY.phone}</a>.</div>`
     : commercialLowConfidence
@@ -5746,6 +5936,8 @@ ${shellTopBar()}
     ${canChooseOneTime && (!oneTimeToggleCopy || oneTimeToggleCopy.callbackNote) ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.callbackNote || 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
+
+  ${proposalCardHtml}
 
   ${membershipBlockHtml}
 
@@ -7831,10 +8023,20 @@ async function handleEstimateView(req, res, next) {
     // it still excludes staff preview hits from the GrowthBook experiment
     // assignment below.
     const adminPreviewRequested = req.query.adminPreview === '1';
+    // Headless estimate-document render (?mode=pdf): the browser pass must
+    // reach the React page — EstimateProposalDocument only exists there —
+    // regardless of this estimate's v1/v2 assignment. Gate-tied so the kill
+    // switch fully restores today's routing: with GATE_ESTIMATE_DOC_PDF off,
+    // ?mode=pdf changes nothing (a v1 estimate keeps its legacy SSR page).
+    // Verified renders never count as customer views (the /data route skips
+    // their side effects) and never enter the experiment below.
+    const estimatePdfRenderPass = req.query.mode === 'pdf'
+      && featureGates.isEnabled('estimateDocPdf');
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
-      || recurringCardForcesReactView;
+      || recurringCardForcesReactView
+      || estimatePdfRenderPass;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -7856,6 +8058,7 @@ async function handleEstimateView(req, res, next) {
       && !effectiveInvoiceMode
       && !cardHoldForcesReactView
       && !recurringCardForcesReactView
+      && !estimatePdfRenderPass
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -8132,11 +8335,26 @@ function commercialAcceptDepositExempt({ isCommercialAccept = false, siteConfirm
 // transaction — customer_id gets linked, reservation_expires_at cleared.
 // Paths without slotId behave exactly as pre-PR-B.1 (EstimateConverter
 // creates scheduled_services post-transaction).
-router.put('/:token/accept', async (req, res, next) => {
+router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
+    // Fresh ACCEPT of a persisted bermuda-suppression estimate requires the
+    // gate to still be live — acceptance bills/schedules from stored rows
+    // without re-entering priceLawnCare, so a save-then-gate-off sequence
+    // would otherwise charge a disabled add-on (codex #3272 r2). Retries of
+    // an ALREADY-accepted estimate stay untouched (that acceptance happened).
+    if (estimate.status !== 'accepted') {
+      const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
+      if (estimateDataCarriesBermudaSuppression(estimate.estimate_data)
+        && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+        return res.status(409).json({
+          error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
+          code: 'BERMUDA_SUPPRESSION_GATED',
+        });
+      }
+    }
     if (estimate.status === 'accepted') {
       // An archived accepted estimate is no longer customer-viewable (the
       // /:token/data gate rejects archived_at outright), so never rebuild
@@ -10462,6 +10680,23 @@ router.put('/:token/accept', async (req, res, next) => {
         logger.error(`[estimate-accept] tier-upgrade admin notify setup failed: ${e.message}`);
       }
     }
+    // Plan-rate review alert — same deferred post-commit contract as the
+    // tier alert above (multi-plan legacy customer's un-splittable scalar
+    // was replaced; owner eyeballs the rate once).
+    if (acceptConversion?.planRateReviewNotification) {
+      const planNotify = acceptConversion.planRateReviewNotification;
+      try {
+        const NotificationService = require('../services/notification-service');
+        void NotificationService.notifyAdmin(
+          planNotify.type,
+          planNotify.title,
+          planNotify.body,
+          planNotify.options,
+        ).catch((e) => logger.error(`[estimate-accept] plan-rate review notify failed: ${e.message}`));
+      } catch (e) {
+        logger.error(`[estimate-accept] plan-rate review notify setup failed: ${e.message}`);
+      }
+    }
     // The standard conversion runs in-transaction with skipMembershipEmail,
     // so the membership.started email fires here post-commit (mirrors
     // estimate-manual-acceptance). Annual prepay intentionally sends none —
@@ -11814,32 +12049,74 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
 async function transferGroupFollowupOwnership(estimate) {
   try {
     if (!estimate?.estimate_group_id) return;
-    const owner = await db('estimates')
-      .where({ estimate_group_id: estimate.estimate_group_id })
-      .whereNot({ id: estimate.id })
-      .whereIn('status', ['sent', 'viewed'])
-      .whereNull('archived_at')
-      .orderBy('created_at', 'asc')
-      .first('id');
-    if (!owner) return;
-    await db('estimates')
-      .where({ id: owner.id })
-      .whereIn('status', ['sent', 'viewed'])
-      .update({
-        followup_unviewed_sent: false,
-        followup_viewed_sent: false,
-        followup_final_sent: false,
-        followup_expiring_sent: false,
-        updated_at: db.fn.now(),
-      });
-    logger.info(`[estimate-public] group ${estimate.estimate_group_id}: follow-up ownership transferred to sibling ${owner.id} after ${estimate.id} went terminal`);
+    const FLAGS = ['followup_unviewed_sent', 'followup_viewed_sent', 'followup_final_sent', 'followup_expiring_sent'];
+    // Anchor's completed-stage state (fresh read — codex #3244 r8) seeds the
+    // owner so an already-sent stage never repeats.
+    const anchorFlags = await db('estimates')
+      .where({ id: estimate.id })
+      .first(...FLAGS);
+    if (!anchorFlags) return;
+    // PER-STAGE merge under a group advisory lock (codex #3248 r8): a
+    // sibling that re-armed only its expiry stage (own-token extension) must
+    // not block the transfer of the anchor's other stages — and a stage any
+    // live row already has armed (false/NULL) stays with that row. Only
+    // stages burned on EVERY live sibling adopt the anchor's state on the
+    // deterministic owner (earliest created). The xact lock serializes
+    // concurrent terminal events; provenance records the ancestor claim
+    // chain plus exactly which flags this transfer set true, so
+    // releaseStage can un-burn a transient claim without touching stages
+    // the owner earned itself.
+    await db.transaction(async (trx) => {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-followup', String(estimate.estimate_group_id)],
+      );
+      const siblings = await trx('estimates')
+        .where({ estimate_group_id: estimate.estimate_group_id })
+        .whereNot({ id: estimate.id })
+        .whereIn('status', ['sent', 'viewed'])
+        .whereNull('archived_at')
+        .orderBy('created_at', 'asc')
+        .select('id', ...FLAGS);
+      if (!siblings.length) return;
+      const owner = siblings[0];
+      const updates = {};
+      const copied = {};
+      for (const flag of FLAGS) {
+        const armedAnywhere = siblings.some((s) => s[flag] !== true);
+        if (armedAnywhere) {
+          copied[flag] = false;
+          continue;
+        }
+        updates[flag] = anchorFlags[flag] === true;
+        copied[flag] = anchorFlags[flag] === true;
+      }
+      if (!Object.keys(updates).length) return;
+      const chainRow = await trx('estimates')
+        .where({ id: estimate.id })
+        .first(db.raw("estimate_data->'followupOwnershipFrom'->'anchorIds' AS chain"));
+      const anchorIds = Array.isArray(chainRow?.chain) ? chainRow.chain : [];
+      if (!anchorIds.includes(String(estimate.id))) anchorIds.push(String(estimate.id));
+      await trx('estimates')
+        .where({ id: owner.id })
+        .whereIn('status', ['sent', 'viewed'])
+        .update({
+          ...updates,
+          estimate_data: trx.raw(
+            "COALESCE(estimate_data, '{}'::jsonb) || jsonb_build_object('followupOwnershipFrom', jsonb_build_object('anchorId', ?::text, 'anchorIds', ?::jsonb, 'copied', ?::jsonb))",
+            [String(estimate.id), JSON.stringify(anchorIds), JSON.stringify(copied)],
+          ),
+          updated_at: trx.fn.now(),
+        });
+      logger.info(`[estimate-public] group ${estimate.estimate_group_id}: follow-up stages ${Object.keys(updates).join(',')} transferred to sibling ${owner.id} after ${estimate.id} went terminal`);
+    });
   } catch (e) {
     logger.warn(`[estimate-public] follow-up ownership transfer failed for estimate ${estimate?.id}: ${e.message}`);
   }
 }
 
 // PUT /api/estimates/:token/decline
-router.put('/:token/decline', async (req, res, next) => {
+router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     const guard = resolveEstimateDeclineGuard(estimate);
@@ -19310,13 +19587,47 @@ const dataLimiter = rateLimit({
 // of the document is byte-identical. Gated by isEstimateCustomerViewable —
 // identical exposure rules to /:token/data (drafts/expired/send_failed 404;
 // accepted/declined terminal views stay downloadable).
-router.get('/:token/pdf', dataLimiter, async (req, res, next) => {
+// Dedicated tight limiter for the PDF download: with GATE_ESTIMATE_DOC_PDF
+// on, each request can launch a Chromium render — the shared dataLimiter's
+// ceiling (60/min) would let one token holder stack browsers. Belt to the
+// renderer's in-process concurrency semaphore (estimate-doc-pdf.js), which
+// backstops distributed callers this per-IP window can't see.
+const estimatePdfLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many download requests. Please try again shortly.' },
+});
+
+router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
   try {
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.set('Referrer-Policy', 'no-referrer');
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
+    }
+    // Browser-rendered document (GATE_ESTIMATE_DOC_PDF): the work-order style
+    // EstimateProposalDocument, rendered through the headless pipeline. Any
+    // failure falls through to the legacy pdfkit proposal below — the
+    // download must never 500 on a browser hiccup.
+    if (featureGates.isEnabled('estimateDocPdf')) {
+      try {
+        const { renderEstimateDocumentPdf } = require('../services/pdf/estimate-doc-pdf');
+        const { normalizeProposal } = require('../services/estimate-proposal');
+        const buffer = await renderEstimateDocumentPdf(estimate);
+        // Same filename the pdfkit generator sets, so the customer's saved
+        // file is named identically whichever renderer served it.
+        const preparedFor = normalizeProposal(estimate).preparedFor || estimate.id;
+        const fileName = `proposal-${String(preparedFor).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'waves'}.pdf`;
+        res.set('Content-Type', 'application/pdf');
+        res.set('Content-Disposition', `inline; filename="${fileName}"`);
+        return res.send(buffer);
+      } catch (e) {
+        const { sanitizeRenderError } = require('../services/pdf/estimate-doc-pdf');
+        logger.warn(`[estimate-pdf] browser document render failed for estimate ${estimate.id}; serving pdfkit fallback: ${sanitizeRenderError(e)}`);
+      }
     }
     // Lazy require: pdfkit only loads when a PDF is actually requested.
     const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
@@ -19736,7 +20047,21 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       && Boolean(await verifyStaffBearer(req));
     const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
       && verifiedStaffPreview;
-    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview) {
+    // Signed document-render pin — verified BEFORE the viewability gate
+    // (codex #3281 r1): an operator resend of a proposal whose stored
+    // expires_at already passed supplies a pinned new validThrough, but the
+    // stored date would 404 this fetch and silently downgrade the emailed
+    // attachment to the pdfkit document. The pin only mints server-side, so
+    // honoring it here serves exactly the renders our own routes vetted —
+    // archived rows and unpublished drafts stay 404 even pinned.
+    const isPdfRenderPass = req.query.mode === 'pdf';
+    const docRenderPin = isPdfRenderPass && req.query.dpin
+      ? require('../services/pdf/estimate-doc-pdf').verifyEstimateDocPin(req.query.dpin, estimate.token)
+      : null;
+    const docPinViewBypass = docRenderPin !== null
+      && !estimate.archived_at
+      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to
       // a real, published estimate that died of expiry (never a draft), so the
       // SPA's not-found screen may offer the "Request an extension" button.
@@ -19764,7 +20089,18 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
     // suppress the very first "viewed" count + admin notification.
     const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
-    if (!verifiedStaffPreview && !isInternalRefresh && shouldCountView(req, ip, estimate)) {
+    // Headless document render (?mode=pdf — the estimate-PDF browser pass,
+    // mirroring /report/:token?mode=pdf). `mode` alone only shapes CONTENT
+    // (the proposal block + publicOrigin below — data the token holder's own
+    // PDF already carries). Side-effect suppression additionally requires the
+    // SIGNED render pin (isPdfRenderPass/docRenderPin resolved above the
+    // viewability gate): without it, building the proposal email ATTACHMENT
+    // would stamp viewed_at and fire the "Estimate viewed" notification
+    // before the customer ever opened the link — while a customer poking
+    // ?mode=pdf by hand still counts as the view it is (unlike the refresh
+    // param above, no public input can dodge first-view tracking).
+    const verifiedPdfRenderPass = isPdfRenderPass && docRenderPin !== null;
+    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate)) {
       // ONE transaction for the aggregate counter + the per-open row: written
       // separately, a failure of either half leaves view_count permanently
       // diverged from COUNT(estimate_views) — the dashboard count and the
@@ -19801,7 +20137,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // The staff draft preview is hard-excluded above IP/UA heuristics: the
     // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
     // effect) if a staff preview ever slipped through shouldApplyFirstView.
-    if (!verifiedStaffPreview && !isInternalRefresh && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
       // Don't break an in-flight send's `sending` claim (which also gates
       // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
       // the send's final write reconciles to `viewed` via viewed_at.
@@ -20066,8 +20402,100 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       }
     }
 
+    // Commercial glass parity (GATE_ESTIMATE_COMMERCIAL_GLASS): the client's
+    // commercial copy pack + the on-page proposal line items ride this flag —
+    // fail-closed, absent flag renders exactly today's page.
+    const commercialGlassEnabled = featureGates.isEnabled('estimateCommercialGlass');
+    // Public proposal view — the authored buildings/line items the customer's
+    // emailed PDF already contains, projected for the on-page glass render.
+    // Resolved with the SAME live billing lane as the PDF generator so the
+    // page and the attachment can never quote different cadences. Projection
+    // is field-by-field on purpose: the stored proposal block is admin-
+    // authored and may grow internal fields the token holder shouldn't read.
+    //
+    // The headless document render (mode=pdf) gets the block for EVERY
+    // estimate — synthesized fallback included — because the document's
+    // pricing table is normalizeProposal's lines, exactly what the pdfkit
+    // generator prints today; it must not depend on the page-side commercial
+    // gate. On-page renders keep the authored-proposal + gate condition.
+    let proposalPublicView = null;
+    if ((isPdfRenderPass && featureGates.isEnabled('estimateDocPdf'))
+      || (commercialGlassEnabled && estimateDataForIntelligence?.proposal?.enabled === true)) {
+      try {
+        const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
+        const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+        const proposalBilling = await resolveProposalBillingContext(estimate);
+        const proposalForView = normalizeProposal(estimate, {
+          recurringMode: proposalBilling?.billsPerApplication === true ? 'per_application' : 'legacy',
+          livePricing: proposalBilling?.livePricing || null,
+        });
+        proposalPublicView = {
+          enabled: proposalForView.enabled === true,
+          synthesized: proposalForView.synthesized === true,
+          // Drives the commercial inclusions/terms stacks client-side — see
+          // proposalPestRecurringOnly's truth-scope classification.
+          pestRecurringOnly: proposalPestRecurringOnly(proposalForView, estimate),
+          title: proposalForView.title,
+          preparedFor: proposalForView.preparedFor,
+          propertyAddress: proposalForView.propertyAddress,
+          taxRate: proposalForView.taxRate,
+          taxLabel: proposalForView.taxLabel,
+          terms: proposalForView.terms,
+          buildings: (proposalForView.buildings || []).map((building) => ({
+            name: building.name,
+            note: building.note,
+            lineItems: (building.lineItems || []).map((item) => ({
+              description: item.description,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice,
+              amount: item.amount,
+              frequency: item.frequency,
+              frequencyLabel: item.frequencyLabel,
+              ...(item.visitsPerYear > 0 ? { visitsPerYear: item.visitsPerYear } : {}),
+              taxable: item.taxable === true,
+            })),
+          })),
+          totals: computeProposalTotals(proposalForView),
+        };
+        // On-page renders only itemize truly AUTHORED proposals — a raw
+        // enabled flag with no buildings normalizes to the synthesized
+        // fallback (enabled:false), which would paint an empty card. The
+        // pdf pass keeps the synthesized view: it IS the document's pricing
+        // table for ordinary estimates.
+        if (!isPdfRenderPass && proposalPublicView.enabled !== true) {
+          proposalPublicView = null;
+        }
+      } catch (e) {
+        logger.warn(`[estimate-data] proposal view build failed for estimate ${estimate.id}: ${e.message}`);
+      }
+    }
+
     res.json({
       ...(propertyGroup ? { propertyGroup } : {}),
+      // Authored commercial proposal, rendered on-page under the commercial
+      // glass gate. Key only exists for gated proposal estimates so every
+      // other response stays byte-identical.
+      ...(proposalPublicView ? { proposal: proposalPublicView } : {}),
+      // Document-mode affirmation + canonical public origin, BOTH gated on
+      // GATE_ESTIMATE_DOC_PDF: the client renders EstimateProposalDocument
+      // only when the server affirms documentRender (fail-closed — with the
+      // gate off, ?mode=pdf falls through to the normal page instead of an
+      // official-looking document with no pricing). publicOrigin exists so
+      // the headless browser's internal hostname never leaks into the
+      // artifact's links (same rule as the service-report document).
+      // documentRender additionally requires the proposal view to have BUILT
+      // with at least one priced line (codex pre-push r4b): a swallowed
+      // build error would otherwise let the headless renderer capture an
+      // official-looking document with no pricing table as a SUCCESS.
+      // Withholding the flag makes ?mode=pdf fall through to the normal
+      // page, which the render pipeline treats as a failed pass → pdfkit
+      // fallback.
+      ...(isPdfRenderPass && featureGates.isEnabled('estimateDocPdf')
+        && Array.isArray(proposalPublicView?.buildings)
+        && proposalPublicView.buildings.some((b) => (b.lineItems || []).length > 0) ? {
+        documentRender: true,
+        publicOrigin: require('../utils/portal-url').configuredPublicPortalOrigin(),
+      } : {}),
       // Only present on a verified staff draft preview — the React page keys
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
@@ -20130,9 +20558,18 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         askToken: signEstimateAskToken(estimate),
         category: estimate.category || 'RESIDENTIAL',
         createdAt: estimate.created_at,
-        expiresAt: estimate.expires_at,
+        // Pinned override only on a signed pdf render pass — see docRenderPin.
+        expiresAt: docRenderPin?.validThrough || estimate.expires_at,
         status: estimate.status,
-        satelliteUrl: estimate.satellite_url || null,
+        // On a pdf render pass the HEADLESS SERVER browser fetches this URL,
+        // so it must be a known-good public imagery host — satellite_url is
+        // staff-writable free text, and an internal/arbitrary URL here would
+        // let a saved estimate steer server-side GETs (SSRF; codex #3281 r1).
+        // The customer's own browser (normal page loads) keeps the stored
+        // value unfiltered, today's behavior.
+        satelliteUrl: isPdfRenderPass
+          ? (String(estimate.satellite_url || '').startsWith('https://maps.googleapis.com/') ? estimate.satellite_url : null)
+          : (estimate.satellite_url || null),
         intelligence,
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
@@ -20190,6 +20627,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // commercial identity too — its bundle card keeps the monthly contract
         // price, mirroring the SSR fork (codex #3128 r5).
         commercialAutoPriced: isCommercialAutoAcceptEstimate(estimate),
+        // Commercial glass release (GATE_ESTIMATE_COMMERCIAL_GLASS): the
+        // client activates the commercial copy pack + on-page proposal
+        // section only when the server affirms — fail-closed like
+        // glassDefault above.
+        commercialGlass: commercialGlassEnabled,
         // The non-commercial monthly identity (codex #3128 r6): a current
         // monthly member's accept preserves membership billing, so their
         // bundle's combined total is the real charge and must not be replaced
@@ -20414,6 +20856,7 @@ module.exports.extractEngineInputs = extractEngineInputs;
 module.exports.estimateFamilyKeysForAdoption = estimateFamilyKeysForAdoption;
 module.exports.appointmentMatchesEstimateFamily = appointmentMatchesEstimateFamily;
 module.exports.serviceFamilyKeyForAdoption = serviceFamilyKeyForAdoption;
+module.exports.recurringServicesWithSupplements = recurringServicesWithSupplements;
 module.exports.adoptionServiceModesForContract = adoptionServiceModesForContract;
 module.exports.netManualDiscountIntoFrequencyRow = netManualDiscountIntoFrequencyRow;
 module.exports.pricingBundleLacksManualDiscountNetting = pricingBundleLacksManualDiscountNetting;

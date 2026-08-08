@@ -58,7 +58,12 @@ async function getReviewLocationStatuses() {
       }
     }
     statuses[loc.id] = {
-      reviewsSource: hasGbpAccess ? 'gbp' : 'places_fallback',
+      // Without a Maps key the Places fallback cannot run — a non-GBP
+      // location is then fully offline ('none'), and the UI must not claim
+      // a partial feed remains active.
+      reviewsSource: hasGbpAccess
+        ? 'gbp'
+        : (process.env.GOOGLE_MAPS_API_KEY ? 'places_fallback' : 'none'),
       hasGbpAccess,
       authError,
     };
@@ -87,7 +92,7 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // GET /api/admin/reviews — all reviews with filters
 router.get('/', async (req, res, next) => {
   try {
-    const { location, rating, responded, search, page = 1, limit = 200 } = req.query;
+    const { location, rating, responded, search, page = 1, limit = 200, missing } = req.query;
 
     // Exclude stats rows and dismissed reviews from actual reviews.
     // Scoped to active WAVES_LOCATIONS so the displayed list stays
@@ -99,18 +104,51 @@ router.get('/', async (req, res, next) => {
       .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
       .where('google_reviews.reviewer_name', '!=', '_stats')
       .whereIn('google_reviews.location_id', activeLocationIds)
-      .modify(qb => { if (!showDismissed) qb.where(function() { this.where('google_reviews.dismissed', false).orWhereNull('google_reviews.dismissed'); }); })
+      // The removed-from-Google filter promises EVERY stamped review is
+      // reachable (it backs the removal-alert support workflow), so it must
+      // not be narrowed by the dismissed exclusion — a review dismissed
+      // before (or after) Google removed it is still removal evidence.
+      .modify(qb => {
+        if (!showDismissed && missing !== 'true') {
+          qb.where(function () {
+            this.where('google_reviews.dismissed', false)
+              .orWhereNull('google_reviews.dismissed')
+              // Stamped rows pass regardless of dismissal: the removal
+              // alert links to the DEFAULT view, and a review dismissed
+              // before Google removed it is still removal evidence — the
+              // dismissed exclusion must not hide it there.
+              .orWhereNotNull('google_reviews.missing_since');
+          });
+        }
+      })
       .select(
         'google_reviews.*',
         'customers.first_name as cust_first', 'customers.last_name as cust_last',
         'customers.waveguard_tier as cust_tier'
       )
-      .orderBy('google_reviews.review_created_at', 'desc');
+      .orderBy('google_reviews.review_created_at', 'desc')
+      // Deterministic tie-breaker for offset pagination: rows sharing a
+      // review_created_at (or null legacy timestamps) otherwise have
+      // undefined relative order, and a row that swaps pages between
+      // requests is silently skipped by Load More.
+      .orderBy('google_reviews.id', 'desc');
 
     if (location && location !== 'all') query = query.where('google_reviews.location_id', location);
     if (rating) query = query.where('google_reviews.star_rating', parseInt(rating));
+    // Dedicated removed-from-Google filter — makes every stamped review
+    // reachable regardless of the result cap on the default view (a large
+    // profile wipe stays fully inspectable).
+    if (missing === 'true') query = query.whereNotNull('google_reviews.missing_since');
     if (responded === 'true') query = query.modify(whereHasRealReply);
-    if (responded === 'false') query = query.modify(whereNeedsRealReply);
+    if (responded === 'false') {
+      // The default "Needs Reply" view must still surface reviews Google has
+      // removed (missing_since stamped) even when they were already replied
+      // to — the removal notification links here, and a replied-to removed
+      // review would otherwise be invisible in the default list.
+      query = query.where(function () {
+        this.modify(whereNeedsRealReply).orWhereNotNull('google_reviews.missing_since');
+      });
+    }
     if (search) query = query.where(function () {
       this.whereILike('google_reviews.reviewer_name', `%${search}%`)
         .orWhereILike('google_reviews.review_text', `%${search}%`)
@@ -136,7 +174,19 @@ router.get('/', async (req, res, next) => {
     for (const row of statsRows) {
       try {
         const parsed = JSON.parse(row.review_text);
-        googleStats[row.location_id] = { rating: parsed.rating, totalReviews: parsed.totalReviews, syncedAt: row.synced_at };
+        // Shape-validated (matches the dashboard + BI gates): '"corrupt"'
+        // or '{}' parses as valid JSON but contributes nothing — letting it
+        // into googleStats would count its location toward
+        // googleStatsComplete and expose a silently partial Google total.
+        // Finite totalReviews REQUIRED: consumers sum it, so a rating-only
+        // payload counting as "complete" would contribute zero reviews and
+        // silently under-report the Google total. Rating stays optional —
+        // a zero-review location legitimately has none, and every consumer
+        // guards it.
+        if (parsed && typeof parsed === 'object'
+          && Number.isFinite(parsed.totalReviews)) {
+          googleStats[row.location_id] = { rating: parsed.rating, totalReviews: parsed.totalReviews, syncedAt: row.synced_at };
+        }
       } catch { /* ignore */ }
     }
 
@@ -144,8 +194,15 @@ router.get('/', async (req, res, next) => {
     // Scoped to currently-configured WAVES_LOCATIONS so unreplied reviews
     // from retired/renamed GBPs don't pad the unresponded count and
     // skew the response-rate math (denominator already excludes them).
+    // Live rows only, across EVERY overview aggregate: the stats bar reports
+    // current Google state, and rows Google removed are retained evidence —
+    // they stay reachable through the list's dedicated Removed filter, but
+    // must not inflate Total Reviews / averages / star bars. (This also keeps
+    // the reply metrics symmetric: every reply path rejects stamped rows, so
+    // counting them on either side would distort the response rate.)
     const reviewsOnly = db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .whereIn('location_id', activeLocationIds);
     const [totals, unresponded, respondedCountRow, thisMonth, perLocation] = await Promise.all([
       reviewsOnly.clone().select(
@@ -161,9 +218,10 @@ router.get('/', async (req, res, next) => {
         .groupBy('location_id'),
     ]);
 
-    // Star breakdown (exclude stats rows; scope to active locations).
+    // Star breakdown (exclude stats rows and removed rows; active locations).
     const breakdown = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .whereIn('location_id', activeLocationIds)
       .select('star_rating').count('* as count')
       .groupBy('star_rating').orderBy('star_rating', 'desc');
@@ -179,22 +237,6 @@ router.get('/', async (req, res, next) => {
       locationBreakdown[row.location_id][String(row.star_rating)] = parseInt(row.count, 10) || 0;
     }
 
-    // Use Google's real totals if available
-    const totalGoogleReviews = Object.values(googleStats).reduce((s, g) => s + (g.totalReviews || 0), 0);
-
-    // For the response-rate calc, the numerator and denominator must come
-    // from the same population. `totalGoogleReviews` only sums locations
-    // that have a `_stats` row, so scope the unresponded count we expose
-    // for the rate-calc denominator to those same locations. Otherwise a
-    // location with reviews-but-no-_stats would inflate `unresponded`
-    // without contributing to the total, breaking `total - unresponded`.
-    const ratedLocationIds = Object.keys(googleStats).filter(id => (googleStats[id]?.totalReviews || 0) > 0);
-    const unrespondedInRatedRow = ratedLocationIds.length > 0
-      ? await reviewsOnly.clone().whereIn('location_id', ratedLocationIds).modify(whereNeedsRealReply).modify(whereNotDismissed).count('* as count').first()
-      : { count: 0 };
-    const avgGoogleRating = Object.values(googleStats).length > 0
-      ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)
-      : parseFloat(totals?.avg_rating || 0);
     // True only when every currently-configured location has a `_stats`
     // row whose synced_at is recent. Places sync runs hourly and
     // swallows per-location errors (services/google-business.js
@@ -204,8 +246,8 @@ router.get('/', async (req, res, next) => {
     // a retired location can't satisfy the count while a newly added
     // location has no row yet. The 24h window absorbs transient sync
     // hiccups; once any configured location goes a full day without a
-    // fresh _stats write, the client falls back to the
-    // responded+unresponded denominator.
+    // fresh _stats write, every stats consumer below falls back to the
+    // live-row aggregates (which exclude removed reviews).
     const STATS_FRESH_MS = 24 * 60 * 60 * 1000;
     const now = Date.now();
     const isFresh = (locId) => {
@@ -215,6 +257,30 @@ router.get('/', async (req, res, next) => {
       return t > 0 && (now - t) <= STATS_FRESH_MS;
     };
     const googleStatsComplete = WAVES_LOCATIONS.every(loc => isFresh(loc.id));
+
+    // Use Google's real totals only when the snapshot is fresh AND complete —
+    // completeness computed but ignored here previously meant stale _stats
+    // rows (removed Maps key, persistent Places failures) kept feeding the
+    // overview while the corrected live-row fallback never ran.
+    const totalGoogleReviews = googleStatsComplete
+      ? Object.values(googleStats).reduce((s, g) => s + (g.totalReviews || 0), 0)
+      : 0;
+
+    // For the response-rate calc, the numerator and denominator must come
+    // from the same population. `totalGoogleReviews` only sums locations
+    // that have a `_stats` row, so scope the unresponded count we expose
+    // for the rate-calc denominator to those same locations. Otherwise a
+    // location with reviews-but-no-_stats would inflate `unresponded`
+    // without contributing to the total, breaking `total - unresponded`.
+    const ratedLocationIds = googleStatsComplete
+      ? Object.keys(googleStats).filter(id => (googleStats[id]?.totalReviews || 0) > 0)
+      : [];
+    const unrespondedInRatedRow = ratedLocationIds.length > 0
+      ? await reviewsOnly.clone().whereIn('location_id', ratedLocationIds).modify(whereNeedsRealReply).modify(whereNotDismissed).whereNull('missing_since').count('* as count').first()
+      : { count: 0 };
+    const avgGoogleRating = googleStatsComplete && Object.values(googleStats).some(g => g.rating)
+      ? (Object.values(googleStats).reduce((s, g) => s + (g.rating || 0), 0) / Object.values(googleStats).filter(g => g.rating).length).toFixed(1)
+      : parseFloat(totals?.avg_rating || 0);
 
     const locationStatuses = await getReviewLocationStatuses();
 
@@ -229,6 +295,9 @@ router.get('/', async (req, res, next) => {
         reviewCreatedAt: r.review_created_at,
         matchedCustomer: r.cust_first ? { name: `${r.cust_first} ${r.cust_last}`, tier: r.cust_tier, id: r.customer_id } : null,
         syncedAt: r.synced_at,
+        // Non-null = this review no longer appears on Google (removed or
+        // filtered) as of this timestamp; the row is kept as evidence.
+        missingSince: r.missing_since || null,
       })),
       stats: {
         totalReviews: totalGoogleReviews || parseInt(totals?.total || 0),
@@ -245,7 +314,7 @@ router.get('/', async (req, res, next) => {
         breakdown: Object.fromEntries(breakdown.map(b => [b.star_rating, parseInt(b.count)])),
         locationBreakdown,
         perLocation: perLocation.map(l => {
-          const gs = googleStats[l.location_id];
+          const gs = googleStatsComplete ? googleStats[l.location_id] : null;
           return {
             locationId: l.location_id,
             count: gs?.totalReviews || parseInt(l.count),
@@ -271,6 +340,13 @@ router.post('/:id/reply', async (req, res, next) => {
 
     const review = await db('google_reviews').where({ id: req.params.id }).first();
     if (!review) return res.status(404).json({ error: 'Review not found' });
+    // A stamped (removed-from-Google) review has no live GBP resource to
+    // reply to. The client disables the editor, but a page loaded BEFORE the
+    // hourly sync stamped the row still has an active editor — reject here so
+    // a stale client gets a clear 409 instead of the GBP 502.
+    if (review.missing_since) {
+      return res.status(409).json({ error: 'This review has been removed from Google — replies are disabled.' });
+    }
 
     // Try to post reply to Google. When GBP is configured, do not mark the
     // review replied locally unless Google accepted the reply.
@@ -304,12 +380,54 @@ router.post('/:id/reply', async (req, res, next) => {
       }
 
       if (resourceName) {
+        // Liveness decision + external post + local record run under the
+        // per-location publish-claim mechanism (publishWithReviewLivenessLock):
+        // the claim is acquired under the sync advisory lock (so no in-flight
+        // cycle has already observed this review absent), the reconcile
+        // defers stamping claimed rows, and the local save below happens
+        // INSIDE the claim window — Google accepting a reply on a
+        // mid-removal review can no longer leave an external side effect
+        // with no local record.
+        const { publishWithReviewLivenessLock } = require('../services/social-content-studio');
+        let outcome = null;
         try {
-          await gbp.replyToReview(resourceName, replyText, review.location_id);
-          googlePosted = true;
+          outcome = await publishWithReviewLivenessLock(req.params.id, async () => {
+            await gbp.replyToReview(resourceName, replyText, review.location_id);
+            return true;
+          });
         } catch (e) {
           googleError = e.message;
           logger.error(`Google reply failed: ${e.message}`);
+        }
+        if (outcome) {
+          if (outcome.blocked) {
+            return res.status(409).json({
+              error: outcome.lockBusy
+                ? 'Review sync is in progress for this location — try again in a moment.'
+                : 'This review has been removed from Google — replies are disabled.',
+            });
+          }
+          try {
+            googlePosted = true;
+            const updated = await db('google_reviews')
+              .where({ id: req.params.id })
+              .whereNull('missing_since')
+              .update({ review_reply: replyText, reply_updated_at: db.fn.now() });
+            if ((Array.isArray(updated) ? updated.length : updated) === 0) {
+              // Defensive only — unreachable while the claim defers stamping.
+              return res.status(409).json({
+                error: 'This review was removed from Google while replying — the reply was not recorded locally.',
+                googlePosted,
+              });
+            }
+            await db('activity_log').insert({
+              admin_user_id: req.technicianId, action: 'review_replied',
+              description: `Replied to ${review.star_rating}-star review from ${review.reviewer_name} on ${review.location_id}`,
+            });
+            return res.json({ success: true, googlePosted });
+          } finally {
+            await outcome.releaseClaim();
+          }
         }
       } else {
         logger.warn(`No GBP resource name for review ${req.params.id} — reply not saved locally`);
@@ -323,9 +441,22 @@ router.post('/:id/reply', async (req, res, next) => {
       });
     }
 
-    await db('google_reviews').where({ id: req.params.id }).update({
-      review_reply: replyText, reply_updated_at: db.fn.now(),
-    });
+    // Conditional write, mirroring the IB submit path: the reconcile can
+    // stamp the row at any point after the checks above, and an
+    // unconditional update would record a reply that falsely reports as
+    // visible on Google. Zero rows updated ⇒ the stamp won the race.
+    const updated = await db('google_reviews')
+      .where({ id: req.params.id })
+      .whereNull('missing_since')
+      .update({
+        review_reply: replyText, reply_updated_at: db.fn.now(),
+      });
+    if ((Array.isArray(updated) ? updated.length : updated) === 0) {
+      return res.status(409).json({
+        error: 'This review was removed from Google while replying — the reply was not recorded locally.',
+        googlePosted,
+      });
+    }
 
     await db('activity_log').insert({
       admin_user_id: req.technicianId, action: 'review_replied',
@@ -339,7 +470,19 @@ router.post('/:id/reply', async (req, res, next) => {
 // POST /api/admin/reviews/:id/dismiss — dismiss a review from dashboard
 router.post('/:id/dismiss', async (req, res, next) => {
   try {
-    await db('google_reviews').where({ id: req.params.id }).update({ dismissed: true });
+    // Stamped rows are removal evidence, not inbox items: the Removed filter
+    // deliberately ignores the dismissed flag, so dismissing one only plants
+    // a trap — if Google reinstates the review, the stamp clears while
+    // `dismissed` remains and the live review vanishes from every normal
+    // view. Conditional update + 409 (the client hides the button; this
+    // guards stale pages, same as the reply lockout).
+    const updated = await db('google_reviews')
+      .where({ id: req.params.id })
+      .whereNull('missing_since')
+      .update({ dismissed: true });
+    if ((Array.isArray(updated) ? updated.length : updated) === 0) {
+      return res.status(409).json({ error: 'This review has been removed from Google — it is retained as evidence and cannot be dismissed.' });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -349,8 +492,13 @@ router.post('/dismiss-batch', async (req, res, next) => {
   try {
     const { ids } = req.body;
     if (!ids?.length) return res.status(400).json({ error: 'No IDs provided' });
-    await db('google_reviews').whereIn('id', ids).update({ dismissed: true });
-    res.json({ success: true, dismissed: ids.length });
+    // Stamped rows are skipped, not 409'd — a batch may legitimately mix in
+    // a row the hourly sync stamped since the page loaded.
+    const dismissed = await db('google_reviews')
+      .whereIn('id', ids)
+      .whereNull('missing_since')
+      .update({ dismissed: true });
+    res.json({ success: true, dismissed: Array.isArray(dismissed) ? dismissed.length : dismissed });
   } catch (err) { next(err); }
 });
 
@@ -1082,6 +1230,7 @@ router.get('/stats', async (req, res, next) => {
     // --- Avg response time (review_created_at to reply_updated_at) ---
     const responseTimes = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .modify(whereHasRealReply)
       .whereNotNull('reply_updated_at')
       .whereNotNull('review_created_at')
@@ -1096,6 +1245,8 @@ router.get('/stats', async (req, res, next) => {
     const unansweredRow = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
       .modify(whereNeedsRealReply)
+      // Removed reviews can't be answered — they'd sit in this metric forever.
+      .whereNull('missing_since')
       .where('review_created_at', '<', twentyFourHoursAgo)
       .count('* as count')
       .first();
@@ -1106,6 +1257,7 @@ router.get('/stats', async (req, res, next) => {
     sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
     const monthlyCounts = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .where('review_created_at', '>=', sixMonthsAgo.toISOString())
       .select(
         db.raw("TO_CHAR(review_created_at, 'YYYY-MM') as month"),
@@ -1141,6 +1293,7 @@ router.get('/stats', async (req, res, next) => {
     // --- Rating breakdown ---
     const breakdown = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .select('star_rating')
       .count('* as count')
       .groupBy('star_rating')
@@ -1169,12 +1322,12 @@ router.get('/qr/:locationId', async (req, res, next) => {
 
     const reviewUrl = loc.googleReviewUrl;
 
-    // Generate QR code SVG using a lightweight approach via Google Charts API
-    // This avoids adding a QR library dependency
-    const qrApiUrl = `https://chart.googleapis.com/chart?cht=qr&chs=400x400&chl=${encodeURIComponent(reviewUrl)}&choe=UTF-8`;
+    // QR via the QR Server API — avoids adding a QR library dependency.
+    // (Google Image Charts, the previous primary, was retired and returned
+    // 404s — review audit 2026-08-07. qrImageUrlAlt used to carry this same
+    // qrserver URL; collapsed since the primary now IS the working one.)
+    const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(reviewUrl)}`;
 
-    // Return the URL and also an inline SVG-compatible data URI
-    // For direct embedding, use the Google Charts URL
     const { format } = req.query;
 
     if (format === 'redirect') {
@@ -1187,8 +1340,6 @@ router.get('/qr/:locationId', async (req, res, next) => {
       locationName: loc.name,
       reviewUrl,
       qrImageUrl: qrApiUrl,
-      // Also provide a self-hosted version via QR Server API (no Google dependency)
-      qrImageUrlAlt: `https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(reviewUrl)}`,
     });
   } catch (err) { next(err); }
 });

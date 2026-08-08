@@ -72,7 +72,12 @@ const OPERATOR_PINNED_BUCKETS = new Set(['operator_intercept']);
 // article competes with it. Safety demotions (public-health, navigational,
 // explicit do_not_publish) still apply — only the recommended-asset upgrade
 // is skipped.
-const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap']);
+// listicle_family is ACTION-anchored rather than page-anchored: the row
+// exists solely to produce a listicle-shaped supporting blog (the brief
+// overlay keys on this bucket), so rerouting it to another asset type —
+// profiler upgrade or pre-sale customer-question demand — would silently
+// drop the listicle architecture the lane was mined for.
+const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap', 'listicle_family']);
 
 function isOperatorPinned(opportunity = {}) {
   if (OPERATOR_PINNED_BUCKETS.has(opportunity.bucket)) return true;
@@ -201,7 +206,8 @@ function route(opportunity, signals = {}) {
       notes.push(`customer_demand bonus: ${total} clustered mentions`);
       // If we have strong customer demand and no city-service page
       // route yet, prefer customer_question_page.
-      if (action === 'new_supporting_blog' && customer_signal.funnel_stage === 'pre-sale') {
+      if (action === 'new_supporting_blog' && customer_signal.funnel_stage === 'pre-sale'
+          && !PAGE_ANCHORED_BUCKETS.has(opportunity.bucket)) {
         notes.push('routed to customer_question_page: pre-sale FAQ demand');
         action = 'create_customer_question_page';
       }

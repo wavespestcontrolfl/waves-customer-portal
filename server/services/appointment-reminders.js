@@ -24,6 +24,10 @@ const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
 const { buildAppointmentLink } = require('./appointment-link');
+// Canonical service_type normalization — the estimate-backed label recovery
+// compares stored fall-through values against this exact transform; reusing
+// the writer's implementation keeps the two from drifting.
+const { cappedServiceType } = require('./slot-reservation');
 
 // Service states for which a reminder must never fire. A reminder row can be
 // armed (cancelled=false) while its underlying scheduled_service moved into one
@@ -607,18 +611,73 @@ function smsServiceLabelStored(name) {
   return cleaned || String(name);
 }
 
+// The estimate-accept path keeps scheduled_services.service_type canonical
+// for protocol/default lookups; when the accepted service has no canonical
+// mapping it falls back to the estimate's raw service_interest category
+// ("Termite" for a Pre-Slab Termiticide Treatment). That category is wrong
+// as customer-facing SMS copy — the accepted label survives in the
+// "Accepted service mix: X." notes line, so recover it from there. Only
+// single-service mixes qualify: multi-service visits are labeled by the
+// addon join in buildServiceLabel, and substituting a joined mix here
+// would list the same services twice. Visit-count prefixes ("6x Lawn
+// Care") are stripped — counts belong in estimates, not reminders.
+const SERVICE_MIX_NOTE_RE = /(?:^|\n)Accepted service mix:[ \t]*([^\n]+?)\.?[ \t]*(?:\n|$)/;
+
+function acceptedMixServiceName(notes) {
+  const match = SERVICE_MIX_NOTE_RE.exec(String(notes || ''));
+  if (!match) return null;
+  const cleaned = match[1]
+    .replace(/\b\d+x\s+/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  // Multi-service detection keys on the producer's literal ' + ' join
+  // (formatServiceProfileLabel in estimate-slot-availability.js) — '&' and
+  // commas appear in legitimate single-service names ("Tree & Shrub") and
+  // must not disqualify recovery.
+  if (!cleaned || cleaned.includes(' + ')) return null;
+  // No length cap: appointment_reminders.service_type is text
+  // (20260428000010 widened it precisely so joined labels never truncate).
+  return cleaned;
+}
+
+
+// Returns the accepted-estimate service name when the stored parent label is
+// just the estimate's raw category (the canonical-mapping fall-through
+// signature: service_type === estimates.service_interest, or the 'Estimate
+// service' default). Mapped canonical labels ("Quarterly Pest Control") and
+// anything without a usable mix line pass through unchanged.
+async function estimateBackedServiceName(scheduledServiceId, parentName, conn = db) {
+  const stored = String(parentName || '').trim();
+  if (!stored) return parentName;
+  try {
+    const svc = await conn('scheduled_services as s')
+      .leftJoin('estimates as e', 'e.id', 's.source_estimate_id')
+      .where('s.id', scheduledServiceId)
+      .first('s.notes', 'e.service_interest');
+    if (!svc) return parentName;
+    const interest = cappedServiceType(svc.service_interest, '');
+    if (stored !== interest && stored !== 'Estimate service') return parentName;
+    const mixName = acceptedMixServiceName(svc.notes);
+    if (!mixName || mixName === stored) return parentName;
+    return mixName;
+  } catch {
+    return parentName;
+  }
+}
+
 // Joined service label for multi-service appointments. Returns the parent name
 // alone for single-service visits, "A & B" for two, and Oxford-comma style
 // "A, B, and C" for three or more. The result is persisted into
 // appointment_reminders.service_type so the cron / reschedule / cancel paths
 // inherit it automatically without re-querying addons.
 async function buildServiceLabel(scheduledServiceId, parentName) {
-  const fallback = smsServiceLabel(parentName) || 'service';
+  const resolvedParent = await estimateBackedServiceName(scheduledServiceId, parentName);
+  const fallback = smsServiceLabel(resolvedParent) || 'service';
   try {
     const addons = await db('scheduled_service_addons')
       .where({ scheduled_service_id: scheduledServiceId })
       .pluck('service_name');
-    const all = [parentName, ...addons].map(smsServiceLabel).filter(Boolean);
+    const all = [resolvedParent, ...addons].map(smsServiceLabel).filter(Boolean);
     if (all.length <= 1) return fallback;
     if (all.length === 2) return `${all[0]} & ${all[1]}`;
     return `${all.slice(0, -1).join(', ')}, and ${all[all.length - 1]}`;
@@ -660,6 +719,10 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel }
   for (const r of Array.isArray(rows) ? rows : []) {
     let label = String(r.label || '').trim();
     if (r.scheduled_service_id) {
+      // coalesce() above re-reads the raw canonical ss.service_type, so the
+      // estimate fall-through category would resurface in merged labels
+      // without the same recovery registration applies.
+      label = await estimateBackedServiceName(r.scheduled_service_id, label, conn);
       try {
         const addons = await conn('scheduled_service_addons')
           .where({ scheduled_service_id: r.scheduled_service_id })
@@ -1231,7 +1294,13 @@ const AppointmentReminders = {
     const apptTime = parseETDateTime(appointmentTime);
     if (isNaN(apptTime.getTime())) return null;
     const now = new Date();
-    const serviceLabel = smsServiceLabelStored(serviceType) || serviceType || null;
+    // Label recovery reads through the caller's conn — borrowing a second
+    // pool connection while conn holds a transaction could stall the
+    // payment/booking txn behind pool exhaustion (max 20). Same-txn seeded
+    // visits are visible on conn and simply aren't fall-through cases; the
+    // helper fails open on error either way.
+    const estimateBacked = await estimateBackedServiceName(scheduledServiceId, serviceType, conn);
+    const serviceLabel = smsServiceLabelStored(estimateBacked) || estimateBacked || null;
     const reminderSource = source || 'system_seed';
     // Optional booking-time override (self-heal passes the visit's real
     // created_at): the 72h pass reads created_at as the booking time, so a
@@ -3778,6 +3847,8 @@ AppointmentReminders.smsServiceLabelStored = smsServiceLabelStored;
 AppointmentReminders._test = {
   maskPhone,
   sanitizeLookupError,
+  acceptedMixServiceName,
+  estimateBackedServiceName,
   apptChannel,
   deliverAppointmentNotice,
   deliverConfirmationByChannel,

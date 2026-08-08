@@ -1246,7 +1246,11 @@ function summarizeTurfProfileCompleteness(profile) {
     { key: 'lawn_sqft', label: 'Treatable turf sq ft' },
     { key: 'irrigation_status', label: 'Irrigation status', fallbackKeys: ['irrigation_type'] },
     { key: 'soil_test_date', label: 'Soil test date' },
-    { key: 'soil_k_ppm', label: 'Soil K ppm' },
+    // soil_k_ppm is deliberately NOT required: the owner retired its capture
+    // from the completion sheet (2026-08-07) and no client surface submits
+    // it, so requiring it would leave a turf_profile_incomplete warning
+    // nobody can clear (codex P2 on #3262). The column stays — a value, if
+    // one ever lands via API, still counts as profile data elsewhere.
   ];
 
   if (!profile) {

@@ -11,6 +11,10 @@ jest.mock('../models/db', () => {
   qb.whereIn = jest.fn(() => qb);
   qb.forUpdate = jest.fn(() => qb);
   qb.first = jest.fn();
+  // The bulk fast path pre-reads before-rows (FOR UPDATE) whenever tier or
+  // rate is in the update — for the #3245 rate-changed ledger sync and the
+  // #3140 implied-monthly lane stamp. Empty = no rate changes, no stamps.
+  qb.select = jest.fn(() => Promise.resolve([]));
   qb.update = jest.fn(() => Promise.resolve(1));
   const db = jest.fn(() => qb);
   // trx behaves like db() — the executor only uses trx('customers').where().update()
@@ -152,14 +156,17 @@ test('a bulk ADDRESS edit takes the per-row path: mirror + fan-out + re-geocode 
   expect(geocoder.ensureCustomerGeocoded).toHaveBeenCalledWith('cust-b');
 });
 
-test('a bulk NON-address edit keeps the single-statement path', async () => {
+test('a bulk NON-address edit skips per-customer fanout (one transaction, no address machinery)', async () => {
   const result = await executeTool('bulk_update_customers', {
     customer_ids: ['cust-a', 'cust-b'],
     updates: { waveguard_tier: 'gold' },
   });
 
   expect(result.success).toBe(true);
-  expect(db.transaction).not.toHaveBeenCalled();
+  // The non-address path wraps the bulk scalar write + plan-rate-ledger
+  // syncs in ONE transaction (codex #3245 r3) — but never the per-customer
+  // address/email fanout machinery.
+  expect(db.transaction).toHaveBeenCalledTimes(1);
   expect(customerProperties.syncPrimaryAddress).not.toHaveBeenCalled();
   expect(addressFanout.propagateCustomerAddressChange).not.toHaveBeenCalled();
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();

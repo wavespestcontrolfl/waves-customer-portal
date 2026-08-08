@@ -1028,6 +1028,52 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Stripe webhook events the app failed to apply (ledger rows with error /
+  // abandoned claims in the last 48h — the lookback deliberately exceeds
+  // the daily interval + in-flight grace windows) plus Stripe-side delivery
+  // failures reconciled against the local ledger
+  // (kill: STRIPE_WEBHOOK_HEALTH_DISABLED=1) — daily 7:04am ET. Without
+  // this, dead events sit silently until the 3:30am 90-day purge erases
+  // them (2026-08-07 infra audit). A check that cannot complete must land
+  // in job_health as failed, never swallowed — hence the throws below.
+  cron.schedule('30 4 7 * * *', async () => {
+    try {
+      const lockRes = await runExclusive('stripe-webhook-health', async () => {
+        const { runStripeWebhookHealthCheck } = require('./stripe-webhook-health');
+        const result = await runStripeWebhookHealthCheck();
+        logger.info(`[stripe-webhook-health] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count || 0, stripeSide: result.stripeFailureCount || 0 })}`);
+        // Delivery-BLOCKING skips count as failures; expected skips
+        // (nothing_found / disabled / recent_send) stay healthy. A failed
+        // Stripe-side probe or ledger query fails the run even when the
+        // alert email went out — the check did not fully complete.
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient'
+            || result?.skipped === 'stripe_check_failed'
+            || result?.stripeCheckError || result?.ledgerCheckError) {
+          const reason = result.skipped
+            || (result.ledgerCheckError ? 'ledger_check_failed' : null)
+            || (result.stripeCheckError ? 'stripe_check_failed' : null)
+            || 'send_failed';
+          throw new Error(`stripe-webhook-health check did not complete (${reason})`);
+        }
+      });
+      // A pool-exhausted tick returns {skipped} instead of throwing —
+      // surface it so job_health records the missed daily run (same
+      // contract as the sibling watchers above).
+      if (lockRes && lockRes.skipped && lockRes.reason !== 'lease_held') {
+        // lease_held = another instance is running this check (deploy
+        // overlap) — that IS the daily run, not a miss.
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('stripe-webhook-health').catch(() => {});
+        await recordJobEnd('stripe-webhook-health', t0, new Error(`tick skipped: ${lockRes.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`stripe-webhook-health tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Stripe webhook health check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Today's unworked callbacks / follow-ups / unanswered texts (kill:
   // UNWORKED_COMMS_WATCHER_DISABLED=1) — daily 6:17pm ET, after the 6:00pm
   // missed-appointment check and before the 6:40pm stale-visit sweep.
@@ -1156,14 +1202,17 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
-  // QUARTERLY (Jan/Apr/Jul/Oct 1st, 4AM) — Competitor keyword gap mining.
-  // Pulls tracked competitors' ranked keywords from DataForSEO Labs, diffs
-  // against our rankings + live sitemap, enqueues blog gaps the GSC/AEO
-  // miners structurally can't see (zero-footprint topics). ~$1.30/run.
+  // MONTHLY (1st, 4AM) — Competitor keyword gap mining. Pulls tracked
+  // competitors' ranked keywords from DataForSEO Labs, diffs against our
+  // rankings + live sitemap, enqueues blog gaps the GSC/AEO miners
+  // structurally can't see (zero-footprint topics). ~$1.30/run.
+  // Monthly matches the queue's 30-day row expiry — on the original
+  // quarterly cadence, 96 of 157 mined rows expired unclaimed during the
+  // 60-day dead window between shelf life and the next revival re-mine.
   // runExclusive: the Labs pulls cost real money — never double-run.
-  cron.schedule('0 4 1 1,4,7,10 *', async () => {
+  cron.schedule('0 4 1 * *', async () => {
     if (!isEnabled('seoIntelligence')) return;
-    logger.info('Running: Competitor keyword gap mining (quarterly)');
+    logger.info('Running: Competitor keyword gap mining (monthly)');
     try {
       await runExclusive('competitor-gap-miner', async () => {
         const miner = require('./seo/competitor-gap-miner');
@@ -1449,6 +1498,36 @@ function initScheduledJobs() {
       await ImpactTracker.checkPending({});
       await ImpactTracker.checkAeoVisibility({});
     } catch (err) { logger.error(`Impact tracker failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 8:10AM ET — Parked-content digest (owner-authorized lane
+  // 2026-08-07). Emails contact@ an ACT: rollup of autonomous runs parked as
+  // completed_pending_review — the non-approvable kinds the email-approval
+  // poller never emails, which otherwise sit invisibly on the review queue.
+  // Exception-based: sends only when NEW runs parked since the last SENT
+  // digest; Sundays send a full digest whenever the parked set is non-empty;
+  // an empty set never sends. Read-only over runs/opportunities — the only
+  // write is its own ops_email_send_state watermark, advanced ONLY after a
+  // confirmed send (fail-closed). runExclusive so a deploy-overlap tick
+  // can't double-send. Kill switch: unset GATE_PARKED_RUN_DIGEST.
+  cron.schedule('10 8 * * *', async () => {
+    if (!isEnabled('parkedRunDigest')) return;
+    try {
+      await runExclusive('parked-run-digest', async () => {
+        const parkedRunDigest = require('./content/parked-run-digest');
+        const result = await parkedRunDigest.runParkedRunDigest();
+        if (result?.sent) {
+          logger.info(`Parked-run digest sent: ${result.total} parked (${result.newCount} new)`);
+        }
+        // Delivery-blocking failures must surface in job_health as FAILED —
+        // a visibility lane that fails quietly is the bug this lane exists
+        // to fix. Quiet skips (gate off / nothing new) stay successful.
+        if (result?.sent === false) throw new Error(`parked-run digest send failed: ${result.error || 'unknown'}`);
+        if (result?.skipped === 'query_failed' || result?.skipped === 'recipient') {
+          throw new Error(`parked-run digest blocked: ${result.skipped}`);
+        }
+      });
+    } catch (err) { logger.error(`Parked-run digest failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -3197,7 +3276,7 @@ function initScheduledJobs() {
       const { sendEstimateNow } = require('../routes/admin-estimates');
       for (const est of scheduled) {
         try {
-          const result = await sendEstimateNow(est, est.send_method || 'both');
+          const result = await sendEstimateNow(est, est.send_method || 'both', { callerPreClaimed: true });
           if (result.sent) {
             const suffix = result.partialFailure ? ` with channel issues (${result.failedChannels.join(', ')})` : '';
             logger.info(`Scheduled estimate ${est.id} sent${suffix}`);

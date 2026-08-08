@@ -140,6 +140,25 @@ router.use(rateLimit({
 // 'void' matches the services' terminal set (reserveSlot's ESTIMATE_TERMINAL
 // list) so the router and service layers reject the same states.
 const SLOT_BLOCKED_STATES = new Set(['accepted', 'declined', 'expired', 'void']);
+
+// A persisted bermuda-suppression estimate takes NO money, holds, or slot
+// reservations while GATE_BERMUDA_SUPPRESSION is off — the money-boundary
+// mirror of the accept/send/manual-accept gates (codex #3272 r5 P0: a
+// PaymentIntent minted gate-on must never finalize gate-off). Returns a
+// sent 409 (caller must `return` it) or null when unaffected. Callers'
+// row loads all carry estimate_data (`.first()` or an explicit column).
+function rejectGatedSuppressionEstimate(res, estimate = {}) {
+  const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
+  if (estimateDataCarriesBermudaSuppression(estimate.estimate_data)
+    && !require('../config/feature-gates').gateEnvValue('GATE_BERMUDA_SUPPRESSION')) {
+    return res.status(409).json({
+      error: 'This estimate includes an option that is temporarily unavailable. Please contact our office and we will refresh your quote.',
+      code: 'BERMUDA_SUPPRESSION_GATED',
+    });
+  }
+  return null;
+}
+
 function rejectIneligibleEstimate(res, estimate = {}) {
   // Parity with GET /:token/data's exposure gate (isEstimateCustomerViewable,
   // estimate-public.js): archived, unpublished (draft/scheduled), send_failed,
@@ -155,6 +174,8 @@ function rejectIneligibleEstimate(res, estimate = {}) {
   if (SLOT_BLOCKED_STATES.has(estimate.status)) {
     return res.status(409).json({ error: 'Estimate is no longer active' });
   }
+  const gated = rejectGatedSuppressionEstimate(res, estimate);
+  if (gated) return gated;
   return null;
 }
 
@@ -542,6 +563,8 @@ router.post('/:token/deposit-intent', depositLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates').where({ token }).first();
     if (!estimate) return res.status(404).json({ error: 'Not found' });
+    const suppressionGated = rejectGatedSuppressionEstimate(res, estimate);
+    if (suppressionGated) return suppressionGated;
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
     if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -842,6 +865,8 @@ router.post('/:token/deposit-quote', depositLimiter, async (req, res) => {
     }
     const estimate = await db('estimates').where({ token }).first();
     if (!estimate) return res.status(404).json({ error: 'Not found' });
+    const suppressionGated = rejectGatedSuppressionEstimate(res, estimate);
+    if (suppressionGated) return suppressionGated;
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
     if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
 
@@ -879,6 +904,8 @@ router.post('/:token/deposit-finalize', depositLimiter, async (req, res) => {
     }
     const estimate = await db('estimates').where({ token }).first();
     if (!estimate) return res.status(404).json({ error: 'Not found' });
+    const suppressionGated = rejectGatedSuppressionEstimate(res, estimate);
+    if (suppressionGated) return suppressionGated;
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
     if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
 
@@ -918,6 +945,8 @@ router.post('/:token/deposit-reset', depositLimiter, async (req, res) => {
     }
     const estimate = await db('estimates').where({ token }).first();
     if (!estimate) return res.status(404).json({ error: 'Not found' });
+    const suppressionGated = rejectGatedSuppressionEstimate(res, estimate);
+    if (suppressionGated) return suppressionGated;
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted', exemptReason: 'already_accepted' });
     if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
 
@@ -949,6 +978,8 @@ router.post('/:token/card-hold-intent', depositLimiter, async (req, res) => {
   try {
     const estimate = await db('estimates').where({ token }).first();
     if (!estimate) return res.status(404).json({ error: 'Not found' });
+    const suppressionGated = rejectGatedSuppressionEstimate(res, estimate);
+    if (suppressionGated) return suppressionGated;
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
     if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
     await reconcileFrozenMembershipSnapshot(estimate);
@@ -1052,6 +1083,8 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
   try {
     const estimate = await db('estimates').where({ token }).first();
     if (!estimate) return res.status(404).json({ error: 'Not found' });
+    const suppressionGated = rejectGatedSuppressionEstimate(res, estimate);
+    if (suppressionGated) return suppressionGated;
     if (estimate.status === 'accepted') return res.status(409).json({ error: 'Estimate already accepted' });
     if (!isEstimateAcceptActive(estimate)) return res.status(409).json({ error: 'Estimate is no longer active' });
     await reconcileFrozenMembershipSnapshot(estimate);

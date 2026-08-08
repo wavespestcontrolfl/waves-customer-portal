@@ -49,6 +49,35 @@ export function useGlassCopyActive() {
   return useSyncExternalStore(subscribeGlassDefault, glassCopyActive, glassCopyActive);
 }
 
+// Commercial glass release — server-driven exactly like glassDefault above
+// (GATE_ESTIMATE_COMMERCIAL_GLASS → cta.commercialGlass on /data). While off,
+// commercial rows keep today's behavior: glassServiceSlug falls through to
+// the residential slugs and the residential copy renders. Same module-global
+// + subscriber shape as glassDefault so a token-B payload can't paint torn
+// commercial/residential copy after a token-A load.
+let commercialGlassReleased = false;
+const commercialGlassSubscribers = new Set();
+
+export function setCommercialGlass(on) {
+  const next = on === true;
+  if (next === commercialGlassReleased) return;
+  commercialGlassReleased = next;
+  for (const notify of [...commercialGlassSubscribers]) notify();
+}
+
+export function commercialGlassActive() {
+  return commercialGlassReleased;
+}
+
+export function subscribeCommercialGlass(listener) {
+  commercialGlassSubscribers.add(listener);
+  return () => commercialGlassSubscribers.delete(listener);
+}
+
+export function useCommercialGlassActive() {
+  return useSyncExternalStore(subscribeCommercialGlass, commercialGlassActive, commercialGlassActive);
+}
+
 // ── Service-agnostic strings ────────────────────────────────────────────────
 export const GLASS_COPY = {
   ctaMain: 'Approve my plan and schedule',
@@ -121,8 +150,62 @@ const ONE_TIME_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · App
 // CTA covers (rodent plans, unknown/mixed compositions).
 const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No pressure — approve when you’re ready';
 
+// Commercial pack — every claim is grounded in standing owner statements or
+// an already-shipped surface: interior treatment included on request, tenant
+// re-services included in the plan, tenants can join the portal/app for
+// notifications, no-contract + Auto Pay + cancel-in-app terms, and
+// satellite/county-records pricing (the same methodology the residential
+// aiBody claims). The residential-only promises (90-day money-back, waived
+// setup, "unlimited callbacks 100% guaranteed") are deliberately absent —
+// they are not established commercial terms, so this pack must not inherit
+// them (which is why commercial needed its own pack at all).
+// No billing-method claims here (codex #3281 r2): commercial accepts run
+// the MANUAL invoicing lane (commercialAcceptDepositExempt —
+// 'commercial_manual_billing'), so "Auto Pay" / "cancel in the app" would
+// describe a flow commercial accounts don't get. Structural terms only.
+const GLASS_COMMERCIAL_CTA_MICRO = 'No long-term contract · Licensed & insured · Satisfaction guaranteed';
+const GLASS_COMMERCIAL = {
+  heroH1: 'Hello {first}, your commercial service plan is ready!',
+  heroSub: 'Priced from your property’s actual specs — recurring exterior protection with interior service included on request, tenant-reported pests handled between visits, and no long-term contract.',
+  eyebrow: 'Your commercial service plan',
+  aiTitle: 'Your price was built from your property — not somebody else’s',
+  aiBody: 'We measured your building, lot, and grounds from satellite imagery and county property records before pricing this plan — the price fits your actual property, not a generic average.',
+  askChips: [
+    'What does each visit include?',
+    'Do you treat inside the units?',
+    'What if a tenant reports a pest?',
+    'How do I cancel if I need to?',
+  ],
+  ctaMicro: GLASS_COMMERCIAL_CTA_MICRO,
+};
+
+// Terms-neutral commercial pack (codex #3281 r3) — the commercial identity
+// is confirmed but the PEST pack's promises are not: authored proposals
+// (operator-entered terms govern, and may state a commitment or per-visit
+// interior billing the pest hero would contradict) and the non-pest
+// commercial subtypes (lawn/tree/mosquito/termite/rodent never carry the
+// interior-treatment or tenant-re-service promises). Every string here is
+// claim-free: no scope, contract, or pricing-methodology assertions — the
+// line items and authored terms speak for themselves.
+const GLASS_COMMERCIAL_NEUTRAL = {
+  heroH1: 'Hello {first}, your commercial service plan is ready!',
+  heroSub: 'Prepared for your property — the services, pricing, and terms below show exactly what’s included.',
+  eyebrow: 'Your commercial service plan',
+  aiTitle: 'This plan was prepared for your property',
+  aiBody: 'The services and pricing in this plan were scoped to your property specifically — not a generic average.',
+  askChips: [
+    'What does each visit include?',
+    'How often are visits?',
+    'How was this priced?',
+    'How do I get started?',
+  ],
+  ctaMicro: 'Licensed & insured · Satisfaction guaranteed',
+};
+
 const GLASS_PACKS = {
   pest_control: GLASS_PEST,
+  commercial: GLASS_COMMERCIAL,
+  commercial_neutral: GLASS_COMMERCIAL_NEUTRAL,
   lawn_care: {
     heroH1: 'Hello {first}, your greener-lawn game plan is ready!',
     heroSub: 'Built for your actual turf — feeding, weed control, and fungus watch on a program that fits your lawn, backed by a 90-day money-back guarantee.',
@@ -313,7 +396,12 @@ export function glassOneTimeHeroOverlay(pack, { reviewBeforeBooking = false } = 
 export function glassCtaMicroFor(serviceCategory) {
   // Row/section slugs (PriceCard serviceKey) and page categories
   // (deriveServiceCategory) name rodent differently — fold them together.
-  const category = serviceCategory === 'rodent_bait' ? 'rodent' : serviceCategory;
+  // Commercial row slugs (commercial_pest) fold to the commercial pack the
+  // same way, so an auto-priced commercial CTA never advertises the
+  // residential contract/callback/guarantee terms.
+  const category = serviceCategory === 'rodent_bait' ? 'rodent'
+    : serviceCategory === 'commercial_pest' ? 'commercial'
+    : serviceCategory;
   const pack = GLASS_PACKS[category];
   return pack?.ctaMicro || GLASS_COPY.ctaMicro;
 }
@@ -346,6 +434,16 @@ export function glassCtaMicroForKeys(keys) {
 // pest copy, so callers keep the server-provided wording on null.
 export function glassServiceSlug(keyOrLabel) {
   const raw = String(keyOrLabel || '').toLowerCase();
+  // Commercial PEST rows (commercial_pest keys / "Commercial Pest Control"
+  // labels) get their own stack — but ONLY once the server has released
+  // commercial glass (cta.commercialGlass → setCommercialGlass). Scoped to
+  // pest deliberately: commercial_lawn / _tree_shrub / _mosquito /
+  // _termite_bait / _rodent_bait keep their existing service slugs (codex
+  // #3281 r1 — mapping every commercial row here promised pest-specific
+  // interior/tenant terms on non-pest commercial plans). While the gate is
+  // off this falls through to the residential slugs, exactly today's
+  // behavior.
+  if (commercialGlassReleased && raw.includes('commercial') && raw.includes('pest')) return 'commercial_pest';
   if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('mosquito')) return 'mosquito';
@@ -425,6 +523,17 @@ const GLASS_SERVICE_INCLUSIONS = {
     'Targeted drill-and-foam treatment at active termite points — not blanket spraying',
     'Recurring coverage on your selected cadence — pressure stays down because we keep showing up',
     'Every treatment documented and carried forward',
+  ],
+  // Commercial stack — same grounding rule as the GLASS_COMMERCIAL pack:
+  // owner-stated terms and shipped-app facts only, no residential guarantee
+  // claims. "Products applied" is what the service report already documents.
+  commercial_pest: [
+    'Recurring exterior treatment — foundation, entry points, and grounds on your scheduled cadence',
+    'Interior treatment included on request — no extra charge, no surprise fees',
+    'Tenant-reported pests handled between visits — re-service requests are included in the plan',
+    'Tenants can be added to the Waves app for arrival alerts and service reports',
+    'Every visit documented — time on site, areas treated, and products applied',
+    'No long-term contract — stay because it works, not because you\u2019re locked in',
   ],
 };
 

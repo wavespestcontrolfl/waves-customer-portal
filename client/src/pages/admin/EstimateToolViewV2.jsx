@@ -125,6 +125,18 @@ const PRE_SLAB_PRODUCT_META = {
   },
 };
 
+// Plan status for the existing-customer chip. The hydrated edit-source
+// payload carries the server's canonical membership verdict (hasActivePlan:
+// sentinel tiers like Commercial are NOT members even with a rate; a
+// rate-only member with a null tier IS one — raw tier truthiness gets both
+// wrong). Customer-search rows don't carry the boolean, so they keep the
+// legacy tier-truthiness reading and their rendering is unchanged.
+function matchHasActivePlan(match) {
+  if (!match) return false;
+  if (typeof match.hasActivePlan === "boolean") return match.hasActivePlan;
+  return !!(match.tier && match.tier !== "null");
+}
+
 function resolvePreSlabJobContextForForm(form) {
   if (form?._preslabJobContextEdited) return form.preslabJobContext || "standalone";
   const volume = String(form?.preslabVolume || "NONE").trim().toUpperCase();
@@ -554,6 +566,16 @@ const RODENT_GUARANTEE_ELIGIBILITY_KEYS = [
   "rgExclusionCompleted",
   "rgSanitationBaseline",
   "rgNoActivityAfterFinalCheck",
+];
+
+// Per-job eligibility confirmations that must never survive a property/
+// customer identity change or a "next estimate" reset: the rodent-guarantee
+// flags plus the bermuda-suppression add-on (its cultivar / season / turf-
+// stress / %-infestation eligibility is verified per lawn, never carried to
+// another property).
+const PER_JOB_ELIGIBILITY_KEYS = [
+  ...RODENT_GUARANTEE_ELIGIBILITY_KEYS,
+  "bermudaSuppression",
 ];
 
 const MOSQUITO_PROTOCOL_STEPS = [
@@ -2170,6 +2192,7 @@ export default function EstimateToolViewV2({
     roachFeeOverride: "",
     standaloneRoachFeeOverride: "",
     lawnFreq: "9",
+    bermudaSuppression: false,
     measuredTurfSf: "",
     pestFreq: "4",
     plugArea: "",
@@ -2358,13 +2381,15 @@ export default function EstimateToolViewV2({
     initialServiceInterest,
   ]);
 
-  // Rodent-guarantee eligibility confirmations are per-job. A rep can change the
+  // Per-job eligibility confirmations (rodent-guarantee flags + the bermuda-
+  // suppression add-on) never survive an identity change. A rep can change the
   // property/customer identity through many paths (prefill props, address
   // autocomplete, property lookup, customer search, manual edits) that each call
   // setForm directly, so enforce the reset centrally: whenever the address or
-  // customer identity changes, drop the four rg* flags so the guarantee can't be
-  // re-priced for a new property without fresh confirmation. (toggle() still
-  // clears them when the guarantee is switched off; nextEstimate resets too.)
+  // customer identity changes, drop the flags so neither the guarantee nor the
+  // cultivar/season-gated suppression program can be re-priced for a new
+  // property without fresh confirmation. (toggle() still clears the rg* flags
+  // when the guarantee is switched off; nextEstimate resets everything.)
   const rgIdentityKey = `${form.address || ""}|${form.customerId || ""}|${form.customerName || ""}|${form.customerEmail || ""}`;
   const rgIdentityRef = useRef(rgIdentityKey);
   useEffect(() => {
@@ -2372,10 +2397,10 @@ export default function EstimateToolViewV2({
     rgIdentityRef.current = rgIdentityKey;
     // Only act when confirmations were actually set, so a plain address/contact
     // edit on a non-guarantee estimate never needlessly wipes a valid quote.
-    if (!RODENT_GUARANTEE_ELIGIBILITY_KEYS.some((k) => form[k])) return;
+    if (!PER_JOB_ELIGIBILITY_KEYS.some((k) => form[k])) return;
     setForm((f) => {
       const next = { ...f };
-      for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
+      for (const k of PER_JOB_ELIGIBILITY_KEYS) next[k] = false;
       return next;
     });
     // The generated estimate baked the (now-reset) flags into its engineRequest;
@@ -2384,6 +2409,16 @@ export default function EstimateToolViewV2({
     setSavedId(null);
     setSavedViewUrl(null);
   }, [rgIdentityKey, form]);
+
+  // Leaving the St. Augustine track clears the suppression confirmation too —
+  // hiding the checkbox alone would let a track round-trip restore it checked
+  // and price the add-on without fresh cultivar/season verification (same
+  // per-job rule as the lawn-deselect / identity / next-estimate resets).
+  useEffect(() => {
+    if (form.grassType !== "st_augustine" && form.bermudaSuppression) {
+      setForm((f) => ({ ...f, bermudaSuppression: false }));
+    }
+  }, [form.grassType, form.bermudaSuppression]);
 
   // ── live preview (verbatim from V1) ───────────────────────────
   const livePreview = useMemo(() => {
@@ -2491,8 +2526,8 @@ export default function EstimateToolViewV2({
       // factors), then visits/yr -> levelized monthly.
       const mqSeasonal = form.mosquitoProgram === "seasonal9";
       const mqAnchors = mqSeasonal
-        ? [[8000, 73], [12000, 76], [18000, 79], [35000, 86], [62000, 97]]
-        : [[8000, 66], [12000, 69], [18000, 73], [35000, 77], [73500, 86]];
+        ? [[8000, 77], [12000, 80], [18000, 83], [35000, 90], [64500, 102]]
+        : [[8000, 69], [12000, 72], [18000, 77], [35000, 81], [73500, 90]];
       const mqTreatable = Math.max(0, lotSqft - (sqft || 0));
       const mqStepped = Math.ceil(mqTreatable / 500) * 500;
       let mqPerVisit = mqAnchors[mqAnchors.length - 1][1];
@@ -2795,6 +2830,12 @@ export default function EstimateToolViewV2({
           customerName: d.customerName || "",
           hasInputs: !!d.inputs,
         });
+        // The Customer Lookup panel's only linked-customer visual is this
+        // chip — without seeding it here, an opened estimate always shows
+        // the empty search state even though the row IS linked (and
+        // form.customerId was seeded above). Display-only: pricing inputs
+        // like isRecurringCustomer stay exactly as the estimate saved them.
+        setExistingCustomerMatch(d.customer || null);
       } catch (e) {
         if (!cancelled) {
           setEditMode(null);
@@ -2818,6 +2859,9 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
     setPriceRecomputeNotice(null);
     setGroupAnchorId(null);
+    // Hydration now seeds the linked-customer chip — clear it with the rest
+    // of the edit state or it lingers over the next blank form.
+    setExistingCustomerMatch(null);
   }
 
   const set = useCallback((key, val) => {
@@ -2870,6 +2914,12 @@ export default function EstimateToolViewV2({
       // they can't be silently reused if it's re-enabled for a different scope.
       if (key === "svcRodentGuarantee" && f.svcRodentGuarantee) {
         for (const k of RODENT_GUARANTEE_ELIGIBILITY_KEYS) next[k] = false;
+      }
+      // Same per-job rule for the bermuda-suppression confirmation: deselecting
+      // Lawn Care clears it, so reselecting never restores a checked add-on
+      // without fresh verification.
+      if (key === "svcLawn" && f.svcLawn) {
+        next.bermudaSuppression = false;
       }
       if (key === "svcInjection" && !f.svcInjection && String(f.palmTreatmentCount || "").trim() === "") {
         next.palmTreatmentCount = f.palmCount || "";
@@ -3229,6 +3279,27 @@ export default function EstimateToolViewV2({
   // the choice, so the save-time recompute check sees no drift to warn about
   // (codex P1). Fail closed: null/false hides the control entirely.
   const [termiteRentalAvailable, setTermiteRentalAvailable] = useState(false);
+  // Bermuda-suppression add-on availability (GATE_BERMUDA_SUPPRESSION, read
+  // at request time server-side). Explicit true only — 404 / transport
+  // failure / older server all keep the option hidden rather than offering
+  // a control the engine would reject with a 400.
+  const [bermudaSuppressionAvailable, setBermudaSuppressionAvailable] = useState(false);
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const r = await adminFetch("/admin/pricing-config/lawn_pricing_v2");
+        if (!r.ok) return;
+        const row = await r.json();
+        if (active) setBermudaSuppressionAvailable(row?.subFeaturesAvailable?.bermudaSuppression === true);
+      } catch {
+        /* ignore — stays unavailable */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
   useEffect(() => {
     (async () => {
       try {
@@ -3925,6 +3996,20 @@ export default function EstimateToolViewV2({
       const options = {
         grassType: form.grassType || "st_augustine",
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
+        // Availability gates only the CHECKBOX (new selections); a selection
+        // already in the form — e.g. seeded from a saved estimate's inputs
+        // while the availability probe is still in flight — is ALWAYS
+        // forwarded, and the server's live gate rejects it loudly if off.
+        // Silently dropping it here priced an ordinary lawn ladder under a
+        // checked box (codex #3272 r2). Commercial estimates are excluded:
+        // the engine's commercial branch ignores the option, so forwarding
+        // it would stamp a suppression-bearing engineRequest onto an
+        // ordinary commercial quote and falsely trip the send/accept gate
+        // later (codex #3272 r5).
+        ...(form.svcLawn && form.grassType === "st_augustine" && form.bermudaSuppression
+          && !isCommercialEstimateInput(form)
+          ? { bermudaSuppression: true }
+          : {}),
         pestFreq: parseInt(overrides.pestFreq ?? form.pestFreq, 10) || 4,
         manualDiscount,
         serviceSpecificDiscounts,
@@ -4664,7 +4749,7 @@ export default function EstimateToolViewV2({
       _boracareSqftAuto: false,
       _preslabSqftAuto: false,
       // Guarantee eligibility is per-job; the next property must re-confirm.
-      ...Object.fromEntries(RODENT_GUARANTEE_ELIGIBILITY_KEYS.map((k) => [k, false])),
+      ...Object.fromEntries(PER_JOB_ELIGIBILITY_KEYS.map((k) => [k, false])),
     }));
     // Starting the next customer's quote ends any in-place edit — otherwise
     // Save changes would still PUT the new quote over the estimate that was
@@ -5557,13 +5642,12 @@ export default function EstimateToolViewV2({
                     {existingCustomerMatch.firstName}{" "}
                     {existingCustomerMatch.lastName}
                   </strong>
-                  {existingCustomerMatch.tier &&
-                  existingCustomerMatch.tier !== "null"
+                  {matchHasActivePlan(existingCustomerMatch)
                     ? " · Recurring plan"
                     : " · No active plan"}
-                  {existingCustomerMatch.tier &&
-                  existingCustomerMatch.tier !== "null" &&
-                  existingCustomerMatch.monthlyRate > 0
+                  {matchHasActivePlan(existingCustomerMatch) &&
+                  existingCustomerMatch.monthlyRate > 0 &&
+                  form.isRecurringCustomer === "YES"
                     ? " · 15% loyalty discount applied"
                     : ""}
                 </div>
@@ -6004,6 +6088,42 @@ export default function EstimateToolViewV2({
                       />
                     </FieldV2>
                   </div>{" "}
+                  {/* Bermuda-in-St.-Augustine suppression add-on — dark behind
+                      GATE_BERMUDA_SUPPRESSION. The control renders when the
+                      server reports the gate on (subFeaturesAvailable) OR the
+                      form already carries a saved selection — while gated off
+                      the checkbox is the only way to UNCHECK a reopened saved
+                      estimate (every regeneration/send 409s until it's
+                      removed). The engine additionally fails closed, so a
+                      stale client can never produce a silent unchanged price.
+                      St. Augustine track only. */}
+                  {(bermudaSuppressionAvailable || form.bermudaSuppression) && form.grassType === "st_augustine" && (
+                    <div className="mt-3">
+                      <CheckboxV2
+                        k="bermudaSuppression"
+                        label="Bermudagrass suppression add-on (baked into per-application price)"
+                      />
+                      {form.bermudaSuppression && !bermudaSuppressionAvailable && (
+                        <div className="ml-7 mb-1 text-12 text-zinc-600">
+                          This add-on is currently disabled (GATE_BERMUDA_SUPPRESSION) — uncheck it
+                          to reprice, send, or accept this estimate without it.
+                        </div>
+                      )}
+                      {form.bermudaSuppression && (
+                        <div className="ml-7 mb-1 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-12 text-zinc-600">
+                          Recognition + Fusilade II tank mix under the FL 2(ee) — max 2 applications
+                          per growing season, spring only. Verify before quoting: cultivar
+                          (ProVista/Captiva excluded; Seville do-not-treat; CitraBlue or unknown
+                          cultivar needs a test area first), lawn is not already mostly bermuda
+                          (recommend renovation instead), turf unstressed. Torpedograss is
+                          suppression-only — never sell as removal. Pricing is plan-spread by
+                          design (owner ruling): the adder raises every application, annualizing
+                          a program that includes up to 2 suppression treatments each spring
+                          plus the follow-up inspection.
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
               {hasTurfPricedSelection && (

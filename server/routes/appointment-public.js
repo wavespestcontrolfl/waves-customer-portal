@@ -43,6 +43,7 @@ const {
   formatSmsTimeRange,
   ARRIVAL_WINDOW_MINUTES,
 } = require('../utils/sms-time-format');
+const { calendarIcsAvailable } = require('../services/appointment-ics-eligibility');
 
 // Token-keyed appointment data — never cacheable.
 router.use(noStore);
@@ -163,6 +164,7 @@ function pageState(svc, now = new Date()) {
   }
   return { state: 'upcoming' };
 }
+
 
 // Pure verdict for a confirm whose guarded UPDATE matched zero rows. A row
 // that is confirmed AND customer_confirmed was confirmed by a customer
@@ -402,12 +404,10 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
   try {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
-    const { state } = pageState(svc);
-    if (state !== 'upcoming') return res.status(404).json({ error: 'Not found' });
+    if (!calendarIcsAvailable(svc)) return res.status(404).json({ error: 'Not found' });
 
     const date = apptDateStr(svc.scheduled_date);
     const start = hhmm(svc.window_start);
-    if (!date || !start) return res.status(404).json({ error: 'Not found' });
 
     // ET wall-clock -> real instants, so the event lands correctly in any
     // device timezone. The event spans the customer-quoted 2-hour arrival

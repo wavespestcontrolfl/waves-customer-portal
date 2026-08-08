@@ -8097,6 +8097,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (seriesErr) {
         logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
       }
+      // Completion comms guard on the incomplete path too (same reason the
+      // series hook is duplicated here): this early return ALSO leaves the
+      // scheduled_services row 'completed', and an incomplete outcome is if
+      // anything the likelier home for the exception — "nobody home" on the
+      // day the customer texted to say they'd be away is exactly the case
+      // this guard exists to surface. The runner is gated, fail-soft and
+      // deduped per visit, so the two call sites can never double-bell.
+      // Backfills excluded (route-wide quiet-closeout posture): a backdated
+      // cleanup of a months-old row must not ring a live bell correlating it
+      // with an unrelated text from the last week.
+      if (!isBackfillCompletion) {
+        try {
+          const { runCompletionCommsGuard } = require('../services/completion-comms-guard');
+          await runCompletionCommsGuard({ serviceId: svc.id, customerId: svc.customer_id });
+        } catch (commsGuardErr) {
+          logger.warn(`[dispatch] completion comms guard failed (non-blocking): ${commsGuardErr.message}`);
+        }
+      }
       const responsePayload = {
         success: true,
         serviceRecordId: record.id,
@@ -10048,6 +10066,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // normalize, and resolveTracedExteriorZone queries scheduled_services,
         // resolves a completion profile and reads treatment_zone_maps — real
         // synchronous work on every completion whose result would be discarded.
+        // {reservice_line} for every completion-family template (EXPAND half —
+        // supplied before any body carries the token; see
+        // service-report/delivery.js). '' unless GATE_RESERVICE_STREAMLINE +
+        // GATE_RESERVICE_SELF_SERVE are on and the plan grants a lane, so
+        // today's renders are byte-identical. Never throws.
+        const { reserviceLineForCustomer } = require('../services/reservice-link');
+        const completionReserviceLine = await reserviceLineForCustomer(svc.customer_id);
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
             record,
@@ -10055,6 +10080,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             reportUrl,
             smsReportUrl: reportSmsUrl,
             payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
+            reserviceLine: completionReserviceLine,
           })
           : null;
         // A billed report-v1 visit may take the report lane only when the
@@ -10111,6 +10137,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
               pay_url: payUrl,
+              reservice_line: completionReserviceLine,
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
@@ -10126,6 +10153,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             service_type: displayServiceType,
             portal_url: reportSmsUrl || reportUrl,
             pay_url: payUrl,
+            reservice_line: completionReserviceLine,
           }, {
             workflow: 'dispatch_service_complete',
             entity_type: 'service_record',
@@ -10147,6 +10175,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
+              reservice_line: completionReserviceLine,
             };
             const paidTemplateContext = {
               workflow: 'dispatch_service_complete',
@@ -10200,6 +10229,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               first_name: svc.first_name || '',
               service_type: displayServiceType,
               portal_url: reportSmsUrl || reportUrl,
+              reservice_line: completionReserviceLine,
             }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
@@ -10909,6 +10939,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       await runPostCompletionSeriesMaintenance({ db, svc, source: 'dispatch_complete' });
     } catch (seriesErr) {
       logger.error(`[dispatch] recurring series maintenance failed (non-blocking): ${seriesErr.message}`);
+    }
+
+    // Completion comms guard (GATE_COMPLETION_COMMS_GUARD, dark by default):
+    // a visit completed while the customer has a pending reschedule/away
+    // flag or an unanswered inbound text surfaces an admin exception (bell
+    // notification + dispatch_alerts card). POST-COMMIT by placement — the
+    // completion record and the invoice decision are durable above — and
+    // fail-soft by construction: the runner checks the gate, owns its own
+    // advisory-lock dedupe (completion-comms:<serviceId>) and swallows its
+    // errors, and this try/catch backstops it (dues-covered exemplar
+    // pattern). A guard throw must NEVER fail the completion; it never
+    // blocks or alters invoicing and sends no customer communications.
+    // Backfills excluded, matching the route-wide quiet-closeout posture
+    // (referral credit, payer AP send, timer sync): a backdated cleanup must
+    // not ring a live bell correlating a months-old visit with an unrelated
+    // inbound text or customer-wide flag from the last week.
+    if (!isBackfillCompletion) {
+      try {
+        const { runCompletionCommsGuard } = require('../services/completion-comms-guard');
+        await runCompletionCommsGuard({ serviceId: svc.id, customerId: svc.customer_id });
+      } catch (commsGuardErr) {
+        logger.warn(`[dispatch] completion comms guard failed (non-blocking): ${commsGuardErr.message}`);
+      }
     }
 
     const responsePayload = {
@@ -11967,7 +12020,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       });
     }
 
-    const { reasonCode, scope, target, notifyCustomer } = req.body || {};
+    const { reasonCode, scope, target, notifyCustomer, customerNote } = req.body || {};
     if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
       return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
     }
@@ -11980,6 +12033,13 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
       scope: scope === 'route' ? 'route' : 'job',
       target,
       notifyCustomer: notifyCustomer !== false,
+      // Optional dispatcher note appended to the moved-SMS; the service
+      // sanitizes (≤200 chars, no links, no emoji, outbound-guard-clean)
+      // and rejects with the note_* reasons below.
+      customerNote,
+      // Stamps sms_log.admin_user_id on each moved-SMS so the durable
+      // record shows which operator drove the send / authored the note.
+      actorUserId: req.technicianId || null,
       initiatedBy: 'admin',
       // Authenticated dispatch-board click — the moved SMS is exempt from
       // the 8AM-8PM send window (operator-initiated, not machine-initiated).
@@ -11988,7 +12048,9 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 
     if (!result.ok) {
       const code = result.reason === 'not_found' ? 404
-        : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later'].includes(result.reason) ? 400
+        : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later',
+          'note_too_long', 'note_link_blocked', 'note_emoji_blocked', 'note_guard_blocked',
+          'note_compliance_blocked', 'note_invalid'].includes(result.reason) ? 400
           : 409;
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }

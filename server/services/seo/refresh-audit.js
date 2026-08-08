@@ -353,8 +353,12 @@ class RefreshAudit {
     // while leaving the page unrunnable — fall through to the upsert, which
     // resets our own key's budget (same-key row) or seeds a claimable row (a
     // foreign-bucket key; the daily sweep parks the exhausted one for review).
-    const inflight = await db('opportunity_queue')
-      .where('action_type', 'refresh_existing_page')
+    // ANY page-editing action conflicts (r34 follow-up): a pending
+    // rewrite_title_meta edits the same Astro file a refresh would — the
+    // miner's arbitration treats the two as one conflict class
+    // (PAGE_EDITING_ACTIONS), so this producer must too.
+    const inflightRefreshFor = (runner) => runner('opportunity_queue')
+      .whereIn('action_type', miner.PAGE_EDITING_ACTIONS)
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
       .where(function () {
         this.where('status', '<>', 'pending').orWhere('attempt_count', '<', maxClaimAttempts());
@@ -362,6 +366,7 @@ class RefreshAudit {
       .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
       .whereRaw(`${hostRegistrableSql('page_url')} = ?`, [targetDomain])
       .first();
+    const inflight = await inflightRefreshFor(db);
     if (inflight) {
       return { queued: false, status: inflight.status, url: inflight.page_url, dedupeKey: inflight.dedupe_key };
     }
@@ -435,7 +440,16 @@ class RefreshAudit {
 
     // Mirror intercept-brief-seeder's upsert: never reset a claimed/done/in-review
     // row; revive skipped/expired ones (an operator re-queue is an explicit "run it").
-    const result = await db.raw(
+    // Lock-protected (Codex #3255 r34): every queue producer that does a
+    // read-then-insert for a page edit serializes on the SAME advisory
+    // lock the family miner takes in _revalidateFamilyBatch, and re-checks
+    // in-flight state under it — overlapping producers can no longer both
+    // observe no row and insert competing edits for one page.
+    const result = await db.transaction(async (trx) => {
+      await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+      const inflightNow = await inflightRefreshFor(trx);
+      if (inflightNow) return { __inflight: inflightNow };
+      return trx.raw(
       `INSERT INTO opportunity_queue
          (bucket, action_type, query, page_url, service, city,
           score, score_breakdown, signal_metadata, status,
@@ -500,8 +514,12 @@ class RefreshAudit {
         expiresAt,
         dedupeKey,
         maxClaimAttempts(),
-      ]
-    );
+        ]
+      );
+    });
+    if (result.__inflight) {
+      return { queued: false, status: result.__inflight.status, url: result.__inflight.page_url, dedupeKey: result.__inflight.dedupe_key };
+    }
 
     const row = result.rows && result.rows[0];
     const status = row ? row.status : 'pending';

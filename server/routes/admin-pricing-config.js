@@ -309,6 +309,36 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     if (!Number.isInteger(quarters) || quarters < 1 || quarters > 120) {
       return fail('termite_rental.recovery_quarters must be a whole number of quarters between 1 and 120');
     }
+  } else if (configKey === 'lawn_pricing_v2' && data?.bermudaSuppression !== undefined) {
+    // DB-editable per-application adder knobs for the bermuda-suppression
+    // add-on. Strict numbers only (no numeric strings), both keys required,
+    // whole cents, bounded — an admin typo must not massively overprice a
+    // lawn ladder, and a would-be-zero adder is rejected because the engine
+    // fails a SELECTED add-on closed rather than pricing $0. The knobs only
+    // TUNE the price; disabling the add-on is GATE_BERMUDA_SUPPRESSION
+    // (key removal is neither possible through this API's drop guard nor
+    // effective — db-bridge rebases absent knobs to the in-code defaults).
+    const bs = data.bermudaSuppression;
+    if (!bs || typeof bs !== 'object' || Array.isArray(bs)) {
+      return fail('lawn_pricing_v2.bermudaSuppression must be an object with perAppBase and perAppPer1000Sqft');
+    }
+    const base = num(bs.perAppBase);
+    const per1000 = num(bs.perAppPer1000Sqft);
+    if (!Number.isFinite(base) || base < 0 || base > 200) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppBase must be a dollar amount between 0 and 200');
+    }
+    if (!Number.isFinite(per1000) || per1000 < 0 || per1000 > 50) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppPer1000Sqft must be a dollar amount between 0 and 50 (per 1,000 sqft per application)');
+    }
+    if (Math.abs(base * 100 - Math.round(base * 100)) > 1e-6) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppBase must not have sub-cent precision');
+    }
+    if (Math.abs(per1000 * 100 - Math.round(per1000 * 100)) > 1e-6) {
+      return fail('lawn_pricing_v2.bermudaSuppression.perAppPer1000Sqft must not have sub-cent precision');
+    }
+    if (!(base + per1000 > 0)) {
+      return fail('lawn_pricing_v2.bermudaSuppression must produce a positive adder — these knobs only tune the price; to disable the add-on, turn off GATE_BERMUDA_SUPPRESSION');
+    }
   } else if (configKey === 'pest_base') {
     // Validate every field the sync consumes — not just base. A row like
     // { base: 117, floor: -1 } would otherwise persist, then
@@ -476,7 +506,7 @@ async function ensureTable() {
 
       // Mosquito
       { config_key: 'mosquito_lot_sizes', name: 'Mosquito Treatable Area Categories', category: 'mosquito', sort_order: 1, data: JSON.stringify({ SMALL: { max_sqft: 7999 }, QUARTER: { max_sqft: 11999 }, THIRD: { max_sqft: 17999 }, HALF: { max_sqft: 34999 }, ACRE: { max_sqft: 999999 } }) },
-      { config_key: 'mosquito_base_prices', name: 'Mosquito Program Per-Visit Pricing', category: 'mosquito', sort_order: 2, data: JSON.stringify({ SMALL: { seasonal9: 73, monthly12: 66 }, QUARTER: { seasonal9: 76, monthly12: 69 }, THIRD: { seasonal9: 79, monthly12: 73 }, HALF: { seasonal9: 86, monthly12: 77 }, ACRE: { seasonal9: 97, monthly12: 86 } }) },
+      { config_key: 'mosquito_base_prices', name: 'Mosquito Program Per-Visit Pricing', category: 'mosquito', sort_order: 2, data: JSON.stringify({ SMALL: { seasonal9: 77, monthly12: 69 }, QUARTER: { seasonal9: 80, monthly12: 72 }, THIRD: { seasonal9: 83, monthly12: 77 }, HALF: { seasonal9: 90, monthly12: 81 }, ACRE: { seasonal9: 102, monthly12: 90 } }) },
       { config_key: 'mosquito_visits', name: 'Mosquito Program Visits', category: 'mosquito', sort_order: 3, data: JSON.stringify({ seasonal9: 9, monthly12: 12 }) },
       { config_key: 'mosquito_pressure', name: 'Mosquito Pressure Factors', category: 'mosquito', sort_order: 4, data: JSON.stringify({ trees_heavy: 0.15, trees_moderate: 0.05, complexity_complex: 0.10, complexity_moderate: 0.05, pool: 0.05, near_water: 0.10, irrigation: 0.08, lot_acre: 0.15, lot_half: 0.05, cap: 2.0 }) },
 
@@ -502,7 +532,7 @@ async function ensureTable() {
       { config_key: 'onetime_recurring_discount', name: 'Recurring Customer Discount', category: 'one_time', sort_order: 2, data: JSON.stringify({ discount: 0.15, note: '15% off one-time services for recurring customers' }) },
       { config_key: 'onetime_pest', name: 'One-Time Pest Pricing', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 199, multiplier: 2.2 }) },
       { config_key: 'onetime_lawn', name: 'One-Time Lawn Treatment', category: 'one_time', sort_order: 4, data: JSON.stringify({ floor: 115, fungicide_floor: 115, recurringPerAppMultiplier: 1.50, treatment_multipliers: { fert: 1.00, fertilization: 1.00, weed: 1.12, pest: 1.30, fungicide: 1.38 } }) },
-      { config_key: 'onetime_mosquito', name: 'One-Time Mosquito Treatment', category: 'one_time', sort_order: 5, data: JSON.stringify({ SMALL: 149, STANDARD: 169, LARGE: 189, XL: 209, ESTATE: 239, ACRE_CLASS: 269, OVER_ACRE: 269, overAcreIncrementSqFt: 10000, overAcreIncrementPrice: 40, stationAddOn: 75, dunkAddOn: 15 }) },
+      { config_key: 'onetime_mosquito', name: 'One-Time Mosquito Treatment', category: 'one_time', sort_order: 5, data: JSON.stringify({ SMALL: 156, STANDARD: 177, LARGE: 198, XL: 219, ESTATE: 251, ACRE_CLASS: 282, OVER_ACRE: 282, overAcreIncrementSqFt: 10000, overAcreIncrementPrice: 42, stationAddOn: 75, dunkAddOn: 15 }) },
       { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 6, data: JSON.stringify({
         per_lf_dirt: 10,
         per_lf_concrete: 14,
@@ -939,20 +969,39 @@ const CONFIG_KEY_FEATURE_GATES = {
   termite_rental: 'GATE_TERMITE_STATION_RENTAL',
 };
 
+// Gated SUB-features that live inside a broader config row (the row itself
+// stays available). Same read-at-request-time semantics as featureAvailable,
+// so a gate flip needs no client redeploy.
+const CONFIG_KEY_SUB_FEATURE_GATES = {
+  lawn_pricing_v2: { bermudaSuppression: 'GATE_BERMUDA_SUPPRESSION' },
+};
+
+// One shared call-time parser (feature-gates.gateEnvValue) so availability
+// and engine enforcement can never disagree on what counts as "on".
+const { gateEnvValue: gateEnvOn } = require('../config/feature-gates');
+
 function configKeyFeatureAvailable(key) {
   const gate = CONFIG_KEY_FEATURE_GATES[key];
   if (!gate) return true;
-  return ['1', 'true', 'on'].includes(String(process.env[gate] || '').toLowerCase());
+  return gateEnvOn(gate);
+}
+
+function configKeySubFeaturesAvailable(key) {
+  const subs = CONFIG_KEY_SUB_FEATURE_GATES[key];
+  if (!subs) return undefined;
+  return Object.fromEntries(Object.entries(subs).map(([name, gate]) => [name, gateEnvOn(gate)]));
 }
 
 router.get('/:key', async (req, res, next) => {
   try {
     const config = await db('pricing_config').where({ config_key: req.params.key }).first();
     if (!config) return res.status(404).json({ error: 'Config not found' });
+    const subFeaturesAvailable = configKeySubFeaturesAvailable(req.params.key);
     res.json({
       ...normalizePricingConfigRow(config),
       // Read at request time so a gate flip needs no redeploy of the client.
       featureAvailable: configKeyFeatureAvailable(req.params.key),
+      ...(subFeaturesAvailable ? { subFeaturesAvailable } : {}),
     });
   } catch (err) { next(err); }
 });

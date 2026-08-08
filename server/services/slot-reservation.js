@@ -1105,5 +1105,9 @@ module.exports = {
   commitReservation,
   releaseReservation,
   releaseExpiredReservations,
+  // Canonical service_type normalization — appointment-reminders'
+  // estimate-backed label recovery compares stored fall-through values
+  // against this exact transform, so it must reuse it, never re-implement.
+  cappedServiceType,
   _internals: { parseSlotId, addMinutesToTime, cappedServiceType, canonicalServiceTypeForProfile, notesWithServiceMix },
 };

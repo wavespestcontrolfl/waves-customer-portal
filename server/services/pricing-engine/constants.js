@@ -257,6 +257,27 @@ const LAWN_PRICING_V2 = {
   // per-input useLawnCostFloor, or set this key true on the pricing_config
   // lawn_pricing_v2 row (db-bridge resets it false when absent).
   useLawnCostFloor: false,
+  // Cadence frequency-discount arm switch (codex #3274 r3 P1). Default ON —
+  // the in-code grid ships discounted, so the runtime caps that keep
+  // interpolated lookups on the -4%/-8% ladder are part of the same
+  // schedule. migrate:down of 20260807120000 writes an explicit false to
+  // the pricing_config lawn_pricing_v2 row so the DOCUMENTED revert path
+  // actually reverts runtime prices: without this gate the engine cap
+  // re-clamped every enhanced/premium lookup to the discount even after
+  // the rollback restored the pre-discount cells. db-bridge rebases this
+  // to true when the key is absent (kill-value pattern); the always-on
+  // 12x-never-above-9x bound (2026-07-29, pre-dates the discount) is NOT
+  // governed by this switch.
+  cadenceFreqDiscountArmed: true,
+  // Edge-parity arm switch (pre-push audit P1 on the 20k-cutoff change):
+  // default ON — >20k extrapolated 9x/12x carry the per-app parity floor
+  // against the 6x anchor. migrate:down of 20260808000000 writes false so
+  // ROLLING BACK the edge-parity schedule also reverts runtime behavior
+  // (>20k falls back to the _FREQ_DISCOUNT semantics: the -4%/-8% caps
+  // applied at every size) in the same step that restores the version
+  // label — never a label/behavior mismatch. Only consulted while
+  // cadenceFreqDiscountArmed is on.
+  edgeParityFloorArmed: true,
   targetListMargin: null,
   useTargetListMargin: false,
   pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
@@ -266,7 +287,16 @@ const LAWN_PRICING_V2 = {
   // _LADDER_CAP (2026-07-29): Premium 12x bracket column retuned + runtime
   // cap so 12x per-app never exceeds 9x per-app — estimates stamped
   // _SPOT_RESERVE priced 12x on the pre-cap (higher, inverting) column.
-  pricingVersion: 'LAWN_PRICING_V2_GRID_500',
+  // _FREQ_DISCOUNT (2026-08-07): the 12x-never-above-9x cap left the three
+  // cadences within ~1.5% per application at large lawns, so the cards read
+  // as identical. Cadence now carries a real frequency discount off the 6x
+  // per-application anchor — see LAWN_CADENCE_DISCOUNT below.
+  // _EDGE_PARITY (2026-08-07, owner ruling on #3274): the discount ends at
+  // the table edge — >20k sqft extrapolated 9x/12x lookups carry a per-app
+  // parity floor against the 6x anchor, raising them off the discounted
+  // slope. Estimates stamped _FREQ_DISCOUNT priced >20k lawns ~4% lower
+  // per application than this schedule.
+  pricingVersion: 'LAWN_PRICING_V2_EDGE_PARITY',
   laborRateLoaded: 35,
   equipmentIncludedInLabor: true,
   equipmentReservePerVisit: 0,
@@ -274,6 +304,15 @@ const LAWN_PRICING_V2 = {
   callbackReservePerVisitDefault: 2,
   laborMinutesBase: 12,
   laborMinutesPer1000Sqft: 2.5,
+  // Bermuda-in-St.-Augustine suppression add-on (Recognition + Fusilade II
+  // FL 2(ee) tank mix, max 2 applications per growing season): a per-
+  // application adder baked into the lawn per-app price (owner ruling
+  // 2026-08-07 "a number baked into the per application"). St. Augustine
+  // track only; requested per estimate via services.lawn.bermudaSuppression
+  // behind GATE_BERMUDA_SUPPRESSION. Both knobs are DB-editable on the
+  // pricing_config lawn_pricing_v2 row (deepMerge); adder =
+  // perAppBase + perAppPer1000Sqft * (turf sqft / 1000).
+  bermudaSuppression: { perAppBase: 15, perAppPer1000Sqft: 2 },
   defaultRouteDensity: 'DENSE',
   routeDensityMinutes: {
     DENSE: 5,
@@ -285,6 +324,57 @@ const LAWN_PRICING_V2 = {
 
 const LAWN_FREQS = [6, 9, 12];
 const LAWN_TABLE_MAX_SQFT = 20000;
+
+// Cadence frequency discount (owner directive 2026-08-07). The per-application
+// price of the higher-frequency programs is held at a fixed discount off the
+// 6x per-application anchor, so the estimate cards — which lead with the
+// per-application price — show a real difference between cadences.
+//
+// Sizing: unlike pest control (where the truck roll dominates, so route
+// density genuinely lowers unit cost and the curve can be steep — PEST v2
+// runs 1.00/0.88/0.78), lawn cost per visit is FLAT across cadences because
+// materials are applied every visit (12,500 sqft St. Augustine: $86.33/visit
+// at 6x, $91.99 at 9x, $86.48 at 12x). There is no unit-cost saving to pass
+// through, so the discount is funded purely out of the higher plans' larger
+// absolute profit. These rates are the measured maximum that keeps annual
+// profit RISING with frequency (12x > 9x > 6x) at every bracket CELL the
+// caps bind on; steeper rates invert it — a -10%/-20% curve made the 12x
+// plan less profitable than 6x at all sizes.
+//
+// Scope of that claim (codex #3274 r1+r2 — measured PER TRACK by diffing
+// this branch against unmodified origin/main; r1's first pass passed the
+// track where priceLawnCare ignores it and measured St. Augustine 4x):
+// - The discount adds NO sag at any bracket cell on any track. Its only
+//   added 9x-under-6x sag is off-cell, on st_augustine and zoysia only:
+//   the 18k–20k interpolation tail (independent per-column rounding,
+//   ≤ ~$4.7/yr) and the extrapolation region below. Bermuda and bahia
+//   gain zero sag anywhere 500–30,000 sqft.
+// - The bermuda 5,500–5,745 / zoysia 5,500–5,577 inversions (≤ ~$14 and
+//   ~$4.7/yr) PRE-DATE the discount — identical profits on origin/main;
+//   the caps do not bind those cells. Accepted: same class as the
+//   long-standing small-lawn shape, and lawn floors are report-only
+//   (owner 2026-07-17).
+// - ABOVE LAWN_TABLE_MAX_SQFT the discount does NOT apply (owner ruling
+//   2026-08-07 on #3274). A flat -4% there made 9x LESS profitable than 6x
+//   on st_augustine/zoysia (incremental visit cost grows ~$28 per 1,000
+//   sqft against ~$18 of capped incremental revenue, ≈-$33/yr at 30k), and
+//   the industry (TruGreen/Lawn Doctor) publishes no pricing at all past
+//   ~a half acre — every >20k quote is already custom-quote-flagged and
+//   priced on site. Because the extrapolation slope derives from the
+//   DISCOUNTED 15k/20k anchor cells, skipping the caps alone would leak
+//   the discount past the table edge — so extrapolated 9x/12x lookups
+//   carry a per-application PARITY FLOOR against the extrapolated 6x
+//   anchor instead (no discount, profit ordering restored everywhere;
+//   extrapolated sag pinned at ZERO). All envelopes are pinned per track
+//   by lawn-cadence-profit-ordering.test.js — widening one should fail
+//   loudly.
+//
+// Applied to the MONTHLY bracket cell, since pa(v) = monthly * 12 / v:
+//   m9  <= m6 * (1 - 0.04) * 9/6  = m6 * 1.44
+//   m12 <= m6 * (1 - 0.08) * 12/6 = m6 * 1.84
+const LAWN_CADENCE_DISCOUNT = { enhanced: 0.04, premium: 0.08 };
+const LAWN_ENHANCED_MONTHLY_CAP_RATIO = (1 - LAWN_CADENCE_DISCOUNT.enhanced) * 9 / 6;
+const LAWN_PREMIUM_MONTHLY_CAP_RATIO = (1 - LAWN_CADENCE_DISCOUNT.premium) * 12 / 6;
 const LAWN_TRACK_DISPLAY = {
   st_augustine: { code: 'A', label: 'St. Augustine' },
   bermuda: { code: 'C1', label: 'Bermuda' },
@@ -315,6 +405,11 @@ const GRASS_TYPE_ALIASES = {
 // against calcLawnAnnualCostFloorDetails). st_augustine 3,000-row 9x also
 // softened 47 -> 44 (owner-approved shoulder fix: $62.67 -> $58.67/app puts
 // the 3,000-3,300 sqft rate under the $20/1k-sqft dead zone).
+// Frequency discount 2026-08-07 (owner directive): the 9x and 12x columns are
+// capped at LAWN_ENHANCED/PREMIUM_MONTHLY_CAP_RATIO x the 6x cell so each
+// cadence carries a real per-application discount (-4% / -8%). Binds from
+// ~5,500 sqft up, where the old columns had converged to within ~1.5% per
+// application; smaller brackets already separated naturally and are untouched.
 const LAWN_BRACKETS = {
   st_augustine: [
     [1500,  r(30),  r(34),  r(40)],
@@ -325,18 +420,18 @@ const LAWN_BRACKETS = {
     [4000,  r(38),  r(47),  r(62)],
     [4500,  r(38),  r(48),  r(64)],
     [5000,  r(38),  r(50),  r(66)],
-    [5500,  r(38),  r(53),  r(70)],
-    [6000,  r(39),  r(56),  r(74)],
-    [6500,  r(40),  r(59),  r(78)],
-    [7000,  r(42),  r(62),  r(82)],
-    [7500,  r(44),  r(65),  r(86)],
-    [8000,  r(47),  r(68),  r(90)],
-    [9000,  r(50),  r(74),  r(98)],
-    [10000,  r(54),  r(80),  r(106)],
-    [11000,  r(58),  r(86),  r(114)],
-    [12000,  r(62),  r(92),  r(122)],
-    [15000,  r(73),  r(110),  r(146)],
-    [20000,  r(91),  r(140),  r(186)],
+    [5500,  r(38),  r(53),  r(69)],
+    [6000,  r(39),  r(56),  r(71)],
+    [6500,  r(40),  r(57),  r(73)],
+    [7000,  r(42),  r(60),  r(77)],
+    [7500,  r(44),  r(63),  r(80)],
+    [8000,  r(47),  r(67),  r(86)],
+    [9000,  r(50),  r(72),  r(92)],
+    [10000,  r(54),  r(77),  r(99)],
+    [11000,  r(58),  r(83),  r(106)],
+    [12000,  r(62),  r(89),  r(114)],
+    [15000,  r(73),  r(105),  r(134)],
+    [20000,  r(91),  r(131),  r(167)],
   ],
   bermuda: [
     [1500,  r(31),  r(36),  r(42)],
@@ -349,16 +444,16 @@ const LAWN_BRACKETS = {
     [5000,  r(42),  r(51),  r(68)],
     [5500,  r(42),  r(54),  r(72)],
     [6000,  r(42),  r(57),  r(76)],
-    [6500,  r(42),  r(60),  r(80)],
-    [7000,  r(43),  r(63),  r(84)],
-    [7500,  r(45),  r(66),  r(88)],
-    [8000,  r(47),  r(69),  r(92)],
-    [9000,  r(51),  r(75),  r(100)],
-    [10000,  r(55),  r(81),  r(108)],
-    [11000,  r(59),  r(87),  r(116)],
-    [12000,  r(63),  r(94),  r(125)],
-    [15000,  r(74),  r(112),  r(149)],
-    [20000,  r(94),  r(143),  r(190)],
+    [6500,  r(42),  r(60),  r(77)],
+    [7000,  r(43),  r(61),  r(79)],
+    [7500,  r(45),  r(64),  r(82)],
+    [8000,  r(47),  r(67),  r(86)],
+    [9000,  r(51),  r(73),  r(93)],
+    [10000,  r(55),  r(79),  r(101)],
+    [11000,  r(59),  r(84),  r(108)],
+    [12000,  r(63),  r(90),  r(115)],
+    [15000,  r(74),  r(106),  r(136)],
+    [20000,  r(94),  r(135),  r(172)],
   ],
   zoysia: [
     [1500,  r(31),  r(36),  r(42)],
@@ -371,16 +466,16 @@ const LAWN_BRACKETS = {
     [5000,  r(42),  r(52),  r(69)],
     [5500,  r(42),  r(55),  r(73)],
     [6000,  r(42),  r(58),  r(77)],
-    [6500,  r(43),  r(60),  r(80)],
-    [7000,  r(44),  r(63),  r(84)],
-    [7500,  r(45),  r(66),  r(88)],
-    [8000,  r(47),  r(70),  r(93)],
-    [9000,  r(51),  r(76),  r(101)],
-    [10000,  r(56),  r(82),  r(109)],
-    [11000,  r(59),  r(88),  r(117)],
-    [12000,  r(63),  r(95),  r(126)],
-    [15000,  r(75),  r(113),  r(150)],
-    [20000,  r(95),  r(145),  r(193)],
+    [6500,  r(43),  r(60),  r(79)],
+    [7000,  r(44),  r(63),  r(80)],
+    [7500,  r(45),  r(64),  r(82)],
+    [8000,  r(47),  r(67),  r(86)],
+    [9000,  r(51),  r(73),  r(93)],
+    [10000,  r(56),  r(80),  r(103)],
+    [11000,  r(59),  r(84),  r(108)],
+    [12000,  r(63),  r(90),  r(115)],
+    [15000,  r(75),  r(108),  r(138)],
+    [20000,  r(95),  r(136),  r(174)],
   ],
   bahia: [
     [1500,  r(27),  r(30),  r(36)],
@@ -391,18 +486,18 @@ const LAWN_BRACKETS = {
     [4000,  r(34),  r(42),  r(56)],
     [4500,  r(34),  r(44),  r(58)],
     [5000,  r(34),  r(47),  r(62)],
-    [5500,  r(35),  r(49),  r(65)],
-    [6000,  r(36),  r(52),  r(69)],
-    [6500,  r(37),  r(54),  r(72)],
-    [7000,  r(39),  r(57),  r(76)],
-    [7500,  r(40),  r(59),  r(78)],
-    [8000,  r(42),  r(62),  r(82)],
-    [9000,  r(45),  r(67),  r(89)],
-    [10000,  r(49),  r(73),  r(97)],
-    [11000,  r(52),  r(78),  r(103)],
-    [12000,  r(56),  r(83),  r(110)],
-    [15000,  r(65),  r(99),  r(132)],
-    [20000,  r(82),  r(125),  r(166)],
+    [5500,  r(35),  r(49),  r(64)],
+    [6000,  r(36),  r(51),  r(66)],
+    [6500,  r(37),  r(53),  r(68)],
+    [7000,  r(39),  r(56),  r(71)],
+    [7500,  r(40),  r(57),  r(73)],
+    [8000,  r(42),  r(60),  r(77)],
+    [9000,  r(45),  r(64),  r(82)],
+    [10000,  r(49),  r(70),  r(90)],
+    [11000,  r(52),  r(74),  r(95)],
+    [12000,  r(56),  r(80),  r(103)],
+    [15000,  r(65),  r(93),  r(119)],
+    [20000,  r(82),  r(118),  r(150)],
   ],
 };
 
@@ -789,13 +884,20 @@ const MOSQUITO = {
     //           seasonal9, monthly12
     // Repriced 2026-07 to a 60% target contribution margin on the real cost
     // basis (Bifen-only barrier, ~11min on-site via mist blower, 20min drive,
-    // $51/yr admin) — a uniform +10% over the 2026-06 market floor. Still well
-    // under Terminix ($131.11/mo mosquito+tick) and TruGreen ($85.56/app).
-    SMALL:   [r(73), r(66)],
-    QUARTER: [r(76), r(69)],
-    THIRD:   [r(79), r(73)],
-    HALF:    [r(86), r(77)],
-    ACRE:    [r(97), r(86)],
+    // $51/yr admin) — a uniform +10% over the 2026-06 market floor.
+    // Repriced 2026-08-08 (owner directive): +5% across the board, rounded
+    // half-up to whole dollars. Still well under Terminix ($131.11/mo
+    // mosquito+tick) and TruGreen ($85.56/app). The Monthly-vs-Seasonal
+    // per-application discount shape survives (~7-12% per bucket) and is
+    // now guarded at lookup time (mosquitoBoundedBasePrice) + pinned by
+    // mosquito-cadence-guard.test.js. DB-authoritative: migration
+    // 20260808010000 raises the live mosquito_base_prices row; this table
+    // is the fresh-env default.
+    SMALL:   [r(77), r(69)],
+    QUARTER: [r(80), r(72)],
+    THIRD:   [r(83), r(77)],
+    HALF:    [r(90), r(81)],
+    ACRE:    [r(102), r(90)],
   },
   tierVisits: { seasonal9: 9, monthly12: 12 },
   // Prices climb between bucket anchors in 500-sf steps (see
@@ -1199,17 +1301,20 @@ const ONE_TIME = {
   mosquito: {
     // Repriced 2026-07 to sit ~25% under the one-time pest band (quarterly
     // × 2.2, floor $199 → ~$199-290 for typical homes), scaled by lot bucket
-    // instead of footprint. ESTATE/ACRE_CLASS held at the 2026-06 values —
-    // they already sit inside that band and mosquito rates never get cut.
-    SMALL:   r(149),
-    STANDARD: r(169),
-    LARGE:   r(189),
-    XL:      r(209),
-    ESTATE:  r(239),
-    ACRE_CLASS: r(269),
-    OVER_ACRE: r(269),
+    // instead of footprint. Repriced 2026-08-08 (owner directive): +5%
+    // across the board, rounded half-up — buckets and the over-acre
+    // increment move; the station/dunk ADD-ONS are product-cost-linked and
+    // deliberately excluded from the percentage raise. DB-authoritative:
+    // migration 20260808010000 raises the live onetime_mosquito row.
+    SMALL:   r(156),
+    STANDARD: r(177),
+    LARGE:   r(198),
+    XL:      r(219),
+    ESTATE:  r(251),
+    ACRE_CLASS: r(282),
+    OVER_ACRE: r(282),
     overAcreIncrementSqFt: 10000,
-    overAcreIncrementPrice: r(40),
+    overAcreIncrementPrice: r(42),
     stationAddOn: r(75),
     dunkAddOn: r(15),
   },
@@ -2076,6 +2181,7 @@ module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
   PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
+  LAWN_CADENCE_DISCOUNT, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, TERMITE, RODENT,

@@ -1024,7 +1024,20 @@ router.post('/share/:id', authenticate, async (req, res, next) => {
 // shared document. Token is 32-byte crypto-random; expiration enforced;
 // access is counted for audit.
 // =========================================================================
-router.get('/shared/:token', async (req, res, next) => {
+// The only unauthenticated route in this file, and it serves customer PII
+// (full service-report PDFs). The 64-hex gate below blocks enumeration
+// noise; this limiter caps how fast anyone can even try (security review
+// 2026-08-07). Legit use is a handful of opens per shared link.
+const sharedDocLimiter = require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many requests — please slow down.' },
+});
+
+router.get('/shared/:token', sharedDocLimiter, async (req, res, next) => {
   try {
     const token = String(req.params.token || '');
     if (!/^[a-f0-9]{64}$/.test(token)) {

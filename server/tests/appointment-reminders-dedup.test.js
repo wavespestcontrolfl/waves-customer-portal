@@ -50,13 +50,16 @@ describe('appointment reminder registration deduplication', () => {
   });
 
   test('registerVisitReminderInTx inserts a durable, confirmation-skipped row on the caller conn', async () => {
+    // estimateBackedServiceName's enrichment lookup runs first on conn; a
+    // null row means no recovery and the label passes through unchanged.
+    const estimateLookup = chain({ first: jest.fn().mockResolvedValue(null) });
     const lookup = chain({ first: jest.fn().mockResolvedValue(null) });
     const sameTime = chain({ first: jest.fn().mockResolvedValue(null) });
     const insertRow = chain({
       insert: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'rem-1' }]),
     });
-    const queue = [lookup, sameTime, insertRow];
+    const queue = [estimateLookup, lookup, sameTime, insertRow];
     const conn = jest.fn(() => queue.shift());
     conn.raw = jest.fn().mockResolvedValue();
 
@@ -85,6 +88,7 @@ describe('appointment reminder registration deduplication', () => {
   });
 
   test('registerVisitReminderInTx suppresses a same-customer/same-time collision', async () => {
+    const estimateLookup = chain({ first: jest.fn().mockResolvedValue(null) });
     const lookup = chain({ first: jest.fn().mockResolvedValue(null) });
     const sameTime = chain({ first: jest.fn().mockResolvedValue({ id: 'rem-primary', service_type: 'Lawn Care' }) });
     // buildMergedServiceLabel's source-row query (pristine sibling labels)
@@ -94,7 +98,7 @@ describe('appointment reminder registration deduplication', () => {
       insert: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'rem-suppressed' }]),
     });
-    const queue = [lookup, sameTime, labelRows, mergeUpdate, insertSuppressed];
+    const queue = [estimateLookup, lookup, sameTime, labelRows, mergeUpdate, insertSuppressed];
     const conn = jest.fn(() => queue.shift());
     conn.raw = jest.fn().mockResolvedValue();
 
@@ -121,8 +125,10 @@ describe('appointment reminder registration deduplication', () => {
   });
 
   test('registerVisitReminderInTx is idempotent — returns the existing row without inserting', async () => {
+    const estimateLookup = chain({ first: jest.fn().mockResolvedValue(null) });
     const lookup = chain({ first: jest.fn().mockResolvedValue({ id: 'rem-existing' }) });
-    const conn = jest.fn(() => lookup);
+    const queue = [estimateLookup, lookup];
+    const conn = jest.fn(() => queue.shift() || lookup);
     conn.raw = jest.fn().mockResolvedValue();
 
     const result = await AppointmentReminders.registerVisitReminderInTx(conn, {

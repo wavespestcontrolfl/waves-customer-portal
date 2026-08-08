@@ -94,6 +94,25 @@ describe('account and membership email template seeds', () => {
     expect(rendered.text).not.toMatch(/\{\{|\}\}/);
   });
 
+  // #3140 lane gate: sendMembershipStarted blanks the rate outside the
+  // monthly lane (annual prepay always; per-application multi-service
+  // accepts, which carry no customer-level fee by design). The details
+  // renderer must DROP the Rate row for a blank value — this is the
+  // mechanism the gate rides, and migration 20260807220000 makes the blank
+  // legal at the contract level.
+  test('membership.started drops the Rate row on a blank rate and keeps lane cadence copy', () => {
+    const rendered = renderSeedTemplate('membership.started', {
+      monthly_rate: '',
+      billing_cadence: 'per application',
+    });
+
+    expect(rendered.missingPayload).toEqual([]);
+    expect(rendered.text).not.toContain('Rate:');
+    expect(rendered.text).toContain('Billing cadence: per application');
+    expect(rendered.text).not.toMatch(/per visit/i);
+    expect(rendered.text).not.toMatch(/\{\{|\}\}/);
+  });
+
   test('membership renewal copy does not require optional renewal details', () => {
     const rendered = renderSeedTemplate('membership.renewal_reminder', {
       renewal_date: '',

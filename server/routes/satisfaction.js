@@ -214,6 +214,11 @@ router.post('/', async (req, res, next) => {
         const body = await renderRequiredSmsTemplate('review_request', {
           first_name: customer.first_name || 'there',
           review_url: reviewLink,
+          // {reservice_line} EXPAND half (reservice-link.js): '' unless both
+          // re-service gates are on and the plan grants a lane. Must be
+          // supplied before the token lands in the body — an unsupplied key
+          // suppresses the whole send.
+          reservice_line: await require('../services/reservice-link').reserviceLineForCustomer(customer.id),
         }, {
           workflow: 'satisfaction_review_request',
           entity_type: 'customer',

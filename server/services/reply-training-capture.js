@@ -53,12 +53,24 @@ function classifyScenario({ inboundBody = '', outboundBody = '', metadata = {} }
   return 'general_customer_reply';
 }
 
+// Message types that are never a HUMAN reply, even when adminUserId is
+// stamped for audit attribution: system chatter, plus the rain-out Quick
+// Move templates (attribution ≠ authorship — the body is rendered template
+// copy, a proactive notice, not a reply to the customer's last inbound).
+// Shared with admin-agent-decisions.js isAdminAuthoredSmsReply so BOTH
+// reply-inference paths (capture here, agent-review pre-population there)
+// use one list and cannot drift.
+const NON_HUMAN_REPLY_MESSAGE_TYPES = Object.freeze([
+  'internal_alert', 'system_note',
+  'rain_out_moved', 'rain_out_moved_v2', 'rain_out_moved_v3',
+]);
+
 function shouldCaptureReply({ channel, direction, authorType, adminUserId, messageType, body } = {}) {
   if (channel !== 'sms') return false;
   if (direction !== 'outbound') return false;
   if (!normalizeText(body)) return false;
   if (authorType !== 'admin' && !adminUserId) return false;
-  if (['internal_alert', 'system_note'].includes(String(messageType || '').toLowerCase())) return false;
+  if (NON_HUMAN_REPLY_MESSAGE_TYPES.includes(String(messageType || '').toLowerCase())) return false;
   return true;
 }
 
@@ -480,6 +492,7 @@ module.exports = {
   captureReplyExampleForMessage,
   captureReplyExampleForTwilioSid,
   upsertReplyExampleFromAgentReview,
+  NON_HUMAN_REPLY_MESSAGE_TYPES,
   _internals: {
     classifyScenario,
     shouldCaptureReply,

@@ -277,6 +277,13 @@ describe('promoteLinkedCustomerForProposalWin', () => {
     expect(ops.updates[0]).not.toHaveProperty('member_since'); // original start preserved
   });
 
+  test('reactivates a pre-linked past_customer (keeps original start)', async () => {
+    const { trx, ops } = makeCustomerTrx({ pipeline_stage: 'past_customer', member_since: '2024-03-01', active: true, churned_at: null });
+    await promoteLinkedCustomerForProposalWin({ trx, customerId: 'cust-1' });
+    expect(ops.updates[0]).toMatchObject({ pipeline_stage: 'active_customer' });
+    expect(ops.updates[0]).not.toHaveProperty('member_since'); // original start preserved
+  });
+
   test('no-op for an already-active real customer', async () => {
     const { trx, ops } = makeCustomerTrx({ pipeline_stage: 'active_customer', member_since: '2024-01-01', active: true, churned_at: null });
     await promoteLinkedCustomerForProposalWin({ trx, customerId: 'cust-1' });

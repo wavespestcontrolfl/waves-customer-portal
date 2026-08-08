@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
+const { runExclusive } = require('../utils/cron-lock');
 
 const POLICY_KEY = 'review_incentives.policy';
 const DEFAULT_POLICY = {
@@ -284,7 +285,51 @@ async function existingPayoutForSource({ reviewRequestId, googleReviewId, servic
   return null;
 }
 
-async function insertPayout(attrs, conn = db) {
+async function insertPayout(attrs, conn = db, { syncLockHeld = false } = {}) {
+  // Money boundary: never create (or correct) a payout for a review Google
+  // has removed. Two layers, mirroring the graphic-persist gate:
+  //  1. The per-location `gbp-review-sync:<loc>` advisory lock — the row's
+  //     stamp alone can't be trusted mid-cycle: a sync may already hold an
+  //     authoritative feed proving the review absent with the reconcile's
+  //     stamp still queued. Holding the sync lock means no cycle is in
+  //     flight; a busy lock defers the payout (retryable — the hourly scan
+  //     retries next tick). Callers already inside the lock pass
+  //     syncLockHeld to compose (the advisory lock is per-connection and
+  //     would not re-enter).
+  //  2. A transaction with the source review row locked FOR UPDATE through
+  //     the INSERT, so the stamping UPDATE serializes against it. Fail
+  //     closed on a vanished row too.
+  if (attrs.googleReviewId) {
+    const moneyBoundary = () => conn.transaction(async (trx) => {
+      const liveRow = await trx('google_reviews')
+        .where({ id: attrs.googleReviewId })
+        .whereNull('missing_since')
+        .forUpdate()
+        .first();
+      if (!liveRow) {
+        return { created: false, skipped: true, reason: 'removed_from_google' };
+      }
+      return _insertPayoutRow(attrs, trx);
+    });
+    if (syncLockHeld) return moneyBoundary();
+    const current = await conn('google_reviews').where({ id: attrs.googleReviewId }).first();
+    if (!current || current.missing_since != null) {
+      return { created: false, skipped: true, reason: 'removed_from_google' };
+    }
+    const outcome = await runExclusive(
+      `gbp-review-sync:${current.location_id}`,
+      moneyBoundary,
+      { recordHealth: false },
+    );
+    if (outcome?.skipped && (outcome.reason === 'lease_held' || outcome.reason === 'no_connection')) {
+      return { created: false, skipped: true, reason: 'sync_in_progress' };
+    }
+    return outcome;
+  }
+  return _insertPayoutRow(attrs, conn);
+}
+
+async function _insertPayoutRow(attrs, conn) {
   const existing = await existingPayoutForSource(attrs, conn);
   if (existing) return { payout: existing, created: false, reason: 'duplicate' };
 
@@ -329,6 +374,12 @@ async function createPayoutForGoogleReview(reviewId, options = {}) {
   const review = typeof reviewId === 'object'
     ? reviewId
     : await conn('google_reviews').where({ id: reviewId }).first();
+  // A stamped row is retained evidence of a review Google has removed — it
+  // must never earn a payout (the sync scan filters these too; this guards
+  // direct callers passing a row or id).
+  if (review && review.missing_since != null) {
+    return { created: false, skipped: true, reason: 'removed_from_google' };
+  }
   if (review && !reviewWithinProgramWindow(review, policy)) {
     return { created: false, skipped: true, reason: 'before_program_start' };
   }
@@ -379,6 +430,7 @@ async function syncReviewIncentives(options = {}) {
 
   const googleReviews = await conn('google_reviews')
     .where('reviewer_name', '!=', '_stats')
+    .whereNull('missing_since')
     .where('review_created_at', '>=', effectiveSince.toISOString())
     .limit(500);
 
@@ -534,6 +586,7 @@ async function getAttributionQueue(options = {}) {
 
   const reviews = await conn('google_reviews')
     .where('reviewer_name', '!=', '_stats')
+    .whereNull('missing_since')
     .where('review_created_at', '>=', effectiveSince.toISOString())
     .orderBy('review_created_at', 'desc')
     .limit(limit);
@@ -584,6 +637,9 @@ async function searchAttributionCandidates(options = {}) {
   if (!review || review.reviewer_name === '_stats') {
     throw operationalError('Google review not found', 404, 'review_not_found');
   }
+  if (review.missing_since != null) {
+    throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
+  }
 
   const search = String(options.q || '').trim();
   const fallbackName = String(review.reviewer_name || '').trim();
@@ -629,9 +685,41 @@ async function searchAttributionCandidates(options = {}) {
     });
   }
 
+  // Click-time correlation: customers whose tracked review-link click landed
+  // near this review's timestamp. Rendered as a separate "likely reviewers"
+  // section so a name mismatch ("SunshineGal88") still surfaces the probable
+  // customer. Suggestion only — attribution stays a manual confirm.
+  const { findLikelyReviewers } = require('./review-click-correlation');
+  const likelyRaw = await findLikelyReviewers(review, { conn, limit: 4 });
+  const likelyReviewers = [];
+  for (const l of likelyRaw) {
+    const services = await recentServiceCandidatesForCustomer(l.customerId, review, conn);
+    likelyReviewers.push({
+      ...serializeCustomer({
+        id: l.customerId,
+        first_name: l.firstName,
+        last_name: l.lastName,
+        phone: l.phone,
+        email: l.email,
+        address_line1: l.addressLine1,
+        address_line2: l.addressLine2,
+        city: l.city,
+        state: l.state,
+        zip: l.zip,
+      }),
+      services,
+      clickedAt: l.clickedAt,
+      clickOffsetLabel: l.clickOffsetLabel,
+      clickedBeforeReview: l.clickedBeforeReview,
+      locationMatch: l.locationMatch,
+      alreadyFlagged: l.alreadyFlagged,
+    });
+  }
+
   return {
     review: serializeAttributionQueueItem(review, null, review.customer_id ? 'missing_technician' : 'missing_customer'),
     candidates,
+    likelyReviewers,
   };
 }
 
@@ -650,6 +738,12 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   const review = await conn('google_reviews').where({ id: reviewId }).first();
   if (!review || review.reviewer_name === '_stats') {
     throw operationalError('Google review not found', 404, 'review_not_found');
+  }
+  // Attributing a Google-removed review would set customer_id and flip
+  // has_left_google_review (suppressing future review asks) off evidence that
+  // is no longer live — same lockout as the reply/dismiss/publish surfaces.
+  if (review.missing_since != null) {
+    throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
   }
   if (!reviewWithinProgramWindow(review, policy)) {
     throw operationalError('Google review predates the review incentive program start', 422, 'review_before_program_start');
@@ -702,12 +796,28 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     };
   }
 
-  await conn('google_reviews')
+  // Every attribution mutation runs under the per-location sync advisory
+  // lock: the row's stamp alone can't be trusted mid-cycle — a sync may
+  // already hold an authoritative feed proving this review absent with the
+  // reconcile's stamp still queued, and the customer link, review-ask
+  // suppression, thank-you enrollment, and payout would all land against a
+  // review about to be marked removed. Holding the lock means no cycle is in
+  // flight; a busy lock is a retryable 409 BEFORE any side effect.
+  const attributionOutcome = await runExclusive(`gbp-review-sync:${review.location_id}`, async () => {
+  // Conditional write, not a snapshot re-check: a stamp can still have
+  // committed before the lock was free. Zero rows updated means liveness was
+  // lost — abort BEFORE any side effect (the has_left_google_review mark,
+  // thank-you enrollment, and the payout).
+  const linkedCount = await conn('google_reviews')
     .where({ id: review.id })
+    .whereNull('missing_since')
     .update({
       customer_id: customerId,
       updated_at: new Date(),
     });
+  if (!((Array.isArray(linkedCount) ? linkedCount.length : linkedCount) > 0)) {
+    throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
+  }
 
   // Mirror the sync paths' _markCustomerLeftReview on EVERY manual
   // attribution touch: this customer verifiably left a review, so future
@@ -770,7 +880,7 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     currency: policy.currency,
     earnedAt: review.review_created_at || review.created_at || new Date(),
     attributionSnapshot,
-  }, conn);
+  }, conn, { syncLockHeld: true });
 
   // Re-attribution: a payout already existed for this review (the partial
   // unique index on google_review_id dedups it), so insertPayout no-ops with
@@ -825,8 +935,15 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     logger.warn(`[review-incentives] manual attribution activity log failed (${err?.code || err?.name || 'Error'})`);
   }
 
+  return result;
+  }, { recordHealth: false });
+  if (attributionOutcome?.skipped
+    && (attributionOutcome.reason === 'lease_held' || attributionOutcome.reason === 'no_connection')) {
+    throw operationalError('Review sync is in progress for this location — retry the attribution in a moment', 409, 'review_sync_in_progress');
+  }
+
   return {
-    ...result,
+    ...attributionOutcome,
     reviewId: review.id,
     customer: serializeCustomer(customer),
     technician: {
@@ -903,6 +1020,7 @@ async function getDashboard(options = {}) {
     const minRating = Math.max(1, toInt(policy.minRating, 1));
     const confirmedRow = await conn('google_reviews')
       .where('reviewer_name', '!=', '_stats')
+      .whereNull('missing_since')
       .where('review_created_at', '>=', effectivePeriodStart.toISOString())
       .where('review_created_at', '<=', periodEnd.toISOString())
       .where('star_rating', '>=', minRating)

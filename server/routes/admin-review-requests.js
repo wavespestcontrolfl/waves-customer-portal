@@ -98,7 +98,9 @@ router.post('/tech-trigger', async (req, res, next) => {
 
     res.json({
       sent: true,
-      reviewUrl: `${publicPortalUrl()}/rate/${request.token}`,
+      // Tracked direct-Google redirect, not the raw rate page (review audit
+      // 2026-08-07) — same target the cadence SMS links resolve to.
+      reviewUrl: `${publicPortalUrl()}/api/rate/${request.token}/go`,
     });
   } catch (err) { next(err); }
 });

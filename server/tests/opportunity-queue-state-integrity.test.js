@@ -53,14 +53,23 @@ describe('miner upsert: skipped is sticky, expired revives', () => {
     }]);
 
     const [sql] = db.raw.mock.calls[0];
-    const caseMatch = sql.match(/status IN \(([^)]+)\)/);
-    expect(caseMatch).toBeTruthy();
-    expect(caseMatch[1]).toContain("'skipped'");
-    expect(caseMatch[1]).toContain("'claimed'");
-    expect(caseMatch[1]).toContain("'done'");
-    expect(caseMatch[1]).toContain("'pending_review'");
+    // Frozen statuses now skip the conflict-update ENTIRELY (DO UPDATE ...
+    // WHERE) rather than being preserved field-by-field in a status CASE —
+    // skipped stays just as sticky, and identity/score/metadata can no
+    // longer be rewritten beneath a claimed worker or a processed record.
+    const guard = sql.match(/DO UPDATE[\s\S]*WHERE opportunity_queue\.status NOT IN \(([^)]+)\)/);
+    expect(guard).toBeTruthy();
+    expect(guard[1]).toContain("'skipped'");
+    expect(guard[1]).toContain("'claimed'");
+    expect(guard[1]).toContain("'done'");
+    expect(guard[1]).toContain("'pending_review'");
     // expired must revive to pending on a fresh mine of the same signal
-    expect(caseMatch[1]).not.toContain("'expired'");
+    expect(guard[1]).not.toContain("'expired'");
+    expect(sql).toMatch(/status = 'pending'/);
+    // ...and a revived row clears its automatic retirement reason — a
+    // lingering family_* skip_reason on a pending row reads as false
+    // provenance on operator/audit surfaces (Codex r12 P2).
+    expect(sql).toMatch(/skip_reason = NULL/);
   });
 
   test('the metadata refresh preserves the runner gate_retry marker (one-shot redraft survives the morning mine)', async () => {
@@ -277,11 +286,13 @@ describe('resurrection paths reset the lifetime claim budget (Codex round 1)', (
       expect(src).toMatch(/maxClaimAttempts\(\)/);
     }
     // The unattended miners keep 'skipped' sticky instead — a cron must not
-    // overturn a dismissal or an attempts_exhausted sweep.
-    for (const mod of ['../services/seo/gsc-opportunity-miner', '../services/seo/competitor-gap-miner']) {
-      const src = fs.readFileSync(require.resolve(mod), 'utf8');
-      expect(src).toMatch(/status IN \('claimed', 'done', 'pending_review', 'skipped'\)/);
-    }
+    // overturn a dismissal or an attempts_exhausted sweep. The GSC miner
+    // enforces this with a DO UPDATE ... WHERE guard (frozen rows skip the
+    // update entirely); the competitor miner still uses the status CASE.
+    const gscSrc = fs.readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    expect(gscSrc).toMatch(/status NOT IN \('claimed', 'done', 'pending_review', 'skipped'\)/);
+    const compSrc = fs.readFileSync(require.resolve('../services/seo/competitor-gap-miner'), 'utf8');
+    expect(compSrc).toMatch(/status IN \('claimed', 'done', 'pending_review', 'skipped'\)/);
   });
 
   test('refresh-audit in-flight check does not early-return on exhausted pending rows (Codex round 4 — the reset was unreachable)', () => {
@@ -298,6 +309,7 @@ describe('resurrection paths reset the lifetime claim budget (Codex round 1)', (
     const q = {
       _filters: [],
       where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+      whereNot: jest.fn(function (...args) { q._filters.push(['not', ...args]); return q; }),
       whereRaw: jest.fn(function (...args) { q._filters.push(['raw', ...args]); return q; }),
       orderBy: jest.fn(() => q),
       limit: jest.fn(() => q),
@@ -310,6 +322,80 @@ describe('resurrection paths reset the lifetime claim budget (Codex round 1)', (
     expect(q._filters).toEqual(expect.arrayContaining([
       ['attempt_count', '<', 5],
     ]));
+  });
+});
+
+describe('listicle_family lane fence (kill-switch contract)', () => {
+  // With either lane gate off, family rows must be unclaimable — they sit
+  // pending and age out via expireStale rather than drafting plain blogs
+  // (brief overlay off) or publishing listicles after the kill switch.
+  // Gates are dev-open, so the off state is simulated via spy;
+  // listicleFamilyLaneOpen re-destructures isEnabled on every call, which
+  // is what makes the spy visible to the lazy require. The gates module is
+  // required INSIDE each test: an earlier test calls jest.resetModules(),
+  // so a describe-scope reference would be a stale instance the queue's
+  // lazy require never consults.
+  const peekChain = () => {
+    const q = {
+      _filters: [],
+      where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+      whereNot: jest.fn(function (...args) { q._filters.push(['not', ...args]); return q; }),
+      whereRaw: jest.fn(function (...args) { q._filters.push(['raw', ...args]); return q; }),
+      orderBy: jest.fn(() => q),
+      limit: jest.fn(() => q),
+      select: jest.fn(() => Promise.resolve([])),
+    };
+    return q;
+  };
+
+  test('claimNext excludes listicle_family rows while either lane gate is off', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockReturnValue(false);
+    try {
+      db.mockImplementation(() => chain());
+      db.raw.mockResolvedValue({ rows: [] });
+
+      await queue.claimNext({});
+
+      const [sql] = db.raw.mock.calls[0];
+      expect(sql).toContain(`AND bucket <> 'listicle_family'`);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('with both gates on, claimNext does not fence the bucket', async () => {
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+
+    await queue.claimNext({}); // dev-open gates: lane open
+
+    const [sql] = db.raw.mock.calls[0];
+    expect(sql).not.toContain(`bucket <> 'listicle_family'`);
+  });
+
+  test('peek mirrors the fence (previews show exactly what the runner could claim)', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockReturnValue(false);
+    try {
+      const q = peekChain();
+      db.mockImplementation(() => q);
+
+      await queue.peek({});
+
+      expect(q._filters).toEqual(expect.arrayContaining([
+        ['not', 'bucket', 'listicle_family'],
+      ]));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('the fence fails CLOSED — unreadable gates shut the lane', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/content/opportunity-queue'), 'utf8');
+    expect(src).toMatch(/isEnabled\('listicleFamilyMining'\) === true && isEnabled\('listicleBriefs'\) === true/);
+    expect(src).toMatch(/function listicleFamilyLaneOpen\(\) \{[\s\S]*?catch \(_\) \{\s*return false;/);
   });
 });
 

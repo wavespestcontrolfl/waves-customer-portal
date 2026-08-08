@@ -287,13 +287,45 @@ router.get('/', dashboardCache, async (req, res, next) => {
       // Google reviews — use Places API totals from _stats rows, fallback to actual review count
       (async () => {
         try {
-          const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
+          // Only trust FRESH _stats rows (same 24h convention as the
+          // /admin/reviews googleStatsComplete check): when the Maps key is
+          // removed or Places keeps failing, the stale rows would otherwise
+          // keep this branch selected forever, and the Rating tile would
+          // ignore removals the GBP reconciliation has since stamped.
+          // Completeness matters too: a PARTIAL fresh set (one location's
+          // stats failing for >24h while the rest refresh) would silently
+          // drop that location's whole count — require a fresh row for
+          // EVERY configured location or use the live-row fallback.
+          const { WAVES_LOCATIONS: dashLocations } = require('../config/locations');
+          const dashLocationIds = dashLocations.map((l) => l.id);
+          const statsFreshCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+          // Configured locations only — _stats rows from retired/renamed
+          // GBPs would otherwise inflate the total and average even though
+          // completeness is judged against the CURRENT location list.
+          const statsRows = await db('google_reviews')
+            .where({ reviewer_name: '_stats' })
+            .whereIn('location_id', dashLocationIds)
+            .where('synced_at', '>', statsFreshCutoff);
+          const freshStatsLocationIds = new Set();
           let totalFromPlaces = 0, ratingSum = 0, ratingCount = 0;
           for (const row of statsRows) {
             try {
               const parsed = JSON.parse(row.review_text);
-              totalFromPlaces += parsed.totalReviews || 0;
-              if (parsed.rating) { ratingSum += parsed.rating; ratingCount++; }
+              // Shape-validated, not just parsed: '"corrupt"' or '{}' is
+              // syntactically valid JSON that contributes nothing — counting
+              // its location as complete would select a silently partial
+              // Places aggregate instead of the live-row fallback. The sync
+              // writer always stores at least one numeric field.
+              // Finite totalReviews REQUIRED (rating-only would count the
+              // location complete while contributing zero to the total).
+              if (!parsed || typeof parsed !== 'object'
+                || !Number.isFinite(parsed.totalReviews)) {
+                logger.warn(`[admin-dashboard] google_reviews _stats payload has no usable numbers (id=${row.id})`);
+              } else {
+                totalFromPlaces += parsed.totalReviews || 0;
+                if (parsed.rating) { ratingSum += parsed.rating; ratingCount++; }
+                freshStatsLocationIds.add(row.location_id);
+              }
             } catch (parseErr) {
               // Bad JSON in a _stats row would have silently zeroed
               // every Google Rating tile; log so a malformed sync can
@@ -301,7 +333,8 @@ router.get('/', dashboardCache, async (req, res, next) => {
               logger.warn(`[admin-dashboard] google_reviews _stats parse failed (id=${row.id}): ${parseErr.message}`);
             }
           }
-          if (totalFromPlaces > 0) {
+          const statsComplete = dashLocations.every(l => freshStatsLocationIds.has(l.id));
+          if (statsComplete && totalFromPlaces > 0) {
             // Dismissed reviews are deliberately left unreplied — keep them
             // out of the actionable count (matches /admin/reviews stats).
             const unresponded = await db('google_reviews')
@@ -309,16 +342,29 @@ router.get('/', dashboardCache, async (req, res, next) => {
               .whereNotNull('review_text')
               .where(function () { this.where('dismissed', false).orWhereNull('dismissed'); })
               .modify(whereNeedsRealReviewReply)
+              // Removed-from-Google rows are not actionable — no reply path
+              // accepts them, so they'd degrade this count forever.
+              .whereNull('missing_since')
               .count('* as c')
               .first();
             return { total: totalFromPlaces, avg_rating: ratingCount > 0 ? (ratingSum / ratingCount).toFixed(1) : '5.0', unresponded: parseInt(unresponded?.c || 0) };
           }
-          // Fallback to actual review rows
-          return await db('google_reviews').where('reviewer_name', '!=', '_stats').select(
-            db.raw('COUNT(*) as total'),
-            db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
-            db.raw("COUNT(*) FILTER (WHERE review_text IS NOT NULL AND (review_reply IS NULL OR review_reply LIKE '[DRAFT]%') AND COALESCE(dismissed, false) = false) as unresponded")
-          ).first();
+          // Fallback to actual review rows — live rows only: the Rating tile
+          // reports current Google state, and rows Google removed are
+          // retained evidence, not part of the current rating/total. Scoped
+          // to configured locations (rows with no location stamp are kept —
+          // legacy imports belong to the business, not a retired GBP).
+          return await db('google_reviews')
+            .where('reviewer_name', '!=', '_stats')
+            .whereNull('missing_since')
+            .where(function scopeConfiguredLocations() {
+              this.whereIn('location_id', dashLocationIds).orWhereNull('location_id');
+            })
+            .select(
+              db.raw('COUNT(*) as total'),
+              db.raw('ROUND(AVG(star_rating)::numeric, 1) as avg_rating'),
+              db.raw("COUNT(*) FILTER (WHERE review_text IS NOT NULL AND (review_reply IS NULL OR review_reply LIKE '[DRAFT]%') AND COALESCE(dismissed, false) = false) as unresponded")
+            ).first();
         } catch (err) {
           logger.error(`[admin-dashboard] google_reviews query failed: ${err.message}`);
           return { total: 0, avg_rating: '0', unresponded: 0 };
@@ -1327,8 +1373,18 @@ router.get('/review-trend', dashboardCache, async (req, res, next) => {
       window.push({ ym, label });
     }
 
+    const { WAVES_LOCATIONS: trendLocations } = require('../config/locations');
+    const trendLocationIds = trendLocations.map(l => l.id);
     const rows = await db('google_reviews')
       .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
+      // Live rows only — the chart sits next to the live total/rating, and a
+      // removed review counted in its posting month would make the trend
+      // disagree with the adjacent current metrics. Configured locations
+      // only (unstamped legacy rows kept), matching the totals below.
+      .whereNull('missing_since')
+      .where(function scopeConfiguredLocations() {
+        this.whereIn('location_id', trendLocationIds).orWhereNull('location_id');
+      })
       .select(db.raw("to_char(review_created_at AT TIME ZONE 'America/New_York','YYYY-MM') as ym"))
       .count('* as n')
       .avg('star_rating as avg')
@@ -1359,23 +1415,47 @@ router.get('/review-trend', dashboardCache, async (req, res, next) => {
     // by ET month.
     let total = 0;
     let avgRating = null;
-    const statsRows = await db('google_reviews').where({ reviewer_name: '_stats' });
+    // Same validity gate as the Rating tile and /admin/reviews overview:
+    // trust the Places snapshot only when EVERY configured location has a
+    // fresh (24h) _stats row whose payload carries a usable number — stale,
+    // partial, or malformed rows otherwise kept this card on a wrong total
+    // while the corrected headline metrics sat right next to it.
+    const statsFreshCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const statsRows = await db('google_reviews')
+      .where({ reviewer_name: '_stats' })
+      .whereIn('location_id', trendLocationIds)
+      .where('synced_at', '>', statsFreshCutoff);
+    const freshStatsLocationIds = new Set();
     let placesTotal = 0, ratingSum = 0, ratingCount = 0;
     for (const row of statsRows) {
       try {
         const parsed = JSON.parse(row.review_text);
+        if (!parsed || typeof parsed !== 'object'
+          || !Number.isFinite(parsed.totalReviews)) {
+          logger.warn(`[admin-dashboard] review-trend _stats payload has no usable numbers (id=${row.id})`);
+          continue;
+        }
         placesTotal += parsed.totalReviews || 0;
         if (parsed.rating) { ratingSum += parsed.rating; ratingCount += 1; }
+        freshStatsLocationIds.add(row.location_id);
       } catch (parseErr) {
         logger.warn(`[admin-dashboard] review-trend _stats parse failed (id=${row.id}): ${parseErr.message}`);
       }
     }
-    if (placesTotal > 0) {
+    const statsComplete = trendLocations.every(l => freshStatsLocationIds.has(l.id));
+    if (statsComplete && placesTotal > 0) {
       total = placesTotal;
       avgRating = ratingCount > 0 ? Math.round((ratingSum / ratingCount) * 10) / 10 : null;
     } else {
       const totals = await db('google_reviews')
         .where('reviewer_name', '!=', '_stats') // skip Places aggregate rows
+        // Live rows only — removed reviews are retained evidence and must
+        // not inflate the card total (matches every other overview surface).
+        // Configured locations only, same scope as the trend buckets above.
+        .whereNull('missing_since')
+        .where(function scopeConfiguredLocations() {
+          this.whereIn('location_id', trendLocationIds).orWhereNull('location_id');
+        })
         .count('* as total')
         .avg('star_rating as avg')
         .first();

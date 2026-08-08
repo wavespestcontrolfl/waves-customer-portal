@@ -756,6 +756,7 @@ function buildCustomerWaveGuardAlignmentUpdates(customer, detectedPlanKeys, cust
   // backfill.
   const rateBackfillLane = customer?.billing_mode === 'monthly_membership'
     || (customer?.billing_mode == null && customer?.waveguard_tier_source !== 'auto');
+  let planRateComponents = null;
   if (
     customerColumns.monthly_rate
     && rateBackfillLane
@@ -763,6 +764,25 @@ function buildCustomerWaveGuardAlignmentUpdates(customer, detectedPlanKeys, cust
     && monthlyRateEstimate > 0
   ) {
     updates.monthly_rate = Math.round(monthlyRateEstimate * 100) / 100;
+    // Per-plan slices for the plan-rate ledger (codex #3245 r7): this
+    // writer KNOWS each detected plan's rate — a rate minted without
+    // components would hand the customer's first re-quote the
+    // empty-ledger whole-scalar replace after the ledger gate flips.
+    // Keys aggregate under the CANONICAL adoption family (codex r8):
+    // representativePlanKeys returns cadence-specific keys
+    // (pest_control_quarterly, termite_bait_active_annual) which the
+    // accept path would never match — a later re-quote would insert a
+    // second component beside the plan-sync one instead of replacing it.
+    // Lazy require: estimate-public and this module already share
+    // function-scope requires to avoid load cycles.
+    const { serviceFamilyKeyForAdoption } = require('../routes/estimate-public');
+    planRateComponents = {};
+    for (const key of representativePlanKeys(detectedPlanKeys)) {
+      const rate = Number(SELF_BOOKING_RECURRING_PLANS[key]?.monthlyRate || 0);
+      if (!(rate > 0)) continue;
+      const family = serviceFamilyKeyForAdoption({ service: key }) || key;
+      planRateComponents[family] = (planRateComponents[family] || 0) + rate;
+    }
   }
 
   return {
@@ -770,6 +790,7 @@ function buildCustomerWaveGuardAlignmentUpdates(customer, detectedPlanKeys, cust
     detectedFamilyKeys,
     inferredTier,
     monthlyRateEstimate: Math.round(monthlyRateEstimate * 100) / 100,
+    planRateComponents,
   };
 }
 
@@ -912,6 +933,12 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
 
   if (Object.keys(alignment.updates).length) {
     await database('customers').where({ id: customerId }).update(alignment.updates);
+    if (alignment.updates.monthly_rate !== undefined && alignment.planRateComponents) {
+      // Seed the detected per-plan components with the minted rate (codex
+      // #3245 r7); gate-aware error policy lives in the helper.
+      await require('./plan-rate-ledger')
+        .seedLedgerComponents(database, customerId, alignment.planRateComponents, { source: 'plan_sync' });
+    }
   }
 
   if (alignment.inferredTier && Object.keys(alignment.updates).length) {

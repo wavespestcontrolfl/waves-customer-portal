@@ -9,6 +9,9 @@ jest.mock('../config/locations', () => ({
 jest.mock('../config/models', () => ({ FLAGSHIP: 'test-flagship' }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
+// Advisory-lock helper needs a real pg pool — model it as pass-through; the
+// degraded-alert dedupe under test is the 24h notification check inside it.
+jest.mock('../utils/cron-lock', () => ({ runExclusive: async (name, fn) => fn() }));
 
 function createDbMock(initialRows = {}) {
   const state = {
@@ -50,6 +53,10 @@ function createDbMock(initialRows = {}) {
     if (sql.includes("COALESCE(last_name, ''))) = LOWER(?)")) {
       const last = String(bindings[0] || '').trim().toLowerCase();
       return row => String(row.last_name || '').trim().toLowerCase() === last;
+    }
+    if (sql.includes('publish_claimed_until IS NULL OR publish_claimed_until <')) {
+      const cutoff = new Date(bindings[0]);
+      return row => row.publish_claimed_until == null || new Date(row.publish_claimed_until) < cutoff;
     }
     return null;
   }
@@ -103,6 +110,9 @@ function createDbMock(initialRows = {}) {
           const op = value;
           const compareValue = arguments[2];
           if (op === '!=') this._whereNot = { ...(this._whereNot || {}), [arg]: compareValue };
+          else if (op === '<') this._rawFilters.push(row => row[arg] != null && new Date(row[arg]) < new Date(compareValue));
+          else if (op === '>') this._rawFilters.push(row => row[arg] != null && new Date(row[arg]) > new Date(compareValue));
+          else if (op === '>=') this._rawFilters.push(row => row[arg] != null && new Date(row[arg]) >= new Date(compareValue));
           else this._where[arg] = compareValue;
         } else if (typeof arg === 'string' && arguments.length >= 2) {
           this._where[arg] = value;
@@ -116,6 +126,7 @@ function createDbMock(initialRows = {}) {
       },
       whereNull(column) { this._whereNull = column; return this; },
       whereNotNull(column) { this._rawFilters.push(row => row[column] != null); return this; },
+      whereIn(column, values) { this._rawFilters.push(row => values.includes(row[column])); return this; },
       whereNot() { return this; },
       select() { return this; },
       limit(n) { this._limit = n; return this; },
@@ -128,12 +139,29 @@ function createDbMock(initialRows = {}) {
           .find(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value)) || null;
       },
       insert(record) {
-        const row = { id: record.id || `${table}-${state.inserts.length + 1}`, ...record };
+        // created_at mirrors the DB column default — the degraded-sync
+        // dedupe reads it back.
+        const row = { id: record.id || `${table}-${state.inserts.length + 1}`, created_at: new Date(), ...record };
         state.rows[table] = state.rows[table] || [];
-        state.rows[table].push(row);
-        state.inserts.push({ table, row });
+        // Mirror the google_reviews.google_review_id unique constraint: a
+        // plain insert of a duplicate id fails with Postgres 23505 (the
+        // overlapping-runner race under test); onConflict().merge() keeps
+        // its upsert semantics.
+        const duplicate = table === 'google_reviews' && record.google_review_id
+          && state.rows[table].some(r => r.google_review_id === record.google_review_id);
+        if (!duplicate) {
+          state.rows[table].push(row);
+          state.inserts.push({ table, row });
+        }
         return {
-          returning: async () => [{ id: row.id }],
+          returning: async () => {
+            if (duplicate) {
+              const err = new Error('duplicate key value violates unique constraint "google_reviews_google_review_id_unique"');
+              err.code = '23505';
+              throw err;
+            }
+            return [{ id: row.id }];
+          },
           onConflict: () => ({
             merge: async (mergeRecord = {}) => {
               const existing = state.rows[table].find(r => r.google_review_id === row.google_review_id);
@@ -143,13 +171,30 @@ function createDbMock(initialRows = {}) {
           }),
         };
       },
-      async update(record) {
-        const rows = state.rows[this._table] || [];
-        rows.filter(row => matchesWhere(row, this._where)).forEach(row => {
-          Object.assign(row, record);
-          state.updates.push({ table, id: row.id, record });
+      async update(record, returning) {
+        const rows = (state.rows[this._table] || [])
+          .filter(row => matchesWhere(row, this._where))
+          .filter(row => this._rawFilters.every(fn => fn(row)))
+          .filter(row => !this._whereNull || row[this._whereNull] == null)
+          .filter(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value));
+        rows.forEach(row => {
+          const rec = { ...record };
+          // GREATEST(COALESCE(col, epoch), ?) — the monotonic liveness
+          // write: apply the bound value only when it advances the column.
+          for (const [key, val] of Object.entries(rec)) {
+            if (val && typeof val === 'object' && typeof val.__raw === 'string' && val.__raw.includes('GREATEST')) {
+              const bound = new Date(val.__bindings?.[0] || 0);
+              const cur = row[key] ? new Date(row[key]) : new Date(0);
+              rec[key] = bound > cur ? val.__bindings[0] : row[key];
+            }
+          }
+          Object.assign(row, rec);
+          state.updates.push({ table, id: row.id, record: rec });
         });
-        return 1;
+        if (returning) {
+          return rows.map(row => Object.fromEntries(returning.map(col => [col, row[col]])));
+        }
+        return rows.length;
       },
       then(resolve, reject) {
         const rows = (state.rows[this._table] || [])
@@ -164,7 +209,22 @@ function createDbMock(initialRows = {}) {
   }
 
   const db = jest.fn(makeQuery);
-  db.fn = { now: jest.fn(() => 'NOW') };
+  // Real Date, not a sentinel string — the missing-review reconcile compares
+  // synced_at against the sync start time.
+  db.fn = { now: jest.fn(() => new Date()) };
+  db.raw = (sql, bindings = []) => ({ __raw: sql, __bindings: bindings });
+  // Snapshot-rollback transaction: a throw inside the callback restores all
+  // table state, mirroring the claim+alert atomicity under test.
+  db.transaction = async (fn) => {
+    const snapshot = JSON.parse(JSON.stringify(state.rows));
+    try {
+      return await fn(db);
+    } catch (err) {
+      for (const key of Object.keys(state.rows)) delete state.rows[key];
+      Object.assign(state.rows, snapshot);
+      throw err;
+    }
+  };
   db.__state = state;
   return db;
 }
@@ -344,18 +404,18 @@ describe('Google Business review sync', () => {
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
       location_id: 'bradenton',
-      reviewer_name: 'Jackie Lopez',
+      reviewer_name: 'Paula Placeholder',
       star_rating: 5,
       review_text: 'Edited text',
       review_created_at: '2026-04-09T20:54:35Z',
-      review_reply: 'Hello Jackie! Thanks!',
+      review_reply: 'Hello Paula! Thanks!',
       reply_updated_at: '2026-04-10T00:00:00Z',
     });
     service._getClient = jest.fn(async () => null); // force Places fallback
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('fields=reviews')) {
         return { json: async () => ({ status: 'OK', result: { reviews: [{
-          author_name: 'Jackie Lopez',
+          author_name: 'Paula Placeholder',
           rating: 5,
           text: 'Edited text',
           time: 1779307832, // edit moved the timestamp → brand-new places_* id
@@ -372,7 +432,7 @@ describe('Google Business review sync', () => {
       id: 'gbp-row-1',
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       review_text: 'Edited text',
-      review_reply: 'Hello Jackie! Thanks!', // Places carries no reply data — never downgrade
+      review_reply: 'Hello Paula! Thanks!', // Places carries no reply data — never downgrade
     });
   });
 
@@ -384,18 +444,18 @@ describe('Google Business review sync', () => {
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
       location_id: 'bradenton',
-      reviewer_name: 'Jackie Lopez',
+      reviewer_name: 'Paula Placeholder',
       star_rating: 5,
       review_text: 'Original text',
       review_created_at: '2026-04-09T20:54:35Z',
-      review_reply: 'Hello Jackie! Thanks!',
+      review_reply: 'Hello Paula! Thanks!',
       reply_updated_at: '2026-04-10T00:00:00Z',
     });
     service._getClient = jest.fn(async () => null);
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('fields=reviews')) {
         return { json: async () => ({ status: 'OK', result: { reviews: [{
-          author_name: 'Jackie Lopez',
+          author_name: 'Paula Placeholder',
           rating: 1,
           text: 'Completely different text',
           time: 1779307832,
@@ -412,7 +472,7 @@ describe('Google Business review sync', () => {
       id: 'gbp-row-1',
       star_rating: 5,
       review_text: 'Original text', // untouched
-      review_reply: 'Hello Jackie! Thanks!',
+      review_reply: 'Hello Paula! Thanks!',
     });
   });
 
@@ -422,11 +482,11 @@ describe('Google Business review sync', () => {
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
       location_id: 'bradenton',
-      reviewer_name: 'Jackie Lopez',
+      reviewer_name: 'Paula Placeholder',
       star_rating: 5,
       review_text: 'Original text',
       review_created_at: '2026-04-09T20:54:35Z',
-      review_reply: 'Hello Jackie! Thanks!',
+      review_reply: 'Hello Paula! Thanks!',
       reply_updated_at: '2026-04-10T00:00:00Z',
     });
     service._getClient = jest.fn(async () => null);
@@ -752,5 +812,525 @@ describe('Google Business review sync', () => {
     const alert = (db.__state.rows.notifications || []).find(n => n.category === 'review');
     expect(alert).toBeTruthy();
     expect(alert.title).toContain('John Doe');
+  });
+
+  // ==========================================================================
+  // Missing-review watchdog (Aug 2026: the Venice profile lost ALL its
+  // reviews in a Google sweep and nothing noticed — these guard the alarm).
+  // ==========================================================================
+
+  function seedSyncedReview(overrides = {}) {
+    const past = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const row = {
+      google_review_id: 'accounts/1/locations/2/reviews/rev-keep',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-keep',
+      location_id: 'bradenton',
+      reviewer_name: 'John Doe',
+      star_rating: 5,
+      review_text: 'Great work',
+      review_created_at: '2026-05-25T12:00:00Z',
+      review_reply: null,
+      customer_id: null,
+      synced_at: past,
+      missing_since: null,
+      ...overrides,
+    };
+    db.__state.rows.google_reviews.push(row);
+    return row;
+  }
+
+  function gbpFeed(reviews) {
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews });
+    });
+  }
+
+  test('stamps missing_since and alerts admin when a previously-synced review disappears from the GBP feed', async () => {
+    seedSyncedReview({ id: 'keep-1' });
+    seedSyncedReview({
+      id: 'gone-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-gone',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone',
+      reviewer_name: 'Vanished Vera',
+      review_created_at: '2026-04-01T12:00:00Z',
+    });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    const rows = db.__state.rows.google_reviews;
+    expect(rows.find(r => r.id === 'gone-1').missing_since).toBeTruthy();
+    expect(rows.find(r => r.id === 'keep-1').missing_since).toBeNull();
+    const alert = (db.__state.rows.notifications || []).find(n => n.title.includes('removed at'));
+    expect(alert).toBeTruthy();
+    expect(alert.title).toContain('1 Google review removed at Lakewood Ranch');
+    expect(alert.body).toContain('Vanished Vera');
+    expect(alert.link).toBe('/admin/reviews');
+  });
+
+  test('releases the missing_since claim when the removal alert fails to persist (retries next sync)', async () => {
+    seedSyncedReview({
+      id: 'gone-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-gone',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone',
+      reviewer_name: 'Vanished Vera',
+    });
+    gbpFeed([]);
+    const NotificationService = require('../services/notification-service');
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValueOnce(null);
+
+    await service.syncAllReviews();
+
+    // Claim released: the row is re-claimable, and no alert row exists.
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'gone-1').missing_since).toBeNull();
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(0);
+
+    // Next hourly run: notifyAdmin works again → stamp + alert.
+    db.__state.rows.google_reviews.find(r => r.id === 'gone-1').synced_at =
+      new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'gone-1').missing_since).toBeTruthy();
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(1);
+    spy.mockRestore();
+  });
+
+  test('Places fallback clears missing_since when the sample confirms the review is live again', async () => {
+    // GBP credentials down, review reinstated: the Places sample is positive
+    // proof of liveness — the stamp must not persist until GBP recovers.
+    seedSyncedReview({
+      id: 'back-via-places',
+      reviewer_name: 'Paula Placeholder',
+      review_text: 'Edited text',
+      star_rating: 5,
+      missing_since: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+    });
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Paula Placeholder',
+          rating: 5,
+          text: 'Edited text',
+          // Corroborates the seeded review_created_at (2026-05-25T12:00:00Z):
+          // an unedited review's Places `time` is its creation time — the
+          // identity requirement for clearing a removal stamp.
+          time: Math.floor(new Date('2026-05-25T12:00:00Z').getTime() / 1000),
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'back-via-places').missing_since).toBeNull();
+  });
+
+  test('Places fallback does NOT revive a stamped review on an uncorroborated same-name match', async () => {
+    // Same display name + same generic content from a DIFFERENT account: the
+    // dedup merge may still match, but the Places `time` (a fresh creation
+    // date) does not corroborate the stored review_created_at — the removal
+    // stamp must survive until the authoritative GBP feed decides.
+    const stamp = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    seedSyncedReview({
+      id: 'stamped-ambig',
+      reviewer_name: 'Paula Placeholder',
+      review_text: 'Great service',
+      star_rating: 5,
+      review_created_at: '2025-11-01T12:00:00Z',
+      missing_since: stamp,
+    });
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Paula Placeholder',
+          rating: 5,
+          text: 'Great service',
+          time: Math.floor(new Date('2026-05-25T12:00:00Z').getTime() / 1000),
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'stamped-ambig').missing_since).toBe(stamp);
+  });
+
+  test('never stamps a Places-sampled row without an authoritative GBP identity', async () => {
+    // An edited review moves the Places timestamp; the GBP feed may carry it
+    // under its resource name while the orphaned sample row goes stale —
+    // that is not a removal.
+    seedSyncedReview({
+      id: 'places-orphan',
+      google_review_id: 'places_place-1_1700000000',
+      gbp_review_name: null,
+      reviewer_name: 'Sample Sally',
+    });
+    gbpFeed([]);
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'places-orphan').missing_since).toBeNull();
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(0);
+  });
+
+  test('does not re-alert on later syncs for a review already stamped missing', async () => {
+    seedSyncedReview({
+      id: 'gone-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-gone',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone',
+      reviewer_name: 'Vanished Vera',
+      missing_since: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+    });
+    gbpFeed([]);
+
+    await service.syncAllReviews();
+
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(0);
+  });
+
+  test('clears missing_since when a removed review reappears in the feed (reinstated)', async () => {
+    seedSyncedReview({
+      id: 'back-1',
+      missing_since: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+    });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'back-1').missing_since).toBeNull();
+  });
+
+  test('a same-name review from a different account cannot hijack a stamped evidence row', async () => {
+    // Stable GBP identity differs — only the display name and a nearby
+    // timestamp match. The fuzzy fallback must not resolve to the stamped
+    // row: that would overwrite the retained evidence and clear its stamp.
+    seedSyncedReview({
+      id: 'evidence-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-removed',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-removed',
+      missing_since: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+    });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-copycat',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Totally different text',
+      createTime: '2026-05-25T13:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    const evidence = db.__state.rows.google_reviews.find(r => r.id === 'evidence-1');
+    expect(evidence.missing_since).toBeTruthy();
+    expect(evidence.review_text).toBe('Great work');
+    // The copycat landed as its own distinct row instead.
+    const copycat = db.__state.rows.google_reviews.find(
+      r => r.gbp_review_name === 'accounts/1/locations/2/reviews/rev-copycat',
+    );
+    expect(copycat).toBeTruthy();
+  });
+
+  test('an unexpired publish claim defers the removal stamp; an expired claim does not', async () => {
+    seedSyncedReview({ id: 'keep-1' });
+    // Mid-publication: claimed 10 minutes into the future.
+    seedSyncedReview({
+      id: 'claimed-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-claimed',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-claimed',
+      reviewer_name: 'Publishing Pat',
+      publish_claimed_until: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    });
+    // Crashed publisher: claim expired an hour ago — stampable again.
+    seedSyncedReview({
+      id: 'expired-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-expired',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-expired',
+      reviewer_name: 'Expired Edna',
+      publish_claimed_until: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'claimed-1').missing_since).toBeNull();
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'expired-1').missing_since).toBeTruthy();
+  });
+
+  test('a failed reconcile surfaces in errors and rings the degraded alert (no Places fallback)', async () => {
+    seedSyncedReview({ id: 'keep-1' });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+    service._reconcileMissingReviews = jest.fn(async () => ({ ok: false, error: 'boom' }));
+    // A pull-failure alert from earlier in the window must NOT suppress the
+    // reconcile alert — distinct failure classes carry distinct titles.
+    db.__state.rows.notifications = [{
+      recipient_type: 'admin',
+      title: 'Google review sync degraded for Lakewood Ranch',
+      created_at: new Date(Date.now() - 60 * 60 * 1000),
+    }];
+
+    const result = await service.syncAllReviews();
+
+    // The pull itself succeeded — no Places review-sample fallback runs.
+    expect(result.sources).toEqual({ bradenton: 'gbp' });
+    expect(result.errors.some(e => e.source === 'reconcile')).toBe(true);
+    const degraded = (db.__state.rows.notifications || []).filter(n => n.title.includes('removal reconcile failing'));
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0].body).toContain('pulled the GBP feed');
+    expect(degraded[0].body).toContain('REMOVALS will not be detected');
+    const urls = global.fetch.mock.calls.map(c => String(c[0]));
+    expect(urls.filter(u => u.includes('fields=reviews'))).toHaveLength(0);
+  });
+
+  test('an older overlapping runner cannot regress a newer synced_at token', async () => {
+    // Runner B (newer fetch start) refreshed the row; runner A (older start,
+    // slower feed processing) upserts the same review afterwards. A's write
+    // must not move synced_at backwards — B's reconcile would then see
+    // `synced_at < B.syncStart` and stamp a review both feeds returned.
+    const newerToken = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    seedSyncedReview({ id: 'overlap-1', synced_at: newerToken });
+    const olderStart = new Date(Date.now() - 60 * 60 * 1000);
+
+    await service._upsertGbpReview({
+      google_review_id: 'accounts/1/locations/2/reviews/rev-keep',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-keep',
+      location_id: 'bradenton',
+      reviewer_name: 'John Doe',
+      reviewer_photo_url: null,
+      star_rating: 5,
+      review_text: 'Great work',
+      review_created_at: '2026-05-25T12:00:00Z',
+      owner_reply: null,
+      owner_reply_updated_at: null,
+    }, olderStart);
+
+    const row = db.__state.rows.google_reviews.find(r => r.id === 'overlap-1');
+    expect(new Date(row.synced_at).toISOString()).toBe(newerToken);
+  });
+
+  test('Places fallback: uncorroborated same-name+content match cannot mutate a stamped evidence row', async () => {
+    const stamp = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const oldSynced = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    seedSyncedReview({
+      id: 'evidence-2',
+      missing_since: stamp,
+      synced_at: oldSynced,
+      reviewer_photo_url: null,
+    });
+    service._getClient = jest.fn(async () => null); // GBP down → Places fallback
+    // Same display name AND identical content, but the Places `time` is an
+    // hour off the stored creation instant — a copycat account, not the
+    // original review. Pre-fix this merged: photo/customer overwritten and
+    // synced_at refreshed on retained evidence.
+    const copycatTime = Math.floor(new Date('2026-05-25T13:00:00Z').getTime() / 1000);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'John Doe',
+          rating: 5,
+          text: 'Great work',
+          time: copycatTime,
+          profile_photo_url: 'https://copycat.example/photo.jpg',
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const evidence = db.__state.rows.google_reviews.find(r => r.id === 'evidence-2');
+    expect(evidence.missing_since).toBe(stamp);
+    expect(evidence.reviewer_photo_url).toBeNull();
+    expect(evidence.synced_at).toBe(oldSynced);
+    // Ambiguous identity defers entirely — no synthetic Places row either.
+    expect(db.__state.rows.google_reviews.some(r => String(r.google_review_id).startsWith('places_place-1'))).toBe(false);
+  });
+
+  test('fails closed: no missing stamps on the Places fallback, and the degraded-sync alert fires once per 24h', async () => {
+    seedSyncedReview({ id: 'stale-1' });
+    service._getClient = jest.fn(async () => null); // token missing → Places fallback
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+    });
+
+    await service.syncAllReviews();
+    await service.syncAllReviews(); // second hourly run inside the dedupe window
+
+    // The stale row is NOT stamped — a 5-review sample proves nothing.
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'stale-1').missing_since).toBeNull();
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(0);
+    // One degraded alert across both runs (24h title dedupe).
+    const degraded = (db.__state.rows.notifications || []).filter(n => n.title.includes('sync degraded'));
+    expect(degraded).toHaveLength(1);
+    // The alert fires BEFORE the fallback runs, so it must describe the
+    // sample as an attempt — not claim a partial feed is already active.
+    expect(degraded[0].body).toContain('will attempt the ~5-review Places sample');
+  });
+
+  test('fails closed when the GBP pull itself errors (no stamps, degraded alert instead)', async () => {
+    seedSyncedReview({ id: 'stale-1' });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return { ok: false, status: 500, headers: { get: () => 'text/plain' }, text: async () => 'boom' };
+    });
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'stale-1').missing_since).toBeNull();
+    expect((db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'))).toHaveLength(0);
+    expect((db.__state.rows.notifications || []).some(n => n.title.includes('sync degraded'))).toBe(true);
+  });
+
+  test('runs the GBP watchdog when GOOGLE_MAPS_API_KEY is absent (key gates only Places)', async () => {
+    // GBP auth is _getClient, not the Maps key — an env drift on the key
+    // alone must not stop the authoritative pull or the removal watchdog.
+    delete process.env.GOOGLE_MAPS_API_KEY;
+    seedSyncedReview({
+      id: 'gone-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-gone',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone',
+      reviewer_name: 'Vanished Vera',
+    });
+    gbpFeed([]);
+
+    const result = await service.syncAllReviews();
+
+    expect(result.sources).toEqual({ bradenton: 'gbp' });
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'gone-1').missing_since).toBeTruthy();
+    expect((db.__state.rows.notifications || []).some(n => n.title.includes('removed at'))).toBe(true);
+    // No Places request went out without a key.
+    const urls = global.fetch.mock.calls.map(c => String(c[0]));
+    expect(urls.some(u => u.includes('maps.googleapis.com'))).toBe(false);
+  });
+
+  test('still alerts degraded sync when the key is absent AND GBP is down (no Places attempt)', async () => {
+    delete process.env.GOOGLE_MAPS_API_KEY;
+    seedSyncedReview({ id: 'stale-1' });
+    service._getClient = jest.fn(async () => null); // GBP credential gap
+    global.fetch = jest.fn(async () => jsonResponse({}));
+
+    const result = await service.syncAllReviews();
+
+    expect(result.sources).toEqual({ bradenton: 'none' });
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'stale-1').missing_since).toBeNull();
+    const degraded = (db.__state.rows.notifications || []).find(n => n.title.includes('sync degraded'));
+    expect(degraded).toBeTruthy();
+    // The alert must not claim a Places sample remains when the caller
+    // skipped the fallback — this is a complete outage.
+    expect(degraded.body).toContain('no Places fallback is available');
+    expect(degraded.body).not.toContain('Places sample');
+    const urls = global.fetch.mock.calls.map(c => String(c[0]));
+    expect(urls.some(u => u.includes('maps.googleapis.com'))).toBe(false);
+  });
+
+  test('an older sync snapshot cannot clear a stamp written by a newer reconciliation', async () => {
+    // The stamp postdates this runner's fetch start (a newer overlapping
+    // runner already decided the review is gone) — the stale snapshot's
+    // upsert must keep the stamp rather than reviving the review.
+    const futureStamp = new Date(Date.now() + 60 * 1000).toISOString();
+    seedSyncedReview({ id: 'keep-1', missing_since: futureStamp });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'keep-1').missing_since).toBe(futureStamp);
+  });
+
+  test('an insert race between overlapping runners does not ring the degraded alert', async () => {
+    seedSyncedReview({ id: 'keep-1' });
+    gbpFeed([{
+      name: 'accounts/1/locations/2/reviews/rev-keep',
+      reviewer: { displayName: 'John Doe' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-05-25T12:00:00Z',
+    }]);
+    // The losing runner's existence check raced the winner's insert and saw
+    // nothing — its upsert takes the insert path and hits the unique
+    // constraint. That must recover as an update, not surface as a GBP
+    // failure.
+    const spy = jest.spyOn(service, '_findExistingReview').mockResolvedValueOnce(null);
+
+    const result = await service.syncAllReviews();
+
+    expect(result.sources).toEqual({ bradenton: 'gbp' });
+    expect((db.__state.rows.notifications || []).some(n => n.title.includes('sync degraded'))).toBe(false);
+    expect(db.__state.rows.google_reviews.filter(r => r.google_review_id === 'accounts/1/locations/2/reviews/rev-keep')).toHaveLength(1);
+    spy.mockRestore();
+  });
+
+  test('unlinked-review notification defers to the batch collector when one is passed', async () => {
+    const spy = jest.spyOn(service, '_notifyUnlinkedReview').mockResolvedValue();
+    const normalized = {
+      google_review_id: 'gid-defer-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/gid-defer-1',
+      location_id: 'bradenton',
+      reviewer_name: 'SunshineGal88',
+      reviewer_photo_url: null,
+      star_rating: 5,
+      review_text: 'Great service',
+      review_created_at: '2026-05-25T12:00:00Z',
+      owner_reply: null,
+      owner_reply_updated_at: null,
+    };
+
+    // With a collector: pushed, NOT notified inline (batch defers to end of run).
+    const pending = [];
+    const result = await service._upsertGbpReview(normalized, null, pending);
+    expect(result.inserted).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].google_review_id).toBe('gid-defer-1');
+
+    // Without a collector (direct callers): inline notify still fires.
+    await service._upsertGbpReview({
+      ...normalized,
+      google_review_id: 'gid-defer-2',
+      gbp_review_name: 'accounts/1/locations/2/reviews/gid-defer-2',
+      reviewer_name: 'OtherHandle77',
+      review_created_at: '2026-05-26T12:00:00Z',
+    });
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
   });
 });

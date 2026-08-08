@@ -37,7 +37,7 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
     });
 
     expect(constants.LAWN_PRICING_V2).toMatchObject({
-      pricingVersion: 'LAWN_PRICING_V2_GRID_500',
+      pricingVersion: 'LAWN_PRICING_V2_EDGE_PARITY',
       pricingMode: 'THIRTY_FIVE_MARGIN_FLOOR',
       targetCollectedMarginFloor: 0.35,
       laborRateLoaded: 35,
@@ -65,7 +65,10 @@ describeOrSkip('Lawn Pricing V2 DB sync', () => {
     expect(lawn.costs.total).toBeLessThan(386);
     expect(lawn.minimumCollectedAnnualPrice).toBeGreaterThanOrEqual(593);
     expect(lawn.minimumCollectedAnnualPrice).toBeLessThan(594);
-    expect(lawn.pricingVersion).toBe('LAWN_PRICING_V2_GRID_500');
+    // Prices here are unchanged by the 2026-08-07 frequency discount: at
+    // 4,250 sqft the 9x cell ($48/mo) already sits under its -4% cap ($54),
+    // so only the version token moves.
+    expect(lawn.pricingVersion).toBe('LAWN_PRICING_V2_EDGE_PARITY');
     expect(lawn.pricingSource).toBe('MARKET_TABLE');
     expect(lawn.pricingBasis).toBe('TABLE_INTERPOLATION');
     expect(lawn.marketAnnual).toBe(576);

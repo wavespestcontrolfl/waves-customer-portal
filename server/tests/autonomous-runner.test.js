@@ -14,6 +14,7 @@ const { _internals } = require('../services/content/autonomous-runner');
 const {
   isShadow,
   autoPublishEnabled,
+  applyOperatorSlugRepair,
   FACTS_GATED_ACTIONS,
   TRUST_BUILD_THRESHOLD,
   DEFAULT_MIN_SCORE,
@@ -733,6 +734,455 @@ describe('isDeterministicPublishError', () => {
     const heroErr = new Error('autonomous blog hero image generation failed for x: image API down');
     heroErr.code = 'BLOG_HERO_IMAGE_FAILED';
     expect(isDeterministicPublishError(heroErr)).toBe(true);
+  });
+
+  test('an off-site canonical rejection is deterministic (park, never retry or repair into a publish)', () => {
+    expect(isDeterministicPublishError(new Error('autonomous draft canonical points off-site (evil.example.com) — refusing to repair a cross-site canonical'))).toBe(true);
+  });
+});
+
+describe('applyOperatorSlugRepair (operator pin is authoritative — drift repaired, not parked)', () => {
+  const PINNED = '/lawn-care/fall-lawn-mistakes-swfl/';
+  function operatorBrief(slug = PINNED) {
+    return { voice_constraints: { operator_brief: { slug } } };
+  }
+  function driftedDraft(overrides = {}) {
+    return {
+      type: 'draft',
+      url: overrides.url !== undefined
+        ? overrides.url
+        : 'https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/',
+      frontmatter: {
+        slug: '/fall-lawn-mistakes-southwest-florida/',
+        canonical: 'https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/',
+        title: 'Fall Lawn Mistakes',
+        ...overrides.frontmatter,
+      },
+      body: overrides.body !== undefined
+        ? overrides.body
+        : 'Intro. See [our checklist](/fall-lawn-mistakes-southwest-florida/) and the [same post again](/fall-lawn-mistakes-southwest-florida/#faq-adjacent).',
+    };
+  }
+
+  test('returns null (no-op) when the draft already matches the pin — draft.url still stamped for parked-run review targets (Codex r13)', () => {
+    const draft = driftedDraft({ frontmatter: { slug: PINNED, canonical: `https://www.wavespestcontrol.com${PINNED}`, category: 'lawn-care' } });
+    delete draft.url; // production emit_draft never sets it
+    const bodyBefore = draft.body;
+    expect(applyOperatorSlugRepair(operatorBrief(), draft)).toBeNull();
+    // Even the drift-free path stamps the own-route reference: a run parked
+    // BEFORE publish (trust-build, named-competitor review) needs a non-null
+    // review target_url.
+    expect(draft.url).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    // Nothing else moves.
+    expect(draft.body).toBe(bodyBefore);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+    expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+  });
+
+  test('an on-fleet BACKSLASH network-path canonical naming the drifted route is repaired — correspondence reads the parsed pathname (Codex r13)', () => {
+    const draft = driftedDraft({
+      frontmatter: { canonical: '\\\\www.wavespestcontrol.com\\fall-lawn-mistakes-southwest-florida\\' },
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(result.repair.canonical_rewritten).toBe(true);
+  });
+
+  test('a CASE-drifted draft slug is repaired — normalized equality must not skip the repair (Codex r4)', () => {
+    // operatorSlugMismatch lowercases both sides, so /Lawn-Care/… vs the pin
+    // reads as "no drift" — but the publisher would keep the uppercase leaf
+    // and schema-fail instead of publishing the pinned route.
+    const draft = driftedDraft({
+      frontmatter: { slug: '/Lawn-Care/Fall-Lawn-Mistakes-Swfl/', category: 'lawn-care' },
+      body: 'See [our checklist](/Lawn-Care/Fall-Lawn-Mistakes-Swfl/) for details.',
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+    expect(draft.body).toContain(`(${PINNED})`);
+    expect(result.repair.body_self_link_rewrites).toBe(1);
+  });
+
+  test('a drifted CATEGORY is forced to the pin even when the slug matches — the publisher derives the route from category (Codex r4)', () => {
+    const draft = driftedDraft({
+      frontmatter: { slug: PINNED, canonical: `https://www.wavespestcontrol.com${PINNED}`, category: 'pest-control' },
+      body: 'No self links here.',
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.category).toBe('lawn-care');
+    expect(result.repair.category_repaired).toEqual({ from: 'pest-control', to: 'lawn-care' });
+  });
+
+  test('a single-segment pin is unrepairable — the publisher would prepend a category and change the route (Codex r4)', () => {
+    const draft = driftedDraft();
+    const before = JSON.stringify(draft);
+    const result = applyOperatorSlugRepair(operatorBrief('/fall-lawn-mistakes-swfl/'), draft);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/not a \/category\/leaf\/ route/);
+    expect(JSON.stringify(draft)).toBe(before);
+  });
+
+  test('a NESTED pin (3+ segments) is unrepairable — normalizeAutonomousCategory cannot retain a slash-containing category (Codex r5)', () => {
+    const draft = driftedDraft();
+    const before = JSON.stringify(draft);
+    const result = applyOperatorSlugRepair(operatorBrief('/lawn-care/fall/guide/'), draft);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/not a \/category\/leaf\/ route/);
+    expect(JSON.stringify(draft)).toBe(before);
+  });
+
+  test('a pin with a NON-CANONICAL category parks — publish-time normalization would rewrite the route (Codex r6)', () => {
+    for (const badPin of ['/pest/example-post/', '/unknown/example-post/']) {
+      const draft = driftedDraft();
+      const before = JSON.stringify(draft);
+      const result = applyOperatorSlugRepair(operatorBrief(badPin), draft);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/not a canonical post category/);
+      expect(JSON.stringify(draft)).toBe(before);
+    }
+  });
+
+  test('repairs drift in place: slug forced to the pin, canonical repointed, body self-links rewritten, repair recorded', () => {
+    const draft = driftedDraft();
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+    expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    // draft.url feeds the sitemap pre-check, visibility gate, uniqueness
+    // self-exclusion, and published/pending-url fallback — it must describe
+    // the pinned route after repair, not the rejected writer route (Codex r8).
+    expect(draft.url).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(draft.body).not.toContain('/fall-lawn-mistakes-southwest-florida/');
+    expect(draft.body).toContain(`(${PINNED})`);
+    // Fragment link keeps its fragment — only the exact path is swapped.
+    expect(draft.body).toContain(`${PINNED}#faq-adjacent`);
+    expect(result.repair).toMatchObject({
+      from_slug: '/fall-lawn-mistakes-southwest-florida/',
+      to_slug: PINNED,
+      canonical_rewritten: true,
+      url_rewritten: true,
+      body_self_link_rewrites: 2,
+    });
+    // A second pass reads clean afterwards — the repair is its own drift
+    // detector (single definition of slug drift, Codex r9), so the pipeline
+    // continues past the machine check instead of parking.
+    expect(applyOperatorSlugRepair(operatorBrief(), draft)).toBeNull();
+  });
+
+  test('repairs a draft that emitted NO slug at all (slug set, body untouched)', () => {
+    const draft = driftedDraft({ frontmatter: { slug: undefined }, body: 'No self links here.' });
+    delete draft.frontmatter.slug;
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+    expect(result.repair.body_self_link_rewrites).toBe(0);
+    expect(draft.body).toBe('No self links here.');
+  });
+
+  test('does NOT rewrite unrelated content — only the exact old slug path', () => {
+    const draft = driftedDraft({
+      body: 'Talks about fall-lawn-mistakes-southwest-florida as a phrase (no slashes) and links [here](/fall-lawn-mistakes-southwest-florida/).',
+    });
+    applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(draft.body).toContain('fall-lawn-mistakes-southwest-florida as a phrase');
+    expect(draft.body).toContain(`(${PINNED})`);
+  });
+
+  test('an invalid pinned slug is NOT repairable — draft untouched, caller keeps the park', () => {
+    for (const badPin of ['/Fall Lawn Mistakes!!/', '/bad_underscore/', '//', '   ']) {
+      const draft = driftedDraft();
+      const before = JSON.stringify(draft);
+      const result = applyOperatorSlugRepair(operatorBrief(badPin), draft);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/not a valid blog slug path/);
+      expect(result.mismatch.expected_slug).toBe(badPin);
+      expect(JSON.stringify(draft)).toBe(before);
+    }
+  });
+
+  test('a pin malformed only by casing or missing boundary slashes PARKS — never silently normalized into a URL the operator did not write (Codex r1)', () => {
+    for (const badPin of ['/Lawn-Care/Fall-Lawn-Mistakes-Swfl/', 'lawn-care/fall-lawn-mistakes-swfl', '/lawn-care/fall-lawn-mistakes-swfl']) {
+      const draft = driftedDraft();
+      const before = JSON.stringify(draft);
+      const result = applyOperatorSlugRepair(operatorBrief(badPin), draft);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/not a valid blog slug path/);
+      expect(JSON.stringify(draft)).toBe(before);
+    }
+  });
+
+  test('an invalid pin that NORMALIZES equal to the draft slug still parks — normalized equality must not bypass raw validation (Codex r3)', () => {
+    // Pin /Lawn-Care/…-Swfl/ lowercases to the draft slug, so a normalized
+    // comparison alone reads "no drift" — the malformed pin must still park
+    // instead of publishing.
+    const draft = driftedDraft({ frontmatter: { slug: '/lawn-care/fall-lawn-mistakes-swfl/' } });
+    const before = JSON.stringify(draft);
+    const result = applyOperatorSlugRepair(operatorBrief('/Lawn-Care/Fall-Lawn-Mistakes-Swfl/'), draft);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/not a valid blog slug path/);
+    expect(result.mismatch.expected_slug).toBe('/Lawn-Care/Fall-Lawn-Mistakes-Swfl/');
+    expect(JSON.stringify(draft)).toBe(before);
+  });
+
+  test('slug repair rewrites ONLY exact self-link destinations — foreign-host citations and longer internal routes survive verbatim (Codex r1)', () => {
+    const draft = driftedDraft({
+      body: [
+        'See [our checklist](/fall-lawn-mistakes-southwest-florida/) and',
+        '[the absolute form](https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/) and',
+        '[the bare-host form](https://wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/).',
+        'A citation: [report](https://source.example/fall-lawn-mistakes-southwest-florida/report) and',
+        '[an exact foreign path](https://source.example/fall-lawn-mistakes-southwest-florida/) plus',
+        '[a longer internal route](/fall-lawn-mistakes-southwest-florida/archive/) and',
+        '[a query value](https://source.example/report?return=/fall-lawn-mistakes-southwest-florida/) and',
+        '[an absolute query value](https://source.example/r?return=https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/) and',
+        '[a dot-prefixed child](/fall-lawn-mistakes-southwest-florida/.well-known/security.txt) and',
+        '[a percent-encoded child](/fall-lawn-mistakes-southwest-florida/%61rchive/).',
+      ].join(' '),
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(result.repair.body_self_link_rewrites).toBe(3);
+    expect(draft.body).toContain(`(${PINNED})`);
+    expect(draft.body).toContain(`https://www.wavespestcontrol.com${PINNED}`);
+    // The bare-host hub form is the writer's own drifted route too (Codex
+    // r6) — repaired AND normalized to the configured www origin.
+    expect(draft.body).not.toContain('https://wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/');
+    expect(draft.body).not.toContain(`https://wavespestcontrol.com${PINNED}`);
+    expect(draft.body).toContain('https://source.example/fall-lawn-mistakes-southwest-florida/report');
+    expect(draft.body).toContain('[an exact foreign path](https://source.example/fall-lawn-mistakes-southwest-florida/)');
+    expect(draft.body).toContain('(/fall-lawn-mistakes-southwest-florida/archive/)');
+    // A query VALUE embedding the old path is part of a different
+    // destination, not a self-link (Codex r2) — including the ABSOLUTE hub
+    // form embedded in a foreign destination's query (Codex r7).
+    expect(draft.body).toContain('?return=/fall-lawn-mistakes-southwest-florida/');
+    expect(draft.body).toContain('?return=https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/');
+    // Child routes whose next segment starts with a non-alphanumeric URL
+    // char are DIFFERENT pathnames (Codex r5).
+    expect(draft.body).toContain('(/fall-lawn-mistakes-southwest-florida/.well-known/security.txt)');
+    expect(draft.body).toContain('(/fall-lawn-mistakes-southwest-florida/%61rchive/)');
+  });
+
+  test('an APEX-host canonical is the SAME hub — repaired, not preserved as foreign (Codex r7)', () => {
+    // Exact-host comparison would call this foreign, preserve the stale
+    // old-leaf canonical, and the publisher would park a draft whose repair
+    // should have succeeded.
+    const draft = driftedDraft({
+      frontmatter: { canonical: 'https://wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/' },
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(result.repair.canonical_rewritten).toBe(true);
+  });
+
+  test('a SPOKE-host canonical is a valid FLEET URL — repaired, not preserved as foreign (Codex r8)', () => {
+    // The publisher's isFleetCanonicalHost accepts every spoke host, so a
+    // hub-only check here would preserve the stale old-leaf canonical; the
+    // publisher would then accept the host but reject the leaf, parking a
+    // finished spoke draft. Stamping the hub canonical is safe — the
+    // publisher derives the binding, origin-correct canonical from the slug.
+    for (const spokeCanonical of [
+      'https://www.sarasotaflpestcontrol.com/fall-lawn-mistakes-southwest-florida/',
+      'https://sarasotaflpestcontrol.com/fall-lawn-mistakes-southwest-florida/',
+    ]) {
+      const draft = driftedDraft({ frontmatter: { canonical: spokeCanonical } });
+      const result = applyOperatorSlugRepair(operatorBrief(), draft);
+      expect(result.ok).toBe(true);
+      expect(draft.frontmatter.canonical).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+      expect(result.repair.canonical_rewritten).toBe(true);
+    }
+  });
+
+  test('an on-fleet canonical naming a genuinely DIFFERENT post is PRESERVED — the publisher leaf guard must see the confused draft (Codex r11)', () => {
+    // Fleet host alone is not enough to repair: a canonical pointing at an
+    // unrelated post is exactly what assertCanonicalMatchesSlug parks on,
+    // and rewriting it here would publish a confused draft at the pin.
+    const draft = driftedDraft({ frontmatter: { canonical: 'https://www.wavespestcontrol.com/unrelated-post/' } });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.canonical).toBe('https://www.wavespestcontrol.com/unrelated-post/');
+    expect(result.repair.canonical_rewritten).toBe(false);
+  });
+
+  test('unquoted HTML/MDX href self-links are rewritten — legal syntax the body scanners support (Codex r11; query suffix r12)', () => {
+    const draft = driftedDraft({
+      body: [
+        'Click <a href=/fall-lawn-mistakes-southwest-florida/>here</a> or',
+        '<a href=https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/>the absolute form</a> or',
+        '<a href=/fall-lawn-mistakes-southwest-florida/?utm_source=post>the tracked form</a>;',
+        'a query param named src [x](https://source.example/r?src=/fall-lawn-mistakes-southwest-florida/) survives.',
+      ].join(' '),
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.body).toContain(`<a href=${PINNED}>`);
+    expect(draft.body).toContain(`<a href=https://www.wavespestcontrol.com${PINNED}>`);
+    // The query suffix identifies the old route and survives verbatim.
+    expect(draft.body).toContain(`<a href=${PINNED}?utm_source=post>`);
+    expect(draft.body).toContain('?src=/fall-lawn-mistakes-southwest-florida/');
+    expect(result.repair.body_self_link_rewrites).toBe(3);
+  });
+
+  test('a URL-shaped drifted slug rewrites body links by its PATHNAME — raw-string candidates never match (Codex r12)', () => {
+    const draft = driftedDraft({
+      frontmatter: { slug: 'https://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/' },
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.frontmatter.slug).toBe(PINNED);
+    // The default body's two relative self-links on the drifted route are
+    // found via the extracted pathname and rewritten.
+    expect(draft.body).not.toContain('/fall-lawn-mistakes-southwest-florida/');
+    expect(draft.body).toContain(`(${PINNED})`);
+    expect(result.repair.body_self_link_rewrites).toBe(2);
+  });
+
+  test('absolute self-links classify by PARSED host — uppercase serialization and explicit :443 are the same hub (Codex r15)', () => {
+    const draft = driftedDraft({
+      body: [
+        'See [shouty form](HTTPS://WWW.WAVESPESTCONTROL.COM/fall-lawn-mistakes-southwest-florida/) and',
+        '[explicit port](https://www.wavespestcontrol.com:443/fall-lawn-mistakes-southwest-florida/) and',
+        '[a foreign host with the same path](https://source.example/fall-lawn-mistakes-southwest-florida/).',
+      ].join(' '),
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.body).not.toContain('WAVESPESTCONTROL.COM/fall-lawn');
+    expect(draft.body).not.toContain(':443');
+    // Both hub forms normalized to the configured origin + pin.
+    const normalized = draft.body.match(new RegExp(`https://www\\.wavespestcontrol\\.com${PINNED.replace(/\//g, '\\/')}`, 'g')) || [];
+    expect(normalized.length).toBe(2);
+    // A foreign host carrying the same pathname is someone else's page.
+    expect(draft.body).toContain('https://source.example/fall-lawn-mistakes-southwest-florida/');
+    expect(result.repair.body_self_link_rewrites).toBe(2);
+  });
+
+  test('a PROTOCOL-RELATIVE hub self-link is the same drifted route; a protocol-relative foreign host survives (Codex r16)', () => {
+    const draft = driftedDraft({
+      body: [
+        'See [pr hub form](//www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/) and',
+        '[pr foreign form](//source.example/fall-lawn-mistakes-southwest-florida/).',
+      ].join(' '),
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.body).toContain(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(draft.body).not.toContain('//www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/');
+    expect(draft.body).toContain('(//source.example/fall-lawn-mistakes-southwest-florida/)');
+    expect(result.repair.body_self_link_rewrites).toBe(1);
+  });
+
+  test('a FLAT drifted slug with a category also repairs links to the DERIVED category route (Codex r16)', () => {
+    // The publisher derives the public route as category + leaf, so the
+    // writer may self-link to /lawn-care/<flat-slug>/ even though its
+    // frontmatter slug is flat.
+    const draft = driftedDraft({
+      frontmatter: { category: 'lawn-care' },
+      body: 'See [derived route](/lawn-care/fall-lawn-mistakes-southwest-florida/) and [flat form](/fall-lawn-mistakes-southwest-florida/).',
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.body).not.toContain('fall-lawn-mistakes-southwest-florida');
+    const pinnedLinks = draft.body.match(new RegExp(PINNED.replace(/\//g, '\\/'), 'g')) || [];
+    expect(pinnedLinks.length).toBe(2);
+    expect(result.repair.body_self_link_rewrites).toBe(2);
+  });
+
+  test('an http:// hub self-link is the SAME drifted route — matched regardless of the configured scheme (Codex r14)', () => {
+    const draft = driftedDraft({
+      body: 'See [http www form](http://www.wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/) and [http apex form](http://wavespestcontrol.com/fall-lawn-mistakes-southwest-florida/).',
+    });
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    // Both rewritten AND normalized to the configured https origin.
+    expect(draft.body).not.toContain('http://');
+    expect(draft.body).toContain(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(result.repair.body_self_link_rewrites).toBe(2);
+  });
+
+  test('draft.url is stamped even when the writer omitted it — emit_draft never captures a url field (Codex r9)', () => {
+    const draft = driftedDraft();
+    delete draft.url;
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(true);
+    expect(draft.url).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    expect(result.repair.url_rewritten).toBe(true);
+  });
+
+  test('a spoke-targeted draft stamps draft.url on the SPOKE origin and rewrites spoke-absolute self-links (Codex r9)', () => {
+    const prev = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    process.env.SPOKE_BLOG_NETWORK_ENABLED = 'true';
+    try {
+      const brief = {
+        target_sites: ['sarasotaflpestcontrol.com'],
+        voice_constraints: { operator_brief: { slug: PINNED } },
+      };
+      const draft = driftedDraft({
+        body: [
+          'See [www form](https://www.sarasotaflpestcontrol.com/fall-lawn-mistakes-southwest-florida/) and',
+          '[apex form](https://sarasotaflpestcontrol.com/fall-lawn-mistakes-southwest-florida/) and',
+          '[a DIFFERENT spoke](https://www.veniceflpestcontrol.com/fall-lawn-mistakes-southwest-florida/).',
+        ].join(' '),
+      });
+      const result = applyOperatorSlugRepair(brief, draft);
+      expect(result.ok).toBe(true);
+      expect(draft.url).toBe(`https://www.sarasotaflpestcontrol.com${PINNED}`);
+      // Both host forms of the TARGETED spoke are the writer's own drifted
+      // route — repaired and normalized to the spoke's canonical www origin.
+      expect(draft.body).toContain(`https://www.sarasotaflpestcontrol.com${PINNED}`);
+      expect(draft.body).not.toContain('sarasotaflpestcontrol.com/fall-lawn-mistakes-southwest-florida/');
+      expect(draft.body).not.toContain(`https://sarasotaflpestcontrol.com${PINNED}`);
+      // A different fleet site's route is someone else's page, not a self-link.
+      expect(draft.body).toContain('https://www.veniceflpestcontrol.com/fall-lawn-mistakes-southwest-florida/');
+      expect(result.repair.body_self_link_rewrites).toBe(2);
+    } finally {
+      if (prev === undefined) delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+      else process.env.SPOKE_BLOG_NETWORK_ENABLED = prev;
+    }
+  });
+
+  test('with the spoke network DISABLED a spoke-targeted draft publishes on the hub — draft.url stays hub-origin (kill switch honored)', () => {
+    const prev = process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    delete process.env.SPOKE_BLOG_NETWORK_ENABLED;
+    try {
+      const brief = {
+        target_sites: ['sarasotaflpestcontrol.com'],
+        voice_constraints: { operator_brief: { slug: PINNED } },
+      };
+      const draft = driftedDraft();
+      const result = applyOperatorSlugRepair(brief, draft);
+      expect(result.ok).toBe(true);
+      expect(draft.url).toBe(`https://www.wavespestcontrol.com${PINNED}`);
+    } finally {
+      if (prev !== undefined) process.env.SPOKE_BLOG_NETWORK_ENABLED = prev;
+    }
+  });
+
+  test('an off-site canonical is PRESERVED for the publisher guard — repair must not mask the unsafe input (Codex r1; protocol-relative r2; slash-backslash r9; network-path r10)', () => {
+    for (const foreignCanonical of ['https://competitor.example/their-page/', '//competitor.example/their-page/', '/\\competitor.example/their-page/', '\\\\competitor.example/their-page/']) {
+      const draft = driftedDraft({
+        frontmatter: { canonical: foreignCanonical },
+      });
+      const result = applyOperatorSlugRepair(operatorBrief(), draft);
+      expect(result.ok).toBe(true);
+      expect(draft.frontmatter.slug).toBe(PINNED);
+      expect(draft.frontmatter.canonical).toBe(foreignCanonical);
+      expect(result.repair.canonical_rewritten).toBe(false);
+    }
+  });
+
+  test('a draft without a frontmatter object is NOT repairable (cannot publish anyway)', () => {
+    const draft = { type: 'draft', body: 'body only' };
+    const result = applyOperatorSlugRepair(operatorBrief(), draft);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/no frontmatter/);
+  });
+
+  test('no operator pin on the brief → null (non-intercept briefs unaffected)', () => {
+    expect(applyOperatorSlugRepair({}, driftedDraft())).toBeNull();
   });
 });
 
@@ -2238,6 +2688,154 @@ describe('runNext post-publish bookkeeping', () => {
       expect(result.failure_message).toBe(err.message);
       expect(publisher.publishOrUpdatePage).toHaveBeenCalled();
       expect(queue.pendingReview).toHaveBeenCalledWith('opp_invalid_1', 'publish_validation_failed', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+      expect(queue.complete).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
+  // Operator slug pin: drift is repaired and the pipeline CONTINUES to the
+  // publisher (the pinned slug is authoritative); only an unrepairable pin
+  // (invalid slug) keeps the old operator_slug_mismatch park.
+  function operatorPinScenario({ pinnedSlug, draftSlug, publisher }) {
+    const claimedAt = new Date('2026-08-06T05:30:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({
+        id: 'opp_pin_1',
+        action_type: 'new_supporting_blog',
+        bucket: 'operator_intercept',
+        claimed_at: claimedAt,
+      }),
+      complete: jest.fn().mockResolvedValue(true),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({
+        id: 'brief_pin_1',
+        action_type: 'new_supporting_blog',
+        page_type: 'supporting-blog',
+        human_review_required: false,
+        voice_constraints: { operator_brief: { slug: pinnedSlug } },
+      }),
+    };
+    const dispatcher = {
+      runWithBrief: jest.fn().mockResolvedValue({
+        ok: true,
+        draft: {
+          type: 'draft',
+          url: `${draftSlug}`,
+          title: 'Fall Lawn Mistakes in Southwest Florida',
+          frontmatter: {
+            slug: draftSlug,
+            canonical: `https://www.wavespestcontrol.com${draftSlug}`,
+            title: 'Fall Lawn Mistakes in Southwest Florida',
+          },
+          body: `Guidance for SWFL lawns. See [this post](${draftSlug}) for the checklist.`,
+        },
+      }),
+    };
+    const qualityGate = {
+      evaluate: jest.fn().mockReturnValue({
+        ok: true, hard_failures: [], soft_failures: [], total_score: 100, min_total_score: 80,
+      }),
+    };
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder,
+      dispatcher,
+      qualityGate,
+      publisher,
+      indexNow: { submit: jest.fn() },
+      linkPlanner: {},
+      // Gate mocks pass so the test isolates the slug-repair step: the repair
+      // runs BEFORE these gates, so they see the repaired draft.
+      contentGuardrails: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
+      comparisonTableGate: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [], requiresHumanReview: false }) },
+    });
+    return { runner, queue, claimedAt };
+  }
+
+  test('operator slug drift is repaired and the run continues to publish with the pinned slug (repair recorded)', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const publisher = {
+        publishOrUpdatePage: jest.fn().mockResolvedValue({
+          url: 'https://www.wavespestcontrol.com/lawn-care/fall-lawn-mistakes-swfl/',
+          status: 'pr_open',
+          live: false,
+          pr_url: 'https://github.com/wavespestcontrolfl/astro/pull/900',
+        }),
+      };
+      const { runner, queue, claimedAt } = operatorPinScenario({
+        pinnedSlug: '/lawn-care/fall-lawn-mistakes-swfl/',
+        draftSlug: '/fall-lawn-mistakes-southwest-florida/',
+        publisher,
+      });
+
+      const result = await runner.runNext();
+
+      // NOT parked on the old operator_slug_mismatch remedy — the pipeline
+      // ran through to the publisher.
+      expect(result.skip_reason).not.toBe('operator_slug_mismatch');
+      expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+      const publishedDraft = publisher.publishOrUpdatePage.mock.calls[0][0];
+      expect(publishedDraft.frontmatter.slug).toBe('/lawn-care/fall-lawn-mistakes-swfl/');
+      expect(publishedDraft.frontmatter.canonical).toBe('https://www.wavespestcontrol.com/lawn-care/fall-lawn-mistakes-swfl/');
+      expect(publishedDraft.body).toContain('(/lawn-care/fall-lawn-mistakes-swfl/)');
+      expect(publishedDraft.body).not.toContain('/fall-lawn-mistakes-southwest-florida/');
+      // Repair recorded on the persisted draft payload.
+      expect(publishedDraft.operator_slug_repair).toMatchObject({
+        from_slug: '/fall-lawn-mistakes-southwest-florida/',
+        to_slug: '/lawn-care/fall-lawn-mistakes-swfl/',
+        canonical_rewritten: true,
+        body_self_link_rewrites: 1,
+      });
+      expect(result.draft_payload.operator_slug_repair).toMatchObject({
+        to_slug: '/lawn-care/fall-lawn-mistakes-swfl/',
+      });
+      // PR-open publish → the usual pending-merge park, claim NOT released.
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('astro_pr_pending_merge');
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_pin_1', 'astro_pr_pending_merge', { claimToken: claimedAt });
+      expect(queue.release).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+      else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
+      if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
+      else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
+    }
+  });
+
+  test('an INVALID pinned slug still parks as operator_slug_mismatch (repair cannot be made safe)', async () => {
+    const previousShadow = process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
+    const previousThreshold = process.env.TRUST_BUILD_THRESHOLD;
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+
+    try {
+      const publisher = { publishOrUpdatePage: jest.fn() };
+      const { runner, queue, claimedAt } = operatorPinScenario({
+        pinnedSlug: '/Fall Lawn Mistakes!!/',
+        draftSlug: '/fall-lawn-mistakes-southwest-florida/',
+        publisher,
+      });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('operator_slug_mismatch');
+      expect(result.reviewer_notes).toMatch(/not auto-repairable/);
+      expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_pin_1', 'operator_slug_mismatch', { claimToken: claimedAt });
       expect(queue.release).not.toHaveBeenCalled();
       expect(queue.complete).not.toHaveBeenCalled();
     } finally {
