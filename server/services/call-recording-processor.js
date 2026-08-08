@@ -2209,9 +2209,18 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
     if (workableUnnamedLead) {
       ownQuery = ownQuery.whereNotIn('status', TERMINAL_LEAD_STATUSES).whereNull('converted_at');
     }
-    if (unclaimedOnly) {
+    if (unclaimedOnly || !customerId) {
+      // Anonymous retries require an UNCLAIMED row too, not just the
+      // shared-phone-ambiguity case: a phone-less customer-less retry
+      // derives unclaimedOnly=false from having no shared-phone candidates,
+      // so without the `!customerId` arm a sid lead assigned to a customer
+      // between attempts stayed eligible here — and the sameCallLeadReuse
+      // path skips email/ownership revalidation, so with customerId null
+      // its enrichment write is unguarded and would overwrite that
+      // customer-owned row (audit P1 r15). The rejected row falls through
+      // to contact reuse or a fresh mint like any other candidate.
       ownQuery = ownQuery.whereNull('customer_id');
-    } else if (customerId) {
+    } else {
       ownQuery = ownQuery.where((q) => q.whereNull('customer_id').orWhere('customer_id', customerId));
     }
     const own = await ownQuery.orderBy('created_at', 'desc').first();
@@ -7352,7 +7361,7 @@ const CallRecordingProcessor = {
     // Assigned inside the try once the lead source resolves; declared out
     // here so the section catch can run it on a benign failure (codex P2).
     // The default no-op keeps pre-lead-source failures safe.
-    let runCallPpcAttribution = () => {};
+    let runCallPpcAttribution = async () => {};
     if (shouldCreateLead) {
       try {
         // Check if lead already exists for this phone — or by spoken email
@@ -7420,7 +7429,7 @@ const CallRecordingProcessor = {
         // permanently drop the call from paid/organic funnel reporting
         // (codex P2). Reads leadId/customerId at CALL time (final values);
         // fully self-guarded, never throws.
-        runCallPpcAttribution = () => {
+        runCallPpcAttribution = async () => {
           try {
             const callAttr = leadSourceRow
               ? require('./ads/call-attribution').attributionForSourceType(leadSourceRow.source_type)
@@ -7428,7 +7437,7 @@ const CallRecordingProcessor = {
             const isBridgeTarget = leadSourceRow
               && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
             if (leadId && customerId && callAttr && !isBridgeTarget) {
-              require('./ads/call-attribution').recordCallPpcAttribution({
+              const pending = require('./ads/call-attribution').recordCallPpcAttribution({
                 customerId,
                 leadId,
                 leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
@@ -7447,6 +7456,7 @@ const CallRecordingProcessor = {
                 serviceInterest: extracted.matched_service || extracted.requested_service || null,
                 leadDate: call.created_at || null, // date by the actual call
               }).catch(() => {});
+              await pending;
             }
           } catch (attrErr) {
             logger.warn(`[call-proc] PPC attribution dispatch failed: ${attrErr.code || attrErr.name || 'error'}`);
@@ -8017,11 +8027,18 @@ const CallRecordingProcessor = {
         // targets the FINAL leadId — attribution kicked off before recovery
         // could land on a lead the race rejected, leaving the replacement
         // lead unattributed and reporting pointing at the wrong row
-        // (codex P1 r11). Fire-and-forget stays fine here: nothing after
-        // this consumes its result. The body lives in
-        // runCallPpcAttribution (assigned near the lead_source lookup) so
+        // (codex P1 r11). AWAITED, not fire-and-forget (codex P2): a call
+        // that books during this same run reaches
+        // convertCallLeadOnPhoneBooking → bridgeLeadFunnelStage, which only
+        // UPDATES an existing ad_service_attribution row. If the insert were
+        // still in flight the bridge would update zero rows and the row
+        // would then land at funnel_stage 'lead', reporting a booked lead at
+        // the initial stage until some future transition. The write is a
+        // single insert whose own failure is already swallowed, so awaiting
+        // it cannot throw or meaningfully delay processing. The body lives
+        // in runCallPpcAttribution (assigned near the lead_source lookup) so
         // the section catch can fire it too.
-        runCallPpcAttribution();
+        await runCallPpcAttribution();
 
         // Voicemail lead text-back (Layer 3): text the prospect a prefilled
         // quote-wizard link. Only on the voicemail lead path — new prospect,
@@ -8178,7 +8195,7 @@ const CallRecordingProcessor = {
         // leadId holds the final selection made before the throw, and
         // recordCallPpcAttribution dedupes by lead + first-touch, so a
         // double fire is harmless.
-        runCallPpcAttribution();
+        await runCallPpcAttribution();
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
       }
     }
