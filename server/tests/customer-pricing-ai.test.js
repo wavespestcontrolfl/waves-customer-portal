@@ -816,3 +816,51 @@ describe('AI palm estimates never auto-price palm injection (customer-facing rou
     });
   });
 });
+
+describe('lookup confidence gates every vision-derived price modifier', () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const customer = {
+    id: 'cust-conf', monthly_rate: 55, property_sqft: 2200, lot_sqft: 9000,
+    address_line1: '123 Gulf Dr', city: 'Sarasota', state: 'FL', zip: '34236',
+  };
+  const enriched = (extra) => ({
+    homeSqFt: 2200, pool: 'YES', poolCage: 'YES', shrubDensity: 'HEAVY',
+    estimatedTreeCount: 12, estimatedBedAreaSf: 2600, yearBuilt: 1998, ...extra,
+  });
+
+  test('a confident read feeds pool/cage/density/trees and the bed area', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer, turfProfile: null, propertyLookup: async () => ({ enriched: enriched({ aiConfidence: 88 }) }),
+    });
+    expect(ctx.propertyInput.features.pool).toBe(true);
+    expect(ctx.propertyInput.features.poolCage).toBe(true);
+    expect(ctx.propertyInput.features.shrubs).toBe('heavy');
+    expect(ctx.propertyInput.features.treeCount).toBe(12);
+    expect(ctx.propertyInput.bedArea).toBe(2600);
+  });
+
+  test('a LOW-confidence read moves nothing — features stay at their defaults', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer, turfProfile: null, propertyLookup: async () => ({ enriched: enriched({ aiConfidence: 38 }) }),
+    });
+    expect(ctx.propertyInput.features.pool).toBe(false);
+    expect(ctx.propertyInput.features.poolCage).toBe(false);
+    expect(ctx.propertyInput.features.shrubs).toBe('moderate');
+    expect(ctx.propertyInput.features.treeCount).toBe(0);
+    expect(ctx.propertyInput.bedArea).toBeUndefined();
+    // County-sourced facts are not vision reads and still apply.
+    expect(ctx.propertyInput.yearBuilt).toBe(1998);
+  });
+
+  test('a field-verify flag on the imagery disqualifies the features too', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer,
+      turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: enriched({ aiConfidence: 95, fieldVerifyFlags: [{ field: 'estimatedTurfSf', reason: 'stale imagery', priority: 'HIGH' }] }),
+      }),
+    });
+    expect(ctx.propertyInput.features.pool).toBe(false);
+    expect(ctx.propertyInput.bedArea).toBeUndefined();
+  });
+});

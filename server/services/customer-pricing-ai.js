@@ -344,19 +344,8 @@ function lookupEnabled() {
 // was quoted at the bare-property price. customer_turf_profiles has no
 // palm_count either. The property LOOKUP is the real source for all of
 // them; the gate below is what has to open for it to be consulted.
-// Mirrors draft-builder: below this the lookup's own copy calls the read
-// low-confidence, so a measurement derived from it must not price as exact.
-const LOOKUP_AI_CONFIDENCE_FLOOR = 60;
-function lookupBedAreaIsTrustworthy(enriched) {
-  if (!enriched || !positiveNumber(enriched.estimatedBedAreaSf)) return false;
-  const confidence = Number(enriched.aiConfidence ?? enriched.confidenceScore);
-  if (Number.isFinite(confidence) && confidence < LOOKUP_AI_CONFIDENCE_FLOOR) return false;
-  const flags = Array.isArray(enriched.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
-  return !flags.some((flag) => {
-    const field = String(flag?.field || '').toLowerCase();
-    return field.includes('bedarea') || field.includes('bed_area') || field.includes('estimatedturf');
-  });
-}
+// Shared trust predicates — the agent draft path applies the same rule.
+const { lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy } = require('./lookup-confidence');
 
 async function resolvePropertyContext({ customer, turfProfile, propertyLookup }) {
   let source = 'customer_profile';
@@ -443,7 +432,12 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       // Same rule the agent draft path follows: AI counts are not
       // measurements. A missing count still routes to
       // PROPERTY_DETAILS_NEEDED, which asks the customer for it.
-      features = {
+      // Vision-derived FEATURE modifiers all come off the same imagery read
+      // the lookup grades. When it grades that read low (or flags it), none
+      // of them may move a customer-facing price — the profile defaults
+      // stand instead. Records-sourced facts below (year built, construction,
+      // foundation, roof) are county data, not vision, so they are unaffected.
+      features = !lookupFeaturesAreTrustworthy(p) ? features : {
         ...features,
         pool: p.pool === 'YES' || features.pool,
         poolCage: p.poolCage === 'YES' || features.poolCage,

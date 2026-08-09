@@ -95,27 +95,9 @@ function knownEnrichedValue(value) {
   return v && v.toUpperCase() !== 'UNKNOWN' ? v : null;
 }
 
-// Below this the lookup's own reviewer copy calls the read low-confidence
-// ("AI confidence NN%", property-lookup-v2 turf-confirmation reasons), so a
-// measurement derived from it must not silently price as trustworthy.
-const LOOKUP_AI_CONFIDENCE_FLOOR = 60;
-
-// A lookup bed area is trustworthy only when the lookup does not itself
-// doubt it: adequate AI confidence AND no field-verify flag pointing at the
-// bed-area (or whole-imagery) read. Absent confidence data is treated as
-// adequate — legacy payloads carried no score and are not evidence of doubt.
-function lookupBedAreaIsTrustworthy(enriched) {
-  if (!enriched || !positive(enriched.estimatedBedAreaSf)) return false;
-  const confidence = Number(enriched.aiConfidence ?? enriched.confidenceScore);
-  if (Number.isFinite(confidence) && confidence < LOOKUP_AI_CONFIDENCE_FLOOR) return false;
-  const flags = Array.isArray(enriched.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
-  return !flags.some((flag) => {
-    const field = String(flag?.field || '').toLowerCase();
-    // A flagged bed area is disqualifying outright; a flagged turf/imagery
-    // read means the same picture the bed area came from is in question.
-    return field.includes('bedarea') || field.includes('bed_area') || field.includes('estimatedturf');
-  });
-}
+// Trust predicate lives in one place — the customer-facing pricing
+// assistant applies the same rule (services/lookup-confidence.js).
+const { lookupBedAreaIsTrustworthy } = require('../lookup-confidence');
 
 function lookupFeatureModifiers(enriched) {
   if (!enriched) return null;
