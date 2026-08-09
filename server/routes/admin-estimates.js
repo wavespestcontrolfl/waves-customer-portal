@@ -2278,6 +2278,17 @@ router.put('/:id/proposal', async (req, res, next) => {
       // and the write must win — the stale whole-blob rewrite would strip
       // linkage_invalidated_at and revive the old linkage data.
       .whereNull('archived_at')
+      // …and neither a MARKER nor a live delivery CLAIM may be present
+      // (codex P0, PR #3304 GH r8c): sendEstimateNow flips status back to
+      // 'sent' BEFORE its finally block clears delivering_token, so a
+      // proposal save that began earlier can land in that window and
+      // overwrite a concurrently recorded invalidation_pending_* marker
+      // and the claim itself — after which claim cleanup finds no matching
+      // token and wrong-lead content stays public and sendable. The
+      // status-only exclusion could not see that window.
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') = ''")
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'sending']);
     // Payment terms are predicated on bill_by_invoice AT WRITE TIME too — a
     // concurrent PATCH turning invoice mode off between the pre-read guard

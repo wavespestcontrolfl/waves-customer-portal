@@ -608,16 +608,23 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
         // treating the wrong-identity draft as current.
         const quarantinedLeadId = data.lead_id ? String(data.lead_id) : null;
         if (deliveryClaimFresh(data.estimatorEngine)) {
-          if (!data.estimatorEngine?.invalidation_pending_at) {
+          const eng = data.estimatorEngine && typeof data.estimatorEngine === 'object'
+            ? data.estimatorEngine : {};
+          const forcedKey = identityConflict ? 'invalidation_pending_conflict' : 'invalidation_pending_reason';
+          // MERGE the forced verdict into an existing marker (codex P0, PR
+          // #3304 GH r8c): a pending LINKAGE marker already present carried
+          // neither reason nor conflict, so the finalizer read this
+          // quarantine as an ordinary repoint — and discarded it as
+          // obsolete whenever the linkage was unchanged (the sid-linked
+          // case), leaving the rejected or wrong-identity draft live.
+          if (!eng.invalidation_pending_at || eng[forcedKey] !== reason) {
             data.estimatorEngine = {
-              ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
-              invalidation_pending_at: new Date().toISOString(),
+              ...eng,
+              invalidation_pending_at: eng.invalidation_pending_at || new Date().toISOString(),
               // The claim release performs the unlink for a deferred
               // quarantine too — it needs the source lead.
-              invalidation_pending_from: quarantinedLeadId,
-              ...(identityConflict
-                ? { invalidation_pending_conflict: reason }
-                : { invalidation_pending_reason: reason }),
+              invalidation_pending_from: eng.invalidation_pending_from || quarantinedLeadId,
+              [forcedKey]: reason,
             };
             await trx('estimates').where({ id: conflicted.id })
               .update({ estimate_data: JSON.stringify(data), updated_at: new Date() });
@@ -662,7 +669,12 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
 async function strictExistingDraftForCall(callLogId) {
   return db('estimates')
     .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(callLogId)])
-    .whereNull('archived_at')
+    // ARCHIVED rows included (codex P0, PR #3304 GH r8c): an
+    // operator-archived draft keeps a PERMANENT public token, and
+    // /unarchive rejects only MARKED rows — so an unmarked wrong-identity
+    // or rejected-call draft could be revived and served again. The
+    // invalidation preserves whatever archive state it finds
+    // (`fresh.archived_at || new Date()`), so marking one is safe.
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
     .orderBy('created_at', 'desc')
     .first('id', 'status', 'estimate_data');
@@ -676,6 +688,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     if (context.error) {
       result.lane = LANES.RED;
       result.reasons = [context.error];
+      let quarantineOutcome = null;
       // A POSITIVE identity conflict QUARANTINES the same-call draft
       // (codex P0, PR #3304 r19): the prior draft may target the
       // conflicting identity, and returning with only a review bell left
@@ -683,7 +696,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       // linkage invalidation, so every guard (unarchive 409, send claims,
       // duplicate exclusion) applies; the audit reason rides along.
       if (!dryRun && ['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
-        await invalidateDraftForCall(callLogId, { reason: context.error, identityConflict: true });
+        quarantineOutcome = await invalidateDraftForCall(callLogId, { reason: context.error, identityConflict: true });
       }
       if (!dryRun && context.call && quotePromised) {
         await notify({
@@ -700,6 +713,17 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           // draft link and the operator never sees the conflict.
           forceUpdate: ['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error),
         });
+      }
+      // FAIL CLOSED on a quarantine that did not persist (codex P0, PR
+      // #3304 GH r8c): continuing would report the pass as handled while
+      // the conflicting draft and its bearer token stay live, with no
+      // later reconcile scheduled. The RED review bell above has already
+      // fired, so the operator still sees the call; the throw is what
+      // makes the failure visible and retryable.
+      if (quarantineOutcome && !quarantineOutcome.ok) {
+        const qFail = new Error(`identity-conflict quarantine failed for call ${callLogId}: ${quarantineOutcome.error || 'unknown'}`);
+        qFail.quarantineFailed = true;
+        throw qFail;
       }
       return result;
     }

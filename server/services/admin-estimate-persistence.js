@@ -2049,10 +2049,48 @@ async function reviseAdminEstimate({
       .forUpdate()
       .first();
     if (!lockedPrior) return null;
+    // Protocol keys re-applied from the LOCKED row (codex P0, PR #3304 GH
+    // r8c): writeFields.estimate_data was built from the pre-read
+    // snapshot, so a delivery claim or an invalidation marker recorded
+    // during payload resolution would be overwritten by this whole-blob
+    // write — after which clearEstimateDeliveryClaim finds no matching
+    // token and the wrong-lead content stays public. The UPDATE also
+    // refuses outright when either is present (predicates below); this
+    // rebuild is the belt to that suspenders, and is what guarantees
+    // callLogId survives a payload that never carried it.
+    const revisedFields = { ...writeFields };
+    if (typeof revisedFields.estimate_data === 'string') {
+      try {
+        const lockedData = typeof lockedPrior.estimate_data === 'string'
+          ? JSON.parse(lockedPrior.estimate_data) : (lockedPrior.estimate_data || {});
+        const pendingData = JSON.parse(revisedFields.estimate_data);
+        if (pendingData && typeof pendingData === 'object' && lockedData && typeof lockedData === 'object') {
+          for (const key of REVISE_PRESERVED_ESTIMATE_DATA_KEYS) {
+            if (lockedData[key] !== undefined) pendingData[key] = lockedData[key];
+          }
+          for (const key of REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS) {
+            const lockedValue = lockedData?.estimatorEngine?.[key];
+            if (lockedValue === undefined) continue;
+            pendingData.estimatorEngine = {
+              ...(pendingData.estimatorEngine && typeof pendingData.estimatorEngine === 'object'
+                ? pendingData.estimatorEngine : {}),
+              [key]: lockedValue,
+            };
+          }
+          revisedFields.estimate_data = JSON.stringify(pendingData);
+        }
+      } catch { /* unparseable on either side: fall through to the predicates */ }
+    }
     const [row] = await trx('estimates')
       .where({ id: estimate.id })
       .whereNull('price_locked_at')
       .whereNull('archived_at')
+      // A revise NEVER lands on an invalidated row or inside a live
+      // delivery claim (codex P0, PR #3304 GH r8c) — 0 rows becomes the
+      // caller's 409 "refresh and retry".
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') = ''")
       .whereNotIn('status', REVISE_BLOCKED_STATUSES)
       .whereRaw("COALESCE(category, '') <> 'COMMERCIAL'")
       // Mirrors the pre-read's date-expiry verdict: the payload resolution
@@ -2061,7 +2099,7 @@ async function reviseAdminEstimate({
       // saved while the public link already serves the expired page.
       .where((qb) => qb.whereNull('expires_at').orWhere('expires_at', '>', now()))
       .update({
-        ...writeFields,
+        ...revisedFields,
         updated_at: now(),
       })
       .returning('*');
