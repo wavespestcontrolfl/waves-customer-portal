@@ -842,6 +842,10 @@ function generateEstimate(input) {
         // fall back to the treeDensity estimate when no count exists at all
         // (v4.6 — a fabricated 0 would price the per-tree material term away).
         treeCount: services.treeShrub.treeCount,
+        // v4.7: distinct palms-on-property count for the routine palm-care
+        // reserve — a caller's "10 palms" must reach the reserve terms, not
+        // masquerade as 10 generic trees. treeCount stays NON-palm.
+        palmCount: services.treeShrub.palmCount,
       });
       result.annual = Math.round(result.annual);
       result.monthly = Math.round(result.annual / 12 * 100) / 100;

@@ -956,3 +956,39 @@ describe('Tree & Shrub v4.7 density source eligibility + admin validation', () =
     expect(ok({ callback_reserve_per_visit: null })).toBe(false);
   });
 });
+
+describe('Tree & Shrub v4.7 palm count service-line passthrough', () => {
+  const originalReserve = { ...constants.TREE_SHRUB.routinePalmCareReserve };
+  afterEach(() => {
+    constants.TREE_SHRUB.routinePalmCareReserve = { ...originalReserve };
+  });
+
+  test('services.treeShrub.palmCount reaches the reserve through generateEstimate', () => {
+    constants.TREE_SHRUB.routinePalmCareReserve.perPalmAnnual = 6;
+    const estimate = generateEstimate({
+      property: { homeSqFt: 2000, lotSqFt: 8000, bedArea: 2000 },
+      services: { treeShrub: { tier: 'standard', treeCount: 2, palmCount: 10 } },
+    });
+    const ts = estimate.lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.palmCount).toBe(10);
+    expect(ts.palmCountSource).toBe('service_line');
+    expect(ts.treeCount).toBe(2);
+    expect(ts.costs.palmReserveCost).toBe(60);
+  });
+
+  test('service-line palm count wins over the property record; absent falls back to property', () => {
+    constants.TREE_SHRUB.routinePalmCareReserve.perPalmAnnual = 6;
+    const override = priceTreeShrub(
+      { bedArea: 2000, treeCount: 0, palmCount: 4 },
+      { tier: 'standard', palmCount: 9 }
+    );
+    expect(override.palmCount).toBe(9);
+    expect(override.palmCountSource).toBe('service_line');
+    const fallback = priceTreeShrub(
+      { bedArea: 2000, treeCount: 0, palmCount: 4 },
+      { tier: 'standard' }
+    );
+    expect(fallback.palmCount).toBe(4);
+    expect(fallback.palmCountSource).toBe('property');
+  });
+});

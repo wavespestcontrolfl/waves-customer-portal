@@ -2653,15 +2653,22 @@ function priceTreeShrub(property, options = {}) {
     ? (TREE_SHRUB.densityFactors?.[shrubDensity] ?? 1)
     : 1;
 
-  // v4.7 routine palm-care reserve: property-level palm count only (the
-  // service-level override machinery in resolvePalmCount is palm_injection
-  // semantics — a treated-palm count with mandatory-measurement rules; the
-  // recurring program covers every palm on the property or none). Absent /
-  // invalid reads as 0 palms, which zeroes the reserve terms.
-  const palmCountRaw = property.palmCount ?? property.palmInventory?.palmCount ?? property.features?.palmCount;
+  // v4.7 routine palm-care reserve. The service-line option wins (the
+  // estimator's T&S line carries what the caller actually said), then the
+  // property record. This is palms-on-property for the recurring program —
+  // NOT palm_injection's treated-palm count with its mandatory-measurement
+  // override machinery (resolvePalmCount); that stays palm_injection
+  // semantics. Absent / invalid reads as 0 palms, zeroing both reserve
+  // terms. treeCount is NON-palm trees wherever both are supplied — the
+  // per-tree material term and this reserve must never both bill one palm.
+  const palmCountRaw = options.palmCount
+    ?? property.palmCount ?? property.palmInventory?.palmCount ?? property.features?.palmCount;
   const palmCountParsed = Number(palmCountRaw);
   const palmCount = Number.isInteger(palmCountParsed) && palmCountParsed > 0 ? palmCountParsed : 0;
-  const palmCountSource = palmCount > 0 ? 'property' : 'none';
+  const palmCountSource = palmCount > 0
+    ? (options.palmCount !== undefined && options.palmCount !== null && String(options.palmCount).trim() !== ''
+      ? 'service_line' : 'property')
+    : 'none';
   const palmReserve = TREE_SHRUB.routinePalmCareReserve || {};
   const palmMinutesPerVisit = Math.round(palmCount * (palmReserve.minutesPerPalmVisit ?? 0));
 
