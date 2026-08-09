@@ -28,17 +28,18 @@
  *    is the canonical standalone turf-pest treatment priced via
  *    priceOneTimeLawn's pest multiplier. Typed one_time_lawn_treatment
  *    completion IS truthful here — it is a pesticide application.
- *  - trap_only_retainer: NEW ROW. rodent_monitoring is the legacy
- *    QUARTERLY BAIT key (repointed + deactivated by the
- *    2026-07-12 rodent graduation) — a different product from the new
- *    monthly trap-only retainer. The legacy row stays retired; the
- *    retainer gets its own recurring row. Trap checks complete on the
- *    typed rodent_trapping form (traps and captures — NOT the
+ *  - trap_only_retainer: THREE NEW ROWS, one per plan. rodent_monitoring
+ *    is the legacy QUARTERLY BAIT key (repointed + deactivated by the
+ *    2026-07-12 rodent graduation) — a different product; it stays
+ *    retired. The plans differ in VISIT cadence (standard 4/yr, plus
+ *    6/yr, monthly 12/yr) while ALL bill monthly, so a single row
+ *    carrying frequency 'monthly' would make admin scheduling seed 12
+ *    visits for a Standard customer who bought 4 (codex r4 P1). Per-plan
+ *    rows also give each engine line label an exact catalog name, so
+ *    they resolve by name with no id stamping. Trap checks complete on
+ *    the typed rodent_trapping form (traps and captures — NOT the
  *    bait-station schema, whose required stations/consumption fields a
- *    trap visit cannot truthfully fill). Estimate-accept linking is a
- *    known boundary: the v1 mapper persists retainers as one-time spec
- *    items, so converter id-stamping for them rides the queued
- *    link-at-write lane; base-label visits resolve by exact name.
+ *    trap visit cannot truthfully fill).
  *
  * Durations follow the flat-60 owner directive (20260703120000). Tax and
  * license mirror each family's live prod siblings (row-level taxability
@@ -161,23 +162,34 @@ const SERVICES = [
     sort_order: 63,
     internal_notes: 'Pesticide application (L&O). Priced via priceOneTimeLawn treatmentType=pest. Distinct from the archived lawn_insect_control row (2026-05-19 cleanup — leave archived).',
   },
-  {
-    service_key: 'trap_only_retainer',
-    // Base published label; plan-prefixed engine names ('Standard
-    // Trap-Only Retainer') link by service_id.
-    name: 'Trap-Only Rodent Monitoring Retainer',
-    short_name: 'Trap Retainer',
-    description: 'Monthly trap-monitoring retainer with scheduled visits and included response callbacks. No structural warranty without exclusion.',
+  // ONE ROW PER PLAN (codex r4 P1): the plans differ in VISIT cadence
+  // (4 / 6 / 12 per year), and monthly BILLING is not a visit frequency —
+  // a single 'monthly' row would make admin scheduling seed 12 visits for
+  // a Standard customer who bought 4. Per-plan rows also give each engine
+  // line label ('Standard Trap-Only Retainer', …) an exact catalog name,
+  // so name-resolution links them without any id stamping.
+  ...[
+    { plan: 'standard', label: 'Standard Trap-Only Retainer', short: 'Trap Std', monthly: 49.0, annual: 495.0, visits: 4, frequency: 'quarterly', callbacks: 2, sort: 48 },
+    { plan: 'plus', label: 'Plus Trap-Only Retainer', short: 'Trap Plus', monthly: 69.0, annual: 695.0, visits: 6, frequency: 'bimonthly', callbacks: 3, sort: 49 },
+    { plan: 'monthly', label: 'Monthly Trap-Only Retainer', short: 'Trap Monthly', monthly: 99.0, annual: 995.0, visits: 12, frequency: 'monthly', callbacks: 2, sort: 50 },
+  ].map((tier) => ({
+    service_key: `trap_only_retainer_${tier.plan}`,
+    // Verbatim priceTrapOnlyRetainer line name for this plan.
+    name: tier.label,
+    short_name: tier.short,
+    description: `Trap-monitoring retainer with ${tier.visits} scheduled visits per year and ${tier.callbacks} included response callbacks. No structural warranty without exclusion.`,
     category: 'rodent',
     billing_type: 'recurring',
-    frequency: 'monthly',
+    // VISIT cadence, never the billing cadence.
+    frequency: tier.frequency,
+    visits_per_year: tier.visits,
     default_duration_minutes: 60, // flat 60 per 20260703120000
     min_duration_minutes: 30,
     max_duration_minutes: 120,
-    pricing_type: 'variable',
-    base_price: 49.0, // standard plan monthly (plans 49/69/99)
-    price_range_min: 49.0,
-    price_range_max: 99.0,
+    pricing_type: 'fixed',
+    base_price: tier.monthly,
+    price_range_min: tier.monthly,
+    price_range_max: tier.monthly,
     is_waveguard: false,
     is_taxable: true,
     tax_service_key: 'pest_control',
@@ -187,11 +199,11 @@ const SERVICES = [
     booking_enabled: false,
     is_active: true,
     is_archived: false,
-    icon: '🐀',
+    icon: '\u{1F400}',
     color: '#78716c',
-    sort_order: 48,
-    internal_notes: 'Monthly retainer plans standard/plus/monthly = $49/$69/$99 via priceTrapOnlyRetainer (annual prepay discounts apply; setup fee on monthly billing). Distinct from the retired legacy rodent_monitoring quarterly bait key — leave retired.',
-  },
+    sort_order: tier.sort,
+    internal_notes: `Trap-only retainer, ${tier.plan} plan: $${tier.monthly}/mo or $${tier.annual}/yr prepaid (setup fee applies to monthly billing; callbacks beyond ${tier.callbacks} bill the extra-callback rate). ${tier.visits} scheduled visits/year — billing cadence is monthly for all plans and is NOT the visit frequency. Distinct from the retired legacy rodent_monitoring quarterly bait key.`,
+  })),
 ];
 
 // key → completion profile pointer. The two roach programs are generic by
@@ -208,7 +220,9 @@ const PROFILE_TYPES = {
   // NOT rodent_bait_station (an exterior bait-station schema requiring
   // stations_checked/bait_consumption a trap-only visit cannot truthfully
   // fill; codex r2 P1).
-  trap_only_retainer: 'rodent_trapping',
+  trap_only_retainer_standard: 'rodent_trapping',
+  trap_only_retainer_plus: 'rodent_trapping',
+  trap_only_retainer_monthly: 'rodent_trapping',
 };
 
 const PALM_KEY = 'palm_injection';
@@ -356,12 +370,25 @@ exports.down = async function down(knex) {
     }
   }
 
-  // Palm: restore exactly the recorded prior flag values.
+  // Palm: restore a field ONLY if it still holds the value up() wrote —
+  // an admin who changed the posture after deploy owns that field now
+  // (codex r4 P2), the same admin-edit rule the row/profile paths use.
   if (state.palm && state.palm.id && (await knex.schema.hasTable('services'))) {
     const current = await knex('services').where({ id: state.palm.id }).first();
-    if (current) {
-      await knex('services').where({ id: state.palm.id }).update(state.palm.prior);
-      console.log(`[reactivate-identities] down: palm_injection flags restored (${Object.keys(state.palm.prior).join(', ')})`);
+    if (!current) {
+      console.warn('[reactivate-identities] down: palm_injection row is gone — nothing to restore');
+    } else {
+      const restore = {};
+      const skipped = [];
+      for (const [field, priorValue] of Object.entries(state.palm.prior)) {
+        // PALM_TARGET_FLAGS[field] is exactly what up() wrote.
+        if (current[field] === PALM_TARGET_FLAGS[field]) restore[field] = priorValue;
+        else skipped.push(field);
+      }
+      if (Object.keys(restore).length > 0) {
+        await knex('services').where({ id: state.palm.id }).update(restore);
+      }
+      console.log(`[reactivate-identities] down: palm_injection restored [${Object.keys(restore).join(', ') || 'none'}]${skipped.length ? `; admin-edited since deploy, left alone: [${skipped.join(', ')}]` : ''}`);
     }
   }
 

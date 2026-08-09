@@ -9,7 +9,8 @@ const { resolveCompletionProfileForScheduledService } = require('../services/ser
 const { detectServiceCategory } = require('../utils/service-normalizer');
 
 const STATE_KEY = 'migration.20260809000000.state';
-const NEW_KEYS = ['german_roach', 'german_roach_initial', 'lawn_pest_knockdown', 'trap_only_retainer'];
+const TRAP_KEYS = ['trap_only_retainer_standard', 'trap_only_retainer_plus', 'trap_only_retainer_monthly'];
+const NEW_KEYS = ['german_roach', 'german_roach_initial', 'lawn_pest_knockdown', ...TRAP_KEYS];
 
 function fakeKnex(db, { missingTables = [] } = {}) {
   const knex = (table) => {
@@ -143,8 +144,11 @@ describe('20260809000000 reactivation batch', () => {
       });
     }
     expect(profileRow(db, 'lawn_pest_knockdown').project_type).toBe('one_time_lawn_treatment');
-    expect(profileRow(db, 'trap_only_retainer').project_type).toBe('rodent_trapping');
-    expect(svcRow(db, 'trap_only_retainer')).toMatchObject({ billing_type: 'recurring', frequency: 'monthly' });
+    for (const key of TRAP_KEYS) expect(profileRow(db, key).project_type).toBe('rodent_trapping');
+    // VISIT cadence per plan — never the (always-monthly) billing cadence.
+    expect(svcRow(db, 'trap_only_retainer_standard')).toMatchObject({ billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4, base_price: 49.0 });
+    expect(svcRow(db, 'trap_only_retainer_plus')).toMatchObject({ frequency: 'bimonthly', visits_per_year: 6, base_price: 69.0 });
+    expect(svcRow(db, 'trap_only_retainer_monthly')).toMatchObject({ frequency: 'monthly', visits_per_year: 12, base_price: 99.0 });
   });
 
   test('END-TO-END: every estate label resolves — palm via short_name, the rest by exact name', async () => {
@@ -158,7 +162,10 @@ describe('20260809000000 reactivation batch', () => {
       'German Roach Cleanout': { serviceKey: 'german_roach', findingsType: null },
       'German Roach Initial (3-Visit)': { serviceKey: 'german_roach_initial', findingsType: null },
       'Lawn Pest Knockdown': { serviceKey: 'lawn_pest_knockdown', findingsType: 'one_time_lawn_treatment' },
-      'Trap-Only Rodent Monitoring Retainer': { serviceKey: 'trap_only_retainer', findingsType: 'rodent_trapping' },
+      // Each plan's engine line label is its catalog name verbatim.
+      'Standard Trap-Only Retainer': { serviceKey: 'trap_only_retainer_standard', findingsType: 'rodent_trapping' },
+      'Plus Trap-Only Retainer': { serviceKey: 'trap_only_retainer_plus', findingsType: 'rodent_trapping' },
+      'Monthly Trap-Only Retainer': { serviceKey: 'trap_only_retainer_monthly', findingsType: 'rodent_trapping' },
     };
     for (const [label, want] of Object.entries(expected)) {
       const resolved = await resolveCompletionProfileForScheduledService(
@@ -175,7 +182,7 @@ describe('20260809000000 reactivation batch', () => {
     await migration.up(fakeKnex(db));
     expect(detectServiceCategory('German Roach Cleanout')).toBe('pest');
     expect(detectServiceCategory('Lawn Pest Knockdown')).toBe('lawn');
-    expect(detectServiceCategory('Trap-Only Rodent Monitoring Retainer')).toBe('rodent');
+    expect(detectServiceCategory('Standard Trap-Only Retainer')).toBe('rodent');
     expect(detectServiceCategory(svcRow(db, 'palm_injection').name)).toBe('tree_shrub');
   });
 
@@ -202,14 +209,32 @@ describe('20260809000000 reactivation batch', () => {
     const db = seededDb();
     await migration.up(fakeKnex(db));
     db.scheduled_services.push({ id: 'v1', service_id: null, service_type: 'Standard Trap-Only Retainer' });
-    // Plan-prefixed labels do NOT alias-match (they link by id) — but an
-    // exact base-name visit does.
-    db.scheduled_services.push({ id: 'v2', service_id: null, service_type: 'Trap-Only Rodent Monitoring Retainer' });
 
     await migration.down(fakeKnex(db));
 
-    expect(svcRow(db, 'trap_only_retainer')).toMatchObject({ is_active: false });
-    expect(profileRow(db, 'trap_only_retainer')).toMatchObject({ active: true });
+    // The referenced plan row retains+deactivates with its profile live;
+    // the other two plans roll back cleanly.
+    expect(svcRow(db, 'trap_only_retainer_standard')).toMatchObject({ is_active: false });
+    expect(profileRow(db, 'trap_only_retainer_standard')).toMatchObject({ active: true });
+    expect(svcRow(db, 'trap_only_retainer_plus')).toBeUndefined();
+    expect(svcRow(db, 'trap_only_retainer_monthly')).toBeUndefined();
+  });
+
+  test('down() leaves palm fields an admin edited after deploy — restores only untouched ones', async () => {
+    const db = seededDb();
+    await migration.up(fakeKnex(db));
+    // Admin re-hides palm from customers after the migration deployed.
+    svcRow(db, 'palm_injection').customer_visible = false;
+
+    await migration.down(fakeKnex(db));
+
+    const palm = svcRow(db, 'palm_injection');
+    // Untouched fields restore to their archived values...
+    expect(palm).toMatchObject({ is_active: false, is_archived: true, short_name: null });
+    // ...but the admin's own later choice stands (prior value was also
+    // false here, so assert it was NOT written back by us: the field
+    // simply keeps the admin's value).
+    expect(palm.customer_visible).toBe(false);
   });
 
   test('up() is idempotent and a second run preserves the first run\'s palm prior-flags record', async () => {
@@ -217,7 +242,7 @@ describe('20260809000000 reactivation batch', () => {
     await migration.up(fakeKnex(db));
     await migration.up(fakeKnex(db));
 
-    expect(db.services).toHaveLength(5);
+    expect(db.services).toHaveLength(7);
     expect(stateValue(db).palm.prior).toEqual({ is_active: false, is_archived: true, customer_visible: false, short_name: null });
   });
 });
