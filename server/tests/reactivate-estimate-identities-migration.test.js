@@ -177,6 +177,22 @@ describe('20260809000000 reactivation batch', () => {
     }
   });
 
+  test('mapper-vocabulary labels resolve: roach visit-program suffix + short_name aliases', async () => {
+    const db = seededDb();
+    await migration.up(fakeKnex(db));
+
+    // The cleanout pricer labels its line with the severity tier's visit
+    // count; the resolver strips that suffix to the catalog name.
+    for (const label of ['German Roach Cleanout — 2 Visit Program', 'German Roach Cleanout — 4 Visit Program']) {
+      const r = await resolveCompletionProfileForScheduledService({ service_type: label }, fakeKnex(db));
+      expect({ label, key: r.serviceKey }).toEqual({ label, key: 'german_roach' });
+    }
+    // The v1 mapper persists 'German Roach' (SERVICE_LABEL) — the row's
+    // short_name carries that vocabulary.
+    const viaShort = await resolveCompletionProfileForScheduledService({ service_type: 'German Roach' }, fakeKnex(db));
+    expect(viaShort.serviceKey).toBe('german_roach');
+  });
+
   test('names classify into their families through the shared detector', async () => {
     const db = seededDb();
     await migration.up(fakeKnex(db));
