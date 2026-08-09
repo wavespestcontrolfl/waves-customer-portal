@@ -126,34 +126,91 @@ New `service_photo_marks`: `{ id, service_photo_id, n, x, y, kind, label }`.
 Coordinates **normalized 0..1** against the stored image, never pixels — phone photos vary by
 device and orientation.
 
+`kind` is **not null** — every mark is typed (owner ruling 2026-08-09, §5.2).
+
 > **Constraint: never burn marks into the image.** `service_photos` carries a tamper-evident
 > hash chain (`hash_sha256` / `prev_hash_sha256`, validated on the report path). Re-encoding a
 > photo to bake pins in would break that chain. Marks stay metadata and render as an overlay —
 > which also keeps them editable and the original photo intact.
 
-### 5.2 Tech marking UI
+### 5.2 Marks are typed (owner ruling)
+
+Every mark carries a `kind` from a **closed, per-lane vocabulary**, validated server-side
+against the visit's lane so a rodent-exclusion kind can never appear on a termite report. The
+vocabulary is **derived from the completion form's own recorded values**, not invented for the
+map — that's what keeps the legend from drifting away from what was actually recorded.
+
+For the foam lane (`foam_drill` / `foam_recurring`, typed `termite_treatment`):
+
+| `kind` | Legend label | Derived from |
+|---|---|---|
+| `foam_injection` | Drilled & foamed | the catalog key — this is the job |
+| `spot_treatment` | Spot treated | `treatment_method: 'Spot treatment'` |
+| `wood_treatment` | Wood treated | `treatment_method: 'Wood treatment'` |
+
+`foam_injection` is the default on a foam visit. The other two exist because the shared termite
+form legitimately records them on the same stop.
+
+When the rail extends to other lanes (§ "Where it goes next"), each gets its own list drawn the
+same way — `rodent_exclusion` from its `Sealed entry point` / `Installed hardware cloth / mesh`
+/ `Installed sealant / foam / backer` values, and so on. **One rule: a kind must correspond to a
+value the completion form can actually record.** No kind exists that the tech has no way to
+have recorded.
+
+### 5.3 Marks are optional — and that changes the copy
+
+Marks are **not required** (owner ruling 2026-08-09). A foam visit with no marks is a normal,
+complete visit.
+
+- **No marks → no card.** The photo stays an ordinary gallery photo, exactly as today. No empty
+  state, no "marks missing" affordance, nothing in the report that implies something is absent.
+- **Marks are a highlight, never an inventory.**
+
+> **The count rule.** This is where optional marks and drill-point pricing collide: foam is
+> **priced by drill-point count**, so if the card ever states or implies a total, a customer can
+> count 4 marks against a job billed for 12 points and reasonably conclude they were overbilled.
+> Since marks are optional and need not be exhaustive, **the marked-photo card must never state
+> a count or a total** — no "8 points treated," no "4 of 4."
+>
+> This is a deliberate divergence from the station card we're borrowing the pin vocabulary from.
+> `StationMapCard` *does* state counts ("8 of 8 stations inspected") because stations are an
+> exhaustive registry with a row per station. Marks are not a registry. Same pins, different
+> claim — and the caption has to carry that difference.
+
+**All-or-nothing still applies, for a narrower reason.** Not "every foam visit must have marks,"
+but: if any stored mark on a photo fails to resolve, suppress the whole card rather than render
+a subset. A partial render would silently understate what the tech recorded, and the tech's
+record and the customer's view would disagree.
+
+### 5.4 Tech marking UI
 
 After upload, tap to drop marks. Far simpler than the zone modal — no map, no lat/lng, no
 alignment, no turf detection. Pinch-zoom for precision on small targets like a drill hole in a
 mortar joint.
 
-### 5.3 Report renderer
+### 5.5 Report renderer
 
 A `MarkedPhotoCard` sibling to `StationMapCard`, sharing the pin vocabulary: numbered pins,
 staggered pop-in, legend, and a settled still for PDFs and reduced-motion visitors.
 
-### 5.4 Registry routing
+### 5.6 Registry routing
 
 `trace-eligibility.js` gains a third variant, `photo`, alongside `spray` and `outline`, plus the
 two foam keys from §2. One module still decides what each lane may publish. The coverage
 contract test extends to the new variant.
 
-### 5.5 Copy
+### 5.7 Copy
 
 A mark states where treatment was applied on this visit — never an absence or elimination claim,
-same banned-copy rules the station card follows. Proposed caption:
+same banned-copy rules the station card follows, and never a count (§5.3).
 
-> Foam was injected at the marked points during today's visit.
+Proposed caption, revised for the count rule:
+
+> Foam was injected at the points your technician marked on this visit.
+
+The earlier draft said *"at the marked points,"* which reads as a definite, complete set. With
+optional marks and drill-point pricing, "the points your technician marked" is the honest
+phrasing — it attributes the marks to the tech's record without asserting they are all of them.
 
 ### Effort
 
@@ -204,20 +261,25 @@ Both are in the mock; neither is recommended.
 
 ---
 
-## 8. Open questions
+## 8. Decisions on record
 
-1. **Do marks carry a type** (drilled & foamed / wood treated / nest removed / entry sealed)? A
-   typed mark gives an honest legend, and drawing the vocabulary from the completion form's
-   recorded values keeps it from drifting from what was done. **Recommended.**
-2. **Are marks required or optional** on a foam visit?
-3. **Flip `GATE_TRACE_ELIGIBILITY` as a package?** Independent of this build, but it's what
-   stops foam and the two other lanes from publishing a perimeter band they didn't perform.
+| | Ruling | Date |
+|---|---|---|
+| Approach | Mark treated spots on a photo of the area, reusing the bait-station pin vocabulary | 2026-08-09 |
+| Foam trigger | Catalog service key (`foam_drill` / `foam_recurring`) — shipped in #3306, no method-select change | 2026-08-08 |
+| Marks typed | **Yes** — closed per-lane vocabulary drawn from the completion form's recorded values (§5.2) | 2026-08-09 |
+| Marks required | **No** — optional; no marks means no card, and the card never states a count (§5.3) | 2026-08-09 |
+| Flea / cockroach | No visual for the residential side; out of scope | 2026-08-09 |
+
+**Still open:** whether to flip `GATE_TRACE_ELIGIBILITY` as a package. Independent of this
+build, but it's what stops foam and two other lanes from publishing a perimeter band they didn't
+perform.
 
 ---
 
 ## 9. Sequence
 
-1. Answer Q1 and Q2 — both are small and both shape the schema.
-2. Flip the eligibility gate (no new code; stops the over-claiming lanes).
-3. Build the marked-photo rail with foam as its first lane.
-4. Extend to exclusion, nest removal, and palm injection.
+1. Build the marked-photo rail with foam as its first lane — nothing blocking.
+2. Flip the eligibility gate (no new code; stops the over-claiming lanes). Can land before,
+   after, or alongside.
+3. Extend to exclusion, nest removal, and palm injection.
