@@ -909,3 +909,50 @@ describe('Tree & Shrub v4.7 knobs (density / palm reserve / callback reserve)', 
     expect(quote.costs.directCost).toBeCloseTo(125 + 6 * 35 * (35 / 60) + 12, 2);
   });
 });
+
+describe('Tree & Shrub v4.7 density source eligibility + admin validation', () => {
+  const originalDensity = { ...constants.TREE_SHRUB.densityFactors };
+  afterEach(() => {
+    constants.TREE_SHRUB.densityFactors = { ...originalDensity };
+  });
+
+  test('density factor never applies to lot_based or fallback bed areas (already/never density-scaled)', () => {
+    constants.TREE_SHRUB.densityFactors.heavy = 1.3;
+    // lot_based: estimateTreeShrubBedAreaFromLot already scaled the bed by
+    // density (heavy = 25% of lot) — a factor here would double-apply.
+    const lotBased = priceTreeShrub(
+      { lotSqFt: 10000, shrubDensity: 'heavy', treeCount: 0, access: 'easy' },
+      { tier: 'standard' }
+    );
+    expect(lotBased.bedAreaSource).toBe('lot_based');
+    expect(lotBased.densityFactor).toBe(1);
+    // fallback: the 2,000 default is a guess, not a measurement.
+    const fallback = priceTreeShrub(
+      { shrubDensity: 'heavy', treeCount: 0, access: 'easy' },
+      { tier: 'standard' }
+    );
+    expect(fallback.bedAreaSource).toBe('fallback');
+    expect(fallback.densityFactor).toBe(1);
+    // explicit measurement: the factor applies.
+    const explicit = priceTreeShrub(
+      { bedArea: 2000, shrubDensity: 'heavy', treeCount: 0, access: 'easy' },
+      { tier: 'standard' }
+    );
+    expect(explicit.bedAreaSource).toBe('explicit');
+    expect(explicit.densityFactor).toBe(1.3);
+  });
+
+  test('admin PUT validation bounds the v4.7 knobs (strict numbers, no boolean coercion)', () => {
+    const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+    const ok = (data) => validatePricingConfigData('ts_material_rates', data).ok;
+    expect(ok({ density_heavy: 1.3, palm_per_palm_annual: 6, palm_minutes_per_visit: 1, callback_reserve_per_visit: 2 })).toBe(true);
+    expect(ok({ fixed: 15, per_tree: 4, per_sqft: 0.055, light_factor: 0.75 })).toBe(true);
+    expect(ok({ density_heavy: 5 })).toBe(false);
+    expect(ok({ density_light: 0.2 })).toBe(false);
+    expect(ok({ palm_per_palm_annual: 500 })).toBe(false);
+    expect(ok({ palm_minutes_per_visit: 45 })).toBe(false);
+    expect(ok({ callback_reserve_per_visit: true })).toBe(false); // Number(true)=1 must NOT slip through
+    expect(ok({ palm_per_palm_annual: '6' })).toBe(false); // strict numbers, no numeric strings
+    expect(ok({ callback_reserve_per_visit: null })).toBe(false);
+  });
+});

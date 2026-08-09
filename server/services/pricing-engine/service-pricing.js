@@ -2642,8 +2642,16 @@ function priceTreeShrub(property, options = {}) {
   // material + the bedArea-derived minutes) — previously it only shaped the
   // lot-based bed estimate, so a known bed area erased the difference
   // between sparse and packed plantings. Ships neutral (all factors 1).
+  // MEASURED sources only: lot_based bed area is ALREADY density-scaled by
+  // estimateTreeShrubBedAreaFromLot (10/18/25% of lot), so a factor there
+  // would apply density twice; the 2,000 fallback is a guess, not a
+  // measurement, and gets no adjustment either.
   const shrubDensity = getTreeShrubShrubDensity(property);
-  const densityFactor = TREE_SHRUB.densityFactors?.[shrubDensity] ?? 1;
+  const densityEligibleSource = bedAreaInfo.bedAreaSource === 'explicit'
+    || bedAreaInfo.bedAreaSource === 'estimated';
+  const densityFactor = densityEligibleSource
+    ? (TREE_SHRUB.densityFactors?.[shrubDensity] ?? 1)
+    : 1;
 
   // v4.7 routine palm-care reserve: property-level palm count only (the
   // service-level override machinery in resolvePalmCount is palm_injection
