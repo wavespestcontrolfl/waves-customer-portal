@@ -8069,11 +8069,16 @@ const CallRecordingProcessor = {
               // conflict-retire it — before its own finalization writes
               // zero rows; that loss is irreversible. Ownership is
               // verified inside the transaction and every attribution
-              // statement rides it. Rare call_log → leads inversion vs
-              // stamp writers is PostgreSQL-deadlock-resolved; the outer
-              // catch treats it like any transient attribution failure
-              // (the bridge/backfill re-heals on a later pass).
+              // statement rides it, in the repo-wide leads → call_log
+              // acquisition order.
               const pending = db.transaction(async (trx) => {
+                // Repo-wide lock order is leads → call_log (the bridge
+                // and every stamp writer). Lock the selected lead FIRST
+                // (pre-push P1 r8) — the funnel insert's FK takes KEY
+                // SHARE on this lead anyway, and acquiring the call row
+                // first inverted the order against a stamp writer
+                // holding the lead and waiting on this call.
+                await trx('leads').where({ id: leadId }).forUpdate().first('id');
                 const owned = await trx('call_log')
                   .where({ id: call.id })
                   .where('processing_token', procToken)
@@ -8105,7 +8110,12 @@ const CallRecordingProcessor = {
                 sourceCallId: call.id || null,
                 dbc: trx,
                 });
-              }).catch(() => {});
+              }).catch((txnErr) => {
+                // Never silent (pre-push P1 r8): dedicated/organic calls
+                // have no bridge scan to re-heal a dropped attribution —
+                // the warn is the operator's only signal.
+                logger.warn(`[call-proc] PPC attribution transaction failed for ${callSid} (may need manual re-attribution): ${txnErr.code || txnErr.name || 'error'}`);
+              });
               await pending;
             }
           } catch (attrErr) {
@@ -9269,28 +9279,37 @@ const CallRecordingProcessor = {
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
       }
     } else {
-      // Lead creation skipped. Two very different reasons live here
-      // (pre-push P0 r14):
-      //   - CONTENT rejection (nonLeadCall — wrong-number/solicitor/etc.):
-      //     the call supports no lead, so its funnel attribution retires
-      //     at finalization — armed REGARDLESS of stamp presence (a
+      // Lead creation skipped. THREE very different reasons live here
+      // (pre-push P0 r14, narrowed P0 r8):
+      //   - DEFINITIVE content rejection (wrong_number call_type, or the
+      //     V2 spam/wrong-number flag): the call was never a prospect at
+      //     all — prior attribution is fraudulent, so it retires at
+      //     finalization, armed REGARDLESS of stamp presence (a
       //     sid-linked call has a provenanced row but no stamp; P1 r13),
       //     deferred to the final fenced status write where the verdict
       //     becomes durable (P0 r12).
+      //   - ORDINARY non-sales classification (existing-customer
+      //     scheduling/service, billing, complaint, a bare
+      //     is_lead=false): no NEW lead is created, but a force-reprocess
+      //     of a valid historical call must NEVER delete the original
+      //     inquiry's booked/completed revenue because the model now
+      //     files the transcript under service chatter. Stamp, lead, and
+      //     funnel row all stand — mirrors the V2 veto's own
+      //     definitive-rejection gate.
       //   - LIFECYCLE skip (the caller's prospect record has since
       //     advanced to won/active_customer): the ORIGINAL inquiry and its
-      //     booked/completed revenue are still perfectly valid — a
-      //     force-reprocess must NEVER delete that history just because
-      //     the stage now prevents creating another lead.
-      if (nonLeadCall) deferredNonLeadAttributionRetire = true;
-      // The stamp settle too is CONTENT-only (pre-push P0 r15): a
-      // lifecycle skip (prospect since advanced to won/active_customer)
-      // does not invalidate the call→lead linkage — clearing it read as an
-      // unlink to the bridge's repoint reconciliation, which then deleted
-      // the booked/completed attribution row the lifecycle branch
-      // deliberately preserves. The stamp, the lead's state, and the
-      // funnel row all stand.
-      if (nonLeadCall && priorStampedLeadId) {
+      //     booked/completed revenue are still perfectly valid.
+      const definitiveContentRejection = nonLeadCall
+        && (v2VetoDefinitiveRejection
+          || String(extracted?.call_type || '').trim().toLowerCase() === 'wrong_number');
+      if (definitiveContentRejection) deferredNonLeadAttributionRetire = true;
+      // The stamp settle is gated the SAME way (pre-push P0 r15/r8): a
+      // cleared stamp reads to the bridge's repoint reconciliation as a
+      // settled unlink, which would retire the exact funnel row the
+      // retire-gate above just preserved — so only a definitive rejection
+      // clears it. Lifecycle skips and ordinary non-sales classifications
+      // leave the stamp, the lead's state, and the funnel row standing.
+      if (definitiveContentRejection && priorStampedLeadId) {
       // The retry was VETOED out of lead creation but an earlier attempt
       // stamped a lead — the stamp must not survive a non-lead verdict,
       // and the lead's prior summary comes back with the clear, in one
@@ -12189,11 +12208,14 @@ const CallRecordingProcessor = {
       // The non-lead verdict's attribution retire becomes durable HERE,
       // atomically with the final status (pre-push P0 r12) — never on the
       // earlier settle, whose pass could still have failed into a retry.
-      if (written > 0 && !deferredNonLeadAttributionRetire) {
-        // A successful non-rejecting pass SUPERSEDES a previous
+      if (written > 0 && !deferredNonLeadAttributionRetire && !isNonLeadCallContent(extracted)) {
+        // A successful non-rejecting LEAD pass SUPERSEDES a previous
         // no-attribution verdict (pre-push P1 r15): without clearing the
         // marker, the bridge would never attribute the corrected call —
-        // shouldRetryLeadAttribution exits on it forever.
+        // shouldRetryLeadAttribution exits on it forever. An ordinary
+        // non-sales classification (pre-push P0 r8) is NOT such a
+        // correction — it validates no attribution, so it must not
+        // reopen a definitively rejected call to the bridge.
         try {
           const mdRaw = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
           if (mdRaw && mdRaw.no_attribution) {
