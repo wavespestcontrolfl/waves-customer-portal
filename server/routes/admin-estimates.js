@@ -1003,13 +1003,58 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
   }
 }
 
-// Last-instant marker re-check before each provider handoff (codex P0 r23):
-// the verdict lock released moments ago, and a pending invalidation can
-// commit in between. Nothing can make a provider call atomic with a DB
-// commit, but this shrinks the window to milliseconds — and the public
-// routes fail closed on the same markers (estimateLinkageInvalidated in
-// estimate-public.js), so a message that still slips out carries a link
-// that serves nothing. DB failure fails CLOSED (the leg is retryable);
+// Shared live call-linkage revalidation for engine-drafted rows: re-resolve
+// the call's current lead with the pipeline's own precedence (sid-owned
+// lead first, then the settled stamp) and require it to still be the
+// draft's linked lead. Plain reads — no extra locks, and the same
+// estimates→(leads/call_log) order the reconciler uses. Returns null when
+// the linkage stands (or the row carries no durable linkage), else the
+// abort reason.
+async function staleCallLinkageReason(dbc, data) {
+  const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
+  const draftCallLogId = data?.estimatorEngine?.callLogId || null;
+  if (!['sid', 'stamp'].includes(data?.lead_linkage) || !linkedLeadId || !draftCallLogId) return null;
+  const callRow = await dbc('call_log').where({ id: draftCallLogId })
+    .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status');
+  if (!callRow) return 'invalidated_before_delivery';
+  const procStatus = callRow.processing_status == null ? null : String(callRow.processing_status);
+  // A reprocess in flight means the linkage verdict is about to change —
+  // abort; the row is resendable once the call settles.
+  if (callRow.processing_token != null || (procStatus !== null && procStatus !== 'processed')) {
+    return 'call_reprocessing_before_delivery';
+  }
+  const liveStamp = (() => {
+    try {
+      const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
+      return md?.lead_id ? String(md.lead_id) : null;
+    } catch { return null; }
+  })();
+  let resolvedLeadId = null;
+  if (callRow.twilio_call_sid) {
+    const sidLead = await dbc('leads')
+      .where({ twilio_call_sid: callRow.twilio_call_sid })
+      .whereNull('deleted_at')
+      .first('id');
+    if (sidLead) resolvedLeadId = String(sidLead.id);
+  }
+  if (!resolvedLeadId && liveStamp) {
+    const stampLead = await dbc('leads').where({ id: liveStamp }).whereNull('deleted_at').first('id');
+    if (stampLead) resolvedLeadId = liveStamp;
+  }
+  if (resolvedLeadId !== linkedLeadId) return 'call_linkage_changed_before_delivery';
+  return null;
+}
+
+// Last-instant re-check before each provider handoff (codex P0 r23, P1 GH
+// r5): the verdict lock released moments ago, and BOTH an estimate marker
+// AND a call-side correction can commit in between — a retry can stamp a
+// new lead while its detached estimator run hasn't recorded the pending
+// invalidation yet, leaving a real unmarked window that only the call row
+// shows. So the linkage revalidation is repeated here, not just the marker
+// read. Nothing can make a provider call atomic with a DB commit, but this
+// shrinks the window to milliseconds — and the public routes fail closed
+// on the markers, so a message that still slips out carries a link that
+// serves nothing. DB failure fails CLOSED (the leg is retryable);
 // unparseable estimate_data proceeds, matching the verdict read.
 async function estimateInvalidatedJustBeforeHandoff(estimateId) {
   const row = await db('estimates').where({ id: estimateId }).first('archived_at', 'estimate_data');
@@ -1021,7 +1066,8 @@ async function estimateInvalidatedJustBeforeHandoff(estimateId) {
       ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
   } catch { return false; }
   const eng = data?.estimatorEngine;
-  return !!(eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at));
+  if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
+  return !!(await staleCallLinkageReason(db, data));
 }
 
 async function sendEstimateNow(estimate, sendMethod, options = {}) {
@@ -1104,43 +1150,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // PR #3304 r21): the call processor can commit a corrected stamp
       // BEFORE its reconcile archives this draft — the marker check alone
       // misses that window, and stamping the claim below would then defer
-      // the very reconcile meant to stop this send. Re-resolve the call's
-      // current lead with the pipeline's own precedence (sid-owned lead
-      // first, then the settled stamp) and require it to still be the
-      // draft's linked lead. Plain reads — no extra locks, and the same
-      // estimates→(leads/call_log) order the reconciler uses.
-      const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
-      const draftCallLogId = data?.estimatorEngine?.callLogId || null;
-      if (['sid', 'stamp'].includes(data?.lead_linkage) && linkedLeadId && draftCallLogId) {
-        const callRow = await trx('call_log').where({ id: draftCallLogId })
-          .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status');
-        if (!callRow) return 'invalidated_before_delivery';
-        const procStatus = callRow.processing_status == null ? null : String(callRow.processing_status);
-        // A reprocess in flight means the linkage verdict is about to
-        // change — abort; the row is resendable once the call settles.
-        if (callRow.processing_token != null || (procStatus !== null && procStatus !== 'processed')) {
-          return 'call_reprocessing_before_delivery';
-        }
-        const liveStamp = (() => {
-          try {
-            const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
-            return md?.lead_id ? String(md.lead_id) : null;
-          } catch { return null; }
-        })();
-        let resolvedLeadId = null;
-        if (callRow.twilio_call_sid) {
-          const sidLead = await trx('leads')
-            .where({ twilio_call_sid: callRow.twilio_call_sid })
-            .whereNull('deleted_at')
-            .first('id');
-          if (sidLead) resolvedLeadId = String(sidLead.id);
-        }
-        if (!resolvedLeadId && liveStamp) {
-          const stampLead = await trx('leads').where({ id: liveStamp }).whereNull('deleted_at').first('id');
-          if (stampLead) resolvedLeadId = liveStamp;
-        }
-        if (resolvedLeadId !== linkedLeadId) return 'call_linkage_changed_before_delivery';
-      }
+      // the very reconcile meant to stop this send.
+      const staleLinkage = await staleCallLinkageReason(trx, data);
+      if (staleLinkage) return staleLinkage;
       // Unparseable estimate_data: verdict passes (matches the prior
       // read-only behavior) but no claim is stamped — a blind rewrite
       // would clobber whatever is in the column.

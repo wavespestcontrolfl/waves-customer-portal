@@ -71,6 +71,24 @@ describe('isEstimateAcceptActive — unpublished/expiry hardening', () => {
     const pending = JSON.stringify({ estimatorEngine: { invalidation_pending_at: FUTURE } });
     expect(isEstimateAcceptActive({ status: 'sent', expires_at: FUTURE, estimate_data: pending })).toBe(false);
   });
+});
+
+describe('resolveEstimateDeclineGuard — linkage-invalidation fail-closed (PR #3304 GH r5)', () => {
+  const { resolveEstimateDeclineGuard } = require('../routes/estimate-public');
+
+  it('a pending marker 404s the decline — a stale token must not mint a terminal the release then preserves', () => {
+    const pending = JSON.stringify({ estimatorEngine: { invalidation_pending_at: FUTURE } });
+    expect(resolveEstimateDeclineGuard({ status: 'sending', expires_at: FUTURE, estimate_data: pending }))
+      .toEqual({ ok: false, status: 404, error: 'Estimate not found' });
+    const invalidated = JSON.stringify({ estimatorEngine: { linkage_invalidated_at: FUTURE } });
+    expect(resolveEstimateDeclineGuard({ status: 'sent', expires_at: FUTURE, estimate_data: invalidated }))
+      .toEqual({ ok: false, status: 404, error: 'Estimate not found' });
+  });
+
+  it('an unmarked sendable row still declines', () => {
+    expect(resolveEstimateDeclineGuard({ status: 'sent', expires_at: FUTURE, estimate_data: null }))
+      .toEqual({ ok: true });
+  });
 
   it('accepts published estimates, incl. a mid-send row with no expiry yet', () => {
     expect(isEstimateAcceptActive({ status: 'sent', expires_at: FUTURE })).toBe(true);

@@ -581,11 +581,21 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
               // commit an archive inside a live send's verdict-to-handoff
               // window — record a durable PENDING marker the send's claim
               // release consumes instead, so the quarantine is never lost.
+              // The quarantined lead is unlinked exactly like an ordinary
+              // invalidation (codex P1 r5 GH): leaving lead_id and
+              // leads.estimate_id pointing at the archived draft made the
+              // operator's replacement-link action bounce off the
+              // "already linked" pipeline guard, and agent context kept
+              // treating the wrong-identity draft as current.
+              const quarantinedLeadId = data.lead_id ? String(data.lead_id) : null;
               if (deliveryClaimFresh(data.estimatorEngine)) {
                 if (!data.estimatorEngine?.invalidation_pending_at) {
                   data.estimatorEngine = {
                     ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
                     invalidation_pending_at: new Date().toISOString(),
+                    // The claim release performs the unlink for a deferred
+                    // quarantine too — it needs the source lead.
+                    invalidation_pending_from: quarantinedLeadId,
                     invalidation_pending_conflict: context.error,
                   };
                   await trx('estimates').where({ id: conflicted.id })
@@ -594,6 +604,8 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
                 logger.info(`[estimator-engine] quarantine of draft ${conflicted.id} DEFERRED behind a live delivery claim (${context.error}) — pending marker recorded`);
                 return;
               }
+              delete data.lead_id;
+              delete data.lead_linkage;
               data.estimatorEngine = {
                 ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
                 linkage_invalidated_at: new Date().toISOString(),
@@ -606,6 +618,12 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
                 ...(midSend ? {} : { status: 'draft', scheduled_at: null }),
                 updated_at: new Date(),
               });
+              if (quarantinedLeadId) {
+                // Only if the lead still points at this draft — a lead
+                // relinked elsewhere is not ours to touch.
+                await trx('leads').where({ id: quarantinedLeadId, estimate_id: conflicted.id })
+                  .update({ estimate_id: null });
+              }
             });
             logger.info(`[estimator-engine] quarantined draft ${conflicted.id} on identity conflict (${context.error})`);
           }

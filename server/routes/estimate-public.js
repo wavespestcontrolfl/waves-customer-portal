@@ -11770,6 +11770,24 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
       .where({ id: estimate.id })
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .whereNull('price_locked_at')
+      // Whole-blob write over a pre-read snapshot (codex P1, PR #3304 GH
+      // r5): a linkage-invalidation marker or delivery claim committing
+      // between the read and this UPDATE would be silently erased —
+      // leaving the wrong-lead draft public and the claim release with
+      // nothing to consume. Same CAS as the bond/select-tier writes (any
+      // concurrent write bumps updated_at → 0-row → 409 reload), plus
+      // explicit marker/claim-absent predicates as the direct guard.
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') = ''")
+      .modify((q) => {
+        if (estimate.updated_at) {
+          q.andWhere(db.raw(
+            "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+            [estimate.updated_at],
+          ));
+        }
+      })
       .update({
         estimate_data: JSON.stringify(parsedData),
         monthly_total: monthlyTotal,
@@ -12108,13 +12126,18 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       // Mirror the guard's archived check on the UPDATE itself (TOCTOU): an
       // archive committed between the pre-read and this write must not be
-      // mutated back to life as a decline.
+      // mutated back to life as a decline. Same for the linkage markers
+      // (codex P1, PR #3304 GH r5): a pending invalidation recorded during
+      // an active send must not let the stale token flip the wrong-lead
+      // row to a money-bearing 'declined' the release then preserves.
       .whereNull('archived_at')
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
       .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', db.raw('NOW()')))
       .update({ status: 'declined', declined_at: db.fn.now(), updated_at: db.fn.now() });
     if (declinedCount) await transferGroupFollowupOwnership(estimate);
     if (!declinedCount) {
-      const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at', 'archived_at');
+      const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at', 'archived_at', 'estimate_data');
       const freshGuard = resolveEstimateDeclineGuard(fresh);
       if (freshGuard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
       // Honor the guard's own status: a row archived mid-flight must return
@@ -13890,6 +13913,16 @@ function resolveEstimateDeclineGuard(estimate, now = new Date()) {
   // contract as an unknown token; checked BEFORE alreadyDeclined so an
   // archived declined row doesn't confirm its own existence.
   if (estimate.archived_at || UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) {
+    return { ok: false, status: 404, error: 'Estimate not found' };
+  }
+  // A pending or full linkage invalidation kills the decline too (codex
+  // P1, PR #3304 GH r5): a stale token declining a wrong-lead row would
+  // mint a money-bearing terminal the deferred-invalidation release then
+  // has to preserve — the archive/unlink would never happen. Same generic
+  // 404 as archived: the row is dead to this token holder. Both callers
+  // (pre-read and post-UPDATE re-read) pass estimate_data; the UPDATE
+  // itself carries matching marker predicates for the TOCTOU window.
+  if (estimate.estimate_data !== undefined && estimateLinkageInvalidated(estimate)) {
     return { ok: false, status: 404, error: 'Estimate not found' };
   }
   if (estimate.status === 'declined') {
