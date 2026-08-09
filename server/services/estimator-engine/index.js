@@ -697,6 +697,14 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
       logger.info(`[estimator-engine] invalidated draft ${conflicted.id} (${reason})`);
       invalidatedAny = true;
     }
+    // DURABLE call-side verdict for an identity conflict (codex P0, PR
+    // #3304 GH r8f): the drafts that exist are marked above, but a
+    // DETACHED composer that built its context before the conflict
+    // appeared can still insert afterwards — and its in-lock fence checks
+    // rejection and linkage, neither of which sees an identity conflict.
+    // Stamping the CALL makes the verdict visible to that fence
+    // (callRejectedForDrafting reads it) until a later pass disproves it.
+    if (identityConflict) await markIdentityConflictOnCall(callLogId, reason);
     return { ok: true, invalidated: invalidatedAny };
   } catch (qErr) {
     if (qErr.ownershipLost) {
@@ -706,6 +714,38 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
     }
     logger.error(`[estimator-engine] forced draft invalidation FAILED for call ${callLogId} (${reason}): ${qErr.message}`);
     return { ok: false, invalidated: false, error: qErr.message };
+  }
+}
+
+// The call-side identity-conflict verdict the creators' in-lock fence
+// reads. Best-effort: the estimate markers are the primary block, this
+// closes the LATE-composer window (codex P0, PR #3304 GH r8f).
+async function markIdentityConflictOnCall(callLogId, reason) {
+  try {
+    await db('call_log').where({ id: callLogId }).update({
+      metadata: db.raw(
+        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_identity_conflict}', ?::jsonb, true)",
+        [JSON.stringify({ reason, at: new Date().toISOString() })],
+      ),
+      updated_at: new Date(),
+    });
+  } catch (err) {
+    logger.warn(`[estimator-engine] identity-conflict call marker failed for ${callLogId}: ${err.message}`);
+  }
+}
+
+// Cleared the moment a pass reads a CONCLUSIVELY clean context — the
+// conflict is gone and drafting must resume.
+async function clearIdentityConflictOnCall(callLogId) {
+  try {
+    await db('call_log').where({ id: callLogId })
+      .whereRaw("COALESCE(metadata->'estimator_identity_conflict'->>'reason', '') <> ''")
+      .update({
+        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'estimator_identity_conflict'"),
+        updated_at: new Date(),
+      });
+  } catch (err) {
+    logger.warn(`[estimator-engine] identity-conflict call marker clear failed for ${callLogId}: ${err.message}`);
   }
 }
 
@@ -790,9 +830,13 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
       }
     } else {
       const freshContext = await buildCallContext(row.id).catch(() => null);
-      const stillConflicted = ['email_matches_existing_customer', 'email_identity_conflict']
-        .includes(freshContext?.error);
-      if (freshContext && !stillConflicted) {
+      // CONCLUSIVE clean only (codex P0, PR #3304 GH r8f): buildCallContext
+      // RETURNS error objects for lookup failures rather than throwing, so
+      // `customer_lookup_unavailable` would otherwise read as "conflict
+      // cleared" and discard the only durable retry for a conflict that
+      // was never disproved.
+      if (freshContext && !freshContext.error) {
+        await clearIdentityConflictOnCall(row.id);
         await clearQuarantineMarker(row.id, pending);
         logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — the identity conflict cleared`);
         continue;
@@ -857,6 +901,8 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     // The caller's own processing claim rides the context so the creators'
     // in-lock fences can tell it apart from a competing reprocess.
     if (context && ownerProcToken) context.ownerProcToken = ownerProcToken;
+    // A CONCLUSIVELY clean context retires the call-side conflict verdict.
+    if (!dryRun && context && !context.error) await clearIdentityConflictOnCall(callLogId);
     if (context.error) {
       result.lane = LANES.RED;
       result.reasons = [context.error];

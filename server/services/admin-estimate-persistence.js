@@ -285,6 +285,14 @@ async function callRejectedForDrafting(dbc, callLogId, { lockCallRow = false } =
   try {
     const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
     if (md?.no_attribution === true) return 'call_rejected_no_attribution';
+    // A live IDENTITY-CONFLICT verdict blocks drafting too (codex P0, PR
+    // #3304 GH r8f): a detached composer that built its context before the
+    // conflict appeared would otherwise insert a wrong-identity draft
+    // right after the quarantine swept the existing ones.
+    if (md?.estimator_identity_conflict?.reason) return String(md.estimator_identity_conflict.reason);
+    // A QUEUED quarantine that has not landed yet is equally disqualifying
+    // — its estimate-side marker is exactly what failed to write.
+    if (md?.estimator_quarantine_pending?.reason) return String(md.estimator_quarantine_pending.reason);
   } catch { /* unparseable metadata: not a rejection signal */ }
   return null;
 }
@@ -325,6 +333,16 @@ async function staleCallLinkageReason(dbc, data, { lockCallRow = false, ownerPro
   if (!ownedByCaller && callReprocessInFlight(callRow)) {
     return 'call_reprocessing_before_delivery';
   }
+  // CALL-SIDE verdicts fail the send/accept/decline revalidation as well
+  // (codex P0, PR #3304 GH r8f): when a quarantine could not write its
+  // estimate marker it queues on the CALL, and these paths inspect the
+  // estimate only — so the known wrong-identity draft stayed sendable
+  // until a scheduler sweep succeeded.
+  try {
+    const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
+    if (md?.estimator_identity_conflict?.reason) return 'call_identity_conflict';
+    if (md?.estimator_quarantine_pending?.reason) return 'call_quarantine_pending';
+  } catch { /* unparseable metadata: fall through to the linkage compare */ }
   const liveStamp = (() => {
     try {
       const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
