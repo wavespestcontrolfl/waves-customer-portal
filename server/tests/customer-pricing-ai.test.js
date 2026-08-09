@@ -692,3 +692,69 @@ describe('live in-progress rows survive the ownership date cutoff', () => {
     expect(owned).toEqual([]);
   });
 });
+
+describe('property context reads only columns the customers table actually has', () => {
+  // Verified against the live schema 2026-08-09: customers carries bed_sqft,
+  // canopy_type, lot_sqft, palm_count, property_sqft, property_type — and
+  // NONE of home_sqft / stories / pool / pool_cage / shrub_density /
+  // tree_density / landscape_complexity / tree_count / year_built /
+  // construction_material / foundation_type / roof_type. Those reads used to
+  // resolve undefined and silently take the moderate/false/0 defaults.
+  const customerWithBasics = {
+    id: 'cust-features',
+    monthly_rate: 55,
+    address_line1: '123 Gulf Dr',
+    city: 'Sarasota',
+    state: 'FL',
+    zip: '34236',
+    property_sqft: 2200,
+    lot_sqft: 9000,
+  };
+
+  test('a customer with home+lot still gets a lookup, so features are observed not defaulted', async () => {
+    let lookedUp = false;
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      prompt: 'I am interested in adding tree and shrub care',
+      propertyLookup: async () => {
+        lookedUp = true;
+        return {
+          enriched: {
+            homeSqFt: 2200, lotSqFt: 9000,
+            pool: 'YES', poolCage: 'YES',
+            shrubDensity: 'HEAVY', treeDensity: 'HEAVY',
+            estimatedTreeCount: 12, estimatedBedAreaSf: 2600, estimatedPalmCount: 8,
+          },
+        };
+      },
+      customer: customerWithBasics,
+    });
+    // The old gate was (!homeSqFt || !lotSqFt): this customer would never
+    // have been looked up, and would have priced pool-less/moderate/zero-tree.
+    expect(lookedUp).toBe(true);
+    expect(result.ok).toBe(true);
+  });
+
+  test('a lookup-derived bed area is labelled ESTIMATED, never explicit', async () => {
+    const { _private } = require('../services/customer-pricing-ai');
+    const resolve = _private?.resolvePropertyContext;
+    if (!resolve) return;
+    const fromLookup = await resolve({
+      customer: customerWithBasics,
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600 } }),
+    });
+    expect(fromLookup.propertyInput.bedArea).toBe(2600);
+    // Provenance drives money: the T&S density factor applies to measured
+    // sources only, so an AI-derived area must not claim to be measured.
+    expect(fromLookup.propertyInput.bedAreaSource).toBe('estimated');
+
+    const fromProfile = await resolve({
+      customer: { ...customerWithBasics, bed_sqft: 1800, palm_count: 4 },
+      turfProfile: null,
+      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600 } }),
+    });
+    expect(fromProfile.propertyInput.bedArea).toBe(1800);
+    expect(fromProfile.propertyInput.bedAreaSource).toBe('explicit');
+  });
+});

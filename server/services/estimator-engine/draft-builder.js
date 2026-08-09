@@ -200,6 +200,24 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     ...(!isCommercial && lookupEnriched?.treeDensity
       ? { treeDensity: lookupEnriched.treeDensity }
       : {}),
+    // Tree & Shrub measurement inputs from the lookup. Without these the
+    // T&S pricer had no bed area at all on this path and fell back to its
+    // 2,000 sqft default (bedAreaSource 'fallback', LOW confidence, manual
+    // review) — the Aug-2026 audit found two of the three real T&S quotes
+    // priced that way. estimatedBedAreaSf lands as bedAreaSource
+    // 'estimated' / MEDIUM confidence, so the provenance stays truthful:
+    // an AI-derived area is never labelled an operator measurement.
+    // The admin estimator already prefills both fields from the same
+    // enriched payload (EstimateToolViewV2) — this closes the agent path.
+    ...(!isCommercial && positive(lookupEnriched?.estimatedBedAreaSf)
+      ? { estimatedBedAreaSf: Number(lookupEnriched.estimatedBedAreaSf) }
+      : {}),
+    // Palms on the property feed the routine palm-care reserve on the
+    // recurring T&S program (NOT palm_injection's treated-palm count, which
+    // stays a caller-stated service-line value).
+    ...(!isCommercial && positive(lookupEnriched?.estimatedPalmCount)
+      ? { palmCount: Math.round(Number(lookupEnriched.estimatedPalmCount)) }
+      : {}),
     // Structural facts deriveModifiers() prices from: home age (pest $/app),
     // construction + foundation (termite/WDO), roof type (rodent). UNKNOWN
     // merges stay off the input so the engine's own defaults apply.

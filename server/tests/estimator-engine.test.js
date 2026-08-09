@@ -1168,3 +1168,59 @@ describe('verifyEvidenceQuotes — SMS-origin per-message records (transcriptRec
       .toEqual({ total: 1, unverified: 1 });
   });
 });
+
+describe('Tree & Shrub measurement inputs reach the agent draft engine input', () => {
+  const { generateEstimate } = require('../services/pricing-engine');
+
+  test('lookup bed area + palm count are forwarded (residential only)', () => {
+    const facts = {
+      home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+      lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    };
+    const enriched = { estimatedBedAreaSf: 2600, estimatedPalmCount: 8, shrubDensity: 'HEAVY' };
+    const input = buildEngineInput({ intent: baseIntent(), propertyFacts: facts, context: {}, lookupEnriched: enriched });
+    expect(input.estimatedBedAreaSf).toBe(2600);
+    expect(input.palmCount).toBe(8);
+
+    // Commercial prices off footprint/risk-type, not homeowner measurements.
+    const commercial = buildEngineInput({
+      intent: { ...baseIntent(), is_commercial: true, category: 'COMMERCIAL' },
+      propertyFacts: facts,
+      context: {},
+      lookupEnriched: enriched,
+    });
+    expect(commercial.estimatedBedAreaSf).toBeUndefined();
+    expect(commercial.palmCount).toBeUndefined();
+  });
+
+  test('a T&S quote off that input stops using the 2,000 sqft LOW-confidence fallback', () => {
+    const facts = {
+      home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+      lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    };
+    const withBedArea = buildEngineInput({
+      intent: { ...baseIntent(), services: { treeShrub: {} } },
+      propertyFacts: facts,
+      context: {},
+      lookupEnriched: { estimatedBedAreaSf: 2600 },
+    });
+    const ts = generateEstimate({ ...withBedArea, services: { treeShrub: { tier: 'standard' } } })
+      .lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.bedArea).toBe(2600);
+    // Truthful provenance: AI-derived, not an operator measurement.
+    expect(ts.bedAreaSource).toBe('estimated');
+    expect(ts.pricingConfidence).toBe('medium');
+    expect(ts.manualReviewReasons).not.toContain('missing_bed_area_fallback');
+
+    // Without it, the same property falls to the fallback the audit found.
+    const withoutBedArea = buildEngineInput({
+      intent: { ...baseIntent(), services: { treeShrub: {} } },
+      propertyFacts: facts,
+      context: {},
+      lookupEnriched: {},
+    });
+    const tsFallback = generateEstimate({ ...withoutBedArea, services: { treeShrub: { tier: 'standard' } } })
+      .lineItems.find((li) => li.service === 'tree_shrub');
+    expect(tsFallback.bedAreaSource).toBe('lot_based');
+  });
+});

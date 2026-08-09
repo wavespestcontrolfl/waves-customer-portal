@@ -332,33 +332,58 @@ function lookupEnabled() {
   return process.env.CUSTOMER_PRICING_AI_LOOKUP !== 'false';
 }
 
+// Columns the `customers` table ACTUALLY has for pricing (verified against
+// the live schema 2026-08-09): bed_sqft, canopy_type, lot_sqft, palm_count,
+// property_sqft, property_type. Everything else this resolver used to read
+// — home_sqft, square_footage, lot_size_sqft, lawn_sqft,
+// estimated_bed_area_sf, stories, pool, pool_cage, near_water,
+// shrub_density, tree_density, landscape_complexity, irrigation(_system),
+// tree_count, year_built, construction_material, foundation_type, roof_type
+// — DOES NOT EXIST. Those reads resolved to undefined and silently took the
+// 'moderate' / false / 0 defaults, so a caged-pool, heavy-landscaping home
+// was quoted at the bare-property price. customer_turf_profiles has no
+// palm_count either. The property LOOKUP is the real source for all of
+// them; the gate below is what has to open for it to be consulted.
 async function resolvePropertyContext({ customer, turfProfile, propertyLookup }) {
   let source = 'customer_profile';
   const address = addressForCustomer(customer);
-  let homeSqFt = positiveNumber(customer.home_sqft, customer.property_sqft, customer.square_footage);
-  let lotSqFt = positiveNumber(customer.lot_sqft, customer.lot_size_sqft);
-  let lawnSqFt = positiveNumber(turfProfile?.lawn_sqft, customer.lawn_sqft);
-  let bedArea = positiveNumber(customer.bed_sqft, customer.estimated_bed_area_sf);
-  let stories = positiveNumber(customer.stories);
+  let homeSqFt = positiveNumber(customer.property_sqft);
+  let lotSqFt = positiveNumber(customer.lot_sqft);
+  let lawnSqFt = positiveNumber(turfProfile?.lawn_sqft);
+  let bedArea = positiveNumber(customer.bed_sqft);
+  // Provenance is load-bearing money data, not a label: the T&S pricer
+  // applies its shrub-density factor to MEASURED bed areas only, so an
+  // AI-derived area must never claim to be an operator measurement.
+  let bedAreaSource = bedArea ? 'explicit' : undefined;
+  let stories = null;
   let propertyType = customer.property_type || 'single_family';
-  let yearBuilt = customer.year_built || null;
-  let constructionMaterial = customer.construction_material || null;
-  let foundationType = customer.foundation_type || null;
-  let roofType = customer.roof_type || null;
-  let palmCount = positiveNumber(customer.palm_count, turfProfile?.palm_count);
+  let yearBuilt = null;
+  let constructionMaterial = null;
+  let foundationType = null;
+  let roofType = null;
+  let palmCount = positiveNumber(customer.palm_count);
   let lookupMeta = null;
+  // Feature defaults, NOT observations: the profile carries no feature
+  // columns, so these stand only until the lookup answers.
   let features = {
-    pool: !!customer.pool,
-    poolCage: !!(customer.pool_cage || customer.poolCage),
-    nearWater: !!(customer.near_water || customer.nearWater),
-    shrubs: customer.shrub_density || 'moderate',
-    trees: customer.tree_density || 'moderate',
-    complexity: customer.landscape_complexity || 'moderate',
-    irrigation: !!(customer.irrigation_system || customer.irrigation),
-    treeCount: Number(customer.tree_count || 0) || 0,
+    pool: false,
+    poolCage: false,
+    nearWater: false,
+    shrubs: 'moderate',
+    trees: 'moderate',
+    complexity: 'moderate',
+    irrigation: false,
+    treeCount: 0,
   };
 
-  if ((!homeSqFt || !lotSqFt) && lookupEnabled() && address && propertyLookup) {
+  // The gate used to be (!homeSqFt || !lotSqFt) alone, which meant a
+  // customer whose row carried both never got a lookup — and therefore was
+  // priced forever as pool-less, moderate-density, zero-tree, because no
+  // other source for those fields exists. Missing FEATURE evidence now
+  // opens the gate too (bed area and palms matter for the Tree & Shrub
+  // program the same way pool/cage matter for pest).
+  const missingFeatureEvidence = !bedArea || !palmCount;
+  if ((!homeSqFt || !lotSqFt || missingFeatureEvidence) && lookupEnabled() && address && propertyLookup) {
     try {
       const lookup = await propertyLookup(address);
       const p = lookup?.enriched || {};
@@ -372,6 +397,9 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       homeSqFt = positiveNumber(homeSqFt, p.homeSqFt, record.squareFootage);
       lotSqFt = positiveNumber(lotSqFt, p.lotSqFt, record.lotSize);
       lawnSqFt = positiveNumber(lawnSqFt, p.estimatedTurfSf);
+      // Provenance rides WITH the value: a lookup-derived area is
+      // 'estimated', never the operator-measured 'explicit'.
+      if (!bedArea && positiveNumber(p.estimatedBedAreaSf)) bedAreaSource = 'estimated';
       bedArea = positiveNumber(bedArea, p.estimatedBedAreaSf);
       stories = positiveNumber(stories, p.stories, record.stories);
       propertyType = p.propertyType || record.propertyType || propertyType;
@@ -408,7 +436,7 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     propertyType,
     features,
     bedArea: bedArea || undefined,
-    bedAreaSource: bedArea ? 'explicit' : undefined,
+    bedAreaSource: bedArea ? bedAreaSource : undefined,
     yearBuilt,
     constructionMaterial,
     foundationType,
@@ -751,4 +779,7 @@ module.exports = {
   variantsForService,
   currentServiceObjectsFor,
   optionServices,
+  // Test hook (T&S reprice lane 2026-08-09): property-context resolution,
+  // where bed-area provenance is decided.
+  _private: { resolvePropertyContext },
 };
