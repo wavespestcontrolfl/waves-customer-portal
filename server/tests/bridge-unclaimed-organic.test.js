@@ -18,8 +18,8 @@ const mockDb = jest.fn((table) => {
   const b = {};
   const self = () => b;
   [
-    'where', 'whereIn', 'whereRaw', 'whereNotNull', 'whereNotExists', 'whereNot',
-    'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge', 'update',
+    'where', 'whereIn', 'whereRaw', 'whereNotNull', 'whereNull', 'whereNotExists', 'whereNot',
+    'forUpdate', 'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge', 'update',
   ].forEach((m) => { b[m] = jest.fn(self); });
   b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
   b.insert = jest.fn((row) => { insertCalls.push({ table, row }); return b; });
@@ -28,6 +28,10 @@ const mockDb = jest.fn((table) => {
   ).then(res, rej);
   return b;
 });
+// The sweep now runs each candidate through a locked transaction (lead
+// FOR UPDATE re-read + provenance resolution + funnel write on one
+// connection) — the mock passes the same builder through.
+mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
@@ -60,6 +64,9 @@ beforeEach(() => {
   listByTable = {};
   firstByTable = {};
   insertCalls.length = 0;
+  // Provenance resolution's sid/stamp candidate queries — default to no
+  // linked calls (provenance NULL, permanently conservative).
+  listByTable.call_log = [];
 });
 
 describe('attributeUnclaimedBridgeLeads', () => {
@@ -73,6 +80,16 @@ describe('attributeUnclaimedBridgeLeads', () => {
       created_at: '2026-06-11T14:00:00Z',
       lead_source_id: 'src-bridge',
     }];
+    // The locked FOR UPDATE re-read inside the per-lead transaction.
+    firstByTable.leads = {
+      id: 'lead-1',
+      customer_id: 'c1',
+      lead_source_id: 'src-bridge',
+      service_interest: 'pest control',
+      first_contact_at: '2026-06-11T14:00:00Z',
+      created_at: '2026-06-11T14:00:00Z',
+      twilio_call_sid: null,
+    };
 
     const res = await attributeUnclaimedBridgeLeads({ olderThanDays: 7 });
 
@@ -94,6 +111,9 @@ describe('attributeUnclaimedBridgeLeads', () => {
     listByTable['leads as l'] = [{
       id: 'lead-anon', customer_id: null, created_at: '2026-06-01', lead_source_id: 'src-bridge',
     }];
+    firstByTable.leads = {
+      id: 'lead-anon', customer_id: null, created_at: '2026-06-01', lead_source_id: 'src-bridge', twilio_call_sid: null,
+    };
     const res = await attributeUnclaimedBridgeLeads();
     expect(res).toEqual({ candidates: 1, recorded: 0, skipped: 1 });
     expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
@@ -121,6 +141,9 @@ describe('attributeUnclaimedBridgeLeads', () => {
     listByTable['leads as l'] = [{
       id: 'lead-1', customer_id: 'c1', created_at: '2026-06-01', lead_source_id: 'src-bridge',
     }];
+    firstByTable.leads = {
+      id: 'lead-1', customer_id: 'c1', created_at: '2026-06-01', lead_source_id: 'src-bridge', twilio_call_sid: null,
+    };
     // recordCallPpcAttribution's lead_id lookup finds a row owned by another source
     firstByTable.ad_service_attribution = { id: 'asa-1', lead_source: 'google_ads' };
     const res = await attributeUnclaimedBridgeLeads();
