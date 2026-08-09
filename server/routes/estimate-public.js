@@ -8,6 +8,7 @@ const db = require('../models/db');
 // shared with the admin routes so every whole-blob write applies the same
 // rule (dependency-free module: partial test mocks can't blank a guard).
 const { DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
+const { callSideBlockForEstimateData } = require('../services/admin-estimate-persistence');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -8019,7 +8020,13 @@ async function handleEstimateView(req, res, next) {
     if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
       || estimate.archived_at
       || estimate.status === 'send_failed'
-      || estimateLinkageInvalidated(estimate)) {
+      || estimateLinkageInvalidated(estimate)
+      // The DURABLE call-side verdict too (codex P1, PR #3304 GH r9):
+      // when the estimate-side marker could not be written, the block
+      // lives on the CALL — and this page would otherwise keep serving a
+      // wrong-identity estimate's name, address, and pricing until the
+      // scheduler drained the queue.
+      || await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
       if (req.path.startsWith('/estimate/')) return next();
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
     }
@@ -20201,6 +20208,14 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       && !estimate.archived_at
       && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
       && !estimateLinkageInvalidated(estimate);
+    // Call-side verdict check runs alongside the estimate-side gate (codex
+    // P1, PR #3304 GH r9) and overrides EVERY bypass — a staff preview or
+    // a pinned document render of a blocked estimate is the same
+    // disclosure.
+    const callSideBlock = await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate));
+    if (callSideBlock) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to
       // a real, published estimate that died of expiry (never a draft), so the

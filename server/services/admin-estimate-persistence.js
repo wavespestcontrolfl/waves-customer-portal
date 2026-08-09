@@ -272,7 +272,31 @@ function callReprocessInFlight(callRow, nowMs = Date.now()) {
 // is unchanged. Creators call this inside their serialized insert with the
 // call row LOCKED, so a rejection either committed first (seen here) or
 // waits and its own invalidation pass catches what landed.
-async function callRejectedForDrafting(dbc, callLogId, { lockCallRow = false } = {}) {
+// The DURABLE call-side verdict as seen from an ESTIMATE row: when a
+// quarantine could not write its estimate-side marker, the block lives on
+// the call, and the public surfaces — which only ever read the estimate —
+// would keep serving a wrong-identity or rejected-call estimate through
+// its bearer token until the scheduler drained the queue (codex P1, PR
+// #3304 GH r9). Returns the blocking reason, or null. Cheap: one indexed
+// lookup, and only for engine-drafted rows.
+async function callSideBlockForEstimateData(dbc, data) {
+  const callLogId = data?.estimatorEngine?.callLogId || null;
+  if (!callLogId) return null;
+  try {
+    const row = await dbc('call_log').where({ id: callLogId }).first('metadata');
+    if (!row) return null;
+    const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    if (md?.estimator_draft_block?.reason) return String(md.estimator_draft_block.reason);
+    if (md?.estimator_quarantine_pending?.reason) return String(md.estimator_quarantine_pending.reason);
+    return null;
+  } catch {
+    // A lookup failure must not take the public page down; the
+    // estimate-side markers remain the primary gate.
+    return null;
+  }
+}
+
+async function callRejectedForDrafting(dbc, callLogId, { lockCallRow = false, ignoreQueuedMarkers = false } = {}) {
   if (!callLogId) return null;
   const q = dbc('call_log').where({ id: callLogId });
   if (lockCallRow) q.forUpdate();
@@ -289,10 +313,16 @@ async function callRejectedForDrafting(dbc, callLogId, { lockCallRow = false } =
     // #3304 GH r8f): a detached composer that built its context before the
     // conflict appeared would otherwise insert a wrong-identity draft
     // right after the quarantine swept the existing ones.
-    if (md?.estimator_draft_block?.reason) return String(md.estimator_draft_block.reason);
-    // A QUEUED quarantine that has not landed yet is equally disqualifying
-    // — its estimate-side marker is exactly what failed to write.
-    if (md?.estimator_quarantine_pending?.reason) return String(md.estimator_quarantine_pending.reason);
+    // The queued markers are DERIVED verdicts: the drafting fences must
+    // honor them, but the sweep that owns them must NOT read them as
+    // proof of the underlying verdict (codex P1, PR #3304 GH r9) — that
+    // made its own re-qualification cleanup unreachable.
+    if (!ignoreQueuedMarkers) {
+      if (md?.estimator_draft_block?.reason) return String(md.estimator_draft_block.reason);
+      // A QUEUED quarantine that has not landed yet is equally
+      // disqualifying — its estimate-side marker is what failed to write.
+      if (md?.estimator_quarantine_pending?.reason) return String(md.estimator_quarantine_pending.reason);
+    }
   } catch { /* unparseable metadata: not a rejection signal */ }
   return null;
 }
@@ -2219,6 +2249,7 @@ module.exports = {
   deliveryClaimFresh,
   staleCallLinkageReason,
   callRejectedForDrafting,
+  callSideBlockForEstimateData,
   completePendingInvalidation,
   takePendingInvalidation,
   sweepWedgedPendingInvalidations,

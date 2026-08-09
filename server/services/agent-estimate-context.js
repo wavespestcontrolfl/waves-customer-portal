@@ -129,11 +129,19 @@ async function loadCalls(lead, phoneKey) {
     if (rows.length < 3) {
       const stampedRows = await db('call_log')
         .whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
-        // SETTLED stamps only — same rule as every stamp consumer (#3303):
-        // stamp mutations are token-fenced, so a non-null processing_token
-        // means a mid-flight pass may still clear or repoint this stamp,
-        // and its transcript would be another caller's evidence.
+        // SETTLED stamps only — same rule as every stamp consumer (#3303),
+        // and the FULL settled test, not just a cleared token (codex P1,
+        // PR #3304 GH r9): the failure path clears processing_token while
+        // leaving the call in the retryable extraction_failed lane, and
+        // 'pending' / 'no_transcription' rows are queued with no token
+        // either. Those retries can still clear or repoint the stamp, so
+        // treating them as final could attach ANOTHER caller's transcript
+        // and identity to this lead. Settled = token NULL and a durable
+        // successful pass ('processed', or legacy NULL).
         .whereNull('processing_token')
+        .where(function settledPass() {
+          this.whereNull('processing_status').orWhere('processing_status', 'processed');
+        })
         .modify((q) => {
           if (lead.twilio_call_sid) {
             q.where(function notAnchor() {
@@ -327,12 +335,18 @@ async function loadIdentityCandidate(lead) {
   try {
     const rows = await db('call_log')
       .where(function ownedByLead() {
-        // The stamp arm requires a SETTLED call (token-fenced mutations —
-        // same rule as every stamp consumer, #3303); the sid arm is stable
-        // linkage and carries no such condition.
+        // The stamp arm requires a SETTLED call — token NULL AND a
+        // durable successful pass (codex P1, PR #3304 GH r9: a cleared
+        // token alone still admits the retryable extraction_failed lane
+        // and queued pending / no_transcription rows, whose stamp a retry
+        // can still clear or repoint). The sid arm is stable linkage and
+        // carries no such condition.
         this.where(function settledStampArm() {
           this.whereRaw("metadata->>'lead_id' = ?", [String(lead.id)])
-            .whereNull('processing_token');
+            .whereNull('processing_token')
+            .where(function settledPass() {
+              this.whereNull('processing_status').orWhere('processing_status', 'processed');
+            });
         });
         if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
       })

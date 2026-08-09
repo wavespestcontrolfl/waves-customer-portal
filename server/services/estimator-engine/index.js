@@ -159,8 +159,17 @@ async function reconcileExistingDraftLinks(existing, context) {
         // correct relink with its stale context; the absence path must
         // also hold for the FRESH lead, not the snapshot's. The call row
         // is the source of truth.
+        // Lead lock FIRST, then the CALL row LOCKED for the rest of this
+        // transaction (codex P1, PR #3304 GH r9): a plain SELECT let a
+        // NEWER retry restore the linkage between this read and the
+        // estimate write, so an older reconciler archived a now-valid
+        // draft on its stale verdict — and the newer pass, having already
+        // scanned, saw the marker and never rebuilt. Order stays
+        // estimates → leads → call_log, matching accept/decline.
+        if (freshLeadId) await trx('leads').where({ id: freshLeadId }).forUpdate().first('id');
         const callRow = context?.call?.id
-          ? await trx('call_log').where({ id: context.call.id }).first('twilio_call_sid', 'metadata')
+          ? await trx('call_log').where({ id: context.call.id }).forUpdate()
+            .first('twilio_call_sid', 'metadata')
           : null;
         if (!callRow) return;
         const liveStamp = (() => {
@@ -576,17 +585,7 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
     // unmarked wrong-identity (or rejected-call) draft that stays
     // sendable. The creators' in-lock fence and the send/accept/decline
     // revalidation both read this marker.
-    if (ownershipFence?.procToken) {
-      const stillOwned = await db('call_log')
-        .where({ id: ownershipFence.callLogId || callLogId })
-        .where('processing_token', ownershipFence.procToken)
-        .first('id');
-      if (!stillOwned) {
-        logger.info(`[estimator-engine] draft invalidation for call ${callLogId} skipped — processing claim lost before the block stamp`);
-        return { ok: true, invalidated: false, ownershipLost: true };
-      }
-    }
-    await markDraftBlockOnCall(callLogId, reason);
+    await markDraftBlockOnCall(callLogId, reason, { procToken: ownershipFence?.procToken || null });
     // STRICT lookup: existingDraftForCall converts DB errors to null,
     // which would read here as "no draft to invalidate". EVERY
     // uninvalidated row for this call is quarantined, not just the newest
@@ -732,7 +731,7 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
 // composer can slip a draft in behind it; read by the creators' in-lock
 // fence (callRejectedForDrafting) and by send/accept/decline
 // revalidation (staleCallLinkageReason).
-async function markDraftBlockOnCall(callLogId, reason) {
+async function markDraftBlockOnCall(callLogId, reason, { procToken = null } = {}) {
   // THROWS on failure (codex P0, PR #3304 GH r8h): this marker is the only
   // thing standing between a detached composer and an unmarked
   // wrong-identity or rejected-call draft with a permanent public token.
@@ -741,16 +740,29 @@ async function markDraftBlockOnCall(callLogId, reason) {
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const wrote = await db('call_log').where({ id: callLogId }).update({
+      // The WRITE itself carries the ownership predicate (codex P1, PR
+      // #3304 GH r9): a separate pre-check let a stale worker commit an
+      // unconditional block after a replacement reclaimed the call — and
+      // because that block is NEWER than the replacement pass's
+      // generation fence, the valid pass could never clear it and its own
+      // draft stayed blocked indefinitely.
+      const q = db('call_log').where({ id: callLogId });
+      if (procToken) q.where('processing_token', procToken);
+      const wrote = await q.update({
         metadata: db.raw(
           "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_draft_block}', ?::jsonb, true)",
           [JSON.stringify({ reason, at: new Date().toISOString() })],
         ),
         updated_at: new Date(),
       });
-      if (wrote) return;
-      // No row: the call is gone, so there is nothing to draft against
-      // and nothing to block.
+      // 0 rows with a token means the claim moved on — the reclaiming
+      // pass owns the verdict; without one it means the call is gone, so
+      // there is nothing to draft against and nothing to block.
+      if (!wrote && procToken) {
+        const lost = new Error('processing claim lost before the draft-block stamp');
+        lost.ownershipLost = true;
+        throw lost;
+      }
       return;
     } catch (err) { lastErr = err; }
   }
@@ -866,7 +878,12 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
     const identityConflict = String(pending.reason).startsWith('email_');
     if (!identityConflict) {
       const { callRejectedForDrafting } = require('../admin-estimate-persistence');
-      const stillRejected = await callRejectedForDrafting(db, row.id);
+      // The LIVE pipeline verdict only (codex P1, PR #3304 GH r9): the
+      // queued markers are this sweep's own artifacts, so counting them
+      // as proof made the re-qualification cleanup unreachable — the
+      // sweep would replay an obsolete rejection forever and keep
+      // drafting and delivery blocked.
+      const stillRejected = await callRejectedForDrafting(db, row.id, { ignoreQueuedMarkers: true });
       if (!stillRejected) {
         await clearQuarantineMarker(row.id, pending);
         logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — the call was re-qualified (${pending.reason})`);
