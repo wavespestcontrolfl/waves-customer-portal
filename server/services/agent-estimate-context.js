@@ -185,6 +185,11 @@ async function loadCalls(lead, phoneKey) {
       return true;
     });
     uniqueRows.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    // __rawExtraction carries the possibly-V1 blob for customer IDENTITY
+    // matching only — a different use with a different risk profile: a
+    // name selects among EXISTING customer rows, it never feeds composed
+    // pricing or service selection. sanitizePackCall strips it before the
+    // pack leaves this module (codex P1, PR #3304 GH r8).
     const calls = uniqueRows.map((call) => {
       const { extraction, source } = extractionFromCall(call);
       return {
@@ -202,8 +207,16 @@ async function loadCalls(lead, phoneKey) {
           : null,
         has_recording: !!call.recording_url,
         transcription_status: call.transcription_status || null,
-        extraction: compactJson(extraction),
-        extraction_source: source,
+        // ENRICHED (V2, status 'valid') extraction only (codex P1, PR
+        // #3304 GH r8, AGENTS.md L357-362): extractionFromCall falls back
+        // to the legacy ai_extraction blob, and feeding that to the Agent
+        // Estimate composer lets a stale or never-validated V1 service,
+        // identity, or property value steer a NEW estimate. Without V2 the
+        // raw transcript above is the evidence — the same rule the
+        // identity probe below already applies.
+        extraction: source === 'enriched' ? compactJson(extraction) : null,
+        extraction_source: source === 'enriched' ? source : 'transcript_only',
+        __rawExtraction: extraction || null,
       };
     });
     const leadSummary = clampText(lead.transcript_summary, 4000);
@@ -282,6 +295,16 @@ async function loadCalls(lead, phoneKey) {
     logger.warn(`[agent-estimate] call load failed: ${err.message}`);
     return [];
   }
+}
+
+// Strip the internal raw-extraction carrier before the pack leaves this
+// module: it exists only so customer IDENTITY matching can still read a V1
+// blob, and must never reach the composer as evidence (codex P1, PR #3304
+// GH r8).
+function sanitizePackCall(call) {
+  if (!call || typeof call !== 'object') return call;
+  const { __rawExtraction, ...rest } = call;
+  return rest;
 }
 
 // How far back the identity probe looks. Bounded so a lead with a long call
@@ -457,9 +480,10 @@ async function buildAgentEstimateContext(leadId) {
   const leadCall = identityCall || ownedCalls[0] || null;
   // Nothing in the capped pack carries enriched identity — look past the cap
   // before settling for an identity-less row (codex P2 r19).
+  const rawOf = (call) => (call ? (call.__rawExtraction || call.extraction || null) : null);
   const identityExtraction = identityCall
-    ? identityCall.extraction
-    : ((await loadIdentityCandidate(lead)) || leadCall?.extraction || null);
+    ? rawOf(identityCall)
+    : ((await loadIdentityCandidate(lead)) || rawOf(leadCall) || null);
   const {
     customer,
     ambiguous: customerAmbiguous,
@@ -478,11 +502,11 @@ async function buildAgentEstimateContext(leadId) {
   // sid- or metadata-stamp-linked (for_this_lead) or its own transcript
   // summary. Stamped calls are the lead's own evidence and must survive
   // this suppression (codex P1 r12).
-  const calls = (customerAmbiguous || phoneSharedWithOtherCustomer)
+  const calls = ((customerAmbiguous || phoneSharedWithOtherCustomer)
     ? rawCalls.filter((call) => (
       call.for_this_lead || String(call.id).startsWith('lead-summary:')
     ))
-    : rawCalls;
+    : rawCalls).map(sanitizePackCall);
   const [smsThread, priorEstimates, activities, currentEstimate, memories] = await Promise.all([
     (phoneHistorySuppressed || !phoneKey) ? Promise.resolve([]) : loadSmsThread(phoneKey, { limit: 60 }),
     (phoneHistorySuppressed || !phoneKey) ? Promise.resolve([]) : loadPriorEstimates(phoneKey, { limit: 8 }),

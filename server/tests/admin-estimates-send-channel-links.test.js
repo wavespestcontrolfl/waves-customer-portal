@@ -294,22 +294,26 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
   // Stateful estimates row: updates land on a live row object so later
   // reads (pre-handoff re-check, claim release) see what the verdict stamp
   // and the (simulated) reconciler deferral actually wrote.
-  function statefulMock() {
-    const state = { row: engineRow() };
+  function statefulMock({ liveLead = 'lead-A' } = {}) {
+    const state = { row: engineRow(), liveLead };
     const estimateUpdates = [];
     const leadUpdates = [];
     db.mockImplementation((table) => {
       const b = makeBuilder(state.row);
       if (table === 'call_log') {
+        // The call's LIVE linkage. When it has moved off the draft's lead,
+        // a deferred invalidation is current; when it still names the
+        // draft's lead, the deferred verdict is obsolete and the release
+        // discards it instead (codex P2, PR #3304 GH r8).
         b.first = jest.fn(async () => ({
           twilio_call_sid: null,
-          metadata: { lead_id: 'lead-A' },
+          metadata: { lead_id: state.liveLead },
           processing_token: null,
           processing_status: 'processed',
         }));
       }
       if (table === 'leads') {
-        b.first = jest.fn(async () => ({ id: 'lead-A' }));
+        b.first = jest.fn(async () => ({ id: state.liveLead }));
         b.update = jest.fn(async (r) => { leadUpdates.push(r); return 1; });
       }
       if (table === 'estimates') {
@@ -345,9 +349,11 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
   test('a PENDING invalidation recorded during delivery is COMPLETED by the claim release', async () => {
     const { state, estimateUpdates, leadUpdates } = statefulMock();
     // Mid-delivery, the reconciler defers behind the live claim by writing
-    // the pending marker (claim keys preserved — it never touches them).
+    // the pending marker (claim keys preserved — it never touches them),
+    // and the call's live linkage really did move to lead-C.
     sendCustomerMessage.mockImplementation(async () => {
       injectPendingMarker(state);
+      state.liveLead = 'lead-C';
       return { sent: true };
     });
 
@@ -389,6 +395,29 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     expect(result.channels.sms.error).toBe('invalidated_before_delivery');
   });
 
+  test('an OBSOLETE pending verdict is DISCARDED — a later retry restored the recorded linkage (GH r8)', async () => {
+    const { state, estimateUpdates } = statefulMock();
+    // The marker records A→C, but by release time the call's live linkage
+    // resolves to lead-A again (a second retry moved it back). Finalizing
+    // would kill a VALID linkage, so the marker is dropped instead.
+    sendCustomerMessage.mockImplementation(async () => {
+      injectPendingMarker(state);
+      return { sent: true };
+    });
+
+    const result = await router.sendEstimateNow(engineRow(), 'sms');
+    expect(result.sent).toBe(true);
+
+    const final = JSON.parse(state.row.estimate_data);
+    expect(final.estimatorEngine.linkage_invalidated_at).toBeUndefined();
+    expect(final.estimatorEngine.invalidation_pending_at).toBeUndefined();
+    expect(final.estimatorEngine.delivering_token).toBeUndefined();
+    expect(final.lead_id).toBe('lead-A');
+    const releaseWrite = estimateUpdates[estimateUpdates.length - 1];
+    expect(releaseWrite.archived_at).toBeUndefined();
+    expect(releaseWrite.status).toBeUndefined();
+  });
+
   test('a terminal status reached before the release gets a MARKER-ONLY invalidation — status and money preserved (PR #3304 r26)', async () => {
     const { state, estimateUpdates } = statefulMock();
     // Deferral lands mid-delivery AND the customer accept races in before
@@ -398,6 +427,7 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     // or the permanent public token keeps serving wrong-lead content).
     sendCustomerMessage.mockImplementation(async () => {
       injectPendingMarker(state, { status: 'accepted' });
+      state.liveLead = 'lead-C';
       return { sent: true };
     });
 

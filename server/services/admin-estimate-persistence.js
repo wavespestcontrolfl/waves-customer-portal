@@ -78,6 +78,18 @@ function deliveryClaimFresh(estimatorEngine, nowMs = Date.now()) {
 async function completePendingInvalidation(trx, estimateId, { row, data, pending }) {
   const eng = data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {};
   data.estimatorEngine = eng;
+  // The pending verdict can be OBSOLETE by the time it is finalized (codex
+  // P2, PR #3304 GH r8): linkage moved A→B during the claim, a second
+  // retry moved it back to A, and that later reconcile saw the draft
+  // already on its current lead and left the first marker in place.
+  // Finalizing then kills a VALID linkage. Re-resolve the call's live
+  // linkage against the draft's own: still a match ⇒ the verdict is
+  // stale, so drop the marker and keep the row.
+  if (data.lead_id && !(await staleCallLinkageReason(trx, data))) {
+    await trx('estimates').where({ id: estimateId })
+      .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+    return { terminal: false, status: String(row.status || '').toLowerCase(), obsolete: true };
+  }
   const status = String(row.status || '').toLowerCase();
   const terminal = ['accepted', 'declined', 'expired'].includes(status);
   delete data.lead_id;
@@ -162,8 +174,8 @@ async function sweepWedgedPendingInvalidations(nowMs = Date.now(), { limit = 100
         if (!pending) return false;
         delete eng.delivering_at;
         delete eng.delivering_token;
-        await completePendingInvalidation(trx, candidate.id, { row, data, pending });
-        return true;
+        const outcome = await completePendingInvalidation(trx, candidate.id, { row, data, pending });
+        return !outcome.obsolete;
       });
       if (done) {
         finalized += 1;
@@ -1715,6 +1727,21 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // a later stamp-clear skip invalidation and leave the former lead's draft
 // sendable to the wrong recipient.
 const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id'];
+// Nested estimatorEngine keys preserved across a revise — the call
+// provenance every linkage consumer resolves through, plus the
+// invalidation markers a revise must never clear.
+const REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS = [
+  'callLogId',
+  'callSid',
+  'linkage_invalidated_at',
+  'linkage_invalidated_from',
+  'linkage_invalidated_to',
+  'invalidation_pending_at',
+  'invalidation_pending_from',
+  'invalidation_pending_to',
+  'invalidation_pending_conflict',
+  'identity_conflict',
+];
 
 // Revise an existing estimate in place: same body + pricing pipeline as
 // create, but the row keeps its id, token, status, expiry, creator, and
@@ -1827,6 +1854,26 @@ async function reviseAdminEstimate({
           nextData[key] = existingData[key];
           preserved = true;
         }
+      }
+      // Durable CALL PROVENANCE survives a revise even though the rest of
+      // the estimator metadata is deliberately replaced (codex P1, PR
+      // #3304 GH r8): the V2 client sends a fresh blob carrying only
+      // inputs/result/summary/engineRequest, and dropping
+      // estimatorEngine.callLogId orphaned the row — existingDraftForCall
+      // could no longer find it for a later reprocess, and send/accept
+      // revalidation returned early with no call id, leaving the revised
+      // draft and its public token on the former lead. The invalidation
+      // markers ride along for the same reason: a revise must never
+      // resurrect a row the reconcile killed.
+      for (const key of REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS) {
+        const priorValue = existingData?.estimatorEngine?.[key];
+        if (priorValue === undefined) continue;
+        const nextEngine = nextData.estimatorEngine && typeof nextData.estimatorEngine === 'object'
+          ? nextData.estimatorEngine : {};
+        if (nextEngine[key] !== undefined) continue;
+        nextEngine[key] = priorValue;
+        nextData.estimatorEngine = nextEngine;
+        preserved = true;
       }
       if (preserved) writeFields.estimate_data = JSON.stringify(nextData);
     }
@@ -2027,6 +2074,7 @@ module.exports = {
   resolveEstimatePropertyLinkage,
   estimateExpiresAt,
   ESTIMATE_SEND_EXPIRY_DAYS,
+  REVISE_PRESERVED_ESTIMATOR_ENGINE_KEYS,
   ESTIMATE_DELIVERY_CLAIM_TTL_MS,
   deliveryClaimFresh,
   staleCallLinkageReason,

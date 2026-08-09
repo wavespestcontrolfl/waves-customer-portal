@@ -413,6 +413,23 @@ async function maybeBuildCommercialProposalDraft({
           .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
           .first();
         if (existingForCall) return { duplicate: existingForCall };
+        // LIVE call-linkage fence, same as the residential creator (codex
+        // P1, PR #3304 GH r8): an older commercial composer could still
+        // be running when a corrected retry finalizes — its reconcile-only
+        // pass finds no draft — and would then insert a scaffold carrying
+        // the FORMER lead's identity and address. The call row is locked
+        // and held through the insert, so the processor's stamp writers
+        // either commit first (seen here) or wait and their own reconcile
+        // invalidates what lands.
+        if (context?.lead?.id && ['sid', 'stamp'].includes(context?.leadLinkage)) {
+          const { staleCallLinkageReason } = require('../admin-estimate-persistence');
+          const staleReason = await staleCallLinkageReason(trx, {
+            lead_id: context.lead.id,
+            lead_linkage: context.leadLinkage,
+            estimatorEngine: { callLogId: call.id },
+          }, { lockCallRow: true });
+          if (staleReason) return { staleLinkage: staleReason };
+        }
       }
       const openEstimates = await listOpenEstimatesByPhone(customerPhone, { database: trx });
       const conflicting = conflictingOpenEstimate(openEstimates, intent.address);
@@ -478,6 +495,11 @@ async function maybeBuildCommercialProposalDraft({
 
       return { estimate };
     });
+
+    if (creation.staleLinkage) {
+      logger.info(`[commercial-proposal] scaffold abandoned — the call's lead linkage changed while composing (${creation.staleLinkage}); the corrected run rebuilds it`);
+      return { created: false, blocked: true, reason: 'stale_call_linkage' };
+    }
 
     if (creation.duplicate) {
       logger.info('[commercial-proposal] scaffold suppressed by existing open estimate', {

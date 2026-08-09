@@ -954,8 +954,10 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
         // (codex P0 r23/r26: an accept can race the pending marker through
         // the closing public gate; conversion is the operator's to unwind,
         // but the permanent public token must still die).
-        const { terminal, status } = await completePendingInvalidation(trx, estimateId, { row, data, pending });
-        if (terminal) {
+        const { terminal, status, obsolete } = await completePendingInvalidation(trx, estimateId, { row, data, pending });
+        if (obsolete) {
+          logger.info(`[admin-estimates] discarded an OBSOLETE pending invalidation on estimate ${estimateId} — a later retry restored the recorded linkage`);
+        } else if (terminal) {
           logger.warn(`[admin-estimates] deferred invalidation of estimate ${estimateId} met terminal status '${status}' — marker-only invalidation applied (status and money preserved), needs operator review`);
         } else {
           logger.info(`[admin-estimates] completed deferred invalidation of estimate ${estimateId} at delivery-claim release (${pending.from || pending.conflict || 'unlink'} → ${pending.to || 'none'})`);

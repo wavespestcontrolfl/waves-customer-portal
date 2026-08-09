@@ -6207,6 +6207,24 @@ const CallRecordingProcessor = {
         }
       }
 
+      // Reconcile-only draft-linkage pass on the TERMINAL path too (codex
+      // P1, PR #3304 GH r8): a forced retry can reclassify a call that
+      // already produced an estimator draft as spam or a non-workable
+      // voicemail, and this return sits far upstream of the normal hook —
+      // the old draft would keep its former lead linkage and a live public
+      // token. Clearing the metadata stamp is not enough for a SID-linked
+      // lead: the send validator still resolves it by sid, so the draft
+      // must be INVALIDATED. Runs after the token-fenced terminal write
+      // (the pass no longer owns processing_token) and never blocks.
+      try {
+        const { invalidateDraftForCall } = require('./estimator-engine');
+        await invalidateDraftForCall(call.id, {
+          reason: extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail',
+        });
+      } catch (recErr) {
+        logger.warn(`[call-proc] terminal draft invalidation failed (non-blocking): ${recErr.message}`);
+      }
+
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
     }

@@ -872,11 +872,20 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       // race; the corrected retry composes the replacement.
       if (context?.lead?.id && ['sid', 'stamp'].includes(context?.leadLinkage)) {
         const { staleCallLinkageReason } = require('../admin-estimate-persistence');
+        // LOCK the call row and HOLD it through the INSERT (codex P1, PR
+        // #3304 GH r8): a plain read left a window where a corrected
+        // retry could finalize — its reconcile-only pass finding no
+        // committed estimate — and this transaction would then insert the
+        // stale former-lead draft. The processor's stamp writers
+        // token-fence under this same row lock, so they either commit
+        // first (seen here) or wait for this insert and their own
+        // reconcile invalidates it. Lock order holds: estimates (advisory
+        // + insert) → call_log; no lead lock is taken in this txn.
         const staleReason = await staleCallLinkageReason(trx, {
           lead_id: context.lead.id,
           lead_linkage: context.leadLinkage,
           estimatorEngine: { callLogId: call.id },
-        });
+        }, { lockCallRow: true });
         if (staleReason) {
           return {
             duplicateBlock: {

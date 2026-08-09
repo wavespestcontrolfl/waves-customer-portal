@@ -548,14 +548,20 @@ const CALL_ORIGIN = {
  *                   request-only call that can't draft must not mint a false
  *                   owed-quote task.
  */
-// Identity-conflict QUARANTINE, shared by the full run and the
-// reconcile-only entry (codex P0 r19; extracted GH r7): the prior draft may
-// target the conflicting identity, and leaving it sendable with a live
-// public token is the exposure. Same marked-archive as a linkage
-// invalidation, so every guard (unarchive 409, send claims, duplicate
-// exclusion) applies; the audit reason and the lead unlink ride along.
+// FORCED invalidation of a call's existing draft, independent of any
+// linkage comparison. Two callers (codex P0 r19; generalized GH r8):
+//   - an identity conflict, where the draft may target the conflicting
+//     identity and leaving it sendable with a live public token is the
+//     exposure; and
+//   - a TERMINAL rejection (a forced retry reclassifying the call as spam
+//     or a non-workable voicemail), where the draft was composed from a
+//     call the pipeline now rejects — and clearing the metadata stamp does
+//     NOT help, because a sid-linked lead still resolves for send/accept.
+// Same marked-archive as a linkage invalidation, so every guard (unarchive
+// 409, send claims, duplicate exclusion) applies; the audit reason and the
+// lead unlink ride along. Money-bearing terminals get the marker only.
 // Never throws — the caller's review bell is the durable signal.
-async function quarantineDraftForIdentityConflict(callLogId, conflictError) {
+async function invalidateDraftForCall(callLogId, { reason, identityConflict = false }) {
   try {
     const conflicted = await existingDraftForCall(callLogId);
     if (conflicted) {
@@ -601,12 +607,14 @@ async function quarantineDraftForIdentityConflict(callLogId, conflictError) {
               // The claim release performs the unlink for a deferred
               // quarantine too — it needs the source lead.
               invalidation_pending_from: quarantinedLeadId,
-              invalidation_pending_conflict: conflictError,
+              ...(identityConflict
+                ? { invalidation_pending_conflict: reason }
+                : { invalidation_pending_reason: reason }),
             };
             await trx('estimates').where({ id: conflicted.id })
               .update({ estimate_data: JSON.stringify(data), updated_at: new Date() });
           }
-          logger.info(`[estimator-engine] quarantine of draft ${conflicted.id} DEFERRED behind a live delivery claim (${conflictError}) — pending marker recorded`);
+          logger.info(`[estimator-engine] invalidation of draft ${conflicted.id} DEFERRED behind a live delivery claim (${reason}) — pending marker recorded`);
           return;
         }
         delete data.lead_id;
@@ -614,7 +622,7 @@ async function quarantineDraftForIdentityConflict(callLogId, conflictError) {
         data.estimatorEngine = {
           ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
           linkage_invalidated_at: new Date().toISOString(),
-          identity_conflict: conflictError,
+          ...(identityConflict ? { identity_conflict: reason } : { invalidation_reason: reason }),
         };
         const midSend = freshQStatus === 'sending';
         await trx('estimates').where({ id: conflicted.id }).update({
@@ -630,10 +638,10 @@ async function quarantineDraftForIdentityConflict(callLogId, conflictError) {
             .update({ estimate_id: null });
         }
       });
-      logger.info(`[estimator-engine] quarantined draft ${conflicted.id} on identity conflict (${conflictError})`);
+      logger.info(`[estimator-engine] invalidated draft ${conflicted.id} (${reason})`);
     }
   } catch (qErr) {
-    logger.warn(`[estimator-engine] identity-conflict quarantine failed (review bell still fires): ${qErr.message}`);
+    logger.warn(`[estimator-engine] forced draft invalidation failed (review bell still fires): ${qErr.message}`);
   }
 }
 
@@ -652,7 +660,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       // linkage invalidation, so every guard (unarchive 409, send claims,
       // duplicate exclusion) applies; the audit reason rides along.
       if (!dryRun && ['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
-        await quarantineDraftForIdentityConflict(callLogId, context.error);
+        await invalidateDraftForCall(callLogId, { reason: context.error, identityConflict: true });
       }
       if (!dryRun && context.call && quotePromised) {
         await notify({
@@ -1284,7 +1292,29 @@ async function reconcileDraftLinksForCall(callLogId) {
     const context = await buildCallContext(callLogId);
     if (context?.error) {
       if (['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
-        await quarantineDraftForIdentityConflict(callLogId, context.error);
+        await invalidateDraftForCall(callLogId, { reason: context.error, identityConflict: true });
+        // REPLACE the stale bell (codex P1, PR #3304 GH r8): the operator
+        // is otherwise left with the prior ready-to-send notification and
+        // a link to the draft this pass just archived, with no visible
+        // sign of the conflict. Same forceUpdate replacement the full
+        // drafting path performs; a notify failure must not undo the
+        // quarantine, so it is best-effort.
+        try {
+          if (context.call) {
+            await notify({
+              call: context.call,
+              context,
+              lane: LANES.RED,
+              quotePromised: true,
+              title: 'Identity conflict on this call — review before sending',
+              body: `A caller-identity conflict (${context.error}) invalidated the AI draft for this call. `
+                + 'Confirm who the caller is, then quote them manually.',
+              forceUpdate: true,
+            });
+          }
+        } catch (bellErr) {
+          logger.warn(`[estimator-engine] reconcile-only quarantine bell failed: ${bellErr.message}`);
+        }
         return 'invalidated';
       }
       const fallback = await callLinkageContext(callLogId);
@@ -1340,6 +1370,7 @@ module.exports = {
   estimatorEngineEnabled,
   maybeDraftEstimateForCall,
   reconcileDraftLinksForCall,
+  invalidateDraftForCall,
   // Origin-specific entries (sms-thread.js) reuse the shared pipeline and
   // bell plumbing instead of re-implementing the lane/notify contract.
   runDraftPipeline,
