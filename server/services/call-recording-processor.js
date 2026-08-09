@@ -6120,6 +6120,25 @@ const CallRecordingProcessor = {
       // the claim can be reclaimed between its commit and this write. A
       // stale worker must not null a peer's token, overwrite its terminal
       // status, or run this path's downstream effects.
+      // A draft this call already produced must be INVALIDATED before the
+      // terminal verdict is recorded (codex P1/P0, PR #3304 GH r8/r8c): a
+      // forced retry can reclassify a quote call as spam or a non-workable
+      // voicemail, and clearing the metadata stamp does not help — a
+      // sid-linked lead still resolves for send and accept. Running it
+      // BEFORE the terminal write is what makes it durable: a failure
+      // THROWS into the extraction_failed path, so the retry sweep runs
+      // the whole verdict again rather than leaving a live public token on
+      // a rejected call's draft. The invalidation is idempotent (it skips
+      // an already-marked row), so a retry is free.
+      {
+        const { invalidateDraftForCall } = require('./estimator-engine');
+        const invalidation = await invalidateDraftForCall(call.id, {
+          reason: extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail',
+        });
+        if (!invalidation.ok) {
+          throw new Error(`draft invalidation failed on the ${extracted.is_spam ? 'spam' : 'voicemail'} verdict: ${invalidation.error || 'unknown'}`);
+        }
+      }
       const terminalWrote = await db('call_log')
         .where({ id: call.id })
         .where('processing_token', procToken)
@@ -6216,15 +6235,6 @@ const CallRecordingProcessor = {
       // lead: the send validator still resolves it by sid, so the draft
       // must be INVALIDATED. Runs after the token-fenced terminal write
       // (the pass no longer owns processing_token) and never blocks.
-      try {
-        const { invalidateDraftForCall } = require('./estimator-engine');
-        await invalidateDraftForCall(call.id, {
-          reason: extracted.is_spam ? 'call_rejected_spam' : 'call_rejected_voicemail',
-        });
-      } catch (recErr) {
-        logger.warn(`[call-proc] terminal draft invalidation failed (non-blocking): ${recErr.message}`);
-      }
-
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
     }

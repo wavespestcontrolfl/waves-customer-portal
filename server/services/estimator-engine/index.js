@@ -562,8 +562,16 @@ const CALL_ORIGIN = {
 // lead unlink ride along. Money-bearing terminals get the marker only.
 // Never throws — the caller's review bell is the durable signal.
 async function invalidateDraftForCall(callLogId, { reason, identityConflict = false }) {
+  // EXPLICIT result, never a swallowed failure (codex P0, PR #3304 GH
+  // r8c): callers finalized spam/voicemail processing — or reported an
+  // identity-conflict draft as invalidated — while no marker or archive
+  // had been persisted, leaving the old bearer token and a sendable
+  // wrong-identity draft live indefinitely. Returns
+  // { ok, invalidated, error }; the caller decides whether to retry.
   try {
-    const conflicted = await existingDraftForCall(callLogId);
+    // STRICT lookup: existingDraftForCall converts DB errors to null,
+    // which would read here as "no draft to invalidate".
+    const conflicted = await strictExistingDraftForCall(callLogId);
     if (conflicted) {
       await db.transaction(async (trx) => {
         const fresh = await trx('estimates')
@@ -639,10 +647,25 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
         }
       });
       logger.info(`[estimator-engine] invalidated draft ${conflicted.id} (${reason})`);
+      return { ok: true, invalidated: true };
     }
+    return { ok: true, invalidated: false };
   } catch (qErr) {
-    logger.warn(`[estimator-engine] forced draft invalidation failed (review bell still fires): ${qErr.message}`);
+    logger.error(`[estimator-engine] forced draft invalidation FAILED for call ${callLogId} (${reason}): ${qErr.message}`);
+    return { ok: false, invalidated: false, error: qErr.message };
   }
+}
+
+// existingDraftForCall's error-tolerant sibling for the paths where a
+// lookup failure must NOT read as "no draft" (codex P0, PR #3304 GH r8c).
+// Same predicate: this call's draft, not archived, not already invalidated.
+async function strictExistingDraftForCall(callLogId) {
+  return db('estimates')
+    .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(callLogId)])
+    .whereNull('archived_at')
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+    .orderBy('created_at', 'desc')
+    .first('id', 'status', 'estimate_data');
 }
 
 async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false, quotePromised = true }) {
@@ -1292,7 +1315,7 @@ async function reconcileDraftLinksForCall(callLogId) {
     const context = await buildCallContext(callLogId);
     if (context?.error) {
       if (['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
-        await invalidateDraftForCall(callLogId, { reason: context.error, identityConflict: true });
+        const quarantine = await invalidateDraftForCall(callLogId, { reason: context.error, identityConflict: true });
         // REPLACE the stale bell (codex P1, PR #3304 GH r8): the operator
         // is otherwise left with the prior ready-to-send notification and
         // a link to the draft this pass just archived, with no visible
@@ -1315,7 +1338,9 @@ async function reconcileDraftLinksForCall(callLogId) {
         } catch (bellErr) {
           logger.warn(`[estimator-engine] reconcile-only quarantine bell failed: ${bellErr.message}`);
         }
-        return 'invalidated';
+        // Never REPORT an invalidation that did not persist (codex P0, PR
+        // #3304 GH r8c) — 'error' is the caller's fail-closed outcome.
+        return quarantine.ok ? 'invalidated' : 'error';
       }
       const fallback = await callLinkageContext(callLogId);
       if (!fallback) return null;

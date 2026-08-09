@@ -1884,7 +1884,12 @@ async function reviseAdminEstimate({
         if (priorValue === undefined) continue;
         const nextEngine = nextData.estimatorEngine && typeof nextData.estimatorEngine === 'object'
           ? nextData.estimatorEngine : {};
-        if (nextEngine[key] !== undefined) continue;
+        // FORCED from the stored row, not merely filled when absent (codex
+        // P1, PR #3304 GH r8c): these keys are immutable provenance and
+        // invalidation verdicts, so a stale or malformed admin payload
+        // carrying null — or a different call id — must not erase or
+        // repoint them and orphan the draft from later call corrections.
+        if (nextEngine[key] === priorValue) continue;
         nextEngine[key] = priorValue;
         nextData.estimatorEngine = nextEngine;
         preserved = true;
