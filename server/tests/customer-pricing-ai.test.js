@@ -711,6 +711,29 @@ describe('property context reads only columns the customers table actually has',
     lot_sqft: 9000,
   };
 
+  test('a fully-populated profile STILL gets a lookup — bed/palm values are not evidence of pools or density', async () => {
+    // Regression for the half-gate: bed_sqft + palm_count present would have
+    // skipped the lookup, leaving pool/cage/complexity/treeCount hardcoded.
+    let lookedUp = false;
+    const { _private } = require('../services/customer-pricing-ai');
+    const ctx = await _private.resolvePropertyContext({
+      customer: { ...customerWithBasics, bed_sqft: 1800, palm_count: 6 },
+      turfProfile: null,
+      propertyLookup: async () => {
+        lookedUp = true;
+        return { enriched: { pool: 'YES', poolCage: 'YES', shrubDensity: 'HEAVY', estimatedTreeCount: 12 } };
+      },
+    });
+    expect(lookedUp).toBe(true);
+    expect(ctx.propertyInput.features.pool).toBe(true);
+    expect(ctx.propertyInput.features.poolCage).toBe(true);
+    expect(ctx.propertyInput.features.shrubs).toBe('heavy');
+    expect(ctx.propertyInput.features.treeCount).toBe(12);
+    // Stored values still win over the lookup for the fields the profile has.
+    expect(ctx.propertyInput.bedArea).toBe(1800);
+    expect(ctx.propertyInput.bedAreaSource).toBe('explicit');
+  });
+
   test('a customer with home+lot still gets a lookup, so features are observed not defaulted', async () => {
     let lookedUp = false;
     const result = await buildCustomerPricingResponse({

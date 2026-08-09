@@ -376,14 +376,15 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     treeCount: 0,
   };
 
-  // The gate used to be (!homeSqFt || !lotSqFt) alone, which meant a
-  // customer whose row carried both never got a lookup — and therefore was
-  // priced forever as pool-less, moderate-density, zero-tree, because no
-  // other source for those fields exists. Missing FEATURE evidence now
-  // opens the gate too (bed area and palms matter for the Tree & Shrub
-  // program the same way pool/cage matter for pest).
-  const missingFeatureEvidence = !bedArea || !palmCount;
-  if ((!homeSqFt || !lotSqFt || missingFeatureEvidence) && lookupEnabled() && address && propertyLookup) {
+  // The gate used to be (!homeSqFt || !lotSqFt), which meant a customer
+  // whose row carried both was NEVER looked up — and therefore priced
+  // forever as pool-less, moderate-density, zero-tree, because the profile
+  // has no column for any of those. The lookup is the ONLY source of
+  // feature evidence, and no stored value can stand in for it (bed area and
+  // palm count say nothing about a pool cage or landscape complexity), so
+  // it runs whenever one is available. The caller already gates on there
+  // being something to price, and the route is rate-limited per customer.
+  if (lookupEnabled() && address && propertyLookup) {
     try {
       const lookup = await propertyLookup(address);
       const p = lookup?.enriched || {};
