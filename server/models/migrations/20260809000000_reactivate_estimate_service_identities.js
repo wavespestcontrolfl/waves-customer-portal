@@ -29,7 +29,7 @@
  *    priceOneTimeLawn's pest multiplier. Typed one_time_lawn_treatment
  *    completion IS truthful here — it is a pesticide application.
  *  - trap_only_retainer: NEW ROW. rodent_monitoring is the legacy
- *    Square-era QUARTERLY BAIT key (repointed + deactivated by the
+ *    QUARTERLY BAIT key (repointed + deactivated by the
  *    2026-07-12 rodent graduation) — a different product from the new
  *    monthly trap-only retainer. The legacy row stays retired; the
  *    retainer gets its own recurring row. Trap checks complete on the
@@ -178,7 +178,7 @@ const SERVICES = [
     icon: '🐀',
     color: '#78716c',
     sort_order: 48,
-    internal_notes: 'Monthly retainer plans standard/plus/monthly = $49/$69/$99 via priceTrapOnlyRetainer (annual prepay discounts apply; setup fee on monthly billing). Distinct from the retired Square-era rodent_monitoring quarterly bait key — leave retired.',
+    internal_notes: 'Monthly retainer plans standard/plus/monthly = $49/$69/$99 via priceTrapOnlyRetainer (annual prepay discounts apply; setup fee on monthly billing). Distinct from the retired legacy rodent_monitoring quarterly bait key — leave retired.',
   },
 ];
 

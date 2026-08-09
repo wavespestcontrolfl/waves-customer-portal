@@ -1568,6 +1568,18 @@ function remainingUnitCatalogKey(svc = {}) {
   // name, so legacy name-only lines link too. Absent row (env not yet
   // migrated) degrades to the existing name-only warn path.
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'foam_recurring') return 'foam_recurring';
+  // Trap-only retainer: key verified against the catalog 2026-08-09 (row
+  // ships in 20260809000000). priceTrapOnlyRetainer emits service
+  // 'trap_only_retainer' but its LINE names are plan-prefixed ('Standard
+  // Trap-Only Retainer'), which match neither catalog name nor
+  // short_name — the id link is what makes these visits resolve the
+  // typed bait-station profile. Raw-key check plus the distinctive
+  // trap-only token on names (the seeder normalizer has no trap rule and
+  // would collapse these to a slug).
+  const rawKey = String(svc.service || key || '').trim();
+  if (rawKey === 'trap_only_retainer') return 'trap_only_retainer';
+  const label = String(svc.name || svc.label || svc.displayName || svc.service_type || '');
+  if (/trap[\s_-]*only/i.test(label)) return 'trap_only_retainer';
   return null;
 }
 
