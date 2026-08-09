@@ -538,3 +538,53 @@ describe('attributeResolvedLead — sid-only ownership eligibility (codex P1, PR
     expect(res.reason).not.toBe('lead_owner_conflict');
   });
 });
+
+describe('whereCallStillLinked — sid arm yields to a settled dissenting stamp (codex P0, PR #3303 r8)', () => {
+  const { whereCallStillLinked } = GoogleCallBridge._private;
+
+  // Records the predicate tree the real query builder would receive, so the
+  // fetch-before-repoint / apply-after-repoint shape is asserted on the
+  // ACTUAL SQL fragments rather than a paraphrase.
+  function recorder() {
+    const node = { calls: [] };
+    const handler = {
+      get(_t, prop) {
+        if (prop === 'calls') return node.calls;
+        return (...args) => {
+          const child = recorder();
+          node.calls.push({ method: prop, args, child });
+          for (const a of args) if (typeof a === 'function') a.call(child);
+          return proxy;
+        };
+      },
+    };
+    const proxy = new Proxy(node, handler);
+    return proxy;
+  }
+
+  function flatten(rec, out = []) {
+    for (const c of rec.calls) {
+      out.push({ method: c.method, sql: typeof c.args[0] === 'string' ? c.args[0] : null });
+      flatten(c.child, out);
+    }
+    return out;
+  }
+
+  test('the sid arm is conditioned on the absence of a settled stamp naming another lead', () => {
+    const rec = recorder();
+    whereCallStillLinked(rec, 'call-1');
+    const frags = flatten(rec).map((f) => f.sql).filter(Boolean);
+
+    // Sid linkage is still an arm...
+    expect(frags).toContain('call_log.twilio_call_sid = leads.twilio_call_sid');
+    // ...but only when no SETTLED stamp dissents: absent stamp, agreeing
+    // stamp, a live token, or a not-yet-'processed' pass all keep it.
+    expect(frags).toContain("COALESCE(call_log.metadata->>'lead_id', '') = ''");
+    expect(frags).toContain("call_log.metadata->>'lead_id' = leads.id::text");
+    expect(frags).toContain("COALESCE(call_log.processing_status, '') <> 'processed'");
+    // And the settled-stamp arm itself survives.
+    const methods = flatten(rec).map((f) => f.method);
+    expect(methods).toContain('orWhere');
+    expect(methods).toContain('whereNull');
+  });
+});

@@ -623,7 +623,25 @@ function whereCallStillLinked(builder, callLogId) {
       .from('call_log')
       .where('call_log.id', callLogId)
       .andWhere(function linkageArms() {
-        this.whereRaw('call_log.twilio_call_sid = leads.twilio_call_sid')
+        this.where(function sidArm() {
+          this.whereRaw('call_log.twilio_call_sid = leads.twilio_call_sid')
+            // The sid arm YIELDS to a settled dissenting stamp (codex P0,
+            // PR #3303 r8): fetchCrmCalls can capture the old sid lead and
+            // a force-reprocess commit a settled stamp to a DIFFERENT lead
+            // before apply — accepting the sid lead then moves the
+            // provenanced funnel row back, or conflict-retires it and
+            // deletes booked/completed revenue. Evaluated INSIDE the same
+            // correlated EXISTS every write already re-runs under the
+            // lead's row lock, so the check is atomic with the write.
+            // A stamp that is absent, AGREES, or is not yet settled leaves
+            // the sid arm untouched — sid stays authoritative there.
+            .andWhere(function noSettledStampDissent() {
+              this.whereRaw("COALESCE(call_log.metadata->>'lead_id', '') = ''")
+                .orWhereRaw('call_log.metadata->>\'lead_id\' = leads.id::text')
+                .orWhereNotNull('call_log.processing_token')
+                .orWhereRaw("COALESCE(call_log.processing_status, '') <> 'processed'");
+            });
+        })
           .orWhere(function settledStampArm() {
             // Only a SETTLED call's stamp is authoritative (pre-push P1
             // r2/r8): settled = token NULL **and** a durable successful
@@ -1350,6 +1368,7 @@ module.exports = {
   _private: {
     areaCode,
     attributeResolvedLead,
+    whereCallStillLinked,
     buildMatches,
     callStillAttributable,
     dedupeCrmCallRows,
