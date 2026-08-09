@@ -198,3 +198,91 @@ describe('sendEstimateNow — per-channel tracked links (round 7)', () => {
     }));
   });
 });
+
+describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r21)', () => {
+  // Engine-drafted row whose durable linkage is re-resolved inside the
+  // locked verdict transaction: the call processor can commit a corrected
+  // stamp BEFORE its reconcile archives the draft, so the marker check
+  // alone would deliver the former lead's content.
+  function engineRow() {
+    return estimateRow({
+      estimate_data: JSON.stringify({
+        lead_id: 'lead-A',
+        lead_linkage: 'stamp',
+        estimatorEngine: { callLogId: 'call-1' },
+      }),
+    });
+  }
+
+  function mockTables({ callRow, leadRows }) {
+    const estimateUpdates = [];
+    db.mockImplementation((table) => {
+      const b = makeBuilder(engineRow());
+      if (table === 'call_log') b.first = jest.fn(async () => callRow);
+      if (table === 'leads') {
+        b.first = jest.fn(async () => {
+          // The revalidation queries leads by sid or by stamped id; the
+          // fixture answers by stamp target existence only.
+          return leadRows.length ? leadRows[0] : undefined;
+        });
+      }
+      if (table === 'estimates') {
+        b.update = jest.fn(async (r) => { estimateUpdates.push(r); return 1; });
+      }
+      return b;
+    });
+    return estimateUpdates;
+  }
+
+  test('a settled stamp now pointing at a DIFFERENT lead aborts before any provider call', async () => {
+    const estimateUpdates = mockTables({
+      callRow: {
+        twilio_call_sid: null,
+        metadata: { lead_id: 'lead-B' },
+        processing_token: null,
+        processing_status: 'processed',
+      },
+      leadRows: [{ id: 'lead-B' }],
+    });
+
+    await expect(router.sendEstimateNow(engineRow(), 'both')).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(estimateUpdates.some((r) => r.last_send_error === 'call_linkage_changed_before_delivery')).toBe(true);
+  });
+
+  test('a call mid-reprocess (live processing_token) aborts — the verdict is about to change', async () => {
+    const estimateUpdates = mockTables({
+      callRow: {
+        twilio_call_sid: null,
+        metadata: { lead_id: 'lead-A' },
+        processing_token: 'tok-live',
+        processing_status: 'processing',
+      },
+      leadRows: [{ id: 'lead-A' }],
+    });
+
+    await expect(router.sendEstimateNow(engineRow(), 'both')).rejects.toMatchObject({ statusCode: 409 });
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(estimateUpdates.some((r) => r.last_send_error === 'call_reprocessing_before_delivery')).toBe(true);
+  });
+
+  test('an unchanged settled linkage proceeds to delivery', async () => {
+    mockTables({
+      callRow: {
+        twilio_call_sid: null,
+        metadata: { lead_id: 'lead-A' },
+        processing_token: null,
+        processing_status: 'processed',
+      },
+      leadRows: [{ id: 'lead-A' }],
+    });
+
+    const result = await router.sendEstimateNow(engineRow(), 'both');
+
+    expect(result.sent).toBe(true);
+    expect(result.sentChannels.sort()).toEqual(['email', 'sms']);
+  });
+});

@@ -1007,14 +1007,55 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         .where({ id: estimate.id })
         .forUpdate()
         .first('archived_at', 'estimate_data');
-      if (!verdictRow) return true;
-      if (verdictRow.archived_at) return true;
+      if (!verdictRow) return 'invalidated_before_delivery';
+      if (verdictRow.archived_at) return 'invalidated_before_delivery';
       let data;
       try {
         data = typeof verdictRow.estimate_data === 'string'
           ? JSON.parse(verdictRow.estimate_data) : (verdictRow.estimate_data || {});
       } catch { data = null; }
-      if (data?.estimatorEngine?.linkage_invalidated_at) return true;
+      if (data?.estimatorEngine?.linkage_invalidated_at) return 'invalidated_before_delivery';
+      // LIVE call-linkage revalidation for engine-drafted rows (codex P0,
+      // PR #3304 r21): the call processor can commit a corrected stamp
+      // BEFORE its reconcile archives this draft — the marker check alone
+      // misses that window, and stamping the claim below would then defer
+      // the very reconcile meant to stop this send. Re-resolve the call's
+      // current lead with the pipeline's own precedence (sid-owned lead
+      // first, then the settled stamp) and require it to still be the
+      // draft's linked lead. Plain reads — no extra locks, and the same
+      // estimates→(leads/call_log) order the reconciler uses.
+      const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
+      const draftCallLogId = data?.estimatorEngine?.callLogId || null;
+      if (['sid', 'stamp'].includes(data?.lead_linkage) && linkedLeadId && draftCallLogId) {
+        const callRow = await trx('call_log').where({ id: draftCallLogId })
+          .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status');
+        if (!callRow) return 'invalidated_before_delivery';
+        const procStatus = callRow.processing_status == null ? null : String(callRow.processing_status);
+        // A reprocess in flight means the linkage verdict is about to
+        // change — abort; the row is resendable once the call settles.
+        if (callRow.processing_token != null || (procStatus !== null && procStatus !== 'processed')) {
+          return 'call_reprocessing_before_delivery';
+        }
+        const liveStamp = (() => {
+          try {
+            const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
+            return md?.lead_id ? String(md.lead_id) : null;
+          } catch { return null; }
+        })();
+        let resolvedLeadId = null;
+        if (callRow.twilio_call_sid) {
+          const sidLead = await trx('leads')
+            .where({ twilio_call_sid: callRow.twilio_call_sid })
+            .whereNull('deleted_at')
+            .first('id');
+          if (sidLead) resolvedLeadId = String(sidLead.id);
+        }
+        if (!resolvedLeadId && liveStamp) {
+          const stampLead = await trx('leads').where({ id: liveStamp }).whereNull('deleted_at').first('id');
+          if (stampLead) resolvedLeadId = liveStamp;
+        }
+        if (resolvedLeadId !== linkedLeadId) return 'call_linkage_changed_before_delivery';
+      }
       // Unparseable estimate_data: verdict passes (matches the prior
       // read-only behavior) but no claim is stamped — a blind rewrite
       // would clobber whatever is in the column.
@@ -1027,12 +1068,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
         await trx('estimates').where({ id: estimate.id })
           .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
       }
-      return false;
+      return null;
     });
     if (invalidatedNow) {
       await db('estimates')
         .where({ id: estimate.id, status: 'sending' })
-        .update({ status: 'send_failed', last_send_error: 'invalidated_before_delivery', updated_at: db.fn.now() });
+        .update({ status: 'send_failed', last_send_error: invalidatedNow, updated_at: db.fn.now() });
       const err = new Error('This estimate was invalidated by a call-linkage correction before delivery. Nothing was sent.');
       err.statusCode = 409;
       throw err;

@@ -592,6 +592,11 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           title: 'Quote promised on call — send it',
           body: 'A quote was promised on a call the estimator engine could not read '
             + `(${context.error}). Review the call and send the estimate manually.`,
+          // An identity conflict must REPLACE a prior ready-to-send
+          // notification for the same call (codex P1, PR #3304 r21):
+          // without forceUpdate the dedupe keeps the old title + stale
+          // draft link and the operator never sees the conflict.
+          forceUpdate: ['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error),
         });
       }
       return result;
