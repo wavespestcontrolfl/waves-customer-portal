@@ -9258,7 +9258,25 @@ const CallRecordingProcessor = {
           // queue the scheduler drains.
           if (engineErr.quarantineFailed) {
             const { markQuarantinePending } = require('./estimator-engine');
-            await markQuarantinePending(call.id, 'email_identity_conflict');
+            const queued = await markQuarantinePending(call.id, 'email_identity_conflict');
+            if (!queued) {
+              // Neither the estimate markers NOR the durable queue landed
+              // (codex P0, PR #3304 GH r8h) — the unmarked draft would stay
+              // public and sendable with nothing scheduled. Push the call
+              // into the retry lane so the whole pass runs again; the
+              // estimator re-quarantines from a clean slate.
+              try {
+                await db('call_log').where({ id: call.id })
+                  .whereNull('processing_token')
+                  .update({
+                    processing_status: 'extraction_failed',
+                    updated_at: new Date(),
+                  });
+                logger.error(`[call-proc] quarantine queue write failed for ${callSid} — call pushed to the retry lane`);
+              } catch (lastResortErr) {
+                logger.error(`[call-proc] quarantine retry-lane write ALSO failed for ${callSid}: ${lastResortErr.message}`);
+              }
+            }
           }
         });
     } else {

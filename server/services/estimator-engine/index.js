@@ -723,17 +723,28 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
 // fence (callRejectedForDrafting) and by send/accept/decline
 // revalidation (staleCallLinkageReason).
 async function markDraftBlockOnCall(callLogId, reason) {
-  try {
-    await db('call_log').where({ id: callLogId }).update({
-      metadata: db.raw(
-        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_draft_block}', ?::jsonb, true)",
-        [JSON.stringify({ reason, at: new Date().toISOString() })],
-      ),
-      updated_at: new Date(),
-    });
-  } catch (err) {
-    logger.warn(`[estimator-engine] draft-block call marker failed for ${callLogId}: ${err.message}`);
+  // THROWS on failure (codex P0, PR #3304 GH r8h): this marker is the only
+  // thing standing between a detached composer and an unmarked
+  // wrong-identity or rejected-call draft with a permanent public token.
+  // Swallowing the error let the scan succeed — or find nothing — and
+  // report ok with no durable block in place. Retried, then propagated.
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const wrote = await db('call_log').where({ id: callLogId }).update({
+        metadata: db.raw(
+          "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{estimator_draft_block}', ?::jsonb, true)",
+          [JSON.stringify({ reason, at: new Date().toISOString() })],
+        ),
+        updated_at: new Date(),
+      });
+      if (wrote) return;
+      // No row: the call is gone, so there is nothing to draft against
+      // and nothing to block.
+      return;
+    } catch (err) { lastErr = err; }
   }
+  throw new Error(`draft-block marker write failed for call ${callLogId}: ${lastErr?.message || 'unknown'}`);
 }
 
 // Cleared the moment a pass reads a CONCLUSIVELY clean context — the
