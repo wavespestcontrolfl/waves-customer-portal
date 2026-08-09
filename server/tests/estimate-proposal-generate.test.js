@@ -766,4 +766,14 @@ describe('deriveProposalDraft', () => {
     expect(Object.keys(draft.responsibilitiesByFamily).sort()).toEqual(['mosquito', 'pest']);
     expect(draft.responsibilitiesByFamily.mosquito).toContain('Empty or report standing water (plant saucers, gutters, containers) between visits');
   });
+
+  test('r13: agent-persisted buildingSqFt alias feeds the Building scope row', async () => {
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        engineInputs: { buildingSqFt: '12000', stories: 1, lotSqFt: '30000' },
+        engineResult: { lineItems: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 12, annual: 2400 }] },
+      },
+    });
+    expect(draft.propertyScope.items[0]).toEqual({ label: 'Building', value: '12,000 sq ft' });
+  });
 });

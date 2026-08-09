@@ -147,7 +147,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
               </div>
               {(program.buildings || []).length ? (
                 <div style={{ fontSize: 14, color: W.textCaption, marginTop: 4, lineHeight: 1.5 }}>
-                  Covers: {program.buildings.map((b) => b.name).join(' · ')}
+                  Covers: {program.buildings.map((b) => (b.note ? `${b.name} — ${b.note}` : b.name)).join(' · ')}
                 </div>
               ) : null}
               {(program.inclusions || []).length ? (

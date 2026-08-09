@@ -1883,6 +1883,12 @@ router.get('/:id/proposal', async (req, res, next) => {
       // builder page shows it read-only above the line items. Additive:
       // null for operator-originated proposals.
       prospectBrief: parseEstimateData(estimate.estimate_data)?.commercialProspect || null,
+      // Static family → generated-responsibility-line registry so the
+      // builder can prune a deleted program's generated lines even on a
+      // REOPENED proposal, where the in-memory generation capture is gone
+      // (codex 1A-ii r13). Exact-line matching client-side keeps
+      // hand-authored text untouchable.
+      responsibilityRegistry: require('../services/estimate-proposal-generate').FAMILY_RESPONSIBILITIES,
       // Estimate summary for the standalone proposal-builder page, which loads
       // by id without the pipeline list. Additive — older consumers only read
       // `proposal`/`totals`.

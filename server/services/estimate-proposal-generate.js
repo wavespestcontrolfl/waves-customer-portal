@@ -252,7 +252,10 @@ function derivePropertyScope(estimateData) {
   const inputs = estimateData.inputs || estimateData.engineInputs || {};
   const items = [];
 
-  const building = fmtSqft(inputs.homeSqFt);
+  // Agent-generated commercial estimates persist the priced area under the
+  // buildingSqFt alias (validateAgentEngineInput accepts both — codex
+  // 1A-ii r13).
+  const building = fmtSqft(inputs.homeSqFt ?? inputs.buildingSqFt);
   const stories = num(inputs.stories);
   if (building) {
     items.push({

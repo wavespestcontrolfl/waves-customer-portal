@@ -190,7 +190,7 @@ describe('ProposalDetailCard', () => {
         taxable: false,
         inclusions: ['4 scheduled applications per year'],
         exclusions: ['Termite treatment — separate program'],
-        buildings: [{ name: 'Tower A' }],
+        buildings: [{ name: 'Tower A', note: 'Exterior only' }, { name: 'Clubhouse' }],
       }],
       totals: {
         annualRecurring: 480, monthlyEquivalent: 40, oneTime: 0,
@@ -202,7 +202,9 @@ describe('ProposalDetailCard', () => {
     expect(text).toContain('4 applications per year');
     expect(text).toContain('per application');
     expect(text).toContain('Annual program total');
-    expect(text).toContain('Covers: Tower A');
+    // Subdivision notes are contractual scope — they render with the name
+    // (codex 1A-ii r13).
+    expect(text).toContain('Covers: Tower A — Exterior only · Clubhouse');
     expect(text).toContain('Not included (quoted separately): Termite treatment — separate program');
     // Overview line derives from programs.
     expect(text).toContain('4 applications per year across 1 program');

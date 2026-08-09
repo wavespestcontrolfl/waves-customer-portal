@@ -285,8 +285,14 @@ export default function CommercialProposalPage() {
       note: program.note || '',
       inclusionsText: (program.inclusions || []).join('\n'),
       exclusionsText: (program.exclusions || []).join('\n'),
-      coversText: (program.buildings || []).map((b) => b.name).join(', '),
+      coversText: (program.buildings || []).map((b) => (b.note ? `${b.name} | ${b.note}` : b.name)).join(', '),
     })));
+    // Provenance for generated responsibility pruning survives reload: the
+    // load response carries the server's static family registry, so
+    // deleting a program from a REOPENED proposal still prunes its
+    // family's generated lines (codex 1A-ii r13). Exact-line matching
+    // keeps hand-authored text untouchable regardless.
+    if (data.responsibilityRegistry) generatedRespByFamilyRef.current = data.responsibilityRegistry;
     setCorrectiveWork((p.correctiveWork || []).map((w) => ({
       label: w.label || '',
       amount: w.amount ?? 0,
@@ -525,7 +531,15 @@ export default function CommercialProposalPage() {
         note: p.note.trim() || null,
         inclusions: p.inclusionsText.split('\n').map((s) => s.trim()).filter(Boolean),
         exclusions: p.exclusionsText.split('\n').map((s) => s.trim()).filter(Boolean),
-        buildings: p.coversText.split(/[\n,]/).map((s) => s.trim()).filter(Boolean).map((name) => ({ name })),
+        // "Name | note" entries keep subdivision notes through the
+        // round-trip — name-only parsing silently dropped authored scope
+        // like "Exterior only" (codex 1A-ii r13).
+        buildings: p.coversText.split(/[\n,]/).map((s) => s.trim()).filter(Boolean).map((entry) => {
+          const [rawName, ...noteParts] = entry.split('|');
+          const name = rawName.trim();
+          const note = noteParts.join('|').trim();
+          return name ? { name, ...(note ? { note } : {}) } : null;
+        }).filter(Boolean),
       }));
     const work = f.correctiveWork
       .map((w) => ({
@@ -1085,7 +1099,7 @@ export default function CommercialProposalPage() {
                     />
                   </div>
                   <Input
-                    size="sm" placeholder="Covers (optional) — building or area names, comma-separated (e.g. Tower A, Clubhouse)" maxLength={400}
+                    size="sm" placeholder="Covers (optional) — comma-separated names, add a note with | (e.g. Tower A | Exterior only, Clubhouse)" maxLength={400}
                     value={p.coversText} disabled={!!locked}
                     onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, coversText: e.target.value } : it))); }}
                   />

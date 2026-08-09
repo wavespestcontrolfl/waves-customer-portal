@@ -273,7 +273,7 @@ function programsBlock(ctx, programs, y) {
       y += noteH + 2;
     }
     if ((program.buildings || []).length) {
-      const covers = `Covers: ${program.buildings.map((b) => b.name).join(' · ')}`;
+      const covers = `Covers: ${program.buildings.map((b) => (b.note ? `${b.name} — ${b.note}` : b.name)).join(' · ')}`;
       doc.fontSize(9).font('Helvetica').fillColor(MUTED);
       const coversH = doc.heightOfString(covers, { width: W });
       y = ensureSpace(ctx, y, coversH + 3);

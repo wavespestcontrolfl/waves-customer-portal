@@ -5408,7 +5408,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <span class="proposal-line-desc">Annual program total</span>
         <span class="proposal-line-amt">${fmtMoney(program.annual)}</span>
       </div>
-      ${(program.buildings || []).length ? `<div class="proposal-building-note">Covers: ${program.buildings.map((b) => escapeHtml(b.name)).join(' · ')}</div>` : ''}
+      ${(program.buildings || []).length ? `<div class="proposal-building-note">Covers: ${program.buildings.map((b) => escapeHtml(b.note ? `${b.name} — ${b.note}` : b.name)).join(' · ')}</div>` : ''}
       ${(program.inclusions || []).length ? `<ul class="proposal-work-includes">${program.inclusions.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul>` : ''}
       ${(program.exclusions || []).length ? `<div class="proposal-building-note">Not included (quoted separately): ${program.exclusions.map((line) => escapeHtml(line)).join(' · ')}</div>` : ''}
     </div>`).join('') : '';

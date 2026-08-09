@@ -365,7 +365,7 @@ export default function EstimateProposalDocument({ data, token }) {
                 </div>
                 {(program.buildings || []).length > 0 && (
                   <div style={{ fontSize: 10.5, color: MUTED, marginTop: 2, lineHeight: 1.5 }}>
-                    Covers: {program.buildings.map((b) => b.name).join(' · ')}
+                    Covers: {program.buildings.map((b) => (b.note ? `${b.name} — ${b.note}` : b.name)).join(' · ')}
                   </div>
                 )}
                 {(program.inclusions || []).map((line) => <Bullet key={line}>{line}</Bullet>)}
