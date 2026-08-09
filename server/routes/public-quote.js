@@ -835,10 +835,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // the count from the property's treeDensity only when the field is
       // absent — so blank-count estimate-page quotes priced zero trees.
       const treeShrubCount = Number(services.treeShrub.treeCount);
+      // v4.7: distinct palms-on-property count for the routine palm-care
+      // reserve. Optional — clients that never send it simply price no
+      // reserve; treeCount stays NON-palm trees where both are supplied.
+      const treeShrubPalms = Number(services.treeShrub.palmCount);
       engineInput.services.treeShrub = {
         tier: services.treeShrub.tier,
         access: services.treeShrub.access || 'easy',
         ...(Number.isFinite(treeShrubCount) && treeShrubCount > 0 ? { treeCount: treeShrubCount } : {}),
+        ...(Number.isFinite(treeShrubPalms) && treeShrubPalms > 0 ? { palmCount: treeShrubPalms } : {}),
       };
     }
     if (services.palm) {
