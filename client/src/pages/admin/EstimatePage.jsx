@@ -1937,12 +1937,15 @@ function EstimateToolView() {
             alert("Palm count is required for palm injection pricing.");
             return null;
           }
-        } else if (form.svcTs && hasInvalidPositiveInteger(form.palmCount)) {
-          // Tree & Shrub prices palms too (routine palm-care reserve), and a
-          // malformed entry is silently dropped by parsePositiveInteger — so
-          // without this the estimate would quote ZERO palms with no error
-          // and no review marker. Fail loudly, same as the injection path.
-          alert("Palm count must be a positive whole number.");
+        } else if (form.svcTs && String(form.palmCount || "").trim() !== ""
+          && !(propertyPalmCount && propertyPalmCount <= 200)) {
+          // Tree & Shrub prices palms too (routine palm-care reserve). A
+          // malformed entry is silently dropped by parsePositiveInteger and
+          // an oversized one is clamped to 200 by the pricer — either way
+          // the estimate would quote the wrong palm count with no error and
+          // no review marker. Same 1–200 contract as the public route and
+          // the intent schema.
+          alert("Palm count must be a whole number between 1 and 200.");
           return null;
         }
         const options = {
