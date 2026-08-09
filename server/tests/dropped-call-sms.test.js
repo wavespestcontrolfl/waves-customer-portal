@@ -398,15 +398,16 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(claimStamp.payload.outcome).toBe('landline');
   });
 
-  it('fixedVoip — claim kept and stamped with the detected type, no send', async () => {
+  it('fixedVoip — one-shot claim RELEASED (reversible block), no send, no terminal stamp', async () => {
     state.firstResults.leads = [{ customer_id: null, address: null }];
     lineType.lookupLineType.mockResolvedValueOnce('fixedVoip');
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'fixedVoip' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    expect(state.deletes).toHaveLength(0); // claim NOT released
-    const claimStamp = state.updates.find((u) => u.table === 'dropped_call_sms_claims');
-    expect(claimStamp.payload.outcome).toBe('fixedVoip');
+    // Claim released, not consumed: a rollback of LINETYPE_BLOCK_FIXED_VOIP
+    // must let a future call event from this phone re-evaluate.
+    expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
+    expect(state.updates.find((u) => u.table === 'dropped_call_sms_claims')).toBeUndefined();
   });
 
   it('template disabled — releases BOTH claims', async () => {

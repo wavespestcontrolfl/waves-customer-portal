@@ -444,7 +444,15 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     }
     if (NON_SMS_LINE_TYPES.has(lineType)) {
       await stampStatus(leadId, 'blocked');
-      await stampPhoneClaim(phone, lineType); // keep — a landline/fixedVoip stays that way
+      if (lineType === 'landline') {
+        await stampPhoneClaim(phone, 'landline'); // keep — a landline stays a landline
+      } else {
+        // fixedVoip is a REVERSIBLE block (LINETYPE_BLOCK_FIXED_VOIP): no text
+        // was sent, so releasing the one-shot claim keeps the one-text-per-
+        // phone invariant while letting a future call event re-evaluate under
+        // the then-current set instead of being consumed forever.
+        await releasePhoneClaim(phone);
+      }
       await logActivity(leadId, 'note', `Dropped-call address text skipped — caller number is a ${lineType}`, {
         message_type: MESSAGE_TYPE,
         reason: lineType,

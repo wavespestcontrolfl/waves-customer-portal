@@ -211,14 +211,16 @@ describe('voicemail lead text-back gates', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('fixedVoip pre-check blocks the send like a landline (home-phone VoIP, Twilio 30006)', async () => {
+  test('fixedVoip pre-check blocks the send but RELEASES the one-shot claim (reversible block)', async () => {
     lineType.readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'fixedVoip' });
     const result = await sendVoicemailQuoteLink(args());
     expect(result).toEqual({ sent: false, skipped: 'fixedVoip' });
     expect(lineType.lookupLineType).not.toHaveBeenCalled();
     expect(stampsFor()).toContain('blocked');
-    expect(phoneClaimReleased()).toBe(false);
-    expect(phoneClaimOutcomes()).toContain('fixedVoip');
+    // Released, not consumed: a rollback of LINETYPE_BLOCK_FIXED_VOIP must let
+    // a future voicemail from this phone re-evaluate under the current set.
+    expect(phoneClaimReleased()).toBe(true);
+    expect(phoneClaimOutcomes()).not.toContain('fixedVoip');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
