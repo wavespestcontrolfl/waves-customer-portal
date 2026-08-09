@@ -947,6 +947,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
 
 module.exports = {
   LANES,
+  lineRequiresReview,
   buildEngineInput,
   stampPestCurveVersion,
   deriveTotals,

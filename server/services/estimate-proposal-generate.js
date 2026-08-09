@@ -33,6 +33,19 @@ const {
   resolveCommercialPrepayBaseRate,
 } = require('./estimate-converter');
 
+// The estimator's COMPLETE review authority — draft-builder's canonical
+// predicate (quoteRequired / requiresManualReview / requiresMeasurement /
+// customQuoteFlag / requiresCustomQuote / manualReviewReasons / zero-tree
+// default), not a two-flag subset: a priced row gated by ANY marker is a
+// field-verification price, never a publishable one (codex 1A-ii r8).
+const { lineRequiresReview } = require('./estimator-engine/draft-builder');
+
+// Generation adds its own LOW-confidence guard on top (codex 1A-ii r7).
+function rowIsReviewGated(row = {}) {
+  return lineRequiresReview(row)
+    || String(row.pricingConfidence || '').toUpperCase() === 'LOW';
+}
+
 // Engine service key → proposal program family. Prefix/substring match on
 // the pricing-engine vocabulary (pest_control, commercial_pest,
 // german_roach_initial, commercial_termite_bait, …). Foam is TERMITE work
@@ -373,8 +386,7 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
     // authority says they are NOT priced yet, so any of them fails the
     // whole draft (silent exclusion would save an itemization missing the
     // gated service — codex 1A-ii r5b).
-    if (row.requiresManualReview === true || row.quoteRequired === true
-      || String(row.pricingConfidence || '').toUpperCase() === 'LOW') {
+    if (rowIsReviewGated(row)) {
       unrepresentable.push(`${String(row.name || row.service || 'service')} (requires manual review — price is provisional or low-confidence)`);
       continue;
     }
@@ -569,8 +581,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
       && num(line.installation?.price) > 0
       && ((visitsPerYearForRecurringService(line) > 0) || (recurringLineAnnualAmount(line) > 0)));
   const fromLineItems = lineItemsRows.filter((line) => {
-    if (line.requiresManualReview === true || line.quoteRequired === true
-      || String(line.pricingConfidence || '').toUpperCase() === 'LOW') {
+    if (rowIsReviewGated(line)) {
       gated.push(String(line.displayName || line.name || line.service || 'item'));
       return false;
     }
@@ -596,8 +607,7 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   // or every specialty charge doubles and reconciliation rejects the draft
   // (codex 1A-ii r2e).
   for (const item of fromOneTime) {
-    if (item.requiresManualReview === true || item.quoteRequired === true
-      || String(item.pricingConfidence || '').toUpperCase() === 'LOW') {
+    if (rowIsReviewGated(item)) {
       gated.push(String(item.label || item.name || item.service || 'item'));
       continue;
     }

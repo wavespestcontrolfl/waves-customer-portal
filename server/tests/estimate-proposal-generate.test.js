@@ -576,6 +576,35 @@ describe('deriveProposalDraft', () => {
     expect(install.correctiveWork[0].amount).toBe(800);
   });
 
+  test('r8: EVERY engine review marker gates — priced customQuoteFlag/requiresMeasurement rows fail the draft', async () => {
+    // Oversize-lawn custom quotes carry a price but customQuoteFlag says
+    // "field verification required" — the full lineRequiresReview
+    // predicate must gate, not the two-flag subset (codex 1A-ii r8).
+    const custom = await deriveProposalDraft({
+      estimate_data: {
+        engineResult: { lineItems: [{ service: 'commercial_lawn', name: 'Lawn', visitsPerYear: 9, annual: 540, customQuoteFlag: true }] },
+      },
+    });
+    expect(custom.programs).toBeNull();
+    expect(custom.warnings[0]).toMatch(/requires manual review/i);
+
+    const measure = await deriveProposalDraft({
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 500, requiresMeasurement: true }] } },
+      },
+    });
+    expect(measure.correctiveWork).toBeNull();
+    expect(measure.warnings[0]).toMatch(/requires manual review/i);
+
+    const reasons = await deriveProposalDraft({
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468, manualReviewReasons: ['density unknown'] }] } },
+      },
+    });
+    expect(reasons.programs).toBeNull();
+    expect(reasons.warnings[0]).toMatch(/requires manual review/i);
+  });
+
   test('returns null sections for an estimate with nothing to derive', async () => {
     const draft = await deriveProposalDraft({ estimate_data: {} });
     expect(draft).toEqual({ propertyScope: null, programs: null, correctiveWork: null, customerResponsibilities: null, suggestedTaxRate: null, warnings: [] });
