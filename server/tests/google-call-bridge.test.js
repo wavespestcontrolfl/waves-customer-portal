@@ -340,18 +340,19 @@ describe('dedupeCrmCallRows — settled-stamp dissent (PR #3303 r5)', () => {
     id, lead_id: leadId, lead_call_sid: leadCallSid, twilio_call_sid: 'CAcall', ...extra,
   });
 
-  test('a SETTLED stamp targeting a DIFFERENT lead keeps BOTH rows — the repoint is the processor verdict', () => {
+  test('a SETTLED stamp targeting a DIFFERENT lead collapses to the STAMPED lead — the repoint is the processor verdict', () => {
     // Same call → both join rows carry the same call columns: a settled
-    // stamp to lead-stamp while lead-sid still holds the sid. Collapsing
-    // to the sid row would hide the repoint; the pair reads as ambiguous
-    // → conservative no-bridge.
+    // stamp to lead-stamp while lead-sid still holds the sid residue.
+    // Collapsing to the sid row would hide the repoint; keeping both
+    // would read as ordinary match ambiguity FOREVER and starve the
+    // transfer reconciliation — the stamped lead is the current verdict.
     const settled = { metadata: JSON.stringify({ lead_id: 'lead-stamp' }), processing_token: null, processing_status: 'processed' };
     const deduped = dedupeCrmCallRows([
       row('c1', 'lead-stamp', null, settled),
       row('c1', 'lead-sid', 'CAcall', settled),
     ]);
-    expect(deduped).toHaveLength(2);
-    expect(deduped.map((r) => r.lead_id).sort()).toEqual(['lead-sid', 'lead-stamp']);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0].lead_id).toBe('lead-stamp');
   });
 
   test('an UNSETTLED stamp twin still collapses to the sid row — a mid-flight stamp is not a verdict', () => {

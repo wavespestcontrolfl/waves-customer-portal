@@ -520,17 +520,20 @@ function dedupeCrmCallRows(rows) {
       // force-reprocess repointed it after the sid-linked lead lost
       // eligibility (terminal, other-customer-owned), and findReusable-
       // CallLead's sid precedence only ever applied to ELIGIBLE leads.
-      // Keeping the sid row alone would hide the repoint and re-attribute
-      // the former lead. Both rows survive instead: buildMatches reads
-      // the pair as an equal-score second candidate → conservative
-      // no-bridge. An UNSETTLED stamp twin (a retry that minted before
-      // its cleanup ran) still collapses to the sid row — that stamp is
-      // not yet a verdict.
+      // The known settled-repoint shape collapses to the STAMPED lead
+      // (pre-push P1 r6) — keeping both rows would read as ordinary match
+      // ambiguity forever, so applyBridge would never reach
+      // shouldRetryLeadAttribution or the transfer reconciliation and the
+      // former lead's funnel attribution could stand indefinitely.
+      // An UNSETTLED stamp twin (a retry that minted before its cleanup
+      // ran) still collapses to the sid row — that stamp is not yet a
+      // verdict.
       const sidRow = sidLinked[0];
       const settledStampDissenters = group.filter((r) => isStampLinked(r)
         && callSettled(r)
         && String(r.lead_id) !== String(sidRow.lead_id));
-      if (settledStampDissenters.length) deduped.push(sidRow, ...settledStampDissenters);
+      if (settledStampDissenters.length === 1) deduped.push(settledStampDissenters[0]);
+      else if (settledStampDissenters.length > 1) deduped.push(...settledStampDissenters);
       else deduped.push(sidRow);
     } else if (sidLinked.length > 1) deduped.push(...sidLinked);
     else deduped.push(group[0]);
@@ -721,8 +724,12 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFa
   // transaction — re-read the owner on the same connection so the funnel
   // pair carries the lead's CURRENT customer, not the plan's unlocked
   // snapshot (same rule as the joined arm; pre-push P1 r2/r5).
+  // The LOCKED owner is exact — never fall back to the plan's pre-lock
+  // snapshot (pre-push P1 r6): a lead unassigned while we waited has a
+  // live owner of NULL, and restoring the former customer would mint a
+  // permanently mismatched lead/customer funnel pair.
   const plannedOwner = await trx('leads').where({ id: planned.leadId }).first('customer_id');
-  return { match: { ...planned, customerId: plannedOwner?.customer_id || planned.customerId || null } };
+  return { match: { ...planned, customerId: plannedOwner?.customer_id || null } };
 }
 
 // ONE definition of the plan's matching predicate, used by the resolver AND
@@ -999,7 +1006,11 @@ async function applyBridge(options = {}) {
                   ).first('id');
                   if (stillMatches) {
                     backfillLeadId = lm.leadId;
-                    backfillCustomerId = lockedFallback.customer_id || lm.customerId || null;
+                    // Locked owner EXACTLY — no pre-lock fallback (pre-push
+                    // P1 r6): an unassigned-while-waiting lead's live owner
+                    // is NULL, and the plan snapshot would resurrect the
+                    // former customer into a mismatched funnel pair.
+                    backfillCustomerId = lockedFallback.customer_id || null;
                   }
                 }
               }
