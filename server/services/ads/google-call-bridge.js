@@ -803,7 +803,36 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFa
   // sourceCallId recovery move the freshly transferred history row back
   // or conflict-retire it. The next scan resolves with fresh join state.
   if (noPlanFallback || joinedWentStale) {
-    return { match: null, reason: joinedWentStale ? 'lead_not_live' : 'lead_not_found' };
+    // A STALE joined arm is TRANSIENT — never a clear (codex P0, PR #3303
+    // r10): the caller deletes the provenanced row and tombstones the
+    // match on a clear, so a concurrent repoint racing this scan would
+    // destroy booked/completed revenue. Only the noPlanFallback path can
+    // report a clear, and only once the absence is POSITIVELY established
+    // under the call row lock: the call is settled, carries no stamp, and
+    // no live lead holds its sid. Anything else stays transient and the
+    // next scan re-resolves.
+    if (joinedWentStale) return { match: null, reason: 'lead_not_live' };
+    if (!(await callStillAttributable(trx, callLog.id))) {
+      return { match: null, reason: 'call_rejected' };
+    }
+    const liveCall = await trx('call_log').where({ id: callLog.id }).first('twilio_call_sid', 'metadata');
+    const liveStamp = (() => {
+      try {
+        const md = typeof liveCall?.metadata === 'string' ? JSON.parse(liveCall.metadata) : (liveCall?.metadata || {});
+        return md?.lead_id ? String(md.lead_id) : null;
+      } catch { return null; }
+    })();
+    // A live stamp — resolvable or not — means the linkage is not
+    // CLEARED, only unavailable to this scan.
+    if (liveStamp || !liveCall) return { match: null, reason: 'lead_not_live' };
+    if (liveCall?.twilio_call_sid) {
+      const sidLead = await trx('leads')
+        .where({ twilio_call_sid: liveCall.twilio_call_sid })
+        .whereNull('deleted_at')
+        .first('id');
+      if (sidLead) return { match: null, reason: 'lead_not_live' };
+    }
+    return { match: null, reason: 'linkage_cleared' };
   }
   // Plan-only flow: no lead is locked yet, so the call-row check runs
   // first — a rare call_log → leads inversion against a concurrent
@@ -1194,6 +1223,12 @@ async function applyBridge(options = {}) {
             // Either way this scan touches nothing; the retry lane
             // re-evaluates once the call settles.
             if (res.reason === 'call_rejected') return res;
+            // ONLY a POSITIVELY established clear may retire history
+            // (codex P0, PR #3303 r10): 'lead_not_live' and
+            // 'lead_not_found' also cover transient stale-join and
+            // pre-lock states, and treating them as definitive deleted
+            // booked/completed revenue on a concurrent repoint.
+            if (res.reason !== 'linkage_cleared') return res;
             // Recorded match with NO resolvable lead — the CLEARED-link
             // case (codex P1, PR #3303): retire this call's own funnel row
             // (exact provenance) and clear the recorded match, so the
