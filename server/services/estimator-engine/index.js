@@ -576,6 +576,16 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
     // unmarked wrong-identity (or rejected-call) draft that stays
     // sendable. The creators' in-lock fence and the send/accept/decline
     // revalidation both read this marker.
+    if (ownershipFence?.procToken) {
+      const stillOwned = await db('call_log')
+        .where({ id: ownershipFence.callLogId || callLogId })
+        .where('processing_token', ownershipFence.procToken)
+        .first('id');
+      if (!stillOwned) {
+        logger.info(`[estimator-engine] draft invalidation for call ${callLogId} skipped — processing claim lost before the block stamp`);
+        return { ok: true, invalidated: false, ownershipLost: true };
+      }
+    }
     await markDraftBlockOnCall(callLogId, reason);
     // STRICT lookup: existingDraftForCall converts DB errors to null,
     // which would read here as "no draft to invalidate". EVERY
@@ -753,7 +763,14 @@ async function markDraftBlockOnCall(callLogId, reason) {
 // blocks the valid replacement draft just as hard as the verdict itself.
 // A clear that will not land THROWS: the pass fails and retries, which
 // defers the draft rather than losing it to a permanent block.
-async function clearDraftBlockOnCall(callLogId) {
+async function clearDraftBlockOnCall(callLogId, { notNewerThan } = {}) {
+  // GENERATION FENCE (codex P0, PR #3304 GH r8h): only markers that
+  // already existed when this pass began are cleared. A concurrent pass
+  // can write a NEWER conflict or rejection between our unlocked read and
+  // this update, and a blind clear would delete the only durable guard
+  // for it. `notNewerThan` is the ISO instant this pass started; a marker
+  // stamped after it survives untouched.
+  const fenceAt = notNewerThan || new Date().toISOString();
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
@@ -762,6 +779,8 @@ async function clearDraftBlockOnCall(callLogId) {
           this.whereRaw("COALESCE(metadata->'estimator_draft_block'->>'reason', '') <> ''")
             .orWhereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'reason', '') <> ''");
         })
+        .whereRaw("COALESCE(metadata->'estimator_draft_block'->>'at', '') <= ?", [fenceAt])
+        .whereRaw("COALESCE(metadata->'estimator_quarantine_pending'->>'at', '') <= ?", [fenceAt])
         .update({
           metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'estimator_draft_block') - 'estimator_quarantine_pending'"),
           updated_at: new Date(),
@@ -861,7 +880,7 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
       // cleared" and discard the only durable retry for a conflict that
       // was never disproved.
       if (freshContext && !freshContext.error) {
-        await clearDraftBlockOnCall(row.id);
+        await clearDraftBlockOnCall(row.id, { notNewerThan: String(pending.at || new Date().toISOString()) });
         await clearQuarantineMarker(row.id, pending);
         logger.info(`[estimator-engine] dropped a stale queued quarantine for call ${row.id} — the identity conflict cleared`);
         continue;
@@ -921,13 +940,16 @@ async function strictExistingDraftForCall(callLogId) {
 async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false, quotePromised = true, ownerProcToken = null }) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
+  // This pass's generation stamp: markers written after it began belong to
+  // a newer verdict and are never cleared by it.
+  const passStartedAt = new Date().toISOString();
   try {
     context = await buildCallContext(callLogId);
     // The caller's own processing claim rides the context so the creators'
     // in-lock fences can tell it apart from a competing reprocess.
     if (context && ownerProcToken) context.ownerProcToken = ownerProcToken;
     // A CONCLUSIVELY clean context retires the call-side conflict verdict.
-    if (!dryRun && context && !context.error) await clearDraftBlockOnCall(callLogId);
+    if (!dryRun && context && !context.error) await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt });
     if (context.error) {
       result.lane = LANES.RED;
       result.reasons = [context.error];
@@ -939,7 +961,13 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       // linkage invalidation, so every guard (unarchive 409, send claims,
       // duplicate exclusion) applies; the audit reason rides along.
       if (!dryRun && ['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
-        quarantineOutcome = await invalidateDraftForCallWithRetry(callLogId, { reason: context.error, identityConflict: true });
+        quarantineOutcome = await invalidateDraftForCallWithRetry(callLogId, {
+          reason: context.error,
+          identityConflict: true,
+          // A stale run must not stamp a block or archive the drafts of
+          // the pass that RECLAIMED this call (codex P0, PR #3304 GH r8h).
+          ownershipFence: ownerProcToken ? { callLogId, procToken: ownerProcToken } : null,
+        });
       }
       if (!dryRun && context.call && quotePromised) {
         await notify({
