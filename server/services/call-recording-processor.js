@@ -8825,6 +8825,25 @@ const CallRecordingProcessor = {
                     trx, call.id, preSettleStampedLeadId, leadId, new Date(),
                   );
                   if (moveOutcome === 'retired_conflict') attributionConflictRetired = true;
+                  // A LEGACY row on the former lead cannot move (codex P1,
+                  // PR #3303 r11 — the bridge path already suppresses this
+                  // shape): NULL provenance is permanently frozen because
+                  // another call may own it, so the transfer reports
+                  // 'none' with the old row still in place. Letting this
+                  // pass insert a provenanced row for the new lead would
+                  // count the same call on BOTH leads — the row cannot be
+                  // discovered by call id, so nothing would ever reconcile
+                  // them. Suppress the write and name both for an operator.
+                  if (moveOutcome === 'none') {
+                    const stranded = await trx('ad_service_attribution')
+                      .where({ lead_id: preSettleStampedLeadId })
+                      .whereNull('source_call_id')
+                      .first('id');
+                    if (stranded) {
+                      attributionConflictRetired = true;
+                      logger.warn(`[call-proc] repoint of ${callSid} left a legacy unprovenanced row on lead ${preSettleStampedLeadId} — funnel write suppressed to avoid double-counting`);
+                    }
+                  }
                 }
                 return enrichmentWrite.transacting(trx).update(effectiveUpdates);
               });
