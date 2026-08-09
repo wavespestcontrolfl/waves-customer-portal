@@ -2801,14 +2801,30 @@ function priceTreeShrub(property, options = {}) {
   if (bedAreaInfo.bedAreaSource === 'fallback' || bedAreaInfo.requiresManualReview) {
     manualReviewReasonsSet.add('missing_bed_area_fallback');
   }
+  // These two warnings describe DIFFERENT situations and must not share copy
+  // now that the operator panel renders them (codex P2 ×2): a CAPPED area was
+  // clamped and is underpriced until reviewed — the reader needs the number
+  // it was clamped from — while an oversized EXPLICIT measurement was priced
+  // in full and needs only a sanity check. Saying "hit the estimator cap" for
+  // the second would send the operator hunting for a clamp that never
+  // happened.
+  const bedSqFtText = (value) => `${Math.round(Number(value)).toLocaleString()} sq ft`;
   if (bedAreaCapped) {
     manualReviewReasonsSet.add('bed_area_cap_reached');
-    warnings.push('Tree & Shrub bed area hit the estimator cap; manual review recommended.');
+    const uncapped = bedAreaInfo.uncappedBedAreaEstimate;
+    warnings.push(
+      `Tree & Shrub bed area was clamped to the ${bedSqFtText(BED_AREA_CAP)} estimator cap`
+      + (hasPositivePricingNumber(uncapped) ? ` from an estimated ${bedSqFtText(uncapped)}` : '')
+      + ' — this quote prices the capped area, so it is UNDER-priced until reviewed.',
+    );
   }
   if (bedArea >= BED_AREA_CAP) {
     manualReviewReasonsSet.add('bed_area_at_or_above_8000');
     if (!bedAreaCapped) {
-      warnings.push('Tree & Shrub bed area hit the estimator cap; manual review recommended.');
+      warnings.push(
+        `Tree & Shrub bed area of ${bedSqFtText(bedArea)} is at or above the ${bedSqFtText(BED_AREA_CAP)} estimator cap.`
+        + ' It was priced IN FULL (measured areas are never clamped) — confirm the measurement.',
+      );
     }
   }
   // Plant-count review gate. Unarmed: trees plus SERVICE-LINE palms only —

@@ -264,7 +264,7 @@ describe('Tree & Shrub Pricing v4.4', () => {
     const quote = priceTreeShrub({ bedArea: 8000 }, { tier: 'standard' });
 
     expect(quote.requiresManualReview).toBe(true);
-    expect(quote.warnings).toContain('Tree & Shrub bed area hit the estimator cap; manual review recommended.');
+    expect(quote.warnings.some((w) => w.includes('estimator cap'))).toBe(true);
   });
 
   test('6-visit standard is the mandated default recommendation regardless of property signals', () => {
@@ -1498,9 +1498,12 @@ describe('Tree & Shrub prose warnings reach the operator review panel', () => {
     expect(est.pricingMetadata.manualReviewReasons).toEqual(
       expect.arrayContaining(['bed_area_cap_reached', 'bed_area_at_or_above_8000']),
     );
-    expect(est.pricingMetadata.warnings).toEqual(
-      expect.arrayContaining(['Tree & Shrub bed area hit the estimator cap; manual review recommended.']),
-    );
+    // The capped warning names BOTH numbers and says plainly that the quote
+    // is under-priced until reviewed.
+    const capWarning = est.pricingMetadata.warnings.find((w) => w.includes('clamped'));
+    expect(capWarning).toContain('8,000 sq ft');
+    expect(capWarning).toContain('9,000 sq ft');
+    expect(capWarning).toContain('UNDER-priced');
   });
 
   test('an EXPLICIT oversized bed area is priced in full but still flagged for review', () => {
@@ -1508,6 +1511,12 @@ describe('Tree & Shrub prose warnings reach the operator review panel', () => {
     const ts = est.lineItems.find((li) => li.service === 'tree_shrub');
     expect(ts.bedArea).toBe(14000); // a measurement is never silently clamped
     expect(est.pricingMetadata.manualReviewReasons).toContain('bed_area_at_or_above_8000');
+    // Distinct copy: nothing was clamped here, so the operator must not be
+    // sent hunting for a clamp that never happened.
+    const warning = est.pricingMetadata.warnings.find((w) => w.includes('14,000 sq ft'));
+    expect(warning).toContain('priced IN FULL');
+    // It must not claim a clamp happened ("never clamped" is the explanation).
+    expect(warning).not.toContain('was clamped');
   });
 
   test('the missing-bed-area fallback and high plant counts surface too', () => {
