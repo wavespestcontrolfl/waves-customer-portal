@@ -161,7 +161,14 @@ function extractTreeShrubEstimate(estimateData) {
       bedAreaEstimated: typeof tsMeta.bedAreaIsEstimated === 'boolean'
         ? tsMeta.bedAreaIsEstimated : null,
       treeCount: nonnegativeCount(tsMeta.et),
-      access: normalizedEnum(profile.access || profile.features?.access),
+      // Every writer that produces this mapped shape prices T&S through
+      // translateV2CallToV1Input's services.treeShrub = { tier } — the
+      // engine then receives access: 'easy' explicitly (estimate-engine
+      // :839). 'easy' IS the priced access here, so null would defeat the
+      // priced-vs-observed access calibration (pre-push P1 r4). The
+      // profile reads stay first for any future writer that persists a
+      // real access on the replay profile.
+      access: normalizedEnum(profile.access || profile.features?.access) || 'easy',
       tier: normalizedEnum(selected?.tier),
       onSiteMin: null,
     };

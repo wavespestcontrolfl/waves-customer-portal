@@ -265,6 +265,13 @@ describe('extractTreeShrubEstimate', () => {
     });
   });
 
+  it('admin estimates without a profile access record the engine default "easy" — that IS the priced access (pre-push P1 r4)', () => {
+    expect(extractTreeShrubEstimate({
+      result: { results: { tsMeta: { eb: 1800, et: 2, bedAreaIsEstimated: false }, ts: [] } },
+      engineRequest: { profile: { homeSqFt: 2000 } },
+    }).access).toBe('easy');
+  });
+
   it('null when the estimate priced no T&S line', () => {
     expect(extractTreeShrubEstimate(null)).toBeNull();
     expect(extractTreeShrubEstimate({})).toBeNull();
