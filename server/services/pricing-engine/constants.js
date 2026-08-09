@@ -600,6 +600,31 @@ const TREE_SHRUB = {
     enhancedFactor: 1.25,
   },
   treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
+  // Shrub-density multiplier on the MEASURED-bed terms (per-sqft material +
+  // the bedArea-derived labor minutes). Until v4.7, shrub density only
+  // shaped the lot-based bed ESTIMATE and died the moment a real bed area
+  // was known — 2,000 sqft of sparse crotons priced identically to 2,000
+  // sqft of packed tropical hedge. NEUTRAL (all 1) until the owner flips
+  // calibrated values in pricing_config (ts_material_rates.density_*):
+  // these multiply live quotes, so they ship dark like a gate.
+  densityFactors: { light: 1, moderate: 1, heavy: 1 },
+  // Routine palm-care reserve (v4.7, reprice lane 2026-08-08): palms create
+  // inspection time and nutritional/systemic exposure on the RECURRING
+  // program even when no specialty injection happens, but they previously
+  // rode the generic per-tree terms only. perPalmAnnual is material $/palm
+  // per YEAR (annual, like every materialModel term); minutesPerPalmVisit
+  // is labor per palm per VISIT. NEUTRAL (0/0) until calibrated values are
+  // flipped in pricing_config. This reserve NEVER implies trunk injection —
+  // specialty palm work stays the separate palm_injection service, and the
+  // Gold+ $10/palm flat credit stays palm_injection-only (owner ruling
+  // 2026-08-08). Convention: treeCount = NON-palm trees once palm counts
+  // flow; keep the two disjoint or palms double-charge.
+  routinePalmCareReserve: { perPalmAnnual: 0, minutesPerPalmVisit: 0 },
+  // Per-visit callback/re-treatment reserve, mirroring the commercial
+  // pricers' callbackReservePerVisit knob. Residential T&S has ZERO
+  // recorded callbacks (Phase-1 audit) so this ships 0 — a knob with no
+  // opinion, priced in only when real callback data earns a value.
+  callbackReservePerVisit: 0,
   marginTarget: 0.45,
   marginFloor: 0.35,
 };

@@ -202,7 +202,7 @@ function detectServiceLine(serviceType) {
   // Foam matches only the drill-and-foam termite forms — bare 'foam' would
   // steal rodent-exclusion foam-sealing work from the rodent branch below.
   if (/\b(termite|wdo|bora|trelona)\b|foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*foam|foam[\s_-]*recurring/.test(text)) return 'termite';
-  if (/\b(rodent|rat|rats|mouse|mice|mole)\b|bird\s*box|roof-entry/.test(text)) return 'rodent';
+  if (/\b(rodent|rat|rats|mouse|mice|mole)\b|bird\s*box|roof-entry|trap[\s_-]*only/.test(text)) return 'rodent';
   if (/\b(tree|shrub|arborjet)\b/.test(text)) return 'tree_shrub';
   return 'pest';
 }

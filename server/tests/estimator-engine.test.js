@@ -1070,6 +1070,17 @@ describe('review fixes', () => {
     expect(validateIntent(absurd).valid).toBe(false);
   });
 
+  test('treeShrub accepts a caller-stated palmCount (disjoint from treeCount) with the same bounds', () => {
+    const both = { ...baseIntent(), services: { treeShrub: { treeCount: 3, palmCount: 10 } }, service_interest_label: 'Tree & Shrub Care' };
+    expect(validateIntent(both).valid).toBe(true);
+    const palmsOnly = { ...baseIntent(), services: { treeShrub: { palmCount: 8 } }, service_interest_label: 'Tree & Shrub Care' };
+    expect(validateIntent(palmsOnly).valid).toBe(true);
+    const zero = { ...baseIntent(), services: { treeShrub: { palmCount: 0 } }, service_interest_label: 'Tree & Shrub Care' };
+    expect(validateIntent(zero).valid).toBe(false);
+    const absurd = { ...baseIntent(), services: { treeShrub: { palmCount: 500 } }, service_interest_label: 'Tree & Shrub Care' };
+    expect(validateIntent(absurd).valid).toBe(false);
+  });
+
   test('tree_shrub line priced from a defaulted-zero tree count requires review', () => {
     expect(draftPriv.lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'default_zero', annual: 400 })).toBe(true);
     // A real count (caller-stated or density-estimated) does not block.

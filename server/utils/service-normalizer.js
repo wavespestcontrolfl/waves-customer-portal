@@ -132,7 +132,10 @@ function detectServiceCategory(serviceType) {
   // 'bird box' / 'roof-entry' are rodent-exclusion hardware: the catalog
   // row "Roof-entry cover / bird box" (rodent_bird_box) carries no rodent
   // token of its own.
-  if (s.includes('rodent') || s.includes('rat') || s.includes('mouse') || s.includes('mole') || s.includes('bird box') || s.includes('roof-entry')) return 'rodent';
+  // 'trap-only' is the retainer product family ('Standard Trap-Only
+  // Retainer' carries no rodent token). Deliberately NOT bare 'trap' —
+  // that would steal Wildlife Trapping from specialty.
+  if (s.includes('rodent') || s.includes('rat') || s.includes('mouse') || s.includes('mole') || s.includes('bird box') || s.includes('roof-entry') || /trap[\s_-]*only/.test(s)) return 'rodent';
   if (s.includes('callback') || s.includes('re-treat')) return 'callback';
   return 'pest';
 }

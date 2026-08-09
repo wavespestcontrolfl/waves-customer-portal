@@ -72,7 +72,16 @@ function lineRequiresReview(line = {}) {
     // No caller-stated count and no property density data: the pricer
     // silently priced ZERO trees (fixed costs only) — an underquote with no
     // warning of its own, so the draft must carry the review flag here.
-    || (line.service === 'tree_shrub' && line.treeCountSource === 'default_zero')
+    // v4.7: palms exempt this line ONLY when they actually priced —
+    // service-line palms (which fold into the legacy tree terms while the
+    // reserve is unarmed) or any palms once the reserve is armed. A
+    // PROPERTY-sourced palm count with the reserve off deliberately prices
+    // nothing, so exempting it would let that fixed-cost underquote bypass
+    // review — the exact hole this gate exists to catch.
+    || (line.service === 'tree_shrub'
+      && line.treeCountSource === 'default_zero'
+      && !(Number(line.palmCount) > 0
+        && (line.palmCountSource === 'service_line' || line.palmReserveActive === true)))
   );
 }
 

@@ -821,9 +821,17 @@ function generateEstimate(input) {
     if (propertyIsCommercial) {
       // Commercial auto-pricing — priced ornamental program (shrub/tree fert +
       // insect + bed weed control). Replaces the old lawn-adjacent manual quote.
+      // The commercial ornamental pricer has no palm concept and this lane
+      // does not reprice commercial: stated palms keep their PRE-SPLIT
+      // classification here (counted as plants in treeCount) so a
+      // commercial caller stating palms is never priced as zero plants.
+      const commercialTreeCount = [services.treeShrub.treeCount, services.treeShrub.palmCount]
+        .map(Number)
+        .filter((n) => Number.isFinite(n) && n > 0)
+        .reduce((sum, n) => sum + n, 0);
       const result = priceCommercialTreeShrub(property, {
         commercialSubtype,
-        treeCount: services.treeShrub.treeCount,
+        treeCount: commercialTreeCount > 0 ? commercialTreeCount : services.treeShrub.treeCount,
         // Rep-set plant-density multiplier (very_high → manual); admin-set.
         treeShrubDensity: input.treeShrubDensity,
       });
@@ -842,6 +850,14 @@ function generateEstimate(input) {
         // fall back to the treeDensity estimate when no count exists at all
         // (v4.6 — a fabricated 0 would price the per-tree material term away).
         treeCount: services.treeShrub.treeCount,
+        // v4.7: distinct palms-on-property count for the routine palm-care
+        // reserve — a caller's "10 palms" must reach the reserve terms, not
+        // masquerade as 10 generic trees. treeCount stays NON-palm.
+        palmCount: services.treeShrub.palmCount,
+        // Quote-time knob snapshot replayed from a stored estimate (see
+        // estimate-public#savedFloorReplayOverrides). Absent on fresh
+        // quotes, which resolve the live pricing_config values.
+        knobs: input.treeShrubPricingKnobs,
       });
       result.annual = Math.round(result.annual);
       result.monthly = Math.round(result.annual / 12 * 100) / 100;
