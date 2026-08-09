@@ -513,29 +513,24 @@ function dedupeCrmCallRows(rows) {
       seenLeadIds.add(key);
       return true;
     });
-    if (sidLinked.length === 1) {
-      // Collapse to the sid row ONLY when no SETTLED stamp disputes it
-      // (codex P1, PR #3303 r5): a settled stamp targeting a DIFFERENT
-      // lead is the processor's CURRENT verdict for this call — a
-      // force-reprocess repointed it after the sid-linked lead lost
-      // eligibility (terminal, other-customer-owned), and findReusable-
-      // CallLead's sid precedence only ever applied to ELIGIBLE leads.
-      // The known settled-repoint shape collapses to the STAMPED lead
-      // (pre-push P1 r6) — keeping both rows would read as ordinary match
-      // ambiguity forever, so applyBridge would never reach
-      // shouldRetryLeadAttribution or the transfer reconciliation and the
-      // former lead's funnel attribution could stand indefinitely.
-      // An UNSETTLED stamp twin (a retry that minted before its cleanup
-      // ran) still collapses to the sid row — that stamp is not yet a
-      // verdict.
-      const sidRow = sidLinked[0];
-      const settledStampDissenters = group.filter((r) => isStampLinked(r)
-        && callSettled(r)
-        && String(r.lead_id) !== String(sidRow.lead_id));
-      if (settledStampDissenters.length === 1) deduped.push(settledStampDissenters[0]);
-      else if (settledStampDissenters.length > 1) deduped.push(...settledStampDissenters);
-      else deduped.push(sidRow);
-    } else if (sidLinked.length > 1) deduped.push(...sidLinked);
+    // SETTLED-STAMP AUTHORITY FIRST (codex P1, PR #3303 r5; pre-push P1
+    // r6/r14): a settled stamp targeting a lead OUTSIDE the sid-linked
+    // set is the processor's CURRENT verdict for this call — a
+    // force-reprocess repointed it after the sid lead(s) lost
+    // eligibility, and findReusableCallLead's sid precedence only ever
+    // applied to ELIGIBLE leads. This applies regardless of how many
+    // leads share the sid: collapsing to the sid row would hide the
+    // repoint, and preserving multi-sid ambiguity would starve the
+    // transfer reconciliation forever. A stamp AGREEING with a sid lead,
+    // or an UNSETTLED stamp twin (a retry that minted before its cleanup
+    // ran), falls through to the sid branches — that stamp is either
+    // redundant or not yet a verdict.
+    const settledStampVerdict = group.find((r) => isStampLinked(r) && callSettled(r));
+    if (settledStampVerdict
+      && !sidLinked.some((r) => String(r.lead_id) === String(settledStampVerdict.lead_id))) {
+      deduped.push(settledStampVerdict);
+    } else if (sidLinked.length === 1) deduped.push(sidLinked[0]);
+    else if (sidLinked.length > 1) deduped.push(...sidLinked);
     else deduped.push(group[0]);
   }
   return deduped;

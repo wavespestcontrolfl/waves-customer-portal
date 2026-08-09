@@ -393,3 +393,29 @@ describe('cleared-joined tombstone (pre-push P1 r7)', () => {
     expect(shouldRetryLeadAttribution({ status: 'already_bridged', callLog: tombstoned })).toBe(true);
   });
 });
+
+describe('dedupeCrmCallRows — settled stamp beats multi-sid ambiguity (pre-push P1 r14)', () => {
+  const { dedupeCrmCallRows } = GoogleCallBridge._private;
+  const row = (id, leadId, leadCallSid, extra = {}) => ({
+    id, lead_id: leadId, lead_call_sid: leadCallSid, twilio_call_sid: 'CAcall', ...extra,
+  });
+
+  test('two sid-sharing leads plus a settled dissenting stamp collapse to the STAMPED lead', () => {
+    const settled = { metadata: JSON.stringify({ lead_id: 'lead-stamp' }), processing_token: null, processing_status: 'processed' };
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-a', 'CAcall', settled),
+      row('c1', 'lead-b', 'CAcall', settled),
+      row('c1', 'lead-stamp', null, settled),
+    ]);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0].lead_id).toBe('lead-stamp');
+  });
+
+  test('two sid-sharing leads with NO settled stamp keep their ambiguity (conservative no-bridge)', () => {
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-a', 'CAcall'),
+      row('c1', 'lead-b', 'CAcall'),
+    ]);
+    expect(deduped.map((r) => r.lead_id).sort()).toEqual(['lead-a', 'lead-b']);
+  });
+});

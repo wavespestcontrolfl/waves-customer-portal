@@ -527,6 +527,15 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
         .whereRaw('cl.twilio_call_sid = l.twilio_call_sid')
         .whereNotNull('cl.google_ads_call_resource_name');
     })
+    // Same claim check on the STAMP linkage arm (pre-push P1 r14): a
+    // phone-less reused lead links through call_log.metadata.lead_id, and
+    // its call being bridged is just as much a Google Ads claim as a
+    // sid-linked one — sweeping it organic would double-bucket the lead.
+    .whereNotExists(function stampedCallAlreadyBridged() {
+      this.select(1).from('call_log as clb')
+        .whereRaw("clb.metadata->>'lead_id' = l.id::text")
+        .whereNotNull('clb.google_ads_call_resource_name');
+    })
     // A lead whose linked call is not SETTLED-ATTRIBUTABLE must not be
     // swept into organic attribution. Rejection (spam/voicemail terminal,
     // retryable failure, durable no-attribution verdict) means the
