@@ -306,122 +306,110 @@ async function recordCallPpcAttribution({
  * (lead_id dedupe + first-touch, so a pre-existing web row is never
  * overwritten and re-runs are idempotent).
  */
+// Shared source-call provenance resolution — sid arm first (unambiguous +
+// settled-attributable), then the SINGLE settled stamped call, with the
+// chosen candidate locked FOR UPDATE and its verdict re-checked under that
+// lock. The caller MUST already hold the lead row lock (global leads →
+// call_log acquisition order). Returns { sourceCallId } — null when
+// linkage is ambiguous, permanently conservative — or { refusedReason }
+// when the candidate's locked verdict forbids attribution this pass.
+async function resolveSourceCallProvenanceLocked(trx, { leadId, twilioCallSid }) {
+  let candidateId = null;
+  let candidateArm = null;
+  let sidAmbiguous = false;
+  if (twilioCallSid) {
+    const sidRows = await trx('call_log')
+      .where('twilio_call_sid', twilioCallSid)
+      .orderBy('created_at', 'desc')
+      .limit(2)
+      .select('id');
+    if (sidRows.length === 1) {
+      candidateId = sidRows[0].id;
+      candidateArm = 'sid';
+    }
+    // >1 rows: ambiguous — provenance stays NULL, and the stamp fallback
+    // is skipped too (codex P1, PR #3303 r5): attaching a stamped call's
+    // id despite ambiguous sid ownership lets a later rejection/repoint
+    // retire or move another call's funnel history.
+    if (sidRows.length > 1) sidAmbiguous = true;
+  }
+  if (!candidateId && !sidAmbiguous) {
+    // Up to TWO settled stamped calls (codex P1, PR #3303 r5): multiple
+    // successor stamps on one reused lead are supported, and newest-wins
+    // would hand this funnel row to an arbitrary call. Exactly one
+    // candidate or provenance stays NULL.
+    const stampRows = await trx('call_log')
+      .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
+      .whereNull('processing_token')
+      .where('processing_status', 'processed')
+      .orderBy('created_at', 'desc')
+      .limit(2)
+      .select('id');
+    if (stampRows.length === 1) {
+      candidateId = stampRows[0].id;
+      candidateArm = 'stamp';
+    }
+  }
+  if (!candidateId) return { sourceCallId: null };
+  const locked = await trx('call_log')
+    .where({ id: candidateId })
+    .forUpdate()
+    .first('id', 'processing_token', 'processing_status', 'metadata');
+  const status = String(locked?.processing_status || '').toLowerCase();
+  const marker = (() => {
+    try {
+      const md = typeof locked?.metadata === 'string' ? JSON.parse(locked.metadata) : (locked?.metadata || {});
+      return md?.no_attribution === true;
+    } catch { return false; }
+  })();
+  const attributable = !!locked
+    && locked.processing_token == null
+    && (status === 'processed' || status === '')
+    && !marker;
+  if (!attributable) {
+    // Sid arm: the ORIGINATING call is rejected/unsettled — the retired
+    // funnel row must not resurrect. Stamp arm: the settled read raced a
+    // reprocess whose verdict is unknown — refuse this pass rather than
+    // mint a NULL-provenance row nothing could retire.
+    return { refusedReason: candidateArm === 'sid' ? 'call_rejected' : 'call_unsettled' };
+  }
+  return { sourceCallId: locked.id };
+}
+
 async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest = null } = {}) {
   if (!leadId || !customerId) return { recorded: false, reason: 'missing_ids' };
   try {
-    const lead = await db('leads')
-      .where({ id: leadId })
-      .first('lead_source_id', 'service_interest', 'created_at', 'twilio_call_sid');
-    if (!lead?.lead_source_id) return { recorded: false, reason: 'no_lead_source' };
-    const sourceRow = await db('lead_sources').where({ id: lead.lead_source_id }).first();
-    if (!sourceRow) return { recorded: false, reason: 'source_not_found' };
-    const attr = attributionForSourceType(sourceRow.source_type);
-    if (!attr) return { recorded: false, reason: 'no_channel' };
-    // Same exception as the call pipeline: the Google Ads call-bridge target
-    // number is SHARED (organic hub + paid call-extension), resolved by the
-    // bridge after the fact — never pre-attribute it or the row would lock
-    // before the bridge can mark the call paid. The unclaimed-bridge sweep
-    // below picks these up as organic after the claim window. Lazy require:
-    // google-call-bridge lazily requires this module (require cycle).
-    const { isBridgeTargetNumber } = require('./google-call-bridge');
-    if (isBridgeTargetNumber(sourceRow.twilio_phone_number)) {
-      return { recorded: false, reason: 'bridge_target' };
-    }
-    // Provenance for the row this backfill creates (codex P1, PR #3303
-    // r3): the lead's own sid-linked call, or the single call stamped to
-    // it — without it, a later force-reprocess that rejects or repoints
-    // the call could never retire or transfer this row. Best-effort: an
-    // unresolvable call leaves NULL (permanently conservative).
-    //
-    // The WHOLE resolution + funnel write runs in ONE transaction, lead
-    // row locked first (global leads → call_log order), and the chosen
-    // source call is locked FOR UPDATE with its verdict re-checked under
-    // the lock (codex P1, PR #3303 r5): a force-reprocess token-fences
-    // and locks the call row, so it either committed its rejection first
-    // (our locked re-check refuses) or commits after ours (our row
-    // carries source_call_id, so its retire pass finds and retires it).
-    // Without this, a rejection landing between the plain read and the
-    // insert recreated the row it had just retired, unretirable.
+    // The WHOLE flow — lead read, source resolution, provenance, funnel
+    // write — runs in ONE transaction with the lead row locked FIRST
+    // (global leads → call_log order), and EVERY lead field read under
+    // that lock (pre-push P1 r9): a pre-lock snapshot can go stale while
+    // waiting, stamping attribution with the wrong call or customer. The
+    // chosen source call is locked FOR UPDATE and its verdict re-checked
+    // under the lock (codex P1, PR #3303 r5) — see
+    // resolveSourceCallProvenanceLocked.
     return await db.transaction(async (trx) => {
-      await trx('leads').where({ id: leadId }).forUpdate().first('id');
-      // Sid FIRST — authoritative, same precedence every linkage consumer
-      // uses; the stamp arm only as a SETTLED-successful fallback (token
-      // NULL + status 'processed'), never newest-of-both (pre-push P1
-      // r15). The sid arm additionally requires (codex P1 ×2, PR #3303
-      // r4): UNAMBIGUOUS ownership — call_log.twilio_call_sid is
-      // non-unique, and silently picking the newest of several rows
-      // records provenance another row's rejection can never retire — and
-      // a SETTLED, ATTRIBUTABLE call: a lead claimed after its
-      // originating call was rejected (spam/voicemail/failed/marked) must
-      // not resurrect the retired funnel row at all.
-      let candidateId = null;
-      let candidateArm = null;
-      let sidAmbiguous = false;
-      if (lead.twilio_call_sid) {
-        const sidRows = await trx('call_log')
-          .where('twilio_call_sid', lead.twilio_call_sid)
-          .orderBy('created_at', 'desc')
-          .limit(2)
-          .select('id');
-        if (sidRows.length === 1) {
-          candidateId = sidRows[0].id;
-          candidateArm = 'sid';
-        }
-        // >1 rows: ambiguous — leave provenance NULL, permanently
-        // conservative (without refusing: the lead itself is legitimately
-        // claimed). The STAMP fallback is skipped too (codex P1, PR
-        // #3303 r5): attaching a stamped call's id despite ambiguous sid
-        // ownership lets a later rejection/repoint retire or move another
-        // call's funnel history.
-        if (sidRows.length > 1) sidAmbiguous = true;
+      const lead = await trx('leads')
+        .where({ id: leadId })
+        .forUpdate()
+        .first('id', 'lead_source_id', 'service_interest', 'created_at', 'twilio_call_sid');
+      if (!lead?.lead_source_id) return { recorded: false, reason: 'no_lead_source' };
+      const sourceRow = await trx('lead_sources').where({ id: lead.lead_source_id }).first();
+      if (!sourceRow) return { recorded: false, reason: 'source_not_found' };
+      const attr = attributionForSourceType(sourceRow.source_type);
+      if (!attr) return { recorded: false, reason: 'no_channel' };
+      // Same exception as the call pipeline: the Google Ads call-bridge
+      // target number is SHARED (organic hub + paid call-extension),
+      // resolved by the bridge after the fact — never pre-attribute it or
+      // the row would lock before the bridge can mark the call paid. The
+      // unclaimed-bridge sweep below picks these up as organic after the
+      // claim window. Lazy require: google-call-bridge lazily requires
+      // this module (require cycle).
+      const { isBridgeTargetNumber } = require('./google-call-bridge');
+      if (isBridgeTargetNumber(sourceRow.twilio_phone_number)) {
+        return { recorded: false, reason: 'bridge_target' };
       }
-      if (!candidateId && !sidAmbiguous) {
-        // Up to TWO settled stamped calls (codex P1, PR #3303 r5): the
-        // codebase explicitly supports multiple successor stamps on one
-        // reused lead, and silently taking the newest would hand this
-        // funnel row to an arbitrary call whose reprocess could then move
-        // or retire history that belongs to an earlier valid call. Same
-        // rule as the sid arm: exactly one candidate or provenance stays
-        // NULL.
-        const stampRows = await trx('call_log')
-          .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
-          .whereNull('processing_token')
-          .where('processing_status', 'processed')
-          .orderBy('created_at', 'desc')
-          .limit(2)
-          .select('id');
-        if (stampRows.length === 1) {
-          candidateId = stampRows[0].id;
-          candidateArm = 'stamp';
-        }
-      }
-      let sourceCallId = null;
-      if (candidateId) {
-        const locked = await trx('call_log')
-          .where({ id: candidateId })
-          .forUpdate()
-          .first('id', 'processing_token', 'processing_status', 'metadata');
-        const status = String(locked?.processing_status || '').toLowerCase();
-        const marker = (() => {
-          try {
-            const md = typeof locked?.metadata === 'string' ? JSON.parse(locked.metadata) : (locked?.metadata || {});
-            return md?.no_attribution === true;
-          } catch { return false; }
-        })();
-        const attributable = !!locked
-          && locked.processing_token == null
-          && (status === 'processed' || status === '')
-          && !marker;
-        if (!attributable) {
-          // Sid arm: the ORIGINATING call is rejected/unsettled — the
-          // retired funnel row must not resurrect (same refusal as
-          // before, now race-proof). Stamp arm: the settled read raced a
-          // reprocess whose verdict is still unknown — refuse this pass
-          // rather than mint a NULL-provenance row nothing could retire.
-          return { recorded: false, reason: candidateArm === 'sid' ? 'call_rejected' : 'call_unsettled' };
-        }
-        sourceCallId = locked.id;
-      }
+      const prov = await resolveSourceCallProvenanceLocked(trx, { leadId, twilioCallSid: lead.twilio_call_sid });
+      if (prov.refusedReason) return { recorded: false, reason: prov.refusedReason };
       return recordCallPpcAttribution({
         customerId,
         leadId,
@@ -429,7 +417,7 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
         isPaid: attr.isPaid,
         leadSourceDetail: sourceRow.name || 'inbound call',
         serviceInterest: serviceInterest || lead.service_interest || null,
-        sourceCallId,
+        sourceCallId: prov.sourceCallId,
         // Date by the actual call — the call pipeline mints the lead row at
         // call time, so created_at is the call date (not the day the
         // prospect finally clicked the text-back link).
@@ -555,7 +543,7 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
     })
     .orderBy('l.created_at')
     .limit(cap)
-    .select('l.id', 'l.customer_id', 'l.service_interest', 'l.first_contact_at', 'l.created_at', 'l.lead_source_id');
+    .select('l.id', 'l.customer_id', 'l.service_interest', 'l.first_contact_at', 'l.created_at', 'l.lead_source_id', 'l.twilio_call_sid');
 
   let recorded = 0;
   let skipped = 0;
@@ -563,15 +551,38 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
     const source = sourceById.get(lead.lead_source_id);
     const channel = attributionForSourceType(source?.source_type);
     if (!channel) { skipped += 1; continue; } // unmapped source_type → fail closed
-    const res = await recordCallPpcAttribution({
-      customerId: lead.customer_id,
-      leadId: lead.id,
-      leadSource: channel.leadSource,
-      leadSourceDetail: source.name || null,
-      leadDate: lead.first_contact_at || lead.created_at, // date by the call, not this run
-      serviceInterest: lead.service_interest || null,
-      isPaid: channel.isPaid, // main_site → false: unclaimed ⇒ organic
-    });
+    let res;
+    try {
+      // Same locking rules as backfillCallLeadAttribution (pre-push P1
+      // r9): lead locked first, the linked call's provenance resolved and
+      // verified under the call-row lock, and the funnel write riding the
+      // same transaction — so the sweep's rows carry source_call_id and a
+      // later force-reprocess that rejects or repoints the call can
+      // retire or transfer EXACTLY them, instead of leaving a
+      // NULL-provenance organic row standing indefinitely. Ambiguous
+      // linkage still records with NULL provenance (permanently
+      // conservative); a candidate whose locked verdict refuses skips
+      // this pass and waits for the next run.
+      res = await db.transaction(async (trx) => {
+        await trx('leads').where({ id: lead.id }).forUpdate().first('id');
+        const prov = await resolveSourceCallProvenanceLocked(trx, { leadId: lead.id, twilioCallSid: lead.twilio_call_sid });
+        if (prov.refusedReason) return { recorded: false, reason: prov.refusedReason };
+        return recordCallPpcAttribution({
+          customerId: lead.customer_id,
+          leadId: lead.id,
+          leadSource: channel.leadSource,
+          leadSourceDetail: source.name || null,
+          leadDate: lead.first_contact_at || lead.created_at, // date by the call, not this run
+          serviceInterest: lead.service_interest || null,
+          isPaid: channel.isPaid, // main_site → false: unclaimed ⇒ organic
+          sourceCallId: prov.sourceCallId,
+          dbc: trx,
+        });
+      });
+    } catch (sweepErr) {
+      logger.warn(`[call-attribution] bridge-unclaimed sweep failed for lead ${lead.id}: ${sweepErr.message}`);
+      res = { recorded: false, reason: 'error' };
+    }
     if (res.recorded) recorded += 1; else skipped += 1;
   }
   if (leads.length) {
