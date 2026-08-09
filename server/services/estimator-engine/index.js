@@ -144,35 +144,30 @@ async function reconcileExistingDraftLinks(existing, context) {
             if (sidLinked) return;
           }
         }
-        // A REPOINT never reuses the draft (codex P0, PR #3304 r8): its
-        // composed content — recipient, address, engine inputs, totals —
-        // was built from the OLD lead, and re-labeling the linkage could
-        // send the proposal to the wrong person or quote the corrected
-        // lead on the wrong property and price. The draft is INVALIDATED
-        // instead: old lead unlinked, linkage keys removed, a durable
-        // marker set — and existingDraftForCall excludes marked drafts,
-        // so the engine rebuilds from the corrected context. An UNLINK
-        // (no current lead) clears the linkage the same way without the
-        // marker semantics changing anything else.
+        // NO durable linkage change ever reuses the draft (codex P0, PR
+        // #3304 r8/r10): its composed content — recipient, address,
+        // engine inputs, totals — was built from the FORMER lead, and
+        // whether the linkage moved (repoint) or dissolved (established
+        // unlink), reusing it risks a wrong-customer proposal and PII
+        // disclosure. Both paths INVALIDATE: old lead unlinked, linkage
+        // keys removed, durable marker set, and the row ARCHIVED
+        // atomically — it drops out of admin's sendable surface, and
+        // every duplicate guard already excludes archived rows, so the
+        // stale draft cannot block its own rebuild
+        // (existingDraftForCall excludes marked drafts and the engine
+        // rebuilds from the corrected context).
         delete freshData.lead_id;
         delete freshData.lead_linkage;
-        if (currentLeadId) {
-          freshData.estimatorEngine = {
-            ...(freshData.estimatorEngine && typeof freshData.estimatorEngine === 'object' ? freshData.estimatorEngine : {}),
-            linkage_invalidated_at: new Date().toISOString(),
-            linkage_invalidated_from: freshLeadId || null,
-            linkage_invalidated_to: currentLeadId,
-          };
-        }
+        freshData.estimatorEngine = {
+          ...(freshData.estimatorEngine && typeof freshData.estimatorEngine === 'object' ? freshData.estimatorEngine : {}),
+          linkage_invalidated_at: new Date().toISOString(),
+          linkage_invalidated_from: freshLeadId || null,
+          linkage_invalidated_to: currentLeadId || null,
+        };
         await trx('estimates').where({ id: existing.id })
           .update({
             estimate_data: JSON.stringify(freshData),
-            // An INVALIDATED draft is ARCHIVED atomically (codex P0, PR
-            // #3304 r9): it still carries the old recipient/address/
-            // pricing, so it must drop out of admin's sendable surface,
-            // and every duplicate guard already excludes archived rows —
-            // otherwise the stale draft would block its own rebuild.
-            ...(currentLeadId ? { archived_at: new Date() } : {}),
+            archived_at: new Date(),
             updated_at: new Date(),
           });
         if (freshLeadId) {
@@ -181,7 +176,7 @@ async function reconcileExistingDraftLinks(existing, context) {
           await trx('leads').where({ id: freshLeadId, estimate_id: existing.id })
             .update({ estimate_id: null });
         }
-        relinked = { from: freshLeadId || 'none', to: currentLeadId || 'none', invalidated: !!currentLeadId };
+        relinked = { from: freshLeadId || 'none', to: currentLeadId || 'none', invalidated: true };
       });
       if (relinked) {
         logger.info(`[estimator-engine] ${relinked.invalidated ? 'invalidated' : 'unlinked'} existing draft ${existing.id} after call linkage change (${relinked.from} → ${relinked.to})`);
@@ -796,7 +791,44 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             });
             return result;
           }
-          if (proposalOutcome?.blocked) {
+          let commercialOutcome = proposalOutcome;
+          if (commercialOutcome?.blocked && !dryRun && context?.call?.id) {
+            // Same late-race handling as the residential path (codex P1,
+            // PR #3304 r10): a stale composer committing after the
+            // corrected retry's initial check blocks it here — reconcile
+            // the same-call blocker and retry ONCE when invalidated.
+            const lateExisting = await existingDraftForCall(context.call.id);
+            if (lateExisting && (await reconcileExistingDraftLinks(lateExisting, context)) === 'invalidated') {
+              commercialOutcome = await maybeBuildCommercialProposalDraft({
+                intent,
+                propertyFacts,
+                parcelView: effectiveSignals.parcelView,
+                propertyRecord: effectiveSignals.propertyRecord,
+                context,
+                origin,
+                model,
+                reasons,
+              });
+              if (commercialOutcome?.created) {
+                result.created = true;
+                result.estimateId = commercialOutcome.estimateId;
+                result.commercialProposal = true;
+                await notify({
+                  call: context.call,
+                  context,
+                  lane,
+                  quotePromised,
+                  threadKey,
+                  estimateId: commercialOutcome.estimateId,
+                  link: `/admin/estimates/${commercialOutcome.estimateId}/proposal`,
+                  title: S.proposalTitle,
+                  body: S.proposalBody(callerLabel(intent, context)),
+                });
+                return result;
+              }
+            }
+          }
+          if (commercialOutcome?.blocked) {
             // Mirror the created-draft blocked path below: an open estimate
             // already covers this prospect, and the generic red "send it
             // manually" bell would prompt the operator to build a duplicate.
