@@ -1,18 +1,14 @@
 # Treatment Animation Scope — Termite Foam, Flea, Cockroach
 
-**Date:** 2026-08-08 · **Status:** scope for owner sign-off. No code changes in this doc.
+**Date:** 2026-08-08, revised 2026-08-09 · **Status:** scope for owner sign-off. No code changes in this doc.
 
 **Visual mock:** https://claude.ai/code/artifact/f8082d1d-2044-4c32-94cd-20a10cabddc6 — live
-animations for both foam options beside the two that already ship, rendered with the real
-engine algorithms over a synthetic aerial.
+animations for the satellite and cutaway options beside the two that already ship, rendered
+with the real engine algorithms over a synthetic aerial.
 
-The ask: what do we do today with the traced spray and the lawn on service reports,
-and what would an animation look like for termite foam, flea, and cockroach.
-
-Short version: **two of the three are already built and sitting behind a dark gate.**
-Flea's geometry is already corrected to the lawn treatment, and the roach family is
-already split exterior-vs-interior. **Termite foam is the only genuinely new
-animation**, and it needs a geometry we have never built: points, not a path.
+> **Direction as of 2026-08-09 (owner):** mark up a **photo of the area actually treated**,
+> the way bait station pins are marked today. This supersedes both foam options in §6 — see
+> §5, which is now the recommended build.
 
 ---
 
@@ -20,220 +16,225 @@ animation**, and it needs a geometry we have never built: points, not a path.
 
 ### Rail A — Traced Treatment Zone (path geometry)
 
-The one the owner means by "the tray spray and the lawn."
-
-**Capture** — `client/src/components/tech/TechTreatmentZoneModal.jsx` driving
-`client/src/components/tech/treatmentZoneSpray.js` (deliberately React-free canvas +
-`requestAnimationFrame`, so the same engine could back a server-side renderer later).
-The tech traces on a Google Static Maps satellite tile (zoom 21→19, 1280×960 physical
-px, optional rotate-to-square-the-home alignment).
+**Capture** — `TechTreatmentZoneModal.jsx` driving `treatmentZoneSpray.js` (deliberately
+React-free canvas + `requestAnimationFrame`). The tech traces on a Google Static Maps
+satellite tile (zoom 21→19, 1280×960, optional rotate-to-square alignment).
 
 Four persisted capture modes:
 
 | `capture_mode` | Geometry | Animation |
 |---|---|---|
-| `perimeter` | open or closed path | spray-mist band stamped along the line, drifting puffs, Waves mascot riding the head as the emitter, then the whole band breathes |
-| `interior` | closed footprint (tech ticks "Interior spray too") | perimeter band **plus** the footprint flooded with a soft brand-blue wash |
-| `lawn_highlight` | closed loop | per-pixel turf detection inside the loop (region-grown from confidently-green seeds), luminous blue highlight, sweep-reveal with a shimmer on the front edge, then breathes |
-| `lawn` | closed loop | fallback when the imagery isn't pixel-readable: clean 3-stroke outline draws itself in, then pulses |
+| `perimeter` | open or closed path | spray-mist band stamped along the line, drifting puffs, mascot riding the head, then the band breathes |
+| `interior` | closed footprint | perimeter band **plus** the footprint flooded with a brand-blue wash |
+| `lawn_highlight` | closed loop | per-pixel turf detection inside the loop, luminous highlight, sweep reveal, then breathes |
+| `lawn` | closed loop | fallback when imagery isn't pixel-readable: 3-stroke outline draws in, then pulses |
 
-**Persistence** — `treatment_zone_maps`: `snapshot_s3_key` (satellite + settled
-animation baked in), `mask_s3_key` (the transparent highlight layer, lawn only),
-`path_points` (px **and** lat/lng), `closed_loop`, `linear_ft`, `capture_mode`.
+**Persistence** — `treatment_zone_maps`: `snapshot_s3_key`, `mask_s3_key`, `path_points`
+(px **and** lat/lng), `closed_loop`, `linear_ft`, `capture_mode`.
 
-**Report replay** — `client/src/components/report/TracedTreatmentZoneMap.jsx`. Note
-this is a **separate SVG/CSS reimplementation** of the same story, not the canvas
-engine. It mounts only after IntersectionObserver fires on a motion-tolerant screen,
-so PDFs and reduced-motion visitors keep the baked still. Rendered from
-`ReportViewPage`, `PestReportV2`, and `PestReportV2Section`.
+**Report replay** — `TracedTreatmentZoneMap.jsx`, a separate SVG/CSS reimplementation. Mounts
+only after IntersectionObserver fires on a motion-tolerant screen, so PDFs and reduced-motion
+visitors keep the baked still.
 
-**The registry** — `server/services/service-report/trace-eligibility.js`. One module
-decides `{ eligible, variant, captionKey, reason }` for every lane, keyed on typed
-`findingsType` first and catalog `serviceKey` second. Today it knows exactly **two
-variants**: `spray` and `outline`; two captions: `sprayPerimeter` and `lawnCoverage`.
-Unrecognized services are ineligible by design. It is behind
-**`GATE_TRACE_ELIGIBILITY`, currently dark.**
+**The registry** — `trace-eligibility.js` decides `{ eligible, variant, captionKey, reason }`
+per lane, keyed on typed `findingsType` first and catalog `serviceKey` second. Two variants
+today: `spray` and `outline`. Behind **`GATE_TRACE_ELIGIBILITY`, currently dark.**
 
 ### Rail B — Station / trap map (point geometry)
 
-`client/src/components/StationMapCard.jsx`. Numbered pins over the live satellite
-image with staggered pop-in, a snap flash ring, and a rat scurry on captures. Termite
-bait, rodent bait, and trapping programs. No tech tracing — pins come from the station
-registry. **This is our only existing precedent for animating points rather than a
-path**, and it's the closest template for foam.
+`StationMapCard.jsx`. Numbered pins over the live satellite image with staggered pop-in, a
+snap flash ring, and a rat scurry on captures. Server contract in
+`termite-stations.js → buildStationMapReportContext`, returning `{ available, reason }` and
+pins shaped `{ id, number, label, cx, cy, status }` in **image space**.
+
+Two hard rules worth carrying forward: pins are **all-or-nothing** (a single dropped pin
+suppresses the whole map rather than publishing a summary that contradicts the findings), and
+image drift is actively resolved (`resolveZoneRowsImageDrift`) because Google re-shoots the
+satellite tile under saved pins — a stale mark bails out with `marks_stale`.
 
 ### Rail C — Visit recap MP4 (Remotion)
 
-`recap-pipeline.js` → `video/VisitRecap.jsx`. A 28-second composition rendered in an
-isolated child process and queued/stored like the PDF. Driven off the same
-`buildPestReportV2` payload as the report. Phase 1 is **pest service line only**.
-
-**The architectural fact that governs everything below:** Rail A understands paths.
-Rail B understands points. Nothing we have understands rooms or wall voids.
+`recap-pipeline.js` → `video/VisitRecap.jsx`. A 28-second composition rendered in an isolated
+child process, queued and stored like the PDF. Pest service line only.
 
 ---
 
-## 2. Where the three asks actually stand
+## 2. Where the three asks stand
 
-Two behaviors matter per lane: what renders **today** (gate off — the legacy path
-suppresses *only* bed bug and rodent trapping), and what renders **after the flip**.
+Two behaviors matter per lane: what renders **today** (gate off — the legacy path suppresses
+*only* bed bug and rodent trapping), and what renders **after the flip**.
 
 | Lane | Registry entry today | Renders now (gate off) | After the flip |
 |---|---|---|---|
-| `flea` | eligible · `outline` · `lawnCoverage` · `requiresExteriorChip` | **spray band** — the legacy client fallback is `serviceLine === 'lawn' ? outline : spray` | lawn highlight / outline, and only with the exterior chip recorded |
-| `cockroach` | eligible · `spray` · `requiresExteriorChip` | spray band | spray band, conditional on the recorded exterior chip |
+| `flea` | eligible · `outline` · `lawnCoverage` · `requiresExteriorChip` | **spray band** | lawn highlight, with the exterior chip recorded |
+| `cockroach` | eligible · `spray` · `requiresExteriorChip` | spray band | spray band, conditional on the exterior chip |
 | `palmetto_roach_knockdown` | eligible · `spray` · `requiresExteriorChip` | spray band | same, conditional |
-| `german_roach_knockdown` | **ineligible** · `interior_only_lane` | **spray band** — a false exterior claim on an interior bait/IGR visit | suppressed |
-| `termite_treatment` | eligible · `spray` · `requiresPerimeterMethod` | spray band | spray only when the method is Liquid perimeter or Trenching |
-| `termite_spot_treatment` (the drill-and-foam catalog line) | **ineligible** · `localized_treatment_lane` | **spray band** | suppressed |
+| `german_roach_knockdown` | **ineligible** · `interior_only_lane` | **spray band** — a false exterior claim | suppressed |
+| `termite_treatment` | eligible · `spray` · `requiresPerimeterMethod` | spray band | spray only on perimeter methods |
+| `termite_spot_treatment` (drill-and-foam) | **ineligible** · `localized_treatment_lane` | **spray band** | suppressed |
 
-Read the bold cells together: the gate flip is not just a feature toggle. It is
-currently the fix for two lanes that publish a perimeter spray claim the visit did
-not perform.
-
----
-
-## 3. Flea — no new animation needed
-
-The registry already rules flea as `outline` / `lawnCoverage`, on the reasoning that
-the live `flea_tick` service is a full-yard broadcast with interior as the add-on, and
-the form records "Lawn treatment." The treated area is the yard, not the building line.
-
-**So flea's animation is the lawn highlight we already ship.** It arrives with the
-gate flip, not with new code.
-
-- **New animation work: none.**
-- **Work required:** verification. Confirm the exterior chip the condition keys on
-  matches the flea schema; confirm the tech-side capture button copy ("Outline the
-  treated lawn") reads right on a flea job; run the `ui-verify` pass on a real
-  rendered flea report.
-
-**Owner question:** an interior-only flea visit (pet areas, no yard work) currently
-gets **no map at all** rather than an interior render. Confirm that's what you want.
+Two lanes currently publish a perimeter spray claim the visit did not perform. The gate flip
+is the fix.
 
 ---
 
-## 4. Cockroach — the exterior is done; the interior is the open question
+## 3. Flea and cockroach — no new animation
 
-Exterior and palmetto roach already animate as the spray band; the flip only adds the
-honesty condition so a pure-interior bait visit stops publishing a perimeter.
+**Owner ruling 2026-08-09: there is no visual for the residential side of flea or cockroach
+treatments.** Interior flea work and interior roach work (German knockdown's bait/IGR lane,
+harborage, monitors) get no map — nothing outdoors happened, and a footprint wash over a roof
+would read as an exterior claim. This settles the "rooms-treated card" question from the
+earlier draft: **not building it.**
 
-German knockdown is deliberately ineligible — it's an interior bait/IGR program
-(rooms, harborage, prep) with no exterior work in its treatment choices at all. If we
-want *something* animated there, satellite is the wrong canvas: there is nothing
-outdoors to show.
+*Open:* whether that ruling also retires flea's **lawn** highlight on full-yard broadcast
+visits, or applies only to the interior portion. See §8 Q1 — it decides whether `flea` stays
+`outline` or becomes ineligible outright.
 
-Three options, in order of what I'd recommend:
-
-1. **Nothing (recommended for now).** The lane's story is rooms, monitors, and the
-   10–14 day follow-up — none of it spatial from above.
-2. **Rooms-treated motion card.** No geometry, no imagery, no capture UI. The lane
-   already collects `rooms_treated`, `primary_harborage`, and `monitors_placed`; a
-   small animated card can tell that story truthfully. New component, but nothing
-   touches the map stack.
-3. **Reuse the `interior` capture mode** — let German knockdown capture a
-   footprint-only trace and render just the wash. Cheapest in code (the mode already
-   exists and bakes) but weakest and riskiest: a blue wash over a roof is close to the
-   same false-exterior reading the lane was made ineligible for.
-
-Either way this is its own scope, not a rider on foam.
+The roach family's exterior/palmetto lanes keep the spray band they already have; the flip
+just adds the exterior-chip condition so a pure-interior visit stops publishing a perimeter.
 
 ---
 
-## 5. Termite foam — the real new build
+## 4. Termite foam — the trigger question is unchanged
 
-**What foam physically is:** drill points into wall voids, block cells, or the slab,
-with foam expanding to fill the void. The geometry is **points with depth** — not a
-line, not an area. That is exactly why the registry files it as
-`localized_treatment_lane`.
+**There is no "Foam" value in the termite `treatment_method` select.** Options are Spot
+treatment · Liquid perimeter · Trenching · Bait station setup · Cartridge replacement · Wood
+treatment · Other. Drill-and-foam records as "Spot treatment." Any foam-keyed render needs a
+truthful trigger, and that is a business-logic call: add "Foam" to the method select, key on
+the catalog service key, or infer from products applied. **This blocks the §5 build too.**
 
-### Blocker to settle first
+---
 
-**There is no "Foam" value in the termite `treatment_method` select.** The options are
-Spot treatment · Liquid perimeter · Trenching · Bait station setup · Cartridge
-replacement · Wood treatment · Other. Drill-and-foam completions currently record as
-"Spot treatment." Any foam-keyed render needs a truthful trigger, and picking one is a
-business-logic call, not mine to guess (rule 3). Options: add "Foam" to the method
-select, key on the catalog service key, or infer from products applied.
+## 5. Recommended build — mark the treated spots on a photo
 
-### Proposal — Rail A′: treatment points
+The tech photographs the area they actually spot-treated, then taps the treated locations on
+that photo. The report renders the photo with the same numbered-pin vocabulary customers
+already see on the bait station map.
 
-- **Capture:** a new `points` mode in `TechTreatmentZoneModal` where the tech *taps*
-  drill locations instead of tracing. Reuses the map load, zoom, alignment, and
-  px→lat/lng math verbatim. Reuses the `path_points` column as-is (points already
-  store both px and lat/lng); `closed_loop = false`, `linear_ft = null`.
-- **Engine:** a new bloom mode in `treatmentZoneSpray.js`. Per point, a bright core
-  expanding into a soft irregular blob that **settles and holds** — foam expands into
-  a void, it doesn't drift like mist. Staggered by index the way the station pins
-  already stagger. Must bake a settled frame into the snapshot for PDFs.
-- **Report:** a new `points` variant + `foamPoints` caption key in the registry, and a
-  render branch in `TracedTreatmentZoneMap` — SVG circles with a scale/opacity
-  keyframe and per-index `animation-delay`, the same pattern `StationMapCard` uses.
-- **Registry:** `termite_spot_treatment` becomes eligible with `variant: 'points'`,
-  conditional on whatever we settle as the foam trigger. `termite_treatment` keeps
-  `requiresPerimeterMethod` for its spray variant and gains a foam condition for the
-  points variant.
+### Why this beats both foam options
 
-### The risk worth naming before we build
+- **The photo is the evidence.** A satellite view can only put a dot on the roof above a wall
+  void; the cutaway diagram is honest but **identical for every customer** — an explainer, not
+  a record of their visit. A marked photo is *their* home, *this* visit.
+- **No geometry problem.** No satellite tile, no lat/lng, no alignment, no perimeter-vs-area
+  variant to reason about. It works indoors, in a crawlspace, on a soffit, inside a garage.
+- **Marks can never go stale.** The station map needs drift resolution and a `marks_stale`
+  bail because Google re-shoots the imagery under saved pins. A photo is immutable — that
+  entire failure class disappears.
+- **It covers far more than foam.** Every lane the registry rules ineligible *for good reason*
+  is a lane with no honest visual today, and most of them are localized work a photo shows
+  perfectly.
 
-A satellite photo cannot show a wall void. The points will sit on a roof or wall line
-seen from above, and the caption has to carry the honesty — "foam was injected at the
-marked points," never "treated area." **Worth building a static mock and looking at it
-before committing to the capture UI.** It's also fair to ask whether a photo of the
-actual drill points tells the story better than a map does.
+### The lanes it unlocks
 
-### Rough effort
+The registry's existing `reason` values become a routing table — this is the neat part, since
+the classification work is already done:
+
+| Current `reason` | Lanes | Gets |
+|---|---|---|
+| `localized_treatment_lane` | `termite_spot_treatment` (drill-and-foam, wood treatment), `bee_wasp_removal`, `mud_dauber_removal` | **marked photo** |
+| `exclusion_lane` | `rodent_exclusion` — sealed entry points photograph extremely well | **marked photo** |
+| `injection_lane` | `palm_injection` | **marked photo** |
+| `bait_station_lane` / `trap_lane` | termite + rodent stations, trapping | station map (already shipping) |
+| `interior_only_lane` | bed bug, German knockdown | **nothing** — per §3 ruling |
+| `inspection_lane` | all inspections | nothing — no treatment happened |
+
+### What already exists to build on
+
+- **`service_photos`** — carries `caption`, `sort_order`, `zone_id`, `finding_id`,
+  `gps_lat`/`gps_lng`, `state_badge`, `thumbnail_key`, `qa_status`, AI tags, and pre-completion
+  staging against the scheduled visit.
+- **`TechServicePhotosModal`** — already uploads with a type and caption.
+- **`StationMapCard`** — numbered pins, staggered pop-in, flash ring, legend, summary line,
+  program-scoped copy. The pin language to reuse verbatim.
+
+### What's new
+
+1. **Marks storage.** `service_photo_marks`: `{ id, service_photo_id, n, x, y, kind, label }`.
+   Coordinates **normalized 0..1** against the stored image, not pixels — phone photos vary by
+   device and orientation.
+
+   > **Constraint: never burn marks into the image.** `service_photos` carries a
+   > tamper-evident hash chain (`hash_sha256` / `prev_hash_sha256`, validated on the report
+   > path). Re-encoding a photo to bake pins in would break that chain. Marks stay metadata and
+   > render as an overlay — which also keeps them editable and keeps the original photo intact.
+
+2. **Tech marking UI.** After upload, tap to drop marks. Far simpler than the zone modal — no
+   map, no lat/lng, no alignment, no turf detection. Pinch-zoom for precision on small targets.
+
+3. **Report renderer.** A `MarkedPhotoCard` sibling to `StationMapCard`, sharing the pin
+   vocabulary: numbered pins, staggered pop-in, legend, and a settled still for PDFs and
+   reduced-motion visitors.
+
+4. **Registry routing.** `trace-eligibility.js` gains a third answer — `photo` alongside
+   `spray` and `outline` — so one module still decides what a lane may publish. The coverage
+   contract test extends to it.
+
+5. **Copy rules.** A mark states where treatment was applied on this visit. Never an absence
+   or elimination claim; the same banned-copy rules the station card follows.
+
+### Effort
 
 | Piece | Size |
 |---|---|
-| Foam trigger field + registry condition | S |
-| `points` capture mode in the modal | M |
-| Engine bloom mode + baked settled frame | M |
-| Report SVG branch + caption | S |
-| Registry rules + coverage contract test | S |
-| Fixtures / goldens + `ui-verify` pass | M |
+| Marks table + write route | S |
+| Tech marking UI | M |
+| Report card + pin animation | M |
+| Registry routing + contract test | S |
+| Fixtures / goldens + `ui-verify` | M |
 
-Roughly two PRs, both behind the same dark gate.
+Roughly two PRs, behind a dark gate.
 
 ---
 
-## 6. Rules any of this has to respect
+## 6. Superseded: the two foam-specific options
 
-- **Every render decision goes through `trace-eligibility.js`.** That module exists
-  precisely because eight render sites once each keyed on display-name strings
-  independently. Do not add a ninth switch.
-- **Presentation must match the captured bitmap.** `report-data.js` already forces a
-  lawn-family capture to render as `outline` even when the winning verdict came from a
-  spray add-on line — the saved bitmap cannot honestly wear the other animation's
-  copy. A `points` capture needs the same clamp.
+Both are in the mock linked at the top, and both are **not recommended** now that §5 covers
+the same ground better. Kept here so the reasoning isn't relitigated.
+
+- **Option A — drill points on the aerial.** Technically fine; the blooms read convincingly as
+  foam. But the points sit on a roofline and ask the customer to take on faith what happened
+  inside the wall. Superseded by a photo of the actual drilled area.
+- **Option B — block-wall cutaway.** Honest and genuinely explains *why we drilled*, but it's
+  a generic illustration — the same picture for every customer. Possible future use as a
+  static explainer beside a marked photo; not a record of a visit.
+
+---
+
+## 7. Rules any of this has to respect
+
+- **Every render decision goes through `trace-eligibility.js`.** That module exists because
+  eight render sites once each keyed on display-name strings independently. Don't add a ninth.
+- **Presentation must match what was captured** — `report-data.js` already forces a lawn-family
+  capture to render as `outline` regardless of the winning verdict. Photo marks need the same
+  clamp: marks belong to one photo and must never render over a different one.
+- **All-or-nothing, like the station pins** — a partial set of marks publishes a count that
+  contradicts the record.
 - **Legacy rows are suppressed at render, never deleted or relabeled.**
-- **Every new mode needs a baked settled frame** — PDFs and reduced-motion visitors
-  must get a truthful still, not a blank or an arbitrary animation frame.
-- **Banned customer copy applies to every new caption** — observation-scoped wording,
-  no absence or elimination claims.
-- **`ui-verify` before review** on anything that touches the rendered report.
+- **Every mode needs a truthful still** for PDFs and reduced-motion viewers.
+- **`ui-verify` before review** on anything touching the rendered report.
 
 ---
 
-## 7. Recommended sequence
+## 8. Open questions
 
-1. **Flip `GATE_TRACE_ELIGIBILITY`.** Delivers flea's correct lawn geometry, adds the
-   exterior condition to the roach family, and stops two lanes from publishing spray
-   claims they can't support. No new code — but it changes several lanes at once, so
-   it's a package decision.
-2. **Settle the foam trigger** and look at a static mock of the points render.
-3. **Build Rail A′** if the mock reads right.
-4. **Interior roach story** separately, if at all.
+1. **Does the "no visual for residential flea/cockroach" ruling retire flea's lawn highlight
+   too**, or apply only to the interior portion? Decides whether `flea` stays `outline` or
+   becomes ineligible.
+2. **How does a foam visit identify itself?** Add "Foam" to the termite method select, key on
+   the catalog line, or read products applied. Blocks the marked-photo build for foam.
+3. **Do marks carry a type** (drilled & foamed / wood treated / nest removed / entry sealed)?
+   A typed mark gives an honest legend — and drawing the vocabulary from the completion form's
+   recorded method values keeps it from drifting from what was actually done. Recommended.
+4. **Are marks required or optional** on the lanes that support them?
+5. **Flip `GATE_TRACE_ELIGIBILITY` as a package?** It fixes flea's geometry and stops two lanes
+   over-claiming, but moves several lanes in one release.
 
 ---
 
-## 8. Open questions for the owner
+## 9. Sequence
 
-1. **Foam trigger** — add "Foam" to the termite method select, key on the catalog
-   service key, or infer from products?
-2. **Does a drill-point map earn its place** on a customer report, or is a photo of
-   the drill points the better artifact?
-3. **Interior roach (German knockdown)** — build the rooms card, or leave it alone?
-4. **Flea interior-only visits** — no map at all is the current behavior. Confirm.
-5. **Is the gate flip ready to ship as a package**, given it changes flea, the roach
-   family, termite methods, and several other lanes in one move?
+1. Answer Q1 and Q2 — both block code.
+2. Flip the eligibility gate (no new code; fixes the two over-claiming lanes).
+3. Build the marked-photo rail; foam is its first lane, exclusion and nest removal follow.
+4. Revisit the cutaway only if a static "why we drill" explainer is wanted later.
