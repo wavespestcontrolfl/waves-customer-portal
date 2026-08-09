@@ -432,9 +432,16 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       stories = positiveNumber(stories, p.stories, record.stories);
       propertyType = p.propertyType || record.propertyType || propertyType;
       yearBuilt = yearBuilt || p.yearBuilt || record.yearBuilt || null;
-      constructionMaterial = constructionMaterial || p.constructionMaterial || record.constructionMaterial || null;
-      foundationType = foundationType || p.foundationType || record.foundationType || null;
-      roofType = roofType || p.roofType || record.roofType || null;
+      // Structural facts move pest, termite/WDO and rodent prices. The
+      // county RECORD is authoritative and always applies; the merged
+      // enriched value may have been filled from vision when county data was
+      // absent, so it is adopted only when the vision read is trusted.
+      const visionFactsOk = lookupFeaturesAreTrustworthy(p);
+      constructionMaterial = constructionMaterial || record.constructionMaterial
+        || (visionFactsOk ? p.constructionMaterial : null) || null;
+      foundationType = foundationType || record.foundationType
+        || (visionFactsOk ? p.foundationType : null) || null;
+      roofType = roofType || record.roofType || (visionFactsOk ? p.roofType : null) || null;
       // p.estimatedPalmCount is deliberately NOT adopted. This is a
       // customer-facing quote route, and palmCount feeds palm-INJECTION
       // pricing through missingPropertyFor + resolvePalmCount — an AI count

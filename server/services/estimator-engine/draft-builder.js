@@ -97,7 +97,7 @@ function knownEnrichedValue(value) {
 
 // Trust predicate lives in one place — the customer-facing pricing
 // assistant applies the same rule (services/lookup-confidence.js).
-const { lookupBedAreaIsTrustworthy } = require('../lookup-confidence');
+const { lookupBedAreaIsTrustworthy, hasGlobalVerifyFlag } = require('../lookup-confidence');
 
 function lookupFeatureModifiers(enriched) {
   if (!enriched) return null;
@@ -154,6 +154,14 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
   // Only then may the profile's saved turf measurement / property type
   // steer pricing.
   const isCommercial = intent.is_commercial === true;
+  // A global verification failure ('address' — the geocoder snapped to a
+  // different premise; 'all' — no property record at all) invalidates the
+  // WHOLE enriched payload, not one field of it. Dropping it here is the
+  // only way to be sure another parcel's features, tree density,
+  // construction/roof/foundation facts and mosquito multiplier can't steer
+  // an auto-generated draft. The arbitrated propertyFacts (which carry their
+  // own per-field source provenance) are untouched.
+  if (hasGlobalVerifyFlag(lookupEnriched)) lookupEnriched = null;
   const featureModifiers = isCommercial ? null : lookupFeatureModifiers(lookupEnriched);
   const homeSqFt = positive(propertyFacts?.home?.value);
   const lotSqFt = positive(propertyFacts?.lot?.value);

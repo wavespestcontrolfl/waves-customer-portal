@@ -1292,3 +1292,29 @@ describe('global lookup verification failures disqualify every derived input', (
     expect(lookupFeaturesAreTrustworthy(enriched)).toBe(true);
   });
 });
+
+describe('a global verification failure drops the whole enriched payload', () => {
+  test("an 'address' flag stops another parcel's data steering the draft", () => {
+    const facts = {
+      home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+      lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    };
+    const enriched = {
+      estimatedBedAreaSf: 5000, aiConfidence: 95, pool: 'YES', poolCage: 'YES',
+      treeDensity: 'HEAVY', yearBuilt: 1965, constructionMaterial: 'WOOD_FRAME', roofType: 'TILE',
+      modifiers: { mosquitoWaterMult: 1.75 },
+      fieldVerifyFlags: [{ field: 'address', reason: 'snapped premise', priority: 'HIGH' }],
+    };
+    const input = buildEngineInput({ intent: baseIntent(), propertyFacts: facts, context: {}, lookupEnriched: enriched });
+    expect(input.estimatedBedAreaSf).toBeUndefined();
+    expect(input.features).toBeUndefined();
+    expect(input.treeDensity).toBeUndefined();
+    expect(input.yearBuilt).toBeUndefined();
+    expect(input.constructionMaterial).toBeUndefined();
+    expect(input.roofType).toBeUndefined();
+    expect(input.modifierOverrides).toBeUndefined();
+    // The arbitrated facts carry their own per-field provenance and stand.
+    expect(input.homeSqFt).toBe(2000);
+    expect(input.lotSqFt).toBe(9000);
+  });
+});
