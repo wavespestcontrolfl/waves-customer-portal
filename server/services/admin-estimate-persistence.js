@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
 const {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
@@ -272,30 +272,6 @@ function callReprocessInFlight(callRow, nowMs = Date.now()) {
 // is unchanged. Creators call this inside their serialized insert with the
 // call row LOCKED, so a rejection either committed first (seen here) or
 // waits and its own invalidation pass catches what landed.
-// The DURABLE call-side verdict as seen from an ESTIMATE row: when a
-// quarantine could not write its estimate-side marker, the block lives on
-// the call, and the public surfaces — which only ever read the estimate —
-// would keep serving a wrong-identity or rejected-call estimate through
-// its bearer token until the scheduler drained the queue (codex P1, PR
-// #3304 GH r9). Returns the blocking reason, or null. Cheap: one indexed
-// lookup, and only for engine-drafted rows.
-async function callSideBlockForEstimateData(dbc, data) {
-  const callLogId = data?.estimatorEngine?.callLogId || null;
-  if (!callLogId) return null;
-  try {
-    const row = await dbc('call_log').where({ id: callLogId }).first('metadata');
-    if (!row) return null;
-    const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-    if (md?.estimator_draft_block?.reason) return String(md.estimator_draft_block.reason);
-    if (md?.estimator_quarantine_pending?.reason) return String(md.estimator_quarantine_pending.reason);
-    return null;
-  } catch {
-    // A lookup failure must not take the public page down; the
-    // estimate-side markers remain the primary gate.
-    return null;
-  }
-}
-
 async function callRejectedForDrafting(dbc, callLogId, { lockCallRow = false, ignoreQueuedMarkers = false } = {}) {
   if (!callLogId) return null;
   const q = dbc('call_log').where({ id: callLogId });
@@ -330,7 +306,13 @@ async function callRejectedForDrafting(dbc, callLogId, { lockCallRow = false, ig
 async function staleCallLinkageReason(dbc, data, { lockCallRow = false, ownerProcToken = null } = {}) {
   const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
   const draftCallLogId = data?.estimatorEngine?.callLogId || null;
-  if (!['sid', 'stamp'].includes(data?.lead_linkage) || !linkedLeadId || !draftCallLogId) return null;
+  // The CALL-SIDE verdict applies to EVERY engine draft (codex P0, PR
+  // #3304 GH r9b) — legacy rows and lead-less drafts carry only a
+  // callLogId, and returning early on the missing durable linkage skipped
+  // the quarantine markers entirely, leaving those drafts sendable. Only
+  // the linkage COMPARISON below needs lead_id + lead_linkage.
+  if (!draftCallLogId) return null;
+  const durableLinkage = ['sid', 'stamp'].includes(data?.lead_linkage) && !!linkedLeadId;
   // lockCallRow (codex P1, PR #3304 GH r6): inside a money-bearing
   // transaction (accept/decline) the call row is locked FOR UPDATE and
   // HELD through the terminal write — a processor correction (which
@@ -359,20 +341,24 @@ async function staleCallLinkageReason(dbc, data, { lockCallRow = false, ownerPro
   // before finalization would otherwise have its own legitimate draft
   // blocked — with no automatic retry, since the call finalizes as
   // processed. A caller that owns the claim passes its token here.
-  const ownedByCaller = !!ownerProcToken && callRow.processing_token === ownerProcToken;
-  if (!ownedByCaller && callReprocessInFlight(callRow)) {
-    return 'call_reprocessing_before_delivery';
-  }
-  // CALL-SIDE verdicts fail the send/accept/decline revalidation as well
-  // (codex P0, PR #3304 GH r8f): when a quarantine could not write its
-  // estimate marker it queues on the CALL, and these paths inspect the
-  // estimate only — so the known wrong-identity draft stayed sendable
-  // until a scheduler sweep succeeded.
+  // CALL-SIDE verdicts FIRST, and for every engine draft (codex P0, PR
+  // #3304 GH r8f/r9b): when a quarantine could not write its estimate
+  // marker it queues on the CALL, and these paths inspect the estimate
+  // only — so the known wrong-identity draft stayed sendable until a
+  // scheduler sweep succeeded. Legacy and lead-less drafts carry only a
+  // callLogId, so this must precede the durable-linkage bail.
   try {
     const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
     if (md?.estimator_draft_block?.reason) return 'call_draft_block';
     if (md?.estimator_quarantine_pending?.reason) return 'call_quarantine_pending';
   } catch { /* unparseable metadata: fall through to the linkage compare */ }
+  // Everything below is the LINKAGE comparison, which needs a durable
+  // linkage to compare against.
+  if (!durableLinkage) return null;
+  const ownedByCaller = !!ownerProcToken && callRow.processing_token === ownerProcToken;
+  if (!ownedByCaller && callReprocessInFlight(callRow)) {
+    return 'call_reprocessing_before_delivery';
+  }
   const liveStamp = (() => {
     try {
       const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});

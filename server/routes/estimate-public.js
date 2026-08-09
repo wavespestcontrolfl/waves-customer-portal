@@ -7,8 +7,7 @@ const db = require('../models/db');
 // TTL-aware "no LIVE delivery claim" predicate + marker fragments,
 // shared with the admin routes so every whole-blob write applies the same
 // rule (dependency-free module: partial test mocks can't blank a guard).
-const { DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
-const { callSideBlockForEstimateData } = require('../services/admin-estimate-persistence');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -386,6 +385,12 @@ function verifyEstimateAskToken(req, estimate) {
 function isEstimateAskAnswerable(estimate = {}, now = new Date()) {
   if (!estimate) return false;
   if (estimate.archived_at) return false;
+  // A previously issued ask token must die with the estimate (codex P0,
+  // PR #3304 GH r9b): while a live delivery claim defers invalidation into
+  // invalidation_pending_at the row is not yet archived, and this endpoint
+  // would keep answering questions about — and disclosing — the wrong
+  // lead's estimate content.
+  if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   if (estimate.expires_at && new Date(estimate.expires_at) < now) return false;
   return true;
@@ -8412,6 +8417,14 @@ function commercialAcceptDepositExempt({ isCommercialAccept = false, siteConfirm
 router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     await reconcileFrozenMembershipSnapshot(estimate);
     // Fresh ACCEPT of a persisted bermuda-suppression estimate requires the
@@ -11357,6 +11370,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
 router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
     // Reconcile before this handler recomputes + persists, so a stale
@@ -11700,6 +11721,14 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateAcceptActive(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -11770,6 +11799,14 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
 router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!isEstimateAcceptActive(estimate)) return res.status(400).json({ error: 'Estimate is no longer active' });
     // Reconcile before this handler recomputes + persists, so a stale
@@ -11992,6 +12029,14 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateExtensionRequestEligible(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -12219,6 +12264,14 @@ async function transferGroupFollowupOwnership(estimate) {
 router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     const guard = resolveEstimateDeclineGuard(estimate);
     if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
     if (guard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
@@ -19772,6 +19825,14 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.set('Referrer-Policy', 'no-referrer');
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -19847,6 +19908,14 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -19878,6 +19947,14 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
@@ -20095,6 +20172,14 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
       return notFound();
     }
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate || !isEstimateCustomerViewable(estimate)) {
       return notFound();
     }
@@ -20848,6 +20933,14 @@ async function handleEstimateAsk(req, res, next) {
     const serviceMode = req.body?.serviceMode === 'one_time' ? 'one_time' : 'recurring';
 
     const estimate = await db('estimates').where({ token: req.params.token }).first();
+    // Every bearer-token surface fails closed on the DURABLE call-side
+    // verdict, not just /data and the HTML page (codex P0, PR #3304 GH
+    // r9b): when estimate-side invalidation could not be written, the
+    // block lives on the call, and these routes would keep serving the
+    // wrong lead's content until the scheduler drained the queue.
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!verifyEstimateAskToken(req, estimate)) {
       return res.status(403).json({ error: 'estimate_ask_forbidden' });
