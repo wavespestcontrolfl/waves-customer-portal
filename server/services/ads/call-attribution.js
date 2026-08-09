@@ -301,7 +301,7 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
   try {
     const lead = await db('leads')
       .where({ id: leadId })
-      .first('lead_source_id', 'service_interest', 'created_at');
+      .first('lead_source_id', 'service_interest', 'created_at', 'twilio_call_sid');
     if (!lead?.lead_source_id) return { recorded: false, reason: 'no_lead_source' };
     const sourceRow = await db('lead_sources').where({ id: lead.lead_source_id }).first();
     if (!sourceRow) return { recorded: false, reason: 'source_not_found' };
@@ -317,6 +317,22 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
     if (isBridgeTargetNumber(sourceRow.twilio_phone_number)) {
       return { recorded: false, reason: 'bridge_target' };
     }
+    // Provenance for the row this backfill creates (codex P1, PR #3303
+    // r3): the lead's own sid-linked call, or the newest call stamped to
+    // it — without it, a later force-reprocess that rejects or repoints
+    // the call could never retire or transfer this row. Best-effort: an
+    // unresolvable call leaves NULL (permanently conservative).
+    let sourceCallId = null;
+    try {
+      const sourceCall = await db('call_log')
+        .where(function linkageArms() {
+          this.whereRaw("metadata->>'lead_id' = ?", [String(leadId)]);
+          if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
+        })
+        .orderBy('created_at', 'desc')
+        .first('id');
+      sourceCallId = sourceCall?.id || null;
+    } catch { sourceCallId = null; }
     return await recordCallPpcAttribution({
       customerId,
       leadId,
@@ -324,6 +340,7 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
       isPaid: attr.isPaid,
       leadSourceDetail: sourceRow.name || 'inbound call',
       serviceInterest: serviceInterest || lead.service_interest || null,
+      sourceCallId,
       // Date by the actual call — the call pipeline mints the lead row at
       // call time, so created_at is the call date (not the day the prospect
       // finally clicked the text-back link).
@@ -407,6 +424,28 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
       this.select(1).from('call_log as cl')
         .whereRaw('cl.twilio_call_sid = l.twilio_call_sid')
         .whereNotNull('cl.google_ads_call_resource_name');
+    })
+    // A lead whose call was definitively REJECTED (spam/voicemail terminal,
+    // a retryable failure, or the durable no-attribution verdict) must not
+    // be swept into organic attribution — the processor just retired its
+    // funnel row, and this sweep would recreate paid-adjacent attribution
+    // for a rejected call (codex P1, PR #3303 r3). Both linkage arms: the
+    // lead's own sid AND the metadata stamp (phone-less reuse).
+    .whereNotExists(function sidCallRejected() {
+      this.select(1).from('call_log as clr')
+        .whereRaw('clr.twilio_call_sid = l.twilio_call_sid')
+        .where(function rejected() {
+          this.whereIn('clr.processing_status', ['spam', 'voicemail', 'extraction_failed'])
+            .orWhereRaw("clr.metadata->>'no_attribution' = 'true'");
+        });
+    })
+    .whereNotExists(function stampedCallRejected() {
+      this.select(1).from('call_log as cls')
+        .whereRaw("cls.metadata->>'lead_id' = l.id::text")
+        .where(function rejected() {
+          this.whereIn('cls.processing_status', ['spam', 'voicemail', 'extraction_failed'])
+            .orWhereRaw("cls.metadata->>'no_attribution' = 'true'");
+        });
     })
     .orderBy('l.created_at')
     .limit(cap)

@@ -276,7 +276,13 @@ async function callStillAttributable(trx, callLogId) {
   // deleted booked/completed attribution that a failed pass could never
   // restore. The retry lane re-evaluates once the pass settles.
   if (row.processing_token != null) return false;
-  if (['spam', 'voicemail'].includes(String(row.processing_status || '').toLowerCase())) return false;
+  // Only SETTLED SUCCESSFUL verdicts attribute (codex P1, PR #3303 r3):
+  // extraction_failed is a retryable failure whose committed stamp clear
+  // must not read as an unlink; lead/customer_creation_failed are
+  // admin-intervention lanes whose linkage is equally unsettled. Legacy
+  // NULL-status rows keep today's behavior.
+  const status = String(row.processing_status || '').toLowerCase();
+  if (['spam', 'voicemail', 'processing', 'extraction_failed', 'lead_creation_failed', 'customer_creation_failed'].includes(status)) return false;
   return parseCallMetadata(row.metadata)?.no_attribution !== true;
 }
 

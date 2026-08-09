@@ -7063,8 +7063,17 @@ const CallRecordingProcessor = {
       // write throws inside the transaction so the retire and stamp clear
       // roll back with it.
       const vetoSettled = await db.transaction(async (trx) => {
-        const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: v2VetoDefinitiveRejection ? 'retire' : 'keep' });
-        if (!settled) return false;
+        // Only a DEFINITIVE rejection settles the stamp at all (codex P1,
+        // PR #3303 r3): a policy hold (out_of_service_area /
+        // do_not_contact_requested) invalidates neither the call→lead
+        // linkage nor its attribution — 'keep' preserved the funnel row
+        // but the clear still removed the stamp, and the bridge then read
+        // the missing linkage as a settled unlink and retired the row
+        // anyway. Policy holds preserve stamp, lead state, and row.
+        if (v2VetoDefinitiveRejection) {
+          const settled = await clearStampAndRestoreLead(call, procToken, callSid, trx, { mode: 'retire' });
+          if (!settled) return false;
+        }
         const vetoWrote = await trx('call_log')
           .where({ id: call.id })
           .where('processing_token', procToken)
@@ -8944,9 +8953,15 @@ const CallRecordingProcessor = {
             if (!leadId) {
               // Mint failure dropped the lead — a leftover stamp would leave
               // the OR-join consumers associating this call with a lead that
-              // is now foreign (it lost the claim race). Unlink; the call
-              // supports no lead, so its funnel row retires with the stamp.
-              if (currentStampedLeadId) await settleClear({ mode: 'retire' });
+              // is now foreign (it lost the claim race). Unlink the stamp,
+              // but 'keep' the funnel row (codex P1, PR #3303 r3): a mint
+              // failure is transient, not a verdict — the call can
+              // finalize lead_creation_failed (outside the automatic retry
+              // lane) and a retire here would permanently delete
+              // booked/completed history with no definitive rejection.
+              // When a later pass re-attributes, provenance recovery moves
+              // the row.
+              if (currentStampedLeadId) await settleClear({ mode: 'keep' });
             } else if (finalLeadCarriesSid) {
               // The final lead is linked by its own sid — a leftover stamp
               // pointing at a different lead must not survive. The call's
