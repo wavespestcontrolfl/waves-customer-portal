@@ -19,9 +19,14 @@
  *     sends short-circuit at check_suppression — before this validator runs.
  *   - Fails OPEN: any lookup/cache error allows the send (never block on infra).
  *
- * Only 'landline' is treated as non-SMS-capable (mirrors the appointment path's
- * isLandline). voip / tollFree / mobile are allowed through; the rare
- * non-deliverable ones are still caught reactively by the 30006 path.
+ * 'landline' and 'fixedVoip' are treated as non-SMS-capable (mirrored by the
+ * appointment path's isLandline, which shares NON_SMS_LINE_TYPES). fixedVoip
+ * is a home-phone VoIP line (Comcast/Xfinity Voice, Spectrum Voice) — Twilio
+ * rejects SMS to these with 30006, proven 2026-08-06 when an estimate link
+ * bounced off a Comcast fixedVoip and the lead never saw it. nonFixedVoip
+ * (Google Voice-style) IS SMS-capable and stays allowed, as do tollFree /
+ * mobile; anything else non-deliverable is still caught reactively by the
+ * 30006 path.
  */
 
 const db = require('../../../models/db');
@@ -29,7 +34,7 @@ const logger = require('../../logger');
 const { isEnabled } = require('../../../config/feature-gates');
 const { recordNonMobileSuppression } = require('./suppression');
 
-const NON_SMS_LINE_TYPES = new Set(['landline']);
+const NON_SMS_LINE_TYPES = new Set(['landline', 'fixedVoip']);
 
 function maskPhone(p) {
   const d = String(p || '').replace(/\D/g, '');
@@ -101,11 +106,11 @@ async function lookupLineType(phone) {
   }
 }
 
-function blockResult() {
+function blockResult(lineType) {
   return {
     ok: false,
     code: 'NON_MOBILE_SMS_RECIPIENT',
-    reason: 'Recipient is a landline (proactive line-type lookup) — SMS not deliverable',
+    reason: `Recipient is a ${lineType === 'fixedVoip' ? 'fixed-VoIP home phone' : 'landline'} (proactive line-type lookup) — SMS not deliverable`,
   };
 }
 
@@ -125,7 +130,7 @@ async function checkLineType(input, _policy, _contactState) {
   const cached = await readCachedLineType(phone);
   if (cached.state === 'error') return { ok: true };
   if (cached.state === 'hit') {
-    return NON_SMS_LINE_TYPES.has(cached.lineType) ? blockResult() : { ok: true };
+    return NON_SMS_LINE_TYPES.has(cached.lineType) ? blockResult(cached.lineType) : { ok: true };
   }
 
   // Confirmed cache miss — the one-time Twilio Lookup.
@@ -136,10 +141,12 @@ async function checkLineType(input, _policy, _contactState) {
 
   if (NON_SMS_LINE_TYPES.has(lineType)) {
     // Persist a suppression so future sends short-circuit at check_suppression
-    // (earlier in the pipeline) and we pay for the lookup exactly once.
-    await recordNonMobileSuppression({ phone, source: 'proactive_lookup_landline' }).catch(() => {});
-    logger.info(`[line-type] Skipping SMS to ${maskPhone(phone)} — landline (proactive lookup)`);
-    return blockResult();
+    // (earlier in the pipeline) and we pay for the lookup exactly once. The
+    // source carries the detected type ('landline' keeps its historical value).
+    const source = lineType === 'landline' ? 'proactive_lookup_landline' : `proactive_lookup_${lineType}`;
+    await recordNonMobileSuppression({ phone, source }).catch(() => {});
+    logger.info(`[line-type] Skipping SMS to ${maskPhone(phone)} — ${lineType} (proactive lookup)`);
+    return blockResult(lineType);
   }
   return { ok: true };
 }
@@ -150,6 +157,10 @@ module.exports = {
   // isLandline so the two landline checks share one Lookup per number.
   readCachedLineType,
   cacheLineType,
+  // Single source of truth for which Lookup line types cannot receive SMS —
+  // the appointment path's isLandline consumes this so the proactive validator
+  // and the reminder skip-to-email logic can never disagree.
+  NON_SMS_LINE_TYPES,
   // Exported for callers that need an explicit pre-send landline check outside
   // the gated validator (voicemail lead text-back) — same cache, same Lookup.
   lookupLineType,

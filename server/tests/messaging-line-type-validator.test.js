@@ -123,12 +123,37 @@ describe('checkLineType — cache miss → one-time lookup', () => {
     expect(recordNonMobileSuppression).not.toHaveBeenCalled();
   });
 
-  test('allows voip/tollFree through (only landline is treated as non-SMS-capable)', async () => {
+  test('allows nonFixedVoip (Google Voice-style) and tollFree through', async () => {
     wireDb(undefined);
     mockFetch.mockResolvedValue({ lineTypeIntelligence: { type: 'nonFixedVoip' } });
     const res = await checkLineType(SMS);
     expect(res).toEqual({ ok: true });
     expect(recordNonMobileSuppression).not.toHaveBeenCalled();
+  });
+
+  // 2026-08-06: an estimate link bounced off a Comcast fixedVoip (Twilio 30006)
+  // — home-phone VoIP is not SMS-capable, so it is blocked proactively like a
+  // landline instead of costing a bounced send to learn.
+  test('fixedVoip (home-phone VoIP): caches, records typed suppression, and blocks', async () => {
+    const { q } = wireDb(undefined);
+    mockFetch.mockResolvedValue({ lineTypeIntelligence: { type: 'fixedVoip' } });
+
+    const res = await checkLineType(SMS);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(q.insert).toHaveBeenCalledWith(expect.objectContaining({ phone: '+18777175476', line_type: 'fixedVoip' }));
+    expect(recordNonMobileSuppression).toHaveBeenCalledWith({ phone: '+18777175476', source: 'proactive_lookup_fixedVoip' });
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('NON_MOBILE_SMS_RECIPIENT');
+    expect(res.reason).toContain('fixed-VoIP');
+  });
+
+  test('blocks a cached fixedVoip without calling Twilio', async () => {
+    wireDb({ line_type: 'fixedVoip' });
+    const res = await checkLineType(SMS);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('NON_MOBILE_SMS_RECIPIENT');
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   test('fails OPEN without a paid lookup when the cache READ errors (table missing/unreadable)', async () => {
