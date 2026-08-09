@@ -1455,3 +1455,24 @@ describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
     expect((await run({ data: forgedNoReplay }))?.treeShrubPricingKnobs).toBeUndefined();
   });
 });
+
+describe('Tree & Shrub v4.7 GH review round 2 fixes', () => {
+  test('the MAPPED stamp wins over a stale raw engineResult line (GH P1 r2)', () => {
+    const { treeShrubKnobSignalForReplay } = require('../services/estimate-tree-shrub-knob-replay');
+    // A revision rewrote result.results.tsMeta but left the agent draft's
+    // original engineResult in place — the mapped stamp is authoritative.
+    const signal = treeShrubKnobSignalForReplay({
+      engineResult: {
+        lineItems: [{ service: 'tree_shrub', pricingKnobs: { densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0 } }],
+      },
+      result: {
+        results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } },
+      },
+    });
+    expect(signal).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 });
+    // With no mapped stamp, the raw line still answers.
+    expect(treeShrubKnobSignalForReplay({
+      engineResult: { lineItems: [{ service: 'tree_shrub', pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } }] },
+    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 });
+  });
+});

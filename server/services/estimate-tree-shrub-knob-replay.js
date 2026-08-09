@@ -44,7 +44,13 @@ function treeShrubKnobSignalForReplay(estData = {}) {
     : (estData?.result?.results?.tsMeta || null);
   const hasMappedTs = !!tsMeta || (Array.isArray(result?.results?.ts) && result.results.ts.length > 0);
   if (!tsLine && !hasMappedTs) return null;
-  const stamped = (tsLine && tsLine.pricingKnobs) || (tsMeta && tsMeta.pricingKnobs);
+  // The MAPPED stamp wins. A save/revision replaces estimateData.result with
+  // the freshly mapped server result but leaves an agent draft's original
+  // raw engineResult in place, so the raw line can be older than the
+  // authoritative columns the revision just wrote. Preferring it would
+  // replay superseded knob values and charge a total the stored result
+  // disagrees with.
+  const stamped = (tsMeta && tsMeta.pricingKnobs) || (tsLine && tsLine.pricingKnobs);
   if (!stamped || typeof stamped !== 'object') return { ...NEUTRAL_TREE_SHRUB_KNOBS };
   const pick = (key) => {
     const n = Number(stamped[key]);
