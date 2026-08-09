@@ -35,7 +35,20 @@ function lookupConfidenceIsAdequate(enriched) {
   return score === null || score >= LOOKUP_AI_CONFIDENCE_FLOOR;
 }
 
+// Flags whose scope is the WHOLE lookup, not one field: 'address' (the
+// geocoder snapped to a different premise — every read may describe the
+// wrong parcel) and 'all' (no property record; every dimension is
+// estimated). These disqualify every derived pricing input, so a
+// field-name match is not enough on its own.
+const GLOBAL_VERIFY_FIELDS = new Set(['address', 'all']);
+
+function hasGlobalVerifyFlag(enriched) {
+  const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
+  return flags.some((flag) => GLOBAL_VERIFY_FIELDS.has(String(flag?.field || '').trim().toLowerCase()));
+}
+
 function hasVerifyFlagMatching(enriched, matcher) {
+  if (hasGlobalVerifyFlag(enriched)) return true;
   const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
   return flags.some((flag) => matcher(String(flag?.field || '').toLowerCase()));
 }
@@ -67,6 +80,7 @@ function lookupFeaturesAreTrustworthy(enriched) {
 
 module.exports = {
   LOOKUP_AI_CONFIDENCE_FLOOR,
+  hasGlobalVerifyFlag,
   lookupConfidenceIsAdequate,
   lookupBedAreaIsTrustworthy,
   lookupFeaturesAreTrustworthy,

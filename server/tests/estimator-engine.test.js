@@ -1264,3 +1264,26 @@ describe('lookup bed areas carry their confidence into the agent draft', () => {
     }).estimatedBedAreaSf).toBe(2600);
   });
 });
+
+describe('global lookup verification failures disqualify every derived input', () => {
+  const { lookupBedAreaIsTrustworthy, lookupFeaturesAreTrustworthy } = require('../services/lookup-confidence');
+  const base = { estimatedBedAreaSf: 2600, aiConfidence: 95, pool: 'YES' };
+
+  test("an 'address' flag (geocoder snapped to another premise) rejects both", () => {
+    const enriched = { ...base, fieldVerifyFlags: [{ field: 'address', reason: 'snapped premise', priority: 'HIGH' }] };
+    expect(lookupBedAreaIsTrustworthy(enriched)).toBe(false);
+    expect(lookupFeaturesAreTrustworthy(enriched)).toBe(false);
+  });
+
+  test("an 'all' flag (no property record, every dimension estimated) rejects both", () => {
+    const enriched = { ...base, fieldVerifyFlags: [{ field: 'all', reason: 'no record', priority: 'HIGH' }] };
+    expect(lookupBedAreaIsTrustworthy(enriched)).toBe(false);
+    expect(lookupFeaturesAreTrustworthy(enriched)).toBe(false);
+  });
+
+  test('an unrelated field flag still passes both', () => {
+    const enriched = { ...base, fieldVerifyFlags: [{ field: 'yearBuilt', reason: 'county mismatch', priority: 'LOW' }] };
+    expect(lookupBedAreaIsTrustworthy(enriched)).toBe(true);
+    expect(lookupFeaturesAreTrustworthy(enriched)).toBe(true);
+  });
+});
