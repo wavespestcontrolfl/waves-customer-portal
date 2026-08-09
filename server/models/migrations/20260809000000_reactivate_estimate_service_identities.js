@@ -436,6 +436,19 @@ exports.down = async function down(knex) {
           refs += (await knex('scheduled_service_addons').whereRaw('lower(service_name) = lower(?)', [alias]).pluck('id')).length;
         }
       }
+      // The resolver also strips a "— N Visit Program" tail (the roach
+      // cleanout's severity-tiered label), so a visit persisted WITH that
+      // suffix resolves this row and must block deletion too — the sweep
+      // mirrors every alias serviceNameCandidates accepts.
+      if (row.name) {
+        const programPattern = `${row.name}%visit program`;
+        if (await knex.schema.hasTable('scheduled_services')) {
+          refs += (await knex('scheduled_services').whereRaw('lower(service_type) LIKE lower(?)', [programPattern]).pluck('id')).length;
+        }
+        if (await knex.schema.hasTable('scheduled_service_addons')) {
+          refs += (await knex('scheduled_service_addons').whereRaw('lower(service_name) LIKE lower(?)', [programPattern]).pluck('id')).length;
+        }
+      }
     }
     if (refs > 0) {
       retainedKeys.add(entry.key);

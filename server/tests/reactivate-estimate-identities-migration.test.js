@@ -19,16 +19,21 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     const rowMatch = (r) => filters.every((f) => {
       if (f.in) return f.in.values.includes(r[f.in.col]);
       if (f.raw) return String(r[f.raw.col] || '').toLowerCase() === String(f.raw.val).toLowerCase();
+      if (f.like) {
+        const rx = new RegExp(`^${String(f.like.val).toLowerCase().split('%').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`);
+        return rx.test(String(r[f.like.col] || '').toLowerCase());
+      }
       return Object.entries(f).every(([k, v]) => r[k] === v);
     });
     const q = {
       where(cond) { filters.push(cond); return q; },
       whereIn(col, values) { filters.push({ in: { col, values } }); return q; },
       whereRaw(sql, bindings) {
-        const m = /lower\((\w+)\)\s*=\s*lower\(\?\)/.exec(sql);
-        if (!m) throw new Error(`fake whereRaw: unsupported sql ${sql}`);
-        filters.push({ raw: { col: m[1], val: bindings[0] } });
-        return q;
+        const eq = /lower\((\w+)\)\s*=\s*lower\(\?\)/.exec(sql);
+        if (eq) { filters.push({ raw: { col: eq[1], val: bindings[0] } }); return q; }
+        const like = /lower\((\w+)\)\s+LIKE\s+lower\(\?\)/i.exec(sql);
+        if (like) { filters.push({ like: { col: like[1], val: bindings[0] } }); return q; }
+        throw new Error(`fake whereRaw: unsupported sql ${sql}`);
       },
       first: async () => {
         const hit = rowsNow().find(rowMatch);
@@ -213,6 +218,21 @@ describe('20260809000000 reactivation batch', () => {
       expect({ plan, key: resolved.serviceKey, type: resolved.findingsType })
         .toEqual({ plan, key, type: 'rodent_trapping' });
     }
+  });
+
+  test('down() retains a row referenced only by a visit-program-suffixed label', async () => {
+    const db = seededDb();
+    await migration.up(fakeKnex(db));
+    // Resolver strips the suffix to reach german_roach, so this visit
+    // depends on the row — rollback must not delete it.
+    db.scheduled_services.push({ id: 'v1', service_id: null, service_type: 'German Roach Cleanout — 3 Visit Program' });
+
+    await migration.down(fakeKnex(db));
+
+    expect(svcRow(db, 'german_roach')).toMatchObject({ is_active: false });
+    expect(profileRow(db, 'german_roach')).toMatchObject({ active: true });
+    // Its unreferenced sibling still rolls back.
+    expect(svcRow(db, 'german_roach_initial')).toBeUndefined();
   });
 
   test('names classify into their families through the shared detector', async () => {
