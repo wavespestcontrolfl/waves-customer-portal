@@ -342,7 +342,10 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           const draftLeadId = draftData.lead_id ? String(draftData.lead_id) : null;
           const currentLeadId = (context?.lead?.id && context?.leadIsForThisCall)
             ? String(context.lead.id) : null;
-          if (draftLeadId !== currentLeadId) {
+          // A FAILED lead lookup is not an established absence (pre-push
+          // P1 r2) — clearing a valid link on a transient DB error would
+          // be permanent. Reconcile only from a successful resolution.
+          if (!context?.leadLookupUnavailable && draftLeadId !== currentLeadId) {
             if (currentLeadId) draftData.lead_id = currentLeadId;
             else delete draftData.lead_id;
             // ONE transaction for all three writes (pre-push P1 r1): a

@@ -348,7 +348,11 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
     return { lead: byPhone || null, forThisCall: false };
   } catch (err) {
     logger.warn(`[estimator-engine] lead load failed: ${err.message}`);
-    return { lead: null, forThisCall: false };
+    // `unavailable` distinguishes a FAILED lookup from an established
+    // absence (pre-push P1 r2): the existing-draft reconciliation clears
+    // a draft's lead links when the call has no current linkage, and a
+    // transient DB error must not masquerade as that verdict.
+    return { lead: null, forThisCall: false, unavailable: true };
   }
 }
 
@@ -598,6 +602,9 @@ async function buildCallContext(callLogId) {
     // processing) from prior phone history — the current lead's address
     // outranks the saved profile for second-property quotes.
     leadIsForThisCall: leadMatch.forThisCall,
+    // The lead lookup FAILED (as opposed to finding nothing) — reconcilers
+    // that treat absence as a verdict must skip (pre-push P1 r2).
+    leadLookupUnavailable: leadMatch.unavailable === true,
     smsThread,
     priorEstimates,
     // An AMBIGUOUS shared-phone match must never unlock member pricing
