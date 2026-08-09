@@ -236,6 +236,17 @@ function shapeCallLog(row) {
     // after the call leaves call_log.customer_id null while the lead knows
     // its customer — attribution needs it (codex P2, PR #3275).
     leadCustomerId: row.lead_customer_id || null,
+    // The call's own durable stamp target, independent of whether that
+    // lead survived the join's liveness filter (codex P1, PR #3303 r7).
+    stampedLeadId: (() => {
+      const md = parseCallMetadata(row.metadata);
+      return md?.lead_id ? String(md.lead_id) : null;
+    })(),
+    // Set by dedupeCrmCallRows when a SETTLED stamp names a lead the join
+    // could not return (soft-deleted target): the lead columns are cleared
+    // and NOTHING may be attributed this scan — see the flag's use in
+    // attributeResolvedLead (codex P1, PR #3303 r7).
+    stampTargetMissing: row.stamp_target_missing === true,
     leadSourceName: row.lead_source_name || null,
     googleAdsCallResourceName: row.google_ads_call_resource_name || null,
     googleAdsBridgedAt: row.google_ads_bridged_at || null,
@@ -502,8 +513,35 @@ function dedupeCrmCallRows(rows) {
     if (!byId.has(row.id)) byId.set(row.id, []);
     byId.get(row.id).push(row);
   }
+  // The call's own stamp target, regardless of whether the join could
+  // return that lead row.
+  const stampTargetOf = (r) => {
+    try {
+      const md = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {});
+      return md?.lead_id != null ? String(md.lead_id) : null;
+    } catch { return null; }
+  };
+  // A SETTLED stamp whose target the join could not return — the target
+  // lead is soft-deleted (the join's deleted_at filter hides it) or gone
+  // (codex P1, PR #3303 r7). The stamp is still the processor's verdict,
+  // so the sid row left behind must NOT be treated as authoritative: it
+  // would let the bridge rewrite the obsolete sid lead's source and
+  // transfer the history-bearing funnel row back to it. Clear the lead
+  // columns and flag the call — attributeResolvedLead then attributes
+  // nothing (and never falls to the plan), so a recorded match settles
+  // through the cleared-link path instead of moving.
+  const withMissingStampTarget = (group) => {
+    const target = stampTargetOf(group[0]);
+    if (!target || !callSettled(group[0])) return null;
+    if (group.some((r) => r.lead_id != null && String(r.lead_id) === target)) return null;
+    return {
+      ...group[0], lead_id: null, lead_customer_id: null, lead_call_sid: null, stamp_target_missing: true,
+    };
+  };
   const deduped = [];
   for (const group of byId.values()) {
+    const stampMissing = withMissingStampTarget(group);
+    if (stampMissing) { deduped.push(stampMissing); continue; }
     if (group.length === 1) { deduped.push(group[0]); continue; }
     const seenLeadIds = new Set();
     const sidLinked = group.filter((r) => {
@@ -659,12 +697,37 @@ async function joinedLeadLiveRow(callLog, { dbc = db, lock = false } = {}) {
 async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFallback = false } = {}) {
   let joinedWentStale = false;
   let verdictChecked = false;
+  // A settled stamp naming a lead the join could not return (soft-deleted
+  // target) means the authoritative linkage is UNAVAILABLE, not absent
+  // (codex P1, PR #3303 r7): attribute nothing and never fall to the plan,
+  // or the obsolete sid/phone lead would absorb this paid call.
+  if (callLog?.stampTargetMissing) {
+    return { match: null, reason: 'lead_not_live' };
+  }
   if (callLog?.leadId) {
     const lockedLead = await trx('leads')
       .where({ id: callLog.leadId })
       .whereNull('deleted_at')
       .forUpdate()
       .first('id', 'customer_id');
+    // SID-only joins re-apply the processor's OWNERSHIP eligibility
+    // (codex P1, PR #3303 r7): when a phone-bearing reprocess rejected the
+    // original sid lead as foreign-owned and reused a phone-matched lead,
+    // that path writes no stamp — so the next scan joins the obsolete sid
+    // lead, and without this check the bridge would rewrite ITS source and
+    // move another customer's paid call onto it. A CONFLICT is the test —
+    // the call knows customer A while the lead is owned by B. A claimed
+    // lead on a customer-less call is NOT a conflict and stays eligible
+    // (the ordinary call → lead → customer progression; codex P2 #3275).
+    // Lifecycle terminals stay attributable by design: a WON lead is
+    // precisely the paid outcome the bridge exists to credit.
+    const stampConfirmed = callLog.stampedLeadId
+      && String(callLog.stampedLeadId) === String(callLog.leadId);
+    if (lockedLead && !stampConfirmed
+      && lockedLead.customer_id && callLog.customerId
+      && String(lockedLead.customer_id) !== String(callLog.customerId)) {
+      return { match: null, reason: 'lead_owner_conflict' };
+    }
     // Terminal verdict re-checked fresh under the CALL row lock, taken
     // AFTER the lead lock so the leads → call_log order every stamp
     // writer uses is preserved (pre-push P1 r16) — the pre-scan
@@ -949,6 +1012,10 @@ async function applyBridge(options = {}) {
           // a failure rolls back only this backfill and is logged.
           try {
             await db.transaction(async (trx) => {
+              // Unavailable stamp target (soft-deleted): attribute nothing
+              // this scan — same rule as attributeResolvedLead (codex P1,
+              // PR #3303 r7).
+              if (match.callLog?.stampTargetMissing) return;
               let backfillLeadId = match.callLog?.leadId || null;
               let backfillCustomerId = null;
               if (backfillLeadId) {
@@ -983,7 +1050,36 @@ async function applyBridge(options = {}) {
                 // live-ness and the CURRENT owner are read under the row
                 // lock, so a concurrent soft-delete or customer
                 // reassignment can't produce a stale attribution pair.
-                const lm = await findLeadForCall(match.callLog, { dbc: trx }).catch(() => null);
+                // The PERSISTED match wins over a fresh plan lookup (codex
+                // P1, PR #3303 r7): shouldRetryLeadAttribution deliberately
+                // leaves plan-strategy matches in the NON-retry branch, so
+                // this backfill must not silently re-resolve. A new lead
+                // closer to the call timestamp would otherwise win the
+                // 6-hour-window plan lookup and — through source_call_id
+                // recovery — take the history-bearing funnel row, while
+                // metadata.leadMatch still named the old lead and the new
+                // one never received the bridge source. The persisted lead
+                // needs no plan-predicate re-check: it IS the durable
+                // decision, not a re-resolution — only liveness and its
+                // current owner are read under the lock. A persisted
+                // JOINED match with no live join is the cleared-link case
+                // (or its tombstone), which the retry branch owns.
+                const persistedLeadId = match.callLog?.googleAdsLeadMatchedLeadId || null;
+                const persistedStrategy = match.callLog?.googleAdsLeadMatchedStrategy || null;
+                if (persistedStrategy === 'joined_lead') return;
+                if (persistedLeadId) {
+                  const lockedPersisted = await trx('leads')
+                    .where({ id: persistedLeadId })
+                    .whereNull('deleted_at')
+                    .forUpdate()
+                    .first('id', 'customer_id');
+                  if (!lockedPersisted) return;
+                  backfillLeadId = persistedLeadId;
+                  backfillCustomerId = lockedPersisted.customer_id || null;
+                }
+                const lm = backfillLeadId
+                  ? null
+                  : await findLeadForCall(match.callLog, { dbc: trx }).catch(() => null);
                 if (lm?.leadId) {
                   const lockedFallback = await trx('leads')
                     .where({ id: lm.leadId })
@@ -1239,6 +1335,7 @@ module.exports = {
   isBridgeTargetNumber,
   _private: {
     areaCode,
+    attributeResolvedLead,
     buildMatches,
     callStillAttributable,
     dedupeCrmCallRows,

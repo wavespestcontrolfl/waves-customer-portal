@@ -419,3 +419,122 @@ describe('dedupeCrmCallRows — settled stamp beats multi-sid ambiguity (pre-pus
     expect(deduped.map((r) => r.lead_id).sort()).toEqual(['lead-a', 'lead-b']);
   });
 });
+
+describe('soft-deleted stamp target (codex P1, PR #3303 r7)', () => {
+  const { dedupeCrmCallRows, shapeCallLog } = GoogleCallBridge._private;
+
+  test('a SETTLED stamp whose target the join could not return clears the lead columns and flags the call', () => {
+    // Stamp names lead-B (soft-deleted → absent from the join); only the
+    // obsolete sid lead-A came back. Collapsing to A would let the bridge
+    // rewrite A's source and pull the funnel row back to it.
+    const row = {
+      id: 'c1',
+      lead_id: 'lead-a',
+      lead_call_sid: 'CAcall',
+      twilio_call_sid: 'CAcall',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-b' }),
+    };
+    const [deduped] = dedupeCrmCallRows([row]);
+    expect(deduped.lead_id).toBeNull();
+    expect(deduped.stamp_target_missing).toBe(true);
+    expect(shapeCallLog(deduped).stampTargetMissing).toBe(true);
+    expect(shapeCallLog(deduped).leadId).toBeNull();
+  });
+
+  test('an UNSETTLED call with an absent stamp target is untouched — no verdict yet', () => {
+    const row = {
+      id: 'c1',
+      lead_id: 'lead-a',
+      lead_call_sid: 'CAcall',
+      twilio_call_sid: 'CAcall',
+      processing_token: 'tok',
+      processing_status: 'processing',
+      metadata: JSON.stringify({ lead_id: 'lead-b' }),
+    };
+    const [deduped] = dedupeCrmCallRows([row]);
+    expect(deduped.lead_id).toBe('lead-a');
+    expect(deduped.stamp_target_missing).toBeUndefined();
+  });
+
+  test('a settled stamp whose target IS in the join is not flagged', () => {
+    const row = {
+      id: 'c1',
+      lead_id: 'lead-b',
+      lead_call_sid: null,
+      twilio_call_sid: 'CAcall',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-b' }),
+    };
+    const [deduped] = dedupeCrmCallRows([row]);
+    expect(deduped.lead_id).toBe('lead-b');
+    expect(deduped.stamp_target_missing).toBeUndefined();
+  });
+});
+
+describe('attributeResolvedLead — sid-only ownership eligibility (codex P1, PR #3303 r7)', () => {
+  const { attributeResolvedLead } = GoogleCallBridge._private;
+
+  function makeTrx({ lead, callSettled = true }) {
+    return (table) => {
+      const b = {};
+      for (const m of ['where', 'whereNull', 'whereNotNull', 'whereIn', 'whereRaw', 'whereExists',
+        'andWhere', 'forUpdate', 'select', 'orderBy', 'limit']) {
+        b[m] = jest.fn(() => b);
+      }
+      // The lead UPDATE resolves 0 rows: these tests assert the OWNERSHIP
+      // decision, not the write, so a landed-vs-stale update is irrelevant.
+      b.update = jest.fn(async () => 0);
+      b.first = jest.fn(async () => {
+        if (table === 'leads') return lead;
+        if (table === 'call_log') {
+          return callSettled
+            ? { id: 'c1', processing_token: null, processing_status: 'processed', metadata: {} }
+            : { id: 'c1', processing_token: 'tok', processing_status: 'processing', metadata: {} };
+        }
+        return null;
+      });
+      b.then = (res, rej) => Promise.resolve([]).then(res, rej);
+      return b;
+    };
+  }
+
+  test('an unavailable settled stamp target attributes NOTHING and never falls to the plan', async () => {
+    const res = await attributeResolvedLead(
+      { id: 'c1', stampTargetMissing: true, leadId: null },
+      { id: 'src' }, new Date(), makeTrx({ lead: null }),
+    );
+    expect(res).toEqual({ match: null, reason: 'lead_not_live' });
+  });
+
+  test('a SID-only join owned by a DIFFERENT customer than the call is refused', async () => {
+    const res = await attributeResolvedLead(
+      { id: 'c1', leadId: 'lead-a', customerId: 'cust-Y', stampedLeadId: null },
+      { id: 'src' }, new Date(),
+      makeTrx({ lead: { id: 'lead-a', customer_id: 'cust-X' } }),
+    );
+    expect(res).toEqual({ match: null, reason: 'lead_owner_conflict' });
+  });
+
+  test('a STAMP-confirmed join with a different owner is still attributed — the stamp is the verdict', async () => {
+    const res = await attributeResolvedLead(
+      { id: 'c1', leadId: 'lead-a', customerId: 'cust-Y', stampedLeadId: 'lead-a' },
+      { id: 'src' }, new Date(),
+      makeTrx({ lead: { id: 'lead-a', customer_id: 'cust-X' } }),
+    );
+    // updateLeadAttribution's mocked update resolves falsy → stale-joined
+    // path, NOT the ownership refusal.
+    expect(res.reason).not.toBe('lead_owner_conflict');
+  });
+
+  test('a claimed lead on a CUSTOMER-LESS call is not a conflict (call → lead → customer progression)', async () => {
+    const res = await attributeResolvedLead(
+      { id: 'c1', leadId: 'lead-a', customerId: null, stampedLeadId: null },
+      { id: 'src' }, new Date(),
+      makeTrx({ lead: { id: 'lead-a', customer_id: 'cust-X' } }),
+    );
+    expect(res.reason).not.toBe('lead_owner_conflict');
+  });
+});
