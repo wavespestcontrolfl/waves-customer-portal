@@ -932,3 +932,46 @@ describe('lookup trust: global flags, record-backed pools, bed-area-only T&S', (
     expect(result.options.some((o) => o.serviceKey === 'tree_shrub')).toBe(true);
   });
 });
+
+describe("structural facts: 'UNKNOWN' record values do not suppress trusted ones", () => {
+  const { _private } = require('../services/customer-pricing-ai');
+  const customer = {
+    id: 'cust-facts', monthly_rate: 55, lot_sqft: 9000,
+    address_line1: '123 Gulf Dr', city: 'Sarasota', state: 'FL', zip: '34236',
+  };
+
+  test('a high-confidence enriched fact wins over an UNKNOWN record field', async () => {
+    const ctx = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2200, aiConfidence: 90, constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE', roofType: 'TILE' },
+        propertyRecord: { constructionMaterial: 'UNKNOWN', foundationType: 'UNKNOWN', roofType: 'UNKNOWN' },
+      }),
+    });
+    // These drive the wood-frame multiplier, the raised-foundation
+    // adjustment and the tile-roof rodent adjustment.
+    expect(ctx.propertyInput.constructionMaterial).toBe('WOOD_FRAME');
+    expect(ctx.propertyInput.foundationType).toBe('CRAWLSPACE');
+    expect(ctx.propertyInput.roofType).toBe('TILE');
+  });
+
+  test('a real record value still beats the enriched one, and low confidence drops the enriched', async () => {
+    const withRecord = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2200, aiConfidence: 90, constructionMaterial: 'WOOD_FRAME' },
+        propertyRecord: { constructionMaterial: 'CONCRETE_BLOCK' },
+      }),
+    });
+    expect(withRecord.propertyInput.constructionMaterial).toBe('CONCRETE_BLOCK');
+
+    const lowConfidence = await _private.resolvePropertyContext({
+      customer, turfProfile: null,
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2200, aiConfidence: 30, constructionMaterial: 'WOOD_FRAME' },
+        propertyRecord: { constructionMaterial: 'UNKNOWN' },
+      }),
+    });
+    expect(lowConfidence.propertyInput.constructionMaterial).toBeNull();
+  });
+});

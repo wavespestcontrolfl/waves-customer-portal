@@ -436,12 +436,23 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       // county RECORD is authoritative and always applies; the merged
       // enriched value may have been filled from vision when county data was
       // absent, so it is adopted only when the vision read is trusted.
+      // Property records normalize a missing field to the literal string
+      // 'UNKNOWN', which is TRUTHY — a plain `record.x || enriched.x` chain
+      // would stop there and silently drop the trusted value, costing the
+      // wood-frame multiplier, the raised/crawlspace adjustment and the
+      // tile-roof rodent adjustment on real quotes.
+      const knownFact = (value) => {
+        const v = String(value || '').trim();
+        return v && v.toUpperCase() !== 'UNKNOWN' ? value : null;
+      };
       const visionFactsOk = lookupFeaturesAreTrustworthy(p);
-      constructionMaterial = constructionMaterial || record.constructionMaterial
-        || (visionFactsOk ? p.constructionMaterial : null) || null;
-      foundationType = foundationType || record.foundationType
-        || (visionFactsOk ? p.foundationType : null) || null;
-      roofType = roofType || record.roofType || (visionFactsOk ? p.roofType : null) || null;
+      const structuralFact = (recordValue, enrichedValue) => knownFact(recordValue)
+        || (visionFactsOk ? knownFact(enrichedValue) : null)
+        || null;
+      constructionMaterial = constructionMaterial
+        || structuralFact(record.constructionMaterial, p.constructionMaterial);
+      foundationType = foundationType || structuralFact(record.foundationType, p.foundationType);
+      roofType = roofType || structuralFact(record.roofType, p.roofType);
       // p.estimatedPalmCount is deliberately NOT adopted. This is a
       // customer-facing quote route, and palmCount feeds palm-INJECTION
       // pricing through missingPropertyFor + resolvePalmCount — an AI count
