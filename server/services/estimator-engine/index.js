@@ -821,7 +821,27 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             // corrected retry's initial check blocks it here — reconcile
             // the same-call blocker and retry ONCE when invalidated.
             const lateExisting = await existingDraftForCall(context.call.id);
-            if (lateExisting && (await reconcileExistingDraftLinks(lateExisting, context)) === 'invalidated') {
+            const lateOutcome = lateExisting ? await reconcileExistingDraftLinks(lateExisting, context) : null;
+            if (lateOutcome === 'error') {
+              // Fail CLOSED (codex P1, PR #3304 r12) — same rule as the
+              // residential branch.
+              result.lane = LANES.RED;
+              result.reasons = ['existing-draft reconciliation unavailable'];
+              if (quotePromised) {
+                await notify({
+                  call: context.call,
+                  context,
+                  lane: LANES.RED,
+                  quotePromised,
+                  threadKey,
+                  title: 'Quote promised — review the existing draft',
+                  body: 'A draft blocks this proposal but its lead linkage could not be verified '
+                    + '(reconciliation unavailable). Review the call and the draft in admin/estimates before sending.',
+                });
+              }
+              return result;
+            }
+            if (lateOutcome === 'invalidated') {
               commercialOutcome = await maybeBuildCommercialProposalDraft({
                 intent,
                 propertyFacts,
@@ -944,12 +964,35 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // retry the creation ONCE so the corrected content actually lands
       // this run instead of waiting for an external retry (codex P1 r9).
       const lateExisting = await existingDraftForCall(context.call.id);
-      if (lateExisting && (await reconcileExistingDraftLinks(lateExisting, context)) === 'invalidated') {
-        draft = await createDraftEstimate({
-          intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
-          propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
-          membershipSnapshot, priorQualifyingServices, origin,
-        });
+      if (lateExisting) {
+        const lateOutcome = await reconcileExistingDraftLinks(lateExisting, context);
+        if (lateOutcome === 'error') {
+          // Fail CLOSED, same as the early existing-draft handling
+          // (codex P1, PR #3304 r12): telling the operator the blocker
+          // validly covers the prospect could stand a wrong-lead draft.
+          result.lane = LANES.RED;
+          result.reasons = ['existing-draft reconciliation unavailable'];
+          if (quotePromised) {
+            await notify({
+              call: context.call,
+              context,
+              lane: LANES.RED,
+              quotePromised,
+              threadKey,
+              title: 'Quote promised — review the existing draft',
+              body: 'A draft blocks this quote but its lead linkage could not be verified '
+                + '(reconciliation unavailable). Review the call and the draft in admin/estimates before sending.',
+            });
+          }
+          return result;
+        }
+        if (lateOutcome === 'invalidated') {
+          draft = await createDraftEstimate({
+            intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
+            propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
+            membershipSnapshot, priorQualifyingServices, origin,
+          });
+        }
       }
     }
 
