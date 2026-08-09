@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -2803,6 +2803,27 @@ router.post('/:id/extend', async (req, res, next) => {
 // stamped for funnel reporting and acceptance side effects run once.
 router.post('/:id/mark-accepted', async (req, res, next) => {
   try {
+    // The DURABLE call-side verdict blocks a MANUAL acceptance too (codex
+    // P0, PR #3304 GH r10b): when estimate-side invalidation failed — the
+    // exact case the queued marker covers — the public routes and the
+    // delivery paths already refuse, but recording a verbal yes here
+    // would still convert the customer and mint billing off a
+    // wrong-identity or rejected-call estimate.
+    {
+      const row = await db('estimates').where({ id: req.params.id }).first('estimate_data');
+      let data = row?.estimate_data;
+      if (typeof data === 'string') {
+        try { data = JSON.parse(data); } catch { data = null; }
+      }
+      if (data && typeof data === 'object') {
+        const blocked = await callSideBlockForEstimateData(db, data);
+        if (blocked) {
+          return res.status(409).json({
+            error: 'This estimate is quarantined by a call-linkage correction and cannot be accepted. Rebuild it from the corrected call.',
+          });
+        }
+      }
+    }
     const result = await markEstimateManuallyAccepted({
       estimateId: req.params.id,
       adminUserId: req.technicianId,

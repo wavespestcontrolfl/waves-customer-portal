@@ -660,7 +660,9 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
           if (ownershipFence?.procToken) {
             const stillOwned = await trx('call_log')
               .where({ id: ownershipFence.callLogId || callLogId })
-              .where('processing_token', ownershipFence.procToken)
+              .where(function ownedOrUnclaimed() {
+                this.where('processing_token', ownershipFence.procToken).orWhereNull('processing_token');
+              })
               .forUpdate()
               .first('id');
             if (!stillOwned) {
@@ -701,7 +703,17 @@ async function invalidateDraftForCall(callLogId, { reason, identityConflict = fa
         if (ownershipFence?.procToken) {
           const owned = await trx('call_log')
             .where({ id: ownershipFence.callLogId || callLogId })
-            .where('processing_token', ownershipFence.procToken)
+            // Owned-or-UNCLAIMED, matching markDraftBlockOnCall (codex P0,
+            // PR #3304 GH r10b): the estimator runs DETACHED while normal
+            // processing clears the token, so an identity conflict
+            // detected after finalization is not an ownership loss — the
+            // strict predicate rolled the whole invalidation back and
+            // reported success with the wrong-identity draft still live.
+            // A peer that reclaims writes a NEW non-null token, which
+            // still fails this predicate.
+            .where(function ownedOrUnclaimed() {
+              this.where('processing_token', ownershipFence.procToken).orWhereNull('processing_token');
+            })
             .forUpdate()
             .first('id');
           if (!owned) {

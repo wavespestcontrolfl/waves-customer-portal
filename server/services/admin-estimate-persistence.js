@@ -2240,6 +2240,7 @@ module.exports = {
   deliveryClaimFresh,
   staleCallLinkageReason,
   callRejectedForDrafting,
+  callReprocessInFlight,
   callSideBlockForEstimateData,
   completePendingInvalidation,
   takePendingInvalidation,
