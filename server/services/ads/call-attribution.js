@@ -324,13 +324,28 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
     // unresolvable call leaves NULL (permanently conservative).
     let sourceCallId = null;
     try {
-      const sourceCall = await db('call_log')
-        .where(function linkageArms() {
-          this.whereRaw("metadata->>'lead_id' = ?", [String(leadId)]);
-          if (lead.twilio_call_sid) this.orWhere('twilio_call_sid', lead.twilio_call_sid);
-        })
-        .orderBy('created_at', 'desc')
-        .first('id');
+      // Sid FIRST — authoritative, same precedence every linkage consumer
+      // uses; the stamp arm only as a SETTLED-successful fallback (token
+      // NULL + status 'processed'), never newest-of-both (pre-push P1
+      // r15: a later provisional/failed/rejected stamped call would
+      // become the "exact owner" and a repoint could then move or delete
+      // the wrong history-bearing row). Neither resolving leaves NULL —
+      // permanently conservative.
+      let sourceCall = null;
+      if (lead.twilio_call_sid) {
+        sourceCall = await db('call_log')
+          .where('twilio_call_sid', lead.twilio_call_sid)
+          .orderBy('created_at', 'desc')
+          .first('id');
+      }
+      if (!sourceCall) {
+        sourceCall = await db('call_log')
+          .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
+          .whereNull('processing_token')
+          .where('processing_status', 'processed')
+          .orderBy('created_at', 'desc')
+          .first('id');
+      }
       sourceCallId = sourceCall?.id || null;
     } catch { sourceCallId = null; }
     return await recordCallPpcAttribution({
