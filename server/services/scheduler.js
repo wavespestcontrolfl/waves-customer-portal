@@ -345,6 +345,12 @@ async function claimDueScheduledEstimates(now) {
       JOIN ranked r ON r.id = e.id AND r.rn = 1
       WHERE e.status = 'scheduled'
         AND e.scheduled_at IS NOT NULL
+        -- Repeated at every stage (codex P1, PR #3304): ranked's snapshot
+        -- can predate a concurrent archive, and EvalPlanQual re-evaluates
+        -- the locked row against THIS stage's predicate — without the
+        -- guard here (and on the final UPDATE) an archiving that landed
+        -- mid-claim would still deliver the invalidated content.
+        AND e.archived_at IS NULL
         AND e.scheduled_at <= ?
       ORDER BY e.scheduled_at ASC, e.created_at ASC
       FOR UPDATE OF e SKIP LOCKED
@@ -357,6 +363,7 @@ async function claimDueScheduledEstimates(now) {
         updated_at = ?
     FROM due
     WHERE e.id = due.id
+      AND e.archived_at IS NULL
     RETURNING e.*
   `, [now, now, SCHEDULED_ESTIMATE_CLAIM_LIMIT, now]);
 
