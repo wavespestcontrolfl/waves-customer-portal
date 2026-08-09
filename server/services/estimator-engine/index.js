@@ -78,6 +78,16 @@ async function reconcileExistingDraftLinks(existing, context) {
         establishedAbsence = !draftLead
           || !(draftLead.twilio_call_sid && context?.call?.twilio_call_sid
             && draftLead.twilio_call_sid === context.call.twilio_call_sid);
+      } else {
+        // The call CARRIES a stamp, yet the loader (which follows stamps
+        // before any fallback) produced no lead while the lookup itself
+        // succeeded — the stamped target is soft-deleted or otherwise
+        // unusable, i.e. the draft's recorded linkage no longer holds
+        // (codex P1, PR #3304 r18: refusing here returned null and the
+        // caller presented the former lead's draft as verified). The
+        // in-transaction revalidation re-establishes this against live
+        // state before anything changes.
+        establishedAbsence = true;
       }
     }
     // Fast-path gate on the pre-transaction snapshot; the AUTHORITATIVE
@@ -99,11 +109,13 @@ async function reconcileExistingDraftLinks(existing, context) {
           .where({ id: existing.id })
           .forUpdate()
           .first('id', 'status', 'archived_at', 'estimate_data');
-        // Every STILL-SENDABLE status is in scope (codex P0, PR #3304
-        // r13): scheduled and send_failed rows can still deliver to the
-        // former lead; only mid-send and customer-delivered/terminal rows
-        // are exempt.
-        if (!fresh || !['draft', 'scheduled', 'send_failed'].includes(String(fresh.status || '').toLowerCase())) return;
+        // Every STILL-SENDABLE or RESENDABLE status is in scope (codex
+        // P0/P1, PR #3304 r13/r18): scheduled/send_failed can still
+        // deliver, and sent/viewed rows support resend and keep live
+        // public-token access — archiving blocks all of it. Only mid-send
+        // ('sending') and money-bearing terminals (accepted/declined/
+        // expired) are exempt.
+        if (!fresh || !['draft', 'scheduled', 'send_failed', 'sent', 'viewed'].includes(String(fresh.status || '').toLowerCase())) return;
         const freshData = (() => {
           try {
             const data = typeof fresh.estimate_data === 'string'
@@ -114,10 +126,12 @@ async function reconcileExistingDraftLinks(existing, context) {
         if (!freshData) return;
         // Already invalidated by a peer (codex P1, PR #3304 r17): a
         // reconciler whose snapshot predates the first commit must not
-        // re-process the archived row — it would overwrite
-        // linkage_invalidated_from with null and lose the audit
-        // provenance.
-        if (fresh.archived_at || freshData.estimatorEngine?.linkage_invalidated_at) return;
+        // re-process — it would overwrite linkage_invalidated_from with
+        // null and lose the audit provenance. The MARKER alone decides
+        // (codex P1 r18): an OPERATOR-archived row has no marker, and
+        // skipping it would leave it revivable via /unarchive with its
+        // stale links intact — it still gets the full invalidation.
+        if (freshData.estimatorEngine?.linkage_invalidated_at) return;
         // Everything below keys off the LOCKED row's linkage, never the
         // snapshot: a peer reconcile may have already moved it.
         const freshLeadId = freshData.lead_id ? String(freshData.lead_id) : null;
@@ -146,7 +160,17 @@ async function reconcileExistingDraftLinks(existing, context) {
               && context?.lead?.twilio_call_sid === callRow.twilio_call_sid);
           if (!stillLinked) return;
         } else {
-          if (liveStamp) return;
+          if (liveStamp) {
+            // An unlink with a LIVE stamp holds only when the stamped
+            // target is gone (the decision-phase deleted-target case) —
+            // an alive target means the linkage stands and nothing may
+            // change (codex P1, PR #3304 r18).
+            const stampTarget = await trx('leads')
+              .where({ id: liveStamp })
+              .whereNull('deleted_at')
+              .first('id');
+            if (stampTarget) return;
+          }
           if (freshLeadId) {
             const freshLead = await trx('leads').where({ id: freshLeadId }).whereNull('deleted_at').first('twilio_call_sid');
             const sidLinked = !!(freshLead?.twilio_call_sid && callRow.twilio_call_sid
@@ -331,7 +355,7 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
 // instead of adding a second one; when no bell exists (request-only calls,
 // or the generic path failed) it inserts fresh. Re-runs dedupe on the
 // estimator_engine marker.
-async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null }) {
+async function notify({ call, context, title, body, lane, estimateId = null, quotePromised = true, threadKey = null, link = null, forceUpdate = false }) {
   const callSid = call?.twilio_call_sid ? String(call.twilio_call_sid) : null;
   // Callers may pass a specific link (the proposal builder deep-link);
   // otherwise derive the historical default from what the bell references.
@@ -383,7 +407,12 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
         } catch { existingMeta = {}; }
         let insertFresh = false;
         if (existingMeta.estimator_engine === true) {
-          if (callSid) {
+          if (forceUpdate) {
+            // The fail-closed reconciliation alerts REPLACE whatever the
+            // bell said (codex P1, PR #3304 r18): the prior ready-to-send
+            // title/link can point at a wrong-lead draft, and the dedupe's
+            // stand rules would keep it there.
+          } else if (callSid) {
             // Same callSid = same request. A prior estimator bell stands
             // UNLESS this run now has a draft the old bell doesn't know
             // about (transient red → later success), OR the bell tells a
@@ -522,6 +551,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
               title: 'Quote promised on call — review the existing draft',
               body: 'A draft exists for this call but its lead linkage could not be verified '
                 + '(reconciliation unavailable). Review the call and the draft in admin/estimates before sending.',
+              forceUpdate: true,
             });
           }
           return result;
@@ -856,6 +886,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                   title: 'Quote promised — review the existing draft',
                   body: 'A draft blocks this proposal but its lead linkage could not be verified '
                     + '(reconciliation unavailable). Review the call and the draft in admin/estimates before sending.',
+                  forceUpdate: true,
                 });
               }
               return result;
@@ -1001,6 +1032,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               title: 'Quote promised — review the existing draft',
               body: 'A draft blocks this quote but its lead linkage could not be verified '
                 + '(reconciliation unavailable). Review the call and the draft in admin/estimates before sending.',
+              forceUpdate: true,
             });
           }
           return result;

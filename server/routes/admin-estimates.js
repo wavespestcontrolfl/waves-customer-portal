@@ -2110,6 +2110,11 @@ router.put('/:id/proposal', async (req, res, next) => {
     const updateQuery = db('estimates')
       .where({ id: estimate.id })
       .whereNull('price_locked_at')
+      // An ARCHIVED row is not editable (codex P1, PR #3304): a linkage
+      // invalidation archiving the draft between this route's pre-read
+      // and the write must win — the stale whole-blob rewrite would strip
+      // linkage_invalidated_at and revive the old linkage data.
+      .whereNull('archived_at')
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'sending']);
     // Payment terms are predicated on bill_by_invoice AT WRITE TIME too — a
     // concurrent PATCH turning invoice mode off between the pre-read guard

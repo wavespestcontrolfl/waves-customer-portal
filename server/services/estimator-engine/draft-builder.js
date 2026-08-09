@@ -814,6 +814,26 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         'select pg_advisory_xact_lock(hashtext(?), hashtext(?))',
         ['estimator_engine_call', String(call.id)]
       );
+      // (The call-scoped in-lock recheck now runs inside the serialized
+      // callback for EVERY path — see creationResult below.)
+      // No draft phone of our own, but a linked customer's number and
+      // identity can still be read by the guard below — lock them here, in
+      // the same canonical order every other caller uses. Lock order across
+      // namespaces is fixed (call lock first, dedupe locks after) and
+      // nothing else in the codebase ever takes the call-scoped lock, so no
+      // cycle exists.
+      await acquireAutomatedEstimateLocks(trx, dedupeLockSpec);
+      return callback(trx);
+    });
+  };
+
+  const creationResult = await runSerialized(async (trx) => {
+    // Call-scoped in-lock recheck on EVERY serialization path (codex P1,
+    // PR #3304 r18): the phone-lock path used to skip it, so a stale and
+    // a corrected composer with DIFFERENT lead addresses could both pass
+    // the early existing check and the address bypass then let the second
+    // insert through — two drafts for one call.
+    if (call?.id) {
       const existingForCall = await trx('estimates')
         .select('id', 'status')
         .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
@@ -830,18 +850,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           },
         };
       }
-      // No draft phone of our own, but a linked customer's number and
-      // identity can still be read by the guard below — lock them here, in
-      // the same canonical order every other caller uses. Lock order across
-      // namespaces is fixed (call lock first, dedupe locks after) and
-      // nothing else in the codebase ever takes the call-scoped lock, so no
-      // cycle exists.
-      await acquireAutomatedEstimateLocks(trx, dedupeLockSpec);
-      return callback(trx);
-    });
-  };
-
-  const creationResult = await runSerialized(async (trx) => {
+    }
     // The base duplicate guard is phone-only: a caller with several
     // properties on one number would have their SECOND property's draft
     // suppressed by the first property's open estimate. The bypass must
