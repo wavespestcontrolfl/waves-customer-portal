@@ -136,7 +136,7 @@ describe('20260809000000 reactivation batch', () => {
     expect(profileRow(db, 'german_roach').project_type).toBeNull();
     expect(profileRow(db, 'german_roach_initial').project_type).toBeNull();
     expect(profileRow(db, 'lawn_pest_knockdown').project_type).toBe('one_time_lawn_treatment');
-    expect(profileRow(db, 'trap_only_retainer').project_type).toBe('rodent_bait_station');
+    expect(profileRow(db, 'trap_only_retainer').project_type).toBe('rodent_trapping');
     expect(svcRow(db, 'trap_only_retainer')).toMatchObject({ billing_type: 'recurring', frequency: 'monthly' });
   });
 
@@ -151,7 +151,7 @@ describe('20260809000000 reactivation batch', () => {
       'German Roach Cleanout': { serviceKey: 'german_roach', findingsType: null },
       'German Roach Initial (3-Visit)': { serviceKey: 'german_roach_initial', findingsType: null },
       'Lawn Pest Knockdown': { serviceKey: 'lawn_pest_knockdown', findingsType: 'one_time_lawn_treatment' },
-      'Trap-Only Rodent Monitoring Retainer': { serviceKey: 'trap_only_retainer', findingsType: 'rodent_bait_station' },
+      'Trap-Only Rodent Monitoring Retainer': { serviceKey: 'trap_only_retainer', findingsType: 'rodent_trapping' },
     };
     for (const [label, want] of Object.entries(expected)) {
       const resolved = await resolveCompletionProfileForScheduledService(

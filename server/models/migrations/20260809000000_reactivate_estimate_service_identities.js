@@ -33,10 +33,12 @@
  *    2026-07-12 rodent graduation) — a different product from the new
  *    monthly trap-only retainer. The legacy row stays retired; the
  *    retainer gets its own recurring row. Trap checks complete on the
- *    typed rodent_bait_station form, the same decision the
- *    rodent_monitoring repoint made for legacy monitoring visits.
- *    Plan-prefixed engine line names ('Standard Trap-Only Retainer')
- *    link by service_id, same as foam's cadence-suffixed rows.
+ *    typed rodent_trapping form (traps and captures — NOT the
+ *    bait-station schema, whose required stations/consumption fields a
+ *    trap visit cannot truthfully fill). Estimate-accept linking is a
+ *    known boundary: the v1 mapper persists retainers as one-time spec
+ *    items, so converter id-stamping for them rides the queued
+ *    link-at-write lane; base-label visits resolve by exact name.
  *
  * Durations follow the flat-60 owner directive (20260703120000). Tax and
  * license mirror each family's live prod siblings (row-level taxability
@@ -192,7 +194,11 @@ const PROFILE_TYPES = {
   german_roach: null,
   german_roach_initial: null,
   lawn_pest_knockdown: 'one_time_lawn_treatment',
-  trap_only_retainer: 'rodent_bait_station',
+  // Trap checks record traps and captures — the rodent_trapping form.
+  // NOT rodent_bait_station (an exterior bait-station schema requiring
+  // stations_checked/bait_consumption a trap-only visit cannot truthfully
+  // fill; codex r2 P1).
+  trap_only_retainer: 'rodent_trapping',
 };
 
 const PALM_KEY = 'palm_injection';
