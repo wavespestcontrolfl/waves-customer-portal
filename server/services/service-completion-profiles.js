@@ -212,6 +212,16 @@ function serviceNameCandidates(serviceType) {
   if (suffixless && suffixless.toLowerCase() !== raw.toLowerCase()) {
     candidates.push(suffixless);
   }
+  // Visit-count program suffix: the German roach cleanout pricer labels
+  // its line "German Roach Cleanout — 2 Visit Program" (the count is the
+  // severity tier's visit total), so the catalog name it belongs to is
+  // the part before the dash. Same normalization class as the trailing
+  // " Service" strip above — narrow by design: it requires the literal
+  // "N Visit Program" tail.
+  const programless = raw.replace(/\s*[—–-]\s*\d+\s*visit\s*program\s*$/i, '').trim();
+  if (programless && !candidates.some((c) => c.toLowerCase() === programless.toLowerCase())) {
+    candidates.push(programless);
+  }
 
   const expanded = [];
   const seen = new Set();

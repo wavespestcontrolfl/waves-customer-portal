@@ -166,6 +166,10 @@ const SERVICE_KEY_RULES = {
   top_dressing: { eligible: false, reason: 'mechanical_lawn_lane' },
   bora_care: { eligible: false, reason: 'localized_treatment_lane' },
   rodent_guarantee: { eligible: false, reason: 'billing_rider' },
+  // Reactivation batch (20260809000000): German roach work is interior
+  // gel/IGR treatment — no exterior perimeter or lawn trace.
+  german_roach: { eligible: false, reason: 'interior_only_lane' },
+  german_roach_initial: { eligible: false, reason: 'interior_only_lane' },
   // lawn programs — coverage outline/highlight, not a spray-mist replay
   lawn_care_6week: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   lawn_care_monthly: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },

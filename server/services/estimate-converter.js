@@ -1568,6 +1568,13 @@ function remainingUnitCatalogKey(svc = {}) {
   // name, so legacy name-only lines link too. Absent row (env not yet
   // migrated) degrades to the existing name-only warn path.
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'foam_recurring') return 'foam_recurring';
+  // NOTE (2026-08-09): trap_only_retainer deliberately has NO branch
+  // here. The v1 mapper persists retainers under oneTime.specItems (not
+  // RECURRING_SERVICES) and the pricer rows carry no `annual`, so this
+  // function never receives them — a branch would be dead code. Making
+  // the retainer a first-class recurring service (cadence, monthly_rate,
+  // prepay interactions) is an owner-gated billing design queued with
+  // the link-at-write lane.
   return null;
 }
 

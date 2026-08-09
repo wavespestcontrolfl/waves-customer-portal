@@ -128,6 +128,20 @@ function treeShrubLegacyTierRows(v1Result = {}, tsLI = {}) {
   });
 }
 
+// Services whose engine line carries a PLAN-specific name in `name`
+// (not `label`/`display.name`) that SERVICE_LABEL would flatten away.
+// The trap-only retainer's plans differ in visit cadence (4/6/12 per
+// year), so collapsing all three to one label loses the identity the
+// catalog rows and completion profiles are keyed on — the same
+// information-loss rule the pest_initial_roach comment below records.
+// Deliberately an allowlist: a blanket `li.name` fallback would rewrite
+// persisted labels for every other one-time service.
+const PLAN_LABELED_SERVICES = new Set(['trap_only_retainer']);
+
+function planLabelFor(li = {}) {
+  return PLAN_LABELED_SERVICES.has(li.service) && li.name ? li.name : null;
+}
+
 const SERVICE_LABEL = {
   commercial_pest: 'Commercial Pest Control',
   commercial_lawn: 'Commercial Turf Treatment Program',
@@ -832,7 +846,7 @@ function mapV1ToLegacyShape(v1Result) {
     // 'German Cockroach Treatment' — SERVICE_LABEL flattens both to a
     // generic name and would drop the species distinction). Fall back to
     // the SERVICE_LABEL map for legacy services that don't set a label.
-    const name = li.display?.name || li.label || labelFor(li.service);
+    const name = li.display?.name || li.label || planLabelFor(li) || labelFor(li.service);
     const quoteRequired = !!li.quoteRequired || !!li.requiresCustomQuote;
     const price = quoteRequired ? null : effectiveOneTimePrice(li);
     const detail = [
