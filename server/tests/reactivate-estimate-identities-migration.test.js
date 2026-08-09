@@ -193,6 +193,28 @@ describe('20260809000000 reactivation batch', () => {
     expect(viaShort.serviceKey).toBe('german_roach');
   });
 
+  test('E2E through the v1 mapper: each retainer plan keeps its label and resolves its own row', async () => {
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const sp = require('../services/pricing-engine');
+    const db = seededDb();
+    await migration.up(fakeKnex(db));
+
+    for (const [plan, key] of [['standard', 'trap_only_retainer_standard'], ['plus', 'trap_only_retainer_plus'], ['monthly', 'trap_only_retainer_monthly']]) {
+      const priced = sp.priceTrapOnlyRetainer({ plan, billing: 'monthly' });
+      const mapped = mapV1ToLegacyShape({ lineItems: [priced] });
+      const items = [
+        ...(mapped?.oneTime?.items || []),
+        ...(mapped?.oneTime?.specItems || []),
+      ];
+      const line = items.find((i) => /trap-only/i.test(String(i.name || '')));
+      // The mapper must preserve the PLAN label, not flatten to one name.
+      expect({ plan, name: line && line.name }).toEqual({ plan, name: priced.name });
+      const resolved = await resolveCompletionProfileForScheduledService({ service_type: line.name }, fakeKnex(db));
+      expect({ plan, key: resolved.serviceKey, type: resolved.findingsType })
+        .toEqual({ plan, key, type: 'rodent_trapping' });
+    }
+  });
+
   test('names classify into their families through the shared detector', async () => {
     const db = seededDb();
     await migration.up(fakeKnex(db));
