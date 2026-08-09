@@ -34,7 +34,14 @@ const logger = require('../../logger');
 const { isEnabled } = require('../../../config/feature-gates');
 const { recordNonMobileSuppression } = require('./suppression');
 
-const NON_SMS_LINE_TYPES = new Set(['landline', 'fixedVoip']);
+// The fixedVoip block ships with its own revert: LINETYPE_BLOCK_FIXED_VOIP set
+// to false/0/off narrows the set back to landline-only WITHOUT disabling the
+// whole proactive validator (GATE_PROACTIVE_LINETYPE_LOOKUP stays the master
+// kill switch). Escape hatch for the tail case of an SMS-capable number Twilio
+// still labels fixedVoip; recovery for an already-blocked number is the
+// phone-edit path, which clears both the cache row and the suppression.
+const BLOCK_FIXED_VOIP = !['false', '0', 'off'].includes(String(process.env.LINETYPE_BLOCK_FIXED_VOIP || '').toLowerCase());
+const NON_SMS_LINE_TYPES = new Set(BLOCK_FIXED_VOIP ? ['landline', 'fixedVoip'] : ['landline']);
 
 function maskPhone(p) {
   const d = String(p || '').replace(/\D/g, '');

@@ -156,6 +156,20 @@ describe('checkLineType — cache miss → one-time lookup', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  test('LINETYPE_BLOCK_FIXED_VOIP=false narrows the set back to landline-only (default keeps fixedVoip blocked)', () => {
+    process.env.LINETYPE_BLOCK_FIXED_VOIP = 'false';
+    let narrowed;
+    jest.isolateModules(() => { narrowed = require('../services/messaging/validators/line-type'); });
+    delete process.env.LINETYPE_BLOCK_FIXED_VOIP;
+    expect(narrowed.NON_SMS_LINE_TYPES.has('fixedVoip')).toBe(false);
+    expect(narrowed.NON_SMS_LINE_TYPES.has('landline')).toBe(true);
+
+    let dflt;
+    jest.isolateModules(() => { dflt = require('../services/messaging/validators/line-type'); });
+    expect(dflt.NON_SMS_LINE_TYPES.has('fixedVoip')).toBe(true);
+    expect(dflt.NON_SMS_LINE_TYPES.has('landline')).toBe(true);
+  });
+
   test('fails OPEN without a paid lookup when the cache READ errors (table missing/unreadable)', async () => {
     const { q } = wireDb(undefined, { readThrows: true });
     const res = await checkLineType(SMS);
