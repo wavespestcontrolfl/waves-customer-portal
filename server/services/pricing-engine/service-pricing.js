@@ -2646,12 +2646,25 @@ function priceTreeShrub(property, options = {}) {
   // estimateTreeShrubBedAreaFromLot (10/18/25% of lot), so a factor there
   // would apply density twice; the 2,000 fallback is a guess, not a
   // measurement, and gets no adjustment either.
+  // Quote-time knob snapshot (options.knobs) beats the live config. These
+  // knobs mutate global constants, and estimate-public replays stored engine
+  // inputs through generateEstimate on every view/accept — without an
+  // input-level override an admin flip would re-price an ALREADY-SENT quote
+  // and then lock/bill the new amount. Same input-first replay mechanism the
+  // lawn/pest floor state uses (estimate-public#savedFloorReplayOverrides).
+  const knobs = (options.knobs && typeof options.knobs === 'object') ? options.knobs : {};
+  const knobNumber = (value, min, max) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= min && n <= max ? n : null;
+  };
+
   const shrubDensity = getTreeShrubShrubDensity(property);
   const densityEligibleSource = bedAreaInfo.bedAreaSource === 'explicit'
     || bedAreaInfo.bedAreaSource === 'estimated';
-  const densityFactor = densityEligibleSource
-    ? (TREE_SHRUB.densityFactors?.[shrubDensity] ?? 1)
-    : 1;
+  const snapshotDensityFactor = knobNumber(knobs.densityFactor, 0.5, 2);
+  const densityFactor = snapshotDensityFactor !== null
+    ? snapshotDensityFactor
+    : (densityEligibleSource ? (TREE_SHRUB.densityFactors?.[shrubDensity] ?? 1) : 1);
 
   // v4.7 routine palm-care reserve. The service-line option wins (the
   // estimator's T&S line carries what the caller actually said), then the
@@ -2676,7 +2689,13 @@ function priceTreeShrub(property, options = {}) {
     ? (options.palmCount !== undefined && options.palmCount !== null && String(options.palmCount).trim() !== ''
       ? 'service_line' : 'property')
     : 'none';
-  const palmReserve = TREE_SHRUB.routinePalmCareReserve || {};
+  const liveReserve = TREE_SHRUB.routinePalmCareReserve || {};
+  const snapshotPerPalmAnnual = knobNumber(knobs.perPalmAnnual, 0, 200);
+  const snapshotPalmMinutes = knobNumber(knobs.minutesPerPalmVisit, 0, 10);
+  const palmReserve = {
+    perPalmAnnual: snapshotPerPalmAnnual !== null ? snapshotPerPalmAnnual : (liveReserve.perPalmAnnual ?? 0),
+    minutesPerPalmVisit: snapshotPalmMinutes !== null ? snapshotPalmMinutes : (liveReserve.minutesPerPalmVisit ?? 0),
+  };
   // Neutral-rollout bridge (pre-push P0): before v4.7 the intent prompt
   // classified stated palms INTO treeCount, so they priced the generic
   // per-tree material + 1.5 min/visit. The producers now split the counts,
@@ -2754,7 +2773,11 @@ function priceTreeShrub(property, options = {}) {
 
   // Callback reserve mirrors the commercial pricers' knob; 0 until real
   // residential callback data earns a value (Phase-1 audit found zero).
-  const callbackReserveAnnual = (TREE_SHRUB.callbackReservePerVisit ?? 0) * frequency;
+  const snapshotCallbackReserve = knobNumber(knobs.callbackReservePerVisit, 0, 50);
+  const callbackReservePerVisit = snapshotCallbackReserve !== null
+    ? snapshotCallbackReserve
+    : (TREE_SHRUB.callbackReservePerVisit ?? 0);
+  const callbackReserveAnnual = callbackReservePerVisit * frequency;
 
   const annualDirectCost = materialCost + laborAnnual + callbackReserveAnnual;
   // Admin-INCLUSIVE margin target (v4.6): price = (direct + admin) / (1 - target).
@@ -2842,6 +2865,15 @@ function priceTreeShrub(property, options = {}) {
     palmReserveActive,
     palmMaterialArmed,
     palmLaborArmed,
+    // Quote-time knob snapshot. Persisted with the estimate so a later
+    // admin flip cannot re-price an already-sent quote on replay
+    // (estimate-public#savedFloorReplayOverrides injects these back).
+    pricingKnobs: {
+      densityFactor,
+      perPalmAnnual: palmReserve.perPalmAnnual ?? 0,
+      minutesPerPalmVisit: palmReserve.minutesPerPalmVisit ?? 0,
+      callbackReservePerVisit,
+    },
     access,
     onSiteMin,
     materialModel: {

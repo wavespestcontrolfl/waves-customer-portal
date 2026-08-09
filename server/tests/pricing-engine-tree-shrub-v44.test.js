@@ -1242,3 +1242,60 @@ describe('Tree & Shrub v4.7 leg independence for inferred trees + tier-row parit
     }
   });
 });
+
+describe('Tree & Shrub v4.7 quote-time knob snapshot (sent-estimate replay)', () => {
+  const originalDensity = { ...constants.TREE_SHRUB.densityFactors };
+  const originalReserve = { ...constants.TREE_SHRUB.routinePalmCareReserve };
+  const originalCallback = constants.TREE_SHRUB.callbackReservePerVisit;
+  afterEach(() => {
+    constants.TREE_SHRUB.densityFactors = { ...originalDensity };
+    constants.TREE_SHRUB.routinePalmCareReserve = { ...originalReserve };
+    constants.TREE_SHRUB.callbackReservePerVisit = originalCallback;
+  });
+
+  test('every quote stamps the knob values it priced with', () => {
+    const neutral = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard' });
+    expect(neutral.pricingKnobs).toEqual({
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
+    });
+    constants.TREE_SHRUB.densityFactors.heavy = 1.3;
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
+    constants.TREE_SHRUB.callbackReservePerVisit = 2;
+    const armed = priceTreeShrub({ bedArea: 2000, access: 'easy', shrubDensity: 'heavy' }, { tier: 'standard' });
+    expect(armed.pricingKnobs).toEqual({
+      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2,
+    });
+  });
+
+  test('a replayed snapshot beats a later admin flip — the sent price survives', () => {
+    const sent = priceTreeShrub(
+      { bedArea: 2000, access: 'easy', shrubDensity: 'heavy', palmCount: 10 },
+      { tier: 'standard' }
+    );
+    // Admin flips every knob AFTER the estimate was sent.
+    constants.TREE_SHRUB.densityFactors.heavy = 1.3;
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 25, minutesPerPalmVisit: 5 };
+    constants.TREE_SHRUB.callbackReservePerVisit = 10;
+    const liveReprice = priceTreeShrub(
+      { bedArea: 2000, access: 'easy', shrubDensity: 'heavy', palmCount: 10 },
+      { tier: 'standard' }
+    );
+    expect(liveReprice.annual).toBeGreaterThan(sent.annual); // the flip does bite fresh quotes
+    const replay = priceTreeShrub(
+      { bedArea: 2000, access: 'easy', shrubDensity: 'heavy', palmCount: 10 },
+      { tier: 'standard', knobs: sent.pricingKnobs }
+    );
+    expect(replay.annual).toBe(sent.annual);
+    expect(replay.costs.materialCost).toBe(sent.costs.materialCost);
+    expect(replay.onSiteMin).toBe(sent.onSiteMin);
+  });
+
+  test('legacy estimates (no stamp) replay NEUTRAL — they could only have been priced with the knobs off', () => {
+    const { estimateTreeShrubKnobSignal: signal } = require('../routes/estimate-public');
+    expect(signal({ result: { lineItems: [{ service: 'tree_shrub' }] } })).toEqual({
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
+    });
+    // No T&S line at all → inject nothing (fresh quotes resolve live config).
+    expect(signal({ result: { lineItems: [{ service: 'pest_control' }] } })).toBeNull();
+  });
+});

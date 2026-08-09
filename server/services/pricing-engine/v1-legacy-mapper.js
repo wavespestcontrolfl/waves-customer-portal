@@ -99,6 +99,10 @@ function roundedTreeShrubTierQuote(v1Result = {}, tsLI = {}, tier = 'standard') 
     // whether palms fold into the legacy tree terms, so passing them as a
     // property-level value instead would silently reprice the row.
     palmCount: tsLI.palmCountSource === 'service_line' ? tsLI.palmCount : undefined,
+    // The selected line's quote-time knob snapshot governs every alternate
+    // cadence row too — otherwise a post-send admin flip would reprice the
+    // rows the customer can still switch to.
+    knobs: tsLI.pricingKnobs,
   });
   const annual = Math.round(quote.annual);
   const monthly = roundMoney(annual / 12);
