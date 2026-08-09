@@ -98,7 +98,7 @@ async function reconcileExistingDraftLinks(existing, context) {
         const fresh = await trx('estimates')
           .where({ id: existing.id })
           .forUpdate()
-          .first('id', 'status', 'estimate_data');
+          .first('id', 'status', 'archived_at', 'estimate_data');
         // Every STILL-SENDABLE status is in scope (codex P0, PR #3304
         // r13): scheduled and send_failed rows can still deliver to the
         // former lead; only mid-send and customer-delivered/terminal rows
@@ -112,6 +112,12 @@ async function reconcileExistingDraftLinks(existing, context) {
           } catch { return null; }
         })();
         if (!freshData) return;
+        // Already invalidated by a peer (codex P1, PR #3304 r17): a
+        // reconciler whose snapshot predates the first commit must not
+        // re-process the archived row — it would overwrite
+        // linkage_invalidated_from with null and lose the audit
+        // provenance.
+        if (fresh.archived_at || freshData.estimatorEngine?.linkage_invalidated_at) return;
         // Everything below keys off the LOCKED row's linkage, never the
         // snapshot: a peer reconcile may have already moved it.
         const freshLeadId = freshData.lead_id ? String(freshData.lead_id) : null;

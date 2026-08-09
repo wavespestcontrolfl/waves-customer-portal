@@ -1486,7 +1486,12 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // it for send/view/acceptance advancement) and the schedule-stitch pointer
 // the pipeline list + booking flows resolve appointments through. A revise
 // replaces estimate_data wholesale, so these must be carried across.
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'scheduled_service_id'];
+// lead_linkage rides with lead_id (codex P0, PR #3304): it is the durable
+// provenance the estimator's existing-draft reconciliation needs to judge
+// whether an unlink may invalidate the draft — dropping it on revise made
+// a later stamp-clear skip invalidation and leave the former lead's draft
+// sendable to the wrong recipient.
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id'];
 
 // Revise an existing estimate in place: same body + pricing pipeline as
 // create, but the row keeps its id, token, status, expiry, creator, and
