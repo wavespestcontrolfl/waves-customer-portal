@@ -1180,7 +1180,11 @@ describe('Tree & Shrub measurement inputs reach the agent draft engine input', (
     const enriched = { estimatedBedAreaSf: 2600, estimatedPalmCount: 8, shrubDensity: 'HEAVY' };
     const input = buildEngineInput({ intent: baseIntent(), propertyFacts: facts, context: {}, lookupEnriched: enriched });
     expect(input.estimatedBedAreaSf).toBe(2600);
-    expect(input.palmCount).toBe(8);
+    // The AI palm estimate is NOT forwarded: property.palmCount is a
+    // green-lane fallback for palm-INJECTION pricing (resolvePalmCount sets
+    // requiresManualReview false), so forwarding it would auto-price
+    // per-palm injections nobody measured.
+    expect(input.palmCount).toBeUndefined();
 
     // Commercial prices off footprint/risk-type, not homeowner measurements.
     const commercial = buildEngineInput({
@@ -1190,7 +1194,6 @@ describe('Tree & Shrub measurement inputs reach the agent draft engine input', (
       lookupEnriched: enriched,
     });
     expect(commercial.estimatedBedAreaSf).toBeUndefined();
-    expect(commercial.palmCount).toBeUndefined();
   });
 
   test('a T&S quote off that input stops using the 2,000 sqft LOW-confidence fallback', () => {

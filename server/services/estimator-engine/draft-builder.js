@@ -212,12 +212,16 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     ...(!isCommercial && positive(lookupEnriched?.estimatedBedAreaSf)
       ? { estimatedBedAreaSf: Number(lookupEnriched.estimatedBedAreaSf) }
       : {}),
-    // Palms on the property feed the routine palm-care reserve on the
-    // recurring T&S program (NOT palm_injection's treated-palm count, which
-    // stays a caller-stated service-line value).
-    ...(!isCommercial && positive(lookupEnriched?.estimatedPalmCount)
-      ? { palmCount: Math.round(Number(lookupEnriched.estimatedPalmCount)) }
-      : {}),
+    // The lookup's estimatedPalmCount is deliberately NOT forwarded here.
+    // property.palmCount is read by BOTH the T&S reserve and
+    // resolvePalmCount, and the latter treats it as a valid green-lane
+    // fallback for a palm-INJECTION line (requiresManualReview: false) — so
+    // an AI-detected count would auto-price per-palm injections nobody
+    // measured. Routing it through the T&S service line instead is no
+    // better today: that source folds into the legacy tree terms while the
+    // reserve is unarmed, which would raise prices off an AI guess. It
+    // needs its own review-marked input, which belongs with the work that
+    // arms the reserve.
     // Structural facts deriveModifiers() prices from: home age (pest $/app),
     // construction + foundation (termite/WDO), roof type (rodent). UNKNOWN
     // merges stay off the input so the engine's own defaults apply.
