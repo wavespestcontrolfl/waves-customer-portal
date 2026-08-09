@@ -772,7 +772,7 @@ describe('property context reads only columns the customers table actually has',
     const fromLookup = await resolve({
       customer: customerWithBasics,
       turfProfile: null,
-      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600 } }),
+      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600, aiConfidence: 88 } }),
     });
     expect(fromLookup.propertyInput.bedArea).toBe(2600);
     // Provenance drives money: the T&S density factor applies to measured
@@ -782,7 +782,7 @@ describe('property context reads only columns the customers table actually has',
     const fromProfile = await resolve({
       customer: { ...customerWithBasics, bed_sqft: 1800, palm_count: 4 },
       turfProfile: null,
-      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600 } }),
+      propertyLookup: async () => ({ enriched: { estimatedBedAreaSf: 2600, aiConfidence: 88 } }),
     });
     expect(fromProfile.propertyInput.bedArea).toBe(1800);
     expect(fromProfile.propertyInput.bedAreaSource).toBe('explicit');

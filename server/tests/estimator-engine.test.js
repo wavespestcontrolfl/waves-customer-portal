@@ -1177,7 +1177,7 @@ describe('Tree & Shrub measurement inputs reach the agent draft engine input', (
       home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
       lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
     };
-    const enriched = { estimatedBedAreaSf: 2600, estimatedPalmCount: 8, shrubDensity: 'HEAVY' };
+    const enriched = { estimatedBedAreaSf: 2600, estimatedPalmCount: 8, shrubDensity: 'HEAVY', aiConfidence: 88 };
     const input = buildEngineInput({ intent: baseIntent(), propertyFacts: facts, context: {}, lookupEnriched: enriched });
     expect(input.estimatedBedAreaSf).toBe(2600);
     // The AI palm estimate is NOT forwarded: property.palmCount is a
@@ -1205,7 +1205,7 @@ describe('Tree & Shrub measurement inputs reach the agent draft engine input', (
       intent: { ...baseIntent(), services: { treeShrub: {} } },
       propertyFacts: facts,
       context: {},
-      lookupEnriched: { estimatedBedAreaSf: 2600 },
+      lookupEnriched: { estimatedBedAreaSf: 2600, aiConfidence: 88 },
     });
     const ts = generateEstimate({ ...withBedArea, services: { treeShrub: { tier: 'standard' } } })
       .lineItems.find((li) => li.service === 'tree_shrub');
@@ -1242,8 +1242,9 @@ describe('lookup bed areas carry their confidence into the agent draft', () => {
     // The lookup's own copy calls <60 low-confidence — priceTreeShrub would
     // otherwise stamp it medium-confidence with no review reason.
     expect(build({ estimatedBedAreaSf: 2600, aiConfidence: 41 }).estimatedBedAreaSf).toBeUndefined();
-    // Legacy payloads with no score are not evidence of doubt.
-    expect(build({ estimatedBedAreaSf: 2600 }).estimatedBedAreaSf).toBe(2600);
+    // Bed area is a NEW consumption, so it fails closed without a score —
+    // an unscored area would become a medium-confidence price on no evidence.
+    expect(build({ estimatedBedAreaSf: 2600 }).estimatedBedAreaSf).toBeUndefined();
   });
 
   test('a field-verify flag on the bed area or the imagery it came from disqualifies it', () => {
@@ -1284,6 +1285,10 @@ describe('global lookup verification failures disqualify every derived input', (
   test('an unrelated field flag still passes both', () => {
     const enriched = { ...base, fieldVerifyFlags: [{ field: 'yearBuilt', reason: 'county mismatch', priority: 'LOW' }] };
     expect(lookupBedAreaIsTrustworthy(enriched)).toBe(true);
+    // Features keep the lenient rule (already consumed pre-lane); bed area
+    // does not (new consumption).
+    expect(lookupFeaturesAreTrustworthy({ pool: 'YES' })).toBe(true);
+    expect(lookupBedAreaIsTrustworthy({ estimatedBedAreaSf: 2600 })).toBe(false);
     expect(lookupFeaturesAreTrustworthy(enriched)).toBe(true);
   });
 });

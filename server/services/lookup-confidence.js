@@ -27,12 +27,18 @@ function confidenceScore(enriched) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Absent confidence data is NOT evidence of doubt — legacy payloads carried
-// no score, and treating them as untrustworthy would silently stop pricing
-// inputs that have always been used.
-function lookupConfidenceIsAdequate(enriched) {
+// For inputs ALREADY in use, an absent score is not evidence of doubt —
+// legacy payloads carried none, and treating them as untrustworthy would
+// silently stop pricing inputs that have always been used.
+//
+// For a NEWLY consumed input the burden flips: nothing depended on it
+// before, so requiring a real score costs nothing and refuses to invent
+// trust the lookup never expressed. Callers introducing a consumption pass
+// requireExplicitScore.
+function lookupConfidenceIsAdequate(enriched, { requireExplicitScore = false } = {}) {
   const score = confidenceScore(enriched);
-  return score === null || score >= LOOKUP_AI_CONFIDENCE_FLOOR;
+  if (score === null) return !requireExplicitScore;
+  return score >= LOOKUP_AI_CONFIDENCE_FLOOR;
 }
 
 // Flags whose scope is the WHOLE lookup, not one field: 'address' (the
@@ -56,10 +62,15 @@ function hasVerifyFlagMatching(enriched, matcher) {
 // A bed area is trustworthy when the lookup neither graded itself low nor
 // flagged the bed-area read — or the turf/imagery read it came from, since
 // that is the same picture.
+// Bed area is a NEW consumption (nothing priced off it before this lane), so
+// it fails closed on a missing score: an unscored area would otherwise
+// become a medium-confidence T&S price with no review reason. A quote
+// without it simply falls back to the lot inference, which carries its own
+// review markers.
 function lookupBedAreaIsTrustworthy(enriched) {
   const area = Number(enriched?.estimatedBedAreaSf);
   if (!Number.isFinite(area) || area <= 0) return false;
-  if (!lookupConfidenceIsAdequate(enriched)) return false;
+  if (!lookupConfidenceIsAdequate(enriched, { requireExplicitScore: true })) return false;
   return !hasVerifyFlagMatching(enriched, (field) => (
     field.includes('bedarea') || field.includes('bed_area') || field.includes('estimatedturf')
   ));
