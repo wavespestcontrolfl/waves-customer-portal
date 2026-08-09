@@ -728,7 +728,15 @@ async function writeGuardedLeadEstimateLink(context, estimateId) {
             .whereRaw('ref.created_at < (SELECT created_at FROM estimates WHERE id = ?)', [estimateId]);
         });
     });
-  if (context?.call?.id) {
+  // The live-linkage EXISTS applies ONLY to the durable classes (codex
+  // P1, PR #3304 r7): a phone_touched lead retains its ORIGINAL call's
+  // sid and normally carries no stamp, so the sid/stamp predicate can
+  // never match it and the canonical mirror always zero-rowed for that
+  // whole class. Phone-touched (and SMS-origin) writes keep the
+  // destination guard alone — the reconcile never unlinks them either,
+  // so the stale-creator race is bounded to a class whose linkage was
+  // best-effort to begin with.
+  if (context?.call?.id && ['sid', 'stamp'].includes(context?.leadLinkage)) {
     q = q.whereExists(function callStillLinked() {
       this.select(db.raw('1'))
         .from('call_log')
