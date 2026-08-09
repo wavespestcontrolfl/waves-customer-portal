@@ -114,6 +114,36 @@ async function reconcileExistingDraftLinks(existing, context) {
         if (freshLeadId === currentLeadId) return;
         const freshLinkageDurable = ['sid', 'stamp'].includes(freshData.lead_linkage);
         if (!(durableRepoint || (establishedAbsence && freshLinkageDurable))) return;
+        // Re-validate the call's CURRENT linkage inside the transaction
+        // (pre-push P1 r6): estimator runs are detached — an older run
+        // can acquire this lock LAST and would otherwise undo a retry's
+        // correct relink with its stale context; the absence path must
+        // also hold for the FRESH lead, not the snapshot's. The call row
+        // is the source of truth.
+        const callRow = context?.call?.id
+          ? await trx('call_log').where({ id: context.call.id }).first('twilio_call_sid', 'metadata')
+          : null;
+        if (!callRow) return;
+        const liveStamp = (() => {
+          try {
+            const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
+            return md?.lead_id ? String(md.lead_id) : null;
+          } catch { return null; }
+        })();
+        if (currentLeadId) {
+          const stillLinked = liveStamp === currentLeadId
+            || (context?.leadLinkage === 'sid' && !!callRow.twilio_call_sid
+              && context?.lead?.twilio_call_sid === callRow.twilio_call_sid);
+          if (!stillLinked) return;
+        } else {
+          if (liveStamp) return;
+          if (freshLeadId) {
+            const freshLead = await trx('leads').where({ id: freshLeadId }).whereNull('deleted_at').first('twilio_call_sid');
+            const sidLinked = !!(freshLead?.twilio_call_sid && callRow.twilio_call_sid
+              && freshLead.twilio_call_sid === callRow.twilio_call_sid);
+            if (sidLinked) return;
+          }
+        }
         if (currentLeadId) {
           freshData.lead_id = currentLeadId;
           freshData.lead_linkage = context.leadLinkage || null;

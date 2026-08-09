@@ -5,6 +5,7 @@
 
 const mockUpdates = [];
 let mockFreshEstimate = null;
+let mockCallRow = null;
 
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
@@ -16,7 +17,11 @@ jest.mock('../models/db', () => {
         return b;
       };
     }
-    b.first = async () => (table === 'estimates' ? mockFreshEstimate : null);
+    b.first = async () => {
+      if (table === 'estimates') return mockFreshEstimate;
+      if (table === 'call_log') return mockCallRow;
+      return null;
+    };
     b.update = async (row) => { mockUpdates.push({ table, wheres: b._wheres.slice(), row }); return 1; };
     b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
     return b;
@@ -52,6 +57,9 @@ const { _reconcileExistingDraftLinks } = require('../services/estimator-engine/i
 beforeEach(() => {
   mockUpdates.length = 0;
   mockFreshEstimate = null;
+  // Live call row: the in-transaction revalidation reads the CURRENT
+  // stamp — default it to the repoint target the tests intend.
+  mockCallRow = { twilio_call_sid: 'CA-call-1', metadata: { lead_id: 'lead-C' } };
 });
 
 describe('reconcileExistingDraftLinks keys cleanup off the LOCKED row', () => {
