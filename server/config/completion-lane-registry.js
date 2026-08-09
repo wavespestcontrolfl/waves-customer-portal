@@ -127,6 +127,18 @@ const ONE_TIME_GENERIC_BY_DESIGN = [
   // profile keeps one_time billing AND followup_policy 'alert' (the 14-day
   // follow-up now derives from the profile on untyped completions).
   'bed_bug_treatment',
+  // Estimate-gap batch (owner-directed 2026-08-08, migration
+  // 20260808080000). The three mechanical lawn add-ons stay generic
+  // because one_time_lawn_treatment's work_completed choices only
+  // describe fertilizer/pesticide/amendment/inspection work — a tech
+  // could not truthfully record dethatching on that form, and the report
+  // auto-sends. Repoint via CUTOVER_IN_FLIGHT_KEYS if the lawn schema
+  // gains mechanical actions. rodent_guarantee is a guarantee program,
+  // not a treatment — generic is its decided lane.
+  'dethatching',
+  'plugging',
+  'top_dressing',
+  'rodent_guarantee',
 ];
 
 // Registered typed findings schemas — a typed pointer that isn't a real
