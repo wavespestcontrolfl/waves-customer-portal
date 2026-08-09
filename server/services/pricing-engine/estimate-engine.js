@@ -821,9 +821,17 @@ function generateEstimate(input) {
     if (propertyIsCommercial) {
       // Commercial auto-pricing — priced ornamental program (shrub/tree fert +
       // insect + bed weed control). Replaces the old lawn-adjacent manual quote.
+      // The commercial ornamental pricer has no palm concept and this lane
+      // does not reprice commercial: stated palms keep their PRE-SPLIT
+      // classification here (counted as plants in treeCount) so a
+      // commercial caller stating palms is never priced as zero plants.
+      const commercialTreeCount = [services.treeShrub.treeCount, services.treeShrub.palmCount]
+        .map(Number)
+        .filter((n) => Number.isFinite(n) && n > 0)
+        .reduce((sum, n) => sum + n, 0);
       const result = priceCommercialTreeShrub(property, {
         commercialSubtype,
-        treeCount: services.treeShrub.treeCount,
+        treeCount: commercialTreeCount > 0 ? commercialTreeCount : services.treeShrub.treeCount,
         // Rep-set plant-density multiplier (very_high → manual); admin-set.
         treeShrubDensity: input.treeShrubDensity,
       });

@@ -1149,3 +1149,39 @@ describe('Tree & Shrub v4.7 palm count service-line passthrough', () => {
     expect(fallback.palmCountSource).toBe('property');
   });
 });
+
+describe('Tree & Shrub v4.7 commercial + draft-review interactions', () => {
+  test('commercial keeps the PRE-SPLIT plant classification — stated palms are never priced as zero plants', () => {
+    const commercialProperty = { propertyType: 'commercial', homeSqFt: 8000, lotSqFt: 40000, bedArea: 4000 };
+    const withPalms = generateEstimate({
+      ...commercialProperty,
+      services: { treeShrub: { palmCount: 12 } },
+    });
+    const asTrees = generateEstimate({
+      ...commercialProperty,
+      services: { treeShrub: { treeCount: 12 } },
+    });
+    const a = withPalms.lineItems.find((li) => li.service === 'commercial_tree_shrub');
+    const b = asTrees.lineItems.find((li) => li.service === 'commercial_tree_shrub');
+    expect(a).toBeTruthy();
+    expect(a.annual).toBe(b.annual);
+    // Trees and palms both stated add up on the commercial path.
+    const both = generateEstimate({
+      ...commercialProperty,
+      services: { treeShrub: { treeCount: 4, palmCount: 8 } },
+    }).lineItems.find((li) => li.service === 'commercial_tree_shrub');
+    expect(both.annual).toBe(b.annual);
+  });
+
+  test('a palm-only residential draft is fully quoted, not review-blocked for a missing tree count', () => {
+    const draftPriv = require('../services/estimator-engine/draft-builder')._private
+      || require('../services/estimator-engine/draft-builder')._test;
+    const lineRequiresReview = draftPriv.lineRequiresReview;
+    // Palm-only: treeCountSource is default_zero but the palms ARE the
+    // plant count for this line.
+    expect(lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'default_zero', palmCount: 10, annual: 400 })).toBe(false);
+    // Neither count → still review-blocked (the pricer quoted fixed costs only).
+    expect(lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'default_zero', annual: 400 })).toBe(true);
+    expect(lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'default_zero', palmCount: 0, annual: 400 })).toBe(true);
+  });
+});
