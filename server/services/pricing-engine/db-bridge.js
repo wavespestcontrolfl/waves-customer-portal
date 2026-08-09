@@ -1029,6 +1029,16 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
 
     // ── Tree & Shrub ─────────────────────────────────────────
+    // v4.7 knobs rebase to their NEUTRAL in-code defaults on EVERY sync —
+    // same mutate-in-place trap as the lawn floor kill values above: after
+    // a valid value loads, deleting its key (or writing an out-of-range
+    // replacement) must reassert neutral on the next sync, not leave the
+    // old value resident until restart with pods drifting apart. An
+    // out-of-range value therefore degrades to NEUTRAL (fail-safe toward
+    // "no adjustment"), never to whatever loaded before it.
+    constants.TREE_SHRUB.densityFactors = { light: 1, moderate: 1, heavy: 1 };
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 0 };
+    constants.TREE_SHRUB.callbackReservePerVisit = 0;
     if (config.ts_material_rates) {
       const rates = config.ts_material_rates;
       const model = constants.TREE_SHRUB.materialModel;

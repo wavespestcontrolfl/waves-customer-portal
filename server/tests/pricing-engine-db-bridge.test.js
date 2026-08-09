@@ -1015,4 +1015,45 @@ describe('ts_material_rates v4.7 knobs', () => {
     expect(constants.TREE_SHRUB.routinePalmCareReserve).toEqual({ perPalmAnnual: 0, minutesPerPalmVisit: 0 });
     expect(constants.TREE_SHRUB.callbackReservePerVisit).toBe(0);
   });
+
+  test('every sync rebases to neutral: removed or out-of-range keys cannot leave a stale value resident', async () => {
+    // Same mutate-in-place trap as lawn programMinimumMonthly: no manual
+    // reset between these syncs — the bridge itself must rebase.
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'ts_material_rates',
+      data: { density_heavy: 1.3, palm_per_palm_annual: 6, callback_reserve_per_visit: 2 },
+    }]))).resolves.toBe(true);
+    expect(constants.TREE_SHRUB.densityFactors.heavy).toBe(1.3);
+    expect(constants.TREE_SHRUB.routinePalmCareReserve.perPalmAnnual).toBe(6);
+    expect(constants.TREE_SHRUB.callbackReservePerVisit).toBe(2);
+
+    // Keys removed from the row → neutral reasserts on the next sync.
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'ts_material_rates',
+      data: { per_sqft: 0.055 },
+    }]))).resolves.toBe(true);
+    expect(constants.TREE_SHRUB.densityFactors.heavy).toBe(1);
+    expect(constants.TREE_SHRUB.routinePalmCareReserve.perPalmAnnual).toBe(0);
+    expect(constants.TREE_SHRUB.callbackReservePerVisit).toBe(0);
+
+    // A valid value replaced by an out-of-range one degrades to NEUTRAL,
+    // never to the previously loaded value.
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'ts_material_rates',
+      data: { density_heavy: 1.3 },
+    }]))).resolves.toBe(true);
+    expect(constants.TREE_SHRUB.densityFactors.heavy).toBe(1.3);
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'ts_material_rates',
+      data: { density_heavy: 5 },
+    }]))).resolves.toBe(true);
+    expect(constants.TREE_SHRUB.densityFactors.heavy).toBe(1);
+
+    // Whole row gone → neutral too.
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'global_labor_rate',
+      data: { value: constants.GLOBAL.LABOR_RATE },
+    }]))).resolves.toBe(true);
+    expect(constants.TREE_SHRUB.densityFactors).toEqual({ light: 1, moderate: 1, heavy: 1 });
+  });
 });

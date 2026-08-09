@@ -25,7 +25,15 @@ const NEUTRAL_KEYS = {
 
 async function loadRow(knex) {
   if (!(await knex.schema.hasTable('pricing_config'))) return null;
-  const row = await knex('pricing_config').where({ config_key: 'ts_material_rates' }).first();
+  // forUpdate: the admin pricing writer locks this row for its own
+  // read-modify-write; without the lock here an admin edit committed
+  // between this SELECT and the whole-JSON UPDATE below would be silently
+  // overwritten. Knex migrations run transactionally, so the lock
+  // serializes the two writers.
+  const row = await knex('pricing_config')
+    .where({ config_key: 'ts_material_rates' })
+    .forUpdate()
+    .first();
   if (!row) return null;
   const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
   if (!data || typeof data !== 'object') return null;
@@ -61,10 +69,29 @@ exports.down = async function down(knex) {
   const loaded = await loadRow(knex);
   if (!loaded) return;
   const { data } = loaded;
-  // Remove only keys still at their seeded neutral value — an owner-flipped
-  // calibrated value is an admin edit this migration must not revert.
+  // Ownership comes from this migration's own audit trail: a key is ours to
+  // remove only if it was ABSENT in the old_value up() recorded. A neutral
+  // key that pre-existed up() (e.g. an admin already seeded density_light:1)
+  // must survive rollback. No audit row → up() added nothing (skipped, or
+  // audit table absent) → nothing to remove.
+  if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
+  const auditRow = await knex('pricing_config_audit')
+    .where({ config_key: 'ts_material_rates', changed_by: MIGRATION_TAG })
+    .orderBy('id', 'desc')
+    .first();
+  if (!auditRow) return;
+  let preUpData;
+  try {
+    preUpData = typeof auditRow.old_value === 'string'
+      ? JSON.parse(auditRow.old_value) : auditRow.old_value;
+  } catch {
+    return;
+  }
+  if (!preUpData || typeof preUpData !== 'object') return;
   const removable = Object.entries(NEUTRAL_KEYS)
-    .filter(([key, neutral]) => Number(data[key]) === neutral)
+    // Ours (absent pre-up) AND still at the seeded neutral value — an
+    // owner-flipped calibrated value is an admin edit down() must not touch.
+    .filter(([key, neutral]) => preUpData[key] === undefined && Number(data[key]) === neutral)
     .map(([key]) => key);
   if (!removable.length) return;
   const newData = { ...data };
