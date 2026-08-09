@@ -78,11 +78,14 @@ const SERVICES = [
     requires_license: true,
     license_category: 'GHP',
     min_tech_skill_level: 2,
-    // German roach work ALWAYS re-services — the retired knockdown
-    // profile used alert/14d, and the profile heal derives its followup
-    // policy from these fields (codex r3 P1).
-    requires_follow_up: true,
-    follow_up_interval_days: 14,
+    // NO requires_follow_up (codex r2 P1, superseding the r1 request for
+    // alert/14d): the follow-up CTA chain is only bounded for
+    // TWO_TREATMENT_PACKAGE_KEYS, so an alert policy on a 2-4 visit
+    // program mints an unbounded series of $0 visits — each included
+    // child completing raises another alert. These programs are SOLD as
+    // a package and their visits are booked together; automatic
+    // follow-up needs program-position tracking that does not exist yet
+    // (queued with the link-at-write lane).
     customer_visible: true,
     booking_enabled: false,
     is_active: true,
@@ -114,11 +117,14 @@ const SERVICES = [
     requires_license: true,
     license_category: 'GHP',
     min_tech_skill_level: 2,
-    // German roach work ALWAYS re-services — the retired knockdown
-    // profile used alert/14d, and the profile heal derives its followup
-    // policy from these fields (codex r3 P1).
-    requires_follow_up: true,
-    follow_up_interval_days: 14,
+    // NO requires_follow_up (codex r2 P1, superseding the r1 request for
+    // alert/14d): the follow-up CTA chain is only bounded for
+    // TWO_TREATMENT_PACKAGE_KEYS, so an alert policy on a 2-4 visit
+    // program mints an unbounded series of $0 visits — each included
+    // child completing raises another alert. These programs are SOLD as
+    // a package and their visits are booked together; automatic
+    // follow-up needs program-position tracking that does not exist yet
+    // (queued with the link-at-write lane).
     customer_visible: true,
     booking_enabled: false,
     is_active: true,
@@ -186,10 +192,16 @@ const SERVICES = [
     default_duration_minutes: 60, // flat 60 per 20260703120000
     min_duration_minutes: 30,
     max_duration_minutes: 120,
-    pricing_type: 'fixed',
-    base_price: tier.monthly,
-    price_range_min: tier.monthly,
-    price_range_max: tier.monthly,
+    // Prices stay NULL, matching EVERY live recurring catalog row
+    // (verified in prod 2026-08-09): admin scheduling copies base_price
+    // onto the VISIT, and a monthly due is not a per-visit price —
+    // stamping $49 on each of 4 visits would bill $196/yr instead of
+    // $588/yr and skip the setup fee (codex r2 P1). Retainer billing is
+    // the pricer's authority; the catalog row carries identity only.
+    pricing_type: 'variable',
+    base_price: null,
+    price_range_min: null,
+    price_range_max: null,
     is_waveguard: false,
     is_taxable: true,
     tax_service_key: 'pest_control',

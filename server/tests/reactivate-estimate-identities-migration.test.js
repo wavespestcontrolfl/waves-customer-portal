@@ -139,21 +139,28 @@ describe('20260809000000 reactivation batch', () => {
         default_duration_minutes: 60,
       });
     }
-    // German roach ALWAYS re-services: the catalog fields drive the
-    // profile heal to alert/14d (the retired knockdown profile's policy).
+    // Follow-up stays 'none': the CTA chain is bounded only for
+    // TWO_TREATMENT_PACKAGE_KEYS, so an alert on a 2-4 visit program
+    // would mint unbounded $0 visits. Package visits are booked together.
     for (const key of ['german_roach', 'german_roach_initial']) {
       expect(profileRow(db, key)).toMatchObject({
         project_type: null,
-        followup_policy: 'alert',
-        default_followup_days: 14,
+        followup_policy: 'none',
+        default_followup_days: null,
       });
     }
     expect(profileRow(db, 'lawn_pest_knockdown').project_type).toBe('one_time_lawn_treatment');
     for (const key of TRAP_KEYS) expect(profileRow(db, key).project_type).toBe('rodent_trapping');
     // VISIT cadence per plan — never the (always-monthly) billing cadence.
-    expect(svcRow(db, 'trap_only_retainer_standard')).toMatchObject({ billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4, base_price: 49.0 });
-    expect(svcRow(db, 'trap_only_retainer_plus')).toMatchObject({ frequency: 'bimonthly', visits_per_year: 6, base_price: 69.0 });
-    expect(svcRow(db, 'trap_only_retainer_monthly')).toMatchObject({ frequency: 'monthly', visits_per_year: 12, base_price: 99.0 });
+    expect(svcRow(db, 'trap_only_retainer_standard')).toMatchObject({ billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4 });
+    expect(svcRow(db, 'trap_only_retainer_plus')).toMatchObject({ frequency: 'bimonthly', visits_per_year: 6 });
+    expect(svcRow(db, 'trap_only_retainer_monthly')).toMatchObject({ frequency: 'monthly', visits_per_year: 12 });
+    // Monthly dues are NOT a per-visit price — admin scheduling copies
+    // base_price onto the visit, so recurring rows leave it NULL (the
+    // convention every live recurring row follows).
+    for (const key of TRAP_KEYS) {
+      expect(`${key}:${svcRow(db, key).base_price}`).toBe(`${key}:null`);
+    }
   });
 
   test('END-TO-END: every estate label resolves — palm via short_name, the rest by exact name', async () => {

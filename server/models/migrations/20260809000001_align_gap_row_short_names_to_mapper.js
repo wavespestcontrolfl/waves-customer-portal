@@ -67,11 +67,28 @@ exports.down = async function down(knex) {
   for (const entry of changed) {
     const current = await knex('services').where({ id: entry.id }).first();
     // Only revert if the row still holds exactly what up() wrote.
-    if (current && current.short_name === entry.to) {
-      await knex('services').where({ id: entry.id }).update({ short_name: entry.from });
-    } else {
+    if (!current || current.short_name !== entry.to) {
       console.warn(`[short-name-align] down: ${entry.key} short_name changed since deploy — leaving admin value`);
+      continue;
     }
+    // An in-flight name-only visit persisted under the MAPPER label
+    // resolves this row only through the new short_name — reverting it
+    // would strand that visit on the generic completion flow, so the
+    // alias is kept (the reservation path leaves these rows without
+    // service_id; documented boundary). Rollback still un-does the
+    // change everywhere it is safe to.
+    let inFlight = 0;
+    if (await knex.schema.hasTable('scheduled_services')) {
+      inFlight += (await knex('scheduled_services').whereRaw('lower(service_type) = lower(?)', [entry.to]).pluck('id')).length;
+    }
+    if (await knex.schema.hasTable('scheduled_service_addons')) {
+      inFlight += (await knex('scheduled_service_addons').whereRaw('lower(service_name) = lower(?)', [entry.to]).pluck('id')).length;
+    }
+    if (inFlight > 0) {
+      console.warn(`[short-name-align] down: ${entry.key} keeps short_name ${JSON.stringify(entry.to)} — ${inFlight} visit(s)/add-on(s) resolve through it`);
+      continue;
+    }
+    await knex('services').where({ id: entry.id }).update({ short_name: entry.from });
   }
   await knex('system_settings').where({ key: STATE_KEY }).del();
 };
