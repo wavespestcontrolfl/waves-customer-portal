@@ -408,7 +408,13 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
       constructionMaterial = constructionMaterial || p.constructionMaterial || record.constructionMaterial || null;
       foundationType = foundationType || p.foundationType || record.foundationType || null;
       roofType = roofType || p.roofType || record.roofType || null;
-      palmCount = positiveNumber(palmCount, p.estimatedPalmCount);
+      // p.estimatedPalmCount is deliberately NOT adopted. This is a
+      // customer-facing quote route, and palmCount feeds palm-INJECTION
+      // pricing through missingPropertyFor + resolvePalmCount — an AI count
+      // would produce a confident per-palm price for palms nobody counted.
+      // Same rule the agent draft path follows: AI counts are not
+      // measurements. A missing count still routes to
+      // PROPERTY_DETAILS_NEEDED, which asks the customer for it.
       features = {
         ...features,
         pool: p.pool === 'YES' || features.pool,

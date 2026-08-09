@@ -781,3 +781,31 @@ describe('property context reads only columns the customers table actually has',
     expect(fromProfile.propertyInput.bedAreaSource).toBe('explicit');
   });
 });
+
+describe('AI palm estimates never auto-price palm injection (customer-facing route)', () => {
+  test('a lookup palm estimate does not satisfy the measured-count requirement', async () => {
+    const result = await buildCustomerPricingResponse({
+      db: null,
+      prompt: 'I want palm injections',
+      propertyLookup: async () => ({
+        enriched: { homeSqFt: 2200, lotSqFt: 9000, estimatedPalmCount: 14 },
+      }),
+      customer: {
+        id: 'cust-palm-est',
+        monthly_rate: 55,
+        address_line1: '123 Gulf Dr',
+        city: 'Sarasota',
+        state: 'FL',
+        zip: '34236',
+        property_sqft: 2200,
+        lot_sqft: 9000,
+      },
+    });
+    // An AI count is not a measurement — the customer is asked, not quoted.
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'PROPERTY_DETAILS_NEEDED',
+      message: 'Palm count is required for palm injection pricing.',
+    });
+  });
+});
