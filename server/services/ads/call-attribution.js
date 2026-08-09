@@ -373,6 +373,22 @@ async function resolveSourceCallProvenanceLocked(trx, { leadId, twilioCallSid })
     // mint a NULL-provenance row nothing could retire.
     return { refusedReason: candidateArm === 'sid' ? 'call_rejected' : 'call_unsettled' };
   }
+  if (candidateArm === 'stamp') {
+    // Re-verify the STAMP under the lock (codex P1, PR #3303 r8): the
+    // unlocked scan found this call stamped to our lead, but a concurrent
+    // force-reprocess can repoint metadata.lead_id to a DIFFERENT lead
+    // before we acquire the row lock — and the repointed call is still
+    // settled and attributable, so the status checks above pass. Claiming
+    // its id as our provenance would let recordCallPpcAttribution recover
+    // and transfer the other lead's history-bearing row to us.
+    const lockedStamp = (() => {
+      try {
+        const md = typeof locked.metadata === 'string' ? JSON.parse(locked.metadata) : (locked.metadata || {});
+        return md?.lead_id ? String(md.lead_id) : null;
+      } catch { return null; }
+    })();
+    if (lockedStamp !== String(leadId)) return { refusedReason: 'call_repointed' };
+  }
   if (candidateArm === 'sid') {
     // A SETTLED stamp on the sid candidate pointing at a DIFFERENT lead
     // is the processor's current verdict (GH P1 r6, same authority rule

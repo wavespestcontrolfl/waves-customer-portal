@@ -488,7 +488,12 @@ describe('backfillCallLeadAttribution — provenance resolved and written under 
     firstByTable.leads = { ...LEAD };
     firstByTable.lead_sources = SOURCE;
     listQueueByTable.call_log = [[{ id: 's1' }]];
-    firstByTable.call_log = { id: 's1', processing_token: null, processing_status: 'processed', metadata: '{}' };
+    // The locked re-read must still show the stamp naming THIS lead — a
+    // repoint that landed while we waited refuses (see the r8 suite).
+    firstByTable.call_log = {
+      id: 's1', processing_token: null, processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-1' }),
+    };
 
     const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
 
@@ -551,5 +556,51 @@ describe('resolveSourceCallProvenanceLocked — settled dissenting stamp (GH P1 
 
     expect(res.recorded).toBe(true);
     expect(insertCalls.find((c) => c.table === 'ad_service_attribution').row.source_call_id).toBe('call-9');
+  });
+});
+
+describe('resolveSourceCallProvenanceLocked — stamp re-verified under the lock (codex P1, PR #3303 r8)', () => {
+  const LEAD3 = {
+    id: 'lead-1',
+    customer_id: 'cust-1',
+    lead_source_id: 'src-1',
+    service_interest: 'pest control',
+    created_at: '2026-08-01T12:00:00.000Z',
+    twilio_call_sid: null,
+  };
+
+  test('a stamp candidate REPOINTED to another lead before the lock refuses', async () => {
+    firstByTable.leads = { ...LEAD3 };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 's1' }]];
+    // Settled and attributable — but the stamp now names a different lead.
+    firstByTable.call_log = {
+      id: 's1',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-other' }),
+    };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res).toEqual({ recorded: false, reason: 'call_repointed' });
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('a stamp candidate still naming this lead under the lock becomes provenance', async () => {
+    firstByTable.leads = { ...LEAD3 };
+    firstByTable.lead_sources = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+    listQueueByTable.call_log = [[{ id: 's1' }]];
+    firstByTable.call_log = {
+      id: 's1',
+      processing_token: null,
+      processing_status: 'processed',
+      metadata: JSON.stringify({ lead_id: 'lead-1' }),
+    };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res.recorded).toBe(true);
+    expect(insertCalls.find((c) => c.table === 'ad_service_attribution').row.source_call_id).toBe('s1');
   });
 });

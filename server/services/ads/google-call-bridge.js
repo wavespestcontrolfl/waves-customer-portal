@@ -694,6 +694,29 @@ async function joinedLeadLiveRow(callLog, { dbc = db, lock = false } = {}) {
 // plan; only a match whose live-lead update actually landed is returned.
 // Returns { match } on success; { match: null, reason } for skip
 // bookkeeping.
+// SID-only joins re-apply the processor's OWNERSHIP eligibility (codex P1,
+// PR #3303 r7): when a phone-bearing reprocess rejected the original sid
+// lead as foreign-owned and reused a phone-matched lead, that path writes
+// no stamp — so the next scan joins the obsolete sid lead, and without this
+// check the bridge would rewrite ITS source and move another customer's
+// paid call onto it. A CONFLICT is the test — the call knows customer A
+// while the lead is owned by B. A claimed lead on a customer-less call is
+// NOT a conflict and stays eligible (the ordinary call → lead → customer
+// progression; codex P2 #3275). Lifecycle terminals stay attributable by
+// design: a WON lead is precisely the paid outcome the bridge credits.
+// A STAMP-confirmed join is exempt — the stamp IS the processor's verdict.
+// Shared by attributeResolvedLead and the already-bridged backfill (codex
+// P1 r8: the backfill bypassed it, and source_call_id recovery would then
+// transfer the history-bearing row onto the foreign owner).
+function sidJoinOwnerConflict(callLog, lockedLead) {
+  if (!callLog || !lockedLead) return false;
+  const stampConfirmed = callLog.stampedLeadId
+    && String(callLog.stampedLeadId) === String(callLog.leadId);
+  if (stampConfirmed) return false;
+  return !!(lockedLead.customer_id && callLog.customerId
+    && String(lockedLead.customer_id) !== String(callLog.customerId));
+}
+
 async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFallback = false } = {}) {
   let joinedWentStale = false;
   let verdictChecked = false;
@@ -710,22 +733,7 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFa
       .whereNull('deleted_at')
       .forUpdate()
       .first('id', 'customer_id');
-    // SID-only joins re-apply the processor's OWNERSHIP eligibility
-    // (codex P1, PR #3303 r7): when a phone-bearing reprocess rejected the
-    // original sid lead as foreign-owned and reused a phone-matched lead,
-    // that path writes no stamp — so the next scan joins the obsolete sid
-    // lead, and without this check the bridge would rewrite ITS source and
-    // move another customer's paid call onto it. A CONFLICT is the test —
-    // the call knows customer A while the lead is owned by B. A claimed
-    // lead on a customer-less call is NOT a conflict and stays eligible
-    // (the ordinary call → lead → customer progression; codex P2 #3275).
-    // Lifecycle terminals stay attributable by design: a WON lead is
-    // precisely the paid outcome the bridge exists to credit.
-    const stampConfirmed = callLog.stampedLeadId
-      && String(callLog.stampedLeadId) === String(callLog.leadId);
-    if (lockedLead && !stampConfirmed
-      && lockedLead.customer_id && callLog.customerId
-      && String(lockedLead.customer_id) !== String(callLog.customerId)) {
+    if (lockedLead && sidJoinOwnerConflict(callLog, lockedLead)) {
       return { match: null, reason: 'lead_owner_conflict' };
     }
     // Terminal verdict re-checked fresh under the CALL row lock, taken
@@ -1025,6 +1033,12 @@ async function applyBridge(options = {}) {
                 // rejection committing after the scan must win.
                 if (!(await callStillAttributable(trx, match.callLog.id))) return;
                 if (liveJoined) {
+                  // The SAME unstamped-sid ownership test the resolver
+                  // applies (codex P1, PR #3303 r8) — this non-retry
+                  // backfill bypassed it, and source_call_id recovery
+                  // would then hand the history-bearing funnel row to a
+                  // foreign owner.
+                  if (sidJoinOwnerConflict(match.callLog, liveJoined)) return;
                   // The joined lead's CURRENT owner ONLY — an unclaimed
                   // lead stays customer-less and the funnel write
                   // declines (codex P1, PR #3303 r2); never the call's
