@@ -144,34 +144,25 @@ async function reconcileExistingDraftLinks(existing, context) {
             if (sidLinked) return;
           }
         }
-        // DESTINATION CLAIM FIRST (pre-push P0 r7): the conditional
-        // update refuses a lead already pointing at a NEWER estimate —
-        // and if that claim fails, NOTHING else may change, or the
-        // transaction would commit with estimate_data naming a
-        // destination no lead points back to while the prior linkage is
-        // already gone. Zero rows = whole reconcile no-ops.
+        // A REPOINT never reuses the draft (codex P0, PR #3304 r8): its
+        // composed content — recipient, address, engine inputs, totals —
+        // was built from the OLD lead, and re-labeling the linkage could
+        // send the proposal to the wrong person or quote the corrected
+        // lead on the wrong property and price. The draft is INVALIDATED
+        // instead: old lead unlinked, linkage keys removed, a durable
+        // marker set — and existingDraftForCall excludes marked drafts,
+        // so the engine rebuilds from the corrected context. An UNLINK
+        // (no current lead) clears the linkage the same way without the
+        // marker semantics changing anything else.
+        delete freshData.lead_id;
+        delete freshData.lead_linkage;
         if (currentLeadId) {
-          const claimed = await trx('leads').where({ id: currentLeadId })
-            .where(function claimable() {
-              this.whereNull('estimate_id')
-                .orWhere('estimate_id', existing.id)
-                // Older referenced estimates yield; only a NEWER one keeps
-                // the slot (codex P1, PR #3304 r6).
-                .orWhereExists(function referencedIsOlder() {
-                  this.select(db.raw('1')).from('estimates as ref')
-                    .whereRaw('ref.id = leads.estimate_id')
-                    .whereRaw('ref.created_at < (SELECT created_at FROM estimates WHERE id = ?)', [existing.id]);
-                });
-            })
-            .update({ estimate_id: existing.id });
-          if (!claimed) return;
-        }
-        if (currentLeadId) {
-          freshData.lead_id = currentLeadId;
-          freshData.lead_linkage = context.leadLinkage || null;
-        } else {
-          delete freshData.lead_id;
-          delete freshData.lead_linkage;
+          freshData.estimatorEngine = {
+            ...(freshData.estimatorEngine && typeof freshData.estimatorEngine === 'object' ? freshData.estimatorEngine : {}),
+            linkage_invalidated_at: new Date().toISOString(),
+            linkage_invalidated_from: freshLeadId || null,
+            linkage_invalidated_to: currentLeadId,
+          };
         }
         await trx('estimates').where({ id: existing.id })
           .update({ estimate_data: JSON.stringify(freshData), updated_at: new Date() });
@@ -181,14 +172,17 @@ async function reconcileExistingDraftLinks(existing, context) {
           await trx('leads').where({ id: freshLeadId, estimate_id: existing.id })
             .update({ estimate_id: null });
         }
-        relinked = { from: freshLeadId || 'none', to: currentLeadId || 'none' };
+        relinked = { from: freshLeadId || 'none', to: currentLeadId || 'none', invalidated: !!currentLeadId };
       });
       if (relinked) {
-        logger.info(`[estimator-engine] relinked existing draft ${existing.id} after call linkage change (${relinked.from} → ${relinked.to})`);
+        logger.info(`[estimator-engine] ${relinked.invalidated ? 'invalidated' : 'unlinked'} existing draft ${existing.id} after call linkage change (${relinked.from} → ${relinked.to})`);
+        return relinked.invalidated ? 'invalidated' : 'unlinked';
       }
     }
+    return null;
   } catch (relinkErr) {
     logger.warn(`[estimator-engine] existing-draft relink failed (non-blocking): ${relinkErr.message}`);
+    return null;
   }
 }
 
@@ -480,8 +474,13 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       if (existing) {
         // Stale-linkage reconciliation (codex P1, PR #3304) — shared with
         // the duplicate-guard exit below, where a corrected retry that
-        // lost the insert race to a stale detached run lands instead.
-        await reconcileExistingDraftLinks(existing, context);
+        // lost the insert race to a stale detached run lands instead. An
+        // INVALIDATED draft (durable repoint — its content was composed
+        // from the old lead) does NOT short-circuit: existingDraftForCall
+        // excludes it from now on, and this run rebuilds from the
+        // corrected context (codex P0 r8).
+        const reconcileOutcome = await reconcileExistingDraftLinks(existing, context);
+        if (reconcileOutcome !== 'invalidated') {
 
         result.lane = 'existing';
         result.reasons = ['draft already exists for this call'];
@@ -527,6 +526,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           body: `${callerLabel(null, context)}: an estimate draft from this call is waiting (${String(existingMeta.lane).toUpperCase()}). Review in admin/estimates and send.`,
         });
         return result;
+        }
       }
     }
   } catch (err) {

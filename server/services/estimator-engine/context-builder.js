@@ -412,6 +412,11 @@ async function existingDraftForCall(callLogId) {
   try {
     return await db('estimates')
       .whereRaw("estimate_data->'estimatorEngine'->>'callLogId' = ?", [String(callLogId)])
+      // A draft INVALIDATED by a durable linkage repoint (its content was
+      // composed from the old lead) no longer represents this call — the
+      // engine rebuilds from the corrected context instead of returning
+      // it (codex P0, PR #3304 r8).
+      .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
       .first();
   } catch (err) {
     logger.warn(`[estimator-engine] existing-draft check failed: ${err.message}`);

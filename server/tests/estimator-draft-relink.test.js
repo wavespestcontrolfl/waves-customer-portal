@@ -6,7 +6,6 @@
 const mockUpdates = [];
 let mockFreshEstimate = null;
 let mockCallRow = null;
-let mockDestinationClaimFails = false;
 
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
@@ -23,13 +22,7 @@ jest.mock('../models/db', () => {
       if (table === 'call_log') return mockCallRow;
       return null;
     };
-    b.update = async (row) => {
-      // The destination claim is the leads write that SETS estimate_id;
-      // simulate an occupied destination by zero-rowing it.
-      if (mockDestinationClaimFails && table === 'leads' && row.estimate_id) return 0;
-      mockUpdates.push({ table, wheres: b._wheres.slice(), row });
-      return 1;
-    };
+    b.update = async (row) => { mockUpdates.push({ table, wheres: b._wheres.slice(), row }); return 1; };
     b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
     return b;
   };
@@ -67,13 +60,14 @@ beforeEach(() => {
   // Live call row: the in-transaction revalidation reads the CURRENT
   // stamp — default it to the repoint target the tests intend.
   mockCallRow = { twilio_call_sid: 'CA-call-1', metadata: { lead_id: 'lead-C' } };
-  mockDestinationClaimFails = false;
 });
 
 describe('reconcileExistingDraftLinks keys cleanup off the LOCKED row', () => {
-  test('a peer-moved draft unlinks the FRESH lead, never the stale snapshot lead', async () => {
+  test('a durable repoint INVALIDATES the draft, keyed off the FRESH (locked) lead', async () => {
     // Snapshot says lead-A; a concurrent reconcile already moved the draft
-    // to lead-B. This run repoints to lead-C — cleanup must target B.
+    // to lead-B. This run repoints to lead-C — the draft's content was
+    // composed from the OLD lead, so it is invalidated (never silently
+    // repointed), cleanup targets B, and NO destination claim is made.
     const existing = {
       id: 'est-1',
       estimate_data: JSON.stringify({ lead_id: 'lead-A', lead_linkage: 'stamp' }),
@@ -90,15 +84,19 @@ describe('reconcileExistingDraftLinks keys cleanup off the LOCKED row', () => {
       call: { id: 'call-1', metadata: {} },
     };
 
-    await _reconcileExistingDraftLinks(existing, context);
+    const outcome = await _reconcileExistingDraftLinks(existing, context);
 
+    expect(outcome).toBe('invalidated');
     const leadUpdates = mockUpdates.filter((u) => u.table === 'leads');
     const unlink = leadUpdates.find((u) => u.row.estimate_id === null);
     expect(unlink.wheres).toContainEqual(['where', { id: 'lead-B', estimate_id: 'est-1' }]);
-    const link = leadUpdates.find((u) => u.row.estimate_id === 'est-1');
-    expect(link.wheres).toContainEqual(['where', { id: 'lead-C' }]);
+    // NO destination claim — the rebuilt draft links lead-C itself.
+    expect(leadUpdates.filter((u) => u.row.estimate_id === 'est-1')).toHaveLength(0);
     const estimateWrite = mockUpdates.find((u) => u.table === 'estimates');
-    expect(JSON.parse(estimateWrite.row.estimate_data).lead_id).toBe('lead-C');
+    const written = JSON.parse(estimateWrite.row.estimate_data);
+    expect(written.lead_id).toBeUndefined();
+    expect(written.estimatorEngine.linkage_invalidated_from).toBe('lead-B');
+    expect(written.estimatorEngine.linkage_invalidated_to).toBe('lead-C');
   });
 
   test('a peer that already reconciled to the same target makes this run a no-op', async () => {
@@ -119,30 +117,6 @@ describe('reconcileExistingDraftLinks keys cleanup off the LOCKED row', () => {
     await _reconcileExistingDraftLinks(existing, context);
 
     expect(mockUpdates).toHaveLength(0);
-  });
-
-  test('an OCCUPIED destination no-ops the whole reconcile (claim-first)', async () => {
-    // The destination lead already points at a newer estimate — nothing
-    // may change: no mirror write, no old-lead unlink (pre-push P0).
-    mockDestinationClaimFails = true;
-    const existing = {
-      id: 'est-1',
-      estimate_data: JSON.stringify({ lead_id: 'lead-A', lead_linkage: 'stamp' }),
-    };
-    mockFreshEstimate = {
-      id: 'est-1',
-      status: 'draft',
-      estimate_data: JSON.stringify({ lead_id: 'lead-A', lead_linkage: 'stamp' }),
-    };
-    const context = {
-      lead: { id: 'lead-C' }, leadIsForThisCall: true, leadLinkage: 'stamp',
-      call: { id: 'call-1', metadata: {} },
-    };
-
-    await _reconcileExistingDraftLinks(existing, context);
-
-    expect(mockUpdates.filter((u) => u.table === 'estimates')).toHaveLength(0);
-    expect(mockUpdates.filter((u) => u.table === 'leads' && u.row.estimate_id === null)).toHaveLength(0);
   });
 
   test('a non-draft status is never touched', async () => {
