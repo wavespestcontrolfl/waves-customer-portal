@@ -18,6 +18,8 @@ jest.mock('../models/db', () => {
       where() { return builder; },
       whereIn() { return builder; },
       whereNull() { return builder; },
+      orWhere() { return builder; },
+      whereExists() { return builder; },
       whereRaw(...args) { mockState.whereRaws.push({ table, args }); return builder; },
       orderBy() { return builder; },
       select() { return builder; },

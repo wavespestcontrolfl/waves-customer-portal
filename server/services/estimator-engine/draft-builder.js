@@ -703,6 +703,34 @@ function conflictingOpenEstimate(openEstimates, intentAddress) {
 }
 
 // ── Draft row ─────────────────────────────────────────────────
+// The creator's post-commit leads.estimate_id mirror, GUARDED (codex P1,
+// PR #3304 r5): a stale detached creator can resume AFTER a corrected
+// retry's reconciliation moved the linkage — an unconditional write would
+// re-link the old lead and leave two leads pointing at one estimate. The
+// write claims only an unclaimed-or-ours destination, and for call-origin
+// drafts additionally requires the call to STILL link this lead (sid or
+// metadata stamp) at write time. SMS-origin drafts (no call) keep the
+// destination guard alone — their linkage is not call-based.
+async function writeGuardedLeadEstimateLink(context, estimateId) {
+  let q = db('leads')
+    .where({ id: context.lead.id })
+    .where(function unclaimedOrOurs() {
+      this.whereNull('estimate_id').orWhere('estimate_id', estimateId);
+    });
+  if (context?.call?.id) {
+    q = q.whereExists(function callStillLinked() {
+      this.select(db.raw('1'))
+        .from('call_log')
+        .where('call_log.id', context.call.id)
+        .andWhere(function linkageArms() {
+          this.whereRaw('call_log.twilio_call_sid = leads.twilio_call_sid')
+            .orWhereRaw("call_log.metadata->>'lead_id' = leads.id::text");
+        });
+    });
+  }
+  await q.update({ estimate_id: estimateId });
+}
+
 async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, propertyFactsV2 = null, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null }) {
   const token = crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date();
@@ -944,7 +972,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // must not be mutated as if it originated this call.
   if (context?.lead?.id && context?.leadIsForThisCall) {
     try {
-      await db('leads').where({ id: context.lead.id }).update({ estimate_id: creationResult.estimate.id });
+      await writeGuardedLeadEstimateLink(context, creationResult.estimate.id);
     } catch (linkErr) {
       logger.warn(`[estimator-engine] lead link update failed (non-blocking): ${linkErr.message}`);
     }
@@ -954,6 +982,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
 }
 
 module.exports = {
+  writeGuardedLeadEstimateLink,
   LANES,
   buildEngineInput,
   stampPestCurveVersion,

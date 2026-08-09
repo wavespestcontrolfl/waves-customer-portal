@@ -408,8 +408,13 @@ async function maybeBuildCommercialProposalDraft({
           ...(brief ? { commercialProspect: { ...brief, researchedAt: new Date().toISOString() } } : {}),
           proposal: scaffold,
           // Same lead-mirror rule as the residential drafts: only a lead
-          // this call created or touched may be linked.
-          ...(context?.lead?.id && context?.leadIsForThisCall ? { lead_id: context.lead.id } : {}),
+          // this call created or touched may be linked — and the linkage
+          // CLASS rides along so the existing-draft reconciliation can
+          // judge durability (codex P1, PR #3304 r5).
+          ...(context?.lead?.id && context?.leadIsForThisCall ? {
+            lead_id: context.lead.id,
+            lead_linkage: context.leadLinkage || null,
+          } : {}),
           estimatorEngine: {
             version: 1,
             callLogId: call?.id || null,
@@ -467,7 +472,8 @@ async function maybeBuildCommercialProposalDraft({
     // residential draft path).
     if (context?.lead?.id && context?.leadIsForThisCall) {
       try {
-        await db('leads').where({ id: context.lead.id }).update({ estimate_id: creation.estimate.id });
+        const { writeGuardedLeadEstimateLink } = require('./draft-builder');
+        await writeGuardedLeadEstimateLink(context, creation.estimate.id);
       } catch (linkErr) {
         logger.warn(`[commercial-proposal] lead link update failed (non-blocking): ${linkErr.message}`);
       }
