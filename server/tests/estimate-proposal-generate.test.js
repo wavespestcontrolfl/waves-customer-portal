@@ -555,6 +555,27 @@ describe('deriveProposalDraft', () => {
     expect(rodent.warnings[0]).toMatch(/rodent/i);
   });
 
+  test('r7: LOW pricing confidence fails the draft; mapped installations never double', async () => {
+    const low = await deriveProposalDraft({
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'commercial_lawn', name: 'Lawn', visitsPerYear: 9, annualAfterDiscount: 540, pricingConfidence: 'LOW' }] } },
+      },
+    });
+    expect(low.programs).toBeNull();
+    expect(low.warnings[0]).toMatch(/low-confidence/i);
+
+    // Mapper emitted the installation into oneTime.items AND the raw
+    // engineResult row still carries installation.price — one charge.
+    const install = await deriveProposalDraft({
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'termite_bait', name: 'Termite Bait Installation', price: 800 }] } },
+        engineResult: { lineItems: [{ service: 'commercial_termite_bait', name: 'Termite Bait', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } }] },
+      },
+    });
+    expect(install.correctiveWork).toHaveLength(1);
+    expect(install.correctiveWork[0].amount).toBe(800);
+  });
+
   test('returns null sections for an estimate with nothing to derive', async () => {
     const draft = await deriveProposalDraft({ estimate_data: {} });
     expect(draft).toEqual({ propertyScope: null, programs: null, correctiveWork: null, customerResponsibilities: null, suggestedTaxRate: null, warnings: [] });

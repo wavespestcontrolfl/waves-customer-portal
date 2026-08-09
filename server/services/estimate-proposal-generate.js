@@ -157,10 +157,16 @@ const TAX_EXEMPT_FAMILIES = new Set(['lawn', 'tree_shrub']);
 const INSPECTION_KEY_RE = /\bwdo\b|\binspection\b/;
 
 // service family → canonical service_taxability keys (recurring, one-time).
+// lawn/tree_shrub are DELIBERATELY absent: the service_taxability rows mark
+// them taxable while the LIVE commercial billing path
+// (resolveCommercialPrepayTaxRate — the classifier real prepay invoices
+// bill through) treats commercial lawn/tree as non-taxable
+// lawn_spraying_or_treatment. Until the owner/CPA reconciles the two
+// sources, generation follows the billing-path classifier for those
+// families (never overtaxes against what invoices actually charge) and
+// the discrepancy is flagged for an owner ruling.
 const FAMILY_TAXABILITY_KEYS = {
   pest: ['pest_recurring', 'pest_onetime'],
-  lawn: ['lawn_recurring', 'lawn_onetime'],
-  tree_shrub: ['tree_shrub', 'tree_shrub'],
   mosquito: ['mosquito_recurring', 'mosquito_onetime'],
   termite: ['termite_bait', 'termite_trench'],
   rodent: ['rodent_bait', 'rodent_exclusion'],
@@ -188,13 +194,17 @@ function commercialTaxableDefault(serviceKey, explicit, { taxabilityMap = null, 
   const key = String(serviceKey || '').toLowerCase().replace(/[_-]+/g, ' ');
   if (INSPECTION_KEY_RE.test(key)) return false;
   const family = programFamilyForService(serviceKey);
+  // Billing-path classifier wins for lawn/tree (see FAMILY_TAXABILITY_KEYS
+  // note) — checked BEFORE any table hit so a direct `tree_shrub` row
+  // can't override the classifier real invoices bill through.
+  if (TAX_EXEMPT_FAMILIES.has(family)) return false;
   if (taxabilityMap) {
     const direct = taxabilityMap.get(String(serviceKey || '').toLowerCase());
     if (direct !== undefined) return direct;
     const mapped = (FAMILY_TAXABILITY_KEYS[family] || [])[oneTime ? 1 : 0];
     if (mapped !== undefined && taxabilityMap.get(mapped) !== undefined) return taxabilityMap.get(mapped);
   }
-  return !TAX_EXEMPT_FAMILIES.has(family);
+  return true;
 }
 
 function parseEstimateData(estimateData) {
@@ -363,8 +373,9 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
     // authority says they are NOT priced yet, so any of them fails the
     // whole draft (silent exclusion would save an itemization missing the
     // gated service — codex 1A-ii r5b).
-    if (row.requiresManualReview === true || row.quoteRequired === true) {
-      unrepresentable.push(`${String(row.name || row.service || 'service')} (requires manual review — price is provisional)`);
+    if (row.requiresManualReview === true || row.quoteRequired === true
+      || String(row.pricingConfidence || '').toUpperCase() === 'LOW') {
+      unrepresentable.push(`${String(row.name || row.service || 'service')} (requires manual review — price is provisional or low-confidence)`);
       continue;
     }
     // An EXPLICIT accepted zero (comped service) is promised scope, not an
@@ -558,7 +569,8 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
       && num(line.installation?.price) > 0
       && ((visitsPerYearForRecurringService(line) > 0) || (recurringLineAnnualAmount(line) > 0)));
   const fromLineItems = lineItemsRows.filter((line) => {
-    if (line.requiresManualReview === true || line.quoteRequired === true) {
+    if (line.requiresManualReview === true || line.quoteRequired === true
+      || String(line.pricingConfidence || '').toUpperCase() === 'LOW') {
       gated.push(String(line.displayName || line.name || line.service || 'item'));
       return false;
     }
@@ -584,7 +596,8 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   // or every specialty charge doubles and reconciliation rejects the draft
   // (codex 1A-ii r2e).
   for (const item of fromOneTime) {
-    if (item.requiresManualReview === true || item.quoteRequired === true) {
+    if (item.requiresManualReview === true || item.quoteRequired === true
+      || String(item.pricingConfidence || '').toUpperCase() === 'LOW') {
       gated.push(String(item.label || item.name || item.service || 'item'));
       continue;
     }
@@ -629,6 +642,15 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
   }
   for (const line of installationRows) {
     const amount = num(line.installation?.price);
+    // The v1 mapper already emits bait installations into oneTime.items —
+    // when both the mapped result and the raw engineResult persist, the
+    // charge would double (codex 1A-ii r7). Same-amount rows that mention
+    // the service or installation are mirrors.
+    const rounded = Math.round(amount * 100) / 100;
+    const serviceToken = String(line.service || line.name || '').toLowerCase().split(/[_\s-]+/)[0] || '¤';
+    const mirrored = work.some((w) => w.amount === rounded
+      && (/install/i.test(w.label) || w.label.toLowerCase().includes(serviceToken)));
+    if (mirrored) continue;
     work.push({
       label: `${String(line.displayName || line.name || line.service || 'Service').slice(0, 140)} installation`.slice(0, 160),
       amount: Math.round(amount * 100) / 100,
