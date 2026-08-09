@@ -328,12 +328,22 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
       return { recorded: false, reason: 'bridge_target' };
     }
     // Provenance for the row this backfill creates (codex P1, PR #3303
-    // r3): the lead's own sid-linked call, or the newest call stamped to
+    // r3): the lead's own sid-linked call, or the single call stamped to
     // it — without it, a later force-reprocess that rejects or repoints
     // the call could never retire or transfer this row. Best-effort: an
     // unresolvable call leaves NULL (permanently conservative).
-    let sourceCallId = null;
-    try {
+    //
+    // The WHOLE resolution + funnel write runs in ONE transaction, lead
+    // row locked first (global leads → call_log order), and the chosen
+    // source call is locked FOR UPDATE with its verdict re-checked under
+    // the lock (codex P1, PR #3303 r5): a force-reprocess token-fences
+    // and locks the call row, so it either committed its rejection first
+    // (our locked re-check refuses) or commits after ours (our row
+    // carries source_call_id, so its retire pass finds and retires it).
+    // Without this, a rejection landing between the plain read and the
+    // insert recreated the row it had just retired, unretirable.
+    return await db.transaction(async (trx) => {
+      await trx('leads').where({ id: leadId }).forUpdate().first('id');
       // Sid FIRST — authoritative, same precedence every linkage consumer
       // uses; the stamp arm only as a SETTLED-successful fallback (token
       // NULL + status 'processed'), never newest-of-both (pre-push P1
@@ -344,29 +354,18 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
       // a SETTLED, ATTRIBUTABLE call: a lead claimed after its
       // originating call was rejected (spam/voicemail/failed/marked) must
       // not resurrect the retired funnel row at all.
-      let sourceCall = null;
-      let refused = false;
+      let candidateId = null;
+      let candidateArm = null;
       let sidAmbiguous = false;
       if (lead.twilio_call_sid) {
-        const sidRows = await db('call_log')
+        const sidRows = await trx('call_log')
           .where('twilio_call_sid', lead.twilio_call_sid)
           .orderBy('created_at', 'desc')
           .limit(2)
-          .select('id', 'processing_status', 'processing_token', 'metadata');
+          .select('id');
         if (sidRows.length === 1) {
-          const row = sidRows[0];
-          const status = String(row.processing_status || '').toLowerCase();
-          const marker = (() => {
-            try {
-              const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-              return md?.no_attribution === true;
-            } catch { return false; }
-          })();
-          if (row.processing_token != null || (status !== 'processed' && status !== '') || marker) {
-            refused = true;
-          } else {
-            sourceCall = row;
-          }
+          candidateId = sidRows[0].id;
+          candidateArm = 'sid';
         }
         // >1 rows: ambiguous — leave provenance NULL, permanently
         // conservative (without refusing: the lead itself is legitimately
@@ -376,29 +375,67 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
         // call's funnel history.
         if (sidRows.length > 1) sidAmbiguous = true;
       }
-      if (refused) return { recorded: false, reason: 'call_rejected' };
-      if (!sourceCall && !sidAmbiguous) {
-        sourceCall = await db('call_log')
+      if (!candidateId && !sidAmbiguous) {
+        // Up to TWO settled stamped calls (codex P1, PR #3303 r5): the
+        // codebase explicitly supports multiple successor stamps on one
+        // reused lead, and silently taking the newest would hand this
+        // funnel row to an arbitrary call whose reprocess could then move
+        // or retire history that belongs to an earlier valid call. Same
+        // rule as the sid arm: exactly one candidate or provenance stays
+        // NULL.
+        const stampRows = await trx('call_log')
           .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])
           .whereNull('processing_token')
           .where('processing_status', 'processed')
           .orderBy('created_at', 'desc')
-          .first('id');
+          .limit(2)
+          .select('id');
+        if (stampRows.length === 1) {
+          candidateId = stampRows[0].id;
+          candidateArm = 'stamp';
+        }
       }
-      sourceCallId = sourceCall?.id || null;
-    } catch { sourceCallId = null; }
-    return await recordCallPpcAttribution({
-      customerId,
-      leadId,
-      leadSource: attr.leadSource,
-      isPaid: attr.isPaid,
-      leadSourceDetail: sourceRow.name || 'inbound call',
-      serviceInterest: serviceInterest || lead.service_interest || null,
-      sourceCallId,
-      // Date by the actual call — the call pipeline mints the lead row at
-      // call time, so created_at is the call date (not the day the prospect
-      // finally clicked the text-back link).
-      leadDate: lead.created_at || null,
+      let sourceCallId = null;
+      if (candidateId) {
+        const locked = await trx('call_log')
+          .where({ id: candidateId })
+          .forUpdate()
+          .first('id', 'processing_token', 'processing_status', 'metadata');
+        const status = String(locked?.processing_status || '').toLowerCase();
+        const marker = (() => {
+          try {
+            const md = typeof locked?.metadata === 'string' ? JSON.parse(locked.metadata) : (locked?.metadata || {});
+            return md?.no_attribution === true;
+          } catch { return false; }
+        })();
+        const attributable = !!locked
+          && locked.processing_token == null
+          && (status === 'processed' || status === '')
+          && !marker;
+        if (!attributable) {
+          // Sid arm: the ORIGINATING call is rejected/unsettled — the
+          // retired funnel row must not resurrect (same refusal as
+          // before, now race-proof). Stamp arm: the settled read raced a
+          // reprocess whose verdict is still unknown — refuse this pass
+          // rather than mint a NULL-provenance row nothing could retire.
+          return { recorded: false, reason: candidateArm === 'sid' ? 'call_rejected' : 'call_unsettled' };
+        }
+        sourceCallId = locked.id;
+      }
+      return recordCallPpcAttribution({
+        customerId,
+        leadId,
+        leadSource: attr.leadSource,
+        isPaid: attr.isPaid,
+        leadSourceDetail: sourceRow.name || 'inbound call',
+        serviceInterest: serviceInterest || lead.service_interest || null,
+        sourceCallId,
+        // Date by the actual call — the call pipeline mints the lead row at
+        // call time, so created_at is the call date (not the day the
+        // prospect finally clicked the text-back link).
+        leadDate: lead.created_at || null,
+        dbc: trx,
+      });
     });
   } catch (err) {
     logger.warn(`[call-attribution] attached-lead backfill failed for lead ${leadId}: ${err.message}`);
@@ -479,25 +516,40 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
         .whereRaw('cl.twilio_call_sid = l.twilio_call_sid')
         .whereNotNull('cl.google_ads_call_resource_name');
     })
-    // A lead whose call was definitively REJECTED (spam/voicemail terminal,
-    // a retryable failure, or the durable no-attribution verdict) must not
-    // be swept into organic attribution — the processor just retired its
-    // funnel row, and this sweep would recreate paid-adjacent attribution
-    // for a rejected call (codex P1, PR #3303 r3). Both linkage arms: the
-    // lead's own sid AND the metadata stamp (phone-less reuse).
-    .whereNotExists(function sidCallRejected() {
+    // A lead whose linked call is not SETTLED-ATTRIBUTABLE must not be
+    // swept into organic attribution. Rejection (spam/voicemail terminal,
+    // retryable failure, durable no-attribution verdict) means the
+    // processor just retired its funnel row and this sweep would recreate
+    // paid-adjacent attribution for a rejected call (codex P1, PR #3303
+    // r3); an IN-FLIGHT call (processing_token held, or any non-processed
+    // status — e.g. a force-reprocess mid-decision) means the verdict is
+    // about to land, and a row minted now carries no sourceCallId, so a
+    // subsequent rejection could never retire it (codex P1 r5). Same
+    // allowlist as callStillAttributable — token NULL and status
+    // 'processed' or legacy NULL — expressed as its complement, on both
+    // linkage arms: the lead's own sid AND the metadata stamp (phone-less
+    // reuse). A blocked lead simply waits for the next sweep run.
+    .whereNotExists(function sidCallNotAttributable() {
       this.select(1).from('call_log as clr')
         .whereRaw('clr.twilio_call_sid = l.twilio_call_sid')
-        .where(function rejected() {
-          this.whereIn('clr.processing_status', ['spam', 'voicemail', 'extraction_failed'])
+        .where(function notSettled() {
+          this.whereNotNull('clr.processing_token')
+            .orWhere(function badStatus() {
+              this.whereNotNull('clr.processing_status')
+                .whereNot('clr.processing_status', 'processed');
+            })
             .orWhereRaw("clr.metadata->>'no_attribution' = 'true'");
         });
     })
-    .whereNotExists(function stampedCallRejected() {
+    .whereNotExists(function stampedCallNotAttributable() {
       this.select(1).from('call_log as cls')
         .whereRaw("cls.metadata->>'lead_id' = l.id::text")
-        .where(function rejected() {
-          this.whereIn('cls.processing_status', ['spam', 'voicemail', 'extraction_failed'])
+        .where(function notSettled() {
+          this.whereNotNull('cls.processing_token')
+            .orWhere(function badStatus() {
+              this.whereNotNull('cls.processing_status')
+                .whereNot('cls.processing_status', 'processed');
+            })
             .orWhereRaw("cls.metadata->>'no_attribution' = 'true'");
         });
     })

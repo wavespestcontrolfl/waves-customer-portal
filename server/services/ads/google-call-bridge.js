@@ -486,6 +486,17 @@ async function fetchCrmCalls(days = 30) {
 // sid-linked row (codex P2, PR #3275).
 function dedupeCrmCallRows(rows) {
   const isSidLinked = (r) => !!(r.lead_call_sid && r.twilio_call_sid && r.lead_call_sid === r.twilio_call_sid);
+  // The joined row came through the STAMP arm and the call's own metadata
+  // stamp still targets this lead.
+  const isStampLinked = (r) => {
+    if (isSidLinked(r)) return false;
+    try {
+      const md = typeof r.metadata === 'string' ? JSON.parse(r.metadata) : (r.metadata || {});
+      return md?.lead_id != null && String(md.lead_id) === String(r.lead_id);
+    } catch { return false; }
+  };
+  const callSettled = (r) => r.processing_token == null
+    && (r.processing_status == null || String(r.processing_status).toLowerCase() === 'processed');
   const byId = new Map();
   for (const row of rows) {
     if (!byId.has(row.id)) byId.set(row.id, []);
@@ -502,8 +513,26 @@ function dedupeCrmCallRows(rows) {
       seenLeadIds.add(key);
       return true;
     });
-    if (sidLinked.length === 1) deduped.push(sidLinked[0]);
-    else if (sidLinked.length > 1) deduped.push(...sidLinked);
+    if (sidLinked.length === 1) {
+      // Collapse to the sid row ONLY when no SETTLED stamp disputes it
+      // (codex P1, PR #3303 r5): a settled stamp targeting a DIFFERENT
+      // lead is the processor's CURRENT verdict for this call — a
+      // force-reprocess repointed it after the sid-linked lead lost
+      // eligibility (terminal, other-customer-owned), and findReusable-
+      // CallLead's sid precedence only ever applied to ELIGIBLE leads.
+      // Keeping the sid row alone would hide the repoint and re-attribute
+      // the former lead. Both rows survive instead: buildMatches reads
+      // the pair as an equal-score second candidate → conservative
+      // no-bridge. An UNSETTLED stamp twin (a retry that minted before
+      // its cleanup ran) still collapses to the sid row — that stamp is
+      // not yet a verdict.
+      const sidRow = sidLinked[0];
+      const settledStampDissenters = group.filter((r) => isStampLinked(r)
+        && callSettled(r)
+        && String(r.lead_id) !== String(sidRow.lead_id));
+      if (settledStampDissenters.length) deduped.push(sidRow, ...settledStampDissenters);
+      else deduped.push(sidRow);
+    } else if (sidLinked.length > 1) deduped.push(...sidLinked);
     else deduped.push(group[0]);
   }
   return deduped;

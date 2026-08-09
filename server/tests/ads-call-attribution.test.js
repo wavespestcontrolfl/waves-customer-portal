@@ -2,20 +2,28 @@
 // the PPC funnel (ad_service_attribution), keyed by lead_id.
 
 let firstByTable = {};
+let listQueueByTable = {};
 const insertCalls = [];
 const updateCalls = [];
 
 const mockDb = jest.fn((table) => {
   const b = {};
   const self = () => b;
-  ['where', 'whereNot', 'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge'].forEach((m) => { b[m] = jest.fn(self); });
+  ['where', 'whereNot', 'whereRaw', 'whereNull', 'forUpdate', 'select', 'orderBy', 'limit', 'onConflict', 'ignore', 'merge'].forEach((m) => { b[m] = jest.fn(self); });
   b.first = jest.fn(() => Promise.resolve(firstByTable[table]));
   b.insert = jest.fn((row) => { insertCalls.push({ table, row }); return b; });
   b.update = jest.fn((row) => { updateCalls.push({ table, row }); return Promise.resolve(1); });
-  // Makes an awaited insert(...).onConflict(...).ignore() chain resolve.
-  b.then = (res, rej) => Promise.resolve([1]).then(res, rej);
+  // Awaited list queries consume a per-table queue when one is set (the
+  // backfill's sid/stamp candidate reads); an awaited
+  // insert(...).onConflict(...).ignore() chain still resolves [1].
+  b.then = (res, rej) => {
+    const q = listQueueByTable[table];
+    const val = (q && q.length) ? q.shift() : [1];
+    return Promise.resolve(val).then(res, rej);
+  };
   return b;
 });
+mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ error: jest.fn(), warn: jest.fn(), info: jest.fn() }));
@@ -30,6 +38,7 @@ const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('
 beforeEach(() => {
   jest.clearAllMocks();
   firstByTable = {};
+  listQueueByTable = {};
   insertCalls.length = 0;
   updateCalls.length = 0;
 });
@@ -423,5 +432,78 @@ describe("call provenance protects another call's row (PR #3303)", () => {
 
     expect(res).toMatchObject({ recorded: true, updated: true });
     expect(updateCalls[0].row).toMatchObject({ customer_id: 'C1', campaign_id: 'local-9' });
+  });
+});
+
+describe('backfillCallLeadAttribution — provenance resolved and written under ONE lock (PR #3303 r5)', () => {
+  const LEAD = {
+    id: 'lead-1',
+    lead_source_id: 'src-1',
+    service_interest: 'pest control',
+    created_at: '2026-08-01T12:00:00.000Z',
+    twilio_call_sid: null,
+  };
+  const SOURCE = { id: 'src-1', source_type: 'google_ads', name: 'Tracked Line' };
+
+  test('a single sid-linked call verified settled UNDER LOCK becomes provenance; the funnel write rides the same transaction', async () => {
+    firstByTable.leads = { ...LEAD, twilio_call_sid: 'CAx' };
+    firstByTable.lead_sources = SOURCE;
+    listQueueByTable.call_log = [[{ id: 'call-1' }]];
+    firstByTable.call_log = { id: 'call-1', processing_token: null, processing_status: 'processed', metadata: '{}' };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res.recorded).toBe(true);
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    const insert = insertCalls.find((c) => c.table === 'ad_service_attribution');
+    expect(insert.row.source_call_id).toBe('call-1');
+  });
+
+  test('a sid candidate whose LOCKED re-read shows an in-flight reprocess refuses — the retired row never resurrects', async () => {
+    firstByTable.leads = { ...LEAD, twilio_call_sid: 'CAx' };
+    firstByTable.lead_sources = SOURCE;
+    listQueueByTable.call_log = [[{ id: 'call-1' }]];
+    firstByTable.call_log = { id: 'call-1', processing_token: 'tok-live', processing_status: 'processing', metadata: '{}' };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res).toEqual({ recorded: false, reason: 'call_rejected' });
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
+  });
+
+  test('TWO settled stamped calls leave provenance NULL — never newest-wins (codex P1 r5)', async () => {
+    firstByTable.leads = { ...LEAD };
+    firstByTable.lead_sources = SOURCE;
+    listQueueByTable.call_log = [[{ id: 's1' }, { id: 's2' }]];
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res.recorded).toBe(true);
+    const insert = insertCalls.find((c) => c.table === 'ad_service_attribution');
+    expect(insert.row.source_call_id).toBeNull();
+  });
+
+  test('exactly ONE settled stamped call becomes provenance after its locked re-check', async () => {
+    firstByTable.leads = { ...LEAD };
+    firstByTable.lead_sources = SOURCE;
+    listQueueByTable.call_log = [[{ id: 's1' }]];
+    firstByTable.call_log = { id: 's1', processing_token: null, processing_status: 'processed', metadata: '{}' };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res.recorded).toBe(true);
+    expect(insertCalls.find((c) => c.table === 'ad_service_attribution').row.source_call_id).toBe('s1');
+  });
+
+  test('a stamped candidate that turns in-flight under the lock refuses with call_unsettled (retryable, no NULL-provenance row)', async () => {
+    firstByTable.leads = { ...LEAD };
+    firstByTable.lead_sources = SOURCE;
+    listQueueByTable.call_log = [[{ id: 's1' }]];
+    firstByTable.call_log = { id: 's1', processing_token: 'tok-live', processing_status: 'processing', metadata: '{}' };
+
+    const res = await CallAttribution.backfillCallLeadAttribution({ leadId: 'lead-1', customerId: 'cust-1' });
+
+    expect(res).toEqual({ recorded: false, reason: 'call_unsettled' });
+    expect(insertCalls.filter((c) => c.table === 'ad_service_attribution')).toHaveLength(0);
   });
 });

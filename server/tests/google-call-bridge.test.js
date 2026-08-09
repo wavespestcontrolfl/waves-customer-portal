@@ -333,3 +333,44 @@ describe('callStillAttributable — settled terminal verdicts only (PR #3303)', 
     expect(await callStillAttributable(trxFor({ processing_status: 'processed', processing_token: null, metadata: {} }), 'c1')).toBe(true);
   });
 });
+
+describe('dedupeCrmCallRows — settled-stamp dissent (PR #3303 r5)', () => {
+  const { dedupeCrmCallRows } = GoogleCallBridge._private;
+  const row = (id, leadId, leadCallSid, extra = {}) => ({
+    id, lead_id: leadId, lead_call_sid: leadCallSid, twilio_call_sid: 'CAcall', ...extra,
+  });
+
+  test('a SETTLED stamp targeting a DIFFERENT lead keeps BOTH rows — the repoint is the processor verdict', () => {
+    // Same call → both join rows carry the same call columns: a settled
+    // stamp to lead-stamp while lead-sid still holds the sid. Collapsing
+    // to the sid row would hide the repoint; the pair reads as ambiguous
+    // → conservative no-bridge.
+    const settled = { metadata: JSON.stringify({ lead_id: 'lead-stamp' }), processing_token: null, processing_status: 'processed' };
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-stamp', null, settled),
+      row('c1', 'lead-sid', 'CAcall', settled),
+    ]);
+    expect(deduped).toHaveLength(2);
+    expect(deduped.map((r) => r.lead_id).sort()).toEqual(['lead-sid', 'lead-stamp']);
+  });
+
+  test('an UNSETTLED stamp twin still collapses to the sid row — a mid-flight stamp is not a verdict', () => {
+    const inflight = { metadata: JSON.stringify({ lead_id: 'lead-stamp' }), processing_token: 'tok', processing_status: 'processing' };
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-stamp', null, inflight),
+      row('c1', 'lead-sid', 'CAcall', inflight),
+    ]);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0].lead_id).toBe('lead-sid');
+  });
+
+  test('a settled stamp AGREEING with the sid lead collapses normally', () => {
+    const settled = { metadata: JSON.stringify({ lead_id: 'lead-sid' }), processing_token: null, processing_status: 'processed' };
+    const deduped = dedupeCrmCallRows([
+      row('c1', 'lead-sid', 'CAcall', settled),
+      row('c1', 'lead-sid', 'CAcall', settled),
+    ]);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0].lead_id).toBe('lead-sid');
+  });
+});
