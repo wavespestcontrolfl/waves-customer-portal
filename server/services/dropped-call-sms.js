@@ -37,7 +37,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
-const { readCachedLineType, cacheLineType, lookupLineType } = require('./messaging/validators/line-type');
+const { readCachedLineType, cacheLineType, lookupLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
 // sent:true is necessary but not sufficient — upstream suppressions (gate
 // off, template disabled, owner kill switch) report sent:true with a
 // sentinel providerMessageId and no SMS leaves the system.
@@ -442,15 +442,15 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
       lineType = await lookupLineType(phone);
       if (lineType) await cacheLineType(phone, lineType);
     }
-    if (lineType === 'landline') {
+    if (NON_SMS_LINE_TYPES.has(lineType)) {
       await stampStatus(leadId, 'blocked');
-      await stampPhoneClaim(phone, 'landline'); // keep — a landline stays a landline
-      await logActivity(leadId, 'note', 'Dropped-call address text skipped — caller number is a landline', {
+      await stampPhoneClaim(phone, lineType); // keep — a landline/fixedVoip stays that way
+      await logActivity(leadId, 'note', `Dropped-call address text skipped — caller number is a ${lineType}`, {
         message_type: MESSAGE_TYPE,
-        reason: 'landline',
+        reason: lineType,
       });
-      logger.info(`[dropped-call-sms] Skipping ${maskPhone(phone)} — landline`);
-      return { sent: false, skipped: 'landline' };
+      logger.info(`[dropped-call-sms] Skipping ${maskPhone(phone)} — ${lineType}`);
+      return { sent: false, skipped: lineType };
     }
   } catch (e) {
     logger.warn(`[dropped-call-sms] line-type pre-check failed (continuing): ${e.code || e.name || 'lookup_error'}`);

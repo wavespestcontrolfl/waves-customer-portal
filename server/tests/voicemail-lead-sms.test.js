@@ -27,6 +27,7 @@ jest.mock('../services/messaging/validators/line-type', () => ({
   readCachedLineType: jest.fn(async () => ({ state: 'miss' })),
   cacheLineType: jest.fn(async () => {}),
   lookupLineType: jest.fn(async () => 'mobile'),
+  NON_SMS_LINE_TYPES: new Set(['landline', 'fixedVoip']),
 }));
 jest.mock('../utils/lead-prefill-token', () => ({
   mintLeadPrefillToken: jest.fn(() => '1760000000.test-signature'),
@@ -207,6 +208,17 @@ describe('voicemail lead text-back gates', () => {
     expect(phoneClaimOutcomes()).toContain('landline');
     const notes = state.inserts.filter((i) => i.table === 'lead_activities');
     expect(notes).toHaveLength(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('fixedVoip pre-check blocks the send like a landline (home-phone VoIP, Twilio 30006)', async () => {
+    lineType.readCachedLineType.mockResolvedValue({ state: 'hit', lineType: 'fixedVoip' });
+    const result = await sendVoicemailQuoteLink(args());
+    expect(result).toEqual({ sent: false, skipped: 'fixedVoip' });
+    expect(lineType.lookupLineType).not.toHaveBeenCalled();
+    expect(stampsFor()).toContain('blocked');
+    expect(phoneClaimReleased()).toBe(false);
+    expect(phoneClaimOutcomes()).toContain('fixedVoip');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 

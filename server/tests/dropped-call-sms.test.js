@@ -33,6 +33,7 @@ jest.mock('../services/messaging/validators/line-type', () => ({
   readCachedLineType: jest.fn(async () => ({ state: 'miss' })),
   cacheLineType: jest.fn(async () => {}),
   lookupLineType: jest.fn(async () => 'mobile'),
+  NON_SMS_LINE_TYPES: new Set(['landline', 'fixedVoip']),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -395,6 +396,17 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(state.deletes).toHaveLength(0); // claim NOT released
     const claimStamp = state.updates.find((u) => u.table === 'dropped_call_sms_claims');
     expect(claimStamp.payload.outcome).toBe('landline');
+  });
+
+  it('fixedVoip — claim kept and stamped with the detected type, no send', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
+    lineType.lookupLineType.mockResolvedValueOnce('fixedVoip');
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'fixedVoip' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(state.deletes).toHaveLength(0); // claim NOT released
+    const claimStamp = state.updates.find((u) => u.table === 'dropped_call_sms_claims');
+    expect(claimStamp.payload.outcome).toBe('fixedVoip');
   });
 
   it('template disabled — releases BOTH claims', async () => {
