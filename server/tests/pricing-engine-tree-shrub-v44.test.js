@@ -813,3 +813,55 @@ describe('Tree & Shrub estimator hardening', () => {
     });
   });
 });
+
+describe('Tree & Shrub review signals reach the operator review panel', () => {
+  // The autonomous paths already refuse these lines; the admin's "Pricing
+  // Review Notes" panel renders result.pricingMetadata, which used to carry
+  // exactly ONE reason (the german-roach conflict) — so a capped, therefore
+  // underpriced, T&S estimate could be sent with nothing on screen.
+  const { generateEstimate: gen } = require('../services/pricing-engine');
+
+  test('an ESTIMATED bed area above the cap is clamped and both the reason and the prose warning surface', () => {
+    const est = gen({
+      homeSqFt: 2400,
+      lotSqFt: 60000,
+      estimatedBedAreaSf: 9000,
+      services: { treeShrub: { tier: 'standard' } },
+    });
+    const ts = est.lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.bedArea).toBe(8000);
+    expect(ts.bedAreaCapped).toBe(true);
+    expect(ts.uncappedBedAreaEstimate).toBe(9000);
+    expect(est.pricingMetadata.manualReviewReasons).toEqual(
+      expect.arrayContaining(['bed_area_cap_reached', 'bed_area_at_or_above_8000']),
+    );
+    expect(est.pricingMetadata.warnings).toEqual(
+      expect.arrayContaining(['Tree & Shrub bed area hit the estimator cap; manual review recommended.']),
+    );
+  });
+
+  test('an EXPLICIT oversized bed area is priced in full but still flagged for review', () => {
+    const est = gen({ homeSqFt: 2400, lotSqFt: 60000, bedArea: 14000, services: { treeShrub: { tier: 'standard' } } });
+    const ts = est.lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.bedArea).toBe(14000); // a measurement is never silently clamped
+    expect(est.pricingMetadata.manualReviewReasons).toContain('bed_area_at_or_above_8000');
+  });
+
+  test('the missing-bed-area fallback and high plant counts surface too', () => {
+    const fallback = gen({ homeSqFt: 2400, services: { treeShrub: { tier: 'standard' } } });
+    expect(fallback.pricingMetadata.manualReviewReasons).toContain('missing_bed_area_fallback');
+
+    const manyPlants = gen({
+      homeSqFt: 2400, lotSqFt: 9000, bedArea: 2000,
+      services: { treeShrub: { tier: 'standard', treeCount: 20 } },
+    });
+    expect(manyPlants.pricingMetadata.manualReviewReasons).toContain('tree_count_at_or_above_15');
+  });
+
+  test('a clean quote adds nothing — the panel stays quiet', () => {
+    const est = gen({ homeSqFt: 2400, lotSqFt: 9000, bedArea: 2000, services: { treeShrub: { tier: 'standard', treeCount: 3 } } });
+    const ts = est.lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.manualReviewReasons).toEqual([]);
+    expect(est.pricingMetadata.manualReviewReasons).toEqual([]);
+  });
+});

@@ -2202,6 +2202,33 @@ function generateEstimate(input) {
     services.plugging
   );
 
+  // Line-level review signals → the estimate-wide pricingMetadata the admin
+  // "Pricing Review Notes" panel renders. Until now only ONE reason ever
+  // reached that panel (the german-roach conflict, via addManualReviewReason)
+  // while every pricer's own manualReviewReasons/warnings — the Tree & Shrub
+  // 8,000 sqft bed-area cap, the 2,000 sqft fallback, the >=15 plant count,
+  // difficult access on a large bed — stayed on the line item where no human
+  // surface reads them. The autonomous paths already refuse those lines
+  // (draft-builder#lineRequiresReview, lead-estimate-automation,
+  // public-quote#isManualQuoteLine all key off requiresManualReview /
+  // manualReviewReasons), so the ONLY unhardened route was the operator's:
+  // an admin could send a capped — therefore underpriced — Tree & Shrub
+  // estimate with nothing on screen to review. This is display-only
+  // aggregation: no consumer enforces on pricingMetadata, and no price moves.
+  for (const line of lineItems) {
+    if (!line || typeof line !== 'object') continue;
+    for (const reason of (Array.isArray(line.manualReviewReasons) ? line.manualReviewReasons : [])) {
+      addManualReviewReason(reason);
+    }
+    // The prose warnings are already written for exactly this reader
+    // ("Tree & Shrub bed area hit the estimator cap; manual review
+    // recommended.") — carry them so the panel shows the sentence, not just
+    // a humanized token.
+    for (const warning of (Array.isArray(line.warnings) ? line.warnings : [])) {
+      addRoutingWarning(warning);
+    }
+  }
+
   // ── 8. Build estimate output ───────────────────────────────
   return {
     // Property
