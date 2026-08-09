@@ -720,7 +720,22 @@ async function reconcileMovedCallAttributionRow(dbc, callLogId, fromLeadId, toLe
     .first('id');
   if (!oldRow) return 'none';
   if (toLeadId) {
-    const conflict = await dbc('ad_service_attribution').where({ lead_id: toLeadId }).first('id');
+    // The conflicting row is LOCKED and RE-READ (codex P1, PR #3303 r10):
+    // with two calls repointing at once — one arriving at this lead while
+    // the row currently sitting here departs — an unlocked read saw the
+    // departing row, the other transaction then moved it away, and this
+    // one still retired its OWN source row as a conflict. The target slot
+    // ended up empty and the incoming call's booked/completed stage and
+    // revenue were deleted instead of transferred. Locking serializes the
+    // pair; the second re-read after the lock releases tells us whether a
+    // conflict genuinely remains.
+    const conflictLocked = await dbc('ad_service_attribution')
+      .where({ lead_id: toLeadId })
+      .forUpdate()
+      .first('id');
+    const conflict = conflictLocked
+      ? await dbc('ad_service_attribution').where({ lead_id: toLeadId }).first('id')
+      : null;
     if (!conflict) {
       let owner = toCustomerId;
       if (owner === undefined) {
