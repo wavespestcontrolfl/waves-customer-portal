@@ -1226,8 +1226,26 @@ async function applyBridge(options = {}) {
           // prior value was never recorded, and guessing would corrupt
           // real attribution.
           let reconcileOutcome = 'none';
+          let unprovenancedStrandedRow = false;
           if (recordedLeadId && String(recordedLeadId) !== String(res.match.leadId)) {
             reconcileOutcome = await reconcileMovedCallAttribution(trx, match.callLog.id, recordedLeadId, res.match.leadId, res.match.customerId, now);
+            // A LEGACY row on the recorded lead cannot be reconciled —
+            // NULL provenance is permanently frozen (another call may own
+            // it), so the move reports 'none' with the old row still in
+            // place. Writing a fresh provenanced row for the target would
+            // DOUBLE-COUNT this call across two leads (codex P1, PR #3303
+            // r10). Suppress the write and leave both the legacy row and
+            // the recorded match for an operator to resolve.
+            if (reconcileOutcome === 'none') {
+              const stranded = await trx('ad_service_attribution')
+                .where({ lead_id: recordedLeadId })
+                .whereNull('source_call_id')
+                .first('id');
+              unprovenancedStrandedRow = !!stranded;
+              if (unprovenancedStrandedRow) {
+                logger.warn(`[google-call-bridge] repoint of call ${match.callLog.id} left a legacy unprovenanced row on lead ${recordedLeadId} — funnel write suppressed to avoid double-counting`);
+              }
+            }
           }
           await trx('call_log')
             .where({ id: match.callLog.id })
@@ -1249,7 +1267,7 @@ async function applyBridge(options = {}) {
           // write would backfill campaign/detail/service onto it. The
           // customer is the match's own resolved owner — never the call's
           // customer link, which a lead does not necessarily own.
-          if (bridgedToThisCall && reconcileOutcome !== 'retired_conflict') {
+          if (bridgedToThisCall && reconcileOutcome !== 'retired_conflict' && !unprovenancedStrandedRow) {
             await writeCallPpcAttribution(match, res.match.customerId || null, res.match.leadId, trx);
           }
           return res;
