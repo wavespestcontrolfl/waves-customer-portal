@@ -2638,8 +2638,30 @@ function priceTreeShrub(property, options = {}) {
   const bedArea = bedAreaInfo.bedArea;
   const bedAreaCapped = !!bedAreaInfo.capped;
 
+  // v4.7: shrub density now multiplies the MEASURED-bed terms (per-sqft
+  // material + the bedArea-derived minutes) — previously it only shaped the
+  // lot-based bed estimate, so a known bed area erased the difference
+  // between sparse and packed plantings. Ships neutral (all factors 1).
+  const shrubDensity = getTreeShrubShrubDensity(property);
+  const densityFactor = TREE_SHRUB.densityFactors?.[shrubDensity] ?? 1;
+
+  // v4.7 routine palm-care reserve: property-level palm count only (the
+  // service-level override machinery in resolvePalmCount is palm_injection
+  // semantics — a treated-palm count with mandatory-measurement rules; the
+  // recurring program covers every palm on the property or none). Absent /
+  // invalid reads as 0 palms, which zeroes the reserve terms.
+  const palmCountRaw = property.palmCount ?? property.palmInventory?.palmCount ?? property.features?.palmCount;
+  const palmCountParsed = Number(palmCountRaw);
+  const palmCount = Number.isInteger(palmCountParsed) && palmCountParsed > 0 ? palmCountParsed : 0;
+  const palmCountSource = palmCount > 0 ? 'property' : 'none';
+  const palmReserve = TREE_SHRUB.routinePalmCareReserve || {};
+  const palmMinutesPerVisit = Math.round(palmCount * (palmReserve.minutesPerPalmVisit ?? 0));
+
   const accessMin = TREE_SHRUB.accessMinutes[access] || 0;
-  const onSiteMin = Math.max(25, 20 + Math.round(bedArea / 500) + Math.round(treeCount * 1.5) + accessMin);
+  const onSiteMin = Math.max(
+    25,
+    20 + Math.round((bedArea / 500) * densityFactor) + Math.round(treeCount * 1.5) + palmMinutesPerVisit + accessMin,
+  );
 
   const frequency = tierConfig.frequency;
   // Protocol-derived ANNUAL material model (v4.6); every term is already
@@ -2649,17 +2671,25 @@ function priceTreeShrub(property, options = {}) {
   const tierMaterialFactor = tier === 'light' ? (materialModel.lightFactor ?? 0.75)
     : tier === 'enhanced' ? (materialModel.enhancedFactor ?? 1.25)
     : 1;
+  // Palm reserve material sits OUTSIDE the tier factor: it budgets the
+  // annual palm nutrition/systemic calendar, which doesn't grow with extra
+  // foliar visits — the per-visit palm labor already scales with frequency.
+  const palmReserveAnnual = (palmReserve.perPalmAnnual ?? 0) * palmCount;
   const modeledMaterialCost = (
     (materialModel.fixedAnnual ?? 15)
     + (materialModel.perTreeAnnual ?? 4) * treeCount
-    + (materialModel.perSqFtAnnual ?? 0.055) * bedArea
-  ) * tierMaterialFactor;
+    + (materialModel.perSqFtAnnual ?? 0.055) * bedArea * densityFactor
+  ) * tierMaterialFactor + palmReserveAnnual;
   const materialCost = Math.max(frequency * 10, modeledMaterialCost);
 
   const laborPerVisit = GLOBAL.LABOR_RATE * ((onSiteMin + 10) / 60);
   const laborAnnual = laborPerVisit * frequency;
 
-  const annualDirectCost = materialCost + laborAnnual;
+  // Callback reserve mirrors the commercial pricers' knob; 0 until real
+  // residential callback data earns a value (Phase-1 audit found zero).
+  const callbackReserveAnnual = (TREE_SHRUB.callbackReservePerVisit ?? 0) * frequency;
+
+  const annualDirectCost = materialCost + laborAnnual + callbackReserveAnnual;
   // Admin-INCLUSIVE margin target (v4.6): price = (direct + admin) / (1 - target).
   // The displayed margin below equals marginTarget exactly when no floor binds.
   const marginTarget = TREE_SHRUB.marginTarget ?? GLOBAL.MARGIN_TARGET_TS ?? 0.45;
@@ -2727,6 +2757,10 @@ function priceTreeShrub(property, options = {}) {
     bedAreaConfidence: bedAreaInfo.pricingConfidence,
     treeCount,
     treeCountSource,
+    shrubDensity,
+    densityFactor,
+    palmCount,
+    palmCountSource,
     access,
     onSiteMin,
     materialModel: {
@@ -2734,6 +2768,9 @@ function priceTreeShrub(property, options = {}) {
       perTreeAnnual: materialModel.perTreeAnnual ?? 4,
       perSqFtAnnual: materialModel.perSqFtAnnual ?? 0.055,
       tierFactor: tierMaterialFactor,
+      densityFactor,
+      perPalmAnnual: palmReserve.perPalmAnnual ?? 0,
+      minutesPerPalmVisit: palmReserve.minutesPerPalmVisit ?? 0,
     },
     monthly,
     annual,
@@ -2742,6 +2779,8 @@ function priceTreeShrub(property, options = {}) {
     costs: {
       materialCost: roundMoney(materialCost),
       laborCost: roundMoney(laborAnnual),
+      palmReserveCost: roundMoney(palmReserveAnnual),
+      callbackReserveCost: roundMoney(callbackReserveAnnual),
       adminCost: GLOBAL.ADMIN_ANNUAL,
       directCost: roundMoney(annualDirectCost),
       totalWithAdmin: roundMoney(annualDirectCost + GLOBAL.ADMIN_ANNUAL),

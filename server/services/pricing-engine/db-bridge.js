@@ -1049,6 +1049,34 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
           model.enhancedFactor = Number(rates.enhanced_factor);
         }
       }
+      // v4.7 knobs (reprice lane 2026-08-08). All ship neutral in constants;
+      // real values arrive via this row when the owner flips them. Bounds
+      // are fat-finger guards, not calibration opinions.
+      const density = constants.TREE_SHRUB.densityFactors;
+      if (density) {
+        for (const key of ['light', 'moderate', 'heavy']) {
+          const val = Number(rates[`density_${key}`]);
+          // 0.5–2x: outside that a density multiplier is a typo, not a
+          // planting style.
+          if (val >= 0.5 && val <= 2) density[key] = val;
+        }
+      }
+      const reserve = constants.TREE_SHRUB.routinePalmCareReserve;
+      if (reserve) {
+        const perPalm = Number(rates.palm_per_palm_annual);
+        // $0–200/palm/yr — the specialty injection ladder starts around
+        // $35/palm per EVENT; a routine reserve above $200/yr means someone
+        // typed a palm_injection price into the wrong box.
+        if (perPalm >= 0 && perPalm <= 200) reserve.perPalmAnnual = perPalm;
+        const perPalmMin = Number(rates.palm_minutes_per_visit);
+        // 0–10 min/palm/visit; beyond that a 12-palm property books 2h of
+        // palm time per visit.
+        if (perPalmMin >= 0 && perPalmMin <= 10) reserve.minutesPerPalmVisit = perPalmMin;
+      }
+      const callbackReserve = Number(rates.callback_reserve_per_visit);
+      if (callbackReserve >= 0 && callbackReserve <= 50) {
+        constants.TREE_SHRUB.callbackReservePerVisit = callbackReserve;
+      }
     }
     if (config.ts_monthly_floors) {
       for (const [tier, val] of Object.entries(config.ts_monthly_floors)) {

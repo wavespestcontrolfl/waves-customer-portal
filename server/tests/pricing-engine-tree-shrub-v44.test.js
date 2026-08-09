@@ -813,3 +813,99 @@ describe('Tree & Shrub estimator hardening', () => {
     });
   });
 });
+
+describe('Tree & Shrub v4.7 knobs (density / palm reserve / callback reserve)', () => {
+  // Every knob ships NEUTRAL — these tests flip constants directly (the same
+  // object db-bridge mutates) and restore after each test.
+  const TS = () => constants.TREE_SHRUB;
+  const originalDensity = { ...constants.TREE_SHRUB.densityFactors };
+  const originalReserve = { ...constants.TREE_SHRUB.routinePalmCareReserve };
+  const originalCallback = constants.TREE_SHRUB.callbackReservePerVisit;
+
+  afterEach(() => {
+    constants.TREE_SHRUB.densityFactors = { ...originalDensity };
+    constants.TREE_SHRUB.routinePalmCareReserve = { ...originalReserve };
+    constants.TREE_SHRUB.callbackReservePerVisit = originalCallback;
+  });
+
+  test('neutral defaults change nothing: worked example matches v4.6 numbers exactly', () => {
+    expect(TS().densityFactors).toEqual({ light: 1, moderate: 1, heavy: 1 });
+    expect(TS().routinePalmCareReserve).toEqual({ perPalmAnnual: 0, minutesPerPalmVisit: 0 });
+    expect(TS().callbackReservePerVisit).toBe(0);
+
+    // Same fixture as the "standard 2,000 sqft worked example (v4.6)" above,
+    // with density/palm signals present — they must be inert at neutral.
+    const quote = priceTreeShrub(
+      { bedArea: 2000, treeCount: 0, access: 'easy', shrubDensity: 'heavy', palmCount: 12 },
+      { tier: 'standard' }
+    );
+    // material = max(60, 15 + 0 + 0.055*2000) = 125; onSite = max(25, 20+4+0+0) = 25 (heavy inert)
+    expect(quote.costs.materialCost).toBe(125);
+    expect(quote.onSiteMin).toBe(25);
+    expect(quote.costs.palmReserveCost).toBe(0);
+    expect(quote.costs.callbackReserveCost).toBe(0);
+    expect(quote.densityFactor).toBe(1);
+    expect(quote.palmCount).toBe(12);
+    expect(quote.palmCountSource).toBe('property');
+  });
+
+  test('density factor multiplies the measured-bed terms only (per-sqft material + bed minutes)', () => {
+    TS().densityFactors.heavy = 1.3;
+    const heavy = priceTreeShrub(
+      { bedArea: 2000, treeCount: 4, access: 'easy', shrubDensity: 'heavy' },
+      { tier: 'standard' }
+    );
+    const moderate = priceTreeShrub(
+      { bedArea: 2000, treeCount: 4, access: 'easy', shrubDensity: 'moderate' },
+      { tier: 'standard' }
+    );
+    // per-sqft term scales: 0.055*2000*1.3 = 143 vs 110; fixed + per-tree terms don't.
+    expect(heavy.costs.materialCost - moderate.costs.materialCost).toBeCloseTo(33, 5);
+    // bed minutes scale: round(4*1.3)=5 vs 4 — fixed/tree/access minutes don't.
+    expect(heavy.onSiteMin - moderate.onSiteMin).toBe(1);
+    expect(heavy.densityFactor).toBe(1.3);
+    // Unknown/missing density resolves moderate → factor 1.
+    const unknownDensity = priceTreeShrub({ bedArea: 2000, treeCount: 4, access: 'easy' }, { tier: 'standard' });
+    expect(unknownDensity.densityFactor).toBe(1);
+  });
+
+  test('palm reserve adds annual material outside the tier factor and per-visit minutes', () => {
+    TS().routinePalmCareReserve.perPalmAnnual = 6;
+    TS().routinePalmCareReserve.minutesPerPalmVisit = 1;
+    const quote = priceTreeShrub(
+      { bedArea: 2000, treeCount: 0, access: 'easy', palmCount: 8 },
+      { tier: 'enhanced' }
+    );
+    expect(quote.costs.palmReserveCost).toBe(48);
+    // Outside the tier factor: enhanced material = (15 + 0.055*2000)*1.25 + 48,
+    // NOT (…+48)*1.25.
+    expect(quote.costs.materialCost).toBeCloseTo((15 + 110) * 1.25 + 48, 5);
+    // Labor: +8 palm minutes per visit on top of the 20+4 base (>25 floor).
+    expect(quote.onSiteMin).toBe(20 + 4 + 8);
+    expect(quote.materialModel.perPalmAnnual).toBe(6);
+  });
+
+  test('palm count reads property-level sources and treats absent/invalid as zero', () => {
+    TS().routinePalmCareReserve.perPalmAnnual = 6;
+    const inventory = priceTreeShrub(
+      { bedArea: 2000, treeCount: 0, palmInventory: { palmCount: 5 } },
+      { tier: 'standard' }
+    );
+    expect(inventory.palmCount).toBe(5);
+    expect(inventory.costs.palmReserveCost).toBe(30);
+    for (const bad of [{}, { palmCount: 'many' }, { palmCount: -3 }, { palmCount: 2.5 }]) {
+      const quote = priceTreeShrub({ bedArea: 2000, treeCount: 0, ...bad }, { tier: 'standard' });
+      expect(quote.palmCount).toBe(0);
+      expect(quote.palmCountSource).toBe('none');
+      expect(quote.costs.palmReserveCost).toBe(0);
+    }
+  });
+
+  test('callback reserve books per visit into direct cost (lawn-engine-style knob)', () => {
+    TS().callbackReservePerVisit = 2;
+    const quote = priceTreeShrub({ bedArea: 2000, treeCount: 0, access: 'easy' }, { tier: 'standard' });
+    expect(quote.costs.callbackReserveCost).toBe(12);
+    // direct = material 125 + labor 6*35*(35/60) — plus the 12.
+    expect(quote.costs.directCost).toBeCloseTo(125 + 6 * 35 * (35 / 60) + 12, 2);
+  });
+});

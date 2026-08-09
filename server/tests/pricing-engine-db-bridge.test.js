@@ -46,6 +46,9 @@ describe('pricing engine DB bridge', () => {
   const originalEnforceFloor = constants.PEST.enforceFloorPostDiscount;
   const originalPestAdditionalAdjustments = { ...constants.PEST.additionalAdjustments };
   const originalLawnProgramMinimum = constants.LAWN_PRICING_V2.programMinimumMonthly;
+  const originalTsDensityFactors = { ...constants.TREE_SHRUB.densityFactors };
+  const originalTsPalmReserve = { ...constants.TREE_SHRUB.routinePalmCareReserve };
+  const originalTsCallbackReserve = constants.TREE_SHRUB.callbackReservePerVisit;
 
   afterEach(() => {
     constants.PEST.pestInitialRoach = originalInitialRoach;
@@ -86,6 +89,9 @@ describe('pricing engine DB bridge', () => {
     }
     Object.assign(constants.PEST.additionalAdjustments, originalPestAdditionalAdjustments);
     constants.LAWN_PRICING_V2.programMinimumMonthly = originalLawnProgramMinimum;
+    constants.TREE_SHRUB.densityFactors = { ...originalTsDensityFactors };
+    constants.TREE_SHRUB.routinePalmCareReserve = { ...originalTsPalmReserve };
+    constants.TREE_SHRUB.callbackReservePerVisit = originalTsCallbackReserve;
   });
 
   test('lawn program minimum: absent key restores the DISARMED 0 on every sync', async () => {
@@ -950,5 +956,63 @@ describe('pricing engine DB bridge', () => {
     await expect(syncConstantsFromDB(db)).resolves.toBe(false);
     expect(constants.TERMITE.systems.advance.stationCost).toBe(originalTermite.systems.advance.stationCost);
     expect(constants.TERMITE.installMultiplier).toBe(originalTermite.installMultiplier);
+  });
+});
+
+describe('ts_material_rates v4.7 knobs', () => {
+  // Standalone describe: restore the knobs itself — the main describe's
+  // afterEach doesn't cover this block, and syncs mutate constants in place.
+  const neutralDensity = { light: 1, moderate: 1, heavy: 1 };
+  const neutralReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 0 };
+  beforeEach(() => {
+    constants.TREE_SHRUB.densityFactors = { ...neutralDensity };
+    constants.TREE_SHRUB.routinePalmCareReserve = { ...neutralReserve };
+    constants.TREE_SHRUB.callbackReservePerVisit = 0;
+  });
+  afterAll(() => {
+    constants.TREE_SHRUB.densityFactors = { ...neutralDensity };
+    constants.TREE_SHRUB.routinePalmCareReserve = { ...neutralReserve };
+    constants.TREE_SHRUB.callbackReservePerVisit = 0;
+  });
+
+  test('valid density/palm/callback values sync onto TREE_SHRUB', async () => {
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'ts_material_rates',
+      data: {
+        density_light: 0.85, density_moderate: 1, density_heavy: 1.3,
+        palm_per_palm_annual: 6, palm_minutes_per_visit: 1,
+        callback_reserve_per_visit: 2,
+      },
+    }]))).resolves.toBe(true);
+    expect(constants.TREE_SHRUB.densityFactors).toEqual({ light: 0.85, moderate: 1, heavy: 1.3 });
+    expect(constants.TREE_SHRUB.routinePalmCareReserve).toEqual({ perPalmAnnual: 6, minutesPerPalmVisit: 1 });
+    expect(constants.TREE_SHRUB.callbackReservePerVisit).toBe(2);
+  });
+
+  test('out-of-bounds values are ignored (fat-finger guards), in-bounds siblings still apply', async () => {
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'ts_material_rates',
+      data: {
+        density_heavy: 5,              // > 2x — a typo, not a planting style
+        density_light: 0.9,
+        palm_per_palm_annual: 500,     // palm_injection-scale money in the wrong box
+        palm_minutes_per_visit: 45,    // 12 palms would book 9h/visit
+        callback_reserve_per_visit: 400,
+      },
+    }]))).resolves.toBe(true);
+    expect(constants.TREE_SHRUB.densityFactors.heavy).toBe(1);
+    expect(constants.TREE_SHRUB.densityFactors.light).toBe(0.9);
+    expect(constants.TREE_SHRUB.routinePalmCareReserve).toEqual({ perPalmAnnual: 0, minutesPerPalmVisit: 0 });
+    expect(constants.TREE_SHRUB.callbackReservePerVisit).toBe(0);
+  });
+
+  test('absent keys leave the neutral in-code defaults untouched', async () => {
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'ts_material_rates',
+      data: { per_sqft: 0.055 },
+    }]))).resolves.toBe(true);
+    expect(constants.TREE_SHRUB.densityFactors).toEqual({ light: 1, moderate: 1, heavy: 1 });
+    expect(constants.TREE_SHRUB.routinePalmCareReserve).toEqual({ perPalmAnnual: 0, minutesPerPalmVisit: 0 });
+    expect(constants.TREE_SHRUB.callbackReservePerVisit).toBe(0);
   });
 });
