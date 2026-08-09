@@ -2664,7 +2664,14 @@ function priceTreeShrub(property, options = {}) {
   const palmCountRaw = options.palmCount
     ?? property.palmCount ?? property.palmInventory?.palmCount ?? property.features?.palmCount;
   const palmCountParsed = Number(palmCountRaw);
-  const palmCount = Number.isInteger(palmCountParsed) && palmCountParsed > 0 ? palmCountParsed : 0;
+  // Engine-side defense matching the intent/public contracts' 1–200 bound:
+  // an oversized count from any producer clamps (with a warning) instead of
+  // scaling reserve dollars without limit.
+  let palmCount = Number.isInteger(palmCountParsed) && palmCountParsed > 0 ? palmCountParsed : 0;
+  if (palmCount > 200) {
+    warnings.push(`Palm count ${palmCount} exceeds the 200-palm residential bound; clamped to 200.`);
+    palmCount = 200;
+  }
   const palmCountSource = palmCount > 0
     ? (options.palmCount !== undefined && options.palmCount !== null && String(options.palmCount).trim() !== ''
       ? 'service_line' : 'property')

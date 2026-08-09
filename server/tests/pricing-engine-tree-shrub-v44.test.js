@@ -976,6 +976,16 @@ describe('Tree & Shrub v4.7 palm count service-line passthrough', () => {
     expect(ts.costs.palmReserveCost).toBe(60);
   });
 
+  test('palm count clamps at the 200 residential bound with a warning; fractions read as zero', () => {
+    constants.TREE_SHRUB.routinePalmCareReserve.perPalmAnnual = 6;
+    const clamped = priceTreeShrub({ bedArea: 2000, treeCount: 0, palmCount: 9999 }, { tier: 'standard' });
+    expect(clamped.palmCount).toBe(200);
+    expect(clamped.costs.palmReserveCost).toBe(1200);
+    expect(clamped.warnings.some((w) => w.includes('clamped to 200'))).toBe(true);
+    const fractional = priceTreeShrub({ bedArea: 2000, treeCount: 0, palmCount: 2.5 }, { tier: 'standard' });
+    expect(fractional.palmCount).toBe(0);
+  });
+
   test('service-line palm count wins over the property record; absent falls back to property', () => {
     constants.TREE_SHRUB.routinePalmCareReserve.perPalmAnnual = 6;
     const override = priceTreeShrub(

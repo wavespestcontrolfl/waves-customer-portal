@@ -838,12 +838,16 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // v4.7: distinct palms-on-property count for the routine palm-care
       // reserve. Optional — clients that never send it simply price no
       // reserve; treeCount stays NON-palm trees where both are supplied.
+      // Unauthenticated input: integer 1–200 only (the intent contract's
+      // bounds) — fractions would silently zero in the pricer and huge
+      // values would scale reserve dollars without limit once enabled.
       const treeShrubPalms = Number(services.treeShrub.palmCount);
       engineInput.services.treeShrub = {
         tier: services.treeShrub.tier,
         access: services.treeShrub.access || 'easy',
         ...(Number.isFinite(treeShrubCount) && treeShrubCount > 0 ? { treeCount: treeShrubCount } : {}),
-        ...(Number.isFinite(treeShrubPalms) && treeShrubPalms > 0 ? { palmCount: treeShrubPalms } : {}),
+        ...(Number.isInteger(treeShrubPalms) && treeShrubPalms > 0 && treeShrubPalms <= 200
+          ? { palmCount: treeShrubPalms } : {}),
       };
     }
     if (services.palm) {
