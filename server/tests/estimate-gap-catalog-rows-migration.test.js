@@ -76,6 +76,8 @@ function emptyDb() {
     service_addons: [],
     service_package_items: [],
     scheduled_service_addons: [],
+    service_discount_rules: [],
+    discounts: [],
   };
 }
 
@@ -299,10 +301,13 @@ describe('20260808080000 estimate-gap catalog rows', () => {
     db.service_records.push({ id: 'r1', service_id: svcRow(db, 'top_dressing').id });
     db.service_package_items.push({ id: 'pkg-1', service_id: svcRow(db, 'rodent_wire_mesh').id });
     db.scheduled_service_addons.push({ id: 'ssa-1', service_id: svcRow(db, 'rodent_bird_box').id });
+    // Discount wiring references by KEY, not id (canonical guard classes).
+    db.service_discount_rules.push({ id: 'sdr-1', service_key: 'dethatching' });
+    db.discounts.push({ id: 'd-1', service_key_filter: 'plugging' });
 
     await migration.down(fakeKnex(db));
 
-    for (const key of ['bora_care', 'top_dressing', 'rodent_wire_mesh', 'rodent_bird_box']) {
+    for (const key of ['bora_care', 'top_dressing', 'rodent_wire_mesh', 'rodent_bird_box', 'dethatching', 'plugging']) {
       // Service deactivates; the PROFILE stays active — the pending
       // visits that forced retention still complete through it (codex P1:
       // resolution filters active=true).
@@ -313,9 +318,10 @@ describe('20260808080000 estimate-gap catalog rows', () => {
     expect(db.scheduled_services[0].service_id).toBe(boraId);
     expect(db.service_records[0].service_id).toBe(svcRow(db, 'top_dressing').id);
     expect(db.scheduled_service_addons[0].service_id).toBe(svcRow(db, 'rodent_bird_box').id);
-    // The three unreferenced rows are fully removed.
-    expect(db.services).toHaveLength(4);
-    expect(db.service_completion_profiles).toHaveLength(4);
+    // Only the fully unreferenced row (rodent_guarantee) is removed.
+    expect(db.services).toHaveLength(6);
+    expect(db.service_completion_profiles).toHaveLength(6);
+    expect(svcRow(db, 'rodent_guarantee')).toBeUndefined();
   });
 
   test('down() spares the profile of an admin-recreated same-key service — even with the marker untouched', async () => {

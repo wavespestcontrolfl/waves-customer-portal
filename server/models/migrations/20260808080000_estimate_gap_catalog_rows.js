@@ -453,6 +453,14 @@ exports.down = async function down(knex) {
     if (await knex.schema.hasTable('service_package_items')) {
       refs += (await knex('service_package_items').where({ service_id: entry.id }).pluck('service_id')).length;
     }
+    // Discount wiring blocks removal too (canonical getServiceReferences
+    // classes, keyed by service_key not id).
+    if (await knex.schema.hasTable('service_discount_rules')) {
+      refs += (await knex('service_discount_rules').where({ service_key: entry.key }).pluck('service_key')).length;
+    }
+    if (await knex.schema.hasTable('discounts')) {
+      refs += (await knex('discounts').where({ service_key_filter: entry.key }).pluck('service_key_filter')).length;
+    }
     if (await knex.schema.hasTable('scheduled_services')) {
       refs += (await knex('scheduled_services').where({ service_id: entry.id }).pluck('service_id')).length;
     }
