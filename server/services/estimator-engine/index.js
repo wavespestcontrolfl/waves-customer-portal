@@ -345,17 +345,26 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           if (draftLeadId !== currentLeadId) {
             if (currentLeadId) draftData.lead_id = currentLeadId;
             else delete draftData.lead_id;
-            await db('estimates').where({ id: existing.id })
-              .update({ estimate_data: JSON.stringify(draftData), updated_at: new Date() });
-            if (draftLeadId) {
-              // Only if the OLD lead still points at this draft — a lead
-              // relinked elsewhere is not ours to touch.
-              await db('leads').where({ id: draftLeadId, estimate_id: existing.id })
-                .update({ estimate_id: null });
-            }
-            if (currentLeadId) {
-              await db('leads').where({ id: currentLeadId }).update({ estimate_id: existing.id });
-            }
+            // ONE transaction for all three writes (pre-push P1 r1): a
+            // partial repair — mirror updated, a lead write failed —
+            // would make the next retry see draftLeadId ===
+            // currentLeadId and permanently skip the rest, leaving two
+            // leads pointing at one estimate or the current lead
+            // unlinked. Together they commit or roll back; the outer
+            // catch keeps the whole reconcile non-blocking.
+            await db.transaction(async (trx) => {
+              await trx('estimates').where({ id: existing.id })
+                .update({ estimate_data: JSON.stringify(draftData), updated_at: new Date() });
+              if (draftLeadId) {
+                // Only if the OLD lead still points at this draft — a lead
+                // relinked elsewhere is not ours to touch.
+                await trx('leads').where({ id: draftLeadId, estimate_id: existing.id })
+                  .update({ estimate_id: null });
+              }
+              if (currentLeadId) {
+                await trx('leads').where({ id: currentLeadId }).update({ estimate_id: existing.id });
+              }
+            });
             logger.info(`[estimator-engine] relinked existing draft ${existing.id} after call linkage change (${draftLeadId || 'none'} → ${currentLeadId || 'none'})`);
           }
         } catch (relinkErr) {
