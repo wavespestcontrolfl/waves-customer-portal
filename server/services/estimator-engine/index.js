@@ -342,10 +342,36 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           const draftLeadId = draftData.lead_id ? String(draftData.lead_id) : null;
           const currentLeadId = (context?.lead?.id && context?.leadIsForThisCall)
             ? String(context.lead.id) : null;
-          // A FAILED lead lookup is not an established absence (pre-push
-          // P1 r2) — clearing a valid link on a transient DB error would
-          // be permanent. Reconcile only from a successful resolution.
-          if (!context?.leadLookupUnavailable && draftLeadId !== currentLeadId) {
+          // Reconcile only from DURABLE evidence (pre-push P1 r2/r3):
+          // - a REPOINT requires the current lead resolved via sid or the
+          //   metadata stamp — the phone-touched arm is bounded to the
+          //   call's processing window, so any later edit makes the SAME
+          //   lead read as mere history and must clear nothing;
+          // - an UNLINK (no current lead) must be POSITIVELY established:
+          //   the lookup succeeded, the call carries no stamp, and the
+          //   draft's lead does not carry this call's sid (or is gone).
+          //   A transient lookup failure reconciles nothing.
+          const durableRepoint = !!currentLeadId && ['sid', 'stamp'].includes(context?.leadLinkage);
+          let establishedAbsence = false;
+          if (!currentLeadId && draftLeadId && !context?.leadLookupUnavailable) {
+            const callStamp = (() => {
+              try {
+                const md = typeof context?.call?.metadata === 'string'
+                  ? JSON.parse(context.call.metadata) : (context?.call?.metadata || {});
+                return md?.lead_id ? String(md.lead_id) : null;
+              } catch { return null; }
+            })();
+            if (!callStamp) {
+              const draftLead = await db('leads')
+                .where({ id: draftLeadId })
+                .whereNull('deleted_at')
+                .first('twilio_call_sid');
+              establishedAbsence = !draftLead
+                || !(draftLead.twilio_call_sid && context?.call?.twilio_call_sid
+                  && draftLead.twilio_call_sid === context.call.twilio_call_sid);
+            }
+          }
+          if ((durableRepoint || establishedAbsence) && draftLeadId !== currentLeadId) {
             if (currentLeadId) draftData.lead_id = currentLeadId;
             else delete draftData.lead_id;
             // ONE transaction for all three writes (pre-push P1 r1): a

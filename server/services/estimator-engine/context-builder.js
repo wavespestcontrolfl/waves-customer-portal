@@ -216,7 +216,7 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         .whereNull('deleted_at')
         .orderBy('created_at', 'desc')
         .first();
-      if (byCall) return { lead: byCall, forThisCall: true };
+      if (byCall) return { lead: byCall, forThisCall: true, linkage: 'sid' };
     }
     // Phone-less reuse linkage: when a phone-less caller's later call reuses
     // a prior lead, the processor stamps call_log.metadata.lead_id instead
@@ -246,7 +246,7 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         .where({ id: stampedLeadId })
         .whereNull('deleted_at')
         .first();
-      if (byStamp) return { lead: byStamp, forThisCall: true };
+      if (byStamp) return { lead: byStamp, forThisCall: true, linkage: 'stamp' };
     }
     const digits = last10(phone);
     if (!digits) return { lead: null, forThisCall: false };
@@ -287,7 +287,7 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
       if (reused) {
         const ownSid = reused.twilio_call_sid && call?.twilio_call_sid
           && reused.twilio_call_sid === call.twilio_call_sid;
-        if (ownSid) return { lead: reused, forThisCall: true };
+        if (ownSid) return { lead: reused, forThisCall: true, linkage: 'sid' };
         // ANY reused row not stamped with THIS call's sid — an older
         // foreign-sid lead or an unstamped web/manual lead — was most
         // likely touched by this call's processing, but on a shared line a
@@ -311,7 +311,7 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         if (call?.twilio_call_sid) concurrentQ = concurrentQ.whereNot('twilio_call_sid', call.twilio_call_sid);
         if (call?.id) concurrentQ = concurrentQ.whereNot('id', call.id);
         const concurrentCall = await concurrentQ.first();
-        if (!concurrentCall) return { lead: reused, forThisCall: true };
+        if (!concurrentCall) return { lead: reused, forThisCall: true, linkage: 'phone_touched' };
         // Ambiguous attribution on an actively-shared line: demoting the
         // lead to the byPhone fallback is not enough — addressFromContext
         // still lets a history lead supply the quote address for a new
@@ -605,6 +605,12 @@ async function buildCallContext(callLogId) {
     // The lead lookup FAILED (as opposed to finding nothing) — reconcilers
     // that treat absence as a verdict must skip (pre-push P1 r2).
     leadLookupUnavailable: leadMatch.unavailable === true,
+    // HOW this call's lead resolved — 'sid' and 'stamp' are durable
+    // linkage; 'phone_touched' is bounded to the call's processing window
+    // and reads as history once anything later touches the lead, so
+    // reconcilers must not treat its absence as an unlink (pre-push P1
+    // r3).
+    leadLinkage: leadMatch.linkage || null,
     smsThread,
     priorEstimates,
     // An AMBIGUOUS shared-phone match must never unlock member pricing
