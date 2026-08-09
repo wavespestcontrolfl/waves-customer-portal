@@ -714,6 +714,15 @@ function conflictingOpenEstimate(openEstimates, intentAddress) {
 async function writeGuardedLeadEstimateLink(context, estimateId) {
   let q = db('leads')
     .where({ id: context.lead.id })
+    // The candidate estimate must still be UNARCHIVED — for EVERY linkage
+    // class (codex P1, PR #3304 r11): a paused phone_touched creator can
+    // resume after a corrected retry archived its estimate, and would
+    // otherwise point the lead back at the invalidated row.
+    .whereExists(function estimateStillLive() {
+      this.select(db.raw('1')).from('estimates as e')
+        .whereRaw('e.id = ?', [estimateId])
+        .whereNull('e.archived_at');
+    })
     .where(function claimable() {
       this.whereNull('estimate_id')
         .orWhere('estimate_id', estimateId)

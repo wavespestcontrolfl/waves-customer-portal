@@ -185,8 +185,11 @@ async function reconcileExistingDraftLinks(existing, context) {
     }
     return null;
   } catch (relinkErr) {
-    logger.warn(`[estimator-engine] existing-draft relink failed (non-blocking): ${relinkErr.message}`);
-    return null;
+    // Distinct failure outcome (codex P1, PR #3304 r11): a DB error here
+    // can hide a durable repoint, and the caller must not surface the
+    // draft as reusable on it.
+    logger.warn(`[estimator-engine] existing-draft relink failed: ${relinkErr.message}`);
+    return 'error';
   }
 }
 
@@ -484,6 +487,26 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
         // excludes it from now on, and this run rebuilds from the
         // corrected context (codex P0 r8).
         const reconcileOutcome = await reconcileExistingDraftLinks(existing, context);
+        if (reconcileOutcome === 'error') {
+          // Fail CLOSED (codex P1, PR #3304 r11): the failed reconcile
+          // may have hidden a durable repoint, and surfacing this draft
+          // risks the exact wrong-recipient exposure the reconcile
+          // protects against. Manual review instead.
+          result.lane = LANES.RED;
+          result.reasons = ['existing-draft reconciliation unavailable'];
+          if (quotePromised) {
+            await notify({
+              call: context.call,
+              context,
+              lane: LANES.RED,
+              quotePromised,
+              title: 'Quote promised on call — review the existing draft',
+              body: 'A draft exists for this call but its lead linkage could not be verified '
+                + '(reconciliation unavailable). Review the call and the draft in admin/estimates before sending.',
+            });
+          }
+          return result;
+        }
         if (reconcileOutcome !== 'invalidated') {
 
         result.lane = 'existing';
