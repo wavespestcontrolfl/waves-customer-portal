@@ -460,6 +460,35 @@ describe('deriveProposalDraft', () => {
     expect(draft.correctiveWork.every((w) => w.amount === 275)).toBe(true);
   });
 
+  test('r3d: WDO inspections exempt, root one-time beside result, ancillary result does not hide engineResult rows', async () => {
+    // wdo_inspection = canonical non-taxable (FL §212.08(6)).
+    const wdo = await deriveProposalDraft({
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'wdo_inspection', name: 'WDO Inspection', price: 250 }] } },
+      },
+    });
+    expect(wdo.correctiveWork[0].taxable).toBe(false);
+
+    // Root one_time.items beside a truthy result still collects.
+    const rootOneTime = await deriveProposalDraft({
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
+        one_time: { items: [{ name: 'Cleanout', price: 275 }] },
+      },
+    });
+    expect(rootOneTime.correctiveWork).toHaveLength(1);
+
+    // A truthy ancillary `result` must not hide engineResult.lineItems.
+    const hidden = await deriveProposalDraft({
+      estimate_data: {
+        result: { summary: 'ancillary' },
+        engineResult: { lineItems: [{ service: 'commercial_mosquito', name: 'Mosquito', visitsPerYear: 9, annualAfterDiscount: 585 }] },
+      },
+    });
+    expect(hidden.programs).toHaveLength(1);
+    expect(hidden.programs[0].service).toBe('mosquito');
+  });
+
   test('returns null sections for an estimate with nothing to derive', async () => {
     const draft = await deriveProposalDraft({ estimate_data: {} });
     expect(draft).toEqual({ propertyScope: null, programs: null, correctiveWork: null, customerResponsibilities: null, suggestedTaxRate: null, warnings: [] });

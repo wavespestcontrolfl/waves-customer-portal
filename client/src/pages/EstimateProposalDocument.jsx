@@ -209,7 +209,10 @@ export default function EstimateProposalDocument({ data, token }) {
     .flatMap((b) => (b.lineItems || []))
     .filter((li) => li.frequency !== 'one_time')
     .map((li) => String(li.description || ''));
-  const termsLine = authoredTermsPresent
+  // Programs are authored content: their inclusions state the plan terms,
+  // so the canned no-long-term-contract claim must not print beside them
+  // (codex 1A-ii r3d).
+  const termsLine = (authoredTermsPresent || programList.length > 0)
     ? NEUTRAL_TERMS
     : isCommercial
       // Structural terms only — commercial accepts run the MANUAL invoicing

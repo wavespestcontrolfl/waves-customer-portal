@@ -352,6 +352,7 @@ export default function CommercialProposalPage() {
       // Monetary fills (programs/corrective) tracked separately — only they
       // justify clearing the synthesized building pricing (codex 1A-ii r2h).
       let monetaryFilled = 0;
+      let programsInstalled = false;
       if (draft?.propertyScope?.items?.length && !live.scopeItems.some((i) => i.label.trim())) {
         setScopeItems(draft.propertyScope.items.map((item) => ({ label: item.label, value: item.value })));
         filled += 1;
@@ -379,6 +380,7 @@ export default function CommercialProposalPage() {
         })));
         filled += 1;
         monetaryFilled += 1;
+        programsInstalled = true;
       }
       if (draft?.correctiveWork?.length && !live.correctiveWork.some((w) => String(w.label || '').trim())
         && !hasAuthoredBuildingLines) {
@@ -391,7 +393,11 @@ export default function CommercialProposalPage() {
         filled += 1;
         monetaryFilled += 1;
       }
-      if (draft?.customerResponsibilities?.length && !live.responsibilitiesText.trim()) {
+      // Responsibilities derive from the generated programs' families —
+      // installing them when programs were BLOCKED would describe scope the
+      // proposal doesn't carry (codex 1A-ii r3d). programsInstalled is set
+      // by the programs branch above.
+      if (draft?.customerResponsibilities?.length && !live.responsibilitiesText.trim() && programsInstalled) {
         setResponsibilitiesText(draft.customerResponsibilities.join('\n'));
         filled += 1;
       }

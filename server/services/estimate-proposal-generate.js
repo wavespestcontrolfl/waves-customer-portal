@@ -151,8 +151,15 @@ function num(value) {
 // reviews the per-row Tax switch before anything saves.
 const TAX_EXEMPT_FAMILIES = new Set(['lawn', 'tree_shrub']);
 
+// Standalone inspections are NOT taxable (canonical service_taxability
+// rows wdo_inspection / termite_inspection, FL §212.08(6)) — the termite
+// family fallback must not tax them (codex 1A-ii r3d).
+const INSPECTION_KEY_RE = /\bwdo\b|\binspection\b/;
+
 function commercialTaxableDefault(serviceKey, explicit) {
   if (explicit === true || explicit === false) return explicit;
+  const key = String(serviceKey || '').toLowerCase().replace(/[_-]+/g, ' ');
+  if (INSPECTION_KEY_RE.test(key)) return false;
   return !TAX_EXEMPT_FAMILIES.has(programFamilyForService(serviceKey));
 }
 
@@ -236,7 +243,14 @@ function derivePrograms(estimateData, estimate = {}) {
   // r3c). One-time lineItems rows (no recurring evidence) stay out; they
   // belong to deriveCorrectiveWork.
   const canonicalKeys = new Set(canonicalRows.map((row) => String(row.service || row.name || '').toLowerCase()));
-  const extraLineItemRows = (Array.isArray(engineResult.lineItems) ? engineResult.lineItems : [])
+  // BOTH containers contribute raw line items — a truthy ancillary
+  // `result` must not hide engineResult.lineItems (codex 1A-ii r3d).
+  const rawLineItemsMerged = [
+    ...(Array.isArray(engineResult.lineItems) ? engineResult.lineItems : []),
+    ...(estimateData.engineResult && estimateData.engineResult !== engineResult
+      && Array.isArray(estimateData.engineResult.lineItems) ? estimateData.engineResult.lineItems : []),
+  ];
+  const extraLineItemRows = rawLineItemsMerged
     .map((line) => ({
       // Spread first so the canonical cadence resolver sees every
       // persisted alias (appsPerYear/visits/apps/treatmentsPerYear).
@@ -389,8 +403,19 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
   // into agent-draft engineResult shapes too (codex 1A-ii r2b).
   // collapseMirrored: same specialty row mirrored across containers
   // collapses by content identity while LEGITIMATE repeated charges within
-  // one container are preserved (codex 1A-ii r3c).
-  const fromOneTime = estimateOneTimeItemsFromData({ result: engineResult }, { collapseMirrored: true });
+  // one container are preserved (codex 1A-ii r3c). Root containers
+  // (one_time.items / oneTimeItems beside a result) AND agent-draft
+  // engineResult containers both collect — object-deduped so shared rows
+  // never double (codex 1A-ii r3d).
+  const oneTimeSeen = new Set();
+  const fromOneTime = [
+    ...estimateOneTimeItemsFromData(estimateData, { collapseMirrored: true }),
+    ...estimateOneTimeItemsFromData({ result: engineResult }, { collapseMirrored: true }),
+  ].filter((item) => {
+    if (oneTimeSeen.has(item)) return false;
+    oneTimeSeen.add(item);
+    return true;
+  });
   // A lineItems row is one-time when it carries NO recurring evidence (no
   // cadence, no monthly/annual dollars) but IS priced — raw engine drafts
   // persist bed-bug/exclusion work as `{ service, price }` without the
