@@ -9,6 +9,7 @@ const {
 } = require('../services/estimate-proposal-generate');
 
 const COMMERCIAL_ESTIMATE = {
+  category: 'COMMERCIAL',
   estimate_data: {
     inputs: { homeSqFt: '2000', stories: '2', lotSqFt: '5850' },
     commercialProspect: {
@@ -68,7 +69,7 @@ describe('programFamilyForService', () => {
 
 describe('cadence aliases', () => {
   test('recognizes persisted cadence aliases via the canonical resolver (appsPerYear etc.)', async () => {
-    const draft = await deriveProposalDraft({
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: {
           recurring: {
@@ -133,7 +134,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('derives the per-application price from the AUTHORITATIVE discounted annual (pre-push P0)', async () => {
-    const draft = await deriveProposalDraft({
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: {
           recurring: {
@@ -155,7 +156,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('an unrepresentable accepted annual fails the WHOLE programs section with a warning — never a partial list (pre-push P0)', async () => {
-    const draft = await deriveProposalDraft({
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: {
           recurring: {
@@ -177,7 +178,7 @@ describe('deriveProposalDraft', () => {
 
   test('preserves engine taxability, fails on cadence-less priced rows, >10 programs, and total mismatches (pre-push P0s)', async () => {
     // Engine taxability carries through.
-    const taxable = await deriveProposalDraft({
+    const taxable = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { recurring: { services: [{ service: 'commercial_pest', name: 'Pest', taxable: true, visitsPerYear: 4, annualAfterDiscount: 468 }] } },
       },
@@ -185,7 +186,7 @@ describe('deriveProposalDraft', () => {
     expect(taxable.programs[0].taxable).toBe(true);
 
     // Priced row with no cadence fails the whole section.
-    const cadenceless = await deriveProposalDraft({
+    const cadenceless = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { recurring: { services: [
           { service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 },
@@ -197,7 +198,7 @@ describe('deriveProposalDraft', () => {
     expect(cadenceless.warnings[0]).toMatch(/Lawn \(no visit cadence\)/);
 
     // More than 10 priced services refuses rather than truncating.
-    const many = await deriveProposalDraft({
+    const many = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         // Distinct service keys — the canonical collector dedupes by key.
         result: { recurring: { services: Array.from({ length: 11 }, (_, i) => ({
@@ -210,7 +211,7 @@ describe('deriveProposalDraft', () => {
 
     // Stored annual_total contradicting the row sum (plan-level credit)
     // refuses rather than generating numbers acceptance won't charge.
-    const mismatched = await deriveProposalDraft({
+    const mismatched = await deriveProposalDraft({ category: 'COMMERCIAL',
       annual_total: 400,
       estimate_data: {
         result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
@@ -221,7 +222,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('derives one-time work into corrective drafts, all-or-nothing with programs (pre-push P0)', async () => {
-    const withOneTime = await deriveProposalDraft({
+    const withOneTime = await deriveProposalDraft({ category: 'COMMERCIAL',
       onetime_total: 275,
       estimate_data: {
         result: {
@@ -237,7 +238,7 @@ describe('deriveProposalDraft', () => {
 
     // A one-time mismatch with the stored onetime_total fails the WHOLE
     // monetary draft — programs must not install without the one-time side.
-    const mismatch = await deriveProposalDraft({
+    const mismatch = await deriveProposalDraft({ category: 'COMMERCIAL',
       onetime_total: 300,
       estimate_data: {
         result: {
@@ -252,7 +253,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('a stored one-time total with no representable rows, or >24 items, fails the draft (pre-push P0)', async () => {
-    const orphanTotal = await deriveProposalDraft({
+    const orphanTotal = await deriveProposalDraft({ category: 'COMMERCIAL',
       onetime_total: 275,
       estimate_data: {
         result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
@@ -262,7 +263,7 @@ describe('deriveProposalDraft', () => {
     expect(orphanTotal.correctiveWork).toBeNull();
     expect(orphanTotal.warnings[0]).toMatch(/no representable one-time items/);
 
-    const tooMany = await deriveProposalDraft({
+    const tooMany = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: {
           oneTime: { items: Array.from({ length: 25 }, (_, i) => ({ name: `Item ${i}`, price: 10 })) },
@@ -274,7 +275,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('a fractional cadence (biennial 0.5/yr) fails the draft rather than rounding to a different program (pre-push P0)', async () => {
-    const draft = await deriveProposalDraft({
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: {
           recurring: {
@@ -291,7 +292,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('corrective work prices from the operator-accepted net (manualFinalOneTime beats gross price)', async () => {
-    const draft = await deriveProposalDraft({
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: {
           oneTime: { items: [{ name: 'Cleanout', price: 300, manualFinalOneTime: 250 }] },
@@ -304,7 +305,7 @@ describe('deriveProposalDraft', () => {
   test('explicit zeros are authoritative: zeroed totals reject generated prices, comped rows fail the draft (codex r2c)', async () => {
     // Quote-required estimate deliberately zeroed → generated positive
     // programs must NOT install.
-    const zeroed = await deriveProposalDraft({
+    const zeroed = await deriveProposalDraft({ category: 'COMMERCIAL',
       annual_total: 0,
       estimate_data: {
         result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
@@ -314,7 +315,7 @@ describe('deriveProposalDraft', () => {
     expect(zeroed.warnings[0]).toMatch(/annual total/);
 
     // Comped recurring service (explicit accepted zero) fails the draft.
-    const compedRecurring = await deriveProposalDraft({
+    const compedRecurring = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { recurring: { services: [
           { service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 },
@@ -326,7 +327,7 @@ describe('deriveProposalDraft', () => {
     expect(compedRecurring.warnings[0]).toMatch(/comped/i);
 
     // Comped one-time item fails the one-time side.
-    const compedOneTime = await deriveProposalDraft({
+    const compedOneTime = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { oneTime: { items: [{ name: 'Comped Cleanout', price: 300, manualFinalOneTime: 0 }] } },
       },
@@ -336,7 +337,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('taxability defaults: explicit flag wins, lawn exempt, null totals stay null (codex r2e)', async () => {
-    const draft = await deriveProposalDraft({
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
       annual_total: null, // nullable DB column must NOT read as explicit $0
       estimate_data: {
         result: {
@@ -358,7 +359,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('a positive annual total with no representable recurring rows fails the draft (codex r2h)', async () => {
-    const draft = await deriveProposalDraft({
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
       annual_total: 468,
       onetime_total: 275,
       estimate_data: {
@@ -374,7 +375,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('monthly-only recurring rows price via the canonical resolver (monthly × 12 — codex r2i)', async () => {
-    const draft = await deriveProposalDraft({
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: {
           recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 12, mo: 39 }] },
@@ -386,7 +387,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('null annual_total falls back to monthly_total as the recurring authority (codex r2j)', async () => {
-    const match = await deriveProposalDraft({
+    const match = await deriveProposalDraft({ category: 'COMMERCIAL',
       annual_total: null,
       monthly_total: 39,
       estimate_data: {
@@ -396,7 +397,7 @@ describe('deriveProposalDraft', () => {
     expect(match.programs).toHaveLength(1);
     expect(match.warnings).toEqual([]);
 
-    const mismatch = await deriveProposalDraft({
+    const mismatch = await deriveProposalDraft({ category: 'COMMERCIAL',
       annual_total: null,
       monthly_total: 45,
       estimate_data: {
@@ -410,7 +411,7 @@ describe('deriveProposalDraft', () => {
   test('r3 hardening: nested containers, termite ambiguity, raw one-time prices, suggested tax rate', async () => {
     // result.results.recurring.services (mapped shape) collects via the
     // canonical recurringServicesFromEstimateData.
-    const nested = await deriveProposalDraft({
+    const nested = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { results: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } } },
       },
@@ -421,7 +422,7 @@ describe('deriveProposalDraft', () => {
 
     // Flat-monthly termite (mo + per-visit fields) is ambiguous without an
     // explicit billedPerApplication flag — fail, never promise per-app.
-    const termite = await deriveProposalDraft({
+    const termite = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { recurring: { services: [{ service: 'commercial_termite_bait', name: 'Termite Bait', mo: 35, perTreatment: 105, visitsPerYear: 4, annualAfterDiscount: 420 }] } },
       },
@@ -431,7 +432,7 @@ describe('deriveProposalDraft', () => {
 
     // Raw engine one-time rows ({ service, price }) with no recurring
     // evidence derive as corrective work.
-    const rawOneTime = await deriveProposalDraft({
+    const rawOneTime = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         engineResult: { lineItems: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 500 }] },
       },
@@ -440,7 +441,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('legit repeated one-time charges are preserved; mirrored container copies collapse (codex r3c)', async () => {
-    const draft = await deriveProposalDraft({
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: {
           // Two IDENTICAL unit treatments in ONE container = two real
@@ -462,7 +463,7 @@ describe('deriveProposalDraft', () => {
 
   test('r3d: WDO inspections exempt, root one-time beside result, ancillary result does not hide engineResult rows', async () => {
     // wdo_inspection = canonical non-taxable (FL §212.08(6)).
-    const wdo = await deriveProposalDraft({
+    const wdo = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { oneTime: { items: [{ service: 'wdo_inspection', name: 'WDO Inspection', price: 250 }] } },
       },
@@ -470,7 +471,7 @@ describe('deriveProposalDraft', () => {
     expect(wdo.correctiveWork[0].taxable).toBe(false);
 
     // Root one_time.items beside a truthy result still collects.
-    const rootOneTime = await deriveProposalDraft({
+    const rootOneTime = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }] } },
         one_time: { items: [{ name: 'Cleanout', price: 275 }] },
@@ -479,7 +480,7 @@ describe('deriveProposalDraft', () => {
     expect(rootOneTime.correctiveWork).toHaveLength(1);
 
     // A truthy ancillary `result` must not hide engineResult.lineItems.
-    const hidden = await deriveProposalDraft({
+    const hidden = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { summary: 'ancillary' },
         engineResult: { lineItems: [{ service: 'commercial_mosquito', name: 'Mosquito', visitsPerYear: 9, annualAfterDiscount: 585 }] },
@@ -491,7 +492,7 @@ describe('deriveProposalDraft', () => {
 
   test('r5: rodent monthly ambiguity, installation extraction, review-gated exclusion, palm supplements', async () => {
     // Rodent bait with monthly evidence = ambiguous billing, fail.
-    const rodent = await deriveProposalDraft({
+    const rodent = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { recurring: { services: [{ service: 'commercial_rodent_bait', name: 'Rodent Bait', mo: 45, perTreatment: 135, visitsPerYear: 4, annualAfterDiscount: 540 }] } },
       },
@@ -501,7 +502,7 @@ describe('deriveProposalDraft', () => {
 
     // Installation charge on a RECURRING termite-bait row extracts as
     // corrective work (the recurring side fails ambiguity separately).
-    const install = await deriveProposalDraft({
+    const install = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         engineResult: { lineItems: [{ service: 'commercial_termite_bait', name: 'Termite Bait', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } }] },
       },
@@ -512,7 +513,7 @@ describe('deriveProposalDraft', () => {
 
     // Review-gated rows FAIL the draft with a warning — provisional
     // prices never generate and never silently vanish.
-    const gated = await deriveProposalDraft({
+    const gated = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         engineResult: { lineItems: [{ service: 'commercial_pest', name: 'Pest', visitsPerYear: 4, annual: 468, requiresManualReview: true }] },
       },
@@ -522,7 +523,7 @@ describe('deriveProposalDraft', () => {
 
     // Mapped palm-injection supplement is SEEN — cadence unproven → the
     // all-or-nothing warning fires instead of silent omission.
-    const palm = await deriveProposalDraft({
+    const palm = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: {
           recurring: {
@@ -538,7 +539,7 @@ describe('deriveProposalDraft', () => {
 
   test('r6: raw one-time clones collapse across containers; rodent-bait supplement never omitted', async () => {
     const sharedRow = { service: 'bed_bug', name: 'Bed Bug Treatment', price: 500 };
-    const clones = await deriveProposalDraft({
+    const clones = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { lineItems: [{ ...sharedRow }] },
         engineResult: { lineItems: [{ ...sharedRow }] },
@@ -546,7 +547,7 @@ describe('deriveProposalDraft', () => {
     });
     expect(clones.correctiveWork).toHaveLength(1);
 
-    const rodent = await deriveProposalDraft({
+    const rodent = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }], rodentBaitMo: 45 } },
       },
@@ -556,7 +557,7 @@ describe('deriveProposalDraft', () => {
   });
 
   test('r7: LOW pricing confidence fails the draft; mapped installations never double', async () => {
-    const low = await deriveProposalDraft({
+    const low = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { recurring: { services: [{ service: 'commercial_lawn', name: 'Lawn', visitsPerYear: 9, annualAfterDiscount: 540, pricingConfidence: 'LOW' }] } },
       },
@@ -566,7 +567,7 @@ describe('deriveProposalDraft', () => {
 
     // Mapper emitted the installation into oneTime.items AND the raw
     // engineResult row still carries installation.price — one charge.
-    const install = await deriveProposalDraft({
+    const install = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { oneTime: { items: [{ service: 'termite_bait', name: 'Termite Bait Installation', price: 800 }] } },
         engineResult: { lineItems: [{ service: 'commercial_termite_bait', name: 'Termite Bait', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } }] },
@@ -580,7 +581,7 @@ describe('deriveProposalDraft', () => {
     // Oversize-lawn custom quotes carry a price but customQuoteFlag says
     // "field verification required" — the full lineRequiresReview
     // predicate must gate, not the two-flag subset (codex 1A-ii r8).
-    const custom = await deriveProposalDraft({
+    const custom = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         engineResult: { lineItems: [{ service: 'commercial_lawn', name: 'Lawn', visitsPerYear: 9, annual: 540, customQuoteFlag: true }] },
       },
@@ -588,7 +589,7 @@ describe('deriveProposalDraft', () => {
     expect(custom.programs).toBeNull();
     expect(custom.warnings[0]).toMatch(/requires manual review/i);
 
-    const measure = await deriveProposalDraft({
+    const measure = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { oneTime: { items: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 500, requiresMeasurement: true }] } },
       },
@@ -596,7 +597,7 @@ describe('deriveProposalDraft', () => {
     expect(measure.correctiveWork).toBeNull();
     expect(measure.warnings[0]).toMatch(/requires manual review/i);
 
-    const reasons = await deriveProposalDraft({
+    const reasons = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468, manualReviewReasons: ['density unknown'] }] } },
       },
@@ -605,8 +606,72 @@ describe('deriveProposalDraft', () => {
     expect(reasons.warnings[0]).toMatch(/requires manual review/i);
   });
 
+  test('r9: noncommercial estimates generate nothing — no commercial promises from residential pricing', async () => {
+    const residential = await deriveProposalDraft({
+      category: 'RESIDENTIAL',
+      estimate_data: COMMERCIAL_ESTIMATE.estimate_data,
+    });
+    expect(residential.programs).toBeNull();
+    expect(residential.propertyScope).toBeNull();
+    expect(residential.customerResponsibilities).toBeNull();
+    expect(residential.warnings[0]).toMatch(/not a commercial estimate/i);
+    // No category at all (legacy rows default RESIDENTIAL) fails too.
+    const uncategorized = await deriveProposalDraft({ estimate_data: COMMERCIAL_ESTIMATE.estimate_data });
+    expect(uncategorized.programs).toBeNull();
+    expect(uncategorized.warnings[0]).toMatch(/not a commercial estimate/i);
+  });
+
+  test('r9: installation mirrors match by content identity, never a first-token label', async () => {
+    // A distinct same-priced corrective item whose label merely shares the
+    // "commercial" token must NOT absorb the real installation charge —
+    // both rows emit and reconciliation arbitrates (fail-closed, never a
+    // silent underbill).
+    const distinct = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'commercial_deep_clean', name: 'Commercial deep clean', price: 800 }] } },
+        engineResult: { lineItems: [{ service: 'commercial_termite_bait', name: 'Termite Bait', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } }] },
+      },
+    });
+    expect(distinct.correctiveWork).toHaveLength(2);
+    expect(distinct.correctiveWork.map((w) => w.amount)).toEqual([800, 800]);
+
+    // A same-family same-priced item WITHOUT install semantics (a termite
+    // treatment beside the bait installation) is not a mirror either.
+    const treatment = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'termite_treatment', name: 'Termite treatment', price: 800 }] } },
+        engineResult: { lineItems: [{ service: 'commercial_termite_bait', name: 'Termite Bait', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } }] },
+      },
+    });
+    expect(treatment.correctiveWork).toHaveLength(2);
+
+    // The mapper's canonical key dedupes exactly.
+    const exact = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'termite_bait_installation', name: 'Termite bait installation', price: 800 }] } },
+        engineResult: { lineItems: [{ service: 'termite_bait', name: 'Termite Bait', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } }] },
+      },
+    });
+    expect(exact.correctiveWork).toHaveLength(1);
+
+    // Count-aware: TWO installation charges against ONE mapped item keep
+    // the second charge.
+    const twoInstalls = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { oneTime: { items: [{ service: 'termite_bait_installation', name: 'Termite bait installation', price: 800 }] } },
+        engineResult: {
+          lineItems: [
+            { service: 'commercial_termite_bait', name: 'Termite Bait — Bldg A', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } },
+            { service: 'commercial_termite_bait', name: 'Termite Bait — Bldg B', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } },
+          ],
+        },
+      },
+    });
+    expect(twoInstalls.correctiveWork.filter((w) => w.amount === 800)).toHaveLength(2);
+  });
+
   test('returns null sections for an estimate with nothing to derive', async () => {
-    const draft = await deriveProposalDraft({ estimate_data: {} });
+    const draft = await deriveProposalDraft({ category: 'COMMERCIAL', estimate_data: {} });
     expect(draft).toEqual({ propertyScope: null, programs: null, correctiveWork: null, customerResponsibilities: null, suggestedTaxRate: null, warnings: [] });
   });
 });

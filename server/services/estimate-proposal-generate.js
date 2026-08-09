@@ -650,17 +650,38 @@ function deriveCorrectiveWork(estimateData, estimate = {}, taxabilityMap = null)
       includes: [],
     });
   }
+  // The v1 mapper already emits bait installations into oneTime.items —
+  // when both the mapped result and the raw engineResult persist, the
+  // charge would double (codex 1A-ii r7). A mapped item is the mirror of an
+  // installation charge only on CONTENT identity — same amount AND (same
+  // service identity, its `_installation` variant, or an install-labeled
+  // item in the SAME program family), the same semantics the estimator
+  // client's own hasTermiteInstallRow dedupe uses — and each mapped item
+  // absorbs at most one charge. Never a first-token label heuristic, which
+  // let any same-priced "commercial …" corrective item absorb a real
+  // installation charge and silently underbill it (codex 1A-ii r9).
+  const mappedOneTimePool = fromOneTime.map((item) => ({
+    item,
+    amount: num(item.manualFinalOneTime ?? item.priceAfterDiscount ?? item.totalAfterDiscount
+      ?? item.price ?? item.amount ?? item.total ?? item.installation?.price),
+    used: false,
+  }));
   for (const line of installationRows) {
     const amount = num(line.installation?.price);
-    // The v1 mapper already emits bait installations into oneTime.items —
-    // when both the mapped result and the raw engineResult persist, the
-    // charge would double (codex 1A-ii r7). Same-amount rows that mention
-    // the service or installation are mirrors.
     const rounded = Math.round(amount * 100) / 100;
-    const serviceToken = String(line.service || line.name || '').toLowerCase().split(/[_\s-]+/)[0] || '¤';
-    const mirrored = work.some((w) => w.amount === rounded
-      && (/install/i.test(w.label) || w.label.toLowerCase().includes(serviceToken)));
-    if (mirrored) continue;
+    const lineService = String(line.service || line.name || '').toLowerCase();
+    const lineFamily = programFamilyForService(line.service || line.name);
+    const mirror = mappedOneTimePool.find(({ item, amount: amt, used }) => {
+      if (used || !(amt > 0) || Math.round(amt * 100) / 100 !== rounded) return false;
+      const itemService = String(item.service || item.name || '').toLowerCase();
+      if (itemService === lineService || itemService === `${lineService}_installation`) return true;
+      const label = String(item.label || item.name || item.service || '').toLowerCase();
+      return /install/.test(label) && programFamilyForService(item.service || item.name) === lineFamily;
+    });
+    if (mirror) {
+      mirror.used = true;
+      continue;
+    }
     work.push({
       label: `${String(line.displayName || line.name || line.service || 'Service').slice(0, 140)} installation`.slice(0, 160),
       amount: Math.round(amount * 100) / 100,
@@ -735,6 +756,23 @@ function deriveResponsibilities(programs) {
  * fills only what came back and the operator edits before saving.
  */
 async function deriveProposalDraft(estimate = {}, { database } = {}) {
+  // Commercial estimates only. The universal builder action is reachable
+  // from residential estimates too, and saving a generated draft forcibly
+  // recategorizes the estimate as COMMERCIAL and rewrites its
+  // authoritative totals — so generation must never seed commercial
+  // tenant/interior-service promises from residential pricing (codex
+  // 1A-ii r9). The operator can still AUTHOR a proposal by hand, which is
+  // the explicit conversion step.
+  if (String(estimate.category || '').toUpperCase() !== 'COMMERCIAL') {
+    return {
+      propertyScope: null,
+      programs: null,
+      correctiveWork: null,
+      customerResponsibilities: null,
+      suggestedTaxRate: null,
+      warnings: ['Nothing was generated: this is not a commercial estimate. Author the proposal manually to convert it to a commercial contract.'],
+    };
+  }
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
   const taxabilityMap = await loadTaxabilityMap(database);
   const { programs, warning } = derivePrograms(estimateData, estimate, taxabilityMap);
