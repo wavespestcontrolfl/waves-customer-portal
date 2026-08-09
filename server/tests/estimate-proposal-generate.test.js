@@ -606,6 +606,32 @@ describe('deriveProposalDraft', () => {
     expect(reasons.warnings[0]).toMatch(/requires manual review/i);
   });
 
+  test('r10: heuristic turf provenance gates generation — plausibleMaxTurfCap at MEDIUM confidence fails the draft', async () => {
+    const capped = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'commercial_lawn', name: 'Lawn', visitsPerYear: 9, annualAfterDiscount: 1260, turfBasis: 'plausibleMaxTurfCap', turfConfidence: 'MEDIUM' }] } },
+      },
+    });
+    expect(capped.programs).toBeNull();
+    expect(capped.warnings[0]).toMatch(/requires manual review/i);
+
+    const lowTurf = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'commercial_lawn', name: 'Lawn', visitsPerYear: 9, annualAfterDiscount: 1260, turfBasis: 'measuredTurfSf', turfConfidence: 'LOW' }] } },
+      },
+    });
+    expect(lowTurf.programs).toBeNull();
+
+    // A measured basis at MEDIUM+ confidence generates normally.
+    const measured = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'commercial_lawn', name: 'Lawn', visitsPerYear: 9, annualAfterDiscount: 1260, turfBasis: 'measuredTurfSf', turfConfidence: 'HIGH' }] } },
+      },
+    });
+    expect(measured.programs).toHaveLength(1);
+    expect(measured.warnings).toEqual([]);
+  });
+
   test('r9: noncommercial estimates generate nothing — no commercial promises from residential pricing', async () => {
     const residential = await deriveProposalDraft({
       category: 'RESIDENTIAL',
@@ -654,20 +680,66 @@ describe('deriveProposalDraft', () => {
     });
     expect(exact.correctiveWork).toHaveLength(1);
 
-    // Count-aware: TWO installation charges against ONE mapped item keep
-    // the second charge.
+    // Count-aware: TWO installation charges (distinct services) against ONE
+    // mapped item keep the second charge.
     const twoInstalls = await deriveProposalDraft({ category: 'COMMERCIAL',
       estimate_data: {
         result: { oneTime: { items: [{ service: 'termite_bait_installation', name: 'Termite bait installation', price: 800 }] } },
         engineResult: {
           lineItems: [
-            { service: 'commercial_termite_bait', name: 'Termite Bait — Bldg A', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } },
-            { service: 'commercial_termite_bait', name: 'Termite Bait — Bldg B', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } },
+            { service: 'termite_bait', name: 'Termite Bait', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } },
+            { service: 'commercial_termite_bait', name: 'Termite Bait — Annex', visitsPerYear: 4, annual: 480, billedPerApplication: true, installation: { price: 800 } },
           ],
         },
       },
     });
+    // The mapped item emits once and absorbs ONE install (exact
+    // `_installation` key); the second, distinct-service install charge
+    // survives — 2 × $800, never 1 or 3.
     expect(twoInstalls.correctiveWork.filter((w) => w.amount === 800)).toHaveLength(2);
+  });
+
+  test('r10: same-key monetary rows in one container fail the draft — the collector would collapse them', async () => {
+    // Building A and Building B priced separately under the same service
+    // key: the canonical collector dedupes by key, so generation would
+    // merge them into one hybrid program and (with null stored totals)
+    // reconciliation could never catch the lost charge.
+    const twoBuildings = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        engineResult: {
+          lineItems: [
+            { service: 'commercial_pest', name: 'Pest — Bldg A', visitsPerYear: 12, annual: 2400 },
+            { service: 'commercial_pest', name: 'Pest — Bldg B', visitsPerYear: 12, annual: 3600 },
+          ],
+        },
+      },
+    });
+    expect(twoBuildings.programs).toBeNull();
+    expect(twoBuildings.warnings[0]).toMatch(/multiple separately priced rows/i);
+
+    // Identical same-key rows in one container are still two charges.
+    const identicalPair = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { recurring: { services: [
+          { service: 'commercial_pest', name: 'Pest — Bldg A', visitsPerYear: 12, annualAfterDiscount: 2400 },
+          { service: 'commercial_pest', name: 'Pest — Bldg B', visitsPerYear: 12, annualAfterDiscount: 2400 },
+        ] } },
+      },
+    });
+    expect(identicalPair.programs).toBeNull();
+
+    // Cross-container same-key rows keep the established mirror/precedence
+    // semantics — a mapped discounted row beside its raw engine twin still
+    // generates one program.
+    const mirrored = await deriveProposalDraft({ category: 'COMMERCIAL',
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'commercial_pest', name: 'Pest', visitsPerYear: 12, annualAfterDiscount: 2280 }] } },
+        engineResult: { lineItems: [{ service: 'commercial_pest', name: 'Pest', visitsPerYear: 12, annual: 2400 }] },
+      },
+    });
+    expect(mirrored.programs).toHaveLength(1);
+    expect(mirrored.programs[0].annual).toBe(2280);
+    expect(mirrored.warnings).toEqual([]);
   });
 
   test('returns null sections for an estimate with nothing to derive', async () => {

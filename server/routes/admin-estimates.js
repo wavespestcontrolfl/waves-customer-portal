@@ -2168,6 +2168,20 @@ router.put('/:id/proposal', async (req, res, next) => {
       return res.status(400).json({ error: 'One or more corrective-work items failed validation and would be dropped — fix or remove them, then save again.' });
     }
     const totals = computeProposalTotals(normalized);
+    // estimates.monthly_total/annual_total/onetime_total are decimal(10,2)
+    // — a finite-but-huge authored price (e.g. $2,000,000 × 52
+    // applications) would overflow the UPDATE with a raw numeric error
+    // instead of actionable validation (codex 1A-ii r10).
+    const DB_TOTAL_MAX = 99999999.99;
+    for (const [totalLabel, totalValue] of [
+      ['annual recurring', totals.annualRecurring],
+      ['monthly equivalent', totals.monthlyEquivalent],
+      ['one-time', totals.oneTime],
+    ]) {
+      if (Number(totalValue) > DB_TOTAL_MAX) {
+        return res.status(400).json({ error: `The proposal's ${totalLabel} total exceeds $99,999,999.99 — reduce the amounts before saving.` });
+      }
+    }
 
     const existingData = parseEstimateData(estimate.estimate_data) || {};
     const nextData = {

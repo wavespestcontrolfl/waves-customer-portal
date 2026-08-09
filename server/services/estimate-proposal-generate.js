@@ -38,11 +38,15 @@ const {
 // customQuoteFlag / requiresCustomQuote / manualReviewReasons / zero-tree
 // default), not a two-flag subset: a priced row gated by ANY marker is a
 // field-verification price, never a publishable one (codex 1A-ii r8).
-const { lineRequiresReview } = require('./estimator-engine/draft-builder');
+const { lineRequiresReview, lineHasHeuristicTurf } = require('./estimator-engine/draft-builder');
 
-// Generation adds its own LOW-confidence guard on top (codex 1A-ii r7).
+// Generation adds its own LOW-confidence guard on top (codex 1A-ii r7),
+// and the canonical heuristic-turf predicate — a lawn row priced off
+// turfBasis plausibleMaxTurfCap/lotFallback is a field-verification price
+// even at MEDIUM confidence (codex 1A-ii r10).
 function rowIsReviewGated(row = {}) {
   return lineRequiresReview(row)
+    || lineHasHeuristicTurf(row)
     || String(row.pricingConfidence || '').toUpperCase() === 'LOW';
 }
 
@@ -360,6 +364,47 @@ function derivePrograms(estimateData, estimate = {}, taxabilityMap = null) {
     programs: null,
     warning: `Programs were not generated: ${reason} Author the programs manually so every priced service is represented.`,
   });
+  // The canonical collector dedupes by service key — correct for mirrored
+  // copies of the SAME charge across containers (result vs engineResult
+  // precedence), but TWO monetary rows under one key inside a SINGLE
+  // container (e.g. separately priced commercial_pest programs for
+  // Building A and Building B) are distinct charges the collapse would
+  // merge into one hybrid program — and with null stored totals
+  // reconciliation could never catch the loss (local codex P0). Fail with
+  // direction instead of collapsing.
+  const recurringSourceContainers = [
+    estimateData.recurring?.services,
+    estimateData.result?.recurring?.services,
+    estimateData.result?.results?.recurring?.services,
+    Array.isArray(estimateData.services)
+      ? estimateData.services.filter((svc) => svc.recurring || svc.frequency) : null,
+    engineResult.lineItems,
+    estimateData.engineResult && estimateData.engineResult !== engineResult
+      ? estimateData.engineResult.lineItems : null,
+  ];
+  const collapsedKeys = new Map();
+  for (const container of recurringSourceContainers) {
+    if (!Array.isArray(container)) continue;
+    const perContainer = new Map();
+    for (const row of container) {
+      const key = String(row.service || row.name || '').toLowerCase();
+      if (!key) continue;
+      const aliased = { ...row, annualAfterDiscount: row.annualAfterDiscount ?? row.annual };
+      const annual = row.manualFinalAnnual != null
+        ? num(row.manualFinalAnnual) : (recurringLineAnnualAmount(aliased) || 0);
+      const monthly = num(row.mo ?? row.monthly) || 0;
+      // Only MONETARY recurring rows count — an unpriced row generates
+      // nothing, so its collapse loses nothing.
+      if (!(annual > 0) && !(monthly > 0)) continue;
+      perContainer.set(key, (perContainer.get(key) || 0) + 1);
+      if (perContainer.get(key) > 1) {
+        collapsedKeys.set(key, String(row.name || row.displayName || row.service || key));
+      }
+    }
+  }
+  if (collapsedKeys.size) {
+    return fail(`${[...collapsedKeys.values()].map((label) => `${label} (multiple separately priced rows for one service — generation cannot represent them as one program)`).join('; ')}.`);
+  }
   for (const row of rows) {
     const rawVisits = visitsPerYearForRecurringService(row) || 0;
     // Fractional cadences are REAL (Tree-Age palm treatment persists
