@@ -665,13 +665,13 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFa
     }
     joinedWentStale = true;
   }
-  // `noPlanFallback`: the retry lane reconciling a CLEARED joined stamp
-  // must not re-resolve a lead by plan (codex P1, PR #3303 r2) — the
-  // deliberate clear would be silently rewritten as a plan match and the
-  // cleared-link branch (which retires this call's funnel row and clears
-  // the recorded match) would never run. Once cleared, a LATER scan may
-  // legitimately plan-attribute the call through the normal flow.
-  if (noPlanFallback) {
+  // A STALE joined arm never falls back to the plan either (codex P1,
+  // PR #3303 r4, extending r2's cleared-trigger rule): when a concurrent
+  // reprocess repointed the stamp between the fetch and this lock, the
+  // customer/phone plan can re-select the FORMER lead — and through
+  // sourceCallId recovery move the freshly transferred history row back
+  // or conflict-retire it. The next scan resolves with fresh join state.
+  if (noPlanFallback || joinedWentStale) {
     return { match: null, reason: joinedWentStale ? 'lead_not_live' : 'lead_not_found' };
   }
   // Plan-only flow: no lead is locked yet, so the call-row check runs

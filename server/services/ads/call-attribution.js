@@ -204,6 +204,16 @@ async function recordCallPpcAttribution({
         && String(existing.source_call_id) !== String(sourceCallId)) {
         return { recorded: false, reason: 'other_call' };
       }
+      // A NULL-provenance row is frozen to provenanced callers too (codex
+      // P1, PR #3303 r4): after a transfer's retired_conflict against a
+      // legacy row, the moving call's later attribution pass would
+      // otherwise backfill that unprovenanced row with its campaign and
+      // service data — ownership it cannot prove. Legacy rows stay
+      // permanently conservative; lead-centric repairs (no call identity)
+      // still patch.
+      if (sourceCallId && !existing.source_call_id) {
+        return { recorded: false, reason: 'unprovenanced_row' };
+      }
       // A web-attributed row owns this lead's first-touch PPC attribution — via a
       // click id (Google: gclid/wbraid/gbraid, Meta: fbclid/_fbc) OR, for
       // consent/ad-blocker cases with no click id, via UTM (utm_campaign/utm_term).
@@ -327,17 +337,41 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
       // Sid FIRST — authoritative, same precedence every linkage consumer
       // uses; the stamp arm only as a SETTLED-successful fallback (token
       // NULL + status 'processed'), never newest-of-both (pre-push P1
-      // r15: a later provisional/failed/rejected stamped call would
-      // become the "exact owner" and a repoint could then move or delete
-      // the wrong history-bearing row). Neither resolving leaves NULL —
-      // permanently conservative.
+      // r15). The sid arm additionally requires (codex P1 ×2, PR #3303
+      // r4): UNAMBIGUOUS ownership — call_log.twilio_call_sid is
+      // non-unique, and silently picking the newest of several rows
+      // records provenance another row's rejection can never retire — and
+      // a SETTLED, ATTRIBUTABLE call: a lead claimed after its
+      // originating call was rejected (spam/voicemail/failed/marked) must
+      // not resurrect the retired funnel row at all.
       let sourceCall = null;
+      let refused = false;
       if (lead.twilio_call_sid) {
-        sourceCall = await db('call_log')
+        const sidRows = await db('call_log')
           .where('twilio_call_sid', lead.twilio_call_sid)
           .orderBy('created_at', 'desc')
-          .first('id');
+          .limit(2)
+          .select('id', 'processing_status', 'processing_token', 'metadata');
+        if (sidRows.length === 1) {
+          const row = sidRows[0];
+          const status = String(row.processing_status || '').toLowerCase();
+          const marker = (() => {
+            try {
+              const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+              return md?.no_attribution === true;
+            } catch { return false; }
+          })();
+          if (row.processing_token != null || (status !== 'processed' && status !== '') || marker) {
+            refused = true;
+          } else {
+            sourceCall = row;
+          }
+        }
+        // >1 rows: ambiguous — leave provenance NULL, permanently
+        // conservative (fall through without refusing: the lead itself
+        // is legitimately claimed).
       }
+      if (refused) return { recorded: false, reason: 'call_rejected' };
       if (!sourceCall) {
         sourceCall = await db('call_log')
           .whereRaw("metadata->>'lead_id' = ?", [String(leadId)])

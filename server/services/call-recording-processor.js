@@ -7088,10 +7088,14 @@ const CallRecordingProcessor = {
             processing_started_at: null,
             // A definitive rejection that finalizes 'processed' (wrong
             // number with is_spam false) needs the durable marker or the
-            // bridge re-attributes it next scan (pre-push P1 r16).
-            ...(v2VetoDefinitiveRejection ? {
-              metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)"),
-            } : {}),
+            // bridge re-attributes it next scan (pre-push P1 r16). A
+            // NON-definitive policy hold CLEARS a stale marker instead
+            // (codex P1, PR #3303 r4): a force-reprocess that corrected a
+            // prior definitive rejection into out_of_service_area/DNC
+            // must not leave the call terminally rejected forever.
+            metadata: v2VetoDefinitiveRejection
+              ? db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{no_attribution}', 'true'::jsonb, true)")
+              : db.raw("COALESCE(metadata, '{}'::jsonb) - 'no_attribution'"),
             updated_at: new Date(),
           });
         if (!vetoWrote) {
@@ -7960,6 +7964,10 @@ const CallRecordingProcessor = {
     // here so the section catch can run it on a benign failure (codex P2).
     // The default no-op keeps pre-lead-source failures safe.
     let runCallPpcAttribution = async () => {};
+    // Set when a repoint transfer hit a target-slot conflict — this pass's
+    // attribution must not run against the target's foreign row (codex P1,
+    // PR #3303 r4).
+    let attributionConflictRetired = false;
     if (shouldCreateLead) {
       try {
         // Check if lead already exists for this phone — or by spoken email
@@ -8054,7 +8062,7 @@ const CallRecordingProcessor = {
               : null;
             const isBridgeTarget = leadSourceRow
               && require('./ads/google-call-bridge').isBridgeTargetNumber(leadSourceRow.twilio_phone_number);
-            if (leadId && customerId && callAttr && !isBridgeTarget) {
+            if (leadId && customerId && callAttr && !isBridgeTarget && !attributionConflictRetired) {
               // Token-fenced under the call row lock (pre-push P0 r17):
               // with sourceCallId in play, a STALE worker's provenance
               // recovery could move the history-bearing row back — or
@@ -8762,9 +8770,17 @@ const CallRecordingProcessor = {
                 // the previously stamped lead follows it, stages intact
                 // (pre-push P0/P1 r8/r9). Same transaction, same lead lock.
                 if (preSettleStampedLeadId && String(preSettleStampedLeadId) !== String(leadId)) {
-                  await require('./ads/call-attribution').reconcileMovedCallAttributionRow(
+                  // Outcome captured (codex P1, PR #3303 r4): a
+                  // retired_conflict means the target lead owns a row this
+                  // call cannot prove is its own, and the later
+                  // attribution pass must not touch it. The shared
+                  // unprovenanced-row freeze in recordCallPpcAttribution
+                  // is the backstop; suppressing the pass here avoids the
+                  // wasted round-trip and keeps intent explicit.
+                  const moveOutcome = await require('./ads/call-attribution').reconcileMovedCallAttributionRow(
                     trx, call.id, preSettleStampedLeadId, leadId, new Date(),
                   );
+                  if (moveOutcome === 'retired_conflict') attributionConflictRetired = true;
                 }
                 return enrichmentWrite.transacting(trx).update(effectiveUpdates);
               });
