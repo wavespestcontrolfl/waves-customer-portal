@@ -419,6 +419,44 @@ describe('sweepNewlyLive', () => {
   });
 });
 
+describe('selectControlPages — zero-baseline guard', () => {
+  // 2026-08-08: all 28 impact rows showed count:0 controls. Root cause was the
+  // 0.4x–2.5x band around a zero launch baseline — [0, 0] excludes every page
+  // by construction, so the query was a guaranteed-empty scan that read as
+  // "control selection broken". Launches never use controls; skip the work.
+  test('a launch-regime page (0 baseline impressions) returns [] without querying', async () => {
+    const database = jest.fn(() => { throw new Error('db must not be queried for a zero-impression baseline'); });
+    await expect(tracker.selectControlPages(database, {
+      pageUrl: '/blog/new-page/',
+      serviceCategory: 'pest',
+      cityTarget: null,
+      baselineImpressions: 0,
+      startDate: '2026-07-01',
+      endDate: '2026-07-28',
+    })).resolves.toEqual([]);
+    expect(database).not.toHaveBeenCalled();
+  });
+
+  test('a real baseline still queries, band-filters, and excludes optimized pages', async () => {
+    const sums = [
+      { page_url: '/a/', impressions: 50 },   // in band [40, 250]
+      { page_url: '/b/', impressions: 400 },  // out of band
+      { page_url: '/c/', impressions: 90 },   // in band but already optimized
+    ];
+    const database = jest.fn((table) => (table === 'gsc_pages'
+      ? chain({ sumResult: sums })
+      : chain({ selectResult: [{ page_url: '/c/' }] })));
+    await expect(tracker.selectControlPages(database, {
+      pageUrl: '/blog/target/',
+      serviceCategory: null,
+      cityTarget: null,
+      baselineImpressions: 100,
+      startDate: '2026-07-01',
+      endDate: '2026-07-28',
+    })).resolves.toEqual(['/a/']);
+  });
+});
+
 function chain({ selectResult = [], firstResult = null, sumResult = [], insertSink = null, updateSink = null, countResult = [] } = {}) {
   const builder = {};
   ['leftJoin', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'where', 'andWhere', 'andWhereNot', 'groupBy', 'orderBy', 'whereRaw', 'onConflict', 'ignore'].forEach((method) => {

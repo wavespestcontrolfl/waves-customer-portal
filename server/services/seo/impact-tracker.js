@@ -326,6 +326,12 @@ async function buildQueryCohortBaselines(database, pageUrl, queries, startDate, 
  * that already have an impact row (i.e. were themselves optimized).
  */
 async function selectControlPages(database, { pageUrl, serviceCategory, cityTarget, baselineImpressions, startDate, endDate }) {
+  // A zero-impression baseline (launch-regime page) makes the 0.4x–2.5x band
+  // [0, 0] by construction — the query below can only ever return nothing.
+  // Skip it entirely: launches are graded without controls (launchVerdict),
+  // and running the query recorded a misleading count:0 that read as
+  // "control selection broken" across every launch row (2026-08-08).
+  if (!(Number(baselineImpressions) > 0)) return [];
   let q = database('gsc_pages')
     .where('date', '>=', startDate)
     .andWhere('date', '<=', endDate)
@@ -406,7 +412,13 @@ async function snapshotBaseline({ db: database = db, runId, pageUrl, deployedAt 
       baseline_ctr: baseline.ctr,
       query_cohort: JSON.stringify(cohort),
       control_page_urls: controlUrls,
-      control_selection_reason: JSON.stringify({ service_category: classRow?.service_category || null, count: controlUrls.length }),
+      control_selection_reason: JSON.stringify({
+        service_category: classRow?.service_category || null,
+        count: controlUrls.length,
+        // Distinguish "no controls because launch regime needs none" from a
+        // genuinely empty candidate pool on a diff-regime page.
+        ...(isEmptyBaseline(baseline) ? { skipped: 'empty_baseline_launch_regime' } : {}),
+      }),
       updated_at: now,
     })
     .onConflict('run_id').ignore()
