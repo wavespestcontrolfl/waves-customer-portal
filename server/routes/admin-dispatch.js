@@ -11079,7 +11079,11 @@ function findingsDraftProductLines(products) {
 }
 
 function buildFindingsRecapPrompt({ schema, values, chips, serviceType, commsContext, products = [], visitContext = '' }) {
+  // internal fields are tech-facing data (compliance entries, pricing
+  // calibration) that must never influence customer-facing copy — the same
+  // contract buildTypedReportSnapshot enforces on the persisted findings.
   const fieldLines = (schema.fields || [])
+    .filter((field) => !field.internal)
     .map((field) => {
       const value = values?.[field.key];
       if (value == null || String(value).trim() === '') return null;
@@ -13442,4 +13446,5 @@ module.exports._test = {
   BACKFILL_RECORD_END_FIELDS,
   rearmRescheduleReminderWindows,
   captureReminderGuards,
+  buildFindingsRecapPrompt,
 };
