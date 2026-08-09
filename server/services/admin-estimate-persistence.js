@@ -67,11 +67,20 @@ function deliveryClaimFresh(estimatorEngine, nowMs = Date.now()) {
 // estimates→(leads/call_log) order the reconciler uses. Returns null when
 // the linkage stands (or the row carries no durable linkage), else the
 // abort reason.
-async function staleCallLinkageReason(dbc, data) {
+async function staleCallLinkageReason(dbc, data, { lockCallRow = false } = {}) {
   const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
   const draftCallLogId = data?.estimatorEngine?.callLogId || null;
   if (!['sid', 'stamp'].includes(data?.lead_linkage) || !linkedLeadId || !draftCallLogId) return null;
-  const callRow = await dbc('call_log').where({ id: draftCallLogId })
+  // lockCallRow (codex P1, PR #3304 GH r6): inside a money-bearing
+  // transaction (accept/decline) the call row is locked FOR UPDATE and
+  // HELD through the terminal write — a processor correction (which
+  // token-fences under this same row lock) either committed first and is
+  // seen here, or waits until the terminal commit and its reconcile then
+  // applies the marker-only terminal invalidation. Callers must lock the
+  // linked LEAD first (repo-wide leads → call_log order).
+  const callQuery = dbc('call_log').where({ id: draftCallLogId });
+  if (lockCallRow) callQuery.forUpdate();
+  const callRow = await callQuery
     .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status');
   if (!callRow) return 'invalidated_before_delivery';
   const procStatus = callRow.processing_status == null ? null : String(callRow.processing_status);

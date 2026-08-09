@@ -1247,10 +1247,34 @@ function generateEstimateSafely(engineInput) {
   return generateEstimate(engineInput);
 }
 
+// Reconcile-only entry (codex P1, PR #3304 GH r6): a linkage correction
+// must invalidate a stale draft even when the current pass is NOT an
+// eligible drafting run — the gate is off, the retry no longer reads as
+// quote-flavored, or the call is spam-classified. Without this, the
+// eligible-run reconcile was the only production call site, and a stale
+// draft kept its old lead links and a live public token indefinitely.
+// Deliberately runs regardless of GATE_ESTIMATOR_ENGINE: it corrects
+// drafts that already exist, it never creates one. Identity-conflict
+// contexts return without action — the quarantine is the full run's lane.
+async function reconcileDraftLinksForCall(callLogId) {
+  if (!callLogId) return null;
+  try {
+    const existing = await existingDraftForCall(callLogId);
+    if (!existing) return null;
+    const context = await buildCallContext(callLogId);
+    if (context?.error) return null;
+    return await reconcileExistingDraftLinks(existing, context);
+  } catch (err) {
+    logger.warn(`[estimator-engine] reconcile-only pass failed for call ${callLogId}: ${err.message}`);
+    return 'error';
+  }
+}
+
 module.exports = {
   _reconcileExistingDraftLinks: reconcileExistingDraftLinks,
   estimatorEngineEnabled,
   maybeDraftEstimateForCall,
+  reconcileDraftLinksForCall,
   // Origin-specific entries (sms-thread.js) reuse the shared pipeline and
   // bell plumbing instead of re-implementing the lane/notify contract.
   runDraftPipeline,

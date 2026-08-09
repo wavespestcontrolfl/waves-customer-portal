@@ -838,6 +838,11 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         .select('id', 'status')
         .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
         .whereNull('archived_at')
+        // A marker-only invalidated TERMINAL is not archived (codex P1,
+        // PR #3304 GH r6) but is not the call's live draft either —
+        // treating it as one would bounce the corrected rebuild as
+        // duplicate_call_draft with no replacement ever produced.
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
         .first();
       if (existingForCall) {
         return {

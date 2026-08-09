@@ -9545,8 +9545,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             ? JSON.parse(freshLinkRow.estimate_data) : (freshLinkRow?.estimate_data || null);
         } catch { freshLinkData = null; }
         const eng = freshLinkData?.estimatorEngine;
-        if ((eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at))
-          || (freshLinkData && await staleCallLinkageReason(trx, freshLinkData))) {
+        if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) {
+          const err = new Error('Estimate is no longer active');
+          err.status = 409;
+          throw err;
+        }
+        // The call row is locked FOR UPDATE and HELD through the
+        // acceptance write (codex P1, PR #3304 GH r6): an ordinary
+        // SELECT would not serialize against the processor's concurrent
+        // correction, and the estimate marker predicates cannot see a
+        // not-yet-written marker. Linked LEAD locked first — repo-wide
+        // leads → call_log order against the processor's stamp writers.
+        if (freshLinkData?.lead_id && ['sid', 'stamp'].includes(freshLinkData?.lead_linkage)) {
+          await trx('leads').where({ id: String(freshLinkData.lead_id) }).forUpdate().first('id');
+        }
+        if (freshLinkData && await staleCallLinkageReason(trx, freshLinkData, { lockCallRow: true })) {
           const err = new Error('Estimate is no longer active');
           err.status = 409;
           throw err;
@@ -12171,37 +12184,47 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
     const guard = resolveEstimateDeclineGuard(estimate);
     if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
     if (guard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
-    // LIVE call-linkage revalidation (codex P0, PR #3304 r26): same
-    // marker-only race as accept — a corrected call linkage whose
-    // estimator reconcile hasn't stamped the estimate yet must not let a
-    // stale token flip the wrong-lead row to a terminal 'declined'. Same
-    // generic 404 as the marker path: the row is dead to this token.
-    {
+    // LIVE call-linkage revalidation ATOMIC with the decline write (codex
+    // P0 r26, P1 GH r6): the whole transition runs in ONE transaction
+    // with the call row locked FOR UPDATE and held through the UPDATE — a
+    // correction committing after a plain pre-check could otherwise still
+    // interleave, and the marker predicates cannot see the detached
+    // reconciler's not-yet-written marker. Linked LEAD locked first
+    // (repo-wide leads → call_log order). Stale linkage → same generic
+    // 404 as the marker path: the row is dead to this token.
+    const declineTxn = await db.transaction(async (trx) => {
       const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
       let declineLinkData = null;
       try {
         declineLinkData = typeof estimate.estimate_data === 'string'
           ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || null);
       } catch { declineLinkData = null; }
-      if (declineLinkData && await staleCallLinkageReason(db, declineLinkData)) {
-        return res.status(404).json({ error: 'Estimate not found' });
+      if (declineLinkData?.lead_id && ['sid', 'stamp'].includes(declineLinkData?.lead_linkage)) {
+        await trx('leads').where({ id: String(declineLinkData.lead_id) }).forUpdate().first('id');
       }
+      if (declineLinkData && await staleCallLinkageReason(trx, declineLinkData, { lockCallRow: true })) {
+        return { staleLinkage: true, declinedCount: 0 };
+      }
+      const declinedCount = await trx('estimates')
+        .where({ id: estimate.id })
+        .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+        // Mirror the guard's archived check on the UPDATE itself (TOCTOU): an
+        // archive committed between the pre-read and this write must not be
+        // mutated back to life as a decline. Same for the linkage markers
+        // (codex P1, PR #3304 GH r5): a pending invalidation recorded during
+        // an active send must not let the stale token flip the wrong-lead
+        // row to a money-bearing 'declined' the release then preserves.
+        .whereNull('archived_at')
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+        .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
+        .update({ status: 'declined', declined_at: trx.fn.now(), updated_at: trx.fn.now() });
+      return { staleLinkage: false, declinedCount };
+    });
+    if (declineTxn.staleLinkage) {
+      return res.status(404).json({ error: 'Estimate not found' });
     }
-
-    const declinedCount = await db('estimates')
-      .where({ id: estimate.id })
-      .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
-      // Mirror the guard's archived check on the UPDATE itself (TOCTOU): an
-      // archive committed between the pre-read and this write must not be
-      // mutated back to life as a decline. Same for the linkage markers
-      // (codex P1, PR #3304 GH r5): a pending invalidation recorded during
-      // an active send must not let the stale token flip the wrong-lead
-      // row to a money-bearing 'declined' the release then preserves.
-      .whereNull('archived_at')
-      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
-      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
-      .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', db.raw('NOW()')))
-      .update({ status: 'declined', declined_at: db.fn.now(), updated_at: db.fn.now() });
+    const declinedCount = declineTxn.declinedCount;
     if (declinedCount) await transferGroupFollowupOwnership(estimate);
     if (!declinedCount) {
       const fresh = await db('estimates').where({ id: estimate.id }).first('status', 'expires_at', 'archived_at', 'estimate_data');

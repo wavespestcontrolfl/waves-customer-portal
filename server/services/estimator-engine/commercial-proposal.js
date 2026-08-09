@@ -388,6 +388,9 @@ async function maybeBuildCommercialProposalDraft({
           .select('id')
           .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
           .whereNull('archived_at')
+          // Marker-only invalidated terminals are not live drafts
+          // (codex P1, PR #3304 GH r6).
+          .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
           .first();
         if (existingForCall) return { duplicate: existingForCall };
         return callback(trx);
@@ -405,6 +408,9 @@ async function maybeBuildCommercialProposalDraft({
           .select('id')
           .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
           .whereNull('archived_at')
+          // Marker-only invalidated terminals are not live drafts
+          // (codex P1, PR #3304 GH r6).
+          .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
           .first();
         if (existingForCall) return { duplicate: existingForCall };
       }

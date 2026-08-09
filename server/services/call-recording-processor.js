@@ -9192,6 +9192,22 @@ const CallRecordingProcessor = {
         .catch((engineErr) => {
           logger.error(`[call-proc] estimator engine failed (non-blocking): ${engineErr.message}`);
         });
+    } else {
+      // Reconcile-only pass (codex P1, PR #3304 GH r6): even when this
+      // run is not an eligible drafting run — gate off, retry no longer
+      // quote-flavored, spam-classified — a linkage correction must still
+      // invalidate any existing draft for this call, or the stale draft
+      // keeps its old lead links and a live public token indefinitely.
+      // Corrects only; never creates. Fire-and-forget like the engine.
+      estimatorEnginePromise = (async () => {
+        try {
+          const { reconcileDraftLinksForCall } = require('./estimator-engine');
+          const outcome = await reconcileDraftLinksForCall(call.id);
+          if (outcome) logger.info(`[call-proc] reconcile-only draft-linkage pass for ${callSid}: ${outcome}`);
+        } catch (recErr) {
+          logger.warn(`[call-proc] reconcile-only draft-linkage pass failed (non-blocking): ${recErr.message}`);
+        }
+      })();
     }
 
     // A customer-less recovery lead is the ONLY durable record for this call, so
