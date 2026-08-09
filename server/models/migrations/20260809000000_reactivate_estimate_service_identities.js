@@ -77,6 +77,11 @@ const SERVICES = [
     requires_license: true,
     license_category: 'GHP',
     min_tech_skill_level: 2,
+    // German roach work ALWAYS re-services — the retired knockdown
+    // profile used alert/14d, and the profile heal derives its followup
+    // policy from these fields (codex r3 P1).
+    requires_follow_up: true,
+    follow_up_interval_days: 14,
     customer_visible: true,
     booking_enabled: false,
     is_active: true,
@@ -108,6 +113,11 @@ const SERVICES = [
     requires_license: true,
     license_category: 'GHP',
     min_tech_skill_level: 2,
+    // German roach work ALWAYS re-services — the retired knockdown
+    // profile used alert/14d, and the profile heal derives its followup
+    // policy from these fields (codex r3 P1).
+    requires_follow_up: true,
+    follow_up_interval_days: 14,
     customer_visible: true,
     booking_enabled: false,
     is_active: true,

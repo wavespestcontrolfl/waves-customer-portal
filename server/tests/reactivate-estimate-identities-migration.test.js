@@ -133,8 +133,15 @@ describe('20260809000000 reactivation batch', () => {
         default_duration_minutes: 60,
       });
     }
-    expect(profileRow(db, 'german_roach').project_type).toBeNull();
-    expect(profileRow(db, 'german_roach_initial').project_type).toBeNull();
+    // German roach ALWAYS re-services: the catalog fields drive the
+    // profile heal to alert/14d (the retired knockdown profile's policy).
+    for (const key of ['german_roach', 'german_roach_initial']) {
+      expect(profileRow(db, key)).toMatchObject({
+        project_type: null,
+        followup_policy: 'alert',
+        default_followup_days: 14,
+      });
+    }
     expect(profileRow(db, 'lawn_pest_knockdown').project_type).toBe('one_time_lawn_treatment');
     expect(profileRow(db, 'trap_only_retainer').project_type).toBe('rodent_trapping');
     expect(svcRow(db, 'trap_only_retainer')).toMatchObject({ billing_type: 'recurring', frequency: 'monthly' });
