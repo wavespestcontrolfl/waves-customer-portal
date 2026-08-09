@@ -35,6 +35,74 @@ const {
   createDraftEstimate,
 } = require('./draft-builder');
 
+
+// Re-point (or clear) an existing draft's lead links when the call's CURRENT
+// linkage differs from what the draft recorded (codex P1, PR #3304): an
+// in-pipeline draft can persist against a stamp a later retry then cleared
+// or repointed, and returning it unreconciled leaves estimate_data.lead_id
+// and leads.estimate_id advancing the WRONG pipeline record. Acts only on
+// DURABLE evidence: a repoint requires the current lead resolved via sid or
+// the metadata stamp (the phone-touched arm is bounded to the call's
+// processing window — any later edit makes the same lead read as mere
+// history, which must clear nothing); an unlink must be POSITIVELY
+// established (lookup succeeded, no stamp on the call, and the draft's lead
+// does not carry this call's sid or is gone). All three writes are one
+// transaction; the whole reconcile is non-blocking.
+async function reconcileExistingDraftLinks(existing, context) {
+  try {
+    const draftData = (() => {
+      try {
+        const data = typeof existing.estimate_data === 'string'
+          ? JSON.parse(existing.estimate_data) : (existing.estimate_data || {});
+        return data && typeof data === 'object' ? data : {};
+      } catch { return {}; }
+    })();
+    const draftLeadId = draftData.lead_id ? String(draftData.lead_id) : null;
+    const currentLeadId = (context?.lead?.id && context?.leadIsForThisCall)
+      ? String(context.lead.id) : null;
+    const durableRepoint = !!currentLeadId && ['sid', 'stamp'].includes(context?.leadLinkage);
+    let establishedAbsence = false;
+    if (!currentLeadId && draftLeadId && !context?.leadLookupUnavailable) {
+      const callStamp = (() => {
+        try {
+          const md = typeof context?.call?.metadata === 'string'
+            ? JSON.parse(context.call.metadata) : (context?.call?.metadata || {});
+          return md?.lead_id ? String(md.lead_id) : null;
+        } catch { return null; }
+      })();
+      if (!callStamp) {
+        const draftLead = await db('leads')
+          .where({ id: draftLeadId })
+          .whereNull('deleted_at')
+          .first('twilio_call_sid');
+        establishedAbsence = !draftLead
+          || !(draftLead.twilio_call_sid && context?.call?.twilio_call_sid
+            && draftLead.twilio_call_sid === context.call.twilio_call_sid);
+      }
+    }
+    if ((durableRepoint || establishedAbsence) && draftLeadId !== currentLeadId) {
+      if (currentLeadId) draftData.lead_id = currentLeadId;
+      else delete draftData.lead_id;
+      await db.transaction(async (trx) => {
+        await trx('estimates').where({ id: existing.id })
+          .update({ estimate_data: JSON.stringify(draftData), updated_at: new Date() });
+        if (draftLeadId) {
+          // Only if the OLD lead still points at this draft — a lead
+          // relinked elsewhere is not ours to touch.
+          await trx('leads').where({ id: draftLeadId, estimate_id: existing.id })
+            .update({ estimate_id: null });
+        }
+        if (currentLeadId) {
+          await trx('leads').where({ id: currentLeadId }).update({ estimate_id: existing.id });
+        }
+      });
+      logger.info(`[estimator-engine] relinked existing draft ${existing.id} after call linkage change (${draftLeadId || 'none'} → ${currentLeadId || 'none'})`);
+    }
+  } catch (relinkErr) {
+    logger.warn(`[estimator-engine] existing-draft relink failed (non-blocking): ${relinkErr.message}`);
+  }
+}
+
 function estimatorEngineEnabled() {
   const flag = process.env.GATE_ESTIMATOR_ENGINE;
   return flag === '1' || flag === 'true' || flag === 'on';
@@ -321,84 +389,11 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     if (!dryRun) {
       const existing = await existingDraftForCall(callLogId);
       if (existing) {
-        // Stale-linkage reconciliation (codex P1, PR #3304): an
-        // in-pipeline draft can persist against a stamp a later retry
-        // then cleared or repointed — and this short-circuit would return
-        // it forever, leaving estimate_data.lead_id and leads.estimate_id
-        // advancing the WRONG pipeline record. The context above resolved
-        // the call's CURRENT linkage; when the draft's recorded lead
-        // differs, both links are re-pointed (or cleared) here.
-        // Non-blocking, like the original link write: worst case the
-        // draft stays unlinked and advancement falls back to contact
-        // matching.
-        try {
-          const draftData = (() => {
-            try {
-              const data = typeof existing.estimate_data === 'string'
-                ? JSON.parse(existing.estimate_data) : (existing.estimate_data || {});
-              return data && typeof data === 'object' ? data : {};
-            } catch { return {}; }
-          })();
-          const draftLeadId = draftData.lead_id ? String(draftData.lead_id) : null;
-          const currentLeadId = (context?.lead?.id && context?.leadIsForThisCall)
-            ? String(context.lead.id) : null;
-          // Reconcile only from DURABLE evidence (pre-push P1 r2/r3):
-          // - a REPOINT requires the current lead resolved via sid or the
-          //   metadata stamp — the phone-touched arm is bounded to the
-          //   call's processing window, so any later edit makes the SAME
-          //   lead read as mere history and must clear nothing;
-          // - an UNLINK (no current lead) must be POSITIVELY established:
-          //   the lookup succeeded, the call carries no stamp, and the
-          //   draft's lead does not carry this call's sid (or is gone).
-          //   A transient lookup failure reconciles nothing.
-          const durableRepoint = !!currentLeadId && ['sid', 'stamp'].includes(context?.leadLinkage);
-          let establishedAbsence = false;
-          if (!currentLeadId && draftLeadId && !context?.leadLookupUnavailable) {
-            const callStamp = (() => {
-              try {
-                const md = typeof context?.call?.metadata === 'string'
-                  ? JSON.parse(context.call.metadata) : (context?.call?.metadata || {});
-                return md?.lead_id ? String(md.lead_id) : null;
-              } catch { return null; }
-            })();
-            if (!callStamp) {
-              const draftLead = await db('leads')
-                .where({ id: draftLeadId })
-                .whereNull('deleted_at')
-                .first('twilio_call_sid');
-              establishedAbsence = !draftLead
-                || !(draftLead.twilio_call_sid && context?.call?.twilio_call_sid
-                  && draftLead.twilio_call_sid === context.call.twilio_call_sid);
-            }
-          }
-          if ((durableRepoint || establishedAbsence) && draftLeadId !== currentLeadId) {
-            if (currentLeadId) draftData.lead_id = currentLeadId;
-            else delete draftData.lead_id;
-            // ONE transaction for all three writes (pre-push P1 r1): a
-            // partial repair — mirror updated, a lead write failed —
-            // would make the next retry see draftLeadId ===
-            // currentLeadId and permanently skip the rest, leaving two
-            // leads pointing at one estimate or the current lead
-            // unlinked. Together they commit or roll back; the outer
-            // catch keeps the whole reconcile non-blocking.
-            await db.transaction(async (trx) => {
-              await trx('estimates').where({ id: existing.id })
-                .update({ estimate_data: JSON.stringify(draftData), updated_at: new Date() });
-              if (draftLeadId) {
-                // Only if the OLD lead still points at this draft — a lead
-                // relinked elsewhere is not ours to touch.
-                await trx('leads').where({ id: draftLeadId, estimate_id: existing.id })
-                  .update({ estimate_id: null });
-              }
-              if (currentLeadId) {
-                await trx('leads').where({ id: currentLeadId }).update({ estimate_id: existing.id });
-              }
-            });
-            logger.info(`[estimator-engine] relinked existing draft ${existing.id} after call linkage change (${draftLeadId || 'none'} → ${currentLeadId || 'none'})`);
-          }
-        } catch (relinkErr) {
-          logger.warn(`[estimator-engine] existing-draft relink failed (non-blocking): ${relinkErr.message}`);
-        }
+        // Stale-linkage reconciliation (codex P1, PR #3304) — shared with
+        // the duplicate-guard exit below, where a corrected retry that
+        // lost the insert race to a stale detached run lands instead.
+        await reconcileExistingDraftLinks(existing, context);
+
         result.lane = 'existing';
         result.reasons = ['draft already exists for this call'];
         result.estimateId = existing.id;
@@ -789,6 +784,16 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
 
     if (draft.blocked) {
       result.blocked = true;
+      // The corrected retry can LOSE the insert race to a stale detached
+      // composer (codex P1, PR #3304 r3): it passed existingDraftForCall
+      // before the old run committed and lands here via the duplicate
+      // guard. Re-check now that the race is settled — when this call's
+      // draft exists, reconcile its links exactly as the short-circuit
+      // would have.
+      if (!dryRun && context?.call?.id) {
+        const lateExisting = await existingDraftForCall(context.call.id);
+        if (lateExisting) await reconcileExistingDraftLinks(lateExisting, context);
+      }
       // Request-only + already-open estimate = nothing is owed and nothing
       // new exists — a "quote promised" bell here would mint a false task.
       if (quotePromised) {

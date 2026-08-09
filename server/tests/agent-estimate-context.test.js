@@ -26,6 +26,7 @@ jest.mock('../models/db', () => {
       orWhereRaw() { return this; },
       whereNull() { return this; },
       whereNot() { return this; },
+      whereNotIn() { return this; },
       whereRaw(sql) {
         this._whereRaw = true;
         // The metadata-stamp fetch is the only call_log list query keyed on

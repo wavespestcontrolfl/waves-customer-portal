@@ -157,13 +157,17 @@ async function loadCalls(lead, phoneKey) {
         // when the lead HAS a sid: with a NULL lead sid the <> arm never
         // matches under SQL NULL semantics and every normal phone-history
         // row was dropped whenever stamped rows made rows nonempty (codex
-        // P1 r13); stamped-row overlap is handled by the id-dedup below.
+        // P1 r13). Already-fetched rows are excluded BY ID too (codex P2,
+        // PR #3304 r3): a stamped call that also matches by phone would
+        // otherwise re-consume limit slots before the id-dedup, shrinking
+        // the pack below three even when more history exists.
         .modify((q) => {
           if (lead.twilio_call_sid && rows.length) {
             q.where(function notAnchor() {
               this.whereNull('twilio_call_sid').orWhereNot('twilio_call_sid', lead.twilio_call_sid);
             });
           }
+          if (rows.length) q.whereNotIn('id', rows.map((r) => r.id));
         })
         .orderBy('created_at', 'desc')
         .limit(3 - rows.length)
