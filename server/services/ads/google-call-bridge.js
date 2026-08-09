@@ -1282,15 +1282,25 @@ async function applyBridge(options = {}) {
               }
             }
           }
-          await trx('call_log')
-            .where({ id: match.callLog.id })
-            .update({
-              metadata: bridgeMetadataPatch({
-                leadMatch: redactedLeadMatch(res.match),
-                leadAttributedAt: now.toISOString(),
-              }),
-              updated_at: now,
-            });
+          // The recorded match is NOT advanced when a legacy row blocked
+          // the transfer (codex P1, PR #3303 r11): rewriting it to the new
+          // lead would make the next scan see recorded == joined, exit the
+          // retry lane, and leave the old lead's row stranded with the new
+          // lead unattributed — permanently. Leaving it stale keeps the
+          // repoint in the retry lane, so every scan re-detects it (and
+          // re-warns), and the transfer completes on its own the moment
+          // the legacy row is resolved.
+          if (!unprovenancedStrandedRow) {
+            await trx('call_log')
+              .where({ id: match.callLog.id })
+              .update({
+                metadata: bridgeMetadataPatch({
+                  leadMatch: redactedLeadMatch(res.match),
+                  leadAttributedAt: now.toISOString(),
+                }),
+                updated_at: now,
+              });
+          }
           // Funnel write while the lead lock is still held, on the SAME
           // connection (pre-push P1 r3/r4): reconciliation queues on this
           // lock, so the verified linkage cannot be cleared before the
