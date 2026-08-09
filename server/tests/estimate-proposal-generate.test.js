@@ -489,6 +489,53 @@ describe('deriveProposalDraft', () => {
     expect(hidden.programs[0].service).toBe('mosquito');
   });
 
+  test('r5: rodent monthly ambiguity, installation extraction, review-gated exclusion, palm supplements', async () => {
+    // Rodent bait with monthly evidence = ambiguous billing, fail.
+    const rodent = await deriveProposalDraft({
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'commercial_rodent_bait', name: 'Rodent Bait', mo: 45, perTreatment: 135, visitsPerYear: 4, annualAfterDiscount: 540 }] } },
+      },
+    });
+    expect(rodent.programs).toBeNull();
+    expect(rodent.warnings[0]).toMatch(/rodent billing cadence/i);
+
+    // Installation charge on a RECURRING termite-bait row extracts as
+    // corrective work (the recurring side fails ambiguity separately).
+    const install = await deriveProposalDraft({
+      estimate_data: {
+        engineResult: { lineItems: [{ service: 'commercial_termite_bait', name: 'Termite Bait', visitsPerYear: 4, annual: 420, billedPerApplication: true, installation: { price: 800 } }] },
+      },
+    });
+    expect(install.correctiveWork).toEqual([
+      { label: 'Termite Bait installation', amount: 800, taxable: true, includes: [] },
+    ]);
+
+    // Review-gated rows FAIL the draft with a warning — provisional
+    // prices never generate and never silently vanish.
+    const gated = await deriveProposalDraft({
+      estimate_data: {
+        engineResult: { lineItems: [{ service: 'commercial_pest', name: 'Pest', visitsPerYear: 4, annual: 468, requiresManualReview: true }] },
+      },
+    });
+    expect(gated.programs).toBeNull();
+    expect(gated.warnings[0]).toMatch(/requires manual review/i);
+
+    // Mapped palm-injection supplement is SEEN — cadence unproven → the
+    // all-or-nothing warning fires instead of silent omission.
+    const palm = await deriveProposalDraft({
+      estimate_data: {
+        result: {
+          recurring: {
+            services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }],
+            palmInjectionAnn: 300,
+          },
+        },
+      },
+    });
+    expect(palm.programs).toBeNull();
+    expect(palm.warnings[0]).toMatch(/Palm Injection/);
+  });
+
   test('returns null sections for an estimate with nothing to derive', async () => {
     const draft = await deriveProposalDraft({ estimate_data: {} });
     expect(draft).toEqual({ propertyScope: null, programs: null, correctiveWork: null, customerResponsibilities: null, suggestedTaxRate: null, warnings: [] });

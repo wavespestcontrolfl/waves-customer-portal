@@ -573,10 +573,12 @@ export default function CommercialProposalPage() {
         // FILTERED from the payload and silently deleted by the reload —
         // surface the server's minimum-price rule instead (codex 1A-ii r3).
         const incompleteProgram = formRef.current.programsState.find(
-          (row) => String(row.label || '').trim() && !programRowIsPriced(row),
+          (row) => (String(row.label || '').trim() || Number(row.pricePerApplication) > 0
+            || String(row.inclusionsText || '').trim() || String(row.exclusionsText || '').trim())
+            && !programRowIsPriced(row),
         );
         if (incompleteProgram) {
-          setError(`Program “${incompleteProgram.label.trim()}” needs a per-application price of at least $0.01 and a whole-number frequency (1–52) — fix or remove it.`);
+          setError(`Program “${incompleteProgram.label?.trim() || '(unnamed)'}” needs a name, a per-application price of at least $0.01, and a whole-number frequency (1–52) — fix or remove it.`);
           return false;
         }
         const payload = buildPayload();

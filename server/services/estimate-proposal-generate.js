@@ -120,7 +120,7 @@ const FAMILY_RESPONSIBILITIES = {
   ],
   lawn: [
     'Maintain mowing and watering between treatments per the provided guidance',
-    'Keep pets and residents off treated turf until dry',
+    'Keep pets and residents off treated areas until your technician confirms re-entry timing for the products applied',
   ],
   tree_shrub: [
     'Water ornamentals per the provided guidance between treatments',
@@ -272,7 +272,18 @@ function derivePrograms(estimateData, estimate = {}) {
     .filter((row) => (visitsPerYearForRecurringService(row) > 0)
       || (recurringLineAnnualAmount(row) > 0)
       || row.manualFinalAnnual != null);
-  const rows = [...canonicalRows, ...extraLineItemRows];
+  // Mapped admin estimates persist palm-injection pricing OUTSIDE
+  // recurring.services (result.recurring.palmInjectionMo/Ann,
+  // v1-legacy-mapper) — surface it as a row so it can never be silently
+  // omitted; cadence is unproven, so it flows into the all-or-nothing
+  // warning and the operator authors it manually (codex 1A-ii r5).
+  const palmAnn = num(engineResult.recurring?.palmInjectionAnn);
+  const palmMo = num(engineResult.recurring?.palmInjectionMo);
+  const palmRows = (palmAnn > 0 || palmMo > 0)
+    && !canonicalKeys.has('palm_injection')
+    ? [{ service: 'palm_injection', name: 'Palm Injection', annualAfterDiscount: palmAnn || undefined, mo: palmMo || undefined }]
+    : [];
+  const rows = [...canonicalRows, ...extraLineItemRows, ...palmRows];
   const programs = [];
   const unrepresentable = [];
   const fail = (reason) => ({
@@ -301,6 +312,14 @@ function derivePrograms(estimateData, estimate = {}) {
     // frequency, so the per-application price MUST come from that annual
     // or a discounted row would save at list price and rewrite
     // estimates.annual_total upward (pre-push codex P0).
+    // Review-gated rows carry PROVISIONAL amounts — the estimator's
+    // authority says they are NOT priced yet, so any of them fails the
+    // whole draft (silent exclusion would save an itemization missing the
+    // gated service — codex 1A-ii r5b).
+    if (row.requiresManualReview === true || row.quoteRequired === true) {
+      unrepresentable.push(`${String(row.name || row.service || 'service')} (requires manual review — price is provisional)`);
+      continue;
+    }
     // An EXPLICIT accepted zero (comped service) is promised scope, not an
     // unpriced row — dropping it would silently lose scope while totals
     // still reconcile (codex 1A-ii r2c). Fail the draft instead.
@@ -333,10 +352,10 @@ function derivePrograms(estimateData, estimate = {}) {
     // ambiguity rule as AMBIGUOUS_CADENCE_SECTION_KEYS in the proposal
     // model). A "$105 per application" program for a service that bills
     // $35 flat monthly is a wrong promise (codex 1A-ii r3).
-    if (family === 'termite'
+    if ((family === 'termite' || family === 'rodent')
       && (num(row.mo) > 0 || num(row.monthly) > 0)
       && row.billedPerApplication !== true) {
-      unrepresentable.push(`${String(row.name || row.service || 'service')} (termite billing cadence cannot be proven — flat-monthly vs per-application)`);
+      unrepresentable.push(`${String(row.name || row.service || 'service')} (${family} billing cadence cannot be proven — flat-monthly vs per-application)`);
       continue;
     }
     programs.push({
@@ -463,7 +482,19 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
     rawSeen.add(line);
     return true;
   });
+  const gated = [];
+  // Recurring rows can CARRY a one-time installation charge
+  // (installation.price on termite-bait lines) — extract it even though
+  // the row itself is recurring (codex 1A-ii r5).
+  const installationRows = lineItemsRows
+    .filter((line) => line.onProg !== true && line.includedOnProgram !== true
+      && num(line.installation?.price) > 0
+      && ((visitsPerYearForRecurringService(line) > 0) || (recurringLineAnnualAmount(line) > 0)));
   const fromLineItems = lineItemsRows.filter((line) => {
+    if (line.requiresManualReview === true || line.quoteRequired === true) {
+      gated.push(String(line.displayName || line.name || line.service || 'item'));
+      return false;
+    }
     // Canonical included-on-program exclusion (same rule as
     // estimateOneTimeItemsFromData): a row a program already includes must
     // never bill again as corrective work (codex 1A-ii r4b).
@@ -486,6 +517,10 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
   // or every specialty charge doubles and reconciliation rejects the draft
   // (codex 1A-ii r2e).
   for (const item of fromOneTime) {
+    if (item.requiresManualReview === true || item.quoteRequired === true) {
+      gated.push(String(item.label || item.name || item.service || 'item'));
+      continue;
+    }
     // An EXPLICIT accepted zero is comped scope, not an unpriced row
     // (codex 1A-ii r2c) — fail rather than silently lose it.
     if (item.manualFinalOneTime === 0) {
@@ -524,6 +559,21 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
       taxable: commercialTaxableDefault(line.service || line.name, line.taxable),
       includes: [],
     });
+  }
+  for (const line of installationRows) {
+    const amount = num(line.installation?.price);
+    work.push({
+      label: `${String(line.displayName || line.name || line.service || 'Service').slice(0, 140)} installation`.slice(0, 160),
+      amount: Math.round(amount * 100) / 100,
+      taxable: commercialTaxableDefault(line.service || line.name, line.installation?.taxable ?? line.taxable),
+      includes: [],
+    });
+  }
+  if (gated.length) {
+    return {
+      correctiveWork: null,
+      warning: `One-time work was not generated: ${gated.join(', ')} requires manual review (provisional price). Author the corrective work manually.`,
+    };
   }
   if (comped.length) {
     return {
