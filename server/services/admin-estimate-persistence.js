@@ -60,6 +60,49 @@ function deliveryClaimFresh(estimatorEngine, nowMs = Date.now()) {
   return Number.isFinite(t) && (nowMs - t) < ESTIMATE_DELIVERY_CLAIM_TTL_MS;
 }
 
+// Shared live call-linkage revalidation for engine-drafted rows: re-resolve
+// the call's current lead with the pipeline's own precedence (sid-owned
+// lead first, then the settled stamp) and require it to still be the
+// draft's linked lead. Plain reads — no extra locks, and the same
+// estimates→(leads/call_log) order the reconciler uses. Returns null when
+// the linkage stands (or the row carries no durable linkage), else the
+// abort reason.
+async function staleCallLinkageReason(dbc, data) {
+  const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
+  const draftCallLogId = data?.estimatorEngine?.callLogId || null;
+  if (!['sid', 'stamp'].includes(data?.lead_linkage) || !linkedLeadId || !draftCallLogId) return null;
+  const callRow = await dbc('call_log').where({ id: draftCallLogId })
+    .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status');
+  if (!callRow) return 'invalidated_before_delivery';
+  const procStatus = callRow.processing_status == null ? null : String(callRow.processing_status);
+  // A reprocess in flight means the linkage verdict is about to change —
+  // abort; the row is resendable once the call settles.
+  if (callRow.processing_token != null || (procStatus !== null && procStatus !== 'processed')) {
+    return 'call_reprocessing_before_delivery';
+  }
+  const liveStamp = (() => {
+    try {
+      const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
+      return md?.lead_id ? String(md.lead_id) : null;
+    } catch { return null; }
+  })();
+  let resolvedLeadId = null;
+  if (callRow.twilio_call_sid) {
+    const sidLead = await dbc('leads')
+      .where({ twilio_call_sid: callRow.twilio_call_sid })
+      .whereNull('deleted_at')
+      .first('id');
+    if (sidLead) resolvedLeadId = String(sidLead.id);
+  }
+  if (!resolvedLeadId && liveStamp) {
+    const stampLead = await dbc('leads').where({ id: liveStamp }).whereNull('deleted_at').first('id');
+    if (stampLead) resolvedLeadId = liveStamp;
+  }
+  if (resolvedLeadId !== linkedLeadId) return 'call_linkage_changed_before_delivery';
+  return null;
+}
+
+
 function estimateExpiresAt(now = () => new Date()) {
   const expiresAt = new Date(now().getTime());
   expiresAt.setDate(expiresAt.getDate() + ESTIMATE_SEND_EXPIRY_DAYS);
@@ -1824,6 +1867,7 @@ module.exports = {
   ESTIMATE_SEND_EXPIRY_DAYS,
   ESTIMATE_DELIVERY_CLAIM_TTL_MS,
   deliveryClaimFresh,
+  staleCallLinkageReason,
   estimateViewUrl,
   estimateReviseBlock,
   normalizeClientPestFloorMetadata,

@@ -39,6 +39,7 @@ const {
   estimateReviseBlock,
   estimateViewUrl,
   reviseAdminEstimate,
+  staleCallLinkageReason,
 } = require('../services/admin-estimate-persistence');
 const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
@@ -953,20 +954,26 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
       if (pendingAt && !eng.linkage_invalidated_at) {
         // A money-bearing terminal reached before this release (codex P0
         // r23: an accept can race the pending marker through the closing
-        // public gate) is never rewritten — same exemption as the
-        // reconciler. The PENDING keys are RETAINED: the public routes
-        // and the send verdict fail closed on them, the reconciler
-        // exempts terminals anyway, and the marker documents that a due
-        // invalidation met a terminal row — an operator decision.
+        // public gate) keeps its status, archive state, and money fields
+        // — conversion is the operator's to unwind — but the FULL marker
+        // still lands (codex P0 r26, same marker-only doctrine as the
+        // reconciler): the permanent public token dies, linkage keys are
+        // removed, and the old lead is unlinked. A warn surfaces the
+        // terminal collision for operator review.
         const releaseStatus = String(row.status || '').toLowerCase();
         if (['accepted', 'declined', 'expired'].includes(releaseStatus)) {
-          eng.invalidation_pending_at = pendingAt;
-          if (pendingFrom) eng.invalidation_pending_from = pendingFrom;
-          if (pendingTo) eng.invalidation_pending_to = pendingTo;
-          if (pendingConflict) eng.invalidation_pending_conflict = pendingConflict;
+          delete data.lead_id;
+          delete data.lead_linkage;
+          eng.linkage_invalidated_at = new Date().toISOString();
+          eng.linkage_invalidated_from = pendingFrom;
+          eng.linkage_invalidated_to = pendingTo;
+          if (pendingConflict) eng.identity_conflict = pendingConflict;
           await trx('estimates').where({ id: estimateId })
             .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
-          logger.warn(`[admin-estimates] deferred invalidation of estimate ${estimateId} met terminal status '${releaseStatus}' — row preserved, pending marker retained for operator review`);
+          if (pendingFrom) {
+            await trx('leads').where({ id: pendingFrom, estimate_id: estimateId }).update({ estimate_id: null });
+          }
+          logger.warn(`[admin-estimates] deferred invalidation of estimate ${estimateId} met terminal status '${releaseStatus}' — marker-only invalidation applied (status and money preserved), needs operator review`);
           return;
         }
         // Complete the deferred invalidation with the reconciler's own
@@ -1001,48 +1008,6 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
   } catch (e) {
     logger.warn(`[admin-estimates] delivery-claim clear failed for estimate ${estimateId}: ${e.message}`);
   }
-}
-
-// Shared live call-linkage revalidation for engine-drafted rows: re-resolve
-// the call's current lead with the pipeline's own precedence (sid-owned
-// lead first, then the settled stamp) and require it to still be the
-// draft's linked lead. Plain reads — no extra locks, and the same
-// estimates→(leads/call_log) order the reconciler uses. Returns null when
-// the linkage stands (or the row carries no durable linkage), else the
-// abort reason.
-async function staleCallLinkageReason(dbc, data) {
-  const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
-  const draftCallLogId = data?.estimatorEngine?.callLogId || null;
-  if (!['sid', 'stamp'].includes(data?.lead_linkage) || !linkedLeadId || !draftCallLogId) return null;
-  const callRow = await dbc('call_log').where({ id: draftCallLogId })
-    .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status');
-  if (!callRow) return 'invalidated_before_delivery';
-  const procStatus = callRow.processing_status == null ? null : String(callRow.processing_status);
-  // A reprocess in flight means the linkage verdict is about to change —
-  // abort; the row is resendable once the call settles.
-  if (callRow.processing_token != null || (procStatus !== null && procStatus !== 'processed')) {
-    return 'call_reprocessing_before_delivery';
-  }
-  const liveStamp = (() => {
-    try {
-      const md = typeof callRow.metadata === 'string' ? JSON.parse(callRow.metadata) : (callRow.metadata || {});
-      return md?.lead_id ? String(md.lead_id) : null;
-    } catch { return null; }
-  })();
-  let resolvedLeadId = null;
-  if (callRow.twilio_call_sid) {
-    const sidLead = await dbc('leads')
-      .where({ twilio_call_sid: callRow.twilio_call_sid })
-      .whereNull('deleted_at')
-      .first('id');
-    if (sidLead) resolvedLeadId = String(sidLead.id);
-  }
-  if (!resolvedLeadId && liveStamp) {
-    const stampLead = await dbc('leads').where({ id: liveStamp }).whereNull('deleted_at').first('id');
-    if (stampLead) resolvedLeadId = liveStamp;
-  }
-  if (resolvedLeadId !== linkedLeadId) return 'call_linkage_changed_before_delivery';
-  return null;
 }
 
 // Last-instant re-check before each provider handoff (codex P0 r23, P1 GH

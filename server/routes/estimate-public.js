@@ -9528,6 +9528,30 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       if (treatAsOneTime && effectiveOneTimeTotal > 0 && Number(estimate.onetime_total || 0) !== effectiveOneTimeTotal) {
         acceptedUpdates.onetime_total = effectiveOneTimeTotal;
       }
+      // LIVE call-linkage + marker revalidation INSIDE the money-bearing
+      // transaction (codex P0, PR #3304 r26): the call processor can have
+      // committed a corrected lead linkage while its detached estimator
+      // reconcile hasn't written either estimate marker yet — the CAS and
+      // marker predicates below can't see that window, and an old token
+      // accepting a wrong-lead row creates conversion/invoice state for
+      // the wrong identity. Fresh in-transaction read + the same
+      // resolution the send verdict uses.
+      {
+        const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).first('estimate_data');
+        let freshLinkData = null;
+        try {
+          freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
+            ? JSON.parse(freshLinkRow.estimate_data) : (freshLinkRow?.estimate_data || null);
+        } catch { freshLinkData = null; }
+        const eng = freshLinkData?.estimatorEngine;
+        if ((eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at))
+          || (freshLinkData && await staleCallLinkageReason(trx, freshLinkData))) {
+          const err = new Error('Estimate is no longer active');
+          err.status = 409;
+          throw err;
+        }
+      }
       const acceptedCount = await trx('estimates')
         .where({ id: estimate.id })
         .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
@@ -12147,6 +12171,22 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
     const guard = resolveEstimateDeclineGuard(estimate);
     if (!guard.ok) return res.status(guard.status).json({ error: guard.error });
     if (guard.alreadyDeclined) return res.json({ success: true, alreadyDeclined: true });
+    // LIVE call-linkage revalidation (codex P0, PR #3304 r26): same
+    // marker-only race as accept — a corrected call linkage whose
+    // estimator reconcile hasn't stamped the estimate yet must not let a
+    // stale token flip the wrong-lead row to a terminal 'declined'. Same
+    // generic 404 as the marker path: the row is dead to this token.
+    {
+      const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+      let declineLinkData = null;
+      try {
+        declineLinkData = typeof estimate.estimate_data === 'string'
+          ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || null);
+      } catch { declineLinkData = null; }
+      if (declineLinkData && await staleCallLinkageReason(db, declineLinkData)) {
+        return res.status(404).json({ error: 'Estimate not found' });
+      }
+    }
 
     const declinedCount = await db('estimates')
       .where({ id: estimate.id })

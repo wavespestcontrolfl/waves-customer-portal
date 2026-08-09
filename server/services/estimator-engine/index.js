@@ -118,12 +118,19 @@ async function reconcileExistingDraftLinks(existing, context) {
         // status stays untouched so the in-flight send's own terminal
         // write can land, and sendEstimateNow's LOCKED pre-delivery
         // verdict check serializes against this transaction and aborts
-        // when the marker committed first. Only money-bearing terminals
-        // (accepted/declined/expired) are exempt.
+        // when the marker committed first. Money-bearing terminals
+        // (accepted/declined/expired) get a MARKER-ONLY invalidation
+        // (codex P0 r26): status, archive state, and money fields are
+        // preserved — conversion already happened and is the operator's
+        // to unwind — but the marker still lands, because the permanent
+        // public token would otherwise keep serving content composed for
+        // the wrong lead forever (estimateLinkageInvalidated blocks every
+        // public surface on it).
         if (!fresh) return;
         const freshStatus = String(fresh.status || '').toLowerCase();
         const midSend = freshStatus === 'sending';
-        if (!['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshStatus)) return;
+        const terminalRow = ['accepted', 'declined', 'expired'].includes(freshStatus);
+        if (!terminalRow && !['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshStatus)) return;
         const freshData = (() => {
           try {
             const data = typeof fresh.estimate_data === 'string'
@@ -234,13 +241,15 @@ async function reconcileExistingDraftLinks(existing, context) {
         await trx('estimates').where({ id: existing.id })
           .update({
             estimate_data: JSON.stringify(freshData),
-            archived_at: new Date(),
             // Scheduling is CANCELED atomically (codex P0, PR #3304 r14):
             // a 'scheduled' or 'send_failed' row returns to an inert
             // draft with no due time, so the cron can never claim the
             // invalidated content even through a guard gap. A mid-send
-            // row keeps its status — the send flow owns it (P0 r19).
-            ...(midSend ? {} : { status: 'draft', scheduled_at: null }),
+            // row keeps its status — the send flow owns it (P0 r19). A
+            // TERMINAL row keeps status, archive state, and money fields
+            // — the marker alone kills its public token (P0 r26).
+            ...(terminalRow ? {} : { archived_at: new Date() }),
+            ...(midSend || terminalRow ? {} : { status: 'draft', scheduled_at: null }),
             updated_at: new Date(),
           });
         if (freshLeadId) {
@@ -572,11 +581,14 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
               })();
               if (!data || data.estimatorEngine?.linkage_invalidated_at) return;
               // Same scope rule as the linkage reconcile (codex P0, PR
-              // #3304 r20): only sendable/resendable rows are quarantined
-              // — a money-bearing terminal (accepted/declined/expired) is
-              // a customer-facing record this pass must never rewrite.
+              // #3304 r20/r26): a money-bearing terminal
+              // (accepted/declined/expired) keeps status, archive state,
+              // and money fields, but still receives the MARKER-ONLY
+              // quarantine below — the permanent public token must die on
+              // an identity conflict too.
               const freshQStatus = String(fresh.status || '').toLowerCase();
-              if (!['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshQStatus)) return;
+              const terminalQRow = ['accepted', 'declined', 'expired'].includes(freshQStatus);
+              if (!terminalQRow && !['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshQStatus)) return;
               // And the same delivery-claim fence (codex P0 r22): never
               // commit an archive inside a live send's verdict-to-handoff
               // window — record a durable PENDING marker the send's claim
@@ -614,8 +626,8 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
               const midSend = freshQStatus === 'sending';
               await trx('estimates').where({ id: conflicted.id }).update({
                 estimate_data: JSON.stringify(data),
-                archived_at: fresh.archived_at || new Date(),
-                ...(midSend ? {} : { status: 'draft', scheduled_at: null }),
+                ...(terminalQRow ? {} : { archived_at: fresh.archived_at || new Date() }),
+                ...(midSend || terminalQRow ? {} : { status: 'draft', scheduled_at: null }),
                 updated_at: new Date(),
               });
               if (quarantinedLeadId) {

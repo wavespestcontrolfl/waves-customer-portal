@@ -70,6 +70,9 @@ jest.mock('../services/admin-estimate-persistence', () => ({
   createOrReuseAdminEstimate: jest.fn(),
   estimateExpiresAt: jest.fn(() => new Date('2026-08-04T00:00:00.000Z')),
   estimateViewUrl: jest.fn((token) => `https://portal.wavespestcontrol.com/estimate/${token}`),
+  // REAL implementation — the pre-delivery revalidation tests below
+  // exercise its sid/stamp resolution against the mocked db.
+  staleCallLinkageReason: jest.requireActual('../services/admin-estimate-persistence').staleCallLinkageReason,
 }));
 jest.mock('../routes/estimate-public', () => ({
   acceptanceServiceLists: jest.fn(),
@@ -384,12 +387,13 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     expect(result.channels.sms.error).toBe('invalidated_before_delivery');
   });
 
-  test('a terminal status reached before the release is preserved — pending marker retained, no archive (PR #3304 r23)', async () => {
+  test('a terminal status reached before the release gets a MARKER-ONLY invalidation — status and money preserved (PR #3304 r26)', async () => {
     const { state, estimateUpdates } = statefulMock();
     // Deferral lands mid-delivery AND the customer accept races in before
     // the release transaction runs (belt-and-suspenders: the public gates
     // reject pending rows, but the release must still never rewrite a
-    // money-bearing terminal).
+    // money-bearing terminal's status — while the marker must still land,
+    // or the permanent public token keeps serving wrong-lead content).
     sendCustomerMessage.mockImplementation(async () => {
       injectPendingMarker(state, { status: 'accepted' });
       return { sent: true };
@@ -399,13 +403,15 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     expect(result.sent).toBe(true);
 
     const final = JSON.parse(state.row.estimate_data);
-    // NOT invalidated — pending keys retained for operator review.
-    expect(final.estimatorEngine.linkage_invalidated_at).toBeUndefined();
-    expect(final.estimatorEngine.invalidation_pending_at).toBeTruthy();
+    // Full marker applied, linkage keys removed — the public token dies.
+    expect(final.estimatorEngine.linkage_invalidated_at).toBeTruthy();
+    expect(final.estimatorEngine.invalidation_pending_at).toBeUndefined();
     expect(final.estimatorEngine.delivering_token).toBeUndefined();
-    expect(final.lead_id).toBe('lead-A');
+    expect(final.lead_id).toBeUndefined();
+    // Status, archive state, and money fields untouched by the release.
     const releaseWrite = estimateUpdates[estimateUpdates.length - 1];
     expect(releaseWrite.archived_at).toBeUndefined();
     expect(releaseWrite.status).toBeUndefined();
+    expect(state.row.status).toBe('accepted');
   });
 });

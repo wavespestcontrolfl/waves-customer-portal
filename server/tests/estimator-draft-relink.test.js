@@ -119,7 +119,7 @@ describe('reconcileExistingDraftLinks keys cleanup off the LOCKED row', () => {
     expect(mockUpdates).toHaveLength(0);
   });
 
-  test('a money-bearing terminal status is never touched (mid-send now MARKS; sent/viewed invalidate — they resend)', async () => {
+  test('a money-bearing terminal gets a MARKER-ONLY invalidation — status/archive/money preserved, public token dies (r26)', async () => {
     const existing = {
       id: 'est-1',
       estimate_data: JSON.stringify({ lead_id: 'lead-A', lead_linkage: 'stamp' }),
@@ -134,9 +134,20 @@ describe('reconcileExistingDraftLinks keys cleanup off the LOCKED row', () => {
       call: { id: 'call-1', metadata: {} },
     };
 
-    await _reconcileExistingDraftLinks(existing, context);
+    const outcome = await _reconcileExistingDraftLinks(existing, context);
 
-    expect(mockUpdates).toHaveLength(0);
+    expect(outcome).toBe('invalidated');
+    const estimateWrite = mockUpdates.find((u) => u.table === 'estimates');
+    // Marker lands; status, archive state, and money fields untouched.
+    expect(estimateWrite.row.archived_at).toBeUndefined();
+    expect(estimateWrite.row.status).toBeUndefined();
+    expect(estimateWrite.row.scheduled_at).toBeUndefined();
+    const written = JSON.parse(estimateWrite.row.estimate_data);
+    expect(written.estimatorEngine.linkage_invalidated_at).toBeTruthy();
+    expect(written.lead_id).toBeUndefined();
+    // Old lead unlinked (guarded).
+    const unlink = mockUpdates.find((u) => u.table === 'leads' && u.row.estimate_id === null);
+    expect(unlink.wheres).toContainEqual(['where', { id: 'lead-A', estimate_id: 'est-1' }]);
   });
 
   test('a FRESH delivery claim defers invalidation: durable PENDING marker, no archive, error outcome', async () => {
