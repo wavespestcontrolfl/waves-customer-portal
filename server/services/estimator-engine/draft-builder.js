@@ -714,8 +714,19 @@ function conflictingOpenEstimate(openEstimates, intentAddress) {
 async function writeGuardedLeadEstimateLink(context, estimateId) {
   let q = db('leads')
     .where({ id: context.lead.id })
-    .where(function unclaimedOrOurs() {
-      this.whereNull('estimate_id').orWhere('estimate_id', estimateId);
+    .where(function claimable() {
+      this.whereNull('estimate_id')
+        .orWhere('estimate_id', estimateId)
+        // An OLDER referenced estimate — the accepted/expired/declined
+        // history that never blocks drafting anew — YIELDS to this draft
+        // (codex P1, PR #3304 r6): refusing it stranded send/view/accept
+        // advancement on the stale pointer. Only a NEWER estimate keeps
+        // the slot.
+        .orWhereExists(function referencedIsOlder() {
+          this.select(db.raw('1')).from('estimates as ref')
+            .whereRaw('ref.id = leads.estimate_id')
+            .whereRaw('ref.created_at < (SELECT created_at FROM estimates WHERE id = ?)', [estimateId]);
+        });
     });
   if (context?.call?.id) {
     q = q.whereExists(function callStillLinked() {

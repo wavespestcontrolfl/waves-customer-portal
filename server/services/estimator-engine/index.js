@@ -152,8 +152,16 @@ async function reconcileExistingDraftLinks(existing, context) {
         // already gone. Zero rows = whole reconcile no-ops.
         if (currentLeadId) {
           const claimed = await trx('leads').where({ id: currentLeadId })
-            .where(function unclaimedOrOurs() {
-              this.whereNull('estimate_id').orWhere('estimate_id', existing.id);
+            .where(function claimable() {
+              this.whereNull('estimate_id')
+                .orWhere('estimate_id', existing.id)
+                // Older referenced estimates yield; only a NEWER one keeps
+                // the slot (codex P1, PR #3304 r6).
+                .orWhereExists(function referencedIsOlder() {
+                  this.select(db.raw('1')).from('estimates as ref')
+                    .whereRaw('ref.id = leads.estimate_id')
+                    .whereRaw('ref.created_at < (SELECT created_at FROM estimates WHERE id = ?)', [existing.id]);
+                });
             })
             .update({ estimate_id: existing.id });
           if (!claimed) return;

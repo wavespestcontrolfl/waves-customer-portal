@@ -11,7 +11,7 @@ let mockDestinationClaimFails = false;
 jest.mock('../models/db', () => {
   const makeBuilder = (table) => {
     const b = { _wheres: [] };
-    for (const m of ['where', 'whereNull', 'orWhere', 'forUpdate', 'orderBy', 'limit', 'select']) {
+    for (const m of ['where', 'whereNull', 'orWhere', 'orWhereExists', 'whereExists', 'whereRaw', 'from', 'forUpdate', 'orderBy', 'limit', 'select']) {
       b[m] = (...a) => {
         if (typeof a[0] === 'function') a[0].call(b);
         b._wheres.push([m, ...a]);
