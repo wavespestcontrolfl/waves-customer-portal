@@ -441,3 +441,17 @@ describe('client fallback mirrors the Tree & Shrub bed-area cap signals', () => 
     expect(meta.manualReviewReasons || []).not.toContain('bed_area_cap_reached');
   });
 });
+
+describe('client fallback flags an EXPLICIT oversized bed area too', () => {
+  test('a typed 14,000 sq ft area is priced in full and still marked for review', () => {
+    const result = calculateEstimate({
+      lotSqFt: 60000, homeSqFt: 2400, svcTs: true, bedArea: 14000,
+    });
+    const meta = result.pricingMetadata || {};
+    expect(meta.manualReviewReasons).toContain('bed_area_at_or_above_8000');
+    // Nothing was clamped, so it must not claim otherwise.
+    expect(meta.manualReviewReasons || []).not.toContain('bed_area_cap_reached');
+    const warning = (meta.warnings || []).find((w) => w.includes('14,000 sq ft'));
+    expect(warning).toContain('priced IN FULL');
+  });
+});
