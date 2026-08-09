@@ -286,15 +286,15 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     expect(result.sentChannels.sort()).toEqual(['email', 'sms']);
   });
 
-  test('a PENDING invalidation recorded during delivery is COMPLETED by the claim release', async () => {
-    // Stateful estimates row: updates land on currentRow so the release
-    // transaction reads what the verdict stamp and the (simulated)
-    // reconciler deferral actually wrote.
-    let currentRow = engineRow();
+  // Stateful estimates row: updates land on a live row object so later
+  // reads (pre-handoff re-check, claim release) see what the verdict stamp
+  // and the (simulated) reconciler deferral actually wrote.
+  function statefulMock() {
+    const state = { row: engineRow() };
     const estimateUpdates = [];
     const leadUpdates = [];
     db.mockImplementation((table) => {
-      const b = makeBuilder(currentRow);
+      const b = makeBuilder(state.row);
       if (table === 'call_log') {
         b.first = jest.fn(async () => ({
           twilio_call_sid: null,
@@ -308,30 +308,41 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
         b.update = jest.fn(async (r) => { leadUpdates.push(r); return 1; });
       }
       if (table === 'estimates') {
-        b.first = jest.fn(async () => ({ ...currentRow }));
+        b.first = jest.fn(async () => ({ ...state.row }));
         b.update = jest.fn(async (r) => {
           estimateUpdates.push(r);
-          // Plain JSON writes only — the finalize claim write patches
-          // estimate_data with a raw COALESCE expression this stateful
+          // Plain-value writes only — the finalize claim write patches
+          // estimate_data/status with raw SQL expressions this stateful
           // mock can't evaluate.
           if (typeof r.estimate_data === 'string' && r.estimate_data.trim().startsWith('{')) {
-            currentRow = { ...currentRow, estimate_data: r.estimate_data };
+            state.row = { ...state.row, estimate_data: r.estimate_data };
           }
-          if (r.status !== undefined) currentRow = { ...currentRow, status: r.status };
-          if (r.archived_at !== undefined) currentRow = { ...currentRow, archived_at: r.archived_at };
+          if (typeof r.status === 'string' && /^[a-z_]+$/.test(r.status)) {
+            state.row = { ...state.row, status: r.status };
+          }
+          if (r.archived_at !== undefined) state.row = { ...state.row, archived_at: r.archived_at };
           return 1;
         });
       }
       return b;
     });
+    return { state, estimateUpdates, leadUpdates };
+  }
+
+  function injectPendingMarker(state, extra = {}) {
+    const data = JSON.parse(state.row.estimate_data);
+    data.estimatorEngine.invalidation_pending_at = new Date().toISOString();
+    data.estimatorEngine.invalidation_pending_from = 'lead-A';
+    data.estimatorEngine.invalidation_pending_to = 'lead-C';
+    state.row = { ...state.row, estimate_data: JSON.stringify(data), ...extra };
+  }
+
+  test('a PENDING invalidation recorded during delivery is COMPLETED by the claim release', async () => {
+    const { state, estimateUpdates, leadUpdates } = statefulMock();
     // Mid-delivery, the reconciler defers behind the live claim by writing
     // the pending marker (claim keys preserved — it never touches them).
     sendCustomerMessage.mockImplementation(async () => {
-      const data = JSON.parse(currentRow.estimate_data);
-      data.estimatorEngine.invalidation_pending_at = new Date().toISOString();
-      data.estimatorEngine.invalidation_pending_from = 'lead-A';
-      data.estimatorEngine.invalidation_pending_to = 'lead-C';
-      currentRow = { ...currentRow, estimate_data: JSON.stringify(data) };
+      injectPendingMarker(state);
       return { sent: true };
     });
 
@@ -339,7 +350,7 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     expect(result.sent).toBe(true);
 
     // The release consumed the pending marker into the full invalidation.
-    const final = JSON.parse(currentRow.estimate_data);
+    const final = JSON.parse(state.row.estimate_data);
     expect(final.estimatorEngine.linkage_invalidated_at).toBeTruthy();
     expect(final.estimatorEngine.linkage_invalidated_from).toBe('lead-A');
     expect(final.estimatorEngine.linkage_invalidated_to).toBe('lead-C');
@@ -353,5 +364,48 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     expect(finalWrite.scheduled_at).toBeNull();
     // Old-lead unlink rode the same transaction.
     expect(leadUpdates).toContainEqual({ estimate_id: null });
+  });
+
+  test('a pending marker landing between verdict and handoff BLOCKS the provider call (PR #3304 r23)', async () => {
+    const { state } = statefulMock();
+    // The marker commits after the verdict transaction released its lock
+    // but before the SMS provider handoff — simulated inside template
+    // render, which runs between the two.
+    smsTemplates.getTemplate.mockImplementation(async (_key, vars) => {
+      injectPendingMarker(state);
+      return `SMS: ${vars.estimate_url}`;
+    });
+
+    const result = await router.sendEstimateNow(engineRow(), 'sms');
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(result.sent).toBe(false);
+    expect(result.channels.sms.ok).toBe(false);
+    expect(result.channels.sms.error).toBe('invalidated_before_delivery');
+  });
+
+  test('a terminal status reached before the release is preserved — pending marker retained, no archive (PR #3304 r23)', async () => {
+    const { state, estimateUpdates } = statefulMock();
+    // Deferral lands mid-delivery AND the customer accept races in before
+    // the release transaction runs (belt-and-suspenders: the public gates
+    // reject pending rows, but the release must still never rewrite a
+    // money-bearing terminal).
+    sendCustomerMessage.mockImplementation(async () => {
+      injectPendingMarker(state, { status: 'accepted' });
+      return { sent: true };
+    });
+
+    const result = await router.sendEstimateNow(engineRow(), 'sms');
+    expect(result.sent).toBe(true);
+
+    const final = JSON.parse(state.row.estimate_data);
+    // NOT invalidated — pending keys retained for operator review.
+    expect(final.estimatorEngine.linkage_invalidated_at).toBeUndefined();
+    expect(final.estimatorEngine.invalidation_pending_at).toBeTruthy();
+    expect(final.estimatorEngine.delivering_token).toBeUndefined();
+    expect(final.lead_id).toBe('lead-A');
+    const releaseWrite = estimateUpdates[estimateUpdates.length - 1];
+    expect(releaseWrite.archived_at).toBeUndefined();
+    expect(releaseWrite.status).toBeUndefined();
   });
 });

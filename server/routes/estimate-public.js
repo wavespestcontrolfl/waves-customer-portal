@@ -8014,7 +8014,8 @@ async function handleEstimateView(req, res, next) {
     // page below (the customer once legitimately held that link).
     if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
       || estimate.archived_at
-      || estimate.status === 'send_failed') {
+      || estimate.status === 'send_failed'
+      || estimateLinkageInvalidated(estimate)) {
       if (req.path.startsWith('/estimate/')) return next();
       return res.status(404).set('Content-Type', 'text/html').send(renderEstimateNotFoundPage());
     }
@@ -13806,6 +13807,10 @@ function adminDraftPreviewEligible(estimate, adminPreviewParam) {
 
 function isEstimateAcceptActive(estimate = {}, now = new Date()) {
   if (estimate.archived_at) return false;
+  // A pending or full linkage invalidation kills acceptance the moment the
+  // marker lands — accepting wrong-lead content creates the money-bearing
+  // terminal state the deferred-invalidation finalizer must then preserve.
+  if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined', 'expired', 'send_failed'].includes(estimate.status)) return false;
   // An unpublished estimate (draft / scheduled-but-not-yet-sent) must never be
   // acceptable through the public link. The legacy server-HTML page short-
@@ -13827,8 +13832,23 @@ function isEstimateAcceptActive(estimate = {}, now = new Date()) {
 // else (sending/sent/viewed) is gated only by a real, past expiry — a missing
 // expiry during the brief mid-send window does NOT 404. Admin previews bypass
 // this at the call site so staff can still review drafts.
+// Linkage-invalidation fail-closed (codex P0, PR #3304 r23): a full OR
+// pending invalidation marker means this row's composed content — name,
+// address, pricing — belongs to a lead the call no longer links to. The
+// public token dies the moment either marker lands: the PENDING marker is
+// checked precisely because it precedes the archive (the reconciler defers
+// the archive behind a live delivery claim), so a message that slips out
+// mid-correction, or a crashed claim cleanup, still leaves nothing servable.
+function estimateLinkageInvalidated(estimate = {}) {
+  const eng = parseEstimateDataSafe(estimate)?.estimatorEngine;
+  return !!(eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at));
+}
+
 function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
+  // Before the accepted/declined early-allow: acceptance does not change
+  // whose data the row was composed from — an invalidated row never renders.
+  if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return true;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (['expired', 'send_failed'].includes(estimate.status)) return false;
@@ -13851,6 +13871,7 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
 // archived rows are office-retired. Gate + rate limit live at the call sites.
 function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
+  if (estimateLinkageInvalidated(estimate)) return false;
   if (['accepted', 'declined'].includes(estimate.status)) return false;
   if (UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)) return false;
   if (!estimate.sent_at && !estimate.viewed_at) return false;
@@ -20018,7 +20039,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       : null;
     const docPinViewBypass = docRenderPin !== null
       && !estimate.archived_at
-      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status);
+      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
+      && !estimateLinkageInvalidated(estimate);
     if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass) {
       // Carries exactly one extra bit beyond the bare 404: this token maps to
       // a real, published estimate that died of expiry (never a draft), so the
@@ -20769,6 +20791,7 @@ module.exports.findLinkedUpcomingAppointment = findLinkedUpcomingAppointment;
 module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmentUpdateApplied;
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
+module.exports.estimateLinkageInvalidated = estimateLinkageInvalidated;
 module.exports.resolveEstimateDeclineGuard = resolveEstimateDeclineGuard;
 module.exports.isEstimateAskAnswerable = isEstimateAskAnswerable;
 module.exports.buildEstimateAskQueryLog = buildEstimateAskQueryLog;

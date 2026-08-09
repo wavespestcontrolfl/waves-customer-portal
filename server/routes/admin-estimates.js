@@ -951,6 +951,24 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
       delete eng.invalidation_pending_to;
       delete eng.invalidation_pending_conflict;
       if (pendingAt && !eng.linkage_invalidated_at) {
+        // A money-bearing terminal reached before this release (codex P0
+        // r23: an accept can race the pending marker through the closing
+        // public gate) is never rewritten — same exemption as the
+        // reconciler. The PENDING keys are RETAINED: the public routes
+        // and the send verdict fail closed on them, the reconciler
+        // exempts terminals anyway, and the marker documents that a due
+        // invalidation met a terminal row — an operator decision.
+        const releaseStatus = String(row.status || '').toLowerCase();
+        if (['accepted', 'declined', 'expired'].includes(releaseStatus)) {
+          eng.invalidation_pending_at = pendingAt;
+          if (pendingFrom) eng.invalidation_pending_from = pendingFrom;
+          if (pendingTo) eng.invalidation_pending_to = pendingTo;
+          if (pendingConflict) eng.invalidation_pending_conflict = pendingConflict;
+          await trx('estimates').where({ id: estimateId })
+            .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
+          logger.warn(`[admin-estimates] deferred invalidation of estimate ${estimateId} met terminal status '${releaseStatus}' — row preserved, pending marker retained for operator review`);
+          return;
+        }
         // Complete the deferred invalidation with the reconciler's own
         // shape — the delivery is over, so the mid-send status exemption
         // no longer applies (sent/failed rows invalidate; they resend
@@ -983,6 +1001,27 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
   } catch (e) {
     logger.warn(`[admin-estimates] delivery-claim clear failed for estimate ${estimateId}: ${e.message}`);
   }
+}
+
+// Last-instant marker re-check before each provider handoff (codex P0 r23):
+// the verdict lock released moments ago, and a pending invalidation can
+// commit in between. Nothing can make a provider call atomic with a DB
+// commit, but this shrinks the window to milliseconds — and the public
+// routes fail closed on the same markers (estimateLinkageInvalidated in
+// estimate-public.js), so a message that still slips out carries a link
+// that serves nothing. DB failure fails CLOSED (the leg is retryable);
+// unparseable estimate_data proceeds, matching the verdict read.
+async function estimateInvalidatedJustBeforeHandoff(estimateId) {
+  const row = await db('estimates').where({ id: estimateId }).first('archived_at', 'estimate_data');
+  if (!row) return true;
+  if (row.archived_at) return true;
+  let data;
+  try {
+    data = typeof row.estimate_data === 'string'
+      ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+  } catch { return false; }
+  const eng = data?.estimatorEngine;
+  return !!(eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at));
 }
 
 async function sendEstimateNow(estimate, sendMethod, options = {}) {
@@ -1196,6 +1235,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             entity_id: estimate.id,
           });
           if (!smsBody) throw new Error('SMS template estimate_sent is missing or inactive');
+          if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {
+            throw new Error('invalidated_before_delivery');
+          }
           const result = await sendCustomerMessage({
             to: normalized,
             body: smsBody,
@@ -1297,6 +1339,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             const fm = parseFloat(freshEstimate.monthly_total || 0);
             const fa = parseFloat(freshEstimate.annual_total || 0);
             freshPriceLine = fm > 0 ? `$${fm.toFixed(2)}/mo · $${fa.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr` : priceLine;
+          }
+          if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {
+            throw new Error('invalidated_before_delivery');
           }
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,

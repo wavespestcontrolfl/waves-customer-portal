@@ -42,6 +42,17 @@ describe('isEstimateCustomerViewable (React /:token/data security gate)', () => 
     expect(isEstimateCustomerViewable({ status: 'accepted', expires_at: PAST })).toBe(true);
     expect(isEstimateCustomerViewable({ status: 'declined', expires_at: PAST })).toBe(true);
   });
+
+  it('withholds linkage-invalidated rows — full AND pending markers, even accepted (PR #3304 r23)', () => {
+    const invalidated = JSON.stringify({ estimatorEngine: { linkage_invalidated_at: FUTURE } });
+    const pending = JSON.stringify({ estimatorEngine: { invalidation_pending_at: FUTURE } });
+    // The PENDING marker precedes the archive (the reconciler defers behind
+    // a live delivery claim) — the token must die on the marker alone.
+    expect(isEstimateCustomerViewable({ status: 'sent', expires_at: FUTURE, estimate_data: invalidated })).toBe(false);
+    expect(isEstimateCustomerViewable({ status: 'sent', expires_at: FUTURE, estimate_data: pending })).toBe(false);
+    // Acceptance doesn't change whose data the row was composed from.
+    expect(isEstimateCustomerViewable({ status: 'accepted', expires_at: FUTURE, estimate_data: pending })).toBe(false);
+  });
 });
 
 describe('isEstimateAcceptActive — unpublished/expiry hardening', () => {
@@ -54,6 +65,11 @@ describe('isEstimateAcceptActive — unpublished/expiry hardening', () => {
     expect(isEstimateAcceptActive({ status: 'sent', expires_at: PAST })).toBe(false);
     expect(isEstimateAcceptActive({ status: 'accepted', expires_at: FUTURE })).toBe(false);
     expect(isEstimateAcceptActive({ status: 'declined', expires_at: FUTURE })).toBe(false);
+  });
+
+  it('rejects linkage-invalidated rows — pending marker alone blocks acceptance (PR #3304 r23)', () => {
+    const pending = JSON.stringify({ estimatorEngine: { invalidation_pending_at: FUTURE } });
+    expect(isEstimateAcceptActive({ status: 'sent', expires_at: FUTURE, estimate_data: pending })).toBe(false);
   });
 
   it('accepts published estimates, incl. a mid-send row with no expiry yet', () => {
