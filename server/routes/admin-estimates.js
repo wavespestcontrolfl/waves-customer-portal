@@ -2345,6 +2345,24 @@ router.post('/:id/unarchive', async (req, res, next) => {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!estimate.archived_at) return res.json(estimate);  // idempotent
+    // A draft ARCHIVED by linkage invalidation is permanently
+    // non-revivable (codex P0, PR #3304): its composed content —
+    // recipient, address, pricing — belongs to the FORMER lead of a
+    // repointed/unlinked call, and unarchiving would restore public-token
+    // access and make the send claim succeed against the wrong customer.
+    // The engine already rebuilt a corrected draft; this one is history.
+    const invalidatedAt = (() => {
+      try {
+        const data = typeof estimate.estimate_data === 'string'
+          ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
+        return data?.estimatorEngine?.linkage_invalidated_at || null;
+      } catch { return null; }
+    })();
+    if (invalidatedAt) {
+      return res.status(409).json({
+        error: 'This draft was invalidated by a call-linkage correction — its content belongs to a different lead. A corrected draft was rebuilt; this one cannot be unarchived.',
+      });
+    }
     const [updated] = await db('estimates')
       .where({ id: req.params.id })
       .update({ archived_at: null, updated_at: db.fn.now() })
