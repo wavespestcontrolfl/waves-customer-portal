@@ -409,7 +409,7 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
       const lead = await trx('leads')
         .where({ id: leadId })
         .forUpdate()
-        .first('id', 'lead_source_id', 'service_interest', 'created_at', 'twilio_call_sid');
+        .first('id', 'customer_id', 'lead_source_id', 'service_interest', 'created_at', 'twilio_call_sid');
       if (!lead?.lead_source_id) return { recorded: false, reason: 'no_lead_source' };
       const sourceRow = await trx('lead_sources').where({ id: lead.lead_source_id }).first();
       if (!sourceRow) return { recorded: false, reason: 'source_not_found' };
@@ -429,7 +429,12 @@ async function backfillCallLeadAttribution({ leadId, customerId, serviceInterest
       const prov = await resolveSourceCallProvenanceLocked(trx, { leadId, twilioCallSid: lead.twilio_call_sid });
       if (prov.refusedReason) return { recorded: false, reason: prov.refusedReason };
       return recordCallPpcAttribution({
-        customerId,
+        // The LOCKED lead's owner, not the caller snapshot (GH-audit P1):
+        // both attach paths write leads.customer_id BEFORE calling this
+        // backfill, so a mismatch means the lead was reassigned while we
+        // waited for the lock — the funnel row must pair with the live
+        // owner (a NULL owner refuses inside recordCallPpcAttribution).
+        customerId: lead.customer_id || null,
         leadId,
         leadSource: attr.leadSource,
         isPaid: attr.isPaid,

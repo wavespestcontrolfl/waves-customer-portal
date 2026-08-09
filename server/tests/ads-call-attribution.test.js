@@ -438,6 +438,7 @@ describe("call provenance protects another call's row (PR #3303)", () => {
 describe('backfillCallLeadAttribution — provenance resolved and written under ONE lock (PR #3303 r5)', () => {
   const LEAD = {
     id: 'lead-1',
+    customer_id: 'cust-1',
     lead_source_id: 'src-1',
     service_interest: 'pest control',
     created_at: '2026-08-01T12:00:00.000Z',
@@ -511,6 +512,7 @@ describe('backfillCallLeadAttribution — provenance resolved and written under 
 describe('resolveSourceCallProvenanceLocked — settled dissenting stamp (GH P1 r6)', () => {
   const LEAD2 = {
     id: 'lead-old',
+    customer_id: 'cust-1',
     lead_source_id: 'src-1',
     service_interest: 'pest control',
     created_at: '2026-08-01T12:00:00.000Z',
