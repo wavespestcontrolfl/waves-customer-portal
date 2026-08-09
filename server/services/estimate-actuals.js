@@ -126,7 +126,13 @@ function extractTreeShrubEstimate(estimateData) {
       const extracted = {
         bedSqFt: positiveNumber(quote.bedAreaUsed ?? quote.bedArea),
         bedAreaSource,
-        bedAreaEstimated: bedAreaSource ? bedAreaSource !== 'explicit' : null,
+        // Same semantics as v1-legacy-mapper's bedAreaIsEstimated (:523):
+        // true only for the engine-inferred sources. An operator-entered
+        // 'estimated' is FALSE there — deriving it as true here would put
+        // identical inputs in different cohorts by creation path.
+        bedAreaEstimated: bedAreaSource
+          ? (bedAreaSource === 'lot_based' || bedAreaSource === 'fallback')
+          : null,
         treeCount: nonnegativeCount(quote.treeCount),
         access: normalizedEnum(quote.access),
         tier: normalizedEnum(quote.tier),

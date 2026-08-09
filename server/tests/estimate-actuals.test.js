@@ -237,6 +237,16 @@ describe('extractTreeShrubEstimate', () => {
     expect(extracted.bedAreaEstimated).toBe(false);
   });
 
+  it('bedAreaEstimated matches the legacy mapper cohorts: operator-entered "estimated" is FALSE, engine-inferred sources are TRUE (pre-push P1 r3)', () => {
+    const withSource = (bedAreaSource) => extractTreeShrubEstimate({
+      engineResult: { lineItems: [{ service: 'tree_shrub', bedArea: 1500, bedAreaSource, treeCount: 1 }] },
+    }).bedAreaEstimated;
+    expect(withSource('explicit')).toBe(false);
+    expect(withSource('estimated')).toBe(false); // v1-legacy-mapper.js:523 semantics
+    expect(withSource('lot_based')).toBe(true);
+    expect(withSource('fallback')).toBe(true);
+  });
+
   it('falls back to the lossy admin mapping — the collapsed boolean is kept, the enum is NOT invented from it', () => {
     expect(extractTreeShrubEstimate({
       result: {
