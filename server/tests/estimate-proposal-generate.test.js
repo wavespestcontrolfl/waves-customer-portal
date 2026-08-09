@@ -536,6 +536,25 @@ describe('deriveProposalDraft', () => {
     expect(palm.warnings[0]).toMatch(/Palm Injection/);
   });
 
+  test('r6: raw one-time clones collapse across containers; rodent-bait supplement never omitted', async () => {
+    const sharedRow = { service: 'bed_bug', name: 'Bed Bug Treatment', price: 500 };
+    const clones = await deriveProposalDraft({
+      estimate_data: {
+        result: { lineItems: [{ ...sharedRow }] },
+        engineResult: { lineItems: [{ ...sharedRow }] },
+      },
+    });
+    expect(clones.correctiveWork).toHaveLength(1);
+
+    const rodent = await deriveProposalDraft({
+      estimate_data: {
+        result: { recurring: { services: [{ service: 'pest_control', name: 'Pest', visitsPerYear: 4, annualAfterDiscount: 468 }], rodentBaitMo: 45 } },
+      },
+    });
+    expect(rodent.programs).toBeNull();
+    expect(rodent.warnings[0]).toMatch(/rodent/i);
+  });
+
   test('returns null sections for an estimate with nothing to derive', async () => {
     const draft = await deriveProposalDraft({ estimate_data: {} });
     expect(draft).toEqual({ propertyScope: null, programs: null, correctiveWork: null, customerResponsibilities: null, suggestedTaxRate: null, warnings: [] });

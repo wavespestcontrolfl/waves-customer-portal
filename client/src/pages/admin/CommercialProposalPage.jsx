@@ -1005,7 +1005,22 @@ export default function CommercialProposalPage() {
                     <Input
                       size="sm" className="w-20 shrink-0" type="number" min="1" max="52" step="1" title="Visits per year"
                       value={p.frequencyPerYear} disabled={!!locked}
-                      onChange={(e) => { markEdit(); setProgramsState((prev) => prev.map((it, i) => (i === idx ? { ...it, frequencyPerYear: e.target.value } : it))); }}
+                      onChange={(e) => {
+                        markEdit();
+                        const nextFreq = e.target.value;
+                        setProgramsState((prev) => prev.map((it, i) => {
+                          if (i !== idx) return it;
+                          // Keep the generated cadence bullet in sync — a
+                          // stale "4 scheduled service visits per year" line
+                          // beside a changed frequency is a wrong promise
+                          // (codex 1A-ii r6).
+                          const n = Math.round(Number(nextFreq));
+                          const synced = Number.isFinite(n) && n >= 1
+                            ? it.inclusionsText.replace(/^\d+ scheduled service visits? per year$/m, `${n} scheduled service visit${n === 1 ? '' : 's'} per year`)
+                            : it.inclusionsText;
+                          return { ...it, frequencyPerYear: nextFreq, inclusionsText: synced };
+                        }));
+                      }}
                     />
                     <Input
                       size="sm" className="w-28 shrink-0" type="number" min="0" step="0.01" title="Price per application"

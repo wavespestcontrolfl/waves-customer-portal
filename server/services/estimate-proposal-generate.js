@@ -283,7 +283,17 @@ function derivePrograms(estimateData, estimate = {}) {
     && !canonicalKeys.has('palm_injection')
     ? [{ service: 'palm_injection', name: 'Palm Injection', annualAfterDiscount: palmAnn || undefined, mo: palmMo || undefined }]
     : [];
-  const rows = [...canonicalRows, ...extraLineItemRows, ...palmRows];
+  // Same mapped-supplement rule for residential rodent bait
+  // (result.recurring.rodentBaitMo — monthly-billed, so the rodent
+  // ambiguity guard fails the draft with direction rather than omitting
+  // it — codex 1A-ii r6).
+  const rodentMo = num(engineResult.recurring?.rodentBaitMo);
+  const rodentAnn = num(engineResult.recurring?.rodentBaitAnn);
+  const rodentRows = (rodentMo > 0 || rodentAnn > 0)
+    && !canonicalKeys.has('rodent_bait')
+    ? [{ service: 'rodent_bait', name: 'Rodent Bait Service', annualAfterDiscount: rodentAnn || undefined, mo: rodentMo || undefined }]
+    : [];
+  const rows = [...canonicalRows, ...extraLineItemRows, ...palmRows, ...rodentRows];
   const programs = [];
   const unrepresentable = [];
   const fail = (reason) => ({
@@ -472,14 +482,34 @@ function deriveCorrectiveWork(estimateData, estimate = {}) {
   // legacy oneTimePrice alias (codex 1A-ii r3).
   // BOTH raw containers contribute (a truthy ancillary result must not
   // hide engineResult.lineItems), object-deduped (codex 1A-ii r4).
-  const rawSeen = new Set();
-  const lineItemsRows = [
-    ...(Array.isArray(engineResult.lineItems) ? engineResult.lineItems : []),
-    ...(estimateData.engineResult && estimateData.engineResult !== engineResult
-      && Array.isArray(estimateData.engineResult.lineItems) ? estimateData.engineResult.lineItems : []),
-  ].filter((line) => {
-    if (rawSeen.has(line)) return false;
-    rawSeen.add(line);
+  const rawContainers = [
+    Array.isArray(engineResult.lineItems) ? engineResult.lineItems : [],
+    estimateData.engineResult && estimateData.engineResult !== engineResult
+      && Array.isArray(estimateData.engineResult.lineItems) ? estimateData.engineResult.lineItems : [],
+  ];
+  // Clones of the same row across the two containers are mirrors, not
+  // extra charges — collapse by content identity with the max-per-container
+  // rule that preserves legitimate in-container repeats (codex 1A-ii r6).
+  const rawIdentity = (line) => [
+    String(line.service || line.name || '').toLowerCase(),
+    String(line.price ?? ''), String(line.oneTimePrice ?? ''), String(line.total ?? ''),
+    String(line.installation?.price ?? ''), String(line.manualFinalOneTime ?? ''),
+  ].join('|');
+  const rawMax = new Map();
+  for (const container of rawContainers) {
+    const counts = new Map();
+    for (const line of container) counts.set(rawIdentity(line), (counts.get(rawIdentity(line)) || 0) + 1);
+    for (const [key, count] of counts) rawMax.set(key, Math.max(rawMax.get(key) || 0, count));
+  }
+  const rawObjSeen = new Set();
+  const rawEmitted = new Map();
+  const lineItemsRows = rawContainers.flat().filter((line) => {
+    if (rawObjSeen.has(line)) return false;
+    rawObjSeen.add(line);
+    const key = rawIdentity(line);
+    const already = rawEmitted.get(key) || 0;
+    if (already >= (rawMax.get(key) || 0)) return false;
+    rawEmitted.set(key, already + 1);
     return true;
   });
   const gated = [];
