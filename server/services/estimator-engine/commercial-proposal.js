@@ -421,6 +421,13 @@ async function maybeBuildCommercialProposalDraft({
         // and held through the insert, so the processor's stamp writers
         // either commit first (seen here) or wait and their own reconcile
         // invalidates what lands.
+        {
+          // A REJECTED call never receives a new scaffold either (codex
+          // P0, PR #3304 GH r8e).
+          const { callRejectedForDrafting } = require('../admin-estimate-persistence');
+          const rejected = await callRejectedForDrafting(trx, call.id, { lockCallRow: true });
+          if (rejected) return { staleLinkage: rejected };
+        }
         if (context?.lead?.id && ['sid', 'stamp'].includes(context?.leadLinkage)) {
           const { staleCallLinkageReason } = require('../admin-estimate-persistence');
           const staleReason = await staleCallLinkageReason(trx, {

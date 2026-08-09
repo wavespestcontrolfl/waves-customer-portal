@@ -763,10 +763,17 @@ async function sweepPendingQuarantines({ limit = 50 } = {}) {
     if (!outcome.ok) continue;
     try {
        
-      await db('call_log').where({ id: row.id }).update({
-        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'estimator_quarantine_pending'"),
-        updated_at: new Date(),
-      });
+      // CAS on the EXACT marker processed (codex P0, PR #3304 GH r8e): a
+      // peer can replace it between the scan and here, and clearing the
+      // newer request would drop the only durable backstop for a
+      // concurrently created wrong-identity or rejected-call draft.
+      const clearedRows = await db('call_log').where({ id: row.id })
+        .whereRaw("metadata->'estimator_quarantine_pending'->>'at' = ?", [String(pending.at || '')])
+        .update({
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'estimator_quarantine_pending'"),
+          updated_at: new Date(),
+        });
+      if (!clearedRows) continue;
       cleared += 1;
       logger.info(`[estimator-engine] drained a queued quarantine for call ${row.id} (${pending.reason})`);
     } catch (clearErr) {

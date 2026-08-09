@@ -263,6 +263,32 @@ function callReprocessInFlight(callRow, nowMs = Date.now()) {
 // estimates→(leads/call_log) order the reconciler uses. Returns null when
 // the linkage stands (or the row carries no durable linkage), else the
 // abort reason.
+// A call whose pipeline verdict REJECTED it (spam / non-workable
+// voicemail / the durable no-attribution marker) must not receive a new
+// draft (codex P0, PR #3304 GH r8e): the terminal path invalidates the
+// drafts that exist, but a detached composer can still be running and
+// would insert AFTER terminalization — and the linkage check alone permits
+// that, because a settled rejection is "not running" and the sid linkage
+// is unchanged. Creators call this inside their serialized insert with the
+// call row LOCKED, so a rejection either committed first (seen here) or
+// waits and its own invalidation pass catches what landed.
+async function callRejectedForDrafting(dbc, callLogId, { lockCallRow = false } = {}) {
+  if (!callLogId) return null;
+  const q = dbc('call_log').where({ id: callLogId });
+  if (lockCallRow) q.forUpdate();
+  const row = await q.first('processing_status', 'metadata');
+  // A missing row is not a REJECTION verdict — absence is handled by the
+  // linkage fence, which fails closed on it for durably linked drafts.
+  if (!row) return null;
+  const status = String(row.processing_status || '').toLowerCase();
+  if (['spam', 'voicemail'].includes(status)) return `call_rejected_${status}`;
+  try {
+    const md = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    if (md?.no_attribution === true) return 'call_rejected_no_attribution';
+  } catch { /* unparseable metadata: not a rejection signal */ }
+  return null;
+}
+
 async function staleCallLinkageReason(dbc, data, { lockCallRow = false } = {}) {
   const linkedLeadId = data?.lead_id ? String(data.lead_id) : null;
   const draftCallLogId = data?.estimatorEngine?.callLogId || null;
@@ -2167,6 +2193,7 @@ module.exports = {
   DELIVERY_CLAIM_NOT_LIVE_SQL,
   deliveryClaimFresh,
   staleCallLinkageReason,
+  callRejectedForDrafting,
   completePendingInvalidation,
   takePendingInvalidation,
   sweepWedgedPendingInvalidations,

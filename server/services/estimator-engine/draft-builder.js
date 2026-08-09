@@ -870,6 +870,24 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
       // later pass to catch it (the reconcile-only entry runs once per
       // call pass). Aborting the stale insert is the atomic half of that
       // race; the corrected retry composes the replacement.
+      // A REJECTED call never receives a new draft (codex P0, PR #3304 GH
+      // r8e) — checked for EVERY call-origin insert, not just durably
+      // linked ones: the terminal spam/voicemail path invalidates existing
+      // drafts, but a detached composer would otherwise insert after
+      // terminalization and keep a live public token on a rejected call.
+      {
+        const { callRejectedForDrafting } = require('../admin-estimate-persistence');
+        const rejected = await callRejectedForDrafting(trx, call.id, { lockCallRow: true });
+        if (rejected) {
+          return {
+            duplicateBlock: {
+              blocked: true,
+              reason: 'call_rejected',
+              message: `This call was rejected by the pipeline (${rejected}) — no draft is created.`,
+            },
+          };
+        }
+      }
       if (context?.lead?.id && ['sid', 'stamp'].includes(context?.leadLinkage)) {
         const { staleCallLinkageReason } = require('../admin-estimate-persistence');
         // LOCK the call row and HOLD it through the INSERT (codex P1, PR
