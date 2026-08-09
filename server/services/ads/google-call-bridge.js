@@ -1035,10 +1035,15 @@ async function applyBridge(options = {}) {
         // A retry triggered by a CLEARED joined stamp must not re-resolve
         // by plan — the deliberate clear would be rewritten as a plan
         // match and the cleared-link reconciliation below would never run
-        // (codex P1, PR #3303 r2). Repoints (joined lead present) and
-        // plain unmatched retries keep the plan fallback.
-        const clearedJoinedTrigger = !!recordedLeadId
-          && !match.callLog.leadId
+        // (codex P1, PR #3303 r2). Covers BOTH a live recorded joined
+        // match whose join vanished this scan AND the persisted clear
+        // TOMBSTONE from a prior scan (leadId null, strategy retained —
+        // pre-push P1 r7): without the tombstone arm, a cleared call
+        // retried as never-attributed and plan matching could reselect
+        // the former lead, recreating the attribution the clear retired.
+        // Repoints (joined lead present) and plain unmatched retries keep
+        // the plan fallback.
+        const clearedJoinedTrigger = !match.callLog.leadId
           && match.callLog.googleAdsLeadMatchedStrategy === 'joined_lead';
         const attribution = await db.transaction(async (trx) => {
           const res = await attributeResolvedLead(match.callLog, bridgeSource, now, trx, { noPlanFallback: clearedJoinedTrigger });
@@ -1062,7 +1067,14 @@ async function applyBridge(options = {}) {
               await trx('call_log')
                 .where({ id: match.callLog.id })
                 .update({
-                  metadata: bridgeMetadataPatch({ leadMatch: null, leadAttributedAt: null }),
+                  // TOMBSTONE, not erasure (pre-push P1 r7): leadId null
+                  // keeps googleAdsLeadMatched false so a future re-link
+                  // can still attribute cleanly, while the retained
+                  // joined_lead strategy keeps every retry of this call
+                  // on noPlanFallback — erasing the match entirely let
+                  // plan matching reselect the former lead and recreate
+                  // the attribution this branch just retired.
+                  metadata: bridgeMetadataPatch({ leadMatch: { leadId: null, strategy: 'joined_lead' }, leadAttributedAt: null }),
                   updated_at: now,
                 });
               return { match: null, cleared: true };

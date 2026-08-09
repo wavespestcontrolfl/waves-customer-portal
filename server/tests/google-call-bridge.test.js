@@ -375,3 +375,21 @@ describe('dedupeCrmCallRows — settled-stamp dissent (PR #3303 r5)', () => {
     expect(deduped[0].lead_id).toBe('lead-sid');
   });
 });
+
+describe('cleared-joined tombstone (pre-push P1 r7)', () => {
+  test('a clear tombstone (leadId null, strategy retained) still enters the retry lane', () => {
+    // googleAdsLeadMatched is false on the tombstone, so the call retries —
+    // a future re-link attributes cleanly; the retained joined_lead
+    // strategy keeps that retry on noPlanFallback so plan matching can
+    // never reselect the former lead.
+    const tombstoned = {
+      id: 'call-1',
+      noAttribution: false,
+      googleAdsLeadMatched: false,
+      googleAdsLeadMatchedLeadId: null,
+      googleAdsLeadMatchedStrategy: 'joined_lead',
+      leadId: null,
+    };
+    expect(shouldRetryLeadAttribution({ status: 'already_bridged', callLog: tombstoned })).toBe(true);
+  });
+});
