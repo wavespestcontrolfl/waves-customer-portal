@@ -462,19 +462,27 @@ exports.down = async function down(knex) {
     if (await knex.schema.hasTable('service_records')) {
       refs += (await knex('service_records').where({ service_id: entry.id }).pluck('service_id')).length;
     }
-    // Name-only references count too (codex r3 P1): name-only scheduling
-    // is explicitly supported by this change — an unlinked visit or
-    // scheduled add-on carrying the exact catalog name resolves its typed
-    // profile through the name fallback, and deleting the row would
-    // demote it to generic. Same text-reference principle as
-    // service-library getServiceReferences.
+    // Name-only references count too (codex r3 P1 + r4 P1): name-only
+    // scheduling is explicitly supported by this change, and the check
+    // must mirror EVERY alias lookupServiceForScheduledService resolves —
+    // the exact name, the name with a trailing ' Service' (the resolver
+    // strips that suffix from visit labels), and the short_name. A visit
+    // that resolves to this profile today must prevent deletion. Same
+    // text-reference principle as service-library getServiceReferences.
     const row = await knex('services').where({ id: entry.id }).first();
-    if (row && row.name) {
-      if (await knex.schema.hasTable('scheduled_services')) {
-        refs += (await knex('scheduled_services').whereRaw('lower(service_type) = lower(?)', [row.name]).pluck('id')).length;
-      }
-      if (await knex.schema.hasTable('scheduled_service_addons')) {
-        refs += (await knex('scheduled_service_addons').whereRaw('lower(service_name) = lower(?)', [row.name]).pluck('id')).length;
+    if (row) {
+      const aliases = [...new Set([
+        row.name,
+        row.name ? `${row.name} Service` : null,
+        row.short_name,
+      ].filter(Boolean))];
+      for (const alias of aliases) {
+        if (await knex.schema.hasTable('scheduled_services')) {
+          refs += (await knex('scheduled_services').whereRaw('lower(service_type) = lower(?)', [alias]).pluck('id')).length;
+        }
+        if (await knex.schema.hasTable('scheduled_service_addons')) {
+          refs += (await knex('scheduled_service_addons').whereRaw('lower(service_name) = lower(?)', [alias]).pluck('id')).length;
+        }
       }
     }
     if (refs > 0) {
@@ -495,14 +503,19 @@ exports.down = async function down(knex) {
   if (state.profiles.length > 0 && (await knex.schema.hasTable('service_completion_profiles'))) {
     for (const key of state.profiles) {
       if (retainedKeys.has(key)) continue;
-      // A same-key services row that is NOT being removed (admin deleted
-      // ours and recreated it — different UUID) still relies on this
-      // profile: the marker alone is not proof the profile is orphaned
-      // (codex P1). Only delete when the surviving row IS ours-to-remove
-      // or no row exists.
+      // Two different "surviving same-key row" cases (codex r3 P1 vs r4
+      // P2), distinguished by whether up() created the service:
+      //  - key ∈ state.services → we inserted the row; a surviving row
+      //    with a DIFFERENT id is an admin delete-and-recreate that
+      //    inherited our profile — retain it (r3).
+      //  - key ∉ state.services → the row PREDATED the migration and
+      //    up() only HEALED its missing profile; removing that profile
+      //    restores the exact pre-migration fallback — proceed to the
+      //    marker-gated delete (r4).
       const currentService = await knex('services').where({ service_key: key }).first();
-      if (currentService && !removableIds.includes(currentService.id)) {
-        console.warn(`[estimate-gap-catalog] down: profile ${key} serves a surviving service row (${currentService.id}) — leaving untouched`);
+      const weInsertedTheService = state.services.some((entry) => entry && entry.key === key);
+      if (currentService && !removableIds.includes(currentService.id) && weInsertedTheService) {
+        console.warn(`[estimate-gap-catalog] down: profile ${key} serves an admin-recreated service row (${currentService.id}) — leaving untouched`);
         continue;
       }
       const profile = await knex('service_completion_profiles').where({ service_key: key }).first();

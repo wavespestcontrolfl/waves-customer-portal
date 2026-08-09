@@ -191,6 +191,41 @@ describe('20260808080000 estimate-gap catalog rows', () => {
     expect(db.services).toHaveLength(2);
   });
 
+  test('down() retention covers every resolver alias — short_name and trailing-Service labels too', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    // A visit under the SHORT name and one under the name + ' Service'
+    // suffix both resolve through lookupServiceForScheduledService today
+    // (codex r4 P1) — each must prevent deletion.
+    db.scheduled_services.push({ id: 'v1', service_id: null, service_type: 'Bora-Care' });
+    db.scheduled_service_addons.push({ id: 'ssa-1', service_id: null, service_name: 'Lawn Plugging Service' });
+
+    await migration.down(fakeKnex(db));
+
+    expect(svcRow(db, 'bora_care')).toMatchObject({ is_active: false });
+    expect(svcRow(db, 'plugging')).toMatchObject({ is_active: false });
+    expect(profileRow(db, 'bora_care')).toMatchObject({ active: true });
+    expect(profileRow(db, 'plugging')).toMatchObject({ active: true });
+    expect(db.services).toHaveLength(2);
+  });
+
+  test('down() removes a HEALED profile from a pre-existing service — restoring the pre-migration fallback', async () => {
+    const db = emptyDb();
+    // The service predated the migration (admin-created, active, no
+    // profile); up() only healed the missing profile (codex r4 P2).
+    db.services.push({ id: 'admin-bora-preexisting', service_key: 'bora_care', name: 'Adam Bora', is_active: true });
+    await migration.up(fakeKnex(db));
+    expect(profileRow(db, 'bora_care')).toBeDefined();
+
+    await migration.down(fakeKnex(db));
+
+    // The pre-existing row survives untouched (still active — it was
+    // never ours), and the healed profile is gone: pre-migration state.
+    expect(svcRow(db, 'bora_care')).toMatchObject({ id: 'admin-bora-preexisting', is_active: true });
+    expect(profileRow(db, 'bora_care')).toBeUndefined();
+    expect(stateValue(db)).toBeUndefined();
+  });
+
   test('every catalog name classifies into its own family — including the tokenless bird box (new rodent tokens)', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));
