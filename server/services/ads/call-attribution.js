@@ -564,17 +564,29 @@ async function attributeUnclaimedBridgeLeads({ olderThanDays = 7, limit = 200 } 
       // conservative); a candidate whose locked verdict refuses skips
       // this pass and waits for the next run.
       res = await db.transaction(async (trx) => {
-        await trx('leads').where({ id: lead.id }).forUpdate().first('id');
-        const prov = await resolveSourceCallProvenanceLocked(trx, { leadId: lead.id, twilioCallSid: lead.twilio_call_sid });
+        // EVERY attribution field re-read under the lock (pre-push P1
+        // r10): the selection snapshot can go stale while waiting — a
+        // reassigned customer or changed source must not pair a funnel
+        // row with the wrong owner or channel. Channel re-derived from
+        // the LOCKED row; a source that left the bridge set skips.
+        const locked = await trx('leads')
+          .where({ id: lead.id })
+          .forUpdate()
+          .first('id', 'customer_id', 'lead_source_id', 'service_interest', 'first_contact_at', 'created_at', 'twilio_call_sid');
+        if (!locked) return { recorded: false, reason: 'lead_gone' };
+        const lockedSource = sourceById.get(locked.lead_source_id);
+        const lockedChannel = attributionForSourceType(lockedSource?.source_type);
+        if (!lockedChannel) return { recorded: false, reason: 'no_channel' };
+        const prov = await resolveSourceCallProvenanceLocked(trx, { leadId: locked.id, twilioCallSid: locked.twilio_call_sid });
         if (prov.refusedReason) return { recorded: false, reason: prov.refusedReason };
         return recordCallPpcAttribution({
-          customerId: lead.customer_id,
-          leadId: lead.id,
-          leadSource: channel.leadSource,
-          leadSourceDetail: source.name || null,
-          leadDate: lead.first_contact_at || lead.created_at, // date by the call, not this run
-          serviceInterest: lead.service_interest || null,
-          isPaid: channel.isPaid, // main_site → false: unclaimed ⇒ organic
+          customerId: locked.customer_id,
+          leadId: locked.id,
+          leadSource: lockedChannel.leadSource,
+          leadSourceDetail: lockedSource.name || null,
+          leadDate: locked.first_contact_at || locked.created_at, // date by the call, not this run
+          serviceInterest: locked.service_interest || null,
+          isPaid: lockedChannel.isPaid, // main_site → false: unclaimed ⇒ organic
           sourceCallId: prov.sourceCallId,
           dbc: trx,
         });

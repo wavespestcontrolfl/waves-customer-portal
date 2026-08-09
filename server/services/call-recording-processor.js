@@ -8085,7 +8085,7 @@ const CallRecordingProcessor = {
                   .forUpdate()
                   .first('id');
                 if (!owned) return;
-                await require('./ads/call-attribution').recordCallPpcAttribution({
+                const attrRes = await require('./ads/call-attribution').recordCallPpcAttribution({
                 customerId,
                 leadId,
                 leadSource: callAttr.leadSource, // funnel channel key (paid or organic)
@@ -8110,6 +8110,16 @@ const CallRecordingProcessor = {
                 sourceCallId: call.id || null,
                 dbc: trx,
                 });
+                // recordCallPpcAttribution catches its own SQL errors and
+                // returns reason 'error' — but a failed statement has
+                // ABORTED this transaction, so resolving normally would
+                // let PostgreSQL roll it back silently while the call
+                // finalizes without attribution (pre-push P1 r10, same
+                // rule as google-call-bridge). Throw so the catch below
+                // logs it as the real failure it is.
+                if (attrRes?.reason === 'error') {
+                  throw new Error(attrRes.error || 'attribution_write_failed');
+                }
               }).catch((txnErr) => {
                 // Never silent (pre-push P1 r8): dedicated/organic calls
                 // have no bridge scan to re-heal a dropped attribution —
