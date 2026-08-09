@@ -80,7 +80,13 @@ function treeShrubQuoteInput(v1Result = {}, tsLI = {}) {
       // undefined so priceTreeShrub can run its treeDensity fallback instead
       // of pricing the per-tree material term as zero trees.
       treeCount: tsLI.treeCount ?? property.features?.treeCount ?? property.treeCount,
+      // v4.7: the palm count the selected-tier quote priced must reach the
+      // alternate-tier rows too — those rows drive displayed, accepted, and
+      // billed cadence changes, so a zero-palm recalculation would quote a
+      // different job than the one selected.
+      palmCount: tsLI.palmCount ?? property.features?.palmCount ?? property.palmCount,
     },
+    palmCount: tsLI.palmCount ?? property.palmCount ?? property.palmInventory?.palmCount,
   };
 }
 
@@ -89,6 +95,10 @@ function roundedTreeShrubTierQuote(v1Result = {}, tsLI = {}, tier = 'standard') 
     tier,
     access: tsLI.access || 'easy',
     treeCount: tsLI.treeCount,
+    // Preserve the service-line palm source: palmCountSource decides
+    // whether palms fold into the legacy tree terms, so passing them as a
+    // property-level value instead would silently reprice the row.
+    palmCount: tsLI.palmCountSource === 'service_line' ? tsLI.palmCount : undefined,
   });
   const annual = Math.round(quote.annual);
   const monthly = roundMoney(annual / 12);

@@ -2707,14 +2707,19 @@ function priceTreeShrub(property, options = {}) {
   //    shape (property palmCount + treeDensity) must not ALSO bill those
   //    plants as inferred trees (P0 r9/r10).
   // A caller-stated non-palm treeCount is real signal and always survives.
-  const palmsAffectPricing = foldablePalmCount > 0 || (palmReserveActive && palmCount > 0);
-  const baseTreeCount = palmsAffectPricing && treeCountSource === 'density_estimate'
-    ? 0
-    : treeCount;
+  // The suppression is PER LEG (P0 r11): with only the material knob armed,
+  // labor palms still ride the legacy minutes, so the labor leg must keep
+  // its inferred trees — suppressing both legs off either knob deleted the
+  // unarmed leg's cost, the same class of bug as r7.
+  const inferredTrees = treeCountSource === 'density_estimate';
+  const suppressFor = (legArmed) => inferredTrees
+    && (foldablePalmCount > 0 || (legArmed && palmCount > 0));
+  const materialBaseTreeCount = suppressFor(palmMaterialArmed) ? 0 : treeCount;
+  const laborBaseTreeCount = suppressFor(palmLaborArmed) ? 0 : treeCount;
   // Per-leg counts: palms ride the legacy per-tree term only where their
   // replacement is still unarmed.
-  const materialTreeCount = baseTreeCount + (palmMaterialArmed ? 0 : foldablePalmCount);
-  const laborTreeCount = baseTreeCount + (palmLaborArmed ? 0 : foldablePalmCount);
+  const materialTreeCount = materialBaseTreeCount + (palmMaterialArmed ? 0 : foldablePalmCount);
+  const laborTreeCount = laborBaseTreeCount + (palmLaborArmed ? 0 : foldablePalmCount);
   const palmMinutesPerVisit = Math.round((palmLaborArmed ? palmCount : 0) * (palmReserve.minutesPerPalmVisit ?? 0));
 
   const accessMin = TREE_SHRUB.accessMinutes[access] || 0;
@@ -2788,9 +2793,10 @@ function priceTreeShrub(property, options = {}) {
   // reached T&S pricing, so counting them would change neutral behavior).
   // Armed: property palms drive real material/labor too, so a property with
   // 20 known palms must trip the gate rather than auto-price a big job.
-  // Same de-duplicated base: an inferred count suppressed by stated palms
-  // must not be counted twice here either.
-  const gatePlantCount = baseTreeCount + (palmReserveActive ? palmCount : foldablePalmCount);
+  // Same de-duplicated base, taking the LARGER leg count so a half-armed
+  // config errs toward review rather than away from it.
+  const gatePlantCount = Math.max(materialBaseTreeCount, laborBaseTreeCount)
+    + (palmReserveActive ? palmCount : foldablePalmCount);
   if (gatePlantCount >= 15) {
     manualReviewReasonsSet.add('tree_count_at_or_above_15');
     warnings.push('High tree count; manual review recommended.');

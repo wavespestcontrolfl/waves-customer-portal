@@ -1185,3 +1185,56 @@ describe('Tree & Shrub v4.7 commercial + draft-review interactions', () => {
     expect(lineRequiresReview({ service: 'tree_shrub', treeCountSource: 'default_zero', palmCount: 0, annual: 400 })).toBe(true);
   });
 });
+
+describe('Tree & Shrub v4.7 leg independence for inferred trees + tier-row parity', () => {
+  const originalReserve = { ...constants.TREE_SHRUB.routinePalmCareReserve };
+  afterEach(() => {
+    constants.TREE_SHRUB.routinePalmCareReserve = { ...originalReserve };
+  });
+
+  test('half-armed configs suppress the inferred trees only on the ARMED leg (pre-push P0 r11)', () => {
+    const property = { bedArea: 2000, access: 'easy', treeDensity: 'moderate', palmCount: 10 };
+    const unarmed = priceTreeShrub(property, { tier: 'standard' });
+    expect(unarmed.materialTreeCount).toBe(6);
+    expect(unarmed.laborTreeCount).toBe(6);
+
+    // LABOR-only armed: palm minutes come from the reserve, so the labor leg
+    // drops the inferred trees — but the MATERIAL leg still bills them,
+    // exactly as it did before the knob was touched.
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 1 };
+    const laborOnly = priceTreeShrub(property, { tier: 'standard' });
+    expect(laborOnly.materialTreeCount).toBe(6);
+    expect(laborOnly.laborTreeCount).toBe(0);
+    expect(laborOnly.costs.materialCost).toBe(unarmed.costs.materialCost);
+
+    // MATERIAL-only armed: the mirror image — labor keeps its trees.
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 0 };
+    const materialOnly = priceTreeShrub(property, { tier: 'standard' });
+    expect(materialOnly.materialTreeCount).toBe(0);
+    expect(materialOnly.laborTreeCount).toBe(6);
+    expect(materialOnly.onSiteMin).toBe(unarmed.onSiteMin);
+  });
+
+  test('alternate-tier rows price the SAME job: palms reach every ts row (pre-push P0 r11)', () => {
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
+    const estimate = generateEstimate({
+      homeSqFt: 2000,
+      lotSqFt: 8000,
+      bedArea: 2000,
+      services: { treeShrub: { tier: 'standard', palmCount: 10 } },
+    });
+    const ts = estimate.lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.palmCount).toBe(10);
+    // Every alternate-tier row must reflect those 10 palms — priced directly
+    // at the same tier, the annual must match the row's annual.
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    const legacy = mapV1ToLegacyShape(estimate);
+    for (const row of legacy.results.ts) {
+      const direct = priceTreeShrub(
+        { bedArea: 2000, access: 'easy' },
+        { tier: row.tier, palmCount: 10 }
+      );
+      expect(row.ann).toBe(Math.round(direct.annual));
+    }
+  });
+});
