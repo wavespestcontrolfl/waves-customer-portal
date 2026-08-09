@@ -138,9 +138,11 @@ describe('20260808080000 estimate-gap catalog rows', () => {
 
     const expected = {
       'Bora-Care Wood Treatment': { serviceKey: 'bora_care', findingsType: 'termite_treatment' },
-      'Lawn Dethatching': { serviceKey: 'dethatching', findingsType: 'one_time_lawn_treatment' },
-      'Lawn Plugging': { serviceKey: 'plugging', findingsType: 'one_time_lawn_treatment' },
-      'Lawn Top Dressing': { serviceKey: 'top_dressing', findingsType: 'one_time_lawn_treatment' },
+      // Mechanical lawn work reports GENERIC on purpose: the
+      // one_time_lawn_treatment form has no truthful mechanical choices.
+      'Lawn Dethatching': { serviceKey: 'dethatching', findingsType: null },
+      'Lawn Plugging': { serviceKey: 'plugging', findingsType: null },
+      'Lawn Top Dressing': { serviceKey: 'top_dressing', findingsType: null },
       'Rodent Wire Mesh Exclusion': { serviceKey: 'rodent_wire_mesh', findingsType: 'rodent_exclusion' },
       'Roof-entry cover / bird box': { serviceKey: 'rodent_bird_box', findingsType: 'rodent_exclusion' },
       'Rodent Guarantee': { serviceKey: 'rodent_guarantee', findingsType: null },

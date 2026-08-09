@@ -262,12 +262,19 @@ const SERVICES = [
   },
 ];
 
-// key → completion profile project_type (NULL = generic typed report).
+// key → completion profile project_type (NULL = generic typed report,
+// the live bed_bug/tick posture). The three mechanical lawn add-ons stay
+// GENERIC deliberately: one_time_lawn_treatment's work_completed choices
+// only describe fertilizer/pesticide/micronutrient/amendment/inspection
+// work — a tech could not truthfully record dethatching or top dressing
+// on that form, and the report auto-sends (codex P1; extending the lawn
+// schema with mechanical actions is queued as its own coordinated
+// change).
 const PROFILE_TYPES = {
   bora_care: 'termite_treatment',
-  dethatching: 'one_time_lawn_treatment',
-  plugging: 'one_time_lawn_treatment',
-  top_dressing: 'one_time_lawn_treatment',
+  dethatching: null,
+  plugging: null,
+  top_dressing: null,
   rodent_wire_mesh: 'rodent_exclusion',
   rodent_bird_box: 'rodent_exclusion',
   rodent_guarantee: null,
