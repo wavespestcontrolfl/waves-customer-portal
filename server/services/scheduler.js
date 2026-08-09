@@ -324,6 +324,10 @@ async function claimDueScheduledEstimates(now) {
       FROM estimates AS c
       WHERE status = 'scheduled'
         AND scheduled_at IS NOT NULL
+        -- Archived rows never send (codex P0, PR #3304): linkage
+        -- invalidation archives stale wrong-lead drafts, and the cron
+        -- must not claim one scheduled before that commit.
+        AND archived_at IS NULL
         AND scheduled_at <= ?
         -- Cross-process guard (codex #3244 r3): once any member of a group is
         -- mid-send (another pod's batch), the whole group is spoken for — its

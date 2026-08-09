@@ -690,6 +690,10 @@ router.post('/:id/send', async (req, res, next) => {
       const scheduledClaim = await db('estimates')
         .where({ id: estimate.id })
         .whereNull('price_locked_at')
+        // Archived rows can never re-enter the send pipeline (codex P0,
+        // PR #3304): a stale scheduling request racing an invalidation
+        // must not restore status='scheduled' on the archived draft.
+        .whereNull('archived_at')
         .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
         .update({
           status: 'scheduled',

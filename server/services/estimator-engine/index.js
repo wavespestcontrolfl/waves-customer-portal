@@ -172,6 +172,12 @@ async function reconcileExistingDraftLinks(existing, context) {
           .update({
             estimate_data: JSON.stringify(freshData),
             archived_at: new Date(),
+            // Scheduling is CANCELED atomically (codex P0, PR #3304 r14):
+            // a 'scheduled' or 'send_failed' row returns to an inert
+            // draft with no due time, so the cron can never claim the
+            // invalidated content even through a guard gap.
+            status: 'draft',
+            scheduled_at: null,
             updated_at: new Date(),
           });
         if (freshLeadId) {
