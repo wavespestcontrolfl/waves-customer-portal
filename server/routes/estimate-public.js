@@ -10583,9 +10583,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           try { base = JSON.parse(base); } catch { base = null; }
         }
         if (base && typeof base === 'object' && base.recurringCardLaneAccepted === true) {
-          await db('estimates').where({ id: estimate.id }).update({
-            estimate_data: JSON.stringify({ ...base, recurringCardLaneAccepted: false }),
-          });
+          await db('estimates').where({ id: estimate.id })
+            // Marker-absent predicates on this POST-COMMIT whole-blob write
+            // (codex P1, PR #3304 GH r7): the accept transaction released
+            // its call-row lock, so a processor correction can commit its
+            // marker-only terminal invalidation between the read above and
+            // this write — and a blind rewrite would erase
+            // linkage_invalidated_at, restoring public access to a
+            // wrong-lead accepted estimate. 0 rows here just leaves the
+            // lane stamp set on a row that is already invalidated.
+            .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+            .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+            .update({
+              estimate_data: JSON.stringify({ ...base, recurringCardLaneAccepted: false }),
+            });
         }
       } catch (stampErr) {
         logger.warn(`[estimate-public] lane-stamp clear failed for estimate ${estimate.id} (retry may hide the payer pay step): ${stampErr.message}`);

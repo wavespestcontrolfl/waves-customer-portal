@@ -70,9 +70,11 @@ jest.mock('../services/admin-estimate-persistence', () => ({
   createOrReuseAdminEstimate: jest.fn(),
   estimateExpiresAt: jest.fn(() => new Date('2026-08-04T00:00:00.000Z')),
   estimateViewUrl: jest.fn((token) => `https://portal.wavespestcontrol.com/estimate/${token}`),
-  // REAL implementation — the pre-delivery revalidation tests below
-  // exercise its sid/stamp resolution against the mocked db.
+  // REAL implementations — the pre-delivery revalidation and the
+  // deferred-invalidation release below exercise these against the mocked db.
   staleCallLinkageReason: jest.requireActual('../services/admin-estimate-persistence').staleCallLinkageReason,
+  completePendingInvalidation: jest.requireActual('../services/admin-estimate-persistence').completePendingInvalidation,
+  takePendingInvalidation: jest.requireActual('../services/admin-estimate-persistence').takePendingInvalidation,
 }));
 jest.mock('../routes/estimate-public', () => ({
   acceptanceServiceLists: jest.fn(),

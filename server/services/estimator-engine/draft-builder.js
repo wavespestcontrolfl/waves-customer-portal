@@ -721,7 +721,14 @@ async function writeGuardedLeadEstimateLink(context, estimateId) {
     .whereExists(function estimateStillLive() {
       this.select(db.raw('1')).from('estimates as e')
         .whereRaw('e.id = ?', [estimateId])
-        .whereNull('e.archived_at');
+        .whereNull('e.archived_at')
+        // A marker-only invalidated TERMINAL stays UNARCHIVED by design
+        // (codex P2, PR #3304 GH r7 — the new terminal doctrine breaks
+        // the archive-only assumption this guard was written against):
+        // a stale creator resuming after an identity quarantine would
+        // otherwise restore leads.estimate_id to the invalidated row,
+        // blocking replacement linkage and keeping agent context on it.
+        .whereRaw("COALESCE(e.estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''");
     })
     .where(function claimable() {
       this.whereNull('estimate_id')
@@ -854,6 +861,31 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
             message: 'A draft for this call already exists — a concurrent run created it first.',
           },
         };
+      }
+      // LIVE call-linkage check in the same lock as the insert (codex P1,
+      // PR #3304 GH r7): a composer that started before a linkage
+      // correction would otherwise insert a draft composed for the FORMER
+      // lead moments after the reconcile pass found nothing to fix —
+      // leaving the wrong lead linked with a live public token and no
+      // later pass to catch it (the reconcile-only entry runs once per
+      // call pass). Aborting the stale insert is the atomic half of that
+      // race; the corrected retry composes the replacement.
+      if (context?.lead?.id && ['sid', 'stamp'].includes(context?.leadLinkage)) {
+        const { staleCallLinkageReason } = require('../admin-estimate-persistence');
+        const staleReason = await staleCallLinkageReason(trx, {
+          lead_id: context.lead.id,
+          lead_linkage: context.leadLinkage,
+          estimatorEngine: { callLogId: call.id },
+        });
+        if (staleReason) {
+          return {
+            duplicateBlock: {
+              blocked: true,
+              reason: 'stale_call_linkage',
+              message: `This call's lead linkage changed while the draft was composing (${staleReason}) — the corrected run rebuilds it.`,
+            },
+          };
+        }
       }
     }
     // The base duplicate guard is phone-only: a caller with several

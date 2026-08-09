@@ -60,6 +60,127 @@ function deliveryClaimFresh(estimatorEngine, nowMs = Date.now()) {
   return Number.isFinite(t) && (nowMs - t) < ESTIMATE_DELIVERY_CLAIM_TTL_MS;
 }
 
+// Complete a DEFERRED linkage invalidation on an ALREADY-LOCKED estimate
+// row: the reconciler (or the identity quarantine) recorded
+// `invalidation_pending_*` because a delivery claim was live, and this
+// applies the real transition. ONE definition, shared by the delivery-claim
+// release in admin-estimates.js and the scheduler's stale-claim sweep
+// (codex P1, PR #3304 GH r7 — a crash between the marker and the release
+// otherwise wedged the estimate forever: sends abort on the pending marker
+// with a non-matching token, the former lead stays linked, and no
+// corrected rebuild exists).
+//
+// `row` must come from a FOR UPDATE read carrying status/archived_at, and
+// `data` is its parsed estimate_data with the pending keys ALREADY removed
+// by the caller (the release also strips its claim keys in the same pass).
+// Money-bearing terminals keep status, archive state, and money fields —
+// only the marker lands, killing the public token.
+async function completePendingInvalidation(trx, estimateId, { row, data, pending }) {
+  const eng = data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {};
+  data.estimatorEngine = eng;
+  const status = String(row.status || '').toLowerCase();
+  const terminal = ['accepted', 'declined', 'expired'].includes(status);
+  delete data.lead_id;
+  delete data.lead_linkage;
+  eng.linkage_invalidated_at = new Date().toISOString();
+  eng.linkage_invalidated_from = pending.from || null;
+  eng.linkage_invalidated_to = pending.to || null;
+  if (pending.conflict) eng.identity_conflict = pending.conflict;
+  await trx('estimates').where({ id: estimateId })
+    .update({
+      estimate_data: JSON.stringify(data),
+      ...(terminal ? {} : {
+        archived_at: row.archived_at || new Date(),
+        status: 'draft',
+        scheduled_at: null,
+      }),
+      updated_at: trx.fn.now(),
+    });
+  if (pending.from) {
+    // Only if the OLD lead still points at this draft — a lead relinked
+    // elsewhere is not ours to touch.
+    await trx('leads').where({ id: pending.from, estimate_id: estimateId }).update({ estimate_id: null });
+  }
+  return { terminal, status };
+}
+
+// Read the pending-invalidation keys off a parsed estimate_data blob and
+// REMOVE them (the transition replaces them with the full marker).
+function takePendingInvalidation(data) {
+  const eng = data?.estimatorEngine;
+  if (!eng || typeof eng !== 'object' || !eng.invalidation_pending_at) return null;
+  const pending = {
+    at: eng.invalidation_pending_at,
+    from: eng.invalidation_pending_from || null,
+    to: eng.invalidation_pending_to || null,
+    conflict: eng.invalidation_pending_conflict || null,
+  };
+  delete eng.invalidation_pending_at;
+  delete eng.invalidation_pending_from;
+  delete eng.invalidation_pending_to;
+  delete eng.invalidation_pending_conflict;
+  return pending;
+}
+
+// Sweep estimates wedged on a pending invalidation whose delivery claim is
+// GONE or aged past the TTL — the crash case the claim release can no
+// longer reach (codex P1, PR #3304 GH r7). Runs from the scheduler's
+// stale-claim recovery. Returns the number of rows finalized.
+async function sweepWedgedPendingInvalidations(nowMs = Date.now(), { limit = 100 } = {}) {
+  let candidates = [];
+  try {
+    candidates = await db('estimates')
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') <> ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .orderBy('updated_at', 'asc')
+      .limit(limit)
+      .select('id');
+  } catch (err) {
+    logger.warn(`[estimates] wedged pending-invalidation scan failed: ${err.message}`);
+    return 0;
+  }
+  let finalized = 0;
+  for (const candidate of candidates) {
+    try {
+       
+      const done = await db.transaction(async (trx) => {
+        const row = await trx('estimates').where({ id: candidate.id }).forUpdate()
+          .first('id', 'status', 'archived_at', 'estimate_data');
+        if (!row) return false;
+        let data;
+        try {
+          data = typeof row.estimate_data === 'string'
+            ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+        } catch { return false; }
+        if (!data || typeof data !== 'object') return false;
+        const eng = data.estimatorEngine;
+        if (!eng || eng.linkage_invalidated_at) return false;
+        // A FRESH claim means the owning send is still running and will
+        // finalize this itself — only a dead claim is ours to complete.
+        if (deliveryClaimFresh(eng, nowMs)) return false;
+        const pending = takePendingInvalidation(data);
+        if (!pending) return false;
+        delete eng.delivering_at;
+        delete eng.delivering_token;
+        await completePendingInvalidation(trx, candidate.id, { row, data, pending });
+        return true;
+      });
+      if (done) {
+        finalized += 1;
+        logger.warn(`[estimates] finalized a wedged pending invalidation on estimate ${candidate.id} (delivery claim died before its release)`);
+      }
+    } catch (err) {
+      logger.warn(`[estimates] wedged pending-invalidation finalize failed for ${candidate.id}: ${err.message}`);
+    }
+  }
+  return finalized;
+}
+
+// call_log.processing_status values that mean a pass is RUNNING or queued
+// to run again. Everything else with a cleared processing_token is a
+// settled verdict — including the permanent failure terminals.
+const CALL_IN_FLIGHT_STATUSES = new Set(['processing', 'extraction_failed']);
+
 // Shared live call-linkage revalidation for engine-drafted rows: re-resolve
 // the call's current lead with the pipeline's own precedence (sid-owned
 // lead first, then the settled stamp) and require it to still be the
@@ -83,10 +204,18 @@ async function staleCallLinkageReason(dbc, data, { lockCallRow = false } = {}) {
   const callRow = await callQuery
     .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status');
   if (!callRow) return 'invalidated_before_delivery';
-  const procStatus = callRow.processing_status == null ? null : String(callRow.processing_status);
-  // A reprocess in flight means the linkage verdict is about to change —
-  // abort; the row is resendable once the call settles.
-  if (callRow.processing_token != null || (procStatus !== null && procStatus !== 'processed')) {
+  const procStatus = callRow.processing_status == null ? null : String(callRow.processing_status).toLowerCase();
+  // A reprocess IN FLIGHT means the linkage verdict is about to change —
+  // abort; the row is sendable again once the call settles. In-flight is a
+  // held claim token or one of the two retry lanes (codex P1, PR #3304 GH
+  // r7) — NOT every non-'processed' status: the processor also finishes
+  // PERMANENTLY as customer_creation_failed / lead_creation_failed / spam
+  // / voicemail / no_transcription with the token cleared, and treating
+  // those as forever-reprocessing wedged every send, accept, and decline
+  // for a draft the earlier quote-flavored pass had legitimately created.
+  // A settled REJECTION still blocks — via the resolution comparison
+  // below, which finds no live lead — rather than via this gate.
+  if (callRow.processing_token != null || CALL_IN_FLIGHT_STATUSES.has(procStatus)) {
     return 'call_reprocessing_before_delivery';
   }
   const liveStamp = (() => {
@@ -100,6 +229,13 @@ async function staleCallLinkageReason(dbc, data, { lockCallRow = false } = {}) {
     const sidLead = await dbc('leads')
       .where({ twilio_call_sid: callRow.twilio_call_sid })
       .whereNull('deleted_at')
+      // leads.twilio_call_sid carries no unique index — mirror the
+      // CANONICAL estimator loader's ordering (context-builder
+      // loadLeadForCall: created_at DESC) so this revalidation and the
+      // draft's own linkage always name the same owner (codex P1, PR
+      // #3304 GH r7). An unordered .first() could pick an older row and
+      // either block a valid draft or bless a stale one.
+      .orderBy('created_at', 'desc')
       .first('id');
     if (sidLead) resolvedLeadId = String(sidLead.id);
   }
@@ -1877,6 +2013,9 @@ module.exports = {
   ESTIMATE_DELIVERY_CLAIM_TTL_MS,
   deliveryClaimFresh,
   staleCallLinkageReason,
+  completePendingInvalidation,
+  takePendingInvalidation,
+  sweepWedgedPendingInvalidations,
   estimateViewUrl,
   estimateReviseBlock,
   normalizeClientPestFloorMetadata,

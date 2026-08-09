@@ -304,6 +304,22 @@ async function recoverStaleScheduledEstimateClaims(now) {
   if (immediateRows.length > 0) {
     logger.warn(`[scheduled-estimates] Recovered ${immediateRows.length} stale immediate send claim(s) to send_failed`);
   }
+
+  // Wedged DEFERRED invalidations (codex P1, PR #3304): when a linkage
+  // correction lands during a live delivery claim, the reconciler records
+  // `invalidation_pending_*` and the send's claim release completes it. A
+  // crash between the two leaves the estimate permanently stuck — every
+  // send aborts on the pending marker with a non-matching claim token, the
+  // former lead stays linked, and no corrected rebuild exists. The status
+  // recoveries above don't touch estimate_data, so finish the transition
+  // here once the claim is past its TTL. Best-effort: a failure logs and
+  // the next sweep retries.
+  try {
+    const { sweepWedgedPendingInvalidations } = require('./admin-estimate-persistence');
+    await sweepWedgedPendingInvalidations(now.getTime());
+  } catch (err) {
+    logger.warn(`[scheduled-estimates] wedged pending-invalidation sweep failed: ${err.message}`);
+  }
 }
 
 async function claimDueScheduledEstimates(now) {

@@ -40,6 +40,8 @@ const {
   estimateViewUrl,
   reviseAdminEstimate,
   staleCallLinkageReason,
+  completePendingInvalidation,
+  takePendingInvalidation,
 } = require('../services/admin-estimate-persistence');
 const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
@@ -931,7 +933,7 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
   if (!estimateId || !deliveryClaimToken) return;
   try {
     await db.transaction(async (trx) => {
-      const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('status', 'archived_at', 'estimate_data');
+      const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('id', 'status', 'archived_at', 'estimate_data');
       if (!row) return;
       let data;
       try {
@@ -943,63 +945,21 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
       if (!eng || eng.delivering_token !== deliveryClaimToken) return;
       delete eng.delivering_at;
       delete eng.delivering_token;
-      const pendingAt = eng.invalidation_pending_at;
-      const pendingFrom = eng.invalidation_pending_from || null;
-      const pendingTo = eng.invalidation_pending_to || null;
-      const pendingConflict = eng.invalidation_pending_conflict || null;
-      delete eng.invalidation_pending_at;
-      delete eng.invalidation_pending_from;
-      delete eng.invalidation_pending_to;
-      delete eng.invalidation_pending_conflict;
-      if (pendingAt && !eng.linkage_invalidated_at) {
-        // A money-bearing terminal reached before this release (codex P0
-        // r23: an accept can race the pending marker through the closing
-        // public gate) keeps its status, archive state, and money fields
-        // — conversion is the operator's to unwind — but the FULL marker
-        // still lands (codex P0 r26, same marker-only doctrine as the
-        // reconciler): the permanent public token dies, linkage keys are
-        // removed, and the old lead is unlinked. A warn surfaces the
-        // terminal collision for operator review.
-        const releaseStatus = String(row.status || '').toLowerCase();
-        if (['accepted', 'declined', 'expired'].includes(releaseStatus)) {
-          delete data.lead_id;
-          delete data.lead_linkage;
-          eng.linkage_invalidated_at = new Date().toISOString();
-          eng.linkage_invalidated_from = pendingFrom;
-          eng.linkage_invalidated_to = pendingTo;
-          if (pendingConflict) eng.identity_conflict = pendingConflict;
-          await trx('estimates').where({ id: estimateId })
-            .update({ estimate_data: JSON.stringify(data), updated_at: trx.fn.now() });
-          if (pendingFrom) {
-            await trx('leads').where({ id: pendingFrom, estimate_id: estimateId }).update({ estimate_id: null });
-          }
-          logger.warn(`[admin-estimates] deferred invalidation of estimate ${estimateId} met terminal status '${releaseStatus}' — marker-only invalidation applied (status and money preserved), needs operator review`);
-          return;
+      const pending = takePendingInvalidation(data);
+      if (pending && !eng.linkage_invalidated_at) {
+        // ONE shared transition (admin-estimate-persistence): the full
+        // marker lands, linkage keys go, the old lead unlinks, and the row
+        // archives back to an inert draft — EXCEPT a money-bearing
+        // terminal, which keeps status, archive state, and money fields
+        // (codex P0 r23/r26: an accept can race the pending marker through
+        // the closing public gate; conversion is the operator's to unwind,
+        // but the permanent public token must still die).
+        const { terminal, status } = await completePendingInvalidation(trx, estimateId, { row, data, pending });
+        if (terminal) {
+          logger.warn(`[admin-estimates] deferred invalidation of estimate ${estimateId} met terminal status '${status}' — marker-only invalidation applied (status and money preserved), needs operator review`);
+        } else {
+          logger.info(`[admin-estimates] completed deferred invalidation of estimate ${estimateId} at delivery-claim release (${pending.from || pending.conflict || 'unlink'} → ${pending.to || 'none'})`);
         }
-        // Complete the deferred invalidation with the reconciler's own
-        // shape — the delivery is over, so the mid-send status exemption
-        // no longer applies (sent/failed rows invalidate; they resend
-        // from a rebuilt draft).
-        delete data.lead_id;
-        delete data.lead_linkage;
-        eng.linkage_invalidated_at = new Date().toISOString();
-        eng.linkage_invalidated_from = pendingFrom;
-        eng.linkage_invalidated_to = pendingTo;
-        if (pendingConflict) eng.identity_conflict = pendingConflict;
-        await trx('estimates').where({ id: estimateId })
-          .update({
-            estimate_data: JSON.stringify(data),
-            archived_at: row.archived_at || new Date(),
-            status: 'draft',
-            scheduled_at: null,
-            updated_at: trx.fn.now(),
-          });
-        if (pendingFrom) {
-          // Only if the OLD lead still points at this draft — a lead
-          // relinked elsewhere is not ours to touch.
-          await trx('leads').where({ id: pendingFrom, estimate_id: estimateId }).update({ estimate_id: null });
-        }
-        logger.info(`[admin-estimates] completed deferred invalidation of estimate ${estimateId} at delivery-claim release (${pendingFrom || pendingConflict || 'unlink'} → ${pendingTo || 'none'})`);
         return;
       }
       await trx('estimates').where({ id: estimateId })

@@ -548,6 +548,95 @@ const CALL_ORIGIN = {
  *                   request-only call that can't draft must not mint a false
  *                   owed-quote task.
  */
+// Identity-conflict QUARANTINE, shared by the full run and the
+// reconcile-only entry (codex P0 r19; extracted GH r7): the prior draft may
+// target the conflicting identity, and leaving it sendable with a live
+// public token is the exposure. Same marked-archive as a linkage
+// invalidation, so every guard (unarchive 409, send claims, duplicate
+// exclusion) applies; the audit reason and the lead unlink ride along.
+// Never throws — the caller's review bell is the durable signal.
+async function quarantineDraftForIdentityConflict(callLogId, conflictError) {
+  try {
+    const conflicted = await existingDraftForCall(callLogId);
+    if (conflicted) {
+      await db.transaction(async (trx) => {
+        const fresh = await trx('estimates')
+          .where({ id: conflicted.id })
+          .forUpdate()
+          .first('id', 'status', 'archived_at', 'estimate_data');
+        if (!fresh) return;
+        const data = (() => {
+          try {
+            const d = typeof fresh.estimate_data === 'string'
+              ? JSON.parse(fresh.estimate_data) : (fresh.estimate_data || {});
+            return d && typeof d === 'object' ? d : {};
+          } catch { return null; }
+        })();
+        if (!data || data.estimatorEngine?.linkage_invalidated_at) return;
+        // Same scope rule as the linkage reconcile (codex P0, PR
+        // #3304 r20/r26): a money-bearing terminal
+        // (accepted/declined/expired) keeps status, archive state,
+        // and money fields, but still receives the MARKER-ONLY
+        // quarantine below — the permanent public token must die on
+        // an identity conflict too.
+        const freshQStatus = String(fresh.status || '').toLowerCase();
+        const terminalQRow = ['accepted', 'declined', 'expired'].includes(freshQStatus);
+        if (!terminalQRow && !['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshQStatus)) return;
+        // And the same delivery-claim fence (codex P0 r22): never
+        // commit an archive inside a live send's verdict-to-handoff
+        // window — record a durable PENDING marker the send's claim
+        // release consumes instead, so the quarantine is never lost.
+        // The quarantined lead is unlinked exactly like an ordinary
+        // invalidation (codex P1 r5 GH): leaving lead_id and
+        // leads.estimate_id pointing at the archived draft made the
+        // operator's replacement-link action bounce off the
+        // "already linked" pipeline guard, and agent context kept
+        // treating the wrong-identity draft as current.
+        const quarantinedLeadId = data.lead_id ? String(data.lead_id) : null;
+        if (deliveryClaimFresh(data.estimatorEngine)) {
+          if (!data.estimatorEngine?.invalidation_pending_at) {
+            data.estimatorEngine = {
+              ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
+              invalidation_pending_at: new Date().toISOString(),
+              // The claim release performs the unlink for a deferred
+              // quarantine too — it needs the source lead.
+              invalidation_pending_from: quarantinedLeadId,
+              invalidation_pending_conflict: conflictError,
+            };
+            await trx('estimates').where({ id: conflicted.id })
+              .update({ estimate_data: JSON.stringify(data), updated_at: new Date() });
+          }
+          logger.info(`[estimator-engine] quarantine of draft ${conflicted.id} DEFERRED behind a live delivery claim (${conflictError}) — pending marker recorded`);
+          return;
+        }
+        delete data.lead_id;
+        delete data.lead_linkage;
+        data.estimatorEngine = {
+          ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
+          linkage_invalidated_at: new Date().toISOString(),
+          identity_conflict: conflictError,
+        };
+        const midSend = freshQStatus === 'sending';
+        await trx('estimates').where({ id: conflicted.id }).update({
+          estimate_data: JSON.stringify(data),
+          ...(terminalQRow ? {} : { archived_at: fresh.archived_at || new Date() }),
+          ...(midSend || terminalQRow ? {} : { status: 'draft', scheduled_at: null }),
+          updated_at: new Date(),
+        });
+        if (quarantinedLeadId) {
+          // Only if the lead still points at this draft — a lead
+          // relinked elsewhere is not ours to touch.
+          await trx('leads').where({ id: quarantinedLeadId, estimate_id: conflicted.id })
+            .update({ estimate_id: null });
+        }
+      });
+      logger.info(`[estimator-engine] quarantined draft ${conflicted.id} on identity conflict (${conflictError})`);
+    }
+  } catch (qErr) {
+    logger.warn(`[estimator-engine] identity-conflict quarantine failed (review bell still fires): ${qErr.message}`);
+  }
+}
+
 async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false, quotePromised = true }) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
@@ -563,85 +652,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
       // linkage invalidation, so every guard (unarchive 409, send claims,
       // duplicate exclusion) applies; the audit reason rides along.
       if (!dryRun && ['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
-        try {
-          const conflicted = await existingDraftForCall(callLogId);
-          if (conflicted) {
-            await db.transaction(async (trx) => {
-              const fresh = await trx('estimates')
-                .where({ id: conflicted.id })
-                .forUpdate()
-                .first('id', 'status', 'archived_at', 'estimate_data');
-              if (!fresh) return;
-              const data = (() => {
-                try {
-                  const d = typeof fresh.estimate_data === 'string'
-                    ? JSON.parse(fresh.estimate_data) : (fresh.estimate_data || {});
-                  return d && typeof d === 'object' ? d : {};
-                } catch { return null; }
-              })();
-              if (!data || data.estimatorEngine?.linkage_invalidated_at) return;
-              // Same scope rule as the linkage reconcile (codex P0, PR
-              // #3304 r20/r26): a money-bearing terminal
-              // (accepted/declined/expired) keeps status, archive state,
-              // and money fields, but still receives the MARKER-ONLY
-              // quarantine below — the permanent public token must die on
-              // an identity conflict too.
-              const freshQStatus = String(fresh.status || '').toLowerCase();
-              const terminalQRow = ['accepted', 'declined', 'expired'].includes(freshQStatus);
-              if (!terminalQRow && !['draft', 'scheduled', 'send_failed', 'sent', 'viewed', 'sending'].includes(freshQStatus)) return;
-              // And the same delivery-claim fence (codex P0 r22): never
-              // commit an archive inside a live send's verdict-to-handoff
-              // window — record a durable PENDING marker the send's claim
-              // release consumes instead, so the quarantine is never lost.
-              // The quarantined lead is unlinked exactly like an ordinary
-              // invalidation (codex P1 r5 GH): leaving lead_id and
-              // leads.estimate_id pointing at the archived draft made the
-              // operator's replacement-link action bounce off the
-              // "already linked" pipeline guard, and agent context kept
-              // treating the wrong-identity draft as current.
-              const quarantinedLeadId = data.lead_id ? String(data.lead_id) : null;
-              if (deliveryClaimFresh(data.estimatorEngine)) {
-                if (!data.estimatorEngine?.invalidation_pending_at) {
-                  data.estimatorEngine = {
-                    ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
-                    invalidation_pending_at: new Date().toISOString(),
-                    // The claim release performs the unlink for a deferred
-                    // quarantine too — it needs the source lead.
-                    invalidation_pending_from: quarantinedLeadId,
-                    invalidation_pending_conflict: context.error,
-                  };
-                  await trx('estimates').where({ id: conflicted.id })
-                    .update({ estimate_data: JSON.stringify(data), updated_at: new Date() });
-                }
-                logger.info(`[estimator-engine] quarantine of draft ${conflicted.id} DEFERRED behind a live delivery claim (${context.error}) — pending marker recorded`);
-                return;
-              }
-              delete data.lead_id;
-              delete data.lead_linkage;
-              data.estimatorEngine = {
-                ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
-                linkage_invalidated_at: new Date().toISOString(),
-                identity_conflict: context.error,
-              };
-              const midSend = freshQStatus === 'sending';
-              await trx('estimates').where({ id: conflicted.id }).update({
-                estimate_data: JSON.stringify(data),
-                ...(terminalQRow ? {} : { archived_at: fresh.archived_at || new Date() }),
-                ...(midSend || terminalQRow ? {} : { status: 'draft', scheduled_at: null }),
-                updated_at: new Date(),
-              });
-              if (quarantinedLeadId) {
-                // Only if the lead still points at this draft — a lead
-                // relinked elsewhere is not ours to touch.
-                await trx('leads').where({ id: quarantinedLeadId, estimate_id: conflicted.id })
-                  .update({ estimate_id: null });
-              }
-            });
-            logger.info(`[estimator-engine] quarantined draft ${conflicted.id} on identity conflict (${context.error})`);
-          }
-        } catch (qErr) {
-          logger.warn(`[estimator-engine] identity-conflict quarantine failed (review bell still fires): ${qErr.message}`);
-        }
+        await quarantineDraftForIdentityConflict(callLogId, context.error);
       }
       if (!dryRun && context.call && quotePromised) {
         await notify({
@@ -1254,20 +1265,74 @@ function generateEstimateSafely(engineInput) {
 // eligible-run reconcile was the only production call site, and a stale
 // draft kept its old lead links and a live public token indefinitely.
 // Deliberately runs regardless of GATE_ESTIMATOR_ENGINE: it corrects
-// drafts that already exist, it never creates one. Identity-conflict
-// contexts return without action — the quarantine is the full run's lane.
+// drafts that already exist, it never creates one.
+//
+// A FAILED context is not a reason to leave a stale draft standing (codex
+// P1, PR #3304 GH r7): a positive identity conflict routes to the shared
+// quarantine, and any other context error (no_usable_transcript,
+// customer_lookup_unavailable, …) falls back to the CALL'S OWN durable
+// linkage — sid-owned lead first, then the settled stamp — which is all
+// the reconcile needs to decide. The composer-race half of this is closed
+// inside the creator's serialized insert (draft-builder re-checks the live
+// linkage under the same lock), so a run that started before a correction
+// cannot land a stale draft after this pass.
 async function reconcileDraftLinksForCall(callLogId) {
   if (!callLogId) return null;
   try {
     const existing = await existingDraftForCall(callLogId);
     if (!existing) return null;
     const context = await buildCallContext(callLogId);
-    if (context?.error) return null;
+    if (context?.error) {
+      if (['email_matches_existing_customer', 'email_identity_conflict'].includes(context.error)) {
+        await quarantineDraftForIdentityConflict(callLogId, context.error);
+        return 'invalidated';
+      }
+      const fallback = await callLinkageContext(callLogId);
+      if (!fallback) return null;
+      return await reconcileExistingDraftLinks(existing, fallback);
+    }
     return await reconcileExistingDraftLinks(existing, context);
   } catch (err) {
     logger.warn(`[estimator-engine] reconcile-only pass failed for call ${callLogId}: ${err.message}`);
     return 'error';
   }
+}
+
+// Minimal reconcile context built from the CALL ROW alone — the durable
+// linkage the pipeline itself writes, with no transcript, property, or
+// customer lookups to fail. Mirrors context-builder's precedence (sid-owned
+// lead ordered created_at DESC, then the settled stamp) so a fallback
+// reconcile can never disagree with the canonical loader.
+async function callLinkageContext(callLogId) {
+  const call = await db('call_log').where({ id: callLogId })
+    .first('id', 'twilio_call_sid', 'metadata', 'processing_token', 'processing_status');
+  if (!call) return null;
+  // An in-flight pass owns the linkage — its own finalization reconciles.
+  const status = call.processing_status == null ? null : String(call.processing_status).toLowerCase();
+  if (call.processing_token != null || status === 'processing') return null;
+  const stamped = (() => {
+    try {
+      const md = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+      return md?.lead_id ? String(md.lead_id) : null;
+    } catch { return null; }
+  })();
+  let lead = null;
+  let linkage = null;
+  if (call.twilio_call_sid) {
+    lead = await db('leads').where({ twilio_call_sid: call.twilio_call_sid })
+      .whereNull('deleted_at').orderBy('created_at', 'desc').first('id', 'twilio_call_sid');
+    if (lead) linkage = 'sid';
+  }
+  if (!lead && stamped) {
+    lead = await db('leads').where({ id: stamped }).whereNull('deleted_at').first('id', 'twilio_call_sid');
+    if (lead) linkage = 'stamp';
+  }
+  return {
+    call: { id: call.id, twilio_call_sid: call.twilio_call_sid, metadata: call.metadata },
+    lead: lead || null,
+    leadIsForThisCall: !!lead,
+    leadLinkage: linkage,
+  };
 }
 
 module.exports = {
