@@ -119,6 +119,15 @@ describe('20260808080000 estimate-gap catalog rows', () => {
     expect(state.profiles.sort()).toEqual([...ALL_KEYS].sort());
   });
 
+  test('durations follow the flat-60 owner directive; the billing construct is 0 like waveguard_membership', async () => {
+    const db = emptyDb();
+    await migration.up(fakeKnex(db));
+    for (const key of ALL_KEYS) {
+      expect(`${key}:${svcRow(db, key).default_duration_minutes}`)
+        .toBe(`${key}:${key === 'rodent_guarantee' ? 0 : 60}`);
+    }
+  });
+
   test('catalog names equal the engine line labels where the pricer emits one', async () => {
     const db = emptyDb();
     await migration.up(fakeKnex(db));

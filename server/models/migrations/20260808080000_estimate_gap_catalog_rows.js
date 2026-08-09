@@ -60,7 +60,9 @@ const SERVICES = [
     description: 'Borate treatment for exposed wood — termites, wood-boring beetles, and wood-decay fungi. Priced by treated attic and surface area.',
     category: 'termite',
     billing_type: 'one_time',
-    default_duration_minutes: 90,
+    // Owner directive 2026-07-03 (20260703120000): every service call
+    // defaults to 60 minutes unless changed on the appointment.
+    default_duration_minutes: 60,
     min_duration_minutes: 60,
     max_duration_minutes: 240,
     pricing_type: 'variable',
@@ -91,7 +93,7 @@ const SERVICES = [
     description: 'Mechanical dethatching for Bermuda and Zoysia lawns. St. Augustine and large heavy-debris jobs are quoted after inspection.',
     category: 'lawn_care',
     billing_type: 'one_time',
-    default_duration_minutes: 120,
+    default_duration_minutes: 60, // flat 60 per 20260703120000
     min_duration_minutes: 60,
     max_duration_minutes: 240,
     pricing_type: 'variable',
@@ -121,7 +123,7 @@ const SERVICES = [
     description: 'Sod plug installation priced by plug spacing (6", 9", or 12") and treated area; small jobs carry a minimum.',
     category: 'lawn_care',
     billing_type: 'one_time',
-    default_duration_minutes: 180,
+    default_duration_minutes: 60, // flat 60 per 20260703120000
     min_duration_minutes: 60,
     max_duration_minutes: 360,
     pricing_type: 'variable',
@@ -149,7 +151,7 @@ const SERVICES = [
     description: 'Sand top dressing priced by measured lawn area and depth. Recurring-plan customers receive a discounted rate.',
     category: 'lawn_care',
     billing_type: 'one_time',
-    default_duration_minutes: 120,
+    default_duration_minutes: 60, // flat 60 per 20260703120000
     min_duration_minutes: 60,
     max_duration_minutes: 300,
     pricing_type: 'variable',
@@ -178,7 +180,7 @@ const SERVICES = [
     description: 'Wire mesh exclusion priced per linear foot by substrate, with a job minimum.',
     category: 'rodent',
     billing_type: 'one_time',
-    default_duration_minutes: 120,
+    default_duration_minutes: 60, // flat 60 per 20260703120000
     min_duration_minutes: 60,
     max_duration_minutes: 300,
     pricing_type: 'variable',
@@ -209,7 +211,7 @@ const SERVICES = [
     description: 'Roof-entry covers and bird boxes priced per cover: small $195, standard $225 (same-visit additional $175), large $295, oversized/custom $395.',
     category: 'rodent',
     billing_type: 'one_time',
-    default_duration_minutes: 60,
+    default_duration_minutes: 60, // flat 60 per 20260703120000
     min_duration_minutes: 30,
     max_duration_minutes: 120,
     pricing_type: 'variable',
@@ -241,9 +243,12 @@ const SERVICES = [
     description: 'Renewable 12-month rodent-free guarantee. Eligibility requires completed trapping, completed exclusion, sanitation completed (or photo baseline), and no activity after the final trap check. Priced by property tier.',
     category: 'rodent',
     billing_type: 'one_time',
-    default_duration_minutes: 30,
-    min_duration_minutes: 15,
-    max_duration_minutes: 60,
+    // Billing construct, not a visit — duration 0 like
+    // waveguard_membership (same 2026-07-03 directive; booking code
+    // treats 0 as unset and falls back to 60 if ever booked).
+    default_duration_minutes: 0,
+    min_duration_minutes: null,
+    max_duration_minutes: null,
     pricing_type: 'variable',
     base_price: 199.0, // priceRodentGuarantee standard tier
     price_range_min: 199.0, // published range low
