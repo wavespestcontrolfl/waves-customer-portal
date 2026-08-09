@@ -2695,24 +2695,22 @@ function priceTreeShrub(property, options = {}) {
   const palmLaborArmed = (palmReserve.minutesPerPalmVisit ?? 0) > 0;
   const palmReserveActive = palmMaterialArmed || palmLaborArmed;
   const foldablePalmCount = palmCountSource === 'service_line' ? palmCount : 0;
-  // A DENSITY-ESTIMATED treeCount must not stack under a fold (P0 r8): with
-  // the old prompt, "10 palms" arrived AS treeCount 10 — explicit, so the
-  // treeDensity fallback never fired. Post-split the same call leaves
-  // treeCount absent, the resolver infers e.g. 6 trees from lookup density,
-  // and adding the folded palms would price 16 legacy trees where the
-  // pre-split quote priced 10. The fold REPLACES an inferred count; a
-  // caller-stated non-palm count (explicit) is real and still adds.
-  const foldBaseTreeCount = foldablePalmCount > 0 && treeCountSource === 'density_estimate'
+  // De-duplicated NON-PALM tree base. A density-INFERRED treeCount cannot
+  // be trusted to exclude the stated palms: with the old prompt "10 palms"
+  // arrived AS an explicit treeCount 10, so the treeDensity fallback never
+  // fired; post-split the same call leaves treeCount absent and the
+  // resolver infers e.g. 6 trees that may BE those palms. Suppressing the
+  // inference keeps the counts disjoint — unarmed it prevents 16 legacy
+  // trees for a 10-palm job (P0 r8), armed it prevents billing 6 phantom
+  // trees ON TOP of the palm reserve (P0 r9). A caller-stated non-palm
+  // count is real signal and always survives.
+  const baseTreeCount = foldablePalmCount > 0 && treeCountSource === 'density_estimate'
     ? 0
     : treeCount;
-  // Per-leg effective tree counts: palms ride the legacy term only where
-  // their replacement is still unarmed.
-  const materialTreeCount = palmMaterialArmed
-    ? treeCount
-    : foldBaseTreeCount + foldablePalmCount;
-  const laborTreeCount = palmLaborArmed
-    ? treeCount
-    : foldBaseTreeCount + foldablePalmCount;
+  // Per-leg counts: palms ride the legacy per-tree term only where their
+  // replacement is still unarmed.
+  const materialTreeCount = baseTreeCount + (palmMaterialArmed ? 0 : foldablePalmCount);
+  const laborTreeCount = baseTreeCount + (palmLaborArmed ? 0 : foldablePalmCount);
   const palmMinutesPerVisit = Math.round((palmLaborArmed ? palmCount : 0) * (palmReserve.minutesPerPalmVisit ?? 0));
 
   const accessMin = TREE_SHRUB.accessMinutes[access] || 0;
@@ -2786,11 +2784,9 @@ function priceTreeShrub(property, options = {}) {
   // reached T&S pricing, so counting them would change neutral behavior).
   // Armed: property palms drive real material/labor too, so a property with
   // 20 known palms must trip the gate rather than auto-price a big job.
-  // The tree side mirrors the fold: an inferred count replaced by stated
-  // palms must not be counted twice here either.
-  const gatePlantCount = palmReserveActive
-    ? treeCount + palmCount
-    : foldBaseTreeCount + foldablePalmCount;
+  // Same de-duplicated base: an inferred count suppressed by stated palms
+  // must not be counted twice here either.
+  const gatePlantCount = baseTreeCount + (palmReserveActive ? palmCount : foldablePalmCount);
   if (gatePlantCount >= 15) {
     manualReviewReasonsSet.add('tree_count_at_or_above_15');
     warnings.push('High tree count; manual review recommended.');
