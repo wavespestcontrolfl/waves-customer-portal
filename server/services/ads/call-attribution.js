@@ -406,6 +406,21 @@ async function resolveSourceCallProvenanceLocked(trx, { leadId, twilioCallSid })
     if (lockedStamp && lockedStamp !== String(leadId)) {
       return { refusedReason: 'call_repointed' };
     }
+    // STAMP-LESS repoint (codex P1, PR #3303 r9): when a force-reprocess
+    // moved this call from its obsolete sid lead to a PHONE-matched lead,
+    // that path writes no stamp at all — so there is no dissent to see
+    // here. Apply the same ownership eligibility the bridge applies to an
+    // unstamped sid join: a lead owned by a customer OTHER than the
+    // call's is not this call's lead, and claiming it as provenance would
+    // let recovery transfer the history-bearing row back to it.
+    if (!lockedStamp) {
+      const callOwner = await trx('call_log').where({ id: locked.id }).first('customer_id');
+      const leadOwner = await trx('leads').where({ id: leadId }).first('customer_id');
+      if (callOwner?.customer_id && leadOwner?.customer_id
+        && String(callOwner.customer_id) !== String(leadOwner.customer_id)) {
+        return { refusedReason: 'lead_owner_conflict' };
+      }
+    }
   }
   return { sourceCallId: locked.id };
 }

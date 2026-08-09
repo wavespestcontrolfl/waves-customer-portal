@@ -743,6 +743,17 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFa
   // (codex P1, PR #3303 r7): attribute nothing and never fall to the plan,
   // or the obsolete sid/phone lead would absorb this paid call.
   if (callLog?.stampTargetMissing) {
+    // Verdict FIRST, even on this early return (codex P1, PR #3303 r9): a
+    // force-reprocess can hold processing_token by now, and the caller
+    // reads every non-'call_rejected' miss WITH a recorded lead as a
+    // definitive unlink — deleting this call's funnel row and writing the
+    // tombstone. If that in-flight pass then fails or lands on a policy
+    // hold, booked/completed attribution the processor meant to keep is
+    // gone. A mid-flight call reports 'call_rejected', which the caller
+    // treats as "touch nothing this scan".
+    if (!(await callStillAttributable(trx, callLog.id))) {
+      return { match: null, reason: 'call_rejected' };
+    }
     return { match: null, reason: 'lead_not_live' };
   }
   if (callLog?.leadId) {
@@ -751,18 +762,22 @@ async function attributeResolvedLead(callLog, bridgeSource, now, trx, { noPlanFa
       .whereNull('deleted_at')
       .forUpdate()
       .first('id', 'customer_id');
-    if (lockedLead && sidJoinOwnerConflict(callLog, lockedLead)) {
-      return { match: null, reason: 'lead_owner_conflict' };
-    }
     // Terminal verdict re-checked fresh under the CALL row lock, taken
     // AFTER the lead lock so the leads → call_log order every stamp
     // writer uses is preserved (pre-push P1 r16) — the pre-scan
     // snapshot's noAttribution is not proof against a rejection that
-    // committed mid-scan.
+    // committed mid-scan. It runs BEFORE the ownership verdict (codex P1,
+    // PR #3303 r9): a mid-flight pass must report 'call_rejected' — which
+    // the caller treats as "touch nothing this scan" — rather than an
+    // ownership conflict the caller would read as a settled unlink and
+    // act on by deleting this call's funnel row.
     if (!(await callStillAttributable(trx, callLog.id))) {
       return { match: null, reason: 'call_rejected' };
     }
     verdictChecked = true;
+    if (lockedLead && sidJoinOwnerConflict(callLog, lockedLead)) {
+      return { match: null, reason: 'lead_owner_conflict' };
+    }
     if (lockedLead) {
       const joined = {
         strategy: 'joined_lead',
