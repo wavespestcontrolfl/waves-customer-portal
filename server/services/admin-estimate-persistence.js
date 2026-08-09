@@ -179,7 +179,25 @@ async function sweepWedgedPendingInvalidations(nowMs = Date.now(), { limit = 100
 // call_log.processing_status values that mean a pass is RUNNING or queued
 // to run again. Everything else with a cleared processing_token is a
 // settled verdict — including the permanent failure terminals.
-const CALL_IN_FLIGHT_STATUSES = new Set(['processing', 'extraction_failed']);
+//
+// 'extraction_failed' is in-flight only while the processor would actually
+// retry it (codex P1, PR #3304 GH r7b): its sweep requires
+// COALESCE(extraction_attempts,0) < CALL_EXTRACTION_MAX_ATTEMPTS, so an
+// EXHAUSTED row is settled — treating it as forever-retrying would block
+// send, accept, and decline on that draft permanently. Same env default as
+// the processor (3) so the two can't drift silently.
+const CALL_IN_FLIGHT_STATUSES = new Set(['processing']);
+const CALL_EXTRACTION_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.CALL_EXTRACTION_MAX_ATTEMPTS || '3', 10) || 3);
+
+function callReprocessInFlight(callRow) {
+  if (callRow.processing_token != null) return true;
+  const status = callRow.processing_status == null ? null : String(callRow.processing_status).toLowerCase();
+  if (CALL_IN_FLIGHT_STATUSES.has(status)) return true;
+  if (status === 'extraction_failed') {
+    return (Number(callRow.extraction_attempts) || 0) < CALL_EXTRACTION_MAX_ATTEMPTS;
+  }
+  return false;
+}
 
 // Shared live call-linkage revalidation for engine-drafted rows: re-resolve
 // the call's current lead with the pipeline's own precedence (sid-owned
@@ -202,9 +220,8 @@ async function staleCallLinkageReason(dbc, data, { lockCallRow = false } = {}) {
   const callQuery = dbc('call_log').where({ id: draftCallLogId });
   if (lockCallRow) callQuery.forUpdate();
   const callRow = await callQuery
-    .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status');
+    .first('twilio_call_sid', 'metadata', 'processing_token', 'processing_status', 'extraction_attempts');
   if (!callRow) return 'invalidated_before_delivery';
-  const procStatus = callRow.processing_status == null ? null : String(callRow.processing_status).toLowerCase();
   // A reprocess IN FLIGHT means the linkage verdict is about to change —
   // abort; the row is sendable again once the call settles. In-flight is a
   // held claim token or one of the two retry lanes (codex P1, PR #3304 GH
@@ -215,7 +232,7 @@ async function staleCallLinkageReason(dbc, data, { lockCallRow = false } = {}) {
   // for a draft the earlier quote-flavored pass had legitimately created.
   // A settled REJECTION still blocks — via the resolution comparison
   // below, which finds no live lead — rather than via this gate.
-  if (callRow.processing_token != null || CALL_IN_FLIGHT_STATUSES.has(procStatus)) {
+  if (callReprocessInFlight(callRow)) {
     return 'call_reprocessing_before_delivery';
   }
   const liveStamp = (() => {

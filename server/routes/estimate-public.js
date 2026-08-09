@@ -9538,7 +9538,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // resolution the send verdict uses.
       {
         const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
-        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).first('estimate_data');
+        // ESTIMATE row FIRST (codex P1, PR #3304 GH r7b). The reconciler
+        // locks the estimate and then updates the lead; taking the lead
+        // first here inverted that and could deadlock a customer accept
+        // against a linkage correction. One order everywhere:
+        // estimates → leads → call_log. This lock also removes the
+        // read-then-update gap on the verdict below.
+        const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data');
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
@@ -12205,6 +12211,12 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
     // 404 as the marker path: the row is dead to this token.
     const declineTxn = await db.transaction(async (trx) => {
       const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+      // ESTIMATE row first — one lock order everywhere (estimates → leads
+      // → call_log), or a decline racing a linkage reconcile (which locks
+      // the estimate then updates the lead) can deadlock (codex P1, PR
+      // #3304 GH r7b).
+      const declineLocked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id');
+      if (!declineLocked) return { staleLinkage: false, declinedCount: 0 };
       let declineLinkData = null;
       try {
         declineLinkData = typeof estimate.estimate_data === 'string'
