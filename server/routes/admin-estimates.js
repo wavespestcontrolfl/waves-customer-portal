@@ -724,6 +724,11 @@ router.post('/:id/send', async (req, res, next) => {
       const claimed = await db('estimates')
         .where({ id: estimate.id })
         .whereNull('price_locked_at')
+        // An ARCHIVED row is never claimable for send (codex P0, PR
+        // #3304): linkage invalidation archives stale wrong-lead drafts
+        // atomically, and a send that read the row earlier must not
+        // deliver the old recipient's content after that commit.
+        .whereNull('archived_at')
         .whereNotIn('status', ['sending', 'accepted', 'declined', 'expired'])
         .update({ status: 'sending', updated_at: db.fn.now() });
       if (!claimed) {
@@ -817,6 +822,8 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       const anchorClaimed = await trx('estimates')
         .where({ id: estimate.id, status: estimate.status })
         .whereNull('price_locked_at')
+        // Same archive guard as the standalone claim (codex P0, PR #3304).
+        .whereNull('archived_at')
         .whereNotIn('status', ['accepted', 'declined', 'expired'])
         .update({ status: 'sending', updated_at: trx.fn.now() });
       if (!anchorClaimed) {

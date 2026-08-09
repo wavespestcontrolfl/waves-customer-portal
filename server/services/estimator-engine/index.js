@@ -99,7 +99,11 @@ async function reconcileExistingDraftLinks(existing, context) {
           .where({ id: existing.id })
           .forUpdate()
           .first('id', 'status', 'estimate_data');
-        if (!fresh || String(fresh.status || '').toLowerCase() !== 'draft') return;
+        // Every STILL-SENDABLE status is in scope (codex P0, PR #3304
+        // r13): scheduled and send_failed rows can still deliver to the
+        // former lead; only mid-send and customer-delivered/terminal rows
+        // are exempt.
+        if (!fresh || !['draft', 'scheduled', 'send_failed'].includes(String(fresh.status || '').toLowerCase())) return;
         const freshData = (() => {
           try {
             const data = typeof fresh.estimate_data === 'string'
@@ -370,9 +374,12 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
           if (callSid) {
             // Same callSid = same request. A prior estimator bell stands
             // UNLESS this run now has a draft the old bell doesn't know
-            // about (transient red → later success): the stale "send it
-            // manually" text must upgrade to the draft link.
-            if (!estimateId || existingMeta.estimateId) return true;
+            // about (transient red → later success), OR the bell tells a
+            // DIFFERENT draft's story — after an invalidation+rebuild the
+            // old link points at the archived stale draft and must
+            // upgrade to the replacement (codex P1, PR #3304 r13).
+            if (!estimateId) return true;
+            if (existingMeta.estimateId === estimateId) return true;
           } else {
             // A thread key spans REQUESTS on one phone. Only a true retry
             // stands (same draft again, or both sides still-open
@@ -883,7 +890,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                 lane,
                 quotePromised,
                 threadKey,
-                estimateId: proposalOutcome.existingEstimateId || null,
+                estimateId: commercialOutcome.existingEstimateId || null,
                 title: S.blockedTitle,
                 body: S.blockedBody(callerLabel(intent, context)),
               });
