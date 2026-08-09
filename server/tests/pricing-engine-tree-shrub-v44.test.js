@@ -918,6 +918,20 @@ describe('Tree & Shrub v4.7 knobs (density / palm reserve / callback reserve)', 
     expect(stated.materialTreeCount).toBe(3);
   });
 
+  test('ARMED: PROPERTY palms + treeDensity (the normal lookup shape) do not double-bill as inferred trees (pre-push P0 r10)', () => {
+    const property = { bedArea: 2000, access: 'easy', treeDensity: 'moderate', palmCount: 10 };
+    // Unarmed: property palms don't price, so the inferred trees stay — the
+    // unchanged pre-v4.7 charge.
+    const unarmed = priceTreeShrub(property, { tier: 'standard' });
+    expect(unarmed.materialTreeCount).toBe(6);
+    // Armed: the reserve prices those palms, so the inference is suppressed.
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
+    const armed = priceTreeShrub(property, { tier: 'standard' });
+    expect(armed.materialTreeCount).toBe(0);
+    expect(armed.laborTreeCount).toBe(0);
+    expect(armed.costs.materialCost).toBeCloseTo(125 + 60, 5);
+  });
+
   test('armed reserve: property-sourced palms trip the high-count review gate they now price (pre-push P1 r8)', () => {
     const property = { bedArea: 2000, access: 'easy', palmCount: 20 };
     // Unarmed: property palms don't price, so they don't gate either —

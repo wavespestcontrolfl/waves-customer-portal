@@ -2696,15 +2696,19 @@ function priceTreeShrub(property, options = {}) {
   const palmReserveActive = palmMaterialArmed || palmLaborArmed;
   const foldablePalmCount = palmCountSource === 'service_line' ? palmCount : 0;
   // De-duplicated NON-PALM tree base. A density-INFERRED treeCount cannot
-  // be trusted to exclude the stated palms: with the old prompt "10 palms"
-  // arrived AS an explicit treeCount 10, so the treeDensity fallback never
-  // fired; post-split the same call leaves treeCount absent and the
-  // resolver infers e.g. 6 trees that may BE those palms. Suppressing the
-  // inference keeps the counts disjoint — unarmed it prevents 16 legacy
-  // trees for a 10-palm job (P0 r8), armed it prevents billing 6 phantom
-  // trees ON TOP of the palm reserve (P0 r9). A caller-stated non-palm
-  // count is real signal and always survives.
-  const baseTreeCount = foldablePalmCount > 0 && treeCountSource === 'density_estimate'
+  // be trusted to exclude palms — treeDensity describes woody plants
+  // generally, so those inferred trees may BE the palms being counted
+  // separately. It is suppressed whenever palms are actually PRICED:
+  //  - unarmed: only service-line palms price (folded into the legacy
+  //    term), so only they suppress — property palms don't price at all
+  //    while unarmed, leaving the inferred trees as the sole (pre-v4.7,
+  //    unchanged) charge (P0 r8).
+  //  - armed: every palm prices through the reserve, so a property-lookup
+  //    shape (property palmCount + treeDensity) must not ALSO bill those
+  //    plants as inferred trees (P0 r9/r10).
+  // A caller-stated non-palm treeCount is real signal and always survives.
+  const palmsAffectPricing = foldablePalmCount > 0 || (palmReserveActive && palmCount > 0);
+  const baseTreeCount = palmsAffectPricing && treeCountSource === 'density_estimate'
     ? 0
     : treeCount;
   // Per-leg counts: palms ride the legacy per-tree term only where their
