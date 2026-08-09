@@ -80,21 +80,21 @@ async function reconcileExistingDraftLinks(existing, context) {
             && draftLead.twilio_call_sid === context.call.twilio_call_sid);
       }
     }
-    // An UNLINK additionally requires the draft's own recorded linkage to
-    // have been durable (codex P1, PR #3304 r4): a phone-touched or legacy
-    // draft loses its window-bounded resolution on any later lead edit,
-    // and a non-matching historical sid is not proof it was wrong. Such
-    // drafts stay linked; only a durable repoint corrects them.
+    // Fast-path gate on the pre-transaction snapshot; the AUTHORITATIVE
+    // comparison re-runs inside the transaction against the LOCKED row
+    // (codex P1, PR #3304 r5): with two concurrent reconciles, the loser's
+    // snapshot lead is stale, and cleaning up by it would unlink the
+    // wrong lead — leaving two leads pointing at one estimate.
     const draftLinkageDurable = ['sid', 'stamp'].includes(draftData.lead_linkage);
     if ((durableRepoint || (establishedAbsence && draftLinkageDurable)) && draftLeadId !== currentLeadId) {
+      let relinked = null;
       await db.transaction(async (trx) => {
         // RE-READ under the row lock and patch ONLY the linkage keys
-        // (codex P0, PR #3304 r4): draftData came from a pre-transaction
-        // read, and replacing the whole value would silently erase an
-        // admin's concurrent service/pricing edits. Mutable
-        // estimator-engine DRAFTS only — a sent/accepted/finalized
-        // estimate is a customer-facing record this reconcile must never
-        // touch.
+        // (codex P0, PR #3304 r4): a pre-transaction snapshot write would
+        // silently erase an admin's concurrent service/pricing edits.
+        // Mutable estimator-engine DRAFTS only — a sent/accepted/
+        // finalized estimate is a customer-facing record this reconcile
+        // must never touch.
         const fresh = await trx('estimates')
           .where({ id: existing.id })
           .forUpdate()
@@ -108,6 +108,12 @@ async function reconcileExistingDraftLinks(existing, context) {
           } catch { return null; }
         })();
         if (!freshData) return;
+        // Everything below keys off the LOCKED row's linkage, never the
+        // snapshot: a peer reconcile may have already moved it.
+        const freshLeadId = freshData.lead_id ? String(freshData.lead_id) : null;
+        if (freshLeadId === currentLeadId) return;
+        const freshLinkageDurable = ['sid', 'stamp'].includes(freshData.lead_linkage);
+        if (!(durableRepoint || (establishedAbsence && freshLinkageDurable))) return;
         if (currentLeadId) {
           freshData.lead_id = currentLeadId;
           freshData.lead_linkage = context.leadLinkage || null;
@@ -117,10 +123,10 @@ async function reconcileExistingDraftLinks(existing, context) {
         }
         await trx('estimates').where({ id: existing.id })
           .update({ estimate_data: JSON.stringify(freshData), updated_at: new Date() });
-        if (draftLeadId) {
+        if (freshLeadId) {
           // Only if the OLD lead still points at this draft — a lead
           // relinked elsewhere is not ours to touch.
-          await trx('leads').where({ id: draftLeadId, estimate_id: existing.id })
+          await trx('leads').where({ id: freshLeadId, estimate_id: existing.id })
             .update({ estimate_id: null });
         }
         if (currentLeadId) {
@@ -132,8 +138,11 @@ async function reconcileExistingDraftLinks(existing, context) {
             })
             .update({ estimate_id: existing.id });
         }
+        relinked = { from: freshLeadId || 'none', to: currentLeadId || 'none' };
       });
-      logger.info(`[estimator-engine] relinked existing draft ${existing.id} after call linkage change (${draftLeadId || 'none'} → ${currentLeadId || 'none'})`);
+      if (relinked) {
+        logger.info(`[estimator-engine] relinked existing draft ${existing.id} after call linkage change (${relinked.from} → ${relinked.to})`);
+      }
     }
   } catch (relinkErr) {
     logger.warn(`[estimator-engine] existing-draft relink failed (non-blocking): ${relinkErr.message}`);
@@ -892,6 +901,7 @@ function generateEstimateSafely(engineInput) {
 }
 
 module.exports = {
+  _reconcileExistingDraftLinks: reconcileExistingDraftLinks,
   estimatorEngineEnabled,
   maybeDraftEstimateForCall,
   // Origin-specific entries (sms-thread.js) reuse the shared pipeline and
