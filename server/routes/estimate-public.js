@@ -9537,6 +9537,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // not run conversion and invoicing again. Nothing ever clears
         // price_locked_at; its only writers are the two accept flows.
         .whereNull('price_locked_at')
+        // Archive + linkage-marker absence mirrored on the money-bearing
+        // UPDATE itself (codex P0, PR #3304 r25): the accept-active check
+        // ran on a stale pre-read, and the ms-truncated CAS below cannot
+        // exclude a same-millisecond invalidation — a stale token
+        // accepting a wrong-lead row would mint the exact terminal state
+        // the deferred-invalidation release must then preserve.
+        .whereNull('archived_at')
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
         .andWhere((q) => q.whereNull('expires_at').orWhere('expires_at', '>=', trx.raw('NOW()')))
         // Freshness compare-and-swap (pre-push P0 on #2915): acceptedUpdates
         // was built from this handler's earlier estimate read — a bond-term
@@ -11364,6 +11373,24 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
       .where({ id: estimate.id })
       .whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
       .whereNull('price_locked_at')
+      // Same rails as the /preferences write (codex P0, PR #3304 r25):
+      // this can persist the whole estimate_data blob from a pre-read —
+      // an invalidation marker or delivery claim committed since would be
+      // silently erased, leaving the wrong-lead draft public and the
+      // claim release with nothing to consume. CAS on updated_at plus
+      // explicit marker/claim-absent predicates; 0-row → 409 → reload.
+      .whereNull('archived_at')
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+      .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'delivering_at', '') = ''")
+      .modify((q) => {
+        if (estimate.updated_at) {
+          q.andWhere(db.raw(
+            "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+            [estimate.updated_at],
+          ));
+        }
+      })
       .update(writes);
     if (!tierUpdateCount) {
       return res.status(409).json({ error: 'Estimate is no longer active' });

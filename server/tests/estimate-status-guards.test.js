@@ -75,9 +75,10 @@ function routeHandler(router, path, method) {
 
 function makeBuilder({ first = null, updateCount = 1 } = {}) {
   const builder = {};
-  for (const m of ['where', 'whereNotIn', 'whereNull', 'whereIn', 'andWhere', 'orderBy', 'limit']) {
+  for (const m of ['where', 'whereNotIn', 'whereNull', 'whereIn', 'andWhere', 'whereRaw', 'orderBy', 'limit']) {
     builder[m] = jest.fn(() => builder);
   }
+  builder.modify = jest.fn((fn) => { fn(builder); return builder; });
   builder.first = jest.fn(async () => first);
   builder.update = jest.fn(async () => updateCount);
   builder.insert = jest.fn(async () => [1]);
