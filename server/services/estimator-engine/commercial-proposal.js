@@ -395,6 +395,19 @@ async function maybeBuildCommercialProposalDraft({
     };
 
     const creation = await runSerialized(async (trx) => {
+      // Call-scoped in-lock recheck on EVERY serialization path (codex
+      // P1, PR #3304 r4 — mirrors the residential fix): the phone-lock
+      // path serialized only by phone, and two composers with DIFFERENT
+      // corrected lead addresses could both pass conflictingOpenEstimate
+      // and insert two scaffolds for one call.
+      if (call?.id) {
+        const existingForCall = await trx('estimates')
+          .select('id')
+          .whereRaw("estimate_data #>> '{estimatorEngine,callLogId}' = ?", [String(call.id)])
+          .whereNull('archived_at')
+          .first();
+        if (existingForCall) return { duplicate: existingForCall };
+      }
       const openEstimates = await listOpenEstimatesByPhone(customerPhone, { database: trx });
       const conflicting = conflictingOpenEstimate(openEstimates, intent.address);
       if (conflicting) return { duplicate: conflicting };

@@ -947,6 +947,35 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     }
   }
 
+  // FINAL pre-delivery verdict re-read (codex P0, PR #3304): a linkage
+  // invalidation can archive the row after this send claimed it — the
+  // in-memory estimate still carries the FORMER lead's recipient and
+  // content, and delivering it would expose another customer's PII. A row
+  // archived (or marked invalidated) since the claim releases back to
+  // send_failed and aborts before any provider call.
+  {
+    const verdictRow = await db('estimates')
+      .where({ id: estimate.id })
+      .first('archived_at', 'estimate_data');
+    const invalidatedNow = (() => {
+      if (!verdictRow) return true;
+      if (verdictRow.archived_at) return true;
+      try {
+        const data = typeof verdictRow.estimate_data === 'string'
+          ? JSON.parse(verdictRow.estimate_data) : (verdictRow.estimate_data || {});
+        return !!data?.estimatorEngine?.linkage_invalidated_at;
+      } catch { return false; }
+    })();
+    if (invalidatedNow) {
+      await db('estimates')
+        .where({ id: estimate.id, status: 'sending' })
+        .update({ status: 'send_failed', last_send_error: 'invalidated_before_delivery', updated_at: db.fn.now() });
+      const err = new Error('This estimate was invalidated by a call-linkage correction before delivery. Nothing was sent.');
+      err.statusCode = 409;
+      throw err;
+    }
+  }
+
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   const nextExpiresAt = estimateExpiresAt(now);
   const requestedChannels = sendMethod === 'both' ? ['sms', 'email'] : [sendMethod];
