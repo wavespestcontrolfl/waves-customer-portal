@@ -39,7 +39,9 @@ export function detectServiceCategory(serviceType) {
   // NOT a bare 'foam' substring: foam sealant is rodent-exclusion material,
   // and "Rodent Exclusion — Foam Sealing" must reach the rodent branch.
   if (/termite|wdo|bora|termidor|trelona|foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*foam|foam[\s_-]*recurring/.test(s)) return 'termite';
-  if (/rodent|rat|mouse|mice/.test(s)) return 'rodent';
+  // bird box / roof-entry: rodent-exclusion hardware with no rodent token
+  // in the catalog name (mirrors the server normalizer).
+  if (/rodent|rat|mouse|mice|bird\s*box|roof-entry/.test(s)) return 'rodent';
   if (/tree|shrub|palm|arborjet|ornamental/.test(s)) return 'tree';
   if (/inspect|assessment|consultation|estimat/.test(s)) return 'inspection';
   return 'pest';
