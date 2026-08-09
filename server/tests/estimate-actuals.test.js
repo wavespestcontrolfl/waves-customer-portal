@@ -21,7 +21,7 @@ const {
   varianceSummary,
   _private: {
     actualDurationMinutes, buildActualsRow, deltaPct, extractEstimateProfile,
-    extractTreeShrubEstimate, extractTreeShrubActuals,
+    extractTreeShrubEstimate, extractTreeShrubActuals, deltaPctNonnegativeActual,
   },
 } = require('../services/estimate-actuals');
 
@@ -60,6 +60,21 @@ describe('deltaPct', () => {
     expect(deltaPct(5000, null)).toBeNull();
     expect(deltaPct(0, 6000)).toBeNull();
     expect(deltaPct('junk', 6000)).toBeNull();
+  });
+});
+
+describe('deltaPctNonnegativeActual', () => {
+  it('keeps the zero-actual case as -100% — the strongest overestimation signal (pre-push P1)', () => {
+    expect(deltaPctNonnegativeActual(2000, 0)).toBe(-100);
+    expect(deltaPctNonnegativeActual(2000, 2400)).toBe(20);
+  });
+
+  it('still requires a positive estimate and a present, sane actual', () => {
+    expect(deltaPctNonnegativeActual(0, 100)).toBeNull();
+    expect(deltaPctNonnegativeActual(null, 100)).toBeNull();
+    expect(deltaPctNonnegativeActual(2000, null)).toBeNull();
+    expect(deltaPctNonnegativeActual(2000, -5)).toBeNull();
+    expect(deltaPctNonnegativeActual(2000, 'junk')).toBeNull();
   });
 });
 

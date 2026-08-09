@@ -96,6 +96,18 @@ function lenientMeasurement(value) {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
+// deltaPct requires a positive actual, which erases the zero-actual case —
+// but 2,000 estimated sqft of beds against an observed 0 is -100%, the
+// strongest overestimation signal there is. Estimate side stays positive
+// (no signal without a real baseline, and no div-by-zero).
+function deltaPctNonnegativeActual(estimated, actual) {
+  const est = positiveNumber(estimated);
+  if (!est || actual === null || actual === undefined) return null;
+  const act = Number(actual);
+  if (!Number.isFinite(act) || act < 0) return null;
+  return Math.round(((act - est) / est) * 10000) / 100;
+}
+
 // Priced Tree & Shrub inputs. The full engine quote survives ONLY on
 // agent/IB drafts (estimate_data.engineResult.lineItems — the raw
 // generateEstimate output). Admin saves run the result through
@@ -256,7 +268,7 @@ function buildActualsRow({ serviceRecord, scheduledService, estimate, completion
   if (treeShrubActual) {
     actual.treeShrub = treeShrubActual;
     if (treeShrubEstimate) {
-      actual.treeShrub.bedSqFtDeltaPct = deltaPct(treeShrubEstimate.bedSqFt, treeShrubActual.bedSqFt);
+      actual.treeShrub.bedSqFtDeltaPct = deltaPctNonnegativeActual(treeShrubEstimate.bedSqFt, treeShrubActual.bedSqFt);
     }
   }
 
@@ -401,6 +413,7 @@ module.exports = {
     extractEstimateProfile,
     extractTreeShrubEstimate,
     extractTreeShrubActuals,
+    deltaPctNonnegativeActual,
     isReconcileDisabled,
   },
 };
