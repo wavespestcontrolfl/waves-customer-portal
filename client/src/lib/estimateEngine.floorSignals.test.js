@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, test } from "vitest";
 import {
   applyServerLawnPricingConfig,
   applyServerPestPricingConfig,
@@ -409,5 +409,35 @@ describe("collectMarginReviewNotes — report-only low-margin signals for the es
       recurring: { marginWarnings: [{ message: "plain warning text" }] },
     });
     expect(notes).toEqual(["plain warning text"]);
+  });
+});
+
+describe('client fallback mirrors the Tree & Shrub bed-area cap signals', () => {
+  // This path runs when the V1 estimator prices without Property Lookup, and
+  // V1 saves with no replayable engineRequest — so a silent cap here means an
+  // underpriced quote sendable with an empty Pricing Review Notes panel.
+  const bigHeavyLot = {
+    lotSqFt: 60000,
+    homeSqFt: 2400,
+    shrubDensity: 'HEAVY',
+    landscapeComplexity: 'COMPLEX',
+    svcTs: true,
+  };
+
+  test('a lot-derived area above the cap carries the reason codes and the prose', () => {
+    const result = calculateEstimate(bigHeavyLot);
+    const meta = result.pricingMetadata || {};
+    expect(meta.manualReviewReasons).toEqual(
+      expect.arrayContaining(['bed_area_cap_reached', 'bed_area_at_or_above_8000']),
+    );
+    const warning = (meta.warnings || []).find((w) => w.includes('estimator cap'));
+    expect(warning).toContain('clamped');
+    expect(warning).toContain('UNDER-priced');
+  });
+
+  test('a small lot stays quiet', () => {
+    const result = calculateEstimate({ ...bigHeavyLot, lotSqFt: 8000, shrubDensity: 'LIGHT', landscapeComplexity: 'SIMPLE' });
+    const meta = result.pricingMetadata || {};
+    expect(meta.manualReviewReasons || []).not.toContain('bed_area_cap_reached');
   });
 });

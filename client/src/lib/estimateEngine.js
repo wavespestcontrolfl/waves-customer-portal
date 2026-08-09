@@ -2274,8 +2274,22 @@ export function calculateEstimate(inputs) {
       // server-side, so admin-built quotes overpriced big heavy-shrub lots
       // by up to 4,000 sf of bed material vs. what the engine would charge).
       if (landscapeComplexity === 'COMPLEX' || landscapeComplexity === 'MODERATE') bp += 0.05;
-      eb = Math.min(8000, Math.round(lotSqFt * bp));
+      const rawBedArea = Math.round(lotSqFt * bp);
+      eb = Math.min(8000, rawBedArea);
       fieldVerify.push('bed area');
+      // Server parity for the REVIEW SIGNAL too (not just the number): this
+      // client fallback runs when the V1 estimator prices without Property
+      // Lookup, and V1 saves its result with no replayable engineRequest —
+      // so if the cap is silent here, a big heavy-shrub lot produces an
+      // underpriced quote that can be sent with an empty Pricing Review
+      // Notes panel. Mirrors service-pricing.js's reason codes and prose.
+      if (rawBedArea >= 8000) {
+        addManualReviewReason('bed_area_cap_reached');
+        addManualReviewReason('bed_area_at_or_above_8000');
+        addRoutingWarning(rawBedArea > 8000
+          ? `Tree & Shrub bed area was clamped to the 8,000 sq ft estimator cap from an estimated ${rawBedArea.toLocaleString()} sq ft — this quote prices the capped area, so it is UNDER-priced until reviewed.`
+          : 'Tree & Shrub bed area reached the 8,000 sq ft estimator cap — nothing was clamped off, but confirm the measurement.');
+      }
     }
     // Tree count mirrors server v4.6 semantics: an explicit count (including
     // 0) is authoritative; only a MISSING count falls back to a treeDensity

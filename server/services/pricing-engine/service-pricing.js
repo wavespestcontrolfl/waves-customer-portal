@@ -2829,7 +2829,7 @@ function priceTreeShrub(property, options = {}) {
     if (!bedAreaCapped) {
       warnings.push(
         `Tree & Shrub bed area of ${bedSqFtText(bedArea)} is at or above the ${bedSqFtText(BED_AREA_CAP)} estimator cap.`
-        + ' It was priced IN FULL (measured areas are never clamped) — confirm the measurement.',
+        + ' It was priced IN FULL — confirm the measurement.',
       );
     }
   }
